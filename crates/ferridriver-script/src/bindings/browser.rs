@@ -355,7 +355,7 @@ impl BrowserJs {
     // same sandbox roots, caps and extensions this script has.
     let host = ctx.userdata::<crate::session_host::ScriptEnvUd>().map(|env| {
       std::sync::Arc::new(crate::session_host::SessionScriptHost::new(
-        std::sync::Arc::clone(self.inner.state()),
+        std::sync::Arc::clone(&self.inner),
         &title,
         env.0.as_ref().clone(),
       )) as std::sync::Arc<dyn ferridriver_session::ScriptHost>

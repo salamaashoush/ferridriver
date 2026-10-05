@@ -347,7 +347,17 @@ fn check_sidecars(config: &FerridriverConfig) -> Vec<Check> {
 }
 
 fn check_browser(config: &FerridriverConfig) -> Vec<Check> {
-  let backend = config.mcp.backend_kind();
+  let selection = match config.mcp.browser_selection() {
+    Ok(selection) => selection,
+    Err(error) => {
+      return vec![Check {
+        name: "browser",
+        status: Status::Fail,
+        detail: error.to_string(),
+      }];
+    },
+  };
+  let backend = selection.backend;
   let explicit = config.mcp.browser.executable_path.clone();
   if let Some(path) = explicit {
     let exists = Path::new(&path).is_file();
@@ -362,7 +372,7 @@ fn check_browser(config: &FerridriverConfig) -> Vec<Check> {
     }];
   }
 
-  vec![match installed_browser(backend) {
+  vec![match installed_browser(selection.browser) {
     Some(path) => Check {
       name: "browser",
       status: Status::Pass,
@@ -373,28 +383,27 @@ fn check_browser(config: &FerridriverConfig) -> Vec<Check> {
       status: Status::Fail,
       detail: format!(
         "{backend:?}: no browser found. Install one with `ferridriver install --with-deps {}`",
-        match backend {
-          ferridriver::backend::BackendKind::Bidi => "firefox",
-          ferridriver::backend::BackendKind::WebKit => "webkit",
-          _ => "chromium",
-        }
+        selection.browser.name()
       ),
     },
   }]
 }
 
 /// Locate the browser binary a backend would launch.
-fn installed_browser(backend: ferridriver::backend::BackendKind) -> Option<String> {
-  use ferridriver::backend::BackendKind;
+fn installed_browser(browser: ferridriver::options::BrowserKind) -> Option<String> {
+  use ferridriver::options::BrowserKind;
   let installer = ferridriver::install::BrowserInstaller::new();
-  match backend {
-    BackendKind::Bidi => installer.find_installed_firefox(),
+  match browser {
+    BrowserKind::Firefox => installer.find_installed_firefox(),
     // WebKit runs Playwright's `pw_run.sh`, not a bundle we install
     // ourselves, so ask the launcher where it is.
-    BackendKind::WebKit => ferridriver::backend::webkit::launcher::locate_binary()
+    BrowserKind::WebKit => ferridriver::backend::webkit::launcher::locate_binary()
       .ok()
       .map(|p| p.display().to_string()),
-    BackendKind::CdpPipe | BackendKind::CdpRaw => installer.find_installed_chromium(),
+    BrowserKind::Safari => Path::new("/usr/bin/safaridriver")
+      .is_file()
+      .then(|| "/usr/bin/safaridriver".to_owned()),
+    BrowserKind::Chromium => installer.find_installed_chromium(),
   }
 }
 

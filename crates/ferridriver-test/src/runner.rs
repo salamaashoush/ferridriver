@@ -1234,7 +1234,18 @@ impl TestRunner {
 
     // ── Validate fixture DAG ──
     {
-      let mut fixture_defs = builtin_fixtures(&self.config.browser);
+      let mut fixture_defs = match builtin_fixtures(&self.config.browser) {
+        Ok(definitions) => definitions,
+        Err(error) => {
+          tracing::error!("invalid browser selection: {error}");
+          return ExecuteSummary {
+            exit_code: 1,
+            total: total_tests,
+            failed: total_tests,
+            ..Default::default()
+          };
+        },
+      };
       for (name, def) in &custom_fixtures {
         fixture_defs.insert(name.clone(), def.clone());
       }
@@ -1447,7 +1458,16 @@ impl TestRunner {
         };
       },
     };
-    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let connection = match self.config.browser.resolve_instance() {
+      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
+      Err(error) => {
+        tracing::error!("invalid browser connection: {error}");
+        return ExecuteSummary {
+          exit_code: 1,
+          ..Default::default()
+        };
+      },
+    };
     let worker_event_bus = reporting_enabled.then(|| event_bus.clone());
 
     // A session's browser is only this run's browser when this run would
@@ -1737,7 +1757,13 @@ impl TestRunner {
         return 1;
       },
     };
-    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let connection = match self.config.browser.resolve_instance() {
+      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
+      Err(error) => {
+        tracing::error!("invalid browser connection: {error}");
+        return 1;
+      },
+    };
     let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
@@ -2005,7 +2031,13 @@ impl TestRunner {
         return 1;
       },
     };
-    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let connection = match self.config.browser.resolve_instance() {
+      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
+      Err(error) => {
+        tracing::error!("invalid browser connection: {error}");
+        return 1;
+      },
+    };
     let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
@@ -2144,7 +2176,13 @@ impl TestRunner {
         return 1;
       },
     };
-    let connection = self.config.browser.resolve_instance().unwrap_or(ConnectMode::Launch);
+    let connection = match self.config.browser.resolve_instance() {
+      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
+      Err(error) => {
+        tracing::error!("invalid browser connection: {error}");
+        return 1;
+      },
+    };
     let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
       Ok(browser) => Arc::new(browser),
       Err(e) => {
@@ -2575,18 +2613,16 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
   // BrowserConfig is already normalized (browser↔backend consistent)
   // and validated at load, so the mapping cannot silently downgrade an
   // unrecognised backend here.
-  let (backend, kind) = browser_config.resolve_kinds();
+  let (backend, kind) = browser_config.resolve_kinds().map_err(|error| error.to_string())?;
   let overrides = browser_config.instance_overrides()?;
-  let (backend, kind) = overrides.backend.map_or((backend, kind), |backend| {
-    let kind = match backend {
-      ferridriver::backend::BackendKind::CdpPipe | ferridriver::backend::BackendKind::CdpRaw => {
-        ferridriver::options::BrowserKind::Chromium
-      },
-      ferridriver::backend::BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
-      ferridriver::backend::BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
-    };
-    (backend, kind)
-  });
+  let selection = ferridriver::options::BrowserSelection::resolve(
+    overrides.kind.or_else(|| overrides.backend.is_none().then_some(kind)),
+    overrides
+      .backend
+      .or_else(|| overrides.kind.is_none().then_some(backend)),
+  )
+  .map_err(|error| error.to_string())?;
+  let (backend, kind) = (selection.backend, selection.browser);
 
   let mut args = browser_config.args.clone();
   // Proxy launch args, spelled the way this backend's binary takes them.
@@ -2656,8 +2692,101 @@ pub(crate) async fn launch_with_plan(plan: LaunchPlan, connection: ConnectMode) 
 pub struct BrowserHandle {
   plan: LaunchPlan,
   connection: ConnectMode,
-  cell: tokio::sync::OnceCell<Arc<Browser>>,
+  cell: Arc<tokio::sync::OnceCell<Arc<Browser>>>,
+  launch: tokio::sync::Mutex<BrowserLaunchState>,
   shared: bool,
+}
+
+type BrowserLaunch = futures::future::Shared<futures::future::BoxFuture<'static, ferridriver::Result<Arc<Browser>>>>;
+
+#[derive(Default)]
+struct BrowserLaunchState {
+  closed: bool,
+  pending: Option<BrowserLaunch>,
+}
+
+#[cfg(test)]
+mod browser_launch_ownership_tests {
+  use super::*;
+  use axum::{Json, Router, routing};
+  use serde_json::json;
+  use std::sync::atomic::{AtomicBool, Ordering};
+  use std::time::Duration;
+  use tokio::sync::Notify;
+
+  #[tokio::test]
+  async fn close_waits_for_cancelled_browser_setup_and_deletes_its_session() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let deleted = Arc::new(AtomicBool::new(false));
+    let create = {
+      let entered = entered.clone();
+      let release = release.clone();
+      move || {
+        let entered = entered.clone();
+        let release = release.clone();
+        async move {
+          entered.notify_one();
+          release.notified().await;
+          Json(json!({"value":{"sessionId":"owned","capabilities":{
+            "browserName":"safari","browserVersion":"26.2","setWindowRect":false
+          }}}))
+        }
+      }
+    };
+    let delete = {
+      let deleted = deleted.clone();
+      move || {
+        let deleted = deleted.clone();
+        async move {
+          deleted.store(true, Ordering::Release);
+          Json(json!({"value":null}))
+        }
+      }
+    };
+    let app = Router::new()
+      .route("/session", routing::post(create))
+      .route(
+        "/session/owned/window/handles",
+        routing::get(async || Json(json!({"value":[]}))),
+      )
+      .route("/session/owned", routing::delete(delete));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let handle = Arc::new(BrowserHandle::with_connection(
+      LaunchPlan {
+        backend: ferridriver::backend::BackendKind::WebDriver,
+        kind: ferridriver::options::BrowserKind::Safari,
+        ..Default::default()
+      },
+      ConnectMode::WebDriver {
+        endpoint,
+        browser_name: "safari".into(),
+        protocol: ferridriver::backend::webdriver::WebDriverProtocol::Classic,
+        capabilities: None,
+        headers: None,
+        timeout: Some(2000),
+      },
+    ));
+    let setup = tokio::spawn({
+      let handle = handle.clone();
+      async move { handle.get().await }
+    });
+    entered.notified().await;
+    setup.abort();
+    assert!(matches!(setup.await, Err(error) if error.is_cancelled()));
+    let mut closing = tokio::spawn(async move { handle.close().await });
+    assert!(
+      tokio::time::timeout(Duration::from_millis(25), &mut closing)
+        .await
+        .is_err()
+    );
+    release.notify_one();
+    closing.await.unwrap().unwrap();
+    assert!(deleted.load(Ordering::Acquire));
+    server.abort();
+  }
 }
 
 impl BrowserHandle {
@@ -2669,7 +2798,8 @@ impl BrowserHandle {
     Self {
       plan,
       connection,
-      cell: tokio::sync::OnceCell::new(),
+      cell: Arc::new(tokio::sync::OnceCell::new()),
+      launch: tokio::sync::Mutex::default(),
       shared: false,
     }
   }
@@ -2682,7 +2812,8 @@ impl BrowserHandle {
     Self {
       plan: LaunchPlan::default(),
       connection: ConnectMode::Launch,
-      cell,
+      cell: Arc::new(cell),
+      launch: tokio::sync::Mutex::default(),
       shared: true,
     }
   }
@@ -2698,13 +2829,45 @@ impl BrowserHandle {
   }
 
   pub async fn get(&self) -> ferridriver::error::Result<Arc<Browser>> {
-    let plan = self.plan.clone();
-    let connection = self.connection.clone();
-    self
-      .cell
-      .get_or_try_init(|| async move { launch_with_plan(plan, connection).await.map(Arc::new) })
-      .await
-      .cloned()
+    use futures::FutureExt;
+    let pending = {
+      let mut state = self.launch.lock().await;
+      if state.closed {
+        return Err(ferridriver::FerriError::TargetClosed { reason: None });
+      }
+      if let Some(browser) = self.cell.get() {
+        return Ok(browser.clone());
+      }
+      state
+        .pending
+        .get_or_insert_with(|| {
+          let plan = self.plan.clone();
+          let connection = self.connection.clone();
+          let cell = self.cell.clone();
+          // A cancelled fixture must not abandon a session still being created by the driver.
+          let task = tokio::spawn(async move {
+            let browser = Arc::new(launch_with_plan(plan, connection).await?);
+            let _ = cell.set(browser.clone());
+            Ok(browser)
+          });
+          async move {
+            task
+              .await
+              .map_err(|error| ferridriver::FerriError::backend(format!("browser launch task failed: {error}")))?
+          }
+          .boxed()
+          .shared()
+        })
+        .clone()
+    };
+    let result = pending.clone().await;
+    if result.is_err() {
+      let mut state = self.launch.lock().await;
+      if state.pending.as_ref().is_some_and(|current| current.ptr_eq(&pending)) {
+        state.pending = None;
+      }
+    }
+    result
   }
 
   pub fn try_get(&self) -> Option<Arc<Browser>> {
@@ -2712,9 +2875,17 @@ impl BrowserHandle {
   }
 
   pub async fn close(&self) -> ferridriver::Result<()> {
-    if !self.shared
-      && let Some(browser) = self.cell.get()
-    {
+    if self.shared {
+      return Ok(());
+    }
+    let pending = {
+      let mut state = self.launch.lock().await;
+      state.closed = true;
+      state.pending.clone()
+    };
+    if let Some(pending) = pending {
+      pending.await?.close().await?;
+    } else if let Some(browser) = self.cell.get() {
       browser.close().await?;
     }
     Ok(())

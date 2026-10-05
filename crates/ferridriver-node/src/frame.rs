@@ -20,6 +20,11 @@ impl Frame {
 
 #[napi]
 impl Frame {
+  #[napi(getter)]
+  pub fn webmcp(&self) -> crate::web_mcp::WebMcp {
+    crate::web_mcp::WebMcp::wrap(self.inner.webmcp())
+  }
+
   /// Frame name (from the `name` attribute of the iframe element).
   /// Playwright: `frame.name(): string` (sync).
   #[napi]

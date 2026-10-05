@@ -442,10 +442,21 @@ impl ScriptEngine {
     context: RunContext,
   ) -> impl std::future::Future<Output = ScriptResult> + Send + 'a {
     Box::pin(async move {
-      match Session::create(self.config.clone(), &context).await {
+      let resources = Arc::new(crate::SessionResources::default());
+      let mut result = match resources.create(self.config.clone(), &context).await {
         Ok(session) => session.execute(source, args, options, &context).await.result,
-        Err(e) => ScriptResult::err(e, 0, Vec::new()),
+        Err(error) => ScriptResult::err(error, 0, Vec::new()),
+      };
+      if let Err(error) = resources.close().await {
+        match &mut result.outcome {
+          crate::result::Outcome::Error { error: original } => {
+            use std::fmt::Write as _;
+            let _ = write!(original.message, "; resource cleanup failed: {}", error.message);
+          },
+          crate::result::Outcome::Ok { .. } => result.outcome = crate::result::Outcome::Error { error },
+        }
       }
+      result
     })
   }
 }
@@ -501,6 +512,7 @@ impl ferridriver_test::host::DeadlineControl for Deadline {
 /// session-stable globals, the extension registry and every loaded
 /// extension's contributions.
 struct FerridriverExtension {
+  resources: Arc<crate::SessionResources>,
   vars: Arc<dyn VarsStore>,
   artifacts: Option<Arc<OutputDir>>,
   host: ExtensionHost,
@@ -546,7 +558,10 @@ impl ferrijs::Extension for FerridriverExtension {
     let script_id = self.script_id.clone();
     let fetch = Arc::clone(&self.fetch);
     let env = Arc::clone(&self.env);
+    let browser_resources = Arc::clone(&self.resources.browsers);
+    let procs = Arc::clone(&self.resources.procs);
     Box::pin(async move {
+      let _ = ctx.store_userdata(crate::bindings::browser_type::BrowserResourcesUd(browser_resources));
       if let Some(id) = &script_id {
         crate::bindings::call_site::set_script_id(&ctx, id);
       }
@@ -589,7 +604,6 @@ impl ferrijs::Extension for FerridriverExtension {
       install_vars(&ctx, vars)?;
       crate::bindings::runtime::mirror_global(&ctx, "fs")?;
       crate::bindings::runtime::mirror_global(&ctx, "process")?;
-      let procs = Arc::new(crate::session_procs::SessionProcs::default());
       let _ = ctx.store_userdata(SessionProcsUd(procs.clone()));
       install_commands(&ctx, &caps, Some(procs))?;
       if let Some(artifacts) = artifacts {
@@ -644,11 +658,11 @@ impl ferrijs::Extension for FerridriverExtension {
 ///
 /// [`execute`]: Session::execute
 pub struct Session {
+  resources: Arc<crate::SessionResources>,
   rt: Runtime,
   config: ScriptEngineConfig,
   default_request: Arc<ferridriver::http_client::HttpClient>,
   fetch: Arc<crate::bindings::net_policy::SessionFetch>,
-  caps: ScriptCaps,
 }
 
 impl Session {
@@ -664,6 +678,26 @@ impl Session {
   pub fn create(
     config: ScriptEngineConfig,
     context: &RunContext,
+  ) -> impl std::future::Future<Output = Result<Self, ScriptError>> + Send + '_ {
+    Box::pin(async move {
+      let resources = Arc::new(crate::SessionResources::default());
+      match resources.create(config, context).await {
+        Ok(session) => Ok(session),
+        Err(mut error) => {
+          if let Err(cleanup) = resources.close().await {
+            use std::fmt::Write as _;
+            let _ = write!(error.message, "; resource cleanup failed: {}", cleanup.message);
+          }
+          Err(error)
+        },
+      }
+    })
+  }
+
+  pub(crate) fn create_with_resources(
+    config: ScriptEngineConfig,
+    context: &RunContext,
+    resources: Arc<crate::SessionResources>,
   ) -> impl std::future::Future<Output = Result<Self, ScriptError>> + Send + '_ {
     Box::pin(async move {
       let default_request = Arc::new(ferridriver::http_client::HttpClient::new(
@@ -687,6 +721,7 @@ impl Session {
         },
       });
       let extension = FerridriverExtension {
+        resources: Arc::clone(&resources),
         vars: context.vars.clone(),
         artifacts: context.artifacts.clone(),
         host: context.host,
@@ -719,13 +754,27 @@ impl Session {
       }
       let rt = builder.build().await?;
       Ok(Self {
+        resources,
         rt,
         config,
         default_request,
         fetch,
-        caps: context.caps.clone(),
       })
     })
+  }
+
+  #[must_use]
+  pub fn browser_resources(&self) -> Arc<ferridriver::BrowserResources> {
+    Arc::clone(&self.resources.browsers)
+  }
+
+  #[must_use]
+  pub fn resources(&self) -> Arc<crate::SessionResources> {
+    Arc::clone(&self.resources)
+  }
+
+  pub async fn close(&self) -> Result<(), ScriptError> {
+    self.resources.close().await
   }
 
   /// Arm the session's interrupt deadline so a busy-looping test body
@@ -771,20 +820,6 @@ impl Session {
     self.rt.poisoned()
   }
 
-  /// Stash the session's persistent-process registry into VM userdata
-  /// so extension `commands` start/status/stop reach it. Idempotent; the
-  /// same `Arc` is re-installed on each VM rebuild (the registry is
-  /// durable session state, the VM is not).
-  pub async fn install_session_procs(&self, procs: std::sync::Arc<crate::session_procs::SessionProcs>) {
-    let caps = self.caps.clone();
-    let _ = ferrijs::vm_with!(self.rt.handle() => |ctx| {
-      let _ = ctx.store_userdata(SessionProcsUd(procs));
-      let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
-      let _ = install_commands(&ctx, &caps, procs);
-    })
-    .await;
-  }
-
   /// Per-call framework globals (`page`, `context`, ...).
   fn globals_install(&self, context: &RunContext) -> GlobalsInstall {
     GlobalsInstall {
@@ -812,21 +847,33 @@ impl Session {
     options: RunOptions,
     context: &RunContext,
   ) -> SessionRun {
+    if let Err(error) = self.resources.ensure_open() {
+      return SessionRun {
+        result: ScriptResult::err(error, 0, Vec::new()),
+        poisoned: self.poisoned(),
+      };
+    }
     let install = self.globals_install(context);
     let source = source.to_string();
     let args = args.to_vec();
-    let run = self
-      .rt
-      .run(
-        options,
-        Box::new(move |ctx| {
-          Box::pin(async move {
-            install_call_globals(&ctx, install)?;
-            ferrijs::script_body(&ctx, &source, &args).await
-          })
-        }),
-      )
-      .await;
+    let run = self.rt.run(
+      options,
+      Box::new(move |ctx| {
+        Box::pin(async move {
+          install_call_globals(&ctx, install)?;
+          ferrijs::script_body(&ctx, &source, &args).await
+        })
+      }),
+    );
+    let run = match self.resources.run_until_closed(run).await {
+      Ok(run) => run,
+      Err(error) => {
+        return SessionRun {
+          result: ScriptResult::err(error, 0, Vec::new()),
+          poisoned: self.poisoned(),
+        };
+      },
+    };
     self.finish(run)
   }
 
@@ -846,27 +893,39 @@ impl Session {
     options: RunOptions,
     context: &RunContext,
   ) -> SessionRun {
+    if let Err(error) = self.resources.ensure_open() {
+      return SessionRun {
+        result: ScriptResult::err(error, 0, Vec::new()),
+        poisoned: self.poisoned(),
+      };
+    }
     let install = self.globals_install(context);
     let bytecode = Arc::clone(&bundle.bytecode);
     let mapper = bundle.mapper();
     let args = args.to_vec();
-    let run = self
-      .rt
-      .run(
-        options,
-        Box::new(move |ctx| {
-          Box::pin(async move {
-            install_call_globals(&ctx, install)?;
-            let value = ferrijs::module_body(&ctx, &bytecode, mapper, &args).await?;
-            // A module that registered a tool at its top level has no
-            // callable until the bindings are rebuilt.
-            crate::bindings::rebuild_tool_bindings(&ctx)
-              .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}")))?;
-            Ok(value)
-          })
-        }),
-      )
-      .await;
+    let run = self.rt.run(
+      options,
+      Box::new(move |ctx| {
+        Box::pin(async move {
+          install_call_globals(&ctx, install)?;
+          let value = ferrijs::module_body(&ctx, &bytecode, mapper, &args).await?;
+          // A module that registered a tool at its top level has no
+          // callable until the bindings are rebuilt.
+          crate::bindings::rebuild_tool_bindings(&ctx)
+            .map_err(|e| ScriptError::internal(format!("rebuild tool bindings: {e}")))?;
+          Ok(value)
+        })
+      }),
+    );
+    let run = match self.resources.run_until_closed(run).await {
+      Ok(run) => run,
+      Err(error) => {
+        return SessionRun {
+          result: ScriptResult::err(error, 0, Vec::new()),
+          poisoned: self.poisoned(),
+        };
+      },
+    };
     let run = match run.result {
       Err(mut e) => {
         if let Some(line) = e.line
@@ -896,20 +955,32 @@ impl Session {
     options: RunOptions,
     context: &RunContext,
   ) -> SessionRun {
+    if let Err(error) = self.resources.ensure_open() {
+      return SessionRun {
+        result: ScriptResult::err(error, 0, Vec::new()),
+        poisoned: self.poisoned(),
+      };
+    }
     let install = self.globals_install(context);
     let name = name.to_string();
-    let run = self
-      .rt
-      .run(
-        options,
-        Box::new(move |ctx| {
-          Box::pin(async move {
-            install_call_globals(&ctx, install)?;
-            crate::bindings::invoke_tool_by_name(&ctx, &name, &tool_args).await
-          })
-        }),
-      )
-      .await;
+    let run = self.rt.run(
+      options,
+      Box::new(move |ctx| {
+        Box::pin(async move {
+          install_call_globals(&ctx, install)?;
+          crate::bindings::invoke_tool_by_name(&ctx, &name, &tool_args).await
+        })
+      }),
+    );
+    let run = match self.resources.run_until_closed(run).await {
+      Ok(run) => run,
+      Err(error) => {
+        return SessionRun {
+          result: ScriptResult::err(error, 0, Vec::new()),
+          poisoned: self.poisoned(),
+        };
+      },
+    };
     self.finish(run)
   }
 

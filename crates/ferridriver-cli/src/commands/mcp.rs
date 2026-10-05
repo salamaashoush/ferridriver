@@ -22,7 +22,11 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
   // CLI flags beat the config file. The old order was inverted, so
   // `--headless` / `--backend` were silently dropped whenever the
   // config set those keys at all.
-  let effective = cli::effective_browser(&args.browser, &config.mcp);
+  let effective = cli::effective_browser(&args.browser, &config.mcp)?;
+  config.mcp.browser.browser = Some(effective.browser);
+  if args.browser.backend.is_some() || args.browser.browser.is_some() {
+    config.mcp.browser.backend = Some(ferridriver_config::mcp::BackendChoice::parse(effective.backend.name())?);
+  }
   let (backend, headless) = (effective.backend, effective.headless);
   let connect_mode = args.browser.connect_mode();
 

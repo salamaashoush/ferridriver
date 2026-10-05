@@ -3,7 +3,7 @@
 //! All message dispatch (responses, nav waiters, lifecycle tracking, broadcast)
 //! is handled by the shared `CdpDispatcher`. This file only implements WebSocket I/O.
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
@@ -11,15 +11,10 @@ use tokio_tungstenite::tungstenite::Message;
 use super::transport::CdpDispatcher;
 use crate::error::{FerriError, Result};
 
-/// Upper bound on the WebSocket upgrade handshake.
-///
-/// A browser that accepts the TCP connection but never completes the upgrade
-/// would otherwise wedge the caller, and `connect` holds the global state lock.
-const WS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 pub struct WsTransport {
   write_tx: tokio::sync::mpsc::Sender<Message>,
   dispatcher: Arc<CdpDispatcher>,
+  tasks: crate::backend::transport_tasks::TransportTasks,
 }
 
 impl WsTransport {
@@ -46,31 +41,25 @@ impl WsTransport {
         .map_err(|e| FerriError::Backend(format!("invalid header value for '{key}': {e}")))?;
       request.headers_mut().insert(header_name, header_value);
     }
-    let (ws_stream, _) = tokio::time::timeout(WS_CONNECT_TIMEOUT, Box::pin(tokio_tungstenite::connect_async(request)))
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+    let (ws_stream, _) = budget
+      .wait(Box::pin(tokio_tungstenite::connect_async(request)))
       .await
-      .map_err(|_| {
-        FerriError::Backend(format!(
-          "WebSocket connect to {ws_url} timed out after {}s",
-          WS_CONNECT_TIMEOUT.as_secs()
-        ))
-      })?
-      .map_err(|e| FerriError::Backend(format!("WebSocket connect to {ws_url}: {e}")))?;
+      .map_err(|error| error.error("connecting CDP WebSocket"))?
+      .map_err(|error| FerriError::backend(format!("WebSocket connect failed: {error}")))?;
 
     let (write, read) = ws_stream.split();
     let dispatcher = Arc::new(CdpDispatcher::new());
 
-    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Message>(64);
-    tokio::spawn(async move {
-      let mut writer = write;
-      while let Some(msg) = write_rx.recv().await {
-        if writer.send(msg).await.is_err() {
-          break;
-        }
-      }
-    });
+    let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Message>(64);
+    let (shutdown, stopping) = tokio::sync::watch::channel(false);
+    let writer = tokio::spawn(crate::backend::transport_tasks::write_websocket(
+      write, write_rx, stopping,
+    ));
 
     let dispatcher2 = dispatcher.clone();
-    tokio::spawn(async move {
+    let reader_ended = shutdown.clone();
+    let reader = tokio::spawn(async move {
       let mut read = read;
       while let Some(Ok(msg)) = read.next().await {
         let Message::Text(text) = msg else { continue };
@@ -80,9 +69,14 @@ impl WsTransport {
       // `send_command` awaits don't stall to the 30s response
       // timeout (see pipe.rs reader for the same bug fix).
       dispatcher2.fail_all_pending("CDP transport closed (websocket ended)");
+      reader_ended.send_replace(true);
     });
 
-    Ok(Self { write_tx, dispatcher })
+    Ok(Self {
+      write_tx,
+      dispatcher,
+      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
+    })
   }
 
   /// Spawn Chrome with `--remote-debugging-port` and connect via WebSocket.
@@ -148,6 +142,11 @@ impl WsTransport {
 }
 
 impl super::transport::CdpTransport for WsTransport {
+  async fn close(&self) -> Result<()> {
+    self.dispatcher.fail_all_pending("CDP transport closed");
+    self.tasks.close().await
+  }
+
   fn is_disconnected(&self) -> bool {
     self.dispatcher.is_disconnected()
   }
@@ -159,30 +158,21 @@ impl super::transport::CdpTransport for WsTransport {
     method: &str,
     params: &serde_json::Value,
   ) -> Result<serde_json::Value> {
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
     let (id, mut data, rx) = self.dispatcher.build_command(session_id, method, params)?;
-    // Remove NUL terminator — WebSocket doesn't need it
+    let mut pending = self.dispatcher.pending_command(id);
     if data.last() == Some(&0) {
       data.pop();
     }
-    let text = match String::from_utf8(data) {
-      Ok(t) => t,
-      Err(e) => {
-        self.dispatcher.forget_pending(id);
-        return Err(FerriError::Backend(format!("UTF-8: {e}")));
-      },
-    };
-    if self.write_tx.send(Message::Text(text.into())).await.is_err() {
-      self.dispatcher.forget_pending(id);
-      return Err(FerriError::backend("WS writer closed"));
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-      Ok(Ok(result)) => result,
-      Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
-      Err(_) => {
-        self.dispatcher.forget_pending(id);
-        Err(FerriError::timeout(format!("waiting for {method} response"), 30_000))
-      },
-    }
+    let text = String::from_utf8(data).map_err(|error| FerriError::backend(format!("UTF-8: {error}")))?;
+    budget.send(&self.write_tx, Message::Text(text.into())).await?;
+    let result = budget
+      .wait(rx)
+      .await
+      .map_err(|error| error.error(format!("waiting for {method} response")))?
+      .map_err(|_| FerriError::backend(format!("Response channel dropped for {method}")))?;
+    pending.completed();
+    result
   }
 
   fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
@@ -224,6 +214,10 @@ impl super::transport::CdpTransport for WsTransport {
     session_id: &str,
   ) -> tokio::sync::mpsc::UnboundedReceiver<std::sync::Arc<serde_json::Value>> {
     self.dispatcher.tap_all_events(session_id)
+  }
+
+  fn tap_iframe_targets(&self) -> super::transport::IframeTargetSubscription {
+    self.dispatcher.tap_iframe_targets()
   }
 
   fn register_lifecycle_tracker(
@@ -307,6 +301,26 @@ fn launch_failure_detail(what: &str, stderr_tail: &crate::backend::process::Stde
 mod tests {
   use super::launch_failure_detail;
   use crate::backend::process::StderrTail;
+
+  #[tokio::test(start_paused = true)]
+  async fn operation_budgets_cover_replies_queueing_and_cancellation() {
+    use super::{Arc, CdpDispatcher, Message, WsTransport};
+    let dispatcher = Arc::new(CdpDispatcher::new());
+    let (write_tx, queued) = tokio::sync::mpsc::channel(1);
+    let transport = WsTransport {
+      write_tx: write_tx.clone(),
+      dispatcher: dispatcher.clone(),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+    };
+    super::super::transport::verify_operation_budgets(
+      transport,
+      dispatcher,
+      write_tx,
+      queued,
+      Message::Text("queued".into()),
+    )
+    .await;
+  }
 
   /// The whole point of capturing stderr: an enrolled Chrome refuses
   /// remote debugging with one line and otherwise starts normally, so the

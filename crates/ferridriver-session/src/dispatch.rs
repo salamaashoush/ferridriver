@@ -126,12 +126,19 @@ pub trait Dispatcher: Send + Sync + 'static {
   /// normal response the client renders, not a dropped connection.
   async fn dispatch(&self, command: Command, events: EventSink) -> Response;
 
+  async fn close(&self) -> std::result::Result<(), String> {
+    Err("this session does not support cooperative shutdown".to_owned())
+  }
+
   /// The list of verbs this dispatcher understands, for `help` / discovery.
   /// Default empty; hosts override to advertise their surface.
   fn verbs(&self) -> Vec<&'static str> {
     Vec::new()
   }
 }
+
+pub type ReleaseFuture<'a> =
+  std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>;
 
 /// Runs scripts against a bound browser, supplied by a higher crate that owns
 /// the `QuickJS` engine (`ferridriver-script`).
@@ -141,6 +148,8 @@ pub trait Dispatcher: Send + Sync + 'static {
 /// `run` verb is the whole protocol — so every bind path installs one.
 #[async_trait]
 pub trait ScriptHost: Send + Sync + 'static {
+  async fn close(&self, release: ReleaseFuture<'_>) -> std::result::Result<(), String>;
+
   /// Run `request` against the named `context` of the bound browser,
   /// streaming console output into `events` as it happens.
   ///

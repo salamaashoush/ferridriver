@@ -7,8 +7,9 @@
 //! Playwright Node.js cache, then ferridriver's own cache (populated
 //! by `ferridriver install webkit`).
 
+use crate::backend::process::ChildGroup;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use thiserror::Error;
 
 /// Knobs for [`spawn`]. `headless` toggles `--headless`; `user_data_dir`
@@ -16,6 +17,7 @@ use thiserror::Error;
 /// `--user-data-dir=...` and drops `--no-startup-window`).
 #[derive(Debug, Default, Clone)]
 pub struct LaunchConfig {
+  pub executable_path: Option<PathBuf>,
   pub headless: bool,
   /// Extra environment for the `pw_run.sh` child, merged onto the
   /// inherited environment.
@@ -64,6 +66,10 @@ pub fn binary_revision() -> String {
   let Ok(path) = locate_binary() else {
     return "unknown".to_string();
   };
+  revision_from_path(&path)
+}
+
+pub(crate) fn revision_from_path(path: &Path) -> String {
   path
     .parent()
     .and_then(Path::file_name)
@@ -82,9 +88,8 @@ pub fn binary_revision() -> String {
 /// the pipe; this function only borrows the descriptors long enough to
 /// dup them into the child's environment.
 #[cfg(unix)]
-pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child, LaunchError> {
-  let binary = locate_binary()?;
-  let mut cmd = Command::new(&binary);
+pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<ChildGroup, LaunchError> {
+  let mut cmd = Command::new(binary);
   cmd.envs(&config.env);
   cmd.arg("--inspector-pipe");
   if config.headless {
@@ -123,7 +128,9 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
       // killing the direct child would leave the real WebKit process
       // and its helpers behind. `crate::backend::process::kill_process_group`
       // takes the whole group down on teardown instead.
-      libc::setsid();
+      if libc::setsid() == -1 {
+        return Err(std::io::Error::last_os_error());
+      }
       pre_exec_setup_fds(read_fd, write_fd)
     });
   }
@@ -134,9 +141,8 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
     args = ?cmd.get_args().collect::<Vec<_>>(),
     "spawning webkit"
   );
-  let child = cmd.spawn()?;
-  crate::backend::process::track_spawned(child.id(), config.user_data_dir.as_deref(), false);
-  Ok(child)
+  let child = tokio::process::Command::from(cmd).kill_on_drop(true).spawn()?;
+  Ok(ChildGroup::recorded(child, config.user_data_dir.as_deref(), false))
 }
 
 /// Windows stub. The `--inspector-pipe` transport relies on `pre_exec`
@@ -145,7 +151,7 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
 /// inspector-pipe binary today either. Return a typed error so callers
 /// surface "Unsupported" instead of a build failure.
 #[cfg(not(unix))]
-pub fn spawn(_config: &LaunchConfig, _read_fd: i32, _write_fd: i32) -> Result<Child, LaunchError> {
+pub fn spawn(_config: &LaunchConfig, _read_fd: i32, _write_fd: i32) -> Result<ChildGroup, LaunchError> {
   Err(LaunchError::Io(std::io::Error::other(
     "webkit launcher: --inspector-pipe spawn is not supported on this platform yet",
   )))

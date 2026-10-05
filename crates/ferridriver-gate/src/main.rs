@@ -269,6 +269,9 @@ fn suite_jobs(workers: usize) -> Vec<Job> {
     ),
   ] {
     let mut job = Job::new(name, &command, &["build", "types"]);
+    // The Rust UI integration test invokes Cargo for discovery and execution.
+    // Reserve its build slot so other feature sets cannot rebuild between them.
+    job.cargo = name == "integration";
     if matches!(name, "integration" | "acceptance") {
       job
         .command

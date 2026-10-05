@@ -15,7 +15,8 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 
 use crate::dispatch::{Dispatcher, EventSink};
-use crate::protocol::{Command, ServerFrame};
+use crate::lifecycle::Lifecycle;
+use crate::protocol::{CLOSE_VERB, Command, ServerFrame};
 use crate::transport::{read_frame, write_frame};
 use crate::{Result, SessionError};
 
@@ -25,6 +26,8 @@ pub enum Endpoint {
   /// A Unix-domain socket at the given filesystem path.
   #[cfg(unix)]
   Unix(std::path::PathBuf),
+  #[cfg(unix)]
+  OwnedUnix(Arc<tempfile::TempDir>),
   /// A TCP address (`host:port`). Port `0` lets the OS pick a free port; the
   /// chosen port is reported back by [`SessionServer::endpoint_string`].
   Tcp(String),
@@ -52,21 +55,25 @@ impl Endpoint {
 /// A running session server.
 pub struct SessionServer {
   endpoint_string: String,
-  listener: Listener,
-  dispatcher: Arc<dyn Dispatcher>,
+  listener: std::sync::Mutex<Option<Listener>>,
+  lifecycle: Arc<Lifecycle>,
 }
 
 enum Listener {
   #[cfg(unix)]
-  Unix(UnixListener, std::path::PathBuf),
+  Unix {
+    listener: UnixListener,
+    path: std::path::PathBuf,
+    identity: (u64, u64),
+    _directory: Option<Arc<tempfile::TempDir>>,
+  },
   Tcp(TcpListener),
 }
 
 impl SessionServer {
   /// Bind a server to `endpoint`, ready to [`SessionServer::serve`].
   ///
-  /// For a Unix endpoint, any stale socket file at the path is removed first
-  /// (a previous owner that exited without cleanup). For a TCP endpoint with
+  /// Existing Unix socket paths are never replaced. For a TCP endpoint with
   /// port `0`, the OS-assigned address is captured into
   /// [`SessionServer::endpoint_string`].
   ///
@@ -76,40 +83,68 @@ impl SessionServer {
   pub async fn bind(endpoint: Endpoint, dispatcher: Arc<dyn Dispatcher>) -> Result<Self> {
     match endpoint {
       #[cfg(unix)]
-      Endpoint::Unix(path) => {
-        if path.exists() {
-          // A leftover socket file blocks bind(); remove it. If a live owner
-          // still holds it, the subsequent connect by clients would have gone
-          // to that owner — but `bind` here means this process is the owner.
-          let _ = std::fs::remove_file(&path);
-        }
-        if let Some(parent) = path.parent() {
-          std::fs::create_dir_all(parent)?;
-        }
-        let listener = UnixListener::bind(&path)?;
-        // A peer that reaches this socket runs scripts in this process. The
-        // registry directory is already owner-only; the socket mode is the
-        // second half of that boundary on platforms that enforce it.
-        {
-          use std::os::unix::fs::PermissionsExt as _;
-          std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(Self {
-          endpoint_string: path.to_string_lossy().into_owned(),
-          listener: Listener::Unix(listener, path),
-          dispatcher,
-        })
+      Endpoint::Unix(path) => Self::bind_unix(&path, None, dispatcher),
+      #[cfg(unix)]
+      Endpoint::OwnedUnix(directory) => {
+        Self::bind_unix(&directory.path().join("ipc.sock"), Some(directory), dispatcher)
       },
       Endpoint::Tcp(addr) => {
         let listener = TcpListener::bind(&addr).await?;
         let local = listener.local_addr()?;
         Ok(Self {
           endpoint_string: format!("ws://{local}"),
-          listener: Listener::Tcp(listener),
-          dispatcher,
+          listener: std::sync::Mutex::new(Some(Listener::Tcp(listener))),
+          lifecycle: Arc::new(Lifecycle::new(format!("ws://{local}"), dispatcher)?),
         })
       },
     }
+  }
+
+  #[cfg(unix)]
+  fn bind_unix(
+    path: &std::path::Path,
+    directory: Option<Arc<tempfile::TempDir>>,
+    dispatcher: Arc<dyn Dispatcher>,
+  ) -> Result<Self> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+    let socket = UnixListener::bind(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    let listener = Listener::Unix {
+      listener: socket,
+      identity: (metadata.dev(), metadata.ino()),
+      path: path.to_path_buf(),
+      _directory: directory,
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(Self {
+      endpoint_string: path.to_string_lossy().into_owned(),
+      lifecycle: Arc::new(Lifecycle::new(path.to_string_lossy().into_owned(), dispatcher)?),
+      listener: std::sync::Mutex::new(Some(listener)),
+    })
+  }
+
+  pub(crate) fn generation(&self) -> &str {
+    &self.lifecycle.generation
+  }
+
+  pub(crate) fn is_stopped(&self) -> bool {
+    *self.lifecycle.stopped.borrow()
+  }
+
+  pub(crate) async fn stopped(&self) {
+    let _ = self.lifecycle.stopped.subscribe().wait_for(|stopped| *stopped).await;
+  }
+
+  pub(crate) fn publish(&self, claim: crate::registry::RegistryClaim) {
+    self.lifecycle.publish(claim);
+  }
+
+  pub(crate) fn unpublish(&self) -> Result<()> {
+    self.lifecycle.stopped.send_replace(true);
+    self.lifecycle.unpublish()
   }
 
   /// The resolved endpoint string to publish in the registry. For TCP this
@@ -128,26 +163,57 @@ impl SessionServer {
   ///
   /// Returns [`SessionError::Io`] if accepting a connection fails.
   pub async fn serve(&self) -> Result<()> {
-    match &self.listener {
+    let listener = self
+      .listener
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+      .ok_or_else(|| SessionError::Dispatch("session server already started".to_owned()))?;
+    let _serving = Serving(Arc::clone(&self.lifecycle));
+    let mut connections = tokio::task::JoinSet::new();
+    let mut stopped = self.lifecycle.stopped.subscribe();
+    loop {
+      tokio::select! {
+        biased;
+        _ = stopped.wait_for(|stopped| *stopped) => return Ok(()),
+        Some(result) = connections.join_next() => {
+          match result {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => tracing::debug!(%error, "session connection ended"),
+            Err(error) => tracing::warn!(%error, "session connection task failed"),
+          }
+        },
+        result = self.accept(&listener) => { connections.spawn(result?); },
+      }
+    }
+  }
+
+  async fn accept(
+    &self,
+    listener: &Listener,
+  ) -> Result<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>> {
+    let lifecycle = Arc::clone(&self.lifecycle);
+    match listener {
       #[cfg(unix)]
-      Listener::Unix(listener, _path) => loop {
+      Listener::Unix { listener, .. } => {
         let (stream, _) = listener.accept().await?;
-        let dispatcher = Arc::clone(&self.dispatcher);
-        tokio::spawn(async move {
-          if let Err(e) = serve_connection(stream, dispatcher).await {
-            tracing::debug!(error = %e, "session connection ended");
-          }
-        });
+        Ok(Box::pin(serve_connection(stream, lifecycle)))
       },
-      Listener::Tcp(listener) => loop {
+      Listener::Tcp(listener) => {
         let (stream, _) = listener.accept().await?;
-        let dispatcher = Arc::clone(&self.dispatcher);
-        tokio::spawn(async move {
-          if let Err(e) = serve_connection(stream, dispatcher).await {
-            tracing::debug!(error = %e, "session connection ended");
-          }
-        });
+        Ok(Box::pin(serve_connection(stream, lifecycle)))
       },
+    }
+  }
+}
+
+struct Serving(Arc<Lifecycle>);
+
+impl Drop for Serving {
+  fn drop(&mut self) {
+    self.0.stopped.send_replace(true);
+    if let Err(error) = self.0.unpublish() {
+      tracing::warn!(%error, "session publication cleanup failed");
     }
   }
 }
@@ -155,8 +221,14 @@ impl SessionServer {
 #[cfg(unix)]
 impl Drop for Listener {
   fn drop(&mut self) {
-    if let Listener::Unix(_, path) = self {
-      let _ = std::fs::remove_file(path);
+    use std::os::unix::fs::MetadataExt as _;
+    if let Listener::Unix { path, identity, .. } = self
+      && let Ok(metadata) = std::fs::symlink_metadata(&path)
+      && (metadata.dev(), metadata.ino()) == *identity
+      && let Err(error) = std::fs::remove_file(path)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!(%error, "session socket cleanup failed");
     }
   }
 }
@@ -167,7 +239,7 @@ impl Drop for Listener {
 /// A command's events are written as they are emitted — that is what makes a
 /// remote `run` stream its console like a local one — and the response frame
 /// always comes last.
-pub(crate) async fn serve_connection<S>(stream: S, dispatcher: Arc<dyn Dispatcher>) -> Result<()>
+async fn serve_connection<S>(stream: S, lifecycle: Arc<Lifecycle>) -> Result<()>
 where
   S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -181,9 +253,48 @@ where
     };
     let Some(command) = command else { break };
 
+    if command.verb == CLOSE_VERB {
+      if !lifecycle.identifies(&command) {
+        write_frame(
+          &mut writer,
+          &ServerFrame::Response(crate::Response::err(
+            command.id,
+            "close request does not identify this session endpoint",
+          )),
+        )
+        .await?;
+        continue;
+      }
+      let request = lifecycle.close_request();
+      let response = lifecycle.close(&command).await;
+      let closed = response.ok;
+      let written = write_frame(&mut writer, &ServerFrame::Response(response)).await;
+      drop(request);
+      written?;
+      if closed {
+        return Ok(());
+      }
+      continue;
+    }
+    let mut closing = lifecycle.closing();
+    if *closing.borrow() {
+      write_frame(
+        &mut writer,
+        &ServerFrame::Response(crate::Response::err(
+          command.id,
+          "session is closing; retry close if cleanup failed",
+        )),
+      )
+      .await?;
+      continue;
+    }
+    tokio::select! {
+      biased;
+      _ = closing.wait_for(|closing| *closing) => return Ok(()),
+      result = async {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let sink = EventSink::new(command.id, tx);
-    let mut dispatch = std::pin::pin!(dispatcher.dispatch(command, sink));
+    let mut dispatch = std::pin::pin!(lifecycle.run(command, sink));
     // `events_open` is what keeps this from spinning: a dispatcher that drops
     // its sink early closes the channel, and an always-ready `None` branch
     // would otherwise be re-polled on every loop iteration.
@@ -204,6 +315,9 @@ where
       write_frame(&mut writer, &ServerFrame::Event(event)).await?;
     }
     write_frame(&mut writer, &ServerFrame::Response(response)).await?;
+        Ok::<(), SessionError>(())
+      } => result?,
+    }
   }
   Ok(())
 }
@@ -213,6 +327,103 @@ mod tests {
   use super::*;
   use crate::client::SessionClient;
   use crate::dispatch::test_support::EchoDispatcher;
+
+  struct StreamingDispatcher {
+    started: tokio::sync::Notify,
+    closed: std::sync::atomic::AtomicBool,
+  }
+
+  #[async_trait::async_trait]
+  impl Dispatcher for StreamingDispatcher {
+    async fn dispatch(&self, _command: Command, events: EventSink) -> crate::Response {
+      events.console("log", "x".repeat(4096), 0);
+      self.started.notify_one();
+      std::future::pending().await
+    }
+
+    async fn close(&self) -> std::result::Result<(), String> {
+      self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+      Ok(())
+    }
+  }
+
+  #[tokio::test]
+  async fn non_reading_streaming_client_cannot_block_cleanup() {
+    let dispatcher = Arc::new(StreamingDispatcher {
+      started: tokio::sync::Notify::new(),
+      closed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let lifecycle = Arc::new(Lifecycle::new("local".into(), dispatcher.clone()).unwrap());
+    let (server, mut client) = tokio::io::duplex(64);
+    let serving = tokio::spawn(serve_connection(server, lifecycle.clone()));
+    write_frame(&mut client, &Command::new(1, "run", serde_json::json!({})))
+      .await
+      .unwrap();
+    dispatcher.started.notified().await;
+    let close = Command::new(
+      2,
+      CLOSE_VERB,
+      serde_json::json!({"endpoint":"local", "generation":lifecycle.generation}),
+    );
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(1), lifecycle.close(&close))
+      .await
+      .unwrap();
+    assert!(reply.ok);
+    assert!(dispatcher.closed.load(std::sync::atomic::Ordering::SeqCst));
+    serving.await.unwrap().unwrap();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn binding_an_occupied_socket_path_preserves_the_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("existing.sock");
+    std::fs::write(&path, "sashoush sentinel").unwrap();
+    assert!(
+      SessionServer::bind(Endpoint::Unix(path.clone()), Arc::new(EchoDispatcher))
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "sashoush sentinel");
+    let path = temp.path().join("live.sock");
+    let server = Arc::new(
+      SessionServer::bind(Endpoint::Unix(path.clone()), Arc::new(EchoDispatcher))
+        .await
+        .unwrap(),
+    );
+    let serving = tokio::spawn({
+      let server = server.clone();
+      async move { server.serve().await }
+    });
+    assert!(
+      SessionServer::bind(Endpoint::Unix(path), Arc::new(EchoDispatcher))
+        .await
+        .is_err()
+    );
+    let mut client = SessionClient::connect(server.endpoint_string()).await.unwrap();
+    assert!(
+      client
+        .call(Command::new(1, "echo", serde_json::json!({})))
+        .await
+        .unwrap()
+        .ok
+    );
+    serving.abort();
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn dropping_a_listener_does_not_remove_a_replacement_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("session.sock");
+    let server = SessionServer::bind(Endpoint::Unix(path.clone()), Arc::new(EchoDispatcher))
+      .await
+      .unwrap();
+    std::fs::rename(&path, temp.path().join("previous.sock")).unwrap();
+    std::fs::write(&path, "sashoush replacement").unwrap();
+    drop(server);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "sashoush replacement");
+  }
 
   async fn spawn_echo_server() -> (String, tokio::task::JoinHandle<()>) {
     let server = SessionServer::bind(Endpoint::Tcp("127.0.0.1:0".into()), Arc::new(EchoDispatcher))

@@ -48,6 +48,6 @@ pub async fn run(root: &Path, urls: Vec<String>) -> Result<Value> {
     Ok(json!({ "before": before, "after": after, "runningAfterDisconnect": running_after_disconnect }))
   }
   .await;
-  child.shutdown().await;
+  child.shutdown().await?;
   result
 }

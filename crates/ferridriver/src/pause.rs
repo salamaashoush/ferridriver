@@ -15,12 +15,14 @@
 //!
 //! [`ActionGate`]: crate::trace::ActionGate
 
+use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// How long the process has spent parked at the debugger.
+#[derive(Debug)]
 pub struct PauseClock {
   /// Accumulated parked time, in milliseconds. Parks are strictly
   /// sequential (`--debug` runs one worker), so a counter is enough.
@@ -98,7 +100,29 @@ impl Drop for ParkGuard {
 /// The process's parked clock.
 pub fn pause_clock() -> &'static PauseClock {
   static CLOCK: OnceLock<PauseClock> = OnceLock::new();
+  #[cfg(test)]
+  if let Ok(clock) = TEST_CLOCK.try_with(|clock| *clock) {
+    return clock;
+  }
   CLOCK.get_or_init(PauseClock::new)
+}
+
+#[cfg(test)]
+tokio::task_local! { static TEST_CLOCK: &'static PauseClock; }
+
+#[cfg(test)]
+pub(crate) fn with_test_clock<F: Future>(future: F) -> impl Future<Output = F::Output> {
+  TEST_CLOCK.scope(Box::leak(Box::new(PauseClock::new())), future)
+}
+
+pub(crate) fn adjusted_deadline(
+  clock: &PauseClock,
+  deadline: tokio::time::Instant,
+  parked_before: Duration,
+) -> tokio::time::Instant {
+  deadline
+    .checked_add(clock.parked_now().saturating_sub(parked_before))
+    .unwrap_or(deadline)
 }
 
 /// A deadline ran out. Distinct from [`tokio::time::error::Elapsed`]
@@ -122,39 +146,109 @@ impl std::error::Error for Timedout {}
 /// [`Timedout`] when `limit` elapses without the future finishing, not
 /// counting time parked.
 pub async fn run_within<F: Future>(limit: Duration, fut: F) -> Result<F::Output, Timedout> {
-  /// How often to look again while parked. The deadline moves with the
-  /// wall clock meanwhile, so waking is only to re-arm the timer.
-  const PARK_TICK: Duration = Duration::from_millis(100);
-
   let clock = pause_clock();
-  let started = Instant::now();
-  // The clock counts the whole process, so only what it gains from here on
-  // belongs to this call — otherwise work that runs after a long stop would
-  // inherit that stop's grace and never time out.
-  let parked_before = clock.parked_now();
-  let deadline_now = || started + limit + clock.parked_now().saturating_sub(parked_before);
+  let deadline = tokio::time::Instant::now().checked_add(limit).ok_or(Timedout)?;
   let mut fut = std::pin::pin!(fut);
-  loop {
-    // `fut` stays in every select arm: the thing that ends a park is
-    // usually inside it (the debugger's gate returns when a script
-    // resumes it), so a branch that stopped polling `fut` while parked
-    // would wait for a park only `fut` could end.
-    let wake = if clock.is_parked() {
-      Instant::now() + PARK_TICK
-    } else {
-      deadline_now()
-    };
-    tokio::select! {
-      output = &mut fut => return Ok(output),
-      () = tokio::time::sleep_until(wake.into()) => {
-        // A park may have started, or started AND ended, inside the sleep;
-        // either way it moves the deadline out from under it.
-        if Instant::now() < deadline_now() {
-          continue;
-        }
-        return Err(Timedout);
-      },
+  run_until(clock, deadline, clock.parked_now(), fut.as_mut()).await
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline {
+  clock: Option<&'static PauseClock>,
+  at: Option<tokio::time::Instant>,
+  parked_before: Duration,
+}
+
+impl Deadline {
+  pub(crate) fn new(
+    clock: Option<&'static PauseClock>,
+    at: Option<tokio::time::Instant>,
+    parked_before: Duration,
+  ) -> Self {
+    Self {
+      clock,
+      at,
+      parked_before,
     }
+  }
+
+  pub(crate) fn effective(&self) -> Option<tokio::time::Instant> {
+    self.at.map(|deadline| {
+      self
+        .clock
+        .map_or(deadline, |clock| adjusted_deadline(clock, deadline, self.parked_before))
+    })
+  }
+}
+
+pin_project_lite::pin_project! {
+  pub(crate) struct DeadlineFuture<F, D> {
+    #[pin]
+    future: F,
+    timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    deadline: D,
+  }
+}
+
+pub(crate) fn with_deadline<F: Future, D: Borrow<Deadline>>(deadline: D, future: F) -> DeadlineFuture<F, D> {
+  DeadlineFuture {
+    future,
+    timer: None,
+    deadline,
+  }
+}
+
+pub(crate) fn run_until<F: Future>(
+  clock: &'static PauseClock,
+  deadline: tokio::time::Instant,
+  parked_before: Duration,
+  future: F,
+) -> DeadlineFuture<F, Deadline> {
+  with_deadline(Deadline::new(Some(clock), Some(deadline), parked_before), future)
+}
+
+impl<F: Future, D: Borrow<Deadline>> Future for DeadlineFuture<F, D> {
+  type Output = Result<F::Output, Timedout>;
+
+  fn poll(self: std::pin::Pin<&mut Self>, context: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    use std::task::Poll;
+    const PARK_TICK: Duration = Duration::from_millis(100);
+    let mut this = self.project();
+    let deadline: &Deadline = (*this.deadline).borrow();
+    if deadline
+      .effective()
+      .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+    {
+      return Poll::Ready(Err(Timedout));
+    }
+    // The future can release the debugger park itself, so it must remain polled while parked.
+    if let Poll::Ready(output) = this.future.as_mut().poll(context) {
+      return Poll::Ready(Ok(output));
+    }
+    let Some(at) = deadline.effective() else {
+      return Poll::Pending;
+    };
+    let wake = if deadline.clock.is_some_and(PauseClock::is_parked) {
+      tokio::time::Instant::now() + PARK_TICK
+    } else {
+      at
+    };
+    let timer = this
+      .timer
+      .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(wake)));
+    if timer.deadline() != wake {
+      timer.as_mut().reset(wake);
+    }
+    if timer.as_mut().poll(context).is_ready() {
+      if deadline
+        .effective()
+        .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+      {
+        return Poll::Ready(Err(Timedout));
+      }
+      context.waker().wake_by_ref();
+    }
+    Poll::Pending
   }
 }
 
@@ -203,54 +297,55 @@ mod tests {
 
   use super::{pause_clock, run_within};
 
-  // One test, not three: the clock is process-global, so separate `#[test]`
-  // fns would run their parks concurrently and account each other's time.
   #[tokio::test(flavor = "multi_thread")]
   async fn parks_suspend_a_deadline_without_disabling_it() {
-    let clock = pause_clock();
+    super::with_test_clock(async {
+      let clock = pause_clock();
 
-    // A park adds its own duration and nothing else, and while it is open
-    // `parked()` does not move — only `parked_now()` does.
-    let before = clock.parked();
-    assert!(!clock.is_parked());
-    let guard = clock.park();
-    assert!(clock.is_parked());
-    assert_eq!(clock.parked(), before);
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    assert!(clock.parked_now() >= before + Duration::from_millis(25));
-    drop(guard);
-    assert!(!clock.is_parked());
-    assert!(clock.parked() >= before + Duration::from_millis(25));
-
-    // A park longer than the whole budget does not consume it, but real
-    // work after the release still does.
-    let work = async {
+      // A park adds its own duration and nothing else, and while it is open
+      // `parked()` does not move — only `parked_now()` does.
+      let before = clock.parked();
+      assert!(!clock.is_parked());
       let guard = clock.park();
-      tokio::time::sleep(Duration::from_millis(120)).await;
+      assert!(clock.is_parked());
+      assert_eq!(clock.parked(), before);
+      tokio::time::sleep(Duration::from_millis(30)).await;
+      assert!(clock.parked_now() >= before + Duration::from_millis(25));
       drop(guard);
-      tokio::time::sleep(Duration::from_millis(400)).await;
-    };
-    assert!(
-      run_within(Duration::from_millis(60), work).await.is_err(),
-      "work that ran past its budget after being released must still time out"
-    );
+      assert!(!clock.is_parked());
+      assert!(clock.parked() >= before + Duration::from_millis(25));
 
-    // The park is ended by the future itself, which is the shape the
-    // debugger's gate actually has: it parks and waits for a script to
-    // resume it. A `run_within` that stopped polling `fut` while parked
-    // would wait forever for a park only `fut` could end.
-    let (tx, mut rx) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-      tokio::time::sleep(Duration::from_millis(150)).await;
-      tx.send_replace(true);
-    });
-    let gated = async {
-      let _parked = clock.park();
-      let _ = rx.changed().await;
-    };
-    assert!(
-      run_within(Duration::from_millis(30), gated).await.is_ok(),
-      "a park ended from inside the future must not deadlock its own deadline"
-    );
+      // A park longer than the whole budget does not consume it, but real
+      // work after the release still does.
+      let work = async {
+        let guard = clock.park();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+      };
+      assert!(
+        run_within(Duration::from_millis(60), work).await.is_err(),
+        "work that ran past its budget after being released must still time out"
+      );
+
+      // The park is ended by the future itself, which is the shape the
+      // debugger's gate actually has: it parks and waits for a script to
+      // resume it. A `run_within` that stopped polling `fut` while parked
+      // would wait forever for a park only `fut` could end.
+      let (tx, mut rx) = tokio::sync::watch::channel(false);
+      tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tx.send_replace(true);
+      });
+      let gated = async {
+        let _parked = clock.park();
+        let _ = rx.changed().await;
+      };
+      assert!(
+        run_within(Duration::from_millis(30), gated).await.is_ok(),
+        "a park ended from inside the future must not deadlock its own deadline"
+      );
+    })
+    .await;
   }
 }

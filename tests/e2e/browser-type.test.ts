@@ -4,7 +4,7 @@
 // for the duration of a single test. Test titles mirror the original
 // Rust fn names.
 
-import { test, describe, expect } from '@ferridriver/test';
+import { test, describe, expect, safari as safariFactory } from '@ferridriver/test';
 
 describe('browser type', () => {
   test('browser_type_name', async () => {
@@ -13,6 +13,8 @@ describe('browser type', () => {
     expect(chromium().name()).toBe('chromium');
     expect(firefox().name()).toBe('firefox');
     expect(webkit().name()).toBe('webkit');
+    expect(safari().name()).toBe('safari');
+    expect(safariFactory().name()).toBe('safari');
   });
 
   test('browser_type_executable_path', async () => {

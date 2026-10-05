@@ -6,10 +6,10 @@
 //!
 //! Persistent: [`SessionProcs`] keeps long-running children (a dev
 //! server, a watcher) alive across VM rebuilds. It lives in the durable
-//! session tier, so `Drop` (idle-TTL reap / explicit close / shutdown)
-//! SIGKILLs every process group — a session can never leak a server.
+//! session tier. Explicit close awaits its process owners; dropping the
+//! registry requests cleanup through those same owners.
 //!
-//! Every child is its own process group (`setsid` in `pre_exec`) so a
+//! Every child is its own process group so a
 //! shell pipeline dies whole, not just its leader. The environment is
 //! scrubbed to `PATH` plus the spec's declared passthrough names — a
 //! command never inherits ambient server secrets.
@@ -19,6 +19,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ferridriver::backend::process::ChildGroup;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -51,17 +52,13 @@ fn configure(cmd: &mut Command, rc: &ResolvedCommand) {
   if let Some(dir) = &rc.cwd {
     cmd.current_dir(dir);
   }
-  cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-  // New session => child is its own process-group leader (pgid == pid),
-  // so `kill(-pid)` reaps the whole pipeline. SAFETY: `setsid` is
-  // async-signal-safe and the only call in the pre_exec hook.
-  #[allow(unsafe_code)]
-  unsafe {
-    cmd.pre_exec(|| {
-      libc::setsid();
-      Ok(())
-    });
-  }
+  cmd
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
+  #[cfg(unix)]
+  cmd.process_group(0);
 }
 
 fn build(rc: &ResolvedCommand) -> Command {
@@ -84,16 +81,6 @@ fn build(rc: &ResolvedCommand) -> Command {
 
 fn pid_of(id: Option<u32>) -> i32 {
   id.and_then(|p| i32::try_from(p).ok()).unwrap_or(0)
-}
-
-/// SIGKILL the process group led by `pid` (best-effort).
-fn kill_group(pid: i32) {
-  if pid > 0 {
-    #[allow(unsafe_code)]
-    unsafe {
-      libc::kill(-pid, libc::SIGKILL);
-    }
-  }
 }
 
 /// Read up to `cap` bytes; `Err` if the stream exceeds it (the process
@@ -145,12 +132,7 @@ fn shape(stdout: &[u8], mode: CommandOutput) -> Result<serde_json::Value, String
 /// Run a one-shot command to completion. Errors on non-zero exit
 /// (message carries stderr), timeout, or output past the cap.
 pub async fn run_oneshot(rc: &ResolvedCommand) -> Result<serde_json::Value, String> {
-  let result = exec_oneshot(rc).await?;
-  if !result.success {
-    let code = result.exit_code.map_or_else(|| "signal".to_string(), |c| c.to_string());
-    return Err(format!("command failed (exit {code}): {}", result.stderr.trim()));
-  }
-  shape(result.stdout.as_bytes(), rc.output)
+  SessionProcs::default().run_oneshot(rc).await
 }
 
 #[derive(serde::Serialize)]
@@ -163,38 +145,7 @@ pub struct CommandResult {
 }
 
 pub async fn exec_oneshot(rc: &ResolvedCommand) -> Result<CommandResult, String> {
-  if rc.persistent {
-    return Err("this command is declared `persistent`: use commands.start/status/stop, not run".to_string());
-  }
-  let mut child = build(rc).spawn().map_err(|e| format!("spawn command: {e}"))?;
-  let pid = pid_of(child.id());
-  let out = child.stdout.take().ok_or("no stdout pipe")?;
-  let err = child.stderr.take().ok_or("no stderr pipe")?;
-
-  let work = Box::pin(async move {
-    let (o, e) = tokio::join!(read_capped(out, OUTPUT_CAP), read_capped(err, OUTPUT_CAP));
-    let status = child.wait().await.map_err(|e| format!("wait child: {e}"))?;
-    Ok::<_, String>((o?, e?, status))
-  });
-
-  // An explicit `timeoutMs` is honoured as-is; an unset one still gets
-  // a hard default so a hung one-shot can never block the session
-  // indefinitely.
-  let ms = rc.timeout_ms.unwrap_or(DEFAULT_ONESHOT_TIMEOUT_MS);
-  let (stdout, stderr, status) = {
-    let Ok(r) = tokio::time::timeout(Duration::from_millis(ms), work).await else {
-      kill_group(pid);
-      return Err(format!("command timed out after {ms}ms"));
-    };
-    r.inspect_err(|_| kill_group(pid))?
-  };
-
-  Ok(CommandResult {
-    exit_code: status.code(),
-    success: status.success(),
-    stdout: String::from_utf8_lossy(&stdout).into_owned(),
-    stderr: String::from_utf8_lossy(&stderr).into_owned(),
-  })
+  SessionProcs::default().exec_oneshot(rc).await
 }
 
 /// A bounded tail of a stream — only the last [`RING_CAP`] bytes.
@@ -228,23 +179,206 @@ struct Proc {
   stderr: Arc<Mutex<Ring>>,
   /// Set by the reaper task once the child exits.
   exit: tokio::sync::watch::Receiver<Option<i32>>,
+  failure: tokio::sync::watch::Receiver<Option<String>>,
+  control: tokio::sync::mpsc::UnboundedSender<StopRequest>,
 }
 
-/// Per-session persistent-process registry. Owned by the durable
-/// session tier; `Drop` kills every process group.
+type StopRequest = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+#[derive(Clone)]
+struct Job {
+  control: tokio::sync::mpsc::UnboundedSender<StopRequest>,
+  exit: tokio::sync::watch::Receiver<Option<i32>>,
+  failure: tokio::sync::watch::Receiver<Option<String>>,
+}
+
+struct StopOnDrop(Option<tokio::sync::mpsc::UnboundedSender<StopRequest>>);
+
+impl Drop for StopOnDrop {
+  fn drop(&mut self) {
+    if let Some(control) = self.0.take() {
+      let (reply, _) = tokio::sync::oneshot::channel();
+      let _ = control.send(reply);
+    }
+  }
+}
+
+async fn wait_process(
+  mut exit: tokio::sync::watch::Receiver<Option<i32>>,
+  mut failure: tokio::sync::watch::Receiver<Option<String>>,
+) -> Result<i32, String> {
+  loop {
+    if let Some(code) = *exit.borrow_and_update() {
+      return Ok(code);
+    }
+    if let Some(error) = failure.borrow_and_update().as_ref() {
+      return Err(error.clone());
+    }
+    tokio::select! {
+      result = exit.changed() => result.map_err(|e| e.to_string())?,
+      result = failure.changed() => {
+        if result.is_err() && exit.borrow().is_none() {
+          return Err("process owner stopped without an exit result".into());
+        }
+      },
+    }
+  }
+}
+
+async fn stop_process(
+  control: &tokio::sync::mpsc::UnboundedSender<StopRequest>,
+  exit: &tokio::sync::watch::Receiver<Option<i32>>,
+) -> Result<(), String> {
+  if exit.borrow().is_some() {
+    return Ok(());
+  }
+  let (reply, result) = tokio::sync::oneshot::channel();
+  if control.send(reply).is_ok()
+    && let Ok(result) = result.await
+  {
+    return result;
+  }
+  if exit.borrow().is_some() {
+    Ok(())
+  } else {
+    Err("process owner stopped before confirming cleanup".into())
+  }
+}
+
+async fn own_process(
+  mut group: ChildGroup,
+  mut control: tokio::sync::mpsc::UnboundedReceiver<StopRequest>,
+  pumps: Vec<tokio::task::JoinHandle<()>>,
+  exit: tokio::sync::watch::Sender<Option<i32>>,
+  failure: tokio::sync::watch::Sender<Option<String>>,
+) {
+  let mut observing = true;
+  loop {
+    let (result, reply, abandoned) = tokio::select! {
+      result = group.wait(), if observing => (result, None, false),
+      request = control.recv() => {
+        let abandoned = request.is_none();
+        let result = match group.terminate() {
+          Ok(()) => group.wait().await,
+          Err(error) => Err(error),
+        };
+        (result, request, abandoned)
+      }
+    };
+    match result {
+      Ok(status) => {
+        for pump in pumps {
+          if let Err(error) = pump.await {
+            tracing::warn!(%error, "command output task failed");
+          }
+        }
+        exit.send_replace(Some(status.code().unwrap_or(-1)));
+        if let Some(reply) = reply {
+          let _ = reply.send(Ok(()));
+        }
+        return;
+      },
+      Err(error) => {
+        let message = format!("process cleanup: {error}");
+        failure.send_replace(Some(message.clone()));
+        if let Some(reply) = reply {
+          let _ = reply.send(Err(message));
+        }
+        if abandoned {
+          tracing::warn!(%error, "process cleanup failed after owner was dropped");
+          return;
+        }
+        observing = false;
+      },
+    }
+  }
+}
+
+/// Per-session process registry, retained independently of the script VM.
 pub struct SessionProcs {
   inner: Mutex<HashMap<String, Proc>>,
+  closing: std::sync::atomic::AtomicBool,
+  jobs: Mutex<Vec<Job>>,
 }
 
 impl Default for SessionProcs {
   fn default() -> Self {
     Self {
       inner: Mutex::new(HashMap::new()),
+      closing: std::sync::atomic::AtomicBool::new(false),
+      jobs: Mutex::new(Vec::new()),
     }
   }
 }
 
 impl SessionProcs {
+  pub async fn run_oneshot(&self, rc: &ResolvedCommand) -> Result<serde_json::Value, String> {
+    let result = self.exec_oneshot(rc).await?;
+    if !result.success {
+      let code = result.exit_code.map_or_else(|| "signal".to_string(), |c| c.to_string());
+      return Err(format!("command failed (exit {code}): {}", result.stderr.trim()));
+    }
+    shape(result.stdout.as_bytes(), rc.output)
+  }
+
+  pub async fn exec_oneshot(&self, rc: &ResolvedCommand) -> Result<CommandResult, String> {
+    if rc.persistent {
+      return Err("this command is declared `persistent`: use commands.start/status/stop, not run".into());
+    }
+    let (job, out, err) = {
+      let mut jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("session processes are closing".into());
+      }
+      jobs.retain(|job| job.exit.borrow().is_none());
+      let mut child = build(rc).spawn().map_err(|e| format!("spawn command: {e}"))?;
+      let out = child.stdout.take();
+      let err = child.stderr.take();
+      let group = ChildGroup::unregistered(child);
+      let out = out.ok_or("no stdout pipe")?;
+      let err = err.ok_or("no stderr pipe")?;
+      let (control, requests) = tokio::sync::mpsc::unbounded_channel();
+      let (exit_w, exit) = tokio::sync::watch::channel(None);
+      let (failure_w, failure) = tokio::sync::watch::channel(None);
+      let job = Job { control, exit, failure };
+      jobs.push(job.clone());
+      tokio::spawn(own_process(group, requests, Vec::new(), exit_w, failure_w));
+      (job, out, err)
+    };
+    let mut cancel = StopOnDrop(Some(job.control.clone()));
+    let work = Box::pin(async {
+      tokio::try_join!(
+        wait_process(job.exit.clone(), job.failure.clone()),
+        read_capped(out, OUTPUT_CAP),
+        read_capped(err, OUTPUT_CAP),
+      )
+    });
+    let ms = rc.timeout_ms.unwrap_or(DEFAULT_ONESHOT_TIMEOUT_MS);
+    let result = tokio::time::timeout(Duration::from_millis(ms), work)
+      .await
+      .unwrap_or_else(|_| Err(format!("command timed out after {ms}ms")));
+    let cleanup = stop_process(&job.control, &job.exit).await;
+    cancel.0 = None;
+    if cleanup.is_ok() {
+      self
+        .jobs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|entry| !entry.control.same_channel(&job.control));
+    }
+    let (code, stdout, stderr) = match (result, cleanup) {
+      (Ok(result), Ok(())) => result,
+      (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
+      (Err(error), Err(cleanup)) => return Err(format!("{error}; cleanup: {cleanup}")),
+    };
+    Ok(CommandResult {
+      exit_code: (code >= 0).then_some(code),
+      success: code == 0,
+      stdout: String::from_utf8_lossy(&stdout).into_owned(),
+      stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
+  }
+
   /// Start (or no-op if already running) a persistent command. Returns
   /// the pid.
   pub fn start(&self, name: &str, rc: &ResolvedCommand) -> Result<i32, String> {
@@ -260,18 +394,18 @@ impl SessionProcs {
       return Err("this command is not declared `persistent`: use commands.run".to_string());
     }
     let mut map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+      return Err("session processes are closing".into());
+    }
     if let Some(p) = map.get(name)
       && p.exit.borrow().is_none()
     {
+      if let Some(error) = p.failure.borrow().as_ref() {
+        return Err(error.clone());
+      }
       return Ok(p.pid); // already running — idempotent
     }
-    map.retain(|_, p| {
-      let alive = p.exit.borrow().is_none();
-      if !alive {
-        kill_group(p.pid);
-      }
-      alive
-    });
+    map.retain(|_, p| p.exit.borrow().is_none());
     if map.len() >= MAX_PERSISTENT {
       return Err(format!(
         "too many persistent processes (max {MAX_PERSISTENT}) for this session"
@@ -287,6 +421,8 @@ impl SessionProcs {
     let stdout = Arc::new(Mutex::new(Ring::default()));
     let stderr = Arc::new(Mutex::new(Ring::default()));
     let (exit_w, exit) = tokio::sync::watch::channel(None);
+    let (failure_w, failure) = tokio::sync::watch::channel(None);
+    let (control, requests) = tokio::sync::mpsc::unbounded_channel();
     let (output_w, output_changed) = tokio::sync::watch::channel(());
 
     let input = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
@@ -304,13 +440,13 @@ impl SessionProcs {
     if let Some(e) = child.stderr.take() {
       pumps.push(pump(e, stderr.clone(), None));
     }
-    tokio::spawn(async move {
-      let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-      for pump in pumps {
-        let _ = pump.await;
-      }
-      exit_w.send_replace(Some(code));
-    });
+    tokio::spawn(own_process(
+      ChildGroup::unregistered(child),
+      requests,
+      pumps,
+      exit_w,
+      failure_w,
+    ));
 
     map.insert(
       name.to_string(),
@@ -323,6 +459,8 @@ impl SessionProcs {
         output_changed,
         stderr,
         exit,
+        failure,
+        control,
       },
     );
     Ok(pid)
@@ -410,20 +548,12 @@ impl SessionProcs {
   }
 
   pub async fn wait(&self, name: &str) -> Result<i32, String> {
-    let mut exit = {
+    let (exit, failure) = {
       let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      map
-        .get(name)
-        .ok_or_else(|| format!("no process `{name}`"))?
-        .exit
-        .clone()
+      let process = map.get(name).ok_or_else(|| format!("no process `{name}`"))?;
+      (process.exit.clone(), process.failure.clone())
     };
-    loop {
-      if let Some(code) = *exit.borrow_and_update() {
-        return Ok(code);
-      }
-      exit.changed().await.map_err(|e| e.to_string())?;
-    }
+    wait_process(exit, failure).await
   }
 
   pub fn status(&self, name: &str) -> Result<serde_json::Value, String> {
@@ -443,25 +573,73 @@ impl SessionProcs {
     }))
   }
 
-  pub fn stop(&self, name: &str) -> Result<(), String> {
+  pub async fn stop(&self, name: &str) -> Result<(), String> {
+    let (control, exit) = {
+      let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      let process = map
+        .get(name)
+        .ok_or_else(|| format!("no persistent process `{name}` to stop"))?;
+      (process.control.clone(), process.exit.clone())
+    };
+    stop_process(&control, &exit).await?;
     let mut map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    match map.remove(name) {
-      Some(p) => {
-        kill_group(p.pid);
-        Ok(())
-      },
-      None => Err(format!("no persistent process `{name}` to stop")),
+    if map
+      .get(name)
+      .is_some_and(|process| process.control.same_channel(&control))
+    {
+      map.remove(name);
     }
+    Ok(())
   }
-}
 
-impl Drop for SessionProcs {
-  fn drop(&mut self) {
-    if let Ok(map) = self.inner.lock() {
-      for p in map.values() {
-        kill_group(p.pid);
+  pub async fn close(&self) -> Result<(), String> {
+    self.begin_close();
+    let processes = {
+      let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      map
+        .iter()
+        .map(|(name, process)| (name.clone(), process.control.clone(), process.exit.clone()))
+        .collect::<Vec<_>>()
+    };
+    let mut errors = Vec::new();
+    for (name, control, exit) in processes {
+      match stop_process(&control, &exit).await {
+        Ok(()) => {
+          let mut map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+          if map
+            .get(&name)
+            .is_some_and(|process| process.control.same_channel(&control))
+          {
+            map.remove(&name);
+          }
+        },
+        Err(error) => errors.push(format!("{name}: {error}")),
       }
     }
+    let jobs = self
+      .jobs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    for job in jobs {
+      match stop_process(&job.control, &job.exit).await {
+        Ok(()) => self
+          .jobs
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .retain(|entry| !entry.control.same_channel(&job.control)),
+        Err(error) => errors.push(format!("one-shot command: {error}")),
+      }
+    }
+    if errors.is_empty() {
+      Ok(())
+    } else {
+      Err(errors.join("; "))
+    }
+  }
+
+  pub(crate) fn begin_close(&self) {
+    self.closing.store(true, std::sync::atomic::Ordering::Release);
   }
 }
 
@@ -487,4 +665,119 @@ fn pump<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
       }
     }
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn command(source: &str, persistent: bool) -> ResolvedCommand {
+    ResolvedCommand {
+      exec: ResolvedExec::Shell(source.into()),
+      timeout_ms: Some(2_000),
+      env: Vec::new(),
+      cwd: None,
+      output: CommandOutput::Text,
+      persistent,
+    }
+  }
+
+  #[tokio::test]
+  async fn natural_exit_cleans_descendants_and_preserves_output_for_all_waiters() {
+    let procs = SessionProcs::default();
+    procs
+      .start("sashoush", &command("sleep 30 & printf ready; exit 7", true))
+      .expect("start");
+    let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
+      tokio::join!(procs.wait("sashoush"), procs.wait("sashoush"))
+    })
+    .await
+    .expect("descendant is cleaned before its sleep ends");
+    assert_eq!(first.expect("first waiter"), 7);
+    assert_eq!(second.expect("second waiter"), 7);
+    assert_eq!(procs.wait("sashoush").await.expect("late waiter"), 7);
+    assert_eq!(procs.status("sashoush").expect("retained output")["stdout"], "ready");
+    procs.stop("sashoush").await.expect("stop completed process");
+  }
+
+  #[tokio::test]
+  async fn close_waits_for_termination_and_permanently_closes_admission() {
+    let procs = SessionProcs::default();
+    let spec = command("printf ready; exec sleep 30", true);
+    procs.start("sashoush", &spec).expect("start");
+    procs.wait_for_output("sashoush", "ready").await.expect("ready");
+    let exit = procs.inner.lock().expect("registry")["sashoush"].exit.clone();
+    procs.close().await.expect("close");
+    assert_eq!(*exit.borrow(), Some(-1));
+    assert!(procs.inner.lock().expect("registry").is_empty());
+    assert!(
+      procs
+        .start("sashoush", &spec)
+        .expect_err("closed admission")
+        .contains("closing")
+    );
+    assert!(
+      procs
+        .run_oneshot(&command("printf unexpected", false))
+        .await
+        .expect_err("closed admission")
+        .contains("closing")
+    );
+    procs.close().await.expect("repeated close");
+  }
+
+  #[tokio::test]
+  async fn cancelled_oneshot_remains_owned_until_cleanup_finishes() {
+    let procs = Arc::new(SessionProcs::default());
+    let worker = Arc::clone(&procs);
+    let task = tokio::spawn(async move { worker.exec_oneshot(&command("exec sleep 30", false)).await });
+    let job = tokio::time::timeout(Duration::from_secs(3), async {
+      loop {
+        if let Some(job) = procs.jobs.lock().expect("jobs").first().cloned() {
+          break job;
+        }
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("job registered");
+    task.abort();
+    assert!(task.await.err().expect("cancel caller").is_cancelled());
+    tokio::time::timeout(Duration::from_secs(3), procs.close())
+      .await
+      .expect("bounded cleanup")
+      .expect("close");
+    assert_eq!(*job.exit.borrow(), Some(-1));
+    assert!(procs.jobs.lock().expect("jobs").is_empty());
+  }
+
+  #[tokio::test]
+  async fn oneshot_preserves_leader_status_and_terminates_remaining_descendants() {
+    let procs = SessionProcs::default();
+    let result = procs
+      .exec_oneshot(&command("sleep 30 & printf ready; exit 7", false))
+      .await
+      .expect("result");
+    assert_eq!(result.exit_code, Some(7));
+    assert!(!result.success);
+    assert_eq!(result.stdout, "ready");
+    assert!(procs.jobs.lock().expect("jobs").is_empty());
+  }
+
+  #[tokio::test]
+  async fn timeout_and_output_overflow_finish_cleanup_before_returning() {
+    let procs = SessionProcs::default();
+    let mut spec = command("exec sleep 30", false);
+    spec.timeout_ms = Some(20);
+    let error = procs.exec_oneshot(&spec).await.err().expect("timeout");
+    assert!(error.contains("timed out after 20ms"), "{error}");
+    assert!(procs.jobs.lock().expect("jobs").is_empty());
+    let error = procs
+      .exec_oneshot(&command("exec yes sashoush", false))
+      .await
+      .err()
+      .expect("output overflow");
+    assert!(error.contains("output exceeded"), "{error}");
+    assert!(procs.jobs.lock().expect("jobs").is_empty(), "{error}");
+  }
 }

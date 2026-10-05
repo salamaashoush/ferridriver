@@ -906,12 +906,13 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
   let unwrap_guard = if returns_fixture_guard(&input.sig.output) {
     quote! {
       let (__value, __teardown) = __value.into_parts();
+      let __value = ::std::sync::Arc::new(__value);
       if let ::std::option::Option::Some(__td) = __teardown {
-        __pool.register_teardown(#fn_name_str, __td);
+        __pool.register_teardown(#fn_name_str, __value.clone(), __td);
       }
     }
   } else {
-    quote! {}
+    quote! { let __value = ::std::sync::Arc::new(__value); }
   };
 
   let expanded = quote! {
@@ -936,8 +937,7 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
             })?;
             #unwrap_guard
             ::std::result::Result::Ok(
-              ::std::sync::Arc::new(__value)
-                as ::std::sync::Arc<dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync>,
+              __value as ::std::sync::Arc<dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync>,
             )
           })
         }),

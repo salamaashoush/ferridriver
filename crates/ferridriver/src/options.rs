@@ -1827,7 +1827,8 @@ pub struct GotoOptions {
 
 /// Which browser product. Three `BrowserType` instances exposed as
 /// `chromium`, `firefox`, and `webkit` on the top-level module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BrowserKind {
   /// Google Chrome / Chromium
   Chromium,
@@ -1835,6 +1836,23 @@ pub enum BrowserKind {
   Firefox,
   /// Apple `WebKit` (macOS only)
   WebKit,
+  Safari,
+}
+
+impl std::str::FromStr for BrowserKind {
+  type Err = crate::error::FerriError;
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    match value {
+      "chromium" => Ok(Self::Chromium),
+      "firefox" => Ok(Self::Firefox),
+      "webkit" => Ok(Self::WebKit),
+      "safari" => Ok(Self::Safari),
+      _ => Err(crate::error::FerriError::invalid_argument(
+        "browser",
+        format!("unknown browser {value:?}; expected chromium, firefox, webkit, or safari"),
+      )),
+    }
+  }
 }
 
 impl BrowserKind {
@@ -1846,6 +1864,7 @@ impl BrowserKind {
       Self::Chromium => "chromium",
       Self::Firefox => "firefox",
       Self::WebKit => "webkit",
+      Self::Safari => "safari",
     }
   }
 
@@ -1857,8 +1876,53 @@ impl BrowserKind {
     match self {
       Self::Chromium => crate::backend::BackendKind::CdpPipe,
       Self::Firefox => crate::backend::BackendKind::Bidi,
+      Self::Safari => crate::backend::BackendKind::WebDriver,
       Self::WebKit => crate::backend::BackendKind::WebKit,
     }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserSelection {
+  pub browser: BrowserKind,
+  pub backend: crate::backend::BackendKind,
+}
+
+impl BrowserSelection {
+  /// # Errors
+  /// Rejects a protocol that cannot drive the requested browser.
+  pub fn resolve(
+    browser: Option<BrowserKind>,
+    backend: Option<crate::backend::BackendKind>,
+  ) -> crate::error::Result<Self> {
+    use crate::backend::BackendKind;
+    let browser = browser.unwrap_or(match backend {
+      Some(BackendKind::Bidi) => BrowserKind::Firefox,
+      Some(BackendKind::WebKit) => BrowserKind::WebKit,
+      _ => BrowserKind::Chromium,
+    });
+    let backend = backend.unwrap_or_else(|| browser.default_backend());
+    let compatible = matches!(
+      (browser, backend),
+      (
+        BrowserKind::Chromium,
+        BackendKind::CdpPipe | BackendKind::CdpWs | BackendKind::Bidi | BackendKind::WebDriver
+      ) | (
+        BrowserKind::Firefox | BrowserKind::Safari,
+        BackendKind::Bidi | BackendKind::WebDriver
+      ) | (BrowserKind::WebKit, BackendKind::WebKit)
+    );
+    if !compatible {
+      return Err(crate::error::FerriError::invalid_argument(
+        "backend",
+        format!(
+          "{} cannot use {}; omit backend to select its driver automatically",
+          browser.name(),
+          backend.name()
+        ),
+      ));
+    }
+    Ok(Self { browser, backend })
   }
 }
 
@@ -1933,6 +1997,7 @@ pub enum IgnoreDefaultArgs {
 /// lost its cookies on restart.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct InstanceOverrides {
+  pub kind: Option<BrowserKind>,
   /// Extra browser arguments, appended to the base args.
   pub args: Vec<String>,
   /// `--user-data-dir` to launch with (persistent profile).
@@ -1989,7 +2054,7 @@ pub struct LaunchPersistentContextOptions {
 /// `firefox()` / `webkit()` factories. The single field that varies
 /// today is `transport` for Chromium — `chromium` is
 /// always pipe-only; ferridriver lets callers override to the
-/// `WebSocket` transport (`CdpRaw`) for backend-coverage testing.
+/// `WebSocket` transport (`CdpWs`) for backend-coverage testing.
 #[derive(Debug, Clone, Default)]
 pub struct BrowserTypeOptions {
   /// Transport override for Chromium. Ignored for Firefox / `WebKit`.
@@ -2023,6 +2088,7 @@ pub struct LaunchPlan {
   pub env: Option<rustc_hash::FxHashMap<String, String>>,
   pub user_data_dir: Option<String>,
   pub ws_endpoint: Option<String>,
+  pub connection_headers: Option<rustc_hash::FxHashMap<String, String>>,
   pub auto_connect: Option<AutoConnectOptions>,
   pub default_viewport: Option<ViewportConfig>,
   pub slow_mo: Option<u64>,
@@ -2056,6 +2122,7 @@ impl Default for LaunchPlan {
       env: None,
       user_data_dir: None,
       ws_endpoint: None,
+      connection_headers: None,
       auto_connect: None,
       default_viewport: Some(ViewportConfig::default()),
       slow_mo: None,
@@ -2080,7 +2147,7 @@ impl LaunchPlan {
   #[must_use]
   pub fn from_public(kind: BrowserKind, transport: Option<ChromiumTransport>, opts: LaunchOptions) -> Self {
     let backend = match (kind, transport) {
-      (BrowserKind::Chromium, Some(ChromiumTransport::Ws)) => crate::backend::BackendKind::CdpRaw,
+      (BrowserKind::Chromium, Some(ChromiumTransport::Ws)) => crate::backend::BackendKind::CdpWs,
       _ => kind.default_backend(),
     };
     let mut args = opts.args;
@@ -2096,13 +2163,14 @@ impl LaunchPlan {
     Self {
       backend,
       kind,
-      headless: opts.headless.unwrap_or(true),
+      headless: opts.headless.unwrap_or(kind != BrowserKind::Safari),
       executable_path: opts.executable_path,
       args,
       channel: opts.channel,
       env: opts.env,
       user_data_dir: None,
       ws_endpoint: None,
+      connection_headers: None,
       auto_connect: None,
       default_viewport: Some(ViewportConfig::default()),
       slow_mo: opts.slow_mo,
@@ -2168,49 +2236,45 @@ impl Default for VideoSize {
   }
 }
 
-/// Resolve a user-supplied URL against an optional base URL. Delegates
-/// to the standard URL `new URL(given, base)` resolution rule.
-///
-/// - Absolute URLs (with scheme) are returned verbatim.
-/// - Relative paths (`/foo`, `./foo`, `foo`) resolve against `base`.
-/// - Invalid inputs fall through to the given URL unchanged —
-///   matches try/catch fallback.
+/// Matches Playwright's `constructURLBasedOnBaseURL`, including its invalid-input fallback.
 #[must_use]
 pub fn construct_url_with_base(base: Option<&str>, given: &str) -> String {
-  // No base, or already absolute (scheme present) → passthrough.
-  if base.is_none() || given.contains("://") || given.starts_with("data:") || given.starts_with("about:") {
-    return given.to_string();
-  }
-  let base = base.unwrap_or("");
-  // Minimal URL-join: strip trailing slash from base (keep the root
-  // slash only), handle given-has-leading-slash vs not. This is a
-  // pragmatic subset — covers the common `baseURL + /path` and
-  // `baseURL + path` cases. Absolute-URL / query / fragment rules
-  // match `new URL(given, base)` for the common patterns.
-  let (base_origin, base_path) = split_origin_and_path(base);
-  if given.starts_with('/') {
-    // Root-relative: replace the base's path entirely.
-    return format!("{base_origin}{given}");
-  }
-  // Path-relative: strip the last segment of base_path (everything
-  // after the final `/`) then append `given`.
-  let cut = base_path.rfind('/').map_or(0, |i| i + 1);
-  let kept = &base_path[..cut];
-  format!("{base_origin}{kept}{given}")
+  let resolved = match base {
+    Some(base) => reqwest::Url::parse(base).and_then(|base| base.join(given)),
+    None => reqwest::Url::parse(given),
+  };
+  resolved.map_or_else(|_| given.to_owned(), Into::into)
 }
 
-fn split_origin_and_path(url: &str) -> (&str, &str) {
-  // Locate the `://` separator; if missing, treat the whole thing
-  // as a path (no origin).
-  let Some(scheme_end) = url.find("://") else {
-    return ("", url);
-  };
-  let rest_start = scheme_end + 3;
-  let rest = &url[rest_start..];
-  // The path starts at the first `/` after the host (+optional port).
-  match rest.find('/') {
-    Some(path_start) => (&url[..rest_start + path_start], &rest[path_start..]),
-    None => (url, "/"),
+#[cfg(test)]
+mod url_resolution_tests {
+  use super::construct_url_with_base;
+
+  #[test]
+  fn resolves_queries_fragments_paths_and_absolute_urls() {
+    let base = Some("https://example.com/one/two?old=1#before");
+    for (given, expected) in [
+      ("?next=2", "https://example.com/one/two?next=2"),
+      ("#after", "https://example.com/one/two?old=1#after"),
+      ("", "https://example.com/one/two?old=1"),
+      ("../three", "https://example.com/three"),
+      ("//other.example/path", "https://other.example/path"),
+      ("/space here", "https://example.com/space%20here"),
+      ("HTTP://EXAMPLE.COM:80/a/../b", "http://example.com/b"),
+      ("mailto:hello@example.com", "mailto:hello@example.com"),
+    ] {
+      assert_eq!(construct_url_with_base(base, given), expected);
+    }
+    assert_eq!(
+      construct_url_with_base(None, "https://example.com"),
+      "https://example.com/"
+    );
+    assert_eq!(construct_url_with_base(None, "relative"), "relative");
+    assert_eq!(
+      construct_url_with_base(Some("invalid"), "https://example.com"),
+      "https://example.com"
+    );
+    assert_eq!(construct_url_with_base(base, "http://["), "http://[");
   }
 }
 
@@ -3230,7 +3294,7 @@ mod proxy_lowering_tests {
 
   #[test]
   fn chromium_takes_proxy_server() {
-    for backend in [BackendKind::CdpPipe, BackendKind::CdpRaw] {
+    for backend in [BackendKind::CdpPipe, BackendKind::CdpWs] {
       let flags = proxy().launch_flags(backend);
       assert!(
         flags.contains(&"--proxy-server=http://127.0.0.1:3052".to_string()),
@@ -3289,6 +3353,56 @@ mod proxy_lowering_tests {
     };
 
     assert_eq!(no_bypass.launch_flags(BackendKind::WebKit).len(), 1);
-    assert_eq!(no_bypass.launch_flags(BackendKind::CdpRaw).len(), 1);
+    assert_eq!(no_bypass.launch_flags(BackendKind::CdpWs).len(), 1);
+  }
+}
+
+#[cfg(test)]
+mod browser_selection_tests {
+  use super::{BrowserKind, BrowserSelection};
+  use crate::backend::BackendKind;
+
+  #[test]
+  fn products_select_their_driver_without_transport_configuration() {
+    for (browser, backend) in [
+      (BrowserKind::Chromium, BackendKind::CdpPipe),
+      (BrowserKind::Firefox, BackendKind::Bidi),
+      (BrowserKind::WebKit, BackendKind::WebKit),
+      (BrowserKind::Safari, BackendKind::WebDriver),
+    ] {
+      assert_eq!(
+        BrowserSelection::resolve(Some(browser), None).unwrap(),
+        BrowserSelection { browser, backend }
+      );
+    }
+  }
+
+  #[test]
+  fn explicit_protocols_never_change_the_requested_product() {
+    for browser in [
+      BrowserKind::Chromium,
+      BrowserKind::Firefox,
+      BrowserKind::WebKit,
+      BrowserKind::Safari,
+    ] {
+      for backend in [
+        BackendKind::CdpPipe,
+        BackendKind::CdpWs,
+        BackendKind::Bidi,
+        BackendKind::WebKit,
+        BackendKind::WebDriver,
+      ] {
+        let expected = match browser {
+          BrowserKind::Chromium => backend != BackendKind::WebKit,
+          BrowserKind::Firefox | BrowserKind::Safari => matches!(backend, BackendKind::Bidi | BackendKind::WebDriver),
+          BrowserKind::WebKit => backend == BackendKind::WebKit,
+        };
+        let result = BrowserSelection::resolve(Some(browser), Some(backend));
+        assert_eq!(result.is_ok(), expected, "{browser:?} with {backend:?}");
+        if let Ok(selection) = result {
+          assert_eq!(selection.browser, browser);
+        }
+      }
+    }
   }
 }

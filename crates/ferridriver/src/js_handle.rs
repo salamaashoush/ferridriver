@@ -42,11 +42,22 @@ use crate::protocol::HandleId;
 /// the `evaluate(fn, arg)` serialization boundary.
 #[derive(Debug, Clone)]
 pub enum HandleRemote {
+  WebDriver {
+    id: String,
+    frame: String,
+    element: bool,
+  },
   /// CDP `Runtime.RemoteObjectId`. Released via `Runtime.releaseObject`.
-  Cdp(Arc<str>),
+  Cdp {
+    object_id: Arc<str>,
+    session_id: Option<Arc<str>>,
+  },
   /// `BiDi` `SharedReference.sharedId` (plus optional `handle` field).
   /// Released via `script.disown`.
-  Bidi { shared_id: String, handle: Option<String> },
+  Bidi {
+    shared_id: String,
+    handle: Option<String>,
+  },
   /// Playwright `WebKit` `Runtime.RemoteObjectId` — an opaque string.
   /// Released via `Runtime.releaseObject`.
   WebKit(Arc<str>),
@@ -111,7 +122,15 @@ impl HandleRemote {
   #[must_use]
   pub fn to_handle_id(&self) -> HandleId {
     match self {
-      Self::Cdp(obj) => HandleId::Cdp((**obj).to_string()),
+      Self::WebDriver { id, frame, element } => HandleId::WebDriver {
+        id: id.clone(),
+        frame: frame.clone(),
+        element: *element,
+      },
+      Self::Cdp { object_id, session_id } => HandleId::Cdp {
+        object_id: object_id.to_string(),
+        session_id: session_id.as_ref().map(ToString::to_string),
+      },
       Self::Bidi { shared_id, handle } => HandleId::Bidi {
         shared_id: shared_id.clone(),
         handle: handle.clone(),
@@ -125,7 +144,11 @@ impl HandleRemote {
   #[must_use]
   pub fn from_handle_id(id: HandleId) -> Self {
     match id {
-      HandleId::Cdp(obj) => Self::Cdp(Arc::from(obj)),
+      HandleId::WebDriver { id, frame, element } => Self::WebDriver { id, frame, element },
+      HandleId::Cdp { object_id, session_id } => Self::Cdp {
+        object_id: Arc::from(object_id),
+        session_id: session_id.map(Arc::from),
+      },
       HandleId::Bidi { shared_id, handle } => Self::Bidi { shared_id, handle },
       HandleId::WebKit(obj) => Self::WebKit(Arc::from(obj)),
     }
@@ -553,7 +576,10 @@ mod tests {
   #[test]
   fn handle_remote_roundtrips_through_handle_id() {
     let cases = [
-      HandleRemote::Cdp(Arc::from("obj-42")),
+      HandleRemote::Cdp {
+        object_id: Arc::from("obj-42"),
+        session_id: None,
+      },
       HandleRemote::Bidi {
         shared_id: "shared-42".into(),
         handle: Some("h-1".into()),

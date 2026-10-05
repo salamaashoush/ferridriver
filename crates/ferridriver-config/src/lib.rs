@@ -1081,7 +1081,7 @@ test:
   fn serde_json_roundtrip_populated() {
     let mut root = FerridriverConfig::default();
     root.mcp.server.name = Some("custom".into());
-    root.mcp.browser.backend = Some(mcp::BackendChoice::CdpRaw);
+    root.mcp.browser.backend = Some(mcp::BackendChoice::CdpWs);
     root.mcp.browser.headless = Some(true);
     root.mcp.browser.chrome_args = vec!["--no-sandbox".into()];
     root.test.workers = 4;
@@ -1097,7 +1097,7 @@ test:
     assert_eq!(json, json2, "populated config should round-trip");
 
     assert_eq!(parsed.mcp.server.name.as_deref(), Some("custom"));
-    assert_eq!(parsed.mcp.browser.backend, Some(mcp::BackendChoice::CdpRaw));
+    assert_eq!(parsed.mcp.browser.backend, Some(mcp::BackendChoice::CdpWs));
     assert_eq!(parsed.mcp.browser.headless, Some(true));
     assert_eq!(parsed.test.workers, 4);
     assert!(parsed.test.browser.headless);

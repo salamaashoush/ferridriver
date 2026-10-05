@@ -4,7 +4,7 @@
 //! Uses `json_scan` for zero-allocation hot-path field extraction (same as CDP).
 
 use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -134,7 +134,7 @@ pub(crate) struct BidiTransport {
   next_id: AtomicU64,
   pending: Arc<PendingMap>,
   write_tx: mpsc::Sender<Message>,
-  event_tx: broadcast::Sender<BidiEvent>,
+  event_tx: Arc<arc_swap::ArcSwapOption<broadcast::Sender<BidiEvent>>>,
   /// Lossless taps fed by the reader in wire order before the broadcast
   /// fanout. State-mutating consumers (frame cache, network tracker,
   /// route interception) use these; a broadcast `Lagged` drop there
@@ -146,6 +146,7 @@ pub(crate) struct BidiTransport {
   /// an intentional shutdown that's expected teardown, not an error
   /// worth a WARN.
   closing: Arc<AtomicBool>,
+  tasks: crate::backend::transport_tasks::TransportTasks,
 }
 
 impl Drop for BidiTransport {
@@ -184,6 +185,20 @@ fn websocket_request(
   Ok(request)
 }
 
+async fn connect_socket(
+  ws_url: &str,
+  headers: Option<&rustc_hash::FxHashMap<String, String>>,
+) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+  let request = websocket_request(ws_url, headers)?;
+  let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+  let (socket, _) = budget
+    .wait(Box::pin(tokio_tungstenite::connect_async(request)))
+    .await
+    .map_err(|error| error.error("connecting BiDi WebSocket"))?
+    .map_err(|error| FerriError::backend(format!("BiDi WebSocket connection failed: {error}")))?;
+  Ok(socket)
+}
+
 impl BidiTransport {
   /// Connect to a `BiDi` WebSocket endpoint.
   pub async fn connect(ws_url: &str) -> Result<Self> {
@@ -195,24 +210,15 @@ impl BidiTransport {
     headers: Option<&rustc_hash::FxHashMap<String, String>>,
   ) -> Result<Self> {
     debug!("BiDi connecting");
-    let request = websocket_request(ws_url, headers)?;
-    let (ws_stream, _) = Box::pin(tokio_tungstenite::connect_async(request))
-      .await
-      .map_err(|e| FerriError::Backend(format!("BiDi WebSocket connection failed: {e}")))?;
-
-    let (write, read) = ws_stream.split();
+    let (write, read) = connect_socket(ws_url, headers).await?.split();
     let pending: Arc<PendingMap> = Arc::new(DashMap::default());
 
     // Writer task
-    let (write_tx, mut write_rx) = mpsc::channel::<Message>(128);
-    tokio::spawn(async move {
-      let mut writer = write;
-      while let Some(msg) = write_rx.recv().await {
-        if writer.send(msg).await.is_err() {
-          break;
-        }
-      }
-    });
+    let (write_tx, write_rx) = mpsc::channel::<Message>(128);
+    let (shutdown, stopping) = tokio::sync::watch::channel(false);
+    let writer = tokio::spawn(crate::backend::transport_tasks::write_websocket(
+      write, write_rx, stopping,
+    ));
 
     // Event broadcast channel — sized to absorb a worst-case page
     // load fan-out so slow subscribers don't get `RecvError::Lagged`
@@ -221,7 +227,8 @@ impl BidiTransport {
     // `EVENT_BROADCAST_CAPACITY` in the CDP transport for the same
     // rationale.
     let (event_tx, _) = broadcast::channel::<BidiEvent>(4096);
-    let event_tx2 = event_tx.clone();
+    let event_tx = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(event_tx))));
+    let event_tx2 = Arc::clone(&event_tx);
     let event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>> =
       Arc::new(std::sync::Mutex::new(Vec::new()));
     let event_taps2 = Arc::clone(&event_taps);
@@ -231,7 +238,8 @@ impl BidiTransport {
 
     // Reader task -- hot path uses json_scan for zero-alloc field extraction
     let pending2 = pending.clone();
-    tokio::spawn(async move {
+    let reader_ended = shutdown.clone();
+    let reader = tokio::spawn(async move {
       let mut read = read;
       while let Some(result) = read.next().await {
         let msg = match result {
@@ -253,6 +261,9 @@ impl BidiTransport {
           },
           _ => continue,
         };
+        if closing2.load(Ordering::Acquire) {
+          continue;
+        }
         let bytes = text.as_bytes();
 
         // Hot path: extract "type" field without full parse
@@ -280,7 +291,9 @@ impl BidiTransport {
                 let mut taps = event_taps2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 taps.retain(|tap| tap.send(TapMessage::Event(event.clone())).is_ok());
               }
-              let _ = event_tx2.send(event);
+              if let Some(sender) = event_tx2.load().as_ref() {
+                let _ = sender.send(event);
+              }
             },
             Err(e) => {
               warn!("BiDi event parse error: {e}");
@@ -293,12 +306,14 @@ impl BidiTransport {
       // `send_command` awaits return immediately with a `target_closed`
       // error instead of waiting the full 60s response timeout.
       // Mirrors the CDP pipe/ws reader fix.
-      closing2.store(true, Ordering::Relaxed);
+      closing2.store(true, Ordering::Release);
+      event_tx2.store(None);
       event_taps2
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
       fail_pending(&pending2);
+      reader_ended.send_replace(true);
       debug!("BiDi reader task ended");
     });
 
@@ -310,23 +325,32 @@ impl BidiTransport {
       event_tx,
       event_taps,
       closing,
+      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
     })
   }
 
-  /// Flag an intentional shutdown and offer the peer a WebSocket close
-  /// frame. Called right before the browser process is killed so the
-  /// reader logs the ensuing connection reset at debug instead of WARN.
-  /// The close frame is best-effort by design — the writer may already
-  /// be gone and the SIGKILL races frame delivery either way; the flag
-  /// is the load-bearing part.
+  /// Reject commands and request a close handshake independently of queue capacity.
+  /// This also marks expected process termination for the reader's diagnostics.
   pub fn start_close(&self) {
-    self.closing.store(true, Ordering::Relaxed);
+    self.closing.store(true, Ordering::Release);
+    self.event_tx.store(None);
+    self
+      .event_taps
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
     fail_pending(&self.pending);
-    let _ = self.write_tx.try_send(Message::Close(None));
+    self.tasks.start_close();
+  }
+
+  pub async fn close(&self) -> Result<()> {
+    self.start_close();
+    self.tasks.close().await
   }
 
   /// Send a `BiDi` command and await the response.
   pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let budget = crate::operation_budget::OperationBudget::current(60_000)?;
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
 
@@ -336,33 +360,42 @@ impl BidiTransport {
       pending: &self.pending,
       id,
     };
-    if self.closing.load(Ordering::Relaxed) {
+    if self.closing.load(Ordering::Acquire) {
       return Err(FerriError::target_closed(Some(
         "BiDi WebSocket connection closed".into(),
       )));
     }
 
     // Build command JSON directly as string (no Value intermediary for envelope)
-    let params_str = serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
+    let params_str = serde_json::to_string(&params)?;
     let cmd = format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#);
     trace!("BiDi send id={id}: {method}");
 
-    if self.write_tx.send(Message::Text(cmd.into())).await.is_err() {
-      return Err(FerriError::backend("BiDi WebSocket connection closed"));
-    }
-
-    // Await response with timeout
-    match tokio::time::timeout(std::time::Duration::from_mins(1), rx).await {
-      Ok(Ok(result)) => result.map_err(|e| FerriError::protocol(method, e.to_string())),
-      Ok(Err(_)) => Err(FerriError::backend("BiDi command response channel dropped")),
-      Err(_) => Err(FerriError::timeout(format!("BiDi command '{method}'"), 60_000)),
-    }
+    budget.send(&self.write_tx, Message::Text(cmd.into())).await?;
+    let result = budget
+      .wait(rx)
+      .await
+      .map_err(|error| error.error(format!("BiDi command '{method}'")))?
+      .map_err(|_| FerriError::backend("BiDi command response channel dropped"))?;
+    result.map_err(|e| {
+      if matches!(e.error.as_str(), "no such frame" | "target closed") {
+        FerriError::target_closed(Some(e.to_string()))
+      } else if matches!(e.error.as_str(), "unknown command" | "unsupported operation") {
+        FerriError::unsupported(format!("{method}: {e}"))
+      } else {
+        FerriError::protocol(method, e.to_string())
+      }
+    })
   }
 
   /// Subscribe to `BiDi` events. Returns a broadcast receiver.
   /// Receivers filter by event method at the receive site.
   pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
-    self.event_tx.subscribe()
+    self
+      .event_tx
+      .load()
+      .as_ref()
+      .map_or_else(|| broadcast::channel(1).1, |sender| sender.subscribe())
   }
 
   /// Lossless, wire-ordered event tap. Never drops; consumers filter by
@@ -370,11 +403,13 @@ impl BidiTransport {
   /// instead of [`Self::subscribe_events`].
   pub fn tap_events(&self) -> EventTap {
     let (tx, rx) = EventTap::new();
-    self
+    let mut taps = self
       .event_taps
       .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(tx);
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !self.closing.load(Ordering::Acquire) {
+      taps.push(tx);
+    }
     rx
   }
 }
@@ -424,15 +459,148 @@ mod tests {
   use super::*;
 
   #[tokio::test]
+  async fn close_bypasses_a_full_command_queue() {
+    let (write_tx, queued) = mpsc::channel(1);
+    write_tx.send(Message::Text("already queued".into())).await.unwrap();
+    let (shutdown, mut stopping) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(async move {
+      stopping.wait_for(|stopping| *stopping).await.unwrap();
+      assert_eq!(queued.len(), 1);
+      drop(queued);
+    });
+    let transport = BidiTransport {
+      next_id: AtomicU64::new(0),
+      pending: Arc::new(DashMap::default()),
+      write_tx,
+      event_tx: Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(broadcast::channel(1).0)))),
+      event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      closing: Arc::new(AtomicBool::new(false)),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![worker]),
+    };
+    let mut events = transport.subscribe_events();
+    let mut tap = transport.tap_events();
+    let mut pending = Box::pin(
+      crate::operation_budget::OperationBudget::new(0)
+        .unwrap()
+        .scope(transport.send_command("session.status", serde_json::json!({}))),
+    );
+    assert!(futures::poll!(&mut pending).is_pending());
+    transport.close().await.unwrap();
+    assert!(matches!(pending.await, Err(FerriError::TargetClosed { .. })));
+    assert!(transport.pending.is_empty());
+    assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Closed)));
+    assert!(matches!(
+      tap.receiver.try_recv(),
+      Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+    assert!(matches!(
+      transport.subscribe_events().try_recv(),
+      Err(broadcast::error::TryRecvError::Closed)
+    ));
+    assert!(matches!(
+      transport.tap_events().receiver.try_recv(),
+      Err(mpsc::error::TryRecvError::Disconnected)
+    ));
+  }
+
+  #[tokio::test]
+  async fn close_releases_the_socket_and_unbounded_pending_commands_with_handles_retained() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let (received, receipt) = oneshot::channel();
+    let server = tokio::spawn(async move {
+      let (stream, _) = listener.accept().await.unwrap();
+      let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+      let request = socket.next().await.unwrap().unwrap();
+      let request: serde_json::Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+      assert_eq!(request["method"], "session.status");
+      received.send(()).unwrap();
+      while let Some(Ok(message)) = socket.next().await {
+        if message.is_close() {
+          break;
+        }
+        assert!(!message.is_text(), "close sent another protocol command");
+      }
+    });
+    let transport = BidiTransport::connect(&endpoint).await.unwrap();
+    let mut pending = Box::pin(
+      crate::operation_budget::OperationBudget::new(0)
+        .unwrap()
+        .scope(transport.send_command("session.status", serde_json::json!({}))),
+    );
+    assert!(futures::poll!(&mut pending).is_pending());
+    receipt.await.unwrap();
+    transport.close().await.unwrap();
+    assert!(matches!(pending.await, Err(FerriError::TargetClosed { .. })));
+    assert!(matches!(
+      transport.send_command("session.status", serde_json::json!({})).await,
+      Err(FerriError::TargetClosed { .. })
+    ));
+    assert!(transport.pending.is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(1), server)
+      .await
+      .unwrap()
+      .unwrap();
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn operation_budgets_cover_long_replies_and_queued_commands() {
+    use crate::operation_budget::OperationBudget;
+    let (write_tx, mut queued) = mpsc::channel(1);
+    let transport = BidiTransport {
+      next_id: AtomicU64::new(0),
+      pending: Arc::new(DashMap::default()),
+      write_tx,
+      event_tx: Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(broadcast::channel(1).0)))),
+      event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      closing: Arc::new(AtomicBool::new(false)),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+    };
+    for timeout in [0, 90_000] {
+      let mut command = Box::pin(
+        OperationBudget::new(timeout)
+          .unwrap()
+          .scope(transport.send_command("script.callFunction", serde_json::json!({}))),
+      );
+      assert!(futures::poll!(&mut command).is_pending());
+      let message: serde_json::Value = serde_json::from_str(queued.recv().await.unwrap().to_text().unwrap()).unwrap();
+      tokio::time::advance(std::time::Duration::from_secs(61)).await;
+      assert!(futures::poll!(&mut command).is_pending());
+      handle_command_response(
+        serde_json::json!({"type":"success","id":message["id"],"result":{"value":42}})
+          .to_string()
+          .as_bytes(),
+        b"success",
+        &transport.pending,
+      );
+      assert_eq!(command.await.unwrap()["value"], 42);
+      assert!(transport.pending.is_empty());
+    }
+    transport.write_tx.send(Message::Text("queued".into())).await.unwrap();
+    let mut command = Box::pin(
+      OperationBudget::new(1000)
+        .unwrap()
+        .scope(transport.send_command("script.callFunction", serde_json::json!({}))),
+    );
+    assert!(futures::poll!(&mut command).is_pending());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(command.await.unwrap_err().is_timeout_error());
+    assert!(transport.pending.is_empty());
+    assert!(queued.recv().await.is_some());
+    assert!(queued.try_recv().is_err());
+  }
+
+  #[tokio::test]
   async fn cancelled_command_releases_its_pending_response_slot() {
     let (write_tx, mut write_rx) = mpsc::channel(1);
     let transport = BidiTransport {
       next_id: AtomicU64::new(0),
       pending: Arc::new(DashMap::default()),
       write_tx,
-      event_tx: broadcast::channel(1).0,
+      event_tx: Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(broadcast::channel(1).0)))),
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     };
     let mut command = Box::pin(transport.send_command("session.status", serde_json::json!({})));
     assert!(futures::poll!(&mut command).is_pending());

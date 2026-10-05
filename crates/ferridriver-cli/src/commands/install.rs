@@ -17,7 +17,16 @@ use crate::ui;
 /// them. `axe` is not a browser; it is the accessibility engine, and it
 /// is here because it is provisioned the same way and to the same
 /// place, rather than vendored into the repository.
-const KNOWN: [&str; 5] = ["chromium", "chromium-headless-shell", "firefox", "webkit", "axe"];
+const KNOWN: [&str; 8] = [
+  "chromium",
+  "chromium-headless-shell",
+  "firefox",
+  "webkit",
+  "safari",
+  "axe",
+  "android",
+  "ios",
+];
 
 pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
   let mut browsers = args.browsers;
@@ -44,7 +53,22 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
       "chromium-headless-shell" => installer.install_chromium_headless_shell(phase.callback()).await,
       "firefox" => installer.install_firefox(phase.callback()).await,
       "webkit" => installer.install_webkit(phase.callback()).await,
+      "safari" => installer.install_safari(phase.callback()).await,
+      "ios" => installer.install_ios(phase.callback()).await,
       "axe" => installer.install_axe_core(phase.callback()).await,
+      "android" => {
+        installer
+          .install_android(
+            &ferridriver::android::AndroidOptions {
+              api_level: args.android_api_level,
+              sdk_path: args.android_sdk.clone(),
+              accept_licenses: args.accept_licenses,
+              ..Default::default()
+            },
+            phase.callback(),
+          )
+          .await
+      },
       // Rejected above, before any download started.
       other => unreachable!("unvalidated target {other:?}"),
     };

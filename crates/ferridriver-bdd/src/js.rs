@@ -1044,7 +1044,13 @@ async fn worker_session(
       owner.inject(&name, Arc::clone(&session));
       owner.register_teardown(
         &name,
-        Arc::new(move |_| Box::pin(teardown_worker_session((worker_index, bundle_key)))),
+        session.clone(),
+        Arc::new(move |_| {
+          Box::pin(async move {
+            teardown_worker_session((worker_index, bundle_key)).await;
+            Ok(())
+          })
+        }),
       );
       Ok::<_, String>(session)
     })

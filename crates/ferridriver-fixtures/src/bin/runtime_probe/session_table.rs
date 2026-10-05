@@ -62,7 +62,7 @@ pub async fn run(context: &RunContext, request: Request) -> Result<Value> {
           timeout_ms,
           page: use_page,
         } => {
-          let slot = table.acquire(&name);
+          let slot = table.acquire(&name).await?;
           let mut session = slot.lock().await;
           let mut context = context.clone();
           context.host = ExtensionHost::Mcp;
@@ -93,12 +93,13 @@ pub async fn run(context: &RunContext, request: Request) -> Result<Value> {
     Ok(json!(results))
   }
   .await;
-  table.clear();
+  let scripts_closed = table.close().await;
   let closed = match browser {
     Some(browser) => browser.close().await,
     None => Ok(()),
   };
   let value = result?;
+  scripts_closed?;
   closed?;
   Ok(value)
 }

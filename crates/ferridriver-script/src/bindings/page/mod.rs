@@ -1878,6 +1878,11 @@ impl PageJs {
       .await
   }
 
+  #[qjs(get)]
+  pub fn webmcp(&self) -> crate::bindings::native_web_mcp::NativeWebMcpJs {
+    crate::bindings::native_web_mcp::NativeWebMcpJs::new(self.inner.webmcp())
+  }
+
   /// Chromium WebMCP commands backed by the page's existing CDP session.
   #[qjs(get, rename = "webMcp")]
   pub fn web_mcp<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {

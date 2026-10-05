@@ -843,8 +843,7 @@ impl BrowserConfig {
     if let Some(ref name) = self.use_options.browser_name {
       self.browser.clone_from(name);
     } else if let Some(ref name) = self.use_options.default_browser_type
-      && self.browser == "chromium"
-      && self.backend == "cdp-pipe"
+      && self.browser == "auto"
     {
       self.browser.clone_from(name);
     }
@@ -861,26 +860,14 @@ impl BrowserConfig {
   /// - `browser = "webkit"` implies `backend = "webkit"`
   /// - Everything else defaults to `browser = "chromium"`, `backend = "cdp-pipe"`
   pub fn normalize(&mut self) {
-    match self.backend.as_str() {
-      "bidi" => {
-        self.browser = "firefox".into();
-      },
-      "webkit" => {
-        self.browser = "webkit".into();
-      },
-      // No platform gate on webkit: Playwright's WebKit build runs on
-      // Linux and macOS alike, and gating it here silently ran
-      // Chromium for `browser = "webkit"` on Linux.
-      _ => match self.browser.as_str() {
-        "firefox" => self.backend = "bidi".into(),
-        "webkit" => self.backend = "webkit".into(),
-        _ => {},
-      },
+    if let Ok((backend, browser)) = self.resolve_kinds() {
+      backend.name().clone_into(&mut self.backend);
+      browser.name().clone_into(&mut self.browser);
     }
   }
 
   /// Every accepted `browser` spelling.
-  pub const BROWSERS: &'static [&'static str] = &["chromium", "firefox", "webkit"];
+  pub const BROWSERS: &'static [&'static str] = &["chromium", "firefox", "webkit", "safari"];
 
   /// Reject an unknown `browser` or `backend` spelling.
   ///
@@ -890,22 +877,18 @@ impl BrowserConfig {
   /// this, a typo fell through every `match` to Chromium over
   /// `cdp-pipe` and the run looked successful on the wrong engine.
   pub fn validate(&self) -> anyhow::Result<()> {
-    crate::mcp::BackendChoice::parse(&self.backend)?;
-    if !Self::BROWSERS.contains(&self.browser.as_str()) {
-      anyhow::bail!(
-        "unknown browser {:?} (expected one of {})",
-        self.browser,
-        Self::BROWSERS.join(", ")
-      );
-    }
+    self.resolve_kinds()?;
     Ok(())
   }
 
   /// Instance-routing view over this section, so `[test.browser]` and
   /// `[mcp.browser]` resolve instances through one implementation.
-  #[must_use]
-  pub fn routing(&self) -> crate::browser::RoutingView<'_> {
-    crate::browser::RoutingView {
+  ///
+  /// # Errors
+  /// Rejects incompatible browser and protocol choices.
+  pub fn routing(&self) -> ferridriver::error::Result<crate::browser::RoutingView<'_>> {
+    Ok(crate::browser::RoutingView {
+      browser: Some(self.resolve_kinds()?.1),
       global: self.global_browser.as_ref(),
       instances: &self.instances,
       default_instance: self.default_instance.as_ref(),
@@ -915,8 +898,8 @@ impl BrowserConfig {
       cache_ttl: self
         .command_cache_ttl
         .map_or(crate::browser::DEFAULT_CACHE_TTL, std::time::Duration::from_secs),
-      backend: self.resolve_kinds().0,
-    }
+      backend: self.resolve_kinds()?.0,
+    })
   }
 
   /// Launch overrides for the instance this config selects, or the
@@ -931,14 +914,20 @@ impl BrowserConfig {
     let Some(instance) = self.instance.as_deref() else {
       return Ok(ferridriver::options::InstanceOverrides::default());
     };
-    self.routing().health(instance)?;
-    self.routing().overrides_for(instance)
+    let routing = self.routing().map_err(|error| error.to_string())?;
+    routing.health(instance)?;
+    routing.overrides_for(instance)
   }
 
   /// How to reach the selected instance, when it is already running.
-  #[must_use]
-  pub fn resolve_instance(&self) -> Option<ferridriver::state::ConnectMode> {
-    self.routing().resolve_connect(self.instance.as_deref()?)
+  ///
+  /// # Errors
+  /// Rejects incompatible browser and protocol choices.
+  pub fn resolve_instance(&self) -> ferridriver::error::Result<Option<ferridriver::state::ConnectMode>> {
+    let Some(instance) = self.instance.as_deref() else {
+      return Ok(None);
+    };
+    Ok(self.routing()?.resolve_connect(instance))
   }
 
   /// The engine-level backend and browser this config selects.
@@ -947,34 +936,26 @@ impl BrowserConfig {
   /// carried two independent copies of this `match` (`runner.rs` and
   /// `fixture.rs`), each silently defaulting an unrecognised value to
   /// Chromium over `cdp-pipe`.
-  #[must_use]
-  pub fn resolve_kinds(&self) -> (ferridriver::backend::BackendKind, ferridriver::options::BrowserKind) {
-    use ferridriver::backend::BackendKind;
-    use ferridriver::options::BrowserKind;
-
-    let backend = match crate::mcp::BackendChoice::parse(&self.backend) {
-      Ok(choice) => choice.kind(),
-      Err(e) => {
-        // Unreachable for a config that came through `validate`; loud
-        // rather than silent for one built in memory.
-        tracing::error!(backend = %self.backend, "{e}; falling back to cdp-pipe");
-        BackendKind::CdpPipe
-      },
-    };
-    let kind = match self.browser.as_str() {
-      "firefox" => BrowserKind::Firefox,
-      "webkit" => BrowserKind::WebKit,
-      _ => BrowserKind::Chromium,
-    };
-    (backend, kind)
+  ///
+  /// # Errors
+  /// Rejects unknown names and incompatible browser and protocol choices.
+  pub fn resolve_kinds(
+    &self,
+  ) -> ferridriver::error::Result<(ferridriver::backend::BackendKind, ferridriver::options::BrowserKind)> {
+    let browser = (self.browser != "auto").then(|| self.browser.parse()).transpose()?;
+    let backend = (self.backend != "auto")
+      .then(|| ferridriver::backend::BackendKind::parse(&self.backend))
+      .transpose()?;
+    let selection = ferridriver::options::BrowserSelection::resolve(browser, backend)?;
+    Ok((selection.backend, selection.browser))
   }
 }
 
 impl Default for BrowserConfig {
   fn default() -> Self {
     Self {
-      browser: "chromium".into(),
-      backend: "cdp-pipe".into(),
+      browser: "auto".into(),
+      backend: "auto".into(),
       channel: None,
       global_browser: None,
       // Default headed -- matches the new ferridriver CLI convention where
@@ -1599,7 +1580,7 @@ impl TestConfig {
     }
 
     if let Some(ref pb) = project.browser {
-      if pb.browser != "chromium" || pb.backend != "cdp-pipe" {
+      if pb.browser != "auto" || pb.backend != "auto" {
         merged.browser.browser.clone_from(&pb.browser);
         merged.browser.backend.clone_from(&pb.backend);
       }

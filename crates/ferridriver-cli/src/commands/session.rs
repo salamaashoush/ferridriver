@@ -11,8 +11,7 @@
 
 use anyhow::Context as _;
 use ferridriver::backend::BackendKind;
-use ferridriver::browser_type::BrowserType;
-use ferridriver::options::{BrowserKind, LaunchOptions};
+use ferridriver::options::BrowserKind;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_session::{BindOptions, Command, RUN_VERB, Registry, ScriptRequest, SessionClient, bind_in};
 
@@ -45,36 +44,81 @@ pub async fn run(config: FerridriverConfig, origin: ConfigOrigin<'_>, args: Sess
     SessionCommand::Open(a) => open(a, origin).await,
     // Boxed: hosting carries the whole resolved scripting environment, which
     // would otherwise make this match arm's future the size of the enum.
-    SessionCommand::Host(a) => Box::pin(host(config, a)).await,
+    SessionCommand::Host(a) => {
+      let diagnostics = a.startup_error.clone();
+      let result = Box::pin(host(config, a)).await;
+      if let (Some(path), Err(error)) = (diagnostics, &result)
+        && let Err(write) = write_startup_error(&path, error)
+      {
+        tracing::warn!(%write, "Writing session startup error failed");
+      }
+      result
+    },
     SessionCommand::Attach(a) => attach(a).await,
     SessionCommand::List(a) => list(&a),
-    SessionCommand::Close(a) => close(&a),
-    SessionCommand::CloseAll => close_all(),
+    SessionCommand::Close(a) => close(&a).await,
+    SessionCommand::CloseAll => close_all().await,
   }
 }
 
-fn browser_kind_for(backend: BackendKind) -> BrowserKind {
-  match backend {
-    BackendKind::Bidi => BrowserKind::Firefox,
-    BackendKind::WebKit => BrowserKind::WebKit,
-    _ => BrowserKind::Chromium,
-  }
-}
-
-/// Launch a browser for the given CLI browser args.
-async fn launch_browser(browser: &BrowserArgs) -> anyhow::Result<ferridriver::Browser> {
-  let backend = browser.backend_kind().unwrap_or(BackendKind::CdpPipe);
-  let kind = browser_kind_for(backend);
-  let factory = BrowserType::with_backend(kind, backend);
-  let options = LaunchOptions {
-    headless: Some(browser.headless),
-    executable_path: browser.executable_path.clone(),
-    ..Default::default()
+fn write_startup_error(path: &std::path::Path, error: &anyhow::Error) -> std::io::Result<()> {
+  use std::io::Write as _;
+  let mut file = match std::fs::OpenOptions::new().write(true).truncate(true).open(path) {
+    Ok(file) => file,
+    // The opener removes this file once the descriptor is published.
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    Err(error) => return Err(error),
   };
-  factory
-    .launch(options)
-    .await
-    .with_context(|| format!("launching {} browser", kind.name()))
+  let detail = format!("{error:#}");
+  let end = detail.floor_char_boundary(16 * 1024);
+  file.write_all(&detail.as_bytes()[..end])
+}
+
+fn configure_browser(
+  config: &mut ferridriver_config::mcp::McpConfig,
+  instance: &str,
+  args: &BrowserArgs,
+) -> anyhow::Result<Option<ferridriver::state::ConnectMode>> {
+  let mut target = config.instance_settings(instance).map_err(anyhow::Error::msg)?;
+  if args.browser.is_some() || args.backend.is_some() {
+    target.browser = args.browser;
+    target.backend = args.backend_kind();
+  }
+  if let Some(headless) = args.headless_override() {
+    target.headless = Some(headless);
+  }
+  if let Some(path) = &args.executable_path {
+    target.executable_path = Some(path.clone());
+  }
+  if let Some(path) = &args.user_data_dir {
+    target.user_data_dir = Some(path.clone());
+  }
+  let connection = if let Some(endpoint) = &args.connect {
+    target.device = None;
+    target.connect_url = Some(endpoint.clone());
+    None
+  } else if let Some(channel) = &args.auto_connect {
+    if args.browser.is_some_and(|browser| browser != BrowserKind::Chromium)
+      || args
+        .backend_kind()
+        .is_some_and(|backend| !matches!(backend, BackendKind::CdpPipe | BackendKind::CdpWs))
+    {
+      anyhow::bail!("--auto-connect requires Chromium over CDP");
+    }
+    target.device = None;
+    target.browser = Some(BrowserKind::Chromium);
+    target.backend = args.backend_kind();
+    target.connect_url = None;
+    target.connect_options = None;
+    Some(ferridriver::state::ConnectMode::AutoConnect {
+      channel: channel.clone(),
+      user_data_dir: target.user_data_dir.clone(),
+    })
+  } else {
+    None
+  };
+  config.browser.instances.insert(instance.to_owned(), target);
+  Ok(connection)
 }
 
 /// `open`: spawn a detached `session host` process and wait until its
@@ -104,9 +148,29 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
   if let Some(url) = &args.url {
     cmd.arg(url);
   }
-  cmd.arg("--backend").arg(backend_name(&args.browser));
+  if let Some(instance) = &args.instance {
+    cmd.arg("--instance").arg(instance);
+  }
+  if let Some(backend) = args.browser.backend_kind() {
+    cmd.arg("--backend").arg(backend.name());
+  }
+  if let Some(browser) = args.browser.browser {
+    cmd.arg("--browser").arg(browser.name());
+  }
   if args.browser.headless {
     cmd.arg("--headless");
+  }
+  if args.browser.headed {
+    cmd.arg("--headed");
+  }
+  if let Some(endpoint) = &args.browser.connect {
+    cmd.arg("--connect").arg(endpoint);
+  }
+  if let Some(channel) = &args.browser.auto_connect {
+    cmd.arg("--auto-connect").arg(channel);
+  }
+  if let Some(profile) = &args.browser.user_data_dir {
+    cmd.arg("--user-data-dir").arg(profile);
   }
   if let Some(path) = &args.browser.executable_path {
     cmd.arg("--executable-path").arg(path);
@@ -121,14 +185,32 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
     cmd.current_dir(cwd);
   }
   // Detach: the host owns the browser and outlives this invocation.
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::CommandExt as _;
+    cmd.process_group(0);
+  }
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
+  let mut diagnostics = tempfile::NamedTempFile::new_in(registry.dir()).context("creating session startup result")?;
+  cmd.arg("--startup-error").arg(diagnostics.path());
   cmd.stderr(std::process::Stdio::null());
-  let child = cmd.spawn().context("spawning session host process")?;
+  let mut child = cmd.spawn().context("spawning session host process")?;
 
-  // Wait for the host to publish its descriptor (bounded — the browser
-  // launch dominates this).
-  let descriptor = wait_for_descriptor(&registry, &args.id, std::time::Duration::from_mins(1)).await?;
+  // The host owns the configured provisioning deadline, including SDK installation.
+  let descriptor = match wait_for_descriptor(&registry, &args.id, &mut child).await {
+    Ok(descriptor) => descriptor,
+    Err(error) => {
+      if child.try_wait()?.is_some() {
+        use std::io::{Read as _, Seek as _};
+        diagnostics.as_file_mut().rewind()?;
+        let mut detail = String::new();
+        diagnostics.as_file_mut().read_to_string(&mut detail)?;
+        anyhow::bail!("{error:#}: {}", detail.trim());
+      }
+      return Err(error);
+    },
+  };
   ui::say(&ui::success(&format!(
     "session {} open {}",
     ui::bold(&args.id),
@@ -144,19 +226,20 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
   Ok(())
 }
 
-/// Poll the registry until `id` appears or the deadline elapses.
 async fn wait_for_descriptor(
   registry: &Registry,
   id: &str,
-  timeout: std::time::Duration,
+  child: &mut std::process::Child,
 ) -> anyhow::Result<ferridriver_session::SessionDescriptor> {
-  let deadline = std::time::Instant::now() + timeout;
   loop {
-    if let Some(d) = registry.get(id)? {
-      return Ok(d);
+    if let Some(status) = child.try_wait()? {
+      anyhow::bail!("session '{id}' host exited with {status}");
     }
-    if std::time::Instant::now() >= deadline {
-      anyhow::bail!("session '{id}' did not come up within {timeout:?}");
+    if let Some(d) = registry.get(id)? {
+      if d.pid != child.id() {
+        anyhow::bail!("session '{id}' was claimed by another host");
+      }
+      return Ok(d);
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
   }
@@ -164,49 +247,59 @@ async fn wait_for_descriptor(
 
 /// `host`: the long-lived foreground process. Launch, bind, navigate, serve
 /// until killed. `open` spawns this detached.
-async fn host(config: FerridriverConfig, args: SessionHostArgs) -> anyhow::Result<()> {
-  let browser = launch_browser(&args.browser).await?;
-  // Open the first page (and navigate it if a url was given) so an attaching
-  // client sees a ready page immediately.
-  let page = browser.new_page().await.context("opening the session's first page")?;
-  if let Some(url) = &args.url {
-    page.goto(url).await.with_context(|| format!("navigating to {url}"))?;
-  }
-
+async fn host(mut config: FerridriverConfig, args: SessionHostArgs) -> anyhow::Result<()> {
+  let instance = args.instance.as_deref().unwrap_or("default");
+  let connection = configure_browser(&mut config.mcp, instance, &args.browser)?;
   let cwd = std::env::current_dir()?;
   let setup = crate::commands::script_setup::resolve(&config, &cwd, &args.extensions).await?;
-  let script_host = std::sync::Arc::new(ferridriver_script::SessionScriptHost::new(
-    std::sync::Arc::clone(browser.state()),
-    &args.id,
-    ferridriver_script::SessionScriptConfig {
-      script_root: setup.script_root,
-      artifacts: setup.artifacts,
-      caps: setup.caps,
-      extensions: setup.extensions,
-      engine: setup.engine,
-    },
-  ));
-
-  let registry = Registry::open()?;
-  let session = bind_in(&registry, &browser, &args.id, BindOptions::default(), Some(script_host))
-    .await
-    .context("binding the session")?;
-  tracing::info!(id = %args.id, endpoint = %session.endpoint(), "session host serving");
-
-  // Serve until a shutdown signal arrives. Racing against the signal (rather
-  // than letting SIGTERM default-kill the process) lets the BoundSession drop
-  // run on the way out: it stops the server, prunes the descriptor, removes
-  // the socket file, and closes the browser.
-  let serve = session.server().serve();
-  tokio::select! {
-    res = serve => { res.context("serving the session")?; },
-    () = shutdown_signal() => {
-      tracing::info!(id = %args.id, "session host received shutdown signal");
-    },
+  let provisioned = Box::pin(crate::commands::instance::provision_instance(
+    config.mcp,
+    instance,
+    args.browser.headed,
+    false,
+    connection,
+  ))
+  .await?;
+  let browser = provisioned.browser;
+  let serving = async {
+    if let Some(url) = &args.url {
+      provisioned
+        .page
+        .goto(url)
+        .await
+        .with_context(|| format!("navigating to {url}"))?;
+    }
+    let script_host = std::sync::Arc::new(ferridriver_script::SessionScriptHost::new(
+      std::sync::Arc::clone(&browser),
+      &args.id,
+      ferridriver_script::SessionScriptConfig {
+        script_root: setup.script_root,
+        artifacts: setup.artifacts,
+        caps: setup.caps,
+        extensions: setup.extensions,
+        engine: setup.engine,
+      },
+    ));
+    let registry = Registry::open()?;
+    let mut session = bind_in(&registry, &browser, &args.id, BindOptions::default(), Some(script_host))
+      .await
+      .context("binding the session")?;
+    tracing::info!(id = %args.id, endpoint = %session.endpoint(), "session host serving");
+    tokio::select! {
+      result = session.wait() => result.context("serving the session")?,
+      () = shutdown_signal() => tracing::info!(id = %args.id, "session host received shutdown signal"),
+    }
+    drop(session);
+    Ok::<_, anyhow::Error>(())
   }
-  drop(session);
-  browser.close().await.ok();
-  Ok(())
+  .await;
+  let cleanup = browser.close().await;
+  match (serving, cleanup) {
+    (Ok(()), Ok(())) => Ok(()),
+    (Err(error), Ok(())) => Err(error),
+    (Ok(()), Err(error)) => Err(error.into()),
+    (Err(error), Err(cleanup)) => Err(anyhow::anyhow!("{error:#}; browser cleanup failed: {cleanup}")),
+  }
 }
 
 /// Resolve when the process receives SIGTERM or SIGINT (Ctrl-C).
@@ -407,18 +500,28 @@ fn list(_args: &SessionListArgs) -> anyhow::Result<()> {
   Ok(())
 }
 
-/// `close`: stop the session. The browser is owned by the detached host
-/// process, so signal that process to exit (its [`ferridriver_session::BoundSession`]
-/// drop closes the browser and prunes the descriptor); then prune the
-/// descriptor directly in case the host already died.
-fn close(args: &SessionTargetArgs) -> anyhow::Result<()> {
-  let registry = Registry::open()?;
-  let descriptor = registry.get(&args.id)?;
-  if let Some(d) = &descriptor {
-    terminate_owner(d.pid);
+async fn close_descriptor(
+  registry: &Registry,
+  descriptor: &ferridriver_session::SessionDescriptor,
+) -> anyhow::Result<()> {
+  let mut client = SessionClient::attach(registry, &descriptor.id).await?;
+  let reply = client
+    .call(Command::new(
+      1,
+      ferridriver_session::CLOSE_VERB,
+      serde_json::json!({"endpoint": descriptor.endpoint, "generation": descriptor.generation}),
+    ))
+    .await?;
+  if !reply.ok {
+    anyhow::bail!("{}", reply.error.as_deref().unwrap_or("session cleanup failed"));
   }
-  ferridriver_session::unbind(&args.id)?;
-  if descriptor.is_some() {
+  Ok(())
+}
+
+async fn close(args: &SessionTargetArgs) -> anyhow::Result<()> {
+  let registry = Registry::open()?;
+  if let Some(descriptor) = registry.get(&args.id)? {
+    close_descriptor(&registry, &descriptor).await?;
     ui::say(&ui::success(&format!("closed session {}", ui::bold(&args.id))));
   } else {
     ui::say(&ui::info(&format!("no session {}", ui::bold(&args.id))));
@@ -426,48 +529,67 @@ fn close(args: &SessionTargetArgs) -> anyhow::Result<()> {
   Ok(())
 }
 
-/// `close-all`: stop every session.
-fn close_all() -> anyhow::Result<()> {
+async fn close_all() -> anyhow::Result<()> {
   let registry = Registry::open()?;
   let sessions = registry.list()?;
-  for s in &sessions {
-    terminate_owner(s.pid);
-    ferridriver_session::unbind(&s.id)?;
+  let mut errors = Vec::new();
+  for session in &sessions {
+    if let Err(error) = close_descriptor(&registry, session).await {
+      errors.push(format!("{}: {error:#}", session.id));
+    }
+  }
+  if !errors.is_empty() {
+    anyhow::bail!("{}", errors.join("; "));
   }
   ui::say(&ui::success(&format!("closed {} session(s)", sessions.len())));
   Ok(())
 }
 
-/// Ask the owning host process to exit. SIGTERM lets the host run its
-/// `BoundSession` drop (close the browser, remove the socket) cleanly. A no-op
-/// when the pid is this process (the rare same-process bind) or already gone.
-#[cfg(unix)]
-fn terminate_owner(pid: u32) {
-  if pid == std::process::id() {
-    return;
-  }
-  let Ok(pid) = libc::pid_t::try_from(pid) else {
-    return;
-  };
-  // SAFETY: kill(2) with SIGTERM on a pid; failure (already dead, not ours)
-  // is ignored. No memory is touched.
-  #[allow(unsafe_code)]
-  unsafe {
-    libc::kill(pid, libc::SIGTERM);
-  }
-}
+#[cfg(test)]
+mod tests {
+  use super::*;
 
-#[cfg(not(unix))]
-fn terminate_owner(_pid: u32) {
-  // On non-unix the host is reaped via the registry prune + its own exit;
-  // a portable signal path can be added when a Windows host ships.
-}
+  #[tokio::test]
+  async fn session_readiness_follows_publication_and_host_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(directory.path()).unwrap();
+    let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = child.id();
+    let publisher = registry.clone();
+    let publish = async move {
+      tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+      publisher
+        .put(&ferridriver_session::SessionDescriptor {
+          id: "sashoush-startup".into(),
+          endpoint: "owned-session.sock".into(),
+          generation: "startup-test".into(),
+          pid,
+          browser_name: "chromium".into(),
+          version: env!("CARGO_PKG_VERSION").into(),
+          workspace_dir: None,
+          metadata: None,
+        })
+        .unwrap();
+    };
+    let (ready, ()) = tokio::join!(wait_for_descriptor(&registry, "sashoush-startup", &mut child), publish);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(ready.unwrap().pid, pid);
+    let exited = wait_for_descriptor(&registry, "sashoush-startup", &mut child)
+      .await
+      .unwrap_err();
+    assert!(exited.to_string().contains("host exited"), "{exited}");
+  }
 
-fn backend_name(browser: &BrowserArgs) -> &'static str {
-  match browser.backend_kind().unwrap_or(BackendKind::CdpPipe) {
-    BackendKind::CdpPipe => "cdp-pipe",
-    BackendKind::CdpRaw => "cdp-raw",
-    BackendKind::WebKit => "webkit",
-    BackendKind::Bidi => "bidi",
+  #[test]
+  fn startup_errors_are_bounded_and_do_not_recreate_the_openers_file() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_owned();
+    write_startup_error(&path, &anyhow::anyhow!("{}", "é".repeat(20_000))).unwrap();
+    let detail = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(detail.len(), 16 * 1024);
+    file.close().unwrap();
+    write_startup_error(&path, &anyhow::anyhow!("later host diagnostics")).unwrap();
+    assert!(!path.exists());
   }
 }

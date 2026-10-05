@@ -613,6 +613,7 @@ async fn handle_fx(
     ),
     "download-hang" => fx_download_hang(),
     "iframe" => fx_html("<!doctype html><body>outer<iframe src=\"/fx/inner\"></iframe></body>"),
+    "srcdoc" => fx_html("<!doctype html><iframe name=\"child\" srcdoc=\"<p>child</p>\"></iframe>"),
     "inner" => fx_html("<!doctype html><body>inner</body>"),
     "proxy-info" => fx_json(&serde_json::json!({"url": format!("http://{}", state.proxy.addr)})),
     // Origins of the auxiliary listeners, which bind ephemeral ports.

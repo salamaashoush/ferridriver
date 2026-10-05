@@ -17,6 +17,7 @@ type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
 pub struct PipeTransport {
   write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
   dispatcher: Arc<CdpDispatcher>,
+  tasks: crate::backend::transport_tasks::TransportTasks,
 }
 
 impl PipeTransport {
@@ -59,18 +60,25 @@ impl PipeTransport {
 
     // Writer task: batches queued messages into single write_all syscall.
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    tokio::spawn(async move {
+    let (shutdown, mut stopping) = tokio::sync::watch::channel(false);
+    let writer_task = tokio::spawn(async move {
       let mut writer: BoxWriter = writer;
       let mut buf = Vec::with_capacity(8192);
-      while let Some(first) = write_rx.recv().await {
-        buf.clear();
-        buf.extend_from_slice(&first);
-        while let Ok(more) = write_rx.try_recv() {
-          buf.extend_from_slice(&more);
-        }
-        if writer.write_all(&buf).await.is_err() {
-          break;
-        }
+      tokio::select! {
+        biased;
+        _ = stopping.wait_for(|stopping| *stopping) => {},
+        () = async {
+          while let Some(first) = write_rx.recv().await {
+            buf.clear();
+            buf.extend_from_slice(&first);
+            while let Ok(more) = write_rx.try_recv() {
+              buf.extend_from_slice(&more);
+            }
+            if writer.write_all(&buf).await.is_err() {
+              break;
+            }
+          }
+        } => {},
       }
     });
 
@@ -92,7 +100,8 @@ impl PipeTransport {
     // O(buffer-length) — keeps the per-message dispatch cost flat
     // across read sizes.
     let dispatcher2 = dispatcher.clone();
-    tokio::spawn(async move {
+    let reader_ended = shutdown.clone();
+    let reader_task = tokio::spawn(async move {
       let mut reader: BoxReader = reader;
       let mut rx = bytes::BytesMut::with_capacity(64 * 1024);
       #[allow(clippy::large_stack_arrays)]
@@ -108,6 +117,7 @@ impl PipeTransport {
             // SIGKILLs chrome while requests are in flight makes
             // every queued caller wait the full timeout.
             dispatcher2.fail_all_pending("CDP transport closed (chrome exited)");
+            reader_ended.send_replace(true);
             return;
           },
           Ok(n) => n,
@@ -132,12 +142,21 @@ impl PipeTransport {
       }
     });
 
-    let transport = Self { write_tx, dispatcher };
+    let transport = Self {
+      write_tx,
+      dispatcher,
+      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader_task, writer_task]),
+    };
     Ok((transport, child))
   }
 }
 
 impl super::transport::CdpTransport for PipeTransport {
+  async fn close(&self) -> Result<()> {
+    self.dispatcher.fail_all_pending("CDP transport closed");
+    self.tasks.close().await
+  }
+
   fn is_disconnected(&self) -> bool {
     self.dispatcher.is_disconnected()
   }
@@ -149,19 +168,17 @@ impl super::transport::CdpTransport for PipeTransport {
     method: &str,
     params: &serde_json::Value,
   ) -> Result<serde_json::Value> {
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
     let (id, data, rx) = self.dispatcher.build_command(session_id, method, params)?;
-    if self.write_tx.send(data).await.is_err() {
-      self.dispatcher.forget_pending(id);
-      return Err(FerriError::target_closed(Some("Pipe writer closed".into())));
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-      Ok(Ok(result)) => result,
-      Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
-      Err(_) => {
-        self.dispatcher.forget_pending(id);
-        Err(FerriError::timeout(format!("waiting for {method} response"), 30_000))
-      },
-    }
+    let mut pending = self.dispatcher.pending_command(id);
+    budget.send(&self.write_tx, data).await?;
+    let result = budget
+      .wait(rx)
+      .await
+      .map_err(|error| error.error(format!("waiting for {method} response")))?
+      .map_err(|_| FerriError::backend(format!("Response channel dropped for {method}")))?;
+    pending.completed();
+    result
   }
 
   fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
@@ -203,6 +220,10 @@ impl super::transport::CdpTransport for PipeTransport {
     session_id: &str,
   ) -> tokio::sync::mpsc::UnboundedReceiver<std::sync::Arc<serde_json::Value>> {
     self.dispatcher.tap_all_events(session_id)
+  }
+
+  fn tap_iframe_targets(&self) -> super::transport::IframeTargetSubscription {
+    self.dispatcher.tap_iframe_targets()
   }
 
   fn register_lifecycle_tracker(
@@ -401,6 +422,167 @@ fn spawn_with_pipes(
 mod tests {
   use super::*;
 
+  #[tokio::test(start_paused = true)]
+  async fn operation_budgets_cover_replies_queueing_and_cancellation() {
+    let dispatcher = Arc::new(CdpDispatcher::new());
+    let (write_tx, queued) = tokio::sync::mpsc::channel(1);
+    let transport = PipeTransport {
+      write_tx: write_tx.clone(),
+      dispatcher: dispatcher.clone(),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+    };
+    super::super::transport::verify_operation_budgets(transport, dispatcher, write_tx, queued, vec![0]).await;
+  }
+
+  fn context_test_page(transport: Arc<PipeTransport>, session: &str) -> super::super::CdpPage<PipeTransport> {
+    use super::super::{AttachTasks, CdpBrowser};
+    let browser = CdpBrowser {
+      transport,
+      child: Arc::default(),
+      attached_targets: Arc::default(),
+      version: Arc::from("Chrome/fixture"),
+      isolated_contexts: true,
+      headful: false,
+      popup_taps: Arc::default(),
+      create_ledger: Arc::default(),
+      user_data_dir: None,
+      downloads_dir: Arc::new(tempfile::tempdir().unwrap()),
+      attach_tasks: Arc::new(AttachTasks(Vec::new())),
+      webdriver: None,
+      android: None,
+    };
+    browser.adopted_page("frame".into(), Some(session.into()))
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn evaluation_uses_context_events_that_precede_its_barrier_response() {
+    use super::super::transport::CdpTransport as _;
+    use serde_json::json;
+    for session in ["page-session", "renderer-session"] {
+      let dispatcher = Arc::new(CdpDispatcher::new());
+      let (write_tx, mut queued) = tokio::sync::mpsc::channel(4);
+      let transport = Arc::new(PipeTransport {
+        write_tx,
+        dispatcher: dispatcher.clone(),
+        tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+      });
+      let page = context_test_page(transport.clone(), session);
+      transport.register_lifecycle_tracker(
+        session,
+        page.lifecycle.clone(),
+        page.lifecycle_notify.clone(),
+        page.frame_observer(),
+      );
+      let created = |session: &str, id| {
+        json!({"sessionId":session, "method":"Runtime.executionContextCreated",
+        "params":{"context":{"id":id,"auxData":{"frameId":"frame","isDefault":true}}}})
+      };
+      dispatcher.dispatch_message(&serde_json::to_vec(&created(session, 11)).unwrap());
+      tokio::task::yield_now().await;
+      assert_eq!(page.resolve_frame_context("frame").await.unwrap(), 11);
+      let barrier_params = json!({"expression":"0"});
+      let mut barrier = Box::pin(transport.send_command(Some(session), "Runtime.evaluate", &barrier_params));
+      assert!(futures::poll!(&mut barrier).is_pending());
+      let message = queued.try_recv().unwrap();
+      let request: serde_json::Value = serde_json::from_slice(message.strip_suffix(&[0]).unwrap()).unwrap();
+      for event in [
+        json!({"sessionId":session,"method":"Runtime.executionContextDestroyed","params":{"executionContextId":11}}),
+        created(session, 12),
+        created("another-session", 99),
+        json!({"id":request["id"],"result":{}}),
+      ] {
+        dispatcher.dispatch_message(&serde_json::to_vec(&event).unwrap());
+      }
+      assert!(matches!(futures::poll!(&mut barrier), std::task::Poll::Ready(Ok(_))));
+      let context = page.resolve_frame_context("frame").await.unwrap();
+      let mut evaluation =
+        Box::pin(page.call_utility_in_context("() => 42", &[], &[], Some(context), Some(true), true));
+      assert!(futures::poll!(&mut evaluation).is_pending());
+      let message = queued.try_recv().unwrap();
+      let request: serde_json::Value = serde_json::from_slice(message.strip_suffix(&[0]).unwrap()).unwrap();
+      page.dispose_local();
+      assert_eq!(request["method"], "Runtime.callFunctionOn");
+      assert_eq!(request["sessionId"], session);
+      assert_eq!(
+        request["params"]["executionContextId"], 12,
+        "first dispatch used an obsolete context"
+      );
+    }
+  }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn existing_contexts_are_available_when_a_page_observer_attaches_late() {
+    use super::super::transport::CdpTransport as _;
+    use serde_json::json;
+    let dispatcher = Arc::new(CdpDispatcher::new());
+    let (write_tx, _queued) = tokio::sync::mpsc::channel(4);
+    let transport = Arc::new(PipeTransport {
+      write_tx,
+      dispatcher: dispatcher.clone(),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+    });
+    let created = |session: &str, frame: &str, id, default| {
+      json!({"sessionId":session,"method":"Runtime.executionContextCreated",
+      "params":{"context":{"id":id,"auxData":{"frameId":frame,"isDefault":default}}}})
+    };
+    for event in [
+      created("existing", "child", 11, true),
+      created("existing", "frame", 20, true),
+      created("existing", "child", 99, false),
+      created("another", "child", 55, true),
+      json!({"sessionId":"existing","method":"Runtime.executionContextDestroyed","params":{"executionContextId":11}}),
+      created("existing", "child", 12, true),
+      created("existing", "child", 77, false),
+    ] {
+      dispatcher.dispatch_message(&serde_json::to_vec(&event).unwrap());
+    }
+    let page = context_test_page(transport.clone(), "existing");
+    transport.register_lifecycle_tracker(
+      "existing",
+      page.lifecycle.clone(),
+      page.lifecycle_notify.clone(),
+      page.frame_observer(),
+    );
+    let child = page.peek_frame_context("child");
+    let main = page.peek_frame_context("frame");
+    page.dispose_local();
+    assert_eq!(
+      child,
+      Some(12),
+      "existing child context was lost before observer registration"
+    );
+    assert_eq!(main, Some(20));
+  }
+
+  #[test]
+  fn binding_source_is_captured_before_context_id_reuse() {
+    use super::super::CdpPage;
+    use serde_json::json;
+    let contexts = Arc::new(std::sync::RwLock::new(rustc_hash::FxHashMap::default()));
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let (sender, mut queued) = tokio::sync::mpsc::unbounded_channel();
+    let created = |frame| {
+      json!({"method":"Runtime.executionContextCreated",
+      "params":{"context":{"id":11,"auxData":{"frameId":frame,"isDefault":true}}}})
+    };
+    for event in [
+      created("child"),
+      json!({"method":"Runtime.bindingCalled","params":{"name":"__fd_binding__","executionContextId":11,
+        "payload":json!({"name":"report","seq":1,"args":["sashoush"]}).to_string()}}),
+      json!({"method":"Runtime.executionContextsCleared","params":{}}),
+      created("replacement"),
+    ] {
+      CdpPage::<PipeTransport>::handle_tracker_event(&event, &contexts, &notify, &Arc::from("main"), &sender);
+    }
+    let call = queued.try_recv().unwrap();
+    assert_eq!(call.source.frame, "child");
+    assert_eq!(call.source.page, "main");
+    assert_eq!(call.ctx_id, Some(11));
+    assert_eq!(call.args, vec![json!("sashoush")]);
+    assert_eq!(contexts.read().unwrap().get("replacement"), Some(&11));
+    assert!(!contexts.read().unwrap().contains_key("child"));
+  }
+
   #[tokio::test(flavor = "current_thread")]
   async fn fetch_listener_captures_requests_before_its_task_is_polled()
   -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -409,6 +591,7 @@ mod tests {
     let transport = Arc::new(PipeTransport {
       write_tx,
       dispatcher: dispatcher.clone(),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     });
     let listener = super::super::CdpPage::spawn_fetch_listener(
       transport,
@@ -440,6 +623,7 @@ mod tests {
     let transport = Arc::new(PipeTransport {
       write_tx,
       dispatcher: dispatcher.clone(),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     });
     let log = Arc::new(tokio::sync::RwLock::new(Vec::new()));
     let navigation = crate::network::NavRequestSlot::new();

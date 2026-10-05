@@ -15,7 +15,10 @@ pub mod browser;
 pub mod element;
 pub mod input;
 pub mod page;
+mod profile;
 pub(crate) mod session;
+#[cfg(test)]
+mod session_tests;
 pub(crate) mod transport;
 pub mod types;
 mod webdriver;

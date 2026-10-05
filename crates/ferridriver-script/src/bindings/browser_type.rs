@@ -24,6 +24,18 @@ use super::browser::BrowserJs;
 use super::context::BrowserContextJs;
 use crate::bindings::convert::serde_from_js;
 
+#[derive(JsLifetime)]
+pub(crate) struct BrowserResourcesUd(pub(crate) Arc<ferridriver::BrowserResources>);
+
+fn resources(ctx: &Ctx<'_>) -> rquickjs::Result<Arc<ferridriver::BrowserResources>> {
+  ctx
+    .userdata::<BrowserResourcesUd>()
+    .map(|resources| Arc::clone(&resources.0))
+    .ok_or_else(|| {
+      rquickjs::Error::new_from_js_message("BrowserType", "Error", "browser resource owner is unavailable")
+    })
+}
+
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "BrowserType")]
 pub struct BrowserTypeJs {
@@ -60,9 +72,8 @@ impl BrowserTypeJs {
       Some(v) if v.is_undefined() || v.is_null() => LaunchOptions::default(),
       Some(v) => parse_launch_options(&ctx, v)?,
     };
-    let inner = self
-      .inner
-      .launch(core)
+    let inner = resources(&ctx)?
+      .launch(self.inner, core)
       .await
       .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserJs::new(Arc::new(inner));
@@ -83,9 +94,8 @@ impl BrowserTypeJs {
       Some(v) if v.is_undefined() || v.is_null() => ConnectOptions::default(),
       Some(v) => parse_connect_options(&ctx, v)?,
     };
-    let inner = self
-      .inner
-      .connect(&ws_endpoint, core)
+    let inner = resources(&ctx)?
+      .connect(self.inner, &ws_endpoint, core)
       .await
       .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserJs::new(Arc::new(inner));
@@ -106,9 +116,8 @@ impl BrowserTypeJs {
       Some(v) if v.is_undefined() || v.is_null() => ConnectOverCdpOptions::default(),
       Some(v) => parse_connect_over_cdp_options(&ctx, v)?,
     };
-    let inner = self
-      .inner
-      .connect_over_cdp(&endpoint_url, core)
+    let inner = resources(&ctx)?
+      .connect_over_cdp(self.inner, &endpoint_url, core)
       .await
       .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserJs::new(Arc::new(inner));
@@ -136,9 +145,8 @@ impl BrowserTypeJs {
       },
     };
     let core = LaunchPersistentContextOptions { launch, context };
-    let ctx_ref = self
-      .inner
-      .launch_persistent_context(std::path::Path::new(&user_data_dir), core)
+    let ctx_ref = resources(&ctx)?
+      .launch_persistent_context(self.inner, std::path::Path::new(&user_data_dir), core)
       .await
       .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserContextJs::new(Arc::new(ctx_ref));
@@ -150,6 +158,7 @@ impl BrowserTypeJs {
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct JsLaunchOptions {
+  firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
   headless: Option<bool>,
   executable_path: Option<String>,
   args: Option<Vec<String>>,
@@ -234,7 +243,7 @@ fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Res
     handle_sigint: None,
     handle_sigterm: None,
     chromium_sandbox: None,
-    firefox_user_prefs: None,
+    firefox_user_prefs: parsed.firefox_user_prefs,
     proxy: parsed.proxy.map(|p| ferridriver::options::ProxyConfig {
       server: p.server,
       bypass: p.bypass,
@@ -298,6 +307,10 @@ fn firefox_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
   Class::instance(ctx, BrowserTypeJs::new(BrowserType::firefox()))
 }
 
+fn safari_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
+  Class::instance(ctx, BrowserTypeJs::new(BrowserType::safari()))
+}
+
 fn webkit_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
   Class::instance(ctx, BrowserTypeJs::new(BrowserType::webkit()))
 }
@@ -323,6 +336,10 @@ pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   crate::bindings::runtime::mirror_global(ctx, "chromium")?;
   crate::bindings::runtime::mirror_global(ctx, "firefox")?;
   crate::bindings::runtime::mirror_global(ctx, "webkit")?;
+  ctx
+    .globals()
+    .set("safari", rquickjs::Function::new(ctx.clone(), safari_factory)?)?;
+  crate::bindings::runtime::mirror_global(ctx, "safari")?;
 
   // Suppress the unused-import warning for `Browser`, which is only
   // here to keep doc-link references valid in a future binding.

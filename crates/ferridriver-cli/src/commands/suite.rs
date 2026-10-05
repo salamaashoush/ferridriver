@@ -42,6 +42,7 @@ pub fn apply_shared(
   overrides.ui_port = runner.ui_port;
   overrides.shard = runner.shard()?;
   overrides.headless_override = browser.headless_override();
+  overrides.browser = browser.browser.map(|kind| kind.name().to_owned());
   overrides.backend = browser.backend_name().map(str::to_string);
   overrides.executable_path.clone_from(&browser.executable_path);
   Ok(())

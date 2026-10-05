@@ -35,11 +35,12 @@ pub(crate) struct BidiSession {
   pub browser_name: String,
   #[allow(dead_code)]
   pub browser_version: String,
+  pub classic: Option<Arc<crate::backend::webdriver::session::WebDriverSession>>,
+  input_transport: Arc<std::sync::atomic::AtomicU8>,
 }
 
-// Event subscriptions use top-level module names (e.g. "browsingContext", "network")
-// rather than individual event names. This matches Puppeteer's approach and avoids
-// issues with unsupported event names breaking the session.
+// WebKit accepts module subscriptions without expanding them (WebKit bug
+// 291371), so lifecycle subscriptions must name their concrete events.
 
 impl BidiSession {
   /// Connect to a `BiDi` endpoint directly via WebSocket.
@@ -58,9 +59,19 @@ impl BidiSession {
   /// here: the `WebDriver` `proxy` capability is the browser-wide equivalent, and
   /// a user context created later with its own proxy still overrides it.
   pub async fn connect_with_proxy(ws_url: &str, proxy: Option<&crate::options::ProxyConfig>) -> Result<Self> {
-    info!("Connecting BiDi session");
+    Self::connect_with_options(ws_url, proxy, None).await
+  }
 
-    let transport = Arc::new(BidiTransport::connect(ws_url).await?);
+  pub(crate) async fn connect_with_options(
+    ws_url: &str,
+    proxy: Option<&crate::options::ProxyConfig>,
+    headers: Option<&rustc_hash::FxHashMap<String, String>>,
+  ) -> Result<Self> {
+    info!("Connecting BiDi session");
+    let transport = Arc::new(match headers {
+      Some(headers) => BidiTransport::connect_with_headers(ws_url, Some(headers)).await?,
+      None => BidiTransport::connect(ws_url).await?,
+    });
 
     // Create a new session with proper capabilities.
     // webSocketUrl: true tells Firefox to maintain the BiDi WebSocket across navigations.
@@ -89,7 +100,7 @@ impl BidiSession {
       .unwrap_or("unknown")
       .to_string();
     let capabilities = result.get("capabilities").cloned().unwrap_or(json!({}));
-    Self::finish(transport, session_id, capabilities).await
+    Self::finish(transport, session_id, capabilities, None).await
   }
 
   /// Attach to a `BiDi` WebSocket returned by a pre-existing `WebDriver` Classic
@@ -100,13 +111,19 @@ impl BidiSession {
     session_id: String,
     capabilities: serde_json::Value,
     headers: Option<&rustc_hash::FxHashMap<String, String>>,
+    classic: Arc<crate::backend::webdriver::session::WebDriverSession>,
   ) -> Result<Self> {
     info!("Connecting to existing BiDi session");
     let transport = Arc::new(BidiTransport::connect_with_headers(ws_url, headers).await?);
-    Self::finish(transport, session_id, capabilities).await
+    Self::finish(transport, session_id, capabilities, Some(classic)).await
   }
 
-  async fn finish(transport: Arc<BidiTransport>, session_id: String, capabilities: serde_json::Value) -> Result<Self> {
+  async fn finish(
+    transport: Arc<BidiTransport>,
+    session_id: String,
+    capabilities: serde_json::Value,
+    classic: Option<Arc<crate::backend::webdriver::session::WebDriverSession>>,
+  ) -> Result<Self> {
     let browser_name = capabilities
       .get("browserName")
       .and_then(|v| v.as_str())
@@ -120,34 +137,48 @@ impl BidiSession {
 
     debug!("BiDi session created: id={session_id}, browser={browser_name} {browser_version}");
 
-    // Subscribe to top-level event modules (matching Puppeteer's approach).
-    // Using module names instead of individual events ensures we receive ALL
-    // events under each module and avoids issues with unsupported event names.
+    let events = if browser_name.eq_ignore_ascii_case("safari") {
+      json!([
+        "browsingContext.contextCreated",
+        "browsingContext.contextDestroyed",
+        "browsingContext.domContentLoaded",
+        "browsingContext.fragmentNavigated",
+        "browsingContext.load",
+        "browsingContext.navigationAborted",
+        "browsingContext.navigationCommitted",
+        "browsingContext.navigationFailed",
+        "browsingContext.navigationStarted",
+        "browsingContext.userPromptClosed",
+        "browsingContext.userPromptOpened",
+        "browsingContext.downloadWillBegin",
+        "browsingContext.downloadEnd",
+        "log.entryAdded",
+        "script.realmCreated",
+        "script.realmDestroyed",
+        "script.message",
+        "network",
+        "input"
+      ])
+    } else {
+      json!(["browsingContext", "network", "log", "script", "input"])
+    };
     transport
-      .send_command(
-        "session.subscribe",
-        json!({"events": ["browsingContext", "network", "log", "script", "input"]}),
-      )
+      .send_command("session.subscribe", json!({"events": events}))
       .await?;
 
-    // Response bodies: without a registered data collector Firefox
-    // discards response bytes and `network.getData` answers "no such
-    // network data". Same registration + 20MB cap as Playwright's
-    // bidiBrowser.ts:81 (matching CDP's default buffer).
-    transport
-      .send_command(
+    for (method, params) in [
+      (
         "network.addDataCollector",
-        json!({"dataTypes": ["response"], "maxEncodedDataSize": 20_000_000}),
-      )
-      .await?;
-
-    // Auth challenges: intercept at the authRequired phase so stored
-    // httpCredentials can answer via `network.continueWithAuth`
-    // (bidiBrowser.ts:79). Unanswered challenges are cancelled by the
-    // authRequired handler, mirroring Playwright.
-    transport
-      .send_command("network.addIntercept", json!({"phases": ["authRequired"]}))
-      .await?;
+        json!({"dataTypes": ["response"], "maxEncodedDataSize":20_000_000}),
+      ),
+      ("network.addIntercept", json!({"phases":["authRequired"]})),
+    ] {
+      match transport.send_command(method, params).await {
+        Ok(_) => {},
+        Err(FerriError::Unsupported(reason)) => tracing::debug!(%reason, "optional BiDi capability unavailable"),
+        Err(error) => return Err(error),
+      }
+    }
 
     info!("BiDi session ready: {browser_name} {browser_version}");
     Ok(Self {
@@ -155,7 +186,54 @@ impl BidiSession {
       transport,
       browser_name,
       browser_version,
+      classic,
+      input_transport: Arc::new(std::sync::atomic::AtomicU8::new(0)),
     })
+  }
+
+  pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    if method == "input.performActions" && self.classic.is_some() {
+      return Box::pin(self.send_input(params)).await;
+    }
+    self.transport.send_command(method, params).await
+  }
+
+  async fn send_input(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+    let method = "input.performActions";
+    let transport = self.input_transport.load(std::sync::atomic::Ordering::Acquire);
+    if transport == 1 {
+      return self.transport.send_command(method, params).await;
+    }
+    if transport == 0 {
+      match self.transport.send_command(method, params.clone()).await {
+        Err(FerriError::Unsupported(_)) => {
+          self.input_transport.store(2, std::sync::atomic::Ordering::Release);
+        },
+        Ok(result) => {
+          self.input_transport.store(1, std::sync::atomic::Ordering::Release);
+          return Ok(result);
+        },
+        Err(error) => return Err(error),
+      }
+    }
+    let classic = self
+      .classic
+      .as_ref()
+      .ok_or_else(|| FerriError::unsupported("classic WebDriver input requires an HTTP-created session"))?;
+    let context = params
+      .get("context")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::invalid_argument("context", "input requires a browsing context"))?;
+    let page = crate::backend::webdriver::page::WebDriverPage::new(
+      classic.clone(),
+      crate::backend::webdriver::session::Target {
+        window: Some(context.to_owned()),
+        ..Default::default()
+      },
+      30_000,
+    );
+    page.perform_actions(params).await?;
+    Ok(json!({}))
   }
 
   /// Connect to a `BiDi` endpoint at the given port.
@@ -185,7 +263,9 @@ impl BidiSession {
     env: &rustc_hash::FxHashMap<String, String>,
     user_data_dir: Option<&std::path::Path>,
     proxy: Option<&crate::options::ProxyConfig>,
+    firefox_user_prefs: Option<&rustc_hash::FxHashMap<String, serde_json::Value>>,
   ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
+    super::profile::validate_preferences(firefox_user_prefs)?;
     // Prefix the throwaway profile dir so test-harness cleanup can
     // `pkill -f` any leaked Firefox processes by their `--profile` arg —
     // mirrors the `ferridriver-pipe-` / `ferridriver-raw-` prefixes
@@ -207,6 +287,8 @@ impl BidiSession {
       }
     };
 
+    let mut profile_guard = super::profile::ProfileGuard::acquire(&profile_dir.path)?;
+
     // Pre-create the per-profile downloads dir and pin Firefox to it
     // via `browser.download.dir` + `folderList=2`. Without these prefs
     // Firefox falls back to the user's `~/Downloads` for the
@@ -222,7 +304,12 @@ impl BidiSession {
 
     // Write automation preferences to user.js in the profile directory.
     // Matches Playwright's firefoxPreferences + Puppeteer's essentials.
-    write_firefox_prefs(&profile_dir.path, &downloads_dir).map_err(|e| format!("write prefs: {e}"))?;
+    super::profile::write_preferences(
+      &profile_dir.path,
+      &firefox_default_prefs(&downloads_dir)?,
+      firefox_user_prefs,
+    )?;
+    profile_guard.allow_firefox_start()?;
 
     let mut command = tokio::process::Command::new(firefox_path);
     command.envs(env);
@@ -301,6 +388,7 @@ impl BidiSession {
     env: &rustc_hash::FxHashMap<String, String>,
     user_data_dir: Option<&std::path::Path>,
     proxy: Option<&crate::options::ProxyConfig>,
+    firefox_user_prefs: Option<&rustc_hash::FxHashMap<String, serde_json::Value>>,
   ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
@@ -311,6 +399,7 @@ impl BidiSession {
         env,
         user_data_dir,
         proxy,
+        firefox_user_prefs,
       ))
       .await
     } else {
@@ -397,13 +486,11 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
   }
 }
 
-/// Write Firefox automation preferences to `user.js` in the given profile directory.
 /// Based on Playwright's `playwright.cfg` and Puppeteer's Firefox defaults.
-fn write_firefox_prefs(profile_dir: &std::path::Path, downloads_dir: &std::path::Path) -> std::io::Result<()> {
+fn firefox_default_prefs(downloads_dir: &std::path::Path) -> std::io::Result<Vec<u8>> {
   use std::io::Write;
 
-  let prefs_path = profile_dir.join("user.js");
-  let mut f = std::fs::File::create(prefs_path)?;
+  let mut f = Vec::new();
 
   write_firefox_download_prefs(&mut f, downloads_dir)?;
 
@@ -522,7 +609,7 @@ user_pref("screenshots.browser.component.enabled", false);
 "#
   )?;
 
-  Ok(())
+  Ok(f)
 }
 
 /// Append download-related preferences to `user.js` so Firefox routes
@@ -531,15 +618,14 @@ user_pref("screenshots.browser.component.enabled", false);
 /// `suggestedFilename` it ships in `browsingContext.downloadWillBegin`,
 /// which makes the value depend on whichever leftover files happen to
 /// be lying around in the developer's downloads dir.
-fn write_firefox_download_prefs(f: &mut std::fs::File, downloads_dir: &std::path::Path) -> std::io::Result<()> {
-  use std::io::Write;
-  let dir = downloads_dir.to_string_lossy();
+fn write_firefox_download_prefs(f: &mut impl std::io::Write, downloads_dir: &std::path::Path) -> std::io::Result<()> {
+  let dir = serde_json::to_string(&downloads_dir.to_string_lossy()).map_err(std::io::Error::other)?;
   writeln!(
     f,
     "// ── Downloads (profile-scoped to keep suggestedFilename deterministic)\n\
 user_pref(\"browser.download.folderList\", 2);\n\
-user_pref(\"browser.download.dir\", {dir:?});\n\
-user_pref(\"browser.download.lastDir\", {dir:?});\n\
+user_pref(\"browser.download.dir\", {dir});\n\
+user_pref(\"browser.download.lastDir\", {dir});\n\
 user_pref(\"browser.download.useDownloadDir\", true);\n\
 user_pref(\"browser.download.manager.showWhenStarting\", false);\n\
 user_pref(\"browser.download.alwaysOpenPanel\", false);\n\

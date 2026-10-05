@@ -373,7 +373,7 @@ impl Probe {
   }
 
   async fn run_session(&self, source: &str) -> Result<Value> {
-    let slot = self.sessions.acquire("s");
+    let slot = self.sessions.acquire("s").await?;
     let result = slot
       .lock()
       .await
@@ -467,7 +467,7 @@ impl Probe {
       Operation::WebServerShutdown { request } => web_server::shutdown(&self.root, request).await,
       Operation::WebServerProbes => web_server::probes().await,
       Operation::Webkit { request } => webkit::run(request).await,
-      Operation::PersistentProfile { scenario } => persistent_profile::run(&self.root, scenario).await,
+      Operation::PersistentProfile { scenario } => Box::pin(persistent_profile::run(&self.root, scenario)).await,
       Operation::ProcessRecordPublication => process_records::run().await,
       Operation::CdpConnection { urls } => cdp_connection::run(&self.root, urls).await,
       Operation::BrowserLifecycle { actions } => lifecycle::run(actions).await,

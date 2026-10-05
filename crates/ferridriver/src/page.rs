@@ -92,6 +92,11 @@ pub struct Page {
 }
 
 impl Page {
+  #[must_use]
+  pub fn webmcp(self: &Arc<Self>) -> crate::web_mcp::WebMcp {
+    self.main_frame().webmcp()
+  }
+
   /// Highlight helpers (`createHighlight`, `hideHighlight`) layered onto the
   /// injected engine. Shared with the codegen recorder.
   const RECORDER_SUPPORT_JS: &'static str = include_str!("injected/dist/recorder-support.min.js");
@@ -178,59 +183,13 @@ impl Page {
     {
       return;
     }
-    let cache = Arc::clone(&self.frame_cache);
-    let wire_tracks_frames = matches!(
+    let observer = page_state_observer(
       self.inner.kind(),
-      crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw
+      Arc::clone(&self.frame_cache),
+      Arc::clone(self.inner.observed()),
     );
-    let observed = Arc::clone(self.inner.observed());
-    // Frame and observation state must be current before public listeners
-    // or the page-to-context bridge receive the event.
-    let installed = self.inner.events().set_state_observer(Arc::new(move |event| {
-      match event {
-        PageEvent::FrameAttached(info) => {
-          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
-            g.attach(info.clone());
-          }
-        },
-        PageEvent::FrameDetached { frame_id } => {
-          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
-            g.detach(frame_id);
-          }
-        },
-        PageEvent::FrameNavigated(info) => {
-          // A main-frame navigation starts a new `since-navigation`
-          // window for `consoleMessages()` / `pageErrors()`.
-          if info.parent_frame_id.is_none()
-            && let Ok(mut o) = observed.lock()
-          {
-            o.mark_navigation();
-          }
-          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
-            g.navigated(info.clone());
-          }
-        },
-        PageEvent::FrameNavigatedWithinDocument(info) => {
-          // Same document, new URL: no `since-navigation` reset, no
-          // subtree detach — just keep the tracked URL fresh so
-          // `page.url()` / `waitForURL` observe SPA route changes.
-          if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
-            g.navigated_within(&info.frame_id, &info.url);
-          }
-        },
-        PageEvent::Console(msg) => {
-          if let Ok(mut o) = observed.lock() {
-            o.push_console(msg.clone());
-          }
-        },
-        PageEvent::PageError(err) => {
-          if let Ok(mut o) = observed.lock() {
-            o.push_error(err.clone());
-          }
-        },
-        _ => {},
-      }
-    }));
+    // Frame and observation state must be current before public event delivery.
+    let installed = self.inner.events().set_state_observer(Arc::new(observer));
     debug_assert!(installed, "a backend page installs its state observer once");
     let mut rx = self.inner.events().subscribe();
     // Trace identity captured at spawn: console / page-lifecycle events
@@ -316,11 +275,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend's `get_frame_tree()` call fails.
-  pub async fn sync_frames(self: &Arc<Self>) -> Result<()> {
+  pub async fn sync_frames(&self) -> Result<()> {
     let infos = self.inner.get_frame_tree().await?;
-    if let Ok(mut g) = self.frame_cache.lock() {
-      g.seed(infos);
-    }
+    self
+      .frame_cache
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .seed(infos);
     Ok(())
   }
 
@@ -724,6 +685,13 @@ impl Page {
     // `Page._goto` (`/tmp/playwright/packages/playwright-core/src/client/page.ts`).
     // Absolute URLs passthrough; relative paths resolve against baseURL.
     let resolved = self.resolve_with_base_url(url).await;
+    let resolved = if resolved.starts_with("localhost") || resolved.starts_with("127.0.0.1") {
+      format!("http://{resolved}")
+    } else {
+      resolved
+    };
+    reqwest::Url::parse(&resolved)
+      .map_err(|error| crate::error::FerriError::invalid_argument("url", error.to_string()))?;
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let trace_span = self.trace_span("goto", serde_json::json!({ "url": resolved }));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
@@ -778,18 +746,25 @@ impl Page {
     //   `ensure_frame_cache_seeded`'s early-return on `main_frame_id`
     //   present would otherwise skip refreshing the iframe set on a
     //   reused page.
-    let needs_sync = matches!(
+    self.finish_navigation(result).await
+  }
+
+  async fn finish_navigation(
+    &self,
+    result: Result<Option<crate::network::Response>>,
+  ) -> Result<Option<crate::network::Response>> {
+    let response = result?;
+    if matches!(
       self.inner.kind(),
-      crate::backend::BackendKind::Bidi | crate::backend::BackendKind::WebKit
-    );
-    if needs_sync {
+      crate::backend::BackendKind::Bidi | crate::backend::BackendKind::WebKit | crate::backend::BackendKind::WebDriver
+    ) {
       // Single pass — extra sync rounds would push past the
       // `setTimeout(confirm, 80)` window dialog tests rely on between
       // goto-returning and the user subscribing to `waitForEvent`.
       // Stragglers get picked up via the live FrameAttached listener.
-      let _ = self.sync_frames().await;
+      self.sync_frames().await?;
     }
-    result
+    Ok(response)
   }
 
   /// Resolve a user-supplied URL against the owning context's
@@ -826,7 +801,9 @@ impl Page {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("goBack", serde_json::json!({}));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
-    let result = self.inner.go_back(lifecycle, timeout).await;
+    let result = self
+      .finish_navigation(self.inner.go_back(lifecycle, timeout).await)
+      .await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
@@ -850,7 +827,9 @@ impl Page {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let trace_span = self.trace_span("goForward", serde_json::json!({}));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
-    let result = self.inner.go_forward(lifecycle, timeout).await;
+    let result = self
+      .finish_navigation(self.inner.go_forward(lifecycle, timeout).await)
+      .await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
@@ -876,13 +855,15 @@ impl Page {
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let pre_nav = self.observed_lens();
     let result = self.inner.reload(lifecycle, timeout).await;
+    let navigation_succeeded = result.is_ok();
+    let result = self.finish_navigation(result).await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
     // A successful reload ALWAYS commits a new document — advance the
     // observed since-navigation window even when the listener's
     // `FrameNavigated` mark was dropped (lagged broadcast receiver).
-    if result.is_ok() {
+    if navigation_succeeded {
       self.raise_observed_nav_marks(pre_nav);
     }
     result
@@ -2515,11 +2496,7 @@ impl Page {
     let source_selector = source_selector.to_string();
     let target_selector = target_selector.to_string();
     crate::action::Action::new(move |opts| {
-      Box::pin(async move {
-        page
-          .drag_and_drop_impl(&source_selector, &target_selector, Some(opts))
-          .await
-      })
+      Box::pin(async move { Box::pin(page.drag_and_drop_impl(&source_selector, &target_selector, Some(opts))).await })
     })
   }
 
@@ -3080,8 +3057,10 @@ impl Page {
   pub async fn bring_to_front(&self) -> Result<()> {
     self
       .traced("bringToFront", serde_json::json!({}), async {
-        let _ = self.inner.evaluate("window.focus()").await;
-        Ok(())
+        if self.is_closed() {
+          return Err(crate::FerriError::target_closed(None));
+        }
+        self.inner.bring_to_front().await
       })
       .await
   }
@@ -5072,6 +5051,62 @@ fn is_element_not_found(err: &crate::error::FerriError) -> bool {
   }
   let lower = err.to_string().to_ascii_lowercase();
   lower.contains("not found") || lower.contains("no element found")
+}
+
+pub(crate) fn page_state_observer(
+  kind: crate::backend::BackendKind,
+  cache: Arc<Mutex<FrameCache>>,
+  observed: Arc<Mutex<crate::observed::ObservedBuffers>>,
+) -> impl Fn(&PageEvent) + Send + Sync {
+  let wire_tracks_frames = matches!(
+    kind,
+    crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpWs | crate::backend::BackendKind::WebKit
+  );
+  move |event| {
+    match event {
+      PageEvent::FrameAttached(info) => {
+        if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
+          g.attach(info.clone());
+        }
+      },
+      PageEvent::FrameDetached { frame_id } => {
+        if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
+          g.detach(frame_id);
+        }
+      },
+      PageEvent::FrameNavigated(info) => {
+        // A main-frame navigation starts a new `since-navigation`
+        // window for `consoleMessages()` / `pageErrors()`.
+        if info.parent_frame_id.is_none()
+          && let Ok(mut o) = observed.lock()
+        {
+          o.mark_navigation();
+        }
+        if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
+          g.navigated(info.clone());
+        }
+      },
+      PageEvent::FrameNavigatedWithinDocument(info) => {
+        // Same document, new URL: no `since-navigation` reset, no
+        // subtree detach — just keep the tracked URL fresh so
+        // `page.url()` / `waitForURL` observe SPA route changes.
+        if !wire_tracks_frames && let Ok(mut g) = cache.lock() {
+          g.navigated_within(&info.frame_id, &info.url);
+        }
+      },
+      PageEvent::Console(msg) => {
+        if let Ok(mut o) = observed.lock() {
+          o.push_console(msg.clone());
+        }
+      },
+      PageEvent::PageError(err) => {
+        if let Ok(mut o) = observed.lock() {
+          o.push_error(err.clone());
+        }
+      },
+      _ => {},
+    }
+  }
 }
 
 #[cfg(test)]

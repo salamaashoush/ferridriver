@@ -345,6 +345,9 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   }
   if let Some(ref b) = overrides.browser {
     config.browser.browser.clone_from(b);
+    if overrides.backend.is_none() {
+      config.browser.backend = "auto".into();
+    }
   }
   if let Some(ref b) = overrides.backend {
     config.browser.backend.clone_from(b);
@@ -478,6 +481,7 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
 
   // Normalize browser↔backend consistency after all overrides are applied.
   config.browser.apply_use_engine();
+  config.browser.resolve_kinds()?;
   config.browser.normalize();
   config.apply_use_options();
 

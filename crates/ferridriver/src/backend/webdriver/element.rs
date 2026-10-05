@@ -12,12 +12,30 @@ pub struct WebDriverElement {
 }
 
 impl WebDriverElement {
+  pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
+    let (command, body) = if paths.is_empty() {
+      ("clear", json!({}))
+    } else {
+      ("value", json!({"text":paths.join("\n")}))
+    };
+    self
+      .page
+      .command(Command::post(&["element", &self.id, command], body))
+      .await?;
+    Ok(())
+  }
+
   #[must_use]
   pub fn new(page: WebDriverPage, id: String) -> Self {
     Self { page, id }
   }
 
   pub async fn click(&self) -> Result<()> {
+    if super::capabilities::uses_xcuitest(&self.page.capabilities) {
+      self.scroll_into_view().await?;
+      let (x, y) = self.center().await?;
+      return self.page.click_at(x, y).await;
+    }
     self
       .page
       .command(Command::post(&["element", &self.id, "click"], json!({})))

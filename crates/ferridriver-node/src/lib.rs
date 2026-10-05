@@ -82,5 +82,6 @@ mod tracing;
 mod types;
 mod video;
 mod web_error;
+mod web_mcp;
 mod web_socket_route;
 mod web_storage;

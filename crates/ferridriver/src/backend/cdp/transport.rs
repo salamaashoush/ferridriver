@@ -48,6 +48,7 @@ type CdpResult = Result<serde_json::Value>;
 /// larger than the alloc itself).
 pub(crate) struct PendingEntry {
   tx: oneshot::Sender<CdpResult>,
+  session_id: Option<Box<str>>,
   method: String,
   send_at: Option<Instant>,
 }
@@ -220,6 +221,8 @@ pub fn dump_global_rtt_stats() {
 
 /// Trait abstracting CDP transport medium (pipes vs WebSocket).
 pub trait CdpTransport: Send + Sync + 'static {
+  fn close(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+
   /// Whether the browser connection has ended (EOF on the pipe/socket).
   fn is_disconnected(&self) -> bool;
 
@@ -263,6 +266,8 @@ pub trait CdpTransport: Send + Sync + 'static {
   /// into a page-session stream. Backs the public `CDPSession` events.
   fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
 
+  fn tap_iframe_targets(&self) -> IframeTargetSubscription;
+
   fn register_lifecycle_tracker(
     &self,
     session_id: &str,
@@ -287,8 +292,40 @@ pub(crate) fn frame_state_observer(
   cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   events: crate::events::EventEmitter,
 ) -> FrameStateObserver {
+  make_frame_state_observer(cache, events, None)
+}
+
+pub(crate) fn frame_state_observer_for_renderer(
+  cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  events: crate::events::EventEmitter,
+  frame: String,
+  parent: String,
+) -> FrameStateObserver {
+  make_frame_state_observer(cache, events, Some((frame, parent)))
+}
+
+fn make_frame_state_observer(
+  cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  events: crate::events::EventEmitter,
+  renderer: Option<(String, String)>,
+) -> FrameStateObserver {
   Arc::new(move |raw, method| {
-    if let Some(event) = frame_event(raw, method) {
+    if method == "Page.frameDetached" {
+      let params = json_scan::json_field(raw, b"params");
+      if json_scan::json_string(json_scan::json_field(params, b"reason")) == b"swap" {
+        if let Ok(frame) = std::str::from_utf8(json_scan::json_string(json_scan::json_field(params, b"frameId"))) {
+          lock_or_recover(&cache).detach_descendants(frame);
+        }
+        return;
+      }
+    }
+    if let Some(mut event) = frame_event(raw, method) {
+      if let Some((frame, parent)) = &renderer
+        && let crate::events::PageEvent::FrameNavigated(info) = &mut event
+        && info.frame_id == *frame
+      {
+        info.parent_frame_id = Some(parent.clone());
+      }
       {
         let mut cache = lock_or_recover(&cache);
         match &event {
@@ -312,6 +349,80 @@ pub(crate) struct LifecycleTracker {
   pub frame_observer: super::transport::FrameStateObserver,
 }
 
+pub(crate) struct PendingCommand<'a> {
+  dispatcher: &'a CdpDispatcher,
+  id: Option<u64>,
+}
+
+impl PendingCommand<'_> {
+  pub(crate) fn completed(&mut self) {
+    self.id = None;
+  }
+}
+
+impl Drop for PendingCommand<'_> {
+  fn drop(&mut self) {
+    if let Some(id) = self.id {
+      self.dispatcher.forget_pending(id);
+    }
+  }
+}
+
+#[derive(Default)]
+struct ContextSnapshots(FxHashMap<String, FxHashMap<String, CachedContext>>);
+
+struct CachedContext {
+  id: i64,
+  event: Vec<u8>,
+}
+
+impl ContextSnapshots {
+  fn observe(&mut self, session: &str, method: &str, raw: &[u8]) {
+    if method == "Runtime.executionContextsCleared" {
+      self.0.remove(session);
+      return;
+    }
+    let Ok(event) = serde_json::from_slice::<serde_json::Value>(raw) else {
+      return;
+    };
+    let params = &event["params"];
+    match method {
+      "Runtime.executionContextCreated" => {
+        let context = &params["context"];
+        if context["auxData"]["isDefault"] == true
+          && let (Some(frame), Some(id)) = (context["auxData"]["frameId"].as_str(), context["id"].as_i64())
+        {
+          self.0.entry(session.to_owned()).or_default().insert(
+            frame.to_owned(),
+            CachedContext {
+              id,
+              event: raw.to_vec(),
+            },
+          );
+        }
+      },
+      "Runtime.executionContextDestroyed" => {
+        if let Some(id) = params["executionContextId"].as_i64()
+          && let Some(contexts) = self.0.get_mut(session)
+        {
+          contexts.retain(|_, context| context.id != id);
+        }
+      },
+      "Page.frameDetached" => {
+        if let Some(frame) = params["frameId"].as_str()
+          && let Some(contexts) = self.0.get_mut(session)
+        {
+          contexts.remove(frame);
+        }
+      },
+      _ => {},
+    }
+    if self.0.get(session).is_some_and(FxHashMap::is_empty) {
+      self.0.remove(session);
+    }
+  }
+}
+
 /// Shared CDP message dispatch state. Embedded by both `PipeTransport` and `WsTransport`.
 pub(crate) struct CdpDispatcher {
   /// Set once by the reader task on EOF — see [`Self::is_disconnected`].
@@ -322,12 +433,14 @@ pub(crate) struct CdpDispatcher {
   /// via `DashMap` so events firing on N sessions don't contend on
   /// the same mutex.
   lifecycle_trackers: Arc<DashMap<String, LifecycleTracker>>,
+  iframe_targets: std::sync::Mutex<IframeTargets>,
+  context_snapshots: std::sync::Mutex<ContextSnapshots>,
   /// Per-message broadcast channel. Wraps the message in `Arc` so
   /// fanout to N subscribers is N refcount bumps (~5ns each)
   /// instead of N deep `serde_json::Value` clones (~400ns + ~10
   /// allocs each). At 200 events/s × ~12 subscribers per page this
   /// is the single biggest hot-loop CPU win in transport.
-  pub event_tx: broadcast::Sender<Arc<serde_json::Value>>,
+  event_tx: arc_swap::ArcSwapOption<broadcast::Sender<Arc<serde_json::Value>>>,
   /// Routed event channels keyed by exact CDP method, for listeners
   /// that should not wake up for unrelated traffic.
   method_event_txs: Arc<DashMap<&'static str, broadcast::Sender<Arc<serde_json::Value>>>>,
@@ -415,6 +528,57 @@ fn send_to_taps(taps: &mut Vec<EventTap>, sid: &str, msg: &Arc<serde_json::Value
 /// transport, i.e. <1MB even at full saturation.
 const EVENT_BROADCAST_CAPACITY: usize = 4096;
 
+#[derive(Default)]
+struct IframeTargets {
+  attached: Vec<Arc<serde_json::Value>>,
+  taps: Vec<tokio::sync::mpsc::UnboundedSender<IframeTargetEvent>>,
+}
+
+pub enum IframeTargetEvent {
+  Target(Arc<serde_json::Value>),
+  Checkpoint(tokio::sync::oneshot::Sender<()>),
+  Closed,
+}
+
+pub struct IframeTargetSubscription {
+  pub events: tokio::sync::mpsc::UnboundedReceiver<IframeTargetEvent>,
+  pub checkpoints: tokio::sync::mpsc::UnboundedSender<IframeTargetEvent>,
+}
+
+impl IframeTargets {
+  fn dispatch(&mut self, event: &Arc<serde_json::Value>) {
+    let session = &event["params"]["sessionId"];
+    if event["method"] == "Target.attachedToTarget" {
+      if event["params"]["targetInfo"]["type"] != "iframe" {
+        return;
+      }
+      self.attached.retain(|old| old["params"]["sessionId"] != *session);
+      self.attached.push(event.clone());
+    } else if let Some(session) = session.as_str() {
+      self.forget_session(session);
+    }
+    self
+      .taps
+      .retain(|tap| tap.send(IframeTargetEvent::Target(event.clone())).is_ok());
+  }
+
+  fn forget_session(&mut self, session: &str) {
+    let mut removed = vec![session.to_owned()];
+    while let Some(session) = removed.pop() {
+      self.attached.retain(|event| {
+        if event["sessionId"] == session {
+          if let Some(child) = event["params"]["sessionId"].as_str() {
+            removed.push(child.to_owned());
+          }
+          false
+        } else {
+          event["params"]["sessionId"] != session
+        }
+      });
+    }
+  }
+}
+
 impl CdpDispatcher {
   pub fn new() -> Self {
     let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
@@ -423,13 +587,32 @@ impl CdpDispatcher {
       next_id: AtomicU64::new(1),
       pending: Arc::new(DashMap::default()),
       lifecycle_trackers: Arc::new(DashMap::default()),
-      event_tx,
+      iframe_targets: std::sync::Mutex::default(),
+      context_snapshots: std::sync::Mutex::default(),
+      event_tx: arc_swap::ArcSwapOption::from(Some(Arc::new(event_tx))),
       method_event_txs: Arc::new(DashMap::default()),
       domain_event_txs: Arc::new(DashMap::default()),
       method_taps: Arc::new(DashMap::default()),
       domain_taps: Arc::new(DashMap::default()),
       wildcard_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
+    }
+  }
+
+  pub fn tap_iframe_targets(&self) -> IframeTargetSubscription {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut targets = lock_or_recover(&self.iframe_targets);
+    if self.is_disconnected() {
+      let _ = sender.send(IframeTargetEvent::Closed);
+    } else {
+      for event in &targets.attached {
+        let _ = sender.send(IframeTargetEvent::Target(event.clone()));
+      }
+      targets.taps.push(sender.clone());
+    }
+    IframeTargetSubscription {
+      events: receiver,
+      checkpoints: sender,
     }
   }
 
@@ -446,6 +629,9 @@ impl CdpDispatcher {
         strict: false,
       });
     }
+    if self.is_disconnected() {
+      self.method_taps.clear();
+    }
     rx
   }
 
@@ -454,11 +640,14 @@ impl CdpDispatcher {
   /// page-session stream). Backs the public `CDPSession` event surface.
   pub fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    lock_or_recover(&self.wildcard_taps).push(EventTap {
-      session: Some(session_id.to_string()),
-      tx,
-      strict: true,
-    });
+    let mut taps = lock_or_recover(&self.wildcard_taps);
+    if !self.is_disconnected() {
+      taps.push(EventTap {
+        session: Some(session_id.to_string()),
+        tx,
+        strict: true,
+      });
+    }
     rx
   }
 
@@ -475,6 +664,9 @@ impl CdpDispatcher {
         strict: false,
       });
     }
+    if self.is_disconnected() {
+      self.domain_taps.clear();
+    }
     rx
   }
 
@@ -485,6 +677,13 @@ impl CdpDispatcher {
     notify: Arc<tokio::sync::Notify>,
     frame_observer: super::transport::FrameStateObserver,
   ) {
+    // Replay and registration share the event lock so live events cannot overtake the snapshot.
+    let snapshots = lock_or_recover(&self.context_snapshots);
+    if let Some(contexts) = snapshots.0.get(session_id) {
+      for context in contexts.values() {
+        frame_observer(&context.event, "Runtime.executionContextCreated");
+      }
+    }
     self.lifecycle_trackers.insert(
       session_id.to_string(),
       LifecycleTracker {
@@ -493,6 +692,9 @@ impl CdpDispatcher {
         frame_observer,
       },
     );
+    if self.is_disconnected() {
+      self.lifecycle_trackers.clear();
+    }
   }
 
   /// Drop the lifecycle tracker and every tap belonging to
@@ -502,6 +704,7 @@ impl CdpDispatcher {
       return;
     }
     self.lifecycle_trackers.remove(session_id);
+    lock_or_recover(&self.iframe_targets).forget_session(session_id);
     let drop_session = |taps: &mut Vec<EventTap>| taps.retain(|t| t.session.as_deref() != Some(session_id));
     for mut entry in self.method_taps.iter_mut() {
       drop_session(entry.value_mut());
@@ -518,29 +721,41 @@ impl CdpDispatcher {
   }
 
   pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
-    self.event_tx.subscribe()
+    self
+      .event_tx
+      .load()
+      .as_ref()
+      .map_or_else(|| broadcast::channel(1).1, |sender| sender.subscribe())
   }
 
   pub fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
-    match self.method_event_txs.entry(method) {
+    let receiver = match self.method_event_txs.entry(method) {
       Entry::Occupied(entry) => entry.get().subscribe(),
       Entry::Vacant(entry) => {
         let (tx, rx) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         entry.insert(tx);
         rx
       },
+    };
+    if self.is_disconnected() {
+      self.method_event_txs.clear();
     }
+    receiver
   }
 
   pub fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
-    match self.domain_event_txs.entry(domain) {
+    let receiver = match self.domain_event_txs.entry(domain) {
       Entry::Occupied(entry) => entry.get().subscribe(),
       Entry::Vacant(entry) => {
         let (tx, rx) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         entry.insert(tx);
         rx
       },
+    };
+    if self.is_disconnected() {
+      self.domain_event_txs.clear();
     }
+    receiver
   }
 
   /// Drain every in-flight `send_command` oneshot and deliver a
@@ -553,11 +768,27 @@ impl CdpDispatcher {
   /// later session routed to that name gets `TargetClosed` forever
   /// instead of a fresh browser.
   pub fn is_disconnected(&self) -> bool {
-    self.disconnected.load(std::sync::atomic::Ordering::Relaxed)
+    self.disconnected.load(std::sync::atomic::Ordering::Acquire)
   }
 
   pub fn fail_all_pending(&self, reason: &str) {
-    self.disconnected.store(true, std::sync::atomic::Ordering::Relaxed);
+    self.disconnected.store(true, std::sync::atomic::Ordering::Release);
+    self.event_tx.store(None);
+    self.method_event_txs.clear();
+    self.domain_event_txs.clear();
+    self.method_taps.clear();
+    self.domain_taps.clear();
+    lock_or_recover(&self.wildcard_taps).clear();
+    lock_or_recover(&self.context_snapshots).0.clear();
+    self.lifecycle_trackers.clear();
+    {
+      let mut targets = lock_or_recover(&self.iframe_targets);
+      targets.attached.clear();
+      for tap in &targets.taps {
+        let _ = tap.send(IframeTargetEvent::Closed);
+      }
+      targets.taps.clear();
+    }
     // `DashMap::iter_mut` would hold shard locks; collect keys first.
     let keys: Vec<u64> = self.pending.iter().map(|e| *e.key()).collect();
     for id in keys {
@@ -567,12 +798,48 @@ impl CdpDispatcher {
     }
   }
 
+  pub(crate) fn pending_command(&self, id: u64) -> PendingCommand<'_> {
+    PendingCommand {
+      dispatcher: self,
+      id: Some(id),
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn pending_count(&self) -> usize {
+    self.pending.len()
+  }
+
   /// Drop the in-flight entry for `id` after a send failure or response
   /// timeout. Without this the entry lives in the map until transport
   /// teardown — a browser that stops responding but keeps the pipe open
   /// grows the map by one entry per retried command.
   pub fn forget_pending(&self, id: u64) {
     self.pending.remove(&id);
+  }
+
+  fn fail_session_pending(&self, detached_session: &[u8]) {
+    if let Ok(session) = std::str::from_utf8(detached_session) {
+      lock_or_recover(&self.context_snapshots).0.remove(session);
+    }
+    let requests: Vec<u64> = self
+      .pending
+      .iter()
+      .filter(|entry| {
+        entry
+          .session_id
+          .as_deref()
+          .is_some_and(|id| id.as_bytes() == detached_session)
+      })
+      .map(|entry| *entry.key())
+      .collect();
+    for id in requests {
+      if let Some((_, entry)) = self.pending.remove(&id) {
+        let _ = entry
+          .tx
+          .send(Err(FerriError::target_closed(Some("CDP session detached".into()))));
+      }
+    }
   }
 
   /// Build a CDP command as NUL-terminated JSON bytes and register a response receiver.
@@ -610,10 +877,16 @@ impl CdpDispatcher {
       "CDP >>",
     );
 
+    let rx = self.register_command(id, session_id, method)?;
+    Ok((id, data, rx))
+  }
+
+  fn register_command(&self, id: u64, session_id: Option<&str>, method: &str) -> Result<oneshot::Receiver<CdpResult>> {
     let (tx, rx) = oneshot::channel();
     let stats_enabled = rtt_stats_enabled();
     let entry = PendingEntry {
       tx,
+      session_id: session_id.map(Into::into),
       // Allocate the method String only when stats are enabled —
       // saves the per-command alloc when stats are off (the common
       // path).
@@ -625,11 +898,20 @@ impl CdpDispatcher {
       send_at: stats_enabled.then(Instant::now),
     };
     self.pending.insert(id, entry);
-    Ok((id, data, rx))
+    if self.is_disconnected() {
+      self.pending.remove(&id);
+      return Err(FerriError::target_closed(Some(format!(
+        "browser connection closed while registering {method}"
+      ))));
+    }
+    Ok(rx)
   }
 
   /// Dispatch a raw CDP message (response or event). Called by the reader task.
   pub fn dispatch_message(&self, raw: &[u8]) {
+    if self.is_disconnected() {
+      return;
+    }
     let id = json_scan::json_id(raw);
 
     if id > 0 {
@@ -647,7 +929,11 @@ impl CdpDispatcher {
       } else {
         let msg_bytes = json_scan::error_message(error_field);
         let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
-        Err(FerriError::protocol("CDP", msg_str))
+        if msg_str == "Session with given id not found." {
+          Err(FerriError::target_closed(Some(msg_str.to_owned())))
+        } else {
+          Err(FerriError::protocol("CDP", msg_str))
+        }
       };
       tracing::debug!(
         target: "ferridriver::cdp::recv",
@@ -672,57 +958,99 @@ impl CdpDispatcher {
         let _ = entry.tx.send(payload);
       }
     } else {
-      // Event
-      let method = json_scan::json_string(json_scan::json_field(raw, b"method"));
-      let session_id = json_scan::json_string(json_scan::json_field(raw, b"sessionId"));
-      let method_str = std::str::from_utf8(method).unwrap_or("");
-      let sid_str = std::str::from_utf8(session_id).unwrap_or("");
+      self.dispatch_event(raw);
+    }
+  }
 
+  fn dispatch_event(&self, raw: &[u8]) {
+    // Event
+    let method = json_scan::json_string(json_scan::json_field(raw, b"method"));
+    let session_id = json_scan::json_string(json_scan::json_field(raw, b"sessionId"));
+    let method_str = std::str::from_utf8(method).unwrap_or("");
+    let sid_str = std::str::from_utf8(session_id).unwrap_or("");
+
+    let detached_session = match method_str {
+      "Inspector.detached" => session_id,
+      "Target.detachedFromTarget" => {
+        let params = json_scan::json_field(raw, b"params");
+        json_scan::json_string(json_scan::json_field(params, b"sessionId"))
+      },
+      _ => b"",
+    };
+    if !detached_session.is_empty() {
+      self.fail_session_pending(detached_session);
+    }
+
+    if matches!(
+      method_str,
+      "Runtime.executionContextCreated"
+        | "Runtime.executionContextDestroyed"
+        | "Runtime.executionContextsCleared"
+        | "Runtime.bindingCalled"
+        | "Page.frameDetached"
+    ) {
+      let mut snapshots = lock_or_recover(&self.context_snapshots);
+      if method_str != "Runtime.bindingCalled" {
+        snapshots.observe(sid_str, method_str, raw);
+      }
       self.dispatch_lifecycle(raw, method_str, sid_str);
+    } else {
+      self.dispatch_lifecycle(raw, method_str, sid_str);
+    }
 
-      tracing::trace!(
-        target: "ferridriver::cdp::recv",
-        method = method_str,
-        "CDP << event",
-      );
+    tracing::trace!(
+      target: "ferridriver::cdp::recv",
+      method = method_str,
+      "CDP << event",
+    );
 
-      let domain = method_str.split_once('.').map(|(domain, _)| domain);
-      let method_tx = self.method_event_txs.get(method_str).map(|entry| entry.clone());
-      let domain_tx = domain.and_then(|d| self.domain_event_txs.get(d).map(|entry| entry.clone()));
-      let needs_global = self.event_tx.receiver_count() > 0;
-      let needs_method = method_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
-      let needs_domain = domain_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
-      let has_method_taps = self.method_taps.get(method_str).is_some_and(|taps| !taps.is_empty());
-      let has_domain_taps = domain.is_some_and(|d| self.domain_taps.get(d).is_some_and(|taps| !taps.is_empty()));
-      let has_wildcard_taps = !lock_or_recover(&self.wildcard_taps).is_empty();
+    let domain = method_str.split_once('.').map(|(domain, _)| domain);
+    let method_tx = self.method_event_txs.get(method_str).map(|entry| entry.clone());
+    let domain_tx = domain.and_then(|d| self.domain_event_txs.get(d).map(|entry| entry.clone()));
+    let global = self.event_tx.load();
+    let needs_global = global.as_ref().is_some_and(|sender| sender.receiver_count() > 0);
+    let needs_method = method_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+    let needs_domain = domain_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+    let has_method_taps = self.method_taps.get(method_str).is_some_and(|taps| !taps.is_empty());
+    let has_domain_taps = domain.is_some_and(|d| self.domain_taps.get(d).is_some_and(|taps| !taps.is_empty()));
+    let has_wildcard_taps = !lock_or_recover(&self.wildcard_taps).is_empty();
+    let target_event = matches!(method_str, "Target.attachedToTarget" | "Target.detachedFromTarget");
 
-      if (needs_global || needs_method || needs_domain || has_method_taps || has_domain_taps || has_wildcard_taps)
-        && let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw)
+    if (target_event
+      || needs_global
+      || needs_method
+      || needs_domain
+      || has_method_taps
+      || has_domain_taps
+      || has_wildcard_taps)
+      && let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw)
+    {
+      let msg = Arc::new(msg);
+      if target_event {
+        lock_or_recover(&self.iframe_targets).dispatch(&msg);
+      }
+      // Taps first: state trackers must see the event before any
+      // best-effort broadcast consumer can react to it.
+      if has_method_taps && let Some(mut taps) = self.method_taps.get_mut(method_str) {
+        send_to_taps(&mut taps, sid_str, &msg);
+      }
+      if has_domain_taps
+        && let Some(d) = domain
+        && let Some(mut taps) = self.domain_taps.get_mut(d)
       {
-        let msg = Arc::new(msg);
-        // Taps first: state trackers must see the event before any
-        // best-effort broadcast consumer can react to it.
-        if has_method_taps && let Some(mut taps) = self.method_taps.get_mut(method_str) {
-          send_to_taps(&mut taps, sid_str, &msg);
-        }
-        if has_domain_taps
-          && let Some(d) = domain
-          && let Some(mut taps) = self.domain_taps.get_mut(d)
-        {
-          send_to_taps(&mut taps, sid_str, &msg);
-        }
-        if has_wildcard_taps {
-          send_to_taps(&mut lock_or_recover(&self.wildcard_taps), sid_str, &msg);
-        }
-        if needs_global {
-          let _ = self.event_tx.send(msg.clone());
-        }
-        if needs_method && let Some(tx) = method_tx {
-          let _ = tx.send(msg.clone());
-        }
-        if needs_domain && let Some(tx) = domain_tx {
-          let _ = tx.send(msg);
-        }
+        send_to_taps(&mut taps, sid_str, &msg);
+      }
+      if has_wildcard_taps {
+        send_to_taps(&mut lock_or_recover(&self.wildcard_taps), sid_str, &msg);
+      }
+      if needs_global && let Some(sender) = global.as_ref() {
+        let _ = sender.send(msg.clone());
+      }
+      if needs_method && let Some(tx) = method_tx {
+        let _ = tx.send(msg.clone());
+      }
+      if needs_domain && let Some(tx) = domain_tx {
+        let _ = tx.send(msg);
       }
     }
   }
@@ -898,10 +1226,183 @@ impl Drop for CdpDispatcher {
 }
 
 #[cfg(test)]
+pub(crate) async fn verify_operation_budgets<T: CdpTransport, M>(
+  transport: T,
+  dispatcher: Arc<CdpDispatcher>,
+  writer: tokio::sync::mpsc::Sender<M>,
+  mut queued: tokio::sync::mpsc::Receiver<M>,
+  placeholder: M,
+) {
+  use crate::operation_budget::OperationBudget;
+  let params = serde_json::json!({});
+  for timeout in [0, 90_000] {
+    let mut command = Box::pin(OperationBudget::new(timeout).unwrap().scope(transport.send_command(
+      None,
+      "Runtime.evaluate",
+      &params,
+    )));
+    assert!(futures::poll!(&mut command).is_pending());
+    assert!(queued.recv().await.is_some());
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    assert!(futures::poll!(&mut command).is_pending());
+    assert_eq!(dispatcher.pending_count(), 1);
+    let id = *dispatcher.pending.iter().next().unwrap().key();
+    dispatcher.dispatch_message(
+      serde_json::json!({"id":id,"result":{"value":42}})
+        .to_string()
+        .as_bytes(),
+    );
+    assert_eq!(command.await.unwrap()["value"], 42);
+    assert_eq!(dispatcher.pending_count(), 0);
+  }
+  let mut command = Box::pin(transport.send_command(None, "Runtime.evaluate", &params));
+  assert!(futures::poll!(&mut command).is_pending());
+  assert!(queued.recv().await.is_some());
+  let id = *dispatcher.pending.iter().next().unwrap().key();
+  drop(command);
+  assert_eq!(dispatcher.pending_count(), 0);
+  dispatcher.dispatch_message(serde_json::json!({"id":id,"result":{}}).to_string().as_bytes());
+  assert_eq!(dispatcher.pending_count(), 0);
+  writer
+    .send(placeholder)
+    .await
+    .unwrap_or_else(|_| panic!("writer closed"));
+  let mut command = Box::pin(OperationBudget::new(1000).unwrap().scope(transport.send_command(
+    None,
+    "Runtime.evaluate",
+    &params,
+  )));
+  assert!(futures::poll!(&mut command).is_pending());
+  tokio::time::advance(std::time::Duration::from_secs(1)).await;
+  assert!(command.await.unwrap_err().is_timeout_error());
+  assert_eq!(dispatcher.pending_count(), 0);
+  assert!(queued.recv().await.is_some());
+  assert!(queued.try_recv().is_err());
+}
+
+#[cfg(test)]
 mod tests {
+  #[test]
+  fn retired_contexts_are_not_replayed_to_later_observers() {
+    use serde_json::json;
+    for retired in [
+      json!({"sessionId":"session","method":"Runtime.executionContextDestroyed","params":{"executionContextId":11}}),
+      json!({"sessionId":"session","method":"Runtime.executionContextsCleared","params":{}}),
+      json!({"sessionId":"session","method":"Page.frameDetached","params":{"frameId":"frame"}}),
+      json!({"method":"Target.detachedFromTarget","params":{"sessionId":"session"}}),
+      json!({"sessionId":"session","method":"Inspector.detached","params":{}}),
+      serde_json::Value::Null,
+    ] {
+      let dispatcher = super::CdpDispatcher::new();
+      dispatcher.dispatch_message(
+        &serde_json::to_vec(
+          &json!({"sessionId":"session","method":"Runtime.executionContextCreated",
+        "params":{"context":{"id":11,"auxData":{"frameId":"frame","isDefault":true}}}}),
+        )
+        .unwrap(),
+      );
+      if retired.is_null() {
+        dispatcher.fail_all_pending("fixture closed");
+      } else {
+        dispatcher.dispatch_message(&serde_json::to_vec(&retired).unwrap());
+      }
+      let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+      let observed = seen.clone();
+      dispatcher.register_lifecycle_tracker(
+        "session",
+        std::sync::Arc::new(std::sync::Mutex::new(super::super::LifecycleState::new())),
+        std::sync::Arc::new(tokio::sync::Notify::new()),
+        std::sync::Arc::new(move |_, method| {
+          observed.lock().unwrap().push(method.to_owned());
+        }),
+      );
+      assert!(
+        seen.lock().unwrap().is_empty(),
+        "retired context was replayed after {retired}"
+      );
+    }
+  }
+
+  #[test]
+  fn closing_terminates_existing_and_late_event_subscriptions() {
+    let dispatcher = super::CdpDispatcher::new();
+    for _ in 0..2 {
+      let broadcasts = [
+        dispatcher.subscribe_events(),
+        dispatcher.subscribe_event_method("Page.loadEventFired"),
+        dispatcher.subscribe_event_domain("Page"),
+      ];
+      let taps = [
+        dispatcher.tap_event_methods(&["Page.loadEventFired"], None),
+        dispatcher.tap_event_domains(&["Page"], None),
+        dispatcher.tap_all_events("sashoush"),
+      ];
+      dispatcher.fail_all_pending("closed");
+      dispatcher.dispatch_message(br#"{"method":"Page.loadEventFired","sessionId":"sashoush","params":{}}"#);
+      for mut receiver in broadcasts {
+        assert!(matches!(
+          receiver.try_recv(),
+          Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+        ));
+      }
+      for mut receiver in taps {
+        assert!(matches!(
+          receiver.try_recv(),
+          Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+      }
+    }
+  }
+
+  #[test]
+  fn closing_during_command_encoding_cannot_leave_a_pending_response() {
+    let dispatcher = super::CdpDispatcher::new();
+    dispatcher.fail_all_pending("closed during command encoding");
+    let result = dispatcher.register_command(1, None, "Runtime.evaluate");
+    assert!(matches!(result, Err(crate::FerriError::TargetClosed { .. })));
+    assert_eq!(dispatcher.pending_count(), 0);
+  }
+
   use super::*;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::time::Instant;
+
+  #[test]
+  fn detaching_one_session_rejects_only_its_pending_commands() {
+    for event in [
+      br#"{"method":"Inspector.detached","sessionId":"closing","params":{"reason":"target_closed"}}"#.as_slice(),
+      br#"{"method":"Target.detachedFromTarget","params":{"sessionId":"closing","targetId":"page"}}"#.as_slice(),
+    ] {
+      let dispatcher = CdpDispatcher::new();
+      let (_, _, mut closing) = dispatcher
+        .build_command(Some("closing"), "Runtime.evaluate", &serde_json::json!({}))
+        .unwrap();
+      let (_, _, mut live) = dispatcher
+        .build_command(Some("live"), "Runtime.evaluate", &serde_json::json!({}))
+        .unwrap();
+      let (_, _, mut root) = dispatcher
+        .build_command(None, "Target.getTargets", &serde_json::json!({}))
+        .unwrap();
+      dispatcher.dispatch_message(event);
+      assert!(matches!(closing.try_recv(), Ok(Err(FerriError::TargetClosed { .. }))));
+      assert!(matches!(live.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+      assert!(matches!(root.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+      assert_eq!(dispatcher.pending.len(), 2);
+      dispatcher.fail_all_pending("test finished");
+    }
+  }
+
+  #[test]
+  fn commands_racing_session_detachment_report_target_closed() {
+    let dispatcher = CdpDispatcher::new();
+    let (id, _, mut response) = dispatcher
+      .build_command(Some("closing"), "Runtime.evaluate", &serde_json::json!({}))
+      .unwrap();
+    dispatcher.dispatch_message(
+      format!(r#"{{"id":{id},"error":{{"code":-32001,"message":"Session with given id not found."}}}}"#).as_bytes(),
+    );
+    assert!(matches!(response.try_recv(), Ok(Err(FerriError::TargetClosed { .. }))));
+  }
 
   const NETWORK_EVENT: &[u8] = br#"{"method":"Network.requestWillBeSent","sessionId":"s1","params":{"requestId":"r1","request":{"url":"https://example.test/asset.js","method":"GET"},"type":"Script"}}"#;
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1088,8 +1589,59 @@ mod tests {
       "https://example.test/frame#a"
     );
     assert_eq!(lock_or_recover(&state).current_loader_id, "L1");
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameAttached","sessionId":"s1","params":{"frameId":"grandchild","parentFrameId":"child"}}"#,
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameDetached","sessionId":"s1","params":{"frameId":"child","reason":"swap"}}"#,
+    );
+    assert!(!lock_or_recover(&cache).record("child").unwrap().detached);
+    assert!(lock_or_recover(&cache).record("grandchild").unwrap().detached);
+    dispatcher.register_lifecycle_tracker(
+      "remote",
+      Arc::new(std::sync::Mutex::new(super::super::LifecycleState::new())),
+      Arc::default(),
+      frame_state_observer_for_renderer(
+        Arc::clone(&cache),
+        crate::events::EventEmitter::new(),
+        "child".into(),
+        "f1".into(),
+      ),
+    );
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"remote","params":{"frame":{"id":"child","loaderId":"L2","name":"child","url":"https://remote.test/"}}}"#,
+    );
+    assert_eq!(lock_or_recover(&cache).parent_id("child").as_deref(), Some("f1"));
+    assert!(!lock_or_recover(&cache).record("child").unwrap().detached);
+    assert_eq!(lock_or_recover(&state).current_loader_id, "L1");
     dispatcher.dispatch_message(br#"{"method":"Page.frameDetached","sessionId":"s1","params":{"frameId":"child"}}"#);
     assert!(lock_or_recover(&cache).record("child").unwrap().detached);
+  }
+
+  #[test]
+  fn iframe_target_subscriptions_replay_live_sessions_then_follow_wire_order() {
+    let dispatcher = CdpDispatcher::new();
+    dispatcher.dispatch_message(br#"{"method":"Target.attachedToTarget","sessionId":"parent","params":{"sessionId":"child","targetInfo":{"type":"iframe","targetId":"frame"}}}"#);
+    let subscription = dispatcher.tap_iframe_targets();
+    let mut events = subscription.events;
+    let target = |event| match event {
+      IframeTargetEvent::Target(value) => value,
+      _ => panic!("expected target event"),
+    };
+    assert_eq!(target(events.try_recv().unwrap())["params"]["sessionId"], "child");
+    assert!(events.try_recv().is_err());
+    dispatcher.dispatch_message(br#"{"method":"Target.attachedToTarget","sessionId":"child","params":{"sessionId":"nested","targetInfo":{"type":"iframe","targetId":"nested-frame"}}}"#);
+    assert_eq!(target(events.try_recv().unwrap())["params"]["sessionId"], "nested");
+    dispatcher.dispatch_message(
+      br#"{"method":"Target.detachedFromTarget","sessionId":"parent","params":{"sessionId":"child"}}"#,
+    );
+    assert_eq!(
+      target(events.try_recv().unwrap())["method"],
+      "Target.detachedFromTarget"
+    );
+    assert!(dispatcher.tap_iframe_targets().events.try_recv().is_err());
+    dispatcher.fail_all_pending("test disconnect");
+    assert!(matches!(events.try_recv(), Ok(IframeTargetEvent::Closed)));
   }
 
   #[test]

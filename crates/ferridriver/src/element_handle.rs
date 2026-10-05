@@ -896,13 +896,24 @@ impl ElementHandle {
   /// Forwards backend error on protocol failure / page-side exception.
   pub async fn content_frame(&self) -> Result<Option<crate::frame::Frame>> {
     self.ensure_live()?;
+    if let AnyElement::WebDriver(element) = &*self.element {
+      return Ok(
+        element
+          .page
+          .content_frame_id(&element.id)
+          .await?
+          .map(|frame_id| crate::frame::Frame::new(std::sync::Arc::clone(self.page()), std::sync::Arc::from(frame_id))),
+      );
+    }
     // Deterministic first: CDP and WebKit `DOM.describeNode` map the
     // iframe element to its real content-frame id (robust for unnamed
     // / `srcdoc` / `data:` / churned iframes). Backends without it
     // return `None` and we fall through to the name/url cache
     // heuristic below.
     let describe_obj = match self.js_handle.remote() {
-      Some(crate::js_handle::HandleRemote::Cdp(obj) | crate::js_handle::HandleRemote::WebKit(obj)) => Some(obj),
+      Some(
+        crate::js_handle::HandleRemote::Cdp { object_id: obj, .. } | crate::js_handle::HandleRemote::WebKit(obj),
+      ) => Some(obj),
       _ => None,
     };
     if let Some(obj) = describe_obj

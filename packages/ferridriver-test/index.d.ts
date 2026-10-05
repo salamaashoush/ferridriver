@@ -403,6 +403,7 @@ export const devices: Record<string, DeviceDescriptor>;
 export const chromium: (options?: { transport?: 'pipe' | 'ws' }) => BrowserType;
 export const firefox: () => BrowserType;
 export const webkit: () => BrowserType;
+export const safari: () => BrowserType;
 /** The session's HTTP client, the same object the `request` fixture holds. */
 export const request: APIRequestContext;
 
@@ -855,13 +856,23 @@ export interface WebMCPTool {
   backendNodeId?: number;
 }
 
-export interface WebMCP {
+export interface WebMCPProtocol {
   /** Discover the tools currently registered in the page's WebMCP domain. */
   listTools(): Promise<WebMCPTool[]>;
   enable(): Promise<Record<string, unknown>>;
   disable(): Promise<Record<string, unknown>>;
   invokeTool(toolName: string, input?: Record<string, unknown>): Promise<{ invocationId: string }>;
   cancelInvocation(invocationId: string): Promise<Record<string, unknown>>;
+}
+
+export interface WebMCP {
+  tools(options?: { timeout?: number }): Promise<Array<{
+    name: string;
+    description: string;
+    inputSchema?: unknown;
+    annotations?: { readOnly?: boolean; untrustedContent?: boolean; consequential?: boolean };
+  }>>;
+  callTool(name: string, input?: unknown, options?: { timeout?: number }): Promise<unknown>;
 }
 
 /**
@@ -1479,6 +1490,7 @@ export interface Response {
 }
 
 export interface Frame {
+  readonly webmcp: WebMCP;
   name(): string;
   url(): string;
   isMainFrame(): boolean;
@@ -1603,6 +1615,7 @@ export type PageEvent =
   | 'worker';
 
 export interface Page {
+  readonly webmcp: WebMCP;
   goto(url: string, options?: GotoOptions): Promise<Response | null>;
   goBack(options?: GotoOptions): Promise<Response | null>;
   goForward(options?: GotoOptions): Promise<Response | null>;
@@ -1749,7 +1762,7 @@ export interface Page {
   // so it answers the same on every backend.
   developerTools(): Promise<PageToolGroup[]>;
   executeDeveloperTool(name: string, params?: Record<string, unknown>): Promise<unknown>;
-  readonly webMcp: WebMCP;
+  readonly webMcp: WebMCPProtocol;
 
   // Highlight elements under the cursor and resolve with a Locator for
   // whichever one is clicked. Waits as long as the reader takes;
@@ -1911,6 +1924,7 @@ export interface Video {
 
 /** Every knob `chromium().launch()` reads. */
 export interface LaunchOptions {
+  firefoxUserPrefs?: { [key: string]: string | number | boolean };
   headless?: boolean;
   executablePath?: string;
   args?: string[];
@@ -2274,7 +2288,7 @@ export interface Commands {
   waitForOutput(name: string, text: string, timeoutMs?: number): Promise<string>;
   wait(name: string, timeoutMs?: number): Promise<number>;
   status(name: string): Record<string, unknown>;
-  stop(name: string): void;
+  stop(name: string): Promise<void>;
 }
 
 export interface CommandOutput {
@@ -2291,6 +2305,7 @@ declare global {
   function chromium(options?: { transport?: 'pipe' | 'ws' }): BrowserType;
   function firefox(): BrowserType;
   function webkit(): BrowserType;
+  function safari(): BrowserType;
   const commands: Commands;
 
   // `require` serves the native specifiers; `require.resolve` answers a

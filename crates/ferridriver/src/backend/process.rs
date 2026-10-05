@@ -20,6 +20,68 @@
 //! - `killpg` covers the *OS* side (all helpers in the same group die
 //!   too, even if Chrome itself crashed or spun off sandboxed children).
 
+pub(crate) async fn output(
+  mut command: tokio::process::Command,
+  input: Option<&[u8]>,
+  timeout: Option<std::time::Duration>,
+) -> crate::error::Result<String> {
+  use std::process::Stdio;
+
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  use crate::error::FerriError;
+  let program = command.as_std().get_program().to_string_lossy().into_owned();
+  command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
+  command.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+  #[cfg(unix)]
+  command.process_group(0);
+  let mut child = command
+    .spawn()
+    .map_err(|error| FerriError::backend(format!("starting {program}: {error}")))?;
+  let stdin = child.stdin.take();
+  let stdout = child.stdout.take();
+  let stderr = child.stderr.take();
+  let mut group = ChildGroup::new(child);
+  let operation = async {
+    let write = async {
+      if let (Some(input), Some(mut stdin)) = (input, stdin) {
+        stdin.write_all(input).await?;
+      }
+      Ok::<_, std::io::Error>(())
+    };
+    let read_out = async {
+      let mut bytes = Vec::new();
+      if let Some(mut stdout) = stdout {
+        stdout.read_to_end(&mut bytes).await?;
+      }
+      Ok::<_, std::io::Error>(bytes)
+    };
+    let read_err = async {
+      let mut bytes = Vec::new();
+      if let Some(mut stderr) = stderr {
+        stderr.read_to_end(&mut bytes).await?;
+      }
+      Ok::<_, std::io::Error>(bytes)
+    };
+    tokio::try_join!(group.wait(), write, read_out, read_err)
+  };
+  let result = match timeout {
+    Some(timeout) => tokio::time::timeout(timeout, operation)
+      .await
+      .map_err(|_| FerriError::backend(format!("{program} exceeded its command deadline")))?,
+    None => operation.await,
+  }?;
+  let (status, (), stdout, stderr) = result;
+  if !status.success() {
+    return Err(FerriError::backend(format!(
+      "{program} exited {status}: {}{}",
+      String::from_utf8_lossy(&stdout),
+      String::from_utf8_lossy(&stderr)
+    )));
+  }
+  Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+}
+
 /// `pre_exec` closure suitable for every browser `Command` in this crate.
 ///
 /// Runs inside the forked child before `exec`, putting the child in its
@@ -63,16 +125,28 @@ pub fn drain_child_stderr(child: &mut tokio::process::Child) -> StderrTail {
   let Some(stderr) = child.stderr.take() else {
     return tail;
   };
-  let sink = tail.clone();
+  drain_stream(stderr, tail.clone(), "stderr");
+  tail
+}
+
+pub(crate) fn drain_child_output(child: &mut tokio::process::Child) -> StderrTail {
+  let tail = drain_child_stderr(child);
+  if let Some(stdout) = child.stdout.take() {
+    drain_stream(stdout, tail.clone(), "stdout");
+  }
+  tail
+}
+
+fn drain_stream(stream: impl tokio::io::AsyncRead + Unpin + Send + 'static, tail: StderrTail, name: &'static str) {
+  let sink = tail;
   tokio::spawn(async move {
     use tokio::io::AsyncBufReadExt;
-    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let mut lines = tokio::io::BufReader::new(stream).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-      tracing::debug!(target: "ferridriver::browser::stderr", "{line}");
+      tracing::debug!(target: "ferridriver::browser::stderr", stream = name, "{line}");
       sink.record(line);
     }
   });
-  tail
 }
 
 /// How many of the browser's most recent stderr lines to keep for error
@@ -133,7 +207,7 @@ impl StderrTail {
 /// guaranteed to still be ours. A reaped pid may already be recycled
 /// by an unrelated same-UID process (which `killpg` WILL kill —
 /// think a parallel test run's freshly-launched Firefox dying
-/// mid-startup). [`ChildGroup`] enforces this with a `try_wait` gate.
+/// mid-startup). [`ChildGroup`] retains the unreaped child until cleanup.
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn kill_process_group(pid: u32) {
@@ -168,6 +242,8 @@ pub fn kill_process_group(_pid: u32) {
 pub struct ChildGroup {
   pid: u32,
   child: tokio::process::Child,
+  registered: bool,
+  directory_cleanup: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
   /// On-disk record of this browser, removed once the process is
   /// killed. Left behind when our own process dies without running
   /// `Drop` (SIGKILL, panic-abort) — exactly the case
@@ -179,6 +255,18 @@ impl ChildGroup {
   #[must_use]
   pub fn new(child: tokio::process::Child) -> Self {
     Self::recorded(child, None, false)
+  }
+
+  /// Own a command without adding it to the browser recovery registry.
+  #[must_use]
+  pub fn unregistered(child: tokio::process::Child) -> Self {
+    Self {
+      pid: child.id().unwrap_or(0),
+      child,
+      registered: false,
+      directory_cleanup: None,
+      record: None,
+    }
   }
 
   /// Like [`Self::new`], but also writes a launch record so a later run
@@ -200,7 +288,13 @@ impl ChildGroup {
       super::reaper::watch(pid);
       ProcRecord::write(pid, profile_dir, owns_profile_dir)
     };
-    Self { pid, child, record }
+    Self {
+      pid,
+      child,
+      registered: pid != 0,
+      directory_cleanup: None,
+      record,
+    }
   }
 
   /// Add a temp directory to this launch's cleanup set. Removed when
@@ -216,11 +310,127 @@ impl ChildGroup {
   /// exited, so a dead-browser check never has to depend on a
   /// backend-specific transport signal.
   pub fn is_running(&mut self) -> bool {
-    self.pid != 0 && matches!(self.child.try_wait(), Ok(None))
+    #[cfg(unix)]
+    {
+      self.child.id().is_some() && matches!(self.exit_observed(), Ok(false))
+    }
+    #[cfg(not(unix))]
+    {
+      matches!(self.child.try_wait(), Ok(None))
+    }
+  }
+
+  #[cfg(unix)]
+  fn exit_observed(&self) -> std::io::Result<bool> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let pid = Pid::from_raw(i32::try_from(self.pid).map_err(std::io::Error::other)?)
+      .filter(|pid| *pid != Pid::INIT)
+      .ok_or_else(|| std::io::Error::other("child has no owned process id"))?;
+    loop {
+      match waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
+      ) {
+        Ok(status) => return Ok(status.is_some()),
+        Err(rustix::io::Errno::INTR) => {},
+        Err(error) => return Err(error.into()),
+      }
+    }
+  }
+
+  #[cfg(unix)]
+  async fn observe_exit(&self) -> std::io::Result<()> {
+    use std::task::Poll;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
+    std::future::poll_fn(|cx| {
+      loop {
+        // Register before inspecting the child, so an exit between inspection
+        // and suspension cannot lose its only SIGCHLD notification.
+        let pending = signal.poll_recv(cx).is_pending();
+        if self.exit_observed()? {
+          return Poll::Ready(Ok(()));
+        }
+        if pending {
+          return Poll::Pending;
+        }
+      }
+    })
+    .await
+  }
+
+  fn retire_registration(&mut self) -> std::io::Result<()> {
+    if self.registered {
+      super::reaper::forget(self.pid);
+      self.registered = false;
+    }
+    if let Some(record) = &mut self.record {
+      record.retire()?;
+    }
+    Ok(())
+  }
+
+  async fn remove_owned_directories(&mut self) -> std::io::Result<()> {
+    let Some(record) = &self.record else { return Ok(()) };
+    let cleanup = self.directory_cleanup.get_or_insert_with(|| {
+      let directories = std::sync::Arc::clone(&record.owned_dirs);
+      tokio::task::spawn_blocking(move || {
+        directories
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove()
+      })
+    });
+    let result = cleanup.await;
+    self.directory_cleanup = None;
+    result.map_err(std::io::Error::other)?
+  }
+
+  /// Request termination while the child still reserves its process id.
+  ///
+  /// # Errors
+  /// Returns an error if the operating system rejects termination.
+  pub fn terminate(&mut self) -> std::io::Result<()> {
+    if self.child.id().is_none() {
+      return Ok(());
+    }
+    #[cfg(unix)]
+    {
+      use rustix::process::{Pid, Signal, kill_process_group};
+      let pid = Pid::from_raw(i32::try_from(self.pid).map_err(std::io::Error::other)?)
+        .filter(|pid| *pid != Pid::INIT)
+        .ok_or_else(|| std::io::Error::other("child has no owned process id"))?;
+      match kill_process_group(pid, Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => {},
+        #[cfg(target_os = "macos")]
+        Err(rustix::io::Errno::PERM) if process_group_exiting(self.pid) => {},
+        Err(error) => return Err(error.into()),
+      }
+    }
+    self.child.start_kill()
+  }
+
+  /// Wait for the leader, terminate its remaining group, then reap it.
+  ///
+  /// # Errors
+  /// Returns observation, termination, registry or wait errors without
+  /// surrendering the child to another owner.
+  pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    if self.child.id().is_some() {
+      #[cfg(unix)]
+      {
+        self.observe_exit().await?;
+        self.terminate()?;
+      }
+      #[cfg(not(unix))]
+      self.child.wait().await?;
+    }
+    self.retire_registration()?;
+    self.remove_owned_directories().await?;
+    self.child.wait().await
   }
 
   pub(crate) async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> bool {
-    matches!(tokio::time::timeout(timeout, self.child.wait()).await, Ok(Ok(status)) if status.success())
+    matches!(tokio::time::timeout(timeout, self.wait()).await, Ok(Ok(status)) if status.success())
   }
 
   /// Kill the whole process group, then reap the parent. The group
@@ -228,38 +438,28 @@ impl ChildGroup {
   /// recycled by the kernel, so the `killpg` target is guaranteed to
   /// still be our group. Reaping afterwards means the enclosing
   /// runtime carries no zombie.
-  pub async fn shutdown(&mut self) {
-    if self.pid != 0 && matches!(self.child.try_wait(), Ok(None)) {
-      kill_process_group(self.pid);
-    }
-    let _ = self.child.kill().await;
-    super::reaper::forget(self.pid);
-    // Off-worker removal of the (multi-megabyte) profile dir; dropping
-    // the record afterwards deletes the registry entry.
-    if let Some(mut record) = self.record.take() {
-      let dirs = std::mem::take(&mut record.owned_dirs);
-      if !dirs.is_empty() {
-        let _ = tokio::task::spawn_blocking(move || {
-          for dir in dirs {
-            let _ = std::fs::remove_dir_all(dir);
-          }
-        })
-        .await;
-      }
-      drop(record);
-    }
+  ///
+  /// # Errors
+  /// Reports termination, directory, registry or wait failures; the owner remains retryable.
+  pub async fn shutdown(&mut self) -> std::io::Result<()> {
+    self.terminate()?;
+    self.wait().await?;
+    self.record.take();
+    Ok(())
   }
 }
 
 impl Drop for ChildGroup {
   fn drop(&mut self) {
-    // Gate on "not yet reaped": once reaped, the pid may belong to an
-    // unrelated process group (see kill_process_group docs). Unreaped
-    // (running or zombie) pids are still reserved, so killpg is safe.
-    if self.pid != 0 && matches!(self.child.try_wait(), Ok(None)) {
-      kill_process_group(self.pid);
+    if let Err(error) = self.terminate() {
+      tracing::warn!(%error, "failed to clean up owned process group during drop");
     }
-    super::reaper::forget(self.pid);
+    if self.registered {
+      super::reaper::forget(self.pid);
+    }
+    // Retire the PID record before the child field drops. An active directory
+    // worker retains its separate recovery record without that PID authority.
+    self.record.take();
   }
 }
 
@@ -275,7 +475,7 @@ impl Drop for ChildGroup {
 // a record on disk and the next process start reclaims what the
 // previous one leaked.
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct BrowserRecord {
   owner_pid: u32,
   browser_pid: u32,
@@ -319,17 +519,51 @@ fn write_record_file(path: &std::path::Path, record: &BrowserRecord) -> std::io:
 /// was already shutting down: the record went away, the directory did
 /// not, and nothing was left pointing at it.
 pub struct ProcRecord {
-  path: std::path::PathBuf,
+  path: Option<std::path::PathBuf>,
   record: BrowserRecord,
-  owned_dirs: Vec<std::path::PathBuf>,
+  owned_dirs: std::sync::Arc<std::sync::Mutex<OwnedDirectories>>,
+}
+
+struct OwnedDirectories {
+  paths: Vec<std::path::PathBuf>,
+  recovery_path: Option<std::path::PathBuf>,
+}
+
+impl OwnedDirectories {
+  fn remove(&mut self) -> std::io::Result<()> {
+    for dir in &self.paths {
+      super::async_tempdir::removal_result(dir, std::fs::remove_dir_all(dir))?;
+    }
+    self.paths.clear();
+    if let Some(path) = &self.recovery_path {
+      remove_record_file(path)?;
+      self.recovery_path = None;
+    }
+    Ok(())
+  }
+}
+
+impl Drop for OwnedDirectories {
+  fn drop(&mut self) {
+    if let Err(error) = self.remove() {
+      tracing::warn!(%error, "process directory cleanup failed; retaining recovery record");
+    }
+  }
 }
 
 impl Drop for ProcRecord {
   fn drop(&mut self) {
-    for dir in std::mem::take(&mut self.owned_dirs) {
-      let _ = std::fs::remove_dir_all(dir);
+    if let Err(error) = self.retire() {
+      tracing::warn!(%error, "failed to retire process recovery record");
     }
-    let _ = std::fs::remove_file(&self.path);
+  }
+}
+
+fn remove_record_file(path: &std::path::Path) -> std::io::Result<()> {
+  match std::fs::remove_file(path) {
+    Ok(()) => Ok(()),
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    Err(error) => Err(error),
   }
 }
 
@@ -396,18 +630,54 @@ impl ProcRecord {
       start_time: process_start_time(browser_pid),
     };
     Some(Self {
-      path,
+      path: Some(path),
       record,
-      owned_dirs,
+      owned_dirs: std::sync::Arc::new(std::sync::Mutex::new(OwnedDirectories {
+        paths: owned_dirs,
+        recovery_path: None,
+      })),
     })
   }
 
   /// Hand another temp directory to this record, so it is removed with
   /// the browser and reclaimed by the sweep if the process is killed.
   fn own_dir(&mut self, dir: &std::path::Path) {
-    self.owned_dirs.push(dir.to_path_buf());
+    self
+      .owned_dirs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .paths
+      .push(dir.to_path_buf());
     self.record.owned_dirs.push(dir.to_string_lossy().into_owned());
-    let _ = write_record_file(&self.path, &self.record);
+    if let Some(path) = &self.path {
+      let _ = write_record_file(path, &self.record);
+    }
+  }
+
+  fn retire(&mut self) -> std::io::Result<()> {
+    let Some(path) = &self.path else { return Ok(()) };
+    let mut directories = self
+      .owned_dirs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !directories.paths.is_empty() && directories.recovery_path.is_none() {
+      use std::io::Write as _;
+      let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("process record has no parent"))?;
+      let mut record = self.record.clone();
+      record.browser_pid = 0;
+      record.profile_dir = None;
+      record.start_time = None;
+      let mut file = tempfile::Builder::new().prefix("cleanup-").tempfile_in(parent)?;
+      file.write_all(&serde_json::to_vec(&record).map_err(std::io::Error::other)?)?;
+      let recovery_path = file.path().with_extension("json");
+      file.persist_noclobber(&recovery_path).map_err(|error| error.error)?;
+      directories.recovery_path = Some(recovery_path);
+    }
+    remove_record_file(path)?;
+    self.path = None;
+    Ok(())
   }
 }
 
@@ -447,8 +717,13 @@ fn process_start_time(pid: u32) -> Option<String> {
 /// `proc_pidinfo(PROC_PIDTBSDINFO)` for `pid`, or `None` when the
 /// process is gone or not ours to inspect.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 fn proc_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
+  proc_bsdinfo_including_exited(pid, false)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn proc_bsdinfo_including_exited(pid: u32, include_exited: bool) -> Option<libc::proc_bsdinfo> {
   #[allow(clippy::cast_possible_wrap)]
   let pid = pid as i32;
   let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -459,12 +734,52 @@ fn proc_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     libc::proc_pidinfo(
       pid,
       libc::PROC_PIDTBSDINFO,
-      0,
+      u64::from(include_exited),
       std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
       size,
     )
   };
   (written == size).then_some(info)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn process_group_exiting(pid: u32) -> bool {
+  const PROC_FLAG_INEXIT: u32 = 4;
+  let Ok(group) = i32::try_from(pid) else { return false };
+  let mut members = vec![0_i32; 16];
+  loop {
+    let Ok(size) = i32::try_from(std::mem::size_of_val(members.as_slice())) else {
+      return false;
+    };
+    // XNU killpg1 also loses exiting members before they become waitable
+    // zombies. Require a complete group snapshot proving exit has begun;
+    // an unknown or live member must preserve the permission error.
+    // SAFETY: libproc writes at most `size` bytes into this initialized PID
+    // buffer. Its result is a PID count, checked before indexing the buffer.
+    let count = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
+    let Ok(count) = usize::try_from(count) else {
+      return false;
+    };
+    if count == 0 {
+      return false;
+    }
+    if count >= members.len() {
+      let Some(capacity) = members.len().checked_mul(2) else {
+        return false;
+      };
+      members.resize(capacity, 0);
+      continue;
+    }
+    return members[..count].iter().all(|&member| {
+      u32::try_from(member)
+        .ok()
+        .and_then(|pid| proc_bsdinfo_including_exited(pid, true))
+        .is_some_and(|info| {
+          info.pbi_pgid == pid && (info.pbi_status == libc::SZOMB || info.pbi_flags & PROC_FLAG_INEXIT != 0)
+        })
+    });
+  }
 }
 
 /// `/proc/<pid>/stat` field 22 — start time in clock ticks since boot.
@@ -533,7 +848,7 @@ fn parse_procargs2(buf: &[u8]) -> String {
   };
   let argc = u32::from_ne_bytes([count[0], count[1], count[2], count[3]]) as usize;
   // Skip the executable path and the NUL padding that follows it.
-  let after_path = rest.iter().position(|b| *b == 0).map_or(rest.len(), |i| i);
+  let after_path = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
   let mut cursor = &rest[after_path..];
   while cursor.first() == Some(&0) {
     cursor = &cursor[1..];
@@ -625,6 +940,7 @@ fn is_reclaimable_dir(path: &std::path::Path) -> bool {
 /// start time still matches the record and its command line still names the
 /// record's profile directory. A pid we cannot identify is left alone, along
 /// with the record, for the next sweep to re-examine.
+#[must_use]
 pub fn sweep_stale_browsers() -> usize {
   let Some(dir) = registry_dir() else {
     return 0;
@@ -646,37 +962,51 @@ pub fn sweep_stale_browsers() -> usize {
     if record.owner_pid == std::process::id() || process_is_live(record.owner_pid) {
       continue;
     }
-    let identity = if process_is_live(record.browser_pid) {
-      identify_browser(&record)
-    } else {
-      // Already gone: nothing to signal, and its leftovers are ours to clear.
-      Identity::NotOurs
-    };
-    if identity == Identity::Unknown {
-      // Keep the record: deleting it would strand the browser it names, and
-      // deleting its directories would pull the profile out from under a
-      // browser that may still be running.
-      continue;
-    }
-    if identity == Identity::Ours {
-      tracing::info!(
-        target: "ferridriver::process",
-        browser_pid = record.browser_pid,
-        owner_pid = record.owner_pid,
-        "reclaiming a browser leaked by a dead ferridriver process",
-      );
-      kill_process_group(record.browser_pid);
-      reclaimed += 1;
-    }
-    for dir in &record.owned_dirs {
-      let dir = std::path::Path::new(dir);
-      if is_reclaimable_dir(dir) {
-        let _ = std::fs::remove_dir_all(dir);
-      }
-    }
-    let _ = std::fs::remove_file(&path);
+    reclaimed += usize::from(reclaim_record(&path, &record));
   }
   reclaimed
+}
+
+fn reclaim_record(path: &std::path::Path, record: &BrowserRecord) -> bool {
+  let identity = if record.browser_pid == 0 {
+    Identity::NotOurs
+  } else if process_is_live(record.browser_pid) {
+    identify_browser(record)
+  } else {
+    // Already gone: nothing to signal, and its leftovers are ours to clear.
+    Identity::NotOurs
+  };
+  if identity == Identity::Unknown {
+    // Keep the record: deleting it would strand the browser it names, and
+    // deleting its directories would pull the profile out from under a
+    // browser that may still be running.
+    return false;
+  }
+  if identity == Identity::Ours {
+    tracing::info!(
+      target: "ferridriver::process",
+      browser_pid = record.browser_pid,
+      owner_pid = record.owner_pid,
+      "reclaiming a browser leaked by a dead ferridriver process",
+    );
+    kill_process_group(record.browser_pid);
+  }
+  let mut cleanup_complete = true;
+  for dir in &record.owned_dirs {
+    let dir = std::path::Path::new(dir);
+    if is_reclaimable_dir(dir) {
+      if let Err(error) = super::async_tempdir::removal_result(dir, std::fs::remove_dir_all(dir)) {
+        tracing::warn!(%error, path = %dir.display(), "process recovery directory removal failed");
+        cleanup_complete = false;
+      }
+    } else if !matches!(std::fs::symlink_metadata(dir), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+      cleanup_complete = false;
+    }
+  }
+  if cleanup_complete {
+    let _ = std::fs::remove_file(path);
+  }
+  identity == Identity::Ours
 }
 
 #[cfg(test)]
@@ -749,7 +1079,7 @@ mod tests {
     std::fs::create_dir_all(profile.join("Default")).expect("profile dir");
     let record = write_record(owner, browser, Some(&profile), true);
 
-    sweep_stale_browsers();
+    let _ = sweep_stale_browsers();
 
     assert!(!record.exists(), "the record of a dead owner is removed");
     assert!(!profile.exists(), "an owned profile dir is removed with its owner");
@@ -829,7 +1159,7 @@ mod tests {
     let (non_leader, mut leader) = spawn_fake_browser_group();
     let record = write_record(dead_pid(), non_leader, None, false);
 
-    sweep_stale_browsers();
+    let _ = sweep_stale_browsers();
     settle();
 
     let survived = is_running(non_leader);
@@ -859,7 +1189,7 @@ mod tests {
     };
     write_record_file(&record_path, &record).expect("write record");
 
-    sweep_stale_browsers();
+    let _ = sweep_stale_browsers();
     settle();
 
     let survived = is_running(victim);
@@ -885,7 +1215,7 @@ mod tests {
     assert!(record.start_time.is_some(), "ps reports a start time");
     write_record_file(&record_path, &record).expect("write record");
 
-    sweep_stale_browsers();
+    let _ = sweep_stale_browsers();
     settle();
 
     let killed = !is_running(victim);
@@ -902,7 +1232,7 @@ mod tests {
     std::fs::create_dir_all(&profile).expect("profile dir");
     let record = write_record(owner, browser, Some(&profile), false);
 
-    sweep_stale_browsers();
+    let _ = sweep_stale_browsers();
 
     assert!(!record.exists(), "the record is still removed");
     assert!(
@@ -919,12 +1249,29 @@ mod tests {
     // Our own pid is live by definition, so this record must survive.
     let record = write_record(std::process::id(), dead_pid(), Some(&profile), true);
 
-    sweep_stale_browsers();
+    let _ = sweep_stale_browsers();
 
     assert!(record.exists(), "a live owner's browser is not reclaimed");
     assert!(profile.exists(), "a live owner keeps its profile dir");
     let _ = std::fs::remove_file(&record);
     let _ = std::fs::remove_dir_all(&profile);
+  }
+
+  #[test]
+  fn cleanup_only_records_survive_failed_removal_and_are_reclaimed_on_retry() {
+    let root = tempfile::tempdir().expect("owned fixture");
+    let path = root.path().join("profile");
+    std::fs::write(&path, b"sashoush").expect("removal failure fixture");
+    let record = write_record(std::process::id(), 0, Some(&path), true);
+    let metadata: BrowserRecord = serde_json::from_slice(&std::fs::read(&record).expect("record")).expect("metadata");
+    assert!(!reclaim_record(&record, &metadata));
+    assert!(record.exists(), "failed directory removal keeps recovery metadata");
+    assert!(path.exists());
+    std::fs::remove_file(&path).expect("repair fixture");
+    std::fs::create_dir(&path).expect("repair directory");
+    assert!(!reclaim_record(&record, &metadata));
+    assert!(!record.exists());
+    assert!(!path.exists());
   }
 
   #[test]
@@ -946,10 +1293,220 @@ mod tests {
       assert!(path.exists(), "launch writes a record");
       assert!(group.is_running(), "the child is alive");
 
-      group.shutdown().await;
+      group.shutdown().await.expect("shutdown");
       assert!(!path.exists(), "teardown removes the record");
       assert!(!group.is_running(), "the child is reaped");
       let _ = std::fs::remove_dir_all(&profile);
     });
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn observing_exit_keeps_the_leader_waitable_until_group_cleanup() {
+    let child = tokio::process::Command::new("sh")
+      .args(["-c", "exit 7"])
+      .process_group(0)
+      .kill_on_drop(true)
+      .spawn()
+      .expect("spawn leader");
+    let mut group = ChildGroup::unregistered(child);
+    tokio::time::timeout(std::time::Duration::from_secs(5), group.observe_exit())
+      .await
+      .expect("leader exits")
+      .expect("observe exit");
+    assert!(!group.is_running());
+    assert!(!group.is_running());
+    assert!(group.exit_observed().expect("leader is still waitable"));
+    assert_eq!(group.wait().await.expect("reap leader").code(), Some(7));
+    assert!(group.child.id().is_none());
+    group.terminate().expect("completed termination is harmless");
+    assert_eq!(group.wait().await.expect("repeat wait").code(), Some(7));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn failed_directory_cleanup_preserves_the_record_and_unreaped_child_for_retry() {
+    let root = tempfile::tempdir().expect("owned directory fixture");
+    let path = root.path().join("profile");
+    std::fs::write(&path, b"sashoush").expect("failed removal fixture");
+    let child = tokio::process::Command::new("sh")
+      .args(["-c", "exit 7"])
+      .process_group(0)
+      .kill_on_drop(true)
+      .spawn()
+      .expect("spawn leader");
+    let mut group = ChildGroup::new(child);
+    group.own_dir(&path);
+    let record = group
+      .record
+      .as_ref()
+      .expect("record")
+      .path
+      .clone()
+      .expect("record path");
+    assert!(group.wait().await.is_err(), "a file cannot be removed as a directory");
+    assert!(!record.exists(), "PID authority is retired separately");
+    let directories = std::sync::Arc::clone(&group.record.as_ref().expect("record").owned_dirs);
+    let recovery = directories
+      .lock()
+      .expect("directories")
+      .recovery_path
+      .clone()
+      .expect("recovery path");
+    assert!(recovery.exists(), "failed cleanup preserves recovery metadata");
+    assert!(group.exit_observed().expect("leader remains waitable"));
+    assert_eq!(directories.lock().expect("directories").paths, vec![path.clone()]);
+    std::fs::remove_file(&path).expect("repair fixture");
+    std::fs::create_dir(&path).expect("repair directory");
+    assert_eq!(group.wait().await.expect("retry cleanup").code(), Some(7));
+    assert!(!path.exists());
+    assert!(!record.exists());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn cancelled_directory_cleanup_keeps_its_worker_and_record_until_retry() {
+    let root = tempfile::tempdir().expect("owned directory fixture");
+    let path = root.path().join("profile");
+    std::fs::create_dir(&path).expect("owned directory");
+    let child = tokio::process::Command::new("sh")
+      .args(["-c", "exit 0"])
+      .process_group(0)
+      .kill_on_drop(true)
+      .spawn()
+      .expect("spawn leader");
+    let mut group = ChildGroup::new(child);
+    group.own_dir(&path);
+    let record = group
+      .record
+      .as_ref()
+      .expect("record")
+      .path
+      .clone()
+      .expect("record path");
+    group.retire_registration().expect("retire process identity");
+    let directories = std::sync::Arc::clone(&group.record.as_ref().expect("record").owned_dirs);
+    let recovery = directories
+      .lock()
+      .expect("directories")
+      .recovery_path
+      .clone()
+      .expect("recovery path");
+    let (release, released) = std::sync::mpsc::channel();
+    let (started, running) = tokio::sync::oneshot::channel();
+    group.directory_cleanup = Some(tokio::task::spawn_blocking(move || {
+      started.send(()).expect("worker ready");
+      released.recv().expect("release cleanup");
+      directories.lock().expect("directories").remove()
+    }));
+    tokio::select! {
+      result = group.wait() => panic!("wait finished before cleanup was released: {result:?}"),
+      result = running => result.expect("cleanup started"),
+    }
+    assert!(group.directory_cleanup.is_some());
+    assert!(!record.exists());
+    assert!(recovery.exists());
+    release.send(()).expect("release worker");
+    group.wait().await.expect("retry awaits retained worker");
+    assert!(!record.exists());
+    assert!(!path.exists());
+    assert!(!recovery.exists());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn leader_exit_cleans_descendants_holding_its_output_open() {
+    use tokio::io::AsyncReadExt;
+    let mut child = tokio::process::Command::new("sh")
+      .args(["-c", "sleep 30 & printf ready; exit 7"])
+      .process_group(0)
+      .stdout(std::process::Stdio::piped())
+      .kill_on_drop(true)
+      .spawn()
+      .expect("spawn leader and descendant");
+    let mut output = child.stdout.take().expect("output");
+    let mut group = ChildGroup::unregistered(child);
+    let mut bytes = Vec::new();
+    let (status, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      tokio::try_join!(group.wait(), output.read_to_end(&mut bytes))
+    })
+    .await
+    .expect("descendant pipe closes without waiting for sleep")
+    .expect("wait and drain");
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(bytes, b"ready");
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn dropping_an_observed_exited_leader_cleans_its_descendants() {
+    use tokio::io::AsyncReadExt;
+    let mut child = tokio::process::Command::new("sh")
+      .args(["-c", "sleep 30 & printf ready; exit 0"])
+      .process_group(0)
+      .stdout(std::process::Stdio::piped())
+      .kill_on_drop(true)
+      .spawn()
+      .expect("spawn leader and descendant");
+    let mut output = child.stdout.take().expect("output");
+    let mut group = ChildGroup::unregistered(child);
+    tokio::time::timeout(std::time::Duration::from_secs(5), group.observe_exit())
+      .await
+      .expect("leader exits")
+      .expect("observe exit");
+    assert!(!group.is_running());
+    drop(group);
+    let mut bytes = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), output.read_to_end(&mut bytes))
+      .await
+      .expect("drop closes descendant pipe")
+      .expect("read output");
+    assert_eq!(bytes, b"ready");
+  }
+  #[cfg(unix)]
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn dropping_during_directory_cleanup_leaves_the_worker_as_sole_owner() {
+    let root = tempfile::tempdir().expect("owned fixture");
+    let path = root.path().join("profile");
+    std::fs::create_dir(&path).expect("owned profile");
+    let child = tokio::process::Command::new("sh")
+      .args(["-c", "exit 0"])
+      .process_group(0)
+      .kill_on_drop(true)
+      .spawn()
+      .expect("leader");
+    let mut group = ChildGroup::new(child);
+    group.own_dir(&path);
+    group.observe_exit().await.expect("leader exited");
+    group.terminate().expect("terminate descendants");
+    group.retire_registration().expect("retire PID authority");
+    let directories = std::sync::Arc::clone(&group.record.as_ref().expect("record").owned_dirs);
+    let recovery = directories
+      .lock()
+      .expect("directories")
+      .recovery_path
+      .clone()
+      .expect("recovery record");
+    let record: BrowserRecord =
+      serde_json::from_slice(&std::fs::read(&recovery).expect("recovery bytes")).expect("record");
+    assert_eq!(record.browser_pid, 0);
+    let (release, released) = std::sync::mpsc::channel();
+    let (started, running) = tokio::sync::oneshot::channel();
+    let (finished, done) = tokio::sync::oneshot::channel();
+    group.directory_cleanup = Some(tokio::task::spawn_blocking(move || {
+      started.send(()).expect("started");
+      released.recv().expect("release");
+      let result = directories.lock().expect("directories").remove();
+      finished.send(()).expect("finished");
+      result
+    }));
+    running.await.expect("worker is blocked");
+    drop(group);
+    assert!(path.exists(), "drop must not start a competing removal");
+    assert!(recovery.exists(), "in-flight cleanup retains its record");
+    release.send(()).expect("release");
+    done.await.expect("cleanup finishes after owner drop");
+    assert!(!path.exists());
+    assert!(!recovery.exists());
   }
 }

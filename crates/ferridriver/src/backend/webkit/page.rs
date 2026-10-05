@@ -364,162 +364,164 @@ impl WebKitPage {
   /// and let `Self::resume_popup` release it — the popup pump needs
   /// the pause window to register listeners before the popup's first
   /// navigation fires. `new_page` passes `false` (resume immediately).
-  pub async fn attach(
+  pub fn attach(
     browser: &WebKitBrowser,
     proxy: Session,
     context_id: Option<String>,
     defer_resume: bool,
-  ) -> std::result::Result<Self, BrowserError> {
-    let conn = browser.connection();
-    let proxy_id = proxy.page_proxy_id().unwrap_or_default().to_string();
-    // ONE proxy subscription for the whole attach, opened before the
-    // first await and handed to the listener loop at the end.
-    //
-    // `wait_for_first_page_target` used to open its own and drop it on
-    // return, so every proxy event between that drop and the loop's
-    // subscription was lost. A popup that is already navigating
-    // announces its provisional target ~10ms after its own — inside
-    // that window — and losing it meant the commit found nothing
-    // stashed, the page kept sending to the destroyed target, and every
-    // later call blocked with no response to wait for.
-    let mut proxy_rx = proxy.events();
-    let (target_id, is_paused) = wait_for_first_page_target(&mut proxy_rx).await?;
-    let target = conn.target_session(&proxy_id, &target_id);
-    // Same reason for the target session: everything between here and
-    // `attach_listeners` is awaited protocol work, and the events are
-    // buffered until the loop starts.
-    let target_rx = target.events();
+  ) -> impl std::future::Future<Output = std::result::Result<Self, BrowserError>> + Send + 'static {
+    let conn = Arc::clone(browser.connection());
+    let root = browser.root().clone();
+    let options = browser.context_options_lookup();
+    async move {
+      let proxy_id = proxy.page_proxy_id().unwrap_or_default().to_string();
+      // ONE proxy subscription for the whole attach, opened before the
+      // first await and handed to the listener loop at the end.
+      //
+      // `wait_for_first_page_target` used to open its own and drop it on
+      // return, so every proxy event between that drop and the loop's
+      // subscription was lost. A popup that is already navigating
+      // announces its provisional target ~10ms after its own — inside
+      // that window — and losing it meant the commit found nothing
+      // stashed, the page kept sending to the destroyed target, and every
+      // later call blocked with no response to wait for.
+      let mut proxy_rx = proxy.events();
+      let (target_id, is_paused) = wait_for_first_page_target(&mut proxy_rx).await?;
+      let target = conn.target_session(&proxy_id, &target_id);
+      // Same reason for the target session: everything between here and
+      // `attach_listeners` is awaited protocol work, and the events are
+      // buffered until the loop starts.
+      let target_rx = target.events();
 
-    // Page agent before Runtime so executionContextCreated ordering holds.
-    target.send("Page.enable", json!({})).await?;
-    target.send("Runtime.enable", json!({})).await?;
-    target.send("Network.enable", json!({})).await?;
-    target.send("Console.enable", json!({})).await?;
-    // Dialog domain lives on the page-proxy session (per wkPage.ts);
-    // without `Dialog.enable` the `javascriptDialogOpening` event
-    // never fires and `window.alert` would wedge the page.
-    proxy.send("Dialog.enable", json!({})).await?;
-    // Mark the page active + focused (page-proxy session), mirroring
-    // `wkPage.ts::_initializePageProxySession`. Without it WebKit treats
-    // the page as a background/inactive window: a right-button click
-    // opens context-menu tracking that never resolves (no active window
-    // to dismiss it), and every subsequent synthetic mouse event is
-    // swallowed by that pending menu instead of reaching the document.
-    proxy
-      .send("Emulation.setActiveAndFocused", json!({ "active": true }))
-      .await?;
-    // Apply per-page context overrides BEFORE the about:blank document
-    // becomes scriptable. Mirrors `WKPage._initializeSessionMayThrow` —
-    // userAgent / timezone / bypassCSP / offline / permissions live on
-    // the target session and must be set before any JS runs in the
-    // initial document. Without this, `navigator.userAgent`,
-    // `Intl.DateTimeFormat().resolvedOptions().timeZone`, etc. stay at
-    // their default values for the lifetime of about:blank.
-    // The timezone applied here is the one this page HAS; the stash
-    // below records it so a later `apply_context_options` re-asserting
-    // the same value is recognised as a no-op rather than a change the
-    // engine can no longer make.
-    let mut pre_timezone = None;
-    if let Some(ctx_id) = context_id.as_deref()
-      && let Some(opts) = browser.context_options_for(ctx_id)
-    {
-      pre_timezone.clone_from(&opts.timezone_id);
-      apply_pre_page_overrides(&target, &proxy, &opts).await;
-    }
-    // File-chooser interception is enabled lazily through
-    // [`Self::enable_file_chooser_intercept`] when a listener attaches,
-    // matching CDP's `_updateFileChooserInterception`. Setting it at
-    // attach time unconditionally caused matrix runs to wedge because
-    // every page in the session held an intercept lease, and the
-    // shared MCP browser couldn't drain pending events fast enough.
-    let _ = target
-      .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
-      .await;
-    // Install the context-menu suppressor at document start. No user
-    // init scripts exist yet, so the bootstrap is just the suppressor;
-    // `flush_bootstrap_script` re-prepends it whenever the user adds or
-    // removes their own init scripts.
-    let _ = target
-      .send("Page.setBootstrapScript", json!({ "source": CONTEXT_MENU_SUPPRESSOR }))
-      .await;
-    let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
-    let main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-    if let Some(tree) = resource_tree
-      .as_ref()
-      .and_then(|r| r.get("frameTree"))
-      .and_then(|t| t.get("frame"))
-      .and_then(|f| f.get("id"))
-      .and_then(Value::as_str)
-    {
-      *main_frame_id_cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tree.to_string());
-    }
-
-    let page = WebKitPage {
-      proxy,
-      target: Arc::new(ArcSwap::from_pointee(target)),
-      browser: browser.root().clone(),
-      proxy_id: Arc::from(proxy_id),
-      target_id: Arc::new(ArcSwap::from_pointee(Arc::<str>::from(target_id))),
-      context_id: context_id.map(Arc::from),
-      closed: Arc::new(AtomicBool::new(false)),
-      popup_paused: Arc::new(AtomicBool::new(false)),
-      engine_injected: Arc::new(AtomicBool::new(false)),
-      global_object_id: Arc::new(std::sync::Mutex::new(None)),
-      exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      binding_initialized: Arc::new(AtomicBool::new(false)),
-      init_scripts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-      init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-      extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
-      emulated_media: Arc::new(std::sync::Mutex::new(None)),
-      emulated_viewport: Arc::new(std::sync::Mutex::new(None)),
-      requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      nav_request_slot: crate::network::NavRequestSlot::new(),
-      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      intercept_enabled: Arc::new(AtomicBool::new(false)),
-      applied_timezone: Arc::new(std::sync::Mutex::new(pre_timezone)),
-      frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      main_frame_id_cache,
-      websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      events: EventEmitter::new(),
-      dialog_manager: crate::dialog::DialogManager::new(),
-      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
-      download_manager: crate::download::DownloadManager::new(),
-      page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
-      frame_listener_started: Arc::new(AtomicBool::new(false)),
-      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
-      lifecycle: Arc::new(LifecycleSignals::default()),
-      console_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
-      network_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
-      dialog_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
-    };
-    // Spawn the always-on listener: lifecycle signals, frame events,
-    // network log, console log, dialog log, route interception, and
-    // cross-process target swap. Without this, raw users of the page
-    // API (no `attach_listeners` from `BrowserState`) would see
-    // `wait_for_lifecycle` wedge for the full timeout because no one
-    // ever marks the lifecycle latches.
-    super::events::attach_listeners(&page, target_rx, proxy_rx);
-    // Browser-created popup targets arrive paused (`isPaused`, like the
-    // provisional-target swap path) — resume only after the full
-    // session init above so the popup's first document already sees
-    // the bootstrap script and overrides (mirrors `WKPage`'s
-    // initialize-then-`Target.resume` order). With `defer_resume` the
-    // pause is held for `Self::resume_popup` instead.
-    if is_paused {
-      if defer_resume {
-        page.popup_paused.store(true, Ordering::SeqCst);
-      } else {
-        let _ = page
-          .proxy
-          .send("Target.resume", json!({ "targetId": &*page.target_id() }))
-          .await;
+      // Page agent before Runtime so executionContextCreated ordering holds.
+      target.send("Page.enable", json!({})).await?;
+      target.send("Runtime.enable", json!({})).await?;
+      target.send("Network.enable", json!({})).await?;
+      target.send("Console.enable", json!({})).await?;
+      // Dialog domain lives on the page-proxy session (per wkPage.ts);
+      // without `Dialog.enable` the `javascriptDialogOpening` event
+      // never fires and `window.alert` would wedge the page.
+      proxy.send("Dialog.enable", json!({})).await?;
+      // Mark the page active + focused (page-proxy session), mirroring
+      // `wkPage.ts::_initializePageProxySession`. Without it WebKit treats
+      // the page as a background/inactive window: a right-button click
+      // opens context-menu tracking that never resolves (no active window
+      // to dismiss it), and every subsequent synthetic mouse event is
+      // swallowed by that pending menu instead of reaching the document.
+      proxy
+        .send("Emulation.setActiveAndFocused", json!({ "active": true }))
+        .await?;
+      // Apply per-page context overrides BEFORE the about:blank document
+      // becomes scriptable. Mirrors `WKPage._initializeSessionMayThrow` —
+      // userAgent / timezone / bypassCSP / offline / permissions live on
+      // the target session and must be set before any JS runs in the
+      // initial document. Without this, `navigator.userAgent`,
+      // `Intl.DateTimeFormat().resolvedOptions().timeZone`, etc. stay at
+      // their default values for the lifetime of about:blank.
+      // The timezone applied here is the one this page HAS; the stash
+      // below records it so a later `apply_context_options` re-asserting
+      // the same value is recognised as a no-op rather than a change the
+      // engine can no longer make.
+      let mut pre_timezone = None;
+      if let Some(opts) = context_id.as_deref().and_then(options) {
+        pre_timezone.clone_from(&opts.timezone_id);
+        apply_pre_page_overrides(&target, &proxy, &opts).await;
       }
+      // File-chooser interception is enabled lazily through
+      // [`Self::enable_file_chooser_intercept`] when a listener attaches,
+      // matching CDP's `_updateFileChooserInterception`. Setting it at
+      // attach time unconditionally caused matrix runs to wedge because
+      // every page in the session held an intercept lease, and the
+      // shared MCP browser couldn't drain pending events fast enough.
+      let _ = target
+        .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
+        .await;
+      // Install the context-menu suppressor at document start. No user
+      // init scripts exist yet, so the bootstrap is just the suppressor;
+      // `flush_bootstrap_script` re-prepends it whenever the user adds or
+      // removes their own init scripts.
+      let _ = target
+        .send("Page.setBootstrapScript", json!({ "source": CONTEXT_MENU_SUPPRESSOR }))
+        .await;
+      let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
+      let main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+      if let Some(tree) = resource_tree
+        .as_ref()
+        .and_then(|r| r.get("frameTree"))
+        .and_then(|t| t.get("frame"))
+        .and_then(|f| f.get("id"))
+        .and_then(Value::as_str)
+      {
+        *main_frame_id_cache
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tree.to_string());
+      }
+
+      let page = WebKitPage {
+        proxy,
+        target: Arc::new(ArcSwap::from_pointee(target)),
+        browser: root,
+        proxy_id: Arc::from(proxy_id),
+        target_id: Arc::new(ArcSwap::from_pointee(Arc::<str>::from(target_id))),
+        context_id: context_id.map(Arc::from),
+        closed: Arc::new(AtomicBool::new(false)),
+        popup_paused: Arc::new(AtomicBool::new(false)),
+        engine_injected: Arc::new(AtomicBool::new(false)),
+        global_object_id: Arc::new(std::sync::Mutex::new(None)),
+        exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+        binding_initialized: Arc::new(AtomicBool::new(false)),
+        init_scripts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
+        emulated_media: Arc::new(std::sync::Mutex::new(None)),
+        emulated_viewport: Arc::new(std::sync::Mutex::new(None)),
+        requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+        nav_request_slot: crate::network::NavRequestSlot::new(),
+        routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        intercept_enabled: Arc::new(AtomicBool::new(false)),
+        applied_timezone: Arc::new(std::sync::Mutex::new(pre_timezone)),
+        frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+        frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+        main_frame_id_cache,
+        websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+        events: EventEmitter::new(),
+        dialog_manager: crate::dialog::DialogManager::new(),
+        file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+        download_manager: crate::download::DownloadManager::new(),
+        page_backref: crate::backend::PageBackref::new(),
+        frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+        frame_listener_started: Arc::new(AtomicBool::new(false)),
+        observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+        lifecycle: Arc::new(LifecycleSignals::default()),
+        console_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
+        network_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
+        dialog_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
+      };
+      // Spawn the always-on listener: lifecycle signals, frame events,
+      // network log, console log, dialog log, route interception, and
+      // cross-process target swap. Without this, raw users of the page
+      // API (no `attach_listeners` from `BrowserState`) would see
+      // `wait_for_lifecycle` wedge for the full timeout because no one
+      // ever marks the lifecycle latches.
+      super::events::attach_listeners(&page, target_rx, proxy_rx);
+      // Browser-created popup targets arrive paused (`isPaused`, like the
+      // provisional-target swap path) — resume only after the full
+      // session init above so the popup's first document already sees
+      // the bootstrap script and overrides (mirrors `WKPage`'s
+      // initialize-then-`Target.resume` order). With `defer_resume` the
+      // pause is held for `Self::resume_popup` instead.
+      if is_paused {
+        if defer_resume {
+          page.popup_paused.store(true, Ordering::SeqCst);
+        } else {
+          let _ = page
+            .proxy
+            .send("Target.resume", json!({ "targetId": &*page.target_id() }))
+            .await;
+        }
+      }
+      Ok(page)
     }
-    Ok(page)
   }
 
   /// Release a popup target held paused by `attach(defer_resume:
@@ -875,6 +877,16 @@ impl WebKitPage {
       .send(protocol::RUNTIME_RELEASE_OBJECT, json!({ "objectId": object_id }))
       .await;
     call.map(|_| ())
+  }
+
+  pub async fn bring_to_front(&self) -> Result<()> {
+    self.ensure_open()?;
+    self
+      .proxy
+      .send(protocol::TARGET_ACTIVATE, json!({"targetId": &*self.target_id()}))
+      .await
+      .map_err(conn_err)?;
+    Ok(())
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {

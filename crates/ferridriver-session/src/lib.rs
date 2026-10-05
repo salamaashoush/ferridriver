@@ -24,6 +24,7 @@ pub mod bind;
 pub mod browser_dispatch;
 pub mod client;
 pub mod dispatch;
+mod lifecycle;
 pub mod protocol;
 pub mod registry;
 pub mod server;
@@ -32,11 +33,13 @@ pub mod transport;
 pub use bind::{
   BindOptions, BoundSession, bind, bind_dispatcher, bind_global, bind_in, unbind, unbind_browser, unbind_id,
 };
-pub use browser_dispatch::{BrowserDispatcher, browser_name_for, dispatcher_for, page_for, parse_session_key};
+pub use browser_dispatch::{
+  BrowserDispatcher, browser_name_for, context_key_for, dispatcher_for, page_for, parse_session_key,
+};
 pub use client::SessionClient;
-pub use dispatch::{ActionDetail, Dispatcher, EventSink, PageCounts, ScriptHost};
+pub use dispatch::{ActionDetail, Dispatcher, EventSink, PageCounts, ReleaseFuture, ScriptHost};
 pub use protocol::{
-  ActionPhase, Command, Event, EventPayload, RUN_VERB, Response, ScriptKind, ScriptRequest, ServerFrame,
+  ActionPhase, CLOSE_VERB, Command, Event, EventPayload, RUN_VERB, Response, ScriptKind, ScriptRequest, ServerFrame,
 };
 pub use registry::{Registry, SessionDescriptor};
 pub use server::{Endpoint, SessionServer};

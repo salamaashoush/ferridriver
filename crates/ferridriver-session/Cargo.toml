@@ -24,6 +24,10 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 async-trait = { workspace = true }
-
-[dev-dependencies]
+sha2 = { workspace = true }
+getrandom = "0.4"
 tempfile = "3"
+
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }

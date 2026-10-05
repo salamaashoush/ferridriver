@@ -713,6 +713,8 @@ fn json_escape_string_into(buf: &mut String, s: &str) {
 /// The injected JS engine — bundled from `src/injected/` TypeScript sources.
 /// Rebuild with: `cd crates/ferridriver/src/injected && bun build.ts`
 const ENGINE_JS: &str = include_str!("injected/dist/engine.min.js");
+
+pub(crate) const UTILITY_SCRIPT_JS: &str = include_str!("injected/dist/utility-script.min.js");
 pub(crate) const MCP_SUPPORT_JS: &str = include_str!("injected/dist/mcp-support.min.js");
 pub(crate) const AX_SUPPORT_JS: &str = include_str!("injected/dist/ax-support.min.js");
 

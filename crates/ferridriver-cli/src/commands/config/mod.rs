@@ -45,7 +45,7 @@ pub fn run_config(
   let mut options = load_options(startup);
   options.extension_defaults = defaults;
   let resolved = layer::resolve(&options)?;
-  let effective = effective_browser(&args.browser, &resolved.config.mcp);
+  let effective = effective_browser(&args.browser, &resolved.config.mcp)?;
 
   if args.resolved {
     // TOML is the canonical authoring format, but a merged document can
@@ -80,7 +80,8 @@ pub fn run_config(
       "effective": {
         "mcp": {
           "browser": {
-            "backend": format!("{:?}", effective.backend),
+            "browser": effective.browser.name(),
+            "backend": effective.backend.name(),
             "headless": effective.headless,
             "backendFromCli": effective.backend_from_cli,
             "headlessFromCli": effective.headless_from_cli,
@@ -241,6 +242,7 @@ fn print_layers(resolved: &layer::Resolved) {
 /// What a run with these flags would actually launch.
 fn print_effective_browser(effective: &EffectiveBrowser) {
   ui::section("Effective browser");
+  ui::say(&ui::kv_padded("browser", effective.browser.name(), 8));
   let from = |from_cli: bool, flag: &str| {
     if from_cli {
       ui::dim(&format!("  (from {flag})"))

@@ -1,0 +1,640 @@
+diff --git c/lib/mixins/execute.ts w/lib/mixins/execute.ts
+index 495a9ba..0df036c 100644
+--- c/lib/mixins/execute.ts
++++ w/lib/mixins/execute.ts
+@@ -159,6 +159,7 @@ export async function execute<R = any>(
+   command: string,
+   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- kept for API compatibility
+   override?: boolean,
++  options: {emulateUserGesture?: boolean} = {},
+ ): Promise<R> {
+   const {appIdKey, pageIdKey} = checkParams({
+     appIdKey: getAppIdKey(this),
+@@ -174,6 +175,7 @@ export async function execute<R = any>(
+   this.log.debug(`Sending javascript command: '${util.truncateString(command, 50)}'`);
+   const res = await rpcClient.send('Runtime.evaluate', {
+     expression: command,
++    emulateUserGesture: options.emulateUserGesture ?? false,
+     returnByValue: true,
+     appIdKey,
+     pageIdKey,
+diff --git c/lib/mixins/navigate.ts w/lib/mixins/navigate.ts
+index e56319e..cc00f6b 100644
+--- c/lib/mixins/navigate.ts
++++ w/lib/mixins/navigate.ts
+@@ -174,8 +174,7 @@ export async function checkPageIsReady(this: RemoteDebugger, timeoutMs?: number)
+ 
+ /**
+  * Navigates to a new URL and waits for the page to be ready.
+- * Validates the URL format, waits for the page to be available, sets window.location.href
+- * via Runtime.evaluate (Page.navigate was removed from WebKit Inspector protocol), and
++ * Validates the URL format, waits for the page to be available, requests Inspector navigation, and
+  * monitors for the Page.loadEventFired event or timeout.
+  *
+  * @param url - The URL to navigate to. Must be a valid URL format.
+@@ -205,8 +204,7 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
+   let isPageLoading = true;
+   const start = new timing.Timer().start();
+ 
+-  let pageReadinessResolved = false;
+-  const pageReadinessPromise = new Promise<void>((resolve) => {
++  const pageReadinessPromise = new Promise<void>((resolve, reject) => {
+     onPageLoadedTimeout = setTimeout(() => {
+       if (isPageLoading) {
+         isPageLoading = false;
+@@ -215,7 +213,6 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
+             `for the ${url} page readiness. Continuing anyway`,
+         );
+       }
+-      pageReadinessResolved = true;
+       return resolve();
+     }, readinessTimeoutMs);
+ 
+@@ -228,28 +225,27 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
+         clearTimeout(onPageLoadedTimeout);
+         onPageLoadedTimeout = null;
+       }
+-      pageReadinessResolved = true;
+       return resolve();
+     };
+ 
+     // https://chromedevtools.github.io/devtools-protocol/tot/Page/#event-loadEventFired
+     rpcClient.once('Page.loadEventFired', onPageLoaded);
+ 
+-    // Page.navigate was removed from the WebKit Inspector protocol since iOS 26.4
+-    // See https://github.com/appium/appium/issues/21976
+-    // Fire-and-forget: readiness is tracked separately via the Page.loadEventFired listener
+-    // and the timeout above, so a rejection here (e.g. the RPC connection dropping mid-navigation,
+-    // which happens routinely around window/tab switches) must not go unhandled - that would
+-    // crash the whole process instead of just failing this one navigation.
++    // iOS 26.4 removed Page.navigate (appium/appium#21976); older versions still
++    // need it for navigations that script-initiated location assignments cannot perform.
+     rpcClient
+-      .send('Runtime.evaluate', {
+-        expression: `window.location.href = ${JSON.stringify(url)};`,
+-        appIdKey,
+-        pageIdKey,
++      .send('Page.navigate', {url, appIdKey, pageIdKey})
++      .catch(async (err: any) => {
++        if (err.code !== -32601) {
++          throw err;
++        }
++        await rpcClient.send('Runtime.evaluate', {
++          expression: `window.location.href = ${JSON.stringify(url)};`,
++          appIdKey,
++          pageIdKey,
++        });
+       })
+-      .catch((err: any) => {
+-        this.log.warn(`Failed to set 'window.location.href' to '${url}': ${err.message}`);
+-      });
++      .catch(reject);
+   });
+   const cancellationPromise = (async () => {
+     try {
+@@ -263,8 +259,9 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
+     setPageLoading(this, false);
+     isPageLoading = false;
+     setNavigatingToPage(this, false);
++    getPageLoadDelay(this)?.cancel();
+     setPageLoadDelay(this, undefined);
+-    if (onPageLoadedTimeout && pageReadinessResolved) {
++    if (onPageLoadedTimeout) {
+       clearTimeout(onPageLoadedTimeout);
+       onPageLoadedTimeout = null;
+     }
+diff --git c/lib/protocol/index.ts w/lib/protocol/index.ts
+index 93ef6c2..52ffd9c 100644
+--- c/lib/protocol/index.ts
++++ w/lib/protocol/index.ts
+@@ -186,6 +186,7 @@ const COMMANDS = {
+   //#region PAGE DOMAIN
+   'Page.enable': [],
+   'Page.disable': [],
++  'Page.navigate': ['url'],
+   'Page.reload': ['ignoreCache', 'revalidateAllResources'],
+   'Page.overrideUserAgent': ['value'],
+   'Page.overrideSetting': ['setting', 'value'],
+@@ -211,7 +212,7 @@ const COMMANDS = {
+   //#region RUNTIME DOMAIN
+   'Runtime.awaitPromise': ['promiseObjectId', 'returnByValue', 'generatePreview', 'saveResult'],
+   'Runtime.callFunctionOn': ['objectId', 'functionDeclaration', 'arguments', 'returnByValue'],
+-  'Runtime.evaluate': ['expression', 'returnByValue', 'contextId'],
++  'Runtime.evaluate': ['expression', 'returnByValue', 'contextId', 'emulateUserGesture'],
+   'Runtime.enable': [],
+   'Runtime.disable': [],
+   //#endregion
+@@ -282,7 +283,7 @@ export function getProtocolCommand(
+   // commands don't need this: their params get JSON.stringify'd, which already drops `undefined`
+   // values on its own.
+   const params: StringRecord = (paramNames as readonly string[]).reduce(function (acc: StringRecord, name: string) {
+-    if (!direct || opts[name] !== undefined) {
++    if ((!direct || opts[name] !== undefined) && (name !== 'emulateUserGesture' || opts[name] !== undefined)) {
+       acc[name] = opts[name];
+     }
+     return acc;
+diff --git c/lib/rpc/rpc-client-real-device.ts w/lib/rpc/rpc-client-real-device.ts
+index a0c0e90..a7b3490 100644
+--- c/lib/rpc/rpc-client-real-device.ts
++++ w/lib/rpc/rpc-client-real-device.ts
+@@ -42,9 +42,12 @@ export class RpcClientRealDevice extends RpcClient {
+     }
+ 
+     log.debug('Disconnecting from remote debugger');
+-    await super.disconnect();
+-    this.service?.close();
+-    this.isConnected = false;
++    try {
++      await super.disconnect();
++    } finally {
++      this.service?.close();
++      this.isConnected = false;
++    }
+   }
+ 
+   /**
+diff --git c/lib/rpc/rpc-client-simulator.ts w/lib/rpc/rpc-client-simulator.ts
+index 5bd71d0..eb1a59d 100644
+--- c/lib/rpc/rpc-client-simulator.ts
++++ w/lib/rpc/rpc-client-simulator.ts
+@@ -139,9 +139,12 @@ export class RpcClientSimulator extends RpcClient {
+     }
+ 
+     log.debug('Disconnecting from remote debugger');
+-    await super.disconnect();
+-    this.service?.close();
+-    this.isConnected = false;
++    try {
++      await super.disconnect();
++    } finally {
++      this.service?.close();
++      this.isConnected = false;
++    }
+   }
+ 
+   /**
+diff --git c/lib/rpc/rpc-client.ts w/lib/rpc/rpc-client.ts
+index e235445..59eaae8 100644
+--- c/lib/rpc/rpc-client.ts
++++ w/lib/rpc/rpc-client.ts
+@@ -89,9 +89,10 @@ export class RpcClient {
+   protected readonly _contexts: number[];
+   protected readonly _targets: AppToTargetsMap;
+   protected readonly _targetSubscriptions: EventEmitter;
+-  protected _pendingTargetNotification?: PendingPageTargetDetails;
++  protected readonly _pageSenderIds: Map<string, string>;
++  protected readonly _pageTargetsBySenderId: Map<string, PendingPageTargetDetails>;
+   protected readonly _targetCreationTimeoutMs: number;
+-  protected readonly _provisionedPages: Set<PageIdKey>;
++  protected readonly _provisionedPages: Set<string>;
+   protected readonly _pageSelectionLock: AsyncLock;
+   protected readonly _pageSelectionMonitor: EventEmitter;
+ 
+@@ -136,6 +137,8 @@ export class RpcClient {
+     this._contexts = [];
+     this._targets = {};
+     this._targetSubscriptions = new EventEmitter();
++    this._pageSenderIds = new Map();
++    this._pageTargetsBySenderId = new Map();
+     this._provisionedPages = new Set();
+     this._pageSelectionLock = new AsyncLock();
+     this._pageSelectionMonitor = new EventEmitter();
+@@ -391,6 +394,10 @@ export class RpcClient {
+         const appIdKey = opts.appIdKey;
+         const pageIdKey = opts.pageIdKey;
+         const targetId = opts.targetId ?? this.getTarget(appIdKey, pageIdKey);
++        const senderId =
++          appIdKey != null && pageIdKey != null
++            ? (this._pageSenderIds.get(toPageSelectionKey(appIdKey, pageIdKey)) ?? this.senderId)
++            : this.senderId;
+ 
+         // retrieve the correct command to send
+         // connId is always pinned to the current connection, but senderId may be
+@@ -401,7 +408,7 @@ export class RpcClient {
+             targetId,
+             id: msgId.toString(),
+           },
+-          {senderId: this.senderId, ...opts},
++          {senderId, ...opts},
+         );
+         let cmd: RawRemoteCommand;
+         try {
+@@ -461,7 +468,11 @@ export class RpcClient {
+         } else if (hasSocketData) {
+           this.messageHandler.once(msgId.toString(), (err: Error | null, value: any) => {
+             if (err) {
+-              return reject(new Error(`Remote debugger error with code '${(err as any).code}': ${err.message}`));
++              return reject(
++                Object.assign(new Error(`Remote debugger error with code '${(err as any).code}': ${err.message}`), {
++                  code: (err as any).code,
++                }),
++              );
+             }
+             log.debug(
+               `Received data response from send (id: ${msgId}): '${util.truncateString(JSON.stringify(value), DATA_LOG_LENGTH)}'`,
+@@ -507,7 +518,22 @@ export class RpcClient {
+    * Disconnects from the remote debugger and cleans up event listeners.
+    */
+   async disconnect(): Promise<void> {
++    const failures: unknown[] = [];
++    // WebKit's connection-died handler removes only one target per connection.
++    for (const [senderId, {appIdKey, pageIdKey}] of this._pageTargetsBySenderId) {
++      try {
++        await this.send('forwardDidClose', {appIdKey, pageIdKey, senderId}, false);
++      } catch (error) {
++        failures.push(error);
++      }
++    }
++    this._pageTargetsBySenderId.clear();
++    this._pageSenderIds.clear();
++    this._provisionedPages.clear();
+     this.messageHandler.removeAllListeners();
++    if (failures.length) {
++      throw new AggregateError(failures, 'Could not detach every Web Inspector page');
++    }
+   }
+ 
+   /**
+@@ -540,17 +566,18 @@ export class RpcClient {
+    * @param app - The application identifier key.
+    * @param targetInfo - Information about the created target.
+    */
+-  async addTarget(err: Error | undefined, app: AppIdKey, targetInfo: TargetInfo): Promise<void> {
++  async addTarget(err: Error | undefined, app: AppIdKey, targetInfo: TargetInfo, destination?: string): Promise<void> {
+     if (targetInfo?.targetId == null) {
+       log.info(`Received 'Target.targetCreated' event for app '${app}' with no target. Skipping`);
+       return;
+     }
+ 
+-    const pendingPageTargetDetails = this._getPendingPageTargetDetails(app, targetInfo);
++    const pendingPageTargetDetails = this._getPendingPageTargetDetails(app, targetInfo, destination);
+     if (!pendingPageTargetDetails) {
+       return;
+     }
+     const {appIdKey, pageIdKey, pageReadinessDetector} = pendingPageTargetDetails;
++    const pageKey = toPageSelectionKey(appIdKey, pageIdKey);
+ 
+     if (!util.isPlainObject(this.targets[appIdKey])) {
+       this.targets[appIdKey] = {
+@@ -580,7 +607,7 @@ export class RpcClient {
+         `Provisional target created for app '${appIdKey}' and page '${pageIdKey}': '${JSON.stringify(targetInfo)}'`,
+       );
+ 
+-      this._provisionedPages.add(pageIdKey);
++      this._provisionedPages.add(pageKey);
+       try {
+         await this.targets[appIdKey].lock.acquire(String(pageIdKey), async () => {
+           let wasInitialized: boolean;
+@@ -631,9 +658,9 @@ export class RpcClient {
+       await this.targets[appIdKey].lock.acquire(String(pageIdKey), async () => {
+         let wasInitialized = false;
+         try {
+-          if (this._provisionedPages.has(pageIdKey)) {
++          if (this._provisionedPages.has(pageKey)) {
+             log.debug(`Page '${pageIdKey}' has been already provisioned`);
+-            this._provisionedPages.delete(pageIdKey);
++            this._provisionedPages.delete(pageKey);
+           } else {
+             wasInitialized = await this._initializePage(appIdKey, pageIdKey);
+           }
+@@ -761,13 +788,20 @@ export class RpcClient {
+     pageReadinessDetector?: PageReadinessDetector,
+   ): Promise<void> {
+     await this._pageSelectionLock.acquire(toPageSelectionKey(appIdKey, pageIdKey), async () => {
+-      this._pendingTargetNotification = {appIdKey, pageIdKey, pageReadinessDetector};
+-      this._provisionedPages.clear();
++      const pageKey = toPageSelectionKey(appIdKey, pageIdKey);
++      let senderId = this._pageSenderIds.get(pageKey);
++      if (!senderId) {
++        senderId = util.uuidV4();
++        this._pageSenderIds.set(pageKey, senderId);
++      }
++      // Web Inspector replies carry this destination, not the page identifier.
++      this._pageTargetsBySenderId.set(senderId, {appIdKey, pageIdKey, pageReadinessDetector});
+ 
+       if (this.getTarget(appIdKey, pageIdKey)) {
+         log.debug(`Page '${pageIdKey}' is already selected for app '${appIdKey}'`);
+         return;
+       }
++      this._provisionedPages.delete(pageKey);
+ 
+       // go through the steps that the Desktop Safari system
+       // goes through to initialize the Web Inspector session
+@@ -775,6 +809,7 @@ export class RpcClient {
+       const sendOpts = {
+         appIdKey,
+         pageIdKey,
++        senderId,
+       };
+ 
+       const timeoutMs = Math.trunc(this._targetCreationTimeoutMs * 1.2);
+@@ -1182,13 +1217,18 @@ export class RpcClient {
+    * @param targetInfo - Information about the target.
+    * @returns The pending page target details if there's a match, undefined otherwise.
+    */
+-  private _getPendingPageTargetDetails(appId: AppIdKey, targetInfo: TargetInfo): PendingPageTargetDetails | undefined {
++  private _getPendingPageTargetDetails(
++    appId: AppIdKey,
++    targetInfo: TargetInfo,
++    destination?: string,
++  ): PendingPageTargetDetails | undefined {
+     const logInfo = (message: string): undefined =>
+       void log.info(
+         `Skipping 'Target.targetCreated' event ${message} for app '${appId}': ${JSON.stringify(targetInfo)}`,
+       );
+-    if (!this._pendingTargetNotification) {
+-      return logInfo('with no pending request');
++    const selected = destination ? this._pageTargetsBySenderId.get(destination) : undefined;
++    if (!selected) {
++      return logInfo('with no matching destination');
+     }
+     if (targetInfo.type !== 'page') {
+       // TODO: We'll need to handle 'frame' type for several domains.
+@@ -1198,9 +1238,7 @@ export class RpcClient {
+       return logInfo(`with type '${targetInfo.type}'`);
+     }
+ 
+-    return this._pendingTargetNotification.appIdKey === appId
+-      ? {...this._pendingTargetNotification}
+-      : logInfo('with different app id');
++    return selected.appIdKey === appId ? {...selected} : logInfo('with different app id');
+   }
+ }
+ 
+diff --git c/lib/rpc/rpc-message-handler.ts w/lib/rpc/rpc-message-handler.ts
+index f11aeae..bfc2503 100644
+--- c/lib/rpc/rpc-message-handler.ts
++++ w/lib/rpc/rpc-message-handler.ts
+@@ -223,7 +223,7 @@ export default class RpcMessageHandler extends EventEmitter {
+         const app = plist.__argument.WIRApplicationIdentifierKey;
+         const args =
+           method === 'Target.didCommitProvisionalTarget' ? params : (params.targetInfo ?? {targetId: params.targetId});
+-        this.emit(method, null, app, args);
++        this.emit(method, null, app, args, plist.__argument.WIRDestinationKey);
+         return;
+       }
+       case 'Target.dispatchMessageFromTarget': {
+diff --git c/test/unit/mixins/execute.spec.ts w/test/unit/mixins/execute.spec.ts
+index f7d3c35..f5c3e94 100644
+--- c/test/unit/mixins/execute.spec.ts
++++ w/test/unit/mixins/execute.spec.ts
+@@ -4,8 +4,30 @@ import {describe, it} from 'node:test';
+ import sinon from 'sinon';
+ 
+ import {executeAtom, executeAtomAsync, callFunction, execute} from '../../../lib/mixins/execute.js';
++import {getProtocolCommand} from '../../../lib/protocol/index.js';
+ 
+ describe('execute', function () {
++  it('preserves an explicit user gesture through protocol serialization', async function () {
++    const messages: any[] = [];
++    const ctx: any = {
++      _appIdKey: 'appId',
++      _pageIdKey: 'pageId',
++      log: {debug() {}},
++      requireRpcClient() {
++        return {
++          waitForPage: async () => {},
++          send: async (method: string, opts: any) => {
++            messages.push(getProtocolCommand('1', method, opts));
++            return {result: {type: 'boolean', value: true}};
++          },
++        };
++      },
++    };
++    await execute.call(ctx, 'true', undefined, {emulateUserGesture: true});
++    await execute.call(ctx, 'true');
++    assert.equal(messages[0].params.emulateUserGesture, true);
++    assert.equal(messages[1].params.emulateUserGesture, false);
++  });
+   describe('executeAtom', function () {
+     it('should execute atom and call send event on rpc client', async function () {
+       const ctx: any = {
+diff --git c/test/unit/mixins/navigate.spec.ts w/test/unit/mixins/navigate.spec.ts
+index f67d79e..e0027f6 100644
+--- c/test/unit/mixins/navigate.spec.ts
++++ w/test/unit/mixins/navigate.spec.ts
+@@ -1,8 +1,85 @@
+ import assert from 'node:assert/strict';
++import {EventEmitter} from 'node:events';
+ import {describe, it} from 'node:test';
+ 
++import {navToUrl} from '../../../lib/mixins/navigate.js';
++import {getProtocolCommand} from '../../../lib/protocol/index.js';
+ import {RemoteDebugger} from '../../../lib/remote-debugger.js';
+ 
++function navigationContext(send: (method: string, options: any, rpc: EventEmitter) => Promise<any>) {
++  const rpc = Object.assign(new EventEmitter(), {
++    waitForPage: async () => {},
++    send: async (method: string, options: any) => send(method, options, rpc),
++  });
++  const context: any = {
++    _appIdKey: 'appId',
++    _pageIdKey: 'pageId',
++    pageLoadMs: 100,
++    log: {debug() {}, info() {}, warn() {}},
++    requireRpcClient: () => rpc,
++  };
++  return {context, rpc};
++}
++
++it('navigates through Inspector when the command is supported', async () => {
++  const calls: any[] = [];
++  const {context, rpc} = navigationContext(async (method, options, events) => {
++    calls.push(getProtocolCommand('1', method, options));
++    events.emit('Page.loadEventFired');
++  });
++  await navToUrl.call(context, 'data:text/html,<title>sashoush</title>');
++  assert.equal(calls[0].method, 'Page.navigate');
++  assert.equal(calls[0].params.url, 'data:text/html,<title>sashoush</title>');
++  assert.equal(rpc.listenerCount('Page.loadEventFired'), 0);
++});
++
++it('falls back only when Inspector reports method not found', async () => {
++  const calls: string[] = [];
++  const {context} = navigationContext(async (method, _options, events) => {
++    calls.push(method);
++    if (method === 'Page.navigate') {
++      throw Object.assign(new Error('Method not found'), {code: -32601});
++    }
++    events.emit('Page.loadEventFired');
++  });
++  await navToUrl.call(context, 'https://example.com/');
++  assert.deepEqual(calls, ['Page.navigate', 'Runtime.evaluate']);
++});
++
++it('rejects transport failures and removes navigation listeners', async () => {
++  const failure = new Error('Connection closed');
++  const {context, rpc} = navigationContext(async () => {
++    throw failure;
++  });
++  await assert.rejects(navToUrl.call(context, 'https://example.com/'), (error) => error === failure);
++  assert.equal(rpc.listenerCount('Page.loadEventFired'), 0);
++  assert.equal(context._pageLoading, false);
++  assert.equal(context._navigatingToPage, false);
++});
++
++it('does not turn a navigation error into script navigation', async () => {
++  const calls: string[] = [];
++  const failure = Object.assign(new Error('Invalid URL'), {code: -32602});
++  const {context} = navigationContext(async (method) => {
++    calls.push(method);
++    throw failure;
++  });
++  await assert.rejects(navToUrl.call(context, 'https://example.com/'), (error) => error === failure);
++  assert.deepEqual(calls, ['Page.navigate']);
++});
++
++it('propagates failure from the fallback command', async () => {
++  const failure = new Error('Connection closed');
++  const {context, rpc} = navigationContext(async (method) => {
++    if (method === 'Page.navigate') {
++      throw Object.assign(new Error('Method not found'), {code: -32601});
++    }
++    throw failure;
++  });
++  await assert.rejects(navToUrl.call(context, 'https://example.com/'), (error) => error === failure);
++  assert.equal(rpc.listenerCount('Page.loadEventFired'), 0);
++});
++
+ describe('navigate', function () {
+   describe('isPageLoadingCompleted', function () {
+     const BUNDLE_ID = 'com.apple.mobilesafari';
+diff --git c/test/unit/rpc/rpc-client.spec.ts w/test/unit/rpc/rpc-client.spec.ts
+index 1087583..e127333 100644
+--- c/test/unit/rpc/rpc-client.spec.ts
++++ w/test/unit/rpc/rpc-client.spec.ts
+@@ -8,6 +8,86 @@ import sinon from 'sinon';
+ import {RpcClient} from '../../../lib/rpc/rpc-client.js';
+ 
+ describe('rpc-client', function () {
++  for (const failFirst of [false, true]) {
++    it(`detaches every selected page before disconnect, failure=${failFirst}`, async function () {
++      const client = new RpcClient();
++      const rpc = client as any;
++      rpc._pageTargetsBySenderId.set('first', {appIdKey: 'PID:123', pageIdKey: 1});
++      rpc._pageTargetsBySenderId.set('second', {appIdKey: 'PID:123', pageIdKey: 2});
++      const sent: any[] = [];
++      rpc.send = async (...args: any[]) => {
++        sent.push(args);
++        if (failFirst && sent.length === 1) {
++          throw new Error('Socket write failed');
++        }
++      };
++      if (failFirst) {
++        await assert.rejects(client.disconnect(), AggregateError);
++      } else {
++        await client.disconnect();
++      }
++      assert.deepEqual(sent, [
++        ['forwardDidClose', {appIdKey: 'PID:123', pageIdKey: 1, senderId: 'first'}, false],
++        ['forwardDidClose', {appIdKey: 'PID:123', pageIdKey: 2, senderId: 'second'}, false],
++      ]);
++      assert.equal(rpc.messageHandler.eventNames().length, 0);
++      await client.disconnect();
++      assert.equal(sent.length, 2);
++    });
++  }
++
++  it('routes overlapping page selections by their wire destination', async function () {
++    const client = new RpcClient({targetCreationTimeoutMs: 200, platformVersion: '26.2'});
++    const rpc = client as any;
++    const setups: any[] = [];
++    rpc.send = async (command: string, opts: any) => {
++      if (command === 'setSenderKey') {
++        setups.push(opts);
++      }
++    };
++    rpc._initializePage = async () => false;
++    const selected = () =>
++      new Promise<void>((resolve) => {
++        rpc._pageSelectionMonitor.once('newListener', (name: string) => {
++          if (name === 'onPageInitialized') {
++            resolve();
++          }
++        });
++      });
++    let ready = selected();
++    const first = client.selectPage('PID:123', 1);
++    await ready;
++    ready = selected();
++    const second = client.selectPage('PID:123', 2);
++    await ready;
++    const receive = async (destination: string, targetId: string, app = 'PID:123') => {
++      await rpc.messageHandler.handleMessage({
++        __selector: '_rpc_applicationSentData:',
++        __argument: {
++          WIRApplicationIdentifierKey: app,
++          WIRDestinationKey: destination,
++          WIRMessageDataKey: JSON.stringify({
++            method: 'Target.targetCreated',
++            params: {targetInfo: {type: 'page', targetId}},
++          }),
++        },
++      });
++    };
++    try {
++      assert.ok(setups[0].senderId);
++      assert.notEqual(setups[0].senderId, setups[1].senderId);
++      await receive('unknown-destination', 'ignored-target');
++      await receive(setups[0].senderId, 'wrong-app-target', 'PID:456');
++      assert.equal(client.getTarget('PID:123', 1), undefined);
++      await receive(setups[0].senderId, 'target-for-first-page');
++      await receive(setups[1].senderId, 'target-for-second-page');
++      assert.equal(client.getTarget('PID:123', 1), 'target-for-first-page');
++      assert.equal(client.getTarget('PID:123', 2), 'target-for-second-page');
++    } finally {
++      await Promise.all([first, second]);
++    }
++  });
++
+   describe('.send', function () {
+     it('should send RPC message to device', async function () {});
+     it('should send RPC message to device and retry if target id not found', async function () {
+@@ -36,6 +116,27 @@ describe('rpc-client', function () {
+   });
+ 
+   describe('.sendToDevice', function () {
++    it('preserves the Inspector error code for capability detection', async function () {
++      const client = new RpcClient();
++      const rpc = client as any;
++      const failure = Object.assign(new Error('Method not found'), {code: -32601});
++      rpc.msgId = 1;
++      rpc.remoteMessages = {
++        getRemoteCommand: () => ({
++          __selector: '_rpc_forwardSocketData:',
++          __argument: {WIRSocketDataKey: {id: 1}},
++        }),
++      };
++      rpc.sendMessage = async () => {
++        rpc.messageHandler.emit('1', failure);
++      };
++      await assert.rejects(client.sendToDevice('Page.navigate', {}), (error: any) => {
++        assert.equal(error.code, -32601);
++        assert.match(error.message, /Method not found/);
++        return true;
++      });
++    });
++
+     it('should let opts.senderId override the connection senderId while pinning connId', async function () {
+       const {sendToDevice} = RpcClient.prototype;
+       const getRemoteCommandSpy = sinon.spy((_command: string, opts: any) => ({
+@@ -105,7 +206,8 @@ describe('rpc-client', function () {
+         _pageSelectionLock: new AsyncLock(),
+         _pageSelectionMonitor: new EventEmitter(),
+         _provisionedPages: new Set(),
+-        _pendingTargetNotification: null,
++        _pageSenderIds: new Map(),
++        _pageTargetsBySenderId: new Map(),
+         _targetCreationTimeoutMs: 50,
+         getTarget: sinon.stub().returns(undefined),
+         send: sinon.stub().resolves(),
+@@ -121,7 +223,8 @@ describe('rpc-client', function () {
+         _pageSelectionLock: new AsyncLock(),
+         _pageSelectionMonitor: new EventEmitter(),
+         _provisionedPages: new Set(),
+-        _pendingTargetNotification: null,
++        _pageSenderIds: new Map(),
++        _pageTargetsBySenderId: new Map(),
+         _targetCreationTimeoutMs: 10 * 60 * 1000,
+         getTarget: sinon.stub().returns(undefined),
+         send: sinon.stub().resolves(),

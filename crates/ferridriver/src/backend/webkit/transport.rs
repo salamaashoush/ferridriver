@@ -8,9 +8,9 @@
 //! appends a NUL.
 
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read, Write};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -22,11 +22,7 @@ pub enum TransportError {
   Json(#[from] serde_json::Error),
 }
 
-/// Read half of the pipe transport. Wraps a blocking byte source
-/// (typically the child stdout fd 4) and exposes a stream of decoded
-/// JSON envelopes via a non-blocking `mpsc` channel — the I/O thread
-/// reads bytes synchronously and forwards parsed frames to the caller's
-/// tokio runtime.
+/// Read half of the pipe transport, exposing decoded JSON envelopes.
 pub struct ReaderHandle {
   rx: mpsc::UnboundedReceiver<Result<Value, TransportError>>,
 }
@@ -40,8 +36,8 @@ impl ReaderHandle {
 }
 
 /// Write half of the pipe transport. `send` only serializes and queues
-/// the frame — a dedicated writer thread performs the blocking pipe
-/// write. Writing inline on the calling task looked safe ("the child
+/// the frame — a retained writer task performs the pipe write.
+/// Writing inline on the calling task looked safe ("the child
 /// reads fd 3 promptly") but was a latent stall: a child that pauses
 /// reading fills the pipe buffer, `write_all` then blocks a tokio
 /// worker thread, and every other sender serializes behind the mutex.
@@ -55,64 +51,93 @@ impl ReaderHandle {
 /// first blocking on it.
 pub struct WriterHandle {
   tx: mpsc::UnboundedSender<Vec<u8>>,
+  stopping: watch::Receiver<bool>,
 }
 
 impl WriterHandle {
+  #[cfg(test)]
+  pub(crate) fn test_queue() -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (
+      Self {
+        tx,
+        stopping: watch::channel(false).1,
+      },
+      rx,
+    )
+  }
+
   /// Serialize `value` and queue it (with its NUL terminator) for the
-  /// writer thread. Errors on JSON encoding failure or when the
-  /// writer thread has exited (pipe closed).
+  /// writer task. Errors on JSON encoding failure or a closed transport.
   pub fn send(&self, value: &Value) -> Result<(), TransportError> {
-    let mut payload = serde_json::to_vec(value)?;
+    self.send_checked(value, || Ok(()))
+  }
+
+  pub(crate) fn send_checked<E: From<TransportError>>(
+    &self,
+    value: &impl serde::Serialize,
+    check: impl FnOnce() -> Result<(), E>,
+  ) -> Result<(), E> {
+    let mut payload = serde_json::to_vec(value).map_err(TransportError::from)?;
     payload.push(0);
-    self.tx.send(payload).map_err(|_| TransportError::Closed)
+    check()?;
+    if *self.stopping.borrow() {
+      return Err(TransportError::Closed.into());
+    }
+    self.tx.send(payload).map_err(|_| TransportError::Closed.into())
   }
 }
 
-/// Owns both halves of a `--inspector-pipe` connection. Spawns one
-/// background thread to drain the reader, exposing the decoded frames
-/// via [`ReaderHandle::recv`]. Writes happen synchronously through
-/// [`WriterHandle::send`].
+/// Owns both halves and the I/O tasks of a `--inspector-pipe` connection.
 pub struct Transport {
   pub reader: ReaderHandle,
   pub writer: WriterHandle,
+  pub(crate) shutdown: watch::Sender<bool>,
+  pub(crate) tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Transport {
-  /// Construct a transport from raw blocking read + write halves.
-  /// Usually called with the `Stdio::piped()` fds 3/4 of a spawned
-  /// `pw_run.sh` child. The reader/writer threads are named so they
-  /// show up as `webkit-reader` / `webkit-writer` in `tokio-console` /
-  /// `ps`.
-  /// # Panics
-  ///
-  /// Panics if the OS refuses to spawn the reader or writer thread
-  /// (vanishingly rare — would also block almost everything else in
-  /// tokio).
+  /// Construct a transport from asynchronous pipe halves.
   pub fn new<R, W>(read: R, write: W) -> Self
   where
-    R: Read + Send + 'static,
-    W: Write + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
   {
     let (tx, rx) = mpsc::unbounded_channel();
-    std::thread::Builder::new()
-      .name("webkit-reader".into())
-      .spawn(move || drain_reader(read, &tx))
-      .unwrap_or_else(|e| panic!("spawn webkit-reader: {e}"));
+    let (shutdown, stopping) = watch::channel(false);
+    let mut reader_stop = stopping.clone();
+    let reader_ended = shutdown.clone();
+    let reader = tokio::spawn(async move {
+      tokio::select! {
+        biased;
+        _ = reader_stop.wait_for(|stopping| *stopping) => {},
+        () = drain_reader(read, &tx) => {},
+      }
+      reader_ended.send_replace(true);
+    });
     let (wtx, wrx) = mpsc::unbounded_channel::<Vec<u8>>();
-    std::thread::Builder::new()
-      .name("webkit-writer".into())
-      .spawn(move || drain_writer(write, wrx))
-      .unwrap_or_else(|e| panic!("spawn webkit-writer: {e}"));
+    let mut writer_stop = stopping.clone();
+    let writer_ended = shutdown.clone();
+    let writer = tokio::spawn(async move {
+      tokio::select! {
+        biased;
+        _ = writer_stop.wait_for(|stopping| *stopping) => {},
+        () = drain_writer(write, wrx) => {},
+      }
+      writer_ended.send_replace(true);
+    });
     Transport {
       reader: ReaderHandle { rx },
-      writer: WriterHandle { tx: wtx },
+      writer: WriterHandle { tx: wtx, stopping },
+      shutdown,
+      tasks: vec![reader, writer],
     }
   }
 }
 
-fn drain_writer<W: Write>(mut write: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
-  while let Some(frame) = rx.blocking_recv() {
-    if write.write_all(&frame).is_err() || write.flush().is_err() {
+async fn drain_writer<W: AsyncWrite + Unpin>(mut write: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+  while let Some(frame) = rx.recv().await {
+    if write.write_all(&frame).await.is_err() || write.flush().await.is_err() {
       // Pipe gone — the reader thread sees EOF and fails pending
       // callbacks; nothing to report from here.
       break;
@@ -120,14 +145,14 @@ fn drain_writer<W: Write>(mut write: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>
   }
 }
 
-fn drain_reader<R: Read>(read: R, tx: &mpsc::UnboundedSender<Result<Value, TransportError>>) {
+async fn drain_reader<R: AsyncRead + Unpin>(read: R, tx: &mpsc::UnboundedSender<Result<Value, TransportError>>) {
   // `BufRead::read_until` on a NUL terminator gives us exactly one
   // envelope per call. The trailing NUL is included in the returned
   // buffer; we strip it before decoding.
   let mut buf = BufReader::new(read);
   loop {
     let mut frame = Vec::with_capacity(1024);
-    match buf.read_until(0, &mut frame) {
+    match buf.read_until(0, &mut frame).await {
       Ok(0) => break, // EOF
       Ok(_) => {
         if frame.last() == Some(&0) {
@@ -153,17 +178,28 @@ fn drain_reader<R: Read>(read: R, tx: &mpsc::UnboundedSender<Result<Value, Trans
 mod tests {
   use super::*;
   use std::io::Cursor;
-  use std::sync::{Arc, Mutex};
-
-  struct WriterRef(Arc<Mutex<Vec<u8>>>);
-  impl Write for WriterRef {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-      self.0.lock().unwrap().extend_from_slice(b);
-      Ok(b.len())
+  #[test]
+  fn admission_is_checked_after_encoding_without_queueing_rejected_frames() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    struct Encoding<'a>(&'a AtomicBool);
+    impl serde::Serialize for Encoding<'_> {
+      fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.store(true, Ordering::SeqCst);
+        serializer.serialize_str("encoded")
+      }
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-      Ok(())
-    }
+    let encoded = AtomicBool::new(false);
+    let (writer, mut receiver) = WriterHandle::test_queue();
+    let result = writer.send_checked(&Encoding(&encoded), || {
+      if encoded.load(Ordering::SeqCst) {
+        Err(TransportError::Closed)
+      } else {
+        Ok(())
+      }
+    });
+    assert!(result.is_err());
+    assert!(receiver.try_recv().is_err());
+    assert!(encoded.load(Ordering::SeqCst));
   }
 
   #[tokio::test]
@@ -179,21 +215,18 @@ mod tests {
 
   #[tokio::test]
   async fn writer_appends_nul() {
-    let buf_handle = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let transport = Transport::new(Cursor::new(Vec::<u8>::new()), WriterRef(buf_handle.clone()));
+    let (read, _read_peer) = tokio::io::duplex(64);
+    let (write, mut output) = tokio::io::duplex(64);
+    let transport = Transport::new(read, write);
     transport.writer.send(&serde_json::json!({"id": 42})).unwrap();
-    // The write happens on the webkit-writer thread — wait for it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-      {
-        let buf = buf_handle.lock().unwrap();
-        if !buf.is_empty() {
-          assert_eq!(&buf[..], b"{\"id\":42}\0");
-          break;
-        }
-      }
-      assert!(std::time::Instant::now() < deadline, "writer thread never flushed");
-      tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    let mut bytes = [0; 10];
+    tokio::time::timeout(
+      std::time::Duration::from_secs(1),
+      tokio::io::AsyncReadExt::read_exact(&mut output, &mut bytes),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&bytes, b"{\"id\":42}\0");
   }
 }

@@ -274,12 +274,12 @@ async fn create_prepared(
   opts: ferridriver::options::BrowserContextOptions,
   backend: ferridriver::backend::BackendKind,
 ) -> ferridriver::error::Result<Prepared> {
-  match open(browser, &key, opts.clone(), backend).await {
+  match Box::pin(open(browser, &key, opts.clone(), backend)).await {
     Ok(prepared) => Ok(prepared),
     // Firefox occasionally hands back a BrowsingContext whose Window is
     // not wired up yet; the un-pooled path retries once for the same
     // reason (`is_retryable_bidi_page_error`).
-    Err(e) if crate::worker::is_retryable_bidi_page_error(&e) => open(browser, &key, opts, backend).await,
+    Err(e) if crate::worker::is_retryable_bidi_page_error(&e) => Box::pin(open(browser, &key, opts, backend)).await,
     Err(e) => Err(e),
   }
 }

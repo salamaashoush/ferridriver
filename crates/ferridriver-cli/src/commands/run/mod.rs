@@ -87,7 +87,7 @@ async fn provision_for_run(mcp: ferridriver_config::mcp::McpConfig, args: &cli::
   };
   // Boxed: the future holds the whole `[mcp]` config plus the launch state it
   // builds, which is several kilobytes to carry inline on the stack.
-  let p = Box::pin(instance::provision_instance(mcp, name, args.headed, args.fresh)).await?;
+  let p = Box::pin(instance::provision_instance(mcp, name, args.headed, args.fresh, None)).await?;
   let owned = (p.created_session || (p.launched && args.fresh)).then(|| Arc::clone(&p.browser));
   Ok(RunBrowser {
     page: Some(p.page),
@@ -206,8 +206,10 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
   };
   // The browser has to be closed whichever way the rest of this ends, including
   // the bundle and session-create failures that would otherwise return past it.
+  let resources = Arc::new(ferridriver_script::SessionResources::default());
   let outcome: anyhow::Result<_> = async {
-    let session = ferridriver_script::Session::create(engine_config, &ctx)
+    let session = resources
+      .create(engine_config, &ctx)
       .await
       .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
 
@@ -237,8 +239,23 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
   }
   .await;
 
-  let (result, report) = close_owned_browser(owned_browser, outcome).await?;
+  let (result, report) = close_owned_resources(&resources, owned_browser, outcome).await?;
   report_code_result(&result, &collected_code, report.as_ref())
+}
+
+async fn close_owned_resources<T>(
+  resources: &ferridriver_script::SessionResources,
+  owned_browser: Option<Arc<ferridriver::Browser>>,
+  outcome: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+  let outcome = close_owned_browser(owned_browser, outcome).await;
+  match resources.close().await {
+    Ok(()) => outcome,
+    Err(cleanup) => Err(match outcome {
+      Err(error) => error.context(format!("script resource cleanup also failed: {}", cleanup.message)),
+      Ok(_) => anyhow::anyhow!("script resource cleanup failed: {}", cleanup.message),
+    }),
+  }
 }
 
 async fn close_owned_browser<T>(

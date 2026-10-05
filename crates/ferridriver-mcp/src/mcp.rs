@@ -85,20 +85,26 @@ where
       () = signal => (Ok(()), true),
     }
   };
-  if tokio::time::timeout(SHUTDOWN_TIMEOUT, server.shutdown_browsers())
-    .await
-    .is_err()
-  {
-    tracing::warn!("browser shutdown timed out; leaving reclamation to the next start");
+  let cleanup = match tokio::time::timeout(SHUTDOWN_TIMEOUT, Box::pin(server.shutdown())).await {
+    Ok(Ok(())) => Ok(()),
+    Ok(Err(error)) => Err(anyhow::anyhow!("browser shutdown failed: {error}")),
+    Err(_) => Err(anyhow::anyhow!("browser shutdown timed out")),
+  };
+  if let Err(error) = &cleanup {
+    tracing::warn!(%error, "shutdown did not finish cleanup");
   }
+  let outcome = match (outcome, cleanup) {
+    (Ok(()), cleanup) => cleanup,
+    (Err(error), Ok(())) => Err(error),
+    (Err(error), Err(cleanup)) => Err(error.context(format!("{cleanup:#}"))),
+  };
   if signalled {
     // Installing a handler took over the signal's default "terminate
     // now", and unwinding back through main does not get us there:
     // dropping the runtime waits on the blocking stdin read of the
     // stdio transport, which only returns when the client closes the
-    // pipe. The browsers are already down, so exit deliberately rather
-    // than sit there until someone sends SIGKILL.
-    std::process::exit(0);
+    // pipe. Exit after reporting cleanup rather than waiting for stdin.
+    std::process::exit(i32::from(outcome.is_err()));
   }
   outcome
 }

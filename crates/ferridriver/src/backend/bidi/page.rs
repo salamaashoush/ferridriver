@@ -512,7 +512,7 @@ impl BidiPage {
 
   /// Helper: send a `BiDi` command.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-    self.session.transport.send_command(method, params).await
+    self.session.send_command(method, params).await
   }
 
   pub(crate) fn is_retryable_context_error(err: &str) -> bool {
@@ -835,6 +835,13 @@ impl BidiPage {
         "requestGC: TestUtils.gc() is unavailable in this Firefox build over WebDriver BiDi",
       ));
     }
+    Ok(())
+  }
+
+  pub async fn bring_to_front(&self) -> Result<()> {
+    self
+      .cmd("browsingContext.activate", json!({"context": &*self.context_id}))
+      .await?;
     Ok(())
   }
 
@@ -2109,7 +2116,6 @@ impl BidiPage {
   async fn set_permission(&self, permission: &str, state: &str, origin: &str) -> Result<()> {
     self
       .session
-      .transport
       .send_command(
         "permissions.setPermission",
         json!({
@@ -3359,7 +3365,6 @@ impl BidiPage {
     is_function: Option<bool>,
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
-    use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
     use crate::protocol::HandleId;
     use serde_json::json;
 
@@ -3396,6 +3401,69 @@ impl BidiPage {
       self.ensure_engine_injected_in(target_ctx).await?;
     }
 
+    Box::pin(self.call_utility_in_target(
+      fn_source,
+      args,
+      handles,
+      json!({"context":target_ctx}),
+      is_function,
+      return_by_value,
+    ))
+    .await
+  }
+
+  pub(crate) async fn evaluate_isolated(
+    &self,
+    source: &str,
+    arg: &crate::protocol::SerializedArgument,
+    frame_id: &str,
+  ) -> Result<crate::protocol::SerializedValue> {
+    let target = json!({"context":frame_id,"sandbox":"__ferridriver_webmcp"});
+    let injected = self
+      .cmd(
+        "script.evaluate",
+        json!({
+          "expression":crate::selectors::UTILITY_SCRIPT_JS,
+          "target":&target, "awaitPromise":true, "resultOwnership":"none",
+        }),
+      )
+      .await?;
+    let injected: super::types::EvaluateResult = serde_json::from_value(injected)?;
+    if let super::types::EvaluateResult::Exception { exception_details } = injected {
+      return Err(FerriError::evaluation(exception_details.text));
+    }
+    match self
+      .call_utility_in_target(
+        source,
+        std::slice::from_ref(&arg.value),
+        &arg.handles,
+        target,
+        Some(true),
+        true,
+      )
+      .await?
+    {
+      crate::js_handle::EvaluateResult::Value(value) => Ok(value),
+      crate::js_handle::EvaluateResult::Handle(..) => {
+        Err(FerriError::protocol("isolated evaluation", "expected a value"))
+      },
+    }
+  }
+
+  async fn call_utility_in_target(
+    &self,
+    fn_source: &str,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
+    target: serde_json::Value,
+    is_function: Option<bool>,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult> {
+    use crate::protocol::HandleId;
+    let target_ctx = target["context"]
+      .as_str()
+      .ok_or_else(|| FerriError::protocol("utility evaluation", "missing browsing context"))?
+      .to_owned();
     let args_json = serde_json::to_string(args)?;
     let count = args.len();
 
@@ -3445,7 +3513,7 @@ impl BidiPage {
 
     let params = json!({
       "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
-      "target": {"context": target_ctx},
+      "target": target,
       "arguments": arguments,
       "awaitPromise": true,
       "resultOwnership": if return_by_value { "none" } else { "root" },
@@ -3455,6 +3523,16 @@ impl BidiPage {
     let eval_result: super::types::EvaluateResult = serde_json::from_value(response)
       .map_err(|e| FerriError::Backend(format!("BiDi call_utility_evaluate parse: {e}")))?;
 
+    self.parse_utility_result(eval_result, &target_ctx, return_by_value)
+  }
+
+  fn parse_utility_result(
+    &self,
+    eval_result: super::types::EvaluateResult,
+    target_ctx: &str,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult> {
+    use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
     match eval_result {
       super::types::EvaluateResult::Exception { exception_details } => Err(FerriError::evaluation(format!(
         "Evaluation error: {}",

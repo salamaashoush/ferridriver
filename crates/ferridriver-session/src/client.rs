@@ -41,6 +41,8 @@ impl SessionClient {
     let stream = match Endpoint::parse(endpoint) {
       #[cfg(unix)]
       Endpoint::Unix(path) => Stream::Unix(UnixStream::connect(&path).await?),
+      #[cfg(unix)]
+      Endpoint::OwnedUnix(directory) => Stream::Unix(UnixStream::connect(directory.path().join("ipc.sock")).await?),
       Endpoint::Tcp(addr) => Stream::Tcp(TcpStream::connect(&addr).await?),
     };
     Ok(Self {

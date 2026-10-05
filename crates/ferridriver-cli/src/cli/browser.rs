@@ -7,6 +7,9 @@ use ferridriver::state::ConnectMode;
 /// Browser backend and connection options.
 #[derive(Args, Clone)]
 pub struct BrowserArgs {
+  /// Browser to automate; its driver is selected automatically.
+  #[arg(long, help_heading = "Browser")]
+  pub browser: Option<ferridriver::options::BrowserKind>,
   /// Browser backend to use. Unset means "whatever the config says",
   /// falling back to `cdp-pipe`; there is deliberately no clap default,
   /// because a default is indistinguishable from an explicit choice and
@@ -28,7 +31,7 @@ pub struct BrowserArgs {
   #[arg(long, help_heading = "Browser")]
   pub executable_path: Option<String>,
 
-  /// Connect to a running browser at the given WebSocket URL.
+  /// Connect to a browser or `WebDriver` endpoint.
   #[arg(long, help_heading = "Browser")]
   pub connect: Option<String>,
 
@@ -49,6 +52,7 @@ pub struct BrowserArgs {
 /// so a report can never describe a resolution the server does not
 /// perform.
 pub struct EffectiveBrowser {
+  pub browser: ferridriver::options::BrowserKind,
   pub backend: ferridriver::backend::BackendKind,
   pub headless: bool,
   /// Whether the value came from the command line rather than the file,
@@ -58,15 +62,26 @@ pub struct EffectiveBrowser {
 }
 
 /// Apply CLI-over-config precedence for the browser flags.
-pub fn effective_browser(args: &BrowserArgs, mcp: &ferridriver_config::mcp::McpConfig) -> EffectiveBrowser {
+/// # Errors
+/// Rejects incompatible browser and protocol choices after applying CLI precedence.
+pub fn effective_browser(
+  args: &BrowserArgs,
+  mcp: &ferridriver_config::mcp::McpConfig,
+) -> anyhow::Result<EffectiveBrowser> {
   let cli_backend = args.backend_kind();
   let cli_headless = args.headless_override();
-  EffectiveBrowser {
-    backend: cli_backend.unwrap_or_else(|| mcp.backend_kind()),
+  let (configured_browser, configured_backend) = mcp.browser_choices();
+  let selection = ferridriver::options::BrowserSelection::resolve(
+    args.browser.or(configured_browser),
+    cli_backend.or_else(|| args.browser.is_none().then_some(configured_backend).flatten()),
+  )?;
+  Ok(EffectiveBrowser {
+    browser: selection.browser,
+    backend: selection.backend,
     headless: cli_headless.unwrap_or_else(|| mcp.headless()),
     backend_from_cli: cli_backend.is_some(),
     headless_from_cli: cli_headless.is_some(),
-  }
+  })
 }
 
 impl BrowserArgs {
@@ -79,12 +94,7 @@ impl BrowserArgs {
   /// The backend wire name the user asked for, for the string-typed
   /// `[test]` override path.
   pub fn backend_name(&self) -> Option<&'static str> {
-    self.backend.as_ref().map(|b| match b {
-      Backend::CdpPipe => "cdp-pipe",
-      Backend::CdpRaw => "cdp-raw",
-      Backend::WebKit => "webkit",
-      Backend::Bidi => "bidi",
-    })
+    self.backend_kind().map(BackendKind::name)
   }
 
   /// Explicit headed/headless choice, or `None` when neither flag was
@@ -116,10 +126,13 @@ pub struct TransportArgs {
 #[derive(Clone, ValueEnum)]
 pub enum Backend {
   CdpPipe,
-  CdpRaw,
+  #[value(name = "cdp-ws", alias = "cdp-raw")]
+  CdpWs,
   #[value(name = "webkit")]
   WebKit,
   Bidi,
+  #[value(name = "webdriver", alias = "web-driver")]
+  WebDriver,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -131,9 +144,10 @@ pub enum Transport {
 pub fn backend_to_kind(b: &Backend) -> BackendKind {
   match b {
     Backend::CdpPipe => BackendKind::CdpPipe,
-    Backend::CdpRaw => BackendKind::CdpRaw,
+    Backend::CdpWs => BackendKind::CdpWs,
     Backend::WebKit => BackendKind::WebKit,
     Backend::Bidi => BackendKind::Bidi,
+    Backend::WebDriver => BackendKind::WebDriver,
   }
 }
 

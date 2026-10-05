@@ -95,7 +95,7 @@ pub async fn run(root: &Path, scenario: Scenario) -> Result<Value> {
   let (backend, kind) = match scenario {
     Scenario::Firefox | Scenario::Temporary => (BackendKind::Bidi, BrowserKind::Firefox),
     Scenario::Webkit => (BackendKind::WebKit, BrowserKind::WebKit),
-    Scenario::Adopted => (BackendKind::CdpRaw, BrowserKind::Chromium),
+    Scenario::Adopted => (BackendKind::CdpWs, BrowserKind::Chromium),
     _ => (BackendKind::CdpPipe, BrowserKind::Chromium),
   };
   let mut state = BrowserState::with_plan(
@@ -127,9 +127,9 @@ pub async fn run(root: &Path, scenario: Scenario) -> Result<Value> {
     None
   };
   let result = observe(&mut state, scenario, &profile).await;
-  state.shutdown().await;
+  state.shutdown().await?;
   if let Some(child) = &mut external {
-    child.shutdown().await;
+    child.shutdown().await?;
   }
   let mut result = result?;
   result["after"] = profile_state(&profile);

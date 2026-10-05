@@ -47,65 +47,7 @@ pub struct McpConfig {
   instructions_cache: std::sync::OnceLock<String>,
 }
 
-/// Which browser backend drives an instance.
-///
-/// A typed enum, not a string: a misspelled backend used to fall
-/// through to `cdp-pipe` silently, so a config asking for Firefox
-/// quietly drove Chrome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BackendChoice {
-  CdpPipe,
-  CdpRaw,
-  Bidi,
-  #[serde(rename = "webkit")]
-  WebKit,
-}
-
-impl BackendChoice {
-  /// The wire spelling, for diagnostics and for handing back to
-  /// consumers that still take a string.
-  #[must_use]
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::CdpPipe => "cdp-pipe",
-      Self::CdpRaw => "cdp-raw",
-      Self::Bidi => "bidi",
-      Self::WebKit => "webkit",
-    }
-  }
-
-  /// Every accepted spelling, for error messages.
-  pub const ALL: &'static [&'static str] = &["cdp-pipe", "cdp-raw", "bidi", "webkit"];
-
-  /// Parse a wire spelling.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error naming the bad value and listing the valid ones.
-  /// Callers must not fall back to a default: picking `cdp-pipe` for a
-  /// typo is how a run silently drives the wrong engine.
-  pub fn parse(value: &str) -> anyhow::Result<Self> {
-    match value {
-      "cdp-pipe" => Ok(Self::CdpPipe),
-      "cdp-raw" => Ok(Self::CdpRaw),
-      "bidi" => Ok(Self::Bidi),
-      "webkit" => Ok(Self::WebKit),
-      other => anyhow::bail!("unknown backend {other:?} (expected one of {})", Self::ALL.join(", ")),
-    }
-  }
-
-  /// The engine-level backend this choice selects.
-  #[must_use]
-  pub fn kind(self) -> BackendKind {
-    match self {
-      Self::CdpPipe => BackendKind::CdpPipe,
-      Self::CdpRaw => BackendKind::CdpRaw,
-      Self::Bidi => BackendKind::Bidi,
-      Self::WebKit => BackendKind::WebKit,
-    }
-  }
-}
+pub use ferridriver::backend::BackendKind as BackendChoice;
 
 /// MCP server metadata configuration.
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -139,6 +81,7 @@ pub struct ServerConfig {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BrowserConfig {
+  pub browser: Option<ferridriver::options::BrowserKind>,
   /// Browser backend (default `cdp-pipe`).
   pub backend: Option<BackendChoice>,
   /// Run browsers in headless mode.
@@ -215,19 +158,36 @@ impl McpConfig {
       )
   }
 
-  /// Resolve the `BackendKind` from config (defaults to `CdpPipe`).
-  ///
-  /// No platform gate: the `WebKit` backend drives Playwright's
-  /// cross-platform build over `pw_run.sh`, so it is selectable on
-  /// Linux as well as macOS. Gating it to macOS turned `backend =
-  /// "webkit"` into a silent `cdp-pipe` run everywhere else.
+  #[must_use]
+  pub fn browser_choices(&self) -> (Option<ferridriver::options::BrowserKind>, Option<BackendKind>) {
+    let global = self.browser.global_browser.as_ref();
+    let browser = self.browser.browser.or_else(|| global.and_then(|g| g.browser));
+    let backend = self.browser.backend.or_else(|| {
+      self
+        .browser
+        .browser
+        .is_none()
+        .then(|| global.and_then(|g| g.backend))
+        .flatten()
+    });
+    (browser, backend)
+  }
+
+  /// # Errors
+  /// Rejects a browser and protocol combination that cannot run together.
+  pub fn browser_selection(&self) -> ferridriver::error::Result<ferridriver::options::BrowserSelection> {
+    let (browser, backend) = self.browser_choices();
+    ferridriver::options::BrowserSelection::resolve(browser, backend)
+  }
+
   #[must_use]
   pub fn backend_kind(&self) -> BackendKind {
-    self
-      .browser
-      .backend
-      .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.backend))
-      .map_or(BackendKind::CdpPipe, BackendChoice::kind)
+    let (browser, backend) = self.browser_choices();
+    backend.unwrap_or_else(|| {
+      browser
+        .unwrap_or(ferridriver::options::BrowserKind::Chromium)
+        .default_backend()
+    })
   }
 
   /// Whether headless mode is enabled (defaults to false).
@@ -268,8 +228,10 @@ impl McpConfig {
   ///
   /// Returns an error when the section-level proxy declares credentials.
   pub fn base_overrides(&self, instance: &str) -> Result<InstanceOverrides, String> {
+    let selection = self.browser_selection().map_err(|error| error.to_string())?;
     instance_overrides_from(
       &InstanceConfig {
+        browser: Some(selection.browser),
         args: self.browser.chrome_args.clone(),
         user_data_dir: self.browser.user_data_dir.clone(),
         executable_path: self.browser.executable_path.clone(),
@@ -277,10 +239,7 @@ impl McpConfig {
           .browser
           .headless
           .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.headless)),
-        backend: self
-          .browser
-          .backend
-          .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.backend)),
+        backend: Some(selection.backend),
         env: self.browser.env.clone(),
         proxy: self.browser.proxy.clone(),
         ignore_default_args: self.browser.ignore_default_args.clone(),
@@ -302,6 +261,7 @@ impl McpConfig {
 
   fn routing(&self) -> RoutingView<'_> {
     RoutingView {
+      browser: self.browser.browser,
       global: self.browser.global_browser.as_ref(),
       instances: &self.browser.instances,
       default_instance: self.browser.default_instance.as_ref(),
@@ -311,6 +271,15 @@ impl McpConfig {
       cache_ttl: self.cache_ttl(),
       backend: self.backend_kind(),
     }
+  }
+
+  /// # Errors
+  /// Rejects invalid or unknown instance names before applying caller overrides.
+  pub fn instance_settings(&self, instance: &str) -> Result<InstanceConfig, String> {
+    crate::browser::validate_instance_name(instance)?;
+    let routing = self.routing();
+    routing.reject_unknown_instance(instance)?;
+    Ok(routing.config_for(instance).cloned().unwrap_or_default())
   }
 
   /// Every launch setting for `instance`: section defaults, the
@@ -325,6 +294,9 @@ impl McpConfig {
     let mut merged = self.base_overrides(instance)?;
     let per_instance = self.routing().overrides_for(instance)?;
 
+    merged.kind = per_instance
+      .kind
+      .or(merged.kind.filter(|_| per_instance.backend.is_none()));
     merged.args.extend(per_instance.args);
     if per_instance.user_data_dir.is_some() {
       merged.user_data_dir = per_instance.user_data_dir;
@@ -410,6 +382,27 @@ mod tests {
   }
 
   #[test]
+  fn section_browser_replaces_global_protocol_but_explicit_conflicts_fail() {
+    use ferridriver::options::BrowserKind;
+    let mut config = McpConfig::default();
+    config.browser.global_browser = Some(crate::browser::BrowserSectionConfig {
+      browser: Some(BrowserKind::Chromium),
+      backend: Some(BackendKind::CdpPipe),
+      ..Default::default()
+    });
+    config.browser.browser = Some(BrowserKind::Firefox);
+    let selection = config.browser_selection().unwrap();
+    assert_eq!(selection.browser, BrowserKind::Firefox);
+    assert_eq!(selection.backend, BackendKind::Bidi);
+    let overrides = config.base_overrides("default").unwrap();
+    assert_eq!(overrides.kind, Some(BrowserKind::Firefox));
+    assert_eq!(overrides.backend, Some(BackendKind::Bidi));
+    config.browser.backend = Some(BackendKind::CdpPipe);
+    assert!(config.browser_selection().is_err());
+    assert!(config.base_overrides("default").is_err());
+  }
+
+  #[test]
   fn default_config_has_sane_defaults() {
     let config = McpConfig::default();
     assert_eq!(config.server_name(), "ferridriver");
@@ -419,6 +412,43 @@ mod tests {
     assert!(config.resolve_instance("dev").is_none());
     assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
     assert!(!config.headless());
+  }
+
+  #[test]
+  fn instance_protocol_replaces_an_inherited_browser_product() {
+    use ferridriver::options::{BrowserKind, BrowserSelection};
+    for (backend, browser) in [
+      (BackendKind::Bidi, BrowserKind::Firefox),
+      (BackendKind::WebKit, BrowserKind::WebKit),
+    ] {
+      let mut config = McpConfig::default();
+      config.browser.browser = Some(BrowserKind::Chromium);
+      config.browser.instances.insert(
+        "target".into(),
+        InstanceConfig {
+          backend: Some(backend),
+          ..Default::default()
+        },
+      );
+      let overrides = config.instance_overrides("target").unwrap();
+      let selected = BrowserSelection::resolve(overrides.kind, overrides.backend).unwrap();
+      assert_eq!(selected.browser, browser);
+      assert_eq!(selected.backend, backend);
+    }
+  }
+
+  #[test]
+  fn selecting_a_desktop_browser_preserves_the_callers_headless_default() {
+    use ferridriver::options::BrowserKind;
+    for browser in [BrowserKind::Chromium, BrowserKind::Firefox, BrowserKind::WebKit] {
+      let mut config = McpConfig::default();
+      config.browser.browser = Some(browser);
+      assert_eq!(config.base_overrides("default").unwrap().headless, None);
+      config.browser.headless = Some(true);
+      assert_eq!(config.base_overrides("default").unwrap().headless, Some(true));
+      config.browser.headless = Some(false);
+      assert_eq!(config.base_overrides("default").unwrap().headless, Some(false));
+    }
   }
 
   #[test]
@@ -442,8 +472,8 @@ mod tests {
   fn backend_parsing() {
     let mut config = McpConfig::default();
     assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
-    config.browser.backend = Some(BackendChoice::CdpRaw);
-    assert_eq!(config.backend_kind(), BackendKind::CdpRaw);
+    config.browser.backend = Some(BackendChoice::CdpWs);
+    assert_eq!(config.backend_kind(), BackendKind::CdpWs);
     config.browser.backend = Some(BackendChoice::Bidi);
     assert_eq!(config.backend_kind(), BackendKind::Bidi);
   }
@@ -463,6 +493,32 @@ mod tests {
     let msg = err.to_string();
     assert!(msg.contains("chrom-pipe"), "names the bad value: {msg}");
     assert!(msg.contains("cdp-pipe"), "lists valid values: {msg}");
+  }
+
+  #[test]
+  fn websocket_legacy_name_deserializes_to_the_canonical_name() {
+    let backend: BackendChoice = serde_json::from_str("\"cdp-raw\"").unwrap();
+    assert_eq!(backend, BackendChoice::CdpWs);
+    assert_eq!(serde_json::to_string(&backend).unwrap(), "\"cdp-ws\"");
+  }
+
+  #[test]
+  fn safari_instance_selects_its_driver_and_remote_protocol() {
+    let config: McpConfig = serde_json::from_value(serde_json::json!({
+      "browser": { "instances": {
+        "safari": { "browser": "safari" },
+        "remote-safari": { "browser": "safari", "connectUrl": "http://127.0.0.1:4444" }
+      }}
+    }))
+    .unwrap();
+    let launch = config.instance_overrides("safari").unwrap();
+    assert_eq!(launch.kind, Some(ferridriver::options::BrowserKind::Safari));
+    assert_eq!(launch.backend, Some(BackendKind::WebDriver));
+    assert_eq!(launch.headless, Some(false));
+    let Some(ConnectMode::WebDriver { browser_name, .. }) = config.resolve_instance("remote-safari") else {
+      panic!("expected WebDriver negotiation");
+    };
+    assert_eq!(browser_name, "safari");
   }
 
   #[test]
@@ -504,7 +560,7 @@ mod tests {
         args: vec!["--staging".into()],
         headless: Some(false),
         user_data_dir: Some("/profiles/${INSTANCE}".into()),
-        backend: Some(BackendChoice::CdpRaw),
+        backend: Some(BackendChoice::CdpWs),
         env: BTreeMap::from([("APP_ENV".to_string(), "staging".to_string())]),
         ..Default::default()
       },
@@ -514,7 +570,7 @@ mod tests {
     assert_eq!(o.args, ["--base", "--staging"], "section args come first");
     assert_eq!(o.headless, Some(false));
     assert_eq!(o.user_data_dir.as_deref(), Some("/profiles/staging"));
-    assert_eq!(o.backend, Some(BackendKind::CdpRaw));
+    assert_eq!(o.backend, Some(BackendKind::CdpWs));
     assert_eq!(o.env.get("APP_ENV").map(String::as_str), Some("staging"));
   }
 

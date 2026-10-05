@@ -346,7 +346,7 @@ impl ContextRef {
   /// returns it. Called by [`crate::Browser::new_context`] and
   /// [`crate::Browser::default_context`] right after construction.
   #[must_use]
-  pub(crate) fn with_browser(mut self, browser: crate::Browser) -> Self {
+  pub fn with_browser(mut self, browser: crate::Browser) -> Self {
     self.browser = Some(browser);
     self
   }
@@ -634,6 +634,15 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist.
   pub async fn pages(&self) -> Result<Vec<Arc<Page>>> {
+    let needs_discovery = self
+      .state
+      .read()
+      .await
+      .instance_browser(&self.key.instance)
+      .is_some_and(|browser| browser.kind() == crate::backend::BackendKind::WebDriver);
+    if needs_discovery {
+      self.state.write().await.refresh_pages(&self.composite()).await?;
+    }
     let inner_pages = {
       let state = self.state.read().await;
       match state.context(&self.name) {
@@ -1126,7 +1135,7 @@ impl ContextRef {
       // Persistent-context launch contract: closing the context closes
       // the underlying browser too. Playwright:
       // `/tmp/playwright/packages/playwright-core/types/types.d.ts:15199`.
-      state.shutdown().await;
+      state.shutdown().await?;
     }
     Ok(())
   }

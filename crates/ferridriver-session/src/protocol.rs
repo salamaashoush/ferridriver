@@ -54,8 +54,9 @@ impl Command {
   }
 }
 
-/// The only verb a bound browser understands: run a script against it.
+/// Run a script against the bound browser.
 pub const RUN_VERB: &str = "run";
+pub const CLOSE_VERB: &str = "session.close";
 
 /// How the host should treat [`ScriptRequest::code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

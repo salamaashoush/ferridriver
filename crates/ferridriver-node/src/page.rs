@@ -245,6 +245,11 @@ impl Page {
 
 #[napi]
 impl Page {
+  #[napi(getter)]
+  pub fn webmcp(&self) -> crate::web_mcp::WebMcp {
+    crate::web_mcp::WebMcp::wrap(self.inner.webmcp())
+  }
+
   /// Playwright: `page.clock` — the owning context's fake-time
   /// controller (`page.clock` IS `context.clock`).
   #[napi(getter)]

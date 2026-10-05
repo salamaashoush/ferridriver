@@ -76,7 +76,15 @@ pub type SetupFn =
   Arc<dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = ferridriver::error::Result<ArcValue>> + Send>> + Send + Sync>;
 
 /// Async teardown function: receives the Arc value to clean up.
-pub type TeardownFn = Arc<dyn Fn(ArcValue) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+type TeardownFuture = Pin<Box<dyn Future<Output = ferridriver::Result<()>> + Send>>;
+pub type TeardownFn = Arc<dyn Fn(ArcValue) -> TeardownFuture + Send + Sync>;
+
+struct Teardown {
+  name: String,
+  value: ArcValue,
+  callback: TeardownFn,
+  pending: tokio::sync::Mutex<Option<TeardownFuture>>,
+}
 
 /// A fixture value paired with an optional teardown, returned from
 /// `#[fixture]` bodies that need cleanup when their scope ends:
@@ -118,11 +126,18 @@ impl<T: Any + Send + Sync> Fixture<T> {
   pub fn into_parts(self) -> (T, Option<TeardownFn>) {
     let teardown = self.teardown.map(|f| {
       let cell = std::sync::Mutex::new(Some(f));
-      Arc::new(move |value: ArcValue| -> Pin<Box<dyn Future<Output = ()> + Send>> {
+      Arc::new(move |value: ArcValue| -> TeardownFuture {
         let f = cell.lock().ok().and_then(|mut guard| guard.take());
         match (f, value.downcast::<T>()) {
-          (Some(f), Ok(typed)) => f(typed),
-          _ => Box::pin(async {}),
+          (Some(f), Ok(typed)) => Box::pin(async move {
+            f(typed).await;
+            Ok(())
+          }),
+          _ => Box::pin(async {
+            Err(ferridriver::FerriError::backend(
+              "fixture teardown was consumed or received the wrong value type",
+            ))
+          }),
         }
       }) as TeardownFn
     });
@@ -178,7 +193,8 @@ struct FixturePoolInner {
   /// `test.extend` chain or a BDD scenario.
   slots: Arc<Vec<crate::fixture_graph::FixtureSlot>>,
   /// Teardown stack: LIFO order for cleanup. std::sync::Mutex — only locked briefly.
-  teardown_stack: std::sync::Mutex<Vec<(String, TeardownFn)>>,
+  teardown_stack: std::sync::Mutex<Vec<Arc<Teardown>>>,
+  teardown_lock: tokio::sync::Mutex<()>,
   /// Parent pool (for cross-scope access).
   parent: Option<FixturePool>,
   /// This pool's scope.
@@ -195,6 +211,7 @@ impl FixturePool {
         defs: Arc::new(defs),
         slots,
         teardown_stack: std::sync::Mutex::new(Vec::new()),
+        teardown_lock: tokio::sync::Mutex::new(()),
         parent: None,
         scope,
       }),
@@ -209,6 +226,7 @@ impl FixturePool {
         defs: Arc::clone(&self.inner.defs),
         slots: Arc::clone(&self.inner.slots),
         teardown_stack: std::sync::Mutex::new(Vec::new()),
+        teardown_lock: tokio::sync::Mutex::new(()),
         parent: Some(self.clone()),
         scope,
       }),
@@ -217,11 +235,20 @@ impl FixturePool {
 
   /// Register a teardown to run when this pool's scope ends (reverse
   /// registration order). The `#[fixture]` macro calls this for
-  /// [`Fixture`]-returning bodies; the teardown receives the cached
-  /// value for `name`.
-  pub fn register_teardown(&self, name: &str, teardown: TeardownFn) {
-    let mut stack = self.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
-    stack.push((name.to_string(), teardown));
+  /// [`Fixture`]-returning bodies; the teardown retains this exact value
+  /// even if its cache entry is replaced before cleanup starts.
+  pub fn register_teardown(&self, name: &str, value: ArcValue, teardown: TeardownFn) {
+    let mut stack = self
+      .inner
+      .teardown_stack
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    stack.push(Arc::new(Teardown {
+      name: name.to_string(),
+      value,
+      callback: teardown,
+      pending: tokio::sync::Mutex::new(None),
+    }));
   }
 
   /// Create a child pool with additional or overridden fixture definitions.
@@ -239,6 +266,7 @@ impl FixturePool {
         defs: Arc::new(merged),
         slots,
         teardown_stack: std::sync::Mutex::new(Vec::new()),
+        teardown_lock: tokio::sync::Mutex::new(()),
         parent: Some(self.clone()),
         scope,
       }),
@@ -325,6 +353,18 @@ impl FixturePool {
     ensure_resolved(self, name).await
   }
 
+  pub(crate) async fn resolve_worker_dependencies(&self, names: &[String]) -> ferridriver::Result<()> {
+    let order = crate::fixture_graph::dependency_order(&self.inner.slots, names, &|name| self.is_provided(name))
+      .map_err(|error| ferridriver::FerriError::invalid_argument("fixture", error))?;
+    for pos in order {
+      let slot = &self.inner.slots[pos];
+      if slot.scope == FixtureScope::Worker {
+        self.resolve(&slot.name).await?;
+      }
+    }
+    Ok(())
+  }
+
   /// Names of every fixture marked `auto: true` whose scope matches the
   /// argument or any narrower scope (Test fixtures get included for
   /// Test pools; Worker auto fixtures get included for Worker pools).
@@ -347,20 +387,56 @@ impl FixturePool {
   }
 
   /// Tear down all fixtures in this pool (reverse order).
-  pub async fn teardown_all(&self) {
-    let items: Vec<(String, TeardownFn)> = {
-      let mut stack = self.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
-      stack.drain(..).rev().collect()
-    };
-
-    for (name, teardown_fn) in items {
-      let value = self.inner.values.remove(&name).map(|(_, v)| v);
-      if let Some(val) = value {
-        tracing::debug!(target: "ferridriver::fixture", "tearing down fixture: {name}");
-        teardown_fn(val).await;
-      }
+  pub async fn teardown_all(&self) -> ferridriver::Result<()> {
+    let _cleanup = self.inner.teardown_lock.lock().await;
+    loop {
+      let item = self
+        .inner
+        .teardown_stack
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .last()
+        .cloned();
+      let Some(item) = item else { return Ok(()) };
+      let mut pending = item.pending.lock().await;
+      tracing::debug!(target: "ferridriver::fixture", fixture = item.name, "tearing down fixture");
+      let future = pending.get_or_insert_with(|| teardown_future(Arc::clone(&item.callback), Arc::clone(&item.value)));
+      let result = future.await;
+      pending.take();
+      result.map_err(|error| {
+        ferridriver::FerriError::backend(format!("fixture '{}' teardown failed: {error}", item.name))
+      })?;
+      self
+        .inner
+        .values
+        .remove_if(&item.name, |_, current| Arc::ptr_eq(current, &item.value));
+      self
+        .inner
+        .teardown_stack
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|entry| !Arc::ptr_eq(entry, &item));
     }
   }
+}
+
+fn teardown_future(callback: TeardownFn, value: ArcValue) -> TeardownFuture {
+  use futures::FutureExt;
+  Box::pin(async move {
+    std::panic::AssertUnwindSafe(async move { callback(value).await })
+      .catch_unwind()
+      .await
+      .unwrap_or_else(|payload| {
+        let message = payload
+          .downcast_ref::<String>()
+          .map(String::as_str)
+          .or_else(|| payload.downcast_ref::<&str>().copied())
+          .unwrap_or("non-string panic");
+        Err(ferridriver::FerriError::backend(format!(
+          "fixture teardown panicked: {message}"
+        )))
+      })
+  })
 }
 
 /// Ensure a fixture is resolved (trigger creation without needing a
@@ -427,16 +503,19 @@ async fn set_up(pool: &FixturePool, name: &str) -> ferridriver::error::Result<()
   let timeout = def.timeout;
 
   tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
-  let arc_val = ferridriver::pause::run_within(timeout, setup(pool.clone()))
-    .await
-    .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
-    .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
+  let result = if timeout.is_zero() {
+    setup(pool.clone()).await
+  } else {
+    ferridriver::pause::run_within(timeout, setup(pool.clone()))
+      .await
+      .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
+  };
+  let arc_val = result.map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
 
-  pool.inner.values.insert(name.to_string(), arc_val);
   if let Some(td) = teardown {
-    let mut stack = pool.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
-    stack.push((name.to_string(), td));
+    pool.register_teardown(name, Arc::clone(&arc_val), td);
   }
+  pool.inner.values.insert(name.to_string(), arc_val);
   Ok(())
 }
 
@@ -482,10 +561,12 @@ pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> ferridriver::error:
 }
 
 /// Built-in fixture definitions for the ferridriver test runner.
-pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, FixtureDef> {
+/// # Errors
+/// Rejects an invalid browser selection before creating fixture definitions.
+pub fn builtin_fixtures(browser_config: &BrowserConfig) -> ferridriver::error::Result<FxHashMap<String, FixtureDef>> {
   let mut defs = FxHashMap::default();
 
-  let (backend, kind) = browser_config.resolve_kinds();
+  let (backend, kind) = browser_config.resolve_kinds()?;
   let headless = browser_config.headless;
   let executable_path = browser_config.executable_path.clone();
   let args = browser_config.args.clone();
@@ -531,9 +612,10 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       }),
       teardown: Some(Arc::new(|val| {
         Box::pin(async move {
-          if let Ok(browser) = val.downcast::<Browser>() {
-            let _ = browser.close().await;
-          }
+          let browser = val
+            .downcast::<Browser>()
+            .map_err(|_| ferridriver::FerriError::backend("browser fixture has the wrong value type"))?;
+          browser.close().await
         })
       })),
       timeout: Duration::from_secs(30),
@@ -557,9 +639,10 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       }),
       teardown: Some(Arc::new(|val| {
         Box::pin(async move {
-          if let Ok(ctx) = val.downcast::<ferridriver::ContextRef>() {
-            let _ = ctx.close().await;
-          }
+          let context = val
+            .downcast::<ferridriver::ContextRef>()
+            .map_err(|_| ferridriver::FerriError::backend("context fixture has the wrong value type"))?;
+          context.close().await
         })
       })),
       timeout: Duration::from_secs(10),
@@ -587,5 +670,56 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
     },
   );
 
-  defs
+  Ok(defs)
+}
+
+#[cfg(test)]
+mod setup_tests {
+  use super::*;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  #[tokio::test]
+  async fn worker_prerequisites_are_lazy_shared_and_outside_the_body_budget() {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let count = starts.clone();
+    let worker = FixtureDef {
+      name: "browser".into(),
+      scope: FixtureScope::Worker,
+      dependencies: vec![],
+      setup: Arc::new(move |_| {
+        let count = count.clone();
+        Box::pin(async move {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          count.fetch_add(1, Ordering::SeqCst);
+          Ok(Arc::new(42_u32) as ArcValue)
+        })
+      }),
+      teardown: None,
+      timeout: Duration::ZERO,
+      auto: false,
+    };
+    let page = FixtureDef {
+      name: "page".into(),
+      scope: FixtureScope::Test,
+      dependencies: vec!["browser".into()],
+      setup: Arc::new(|_| Box::pin(async { Err(ferridriver::FerriError::backend("test setup must stay lazy")) })),
+      teardown: None,
+      timeout: Duration::from_secs(1),
+      auto: false,
+    };
+    let parent = FixturePool::new(FxHashMap::from_iter([("browser".into(), worker)]), FixtureScope::Worker);
+    let pool = parent.child_with_defs(FxHashMap::from_iter([("page".into(), page)]), FixtureScope::Test);
+    pool.resolve_worker_dependencies(&[]).await.unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    pool.resolve_worker_dependencies(&["page".into()]).await.unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert!(pool.try_get_cached::<u32>("page").is_none());
+    pool.resolve_worker_dependencies(&["page".into()]).await.unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let browser = ferridriver::pause::run_within(Duration::from_millis(1), pool.get::<u32>("browser"))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(*browser, 42);
+  }
 }

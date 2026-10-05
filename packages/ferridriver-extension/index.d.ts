@@ -145,7 +145,7 @@ export interface Commands {
     stdout?: string;
     stderr?: string;
   };
-  stop(name: string): void;
+  stop(name: string): Promise<void>;
 }
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace';

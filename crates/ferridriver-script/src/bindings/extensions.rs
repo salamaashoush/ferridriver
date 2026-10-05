@@ -30,7 +30,7 @@ use crate::bindings::convert::{json_to_js, serde_from_js};
 use crate::command_spec::CommandSpec;
 use crate::engine::SessionProcsUd;
 use crate::error::ScriptError;
-use crate::session_procs::{self, SessionProcs};
+use crate::session_procs::SessionProcs;
 
 /// One extension file handed to the engine at `install_extensions` time:
 /// its precompiled bytecode plus a display name for diagnostics. Tool
@@ -118,7 +118,8 @@ impl ExtensionCommandsJs {
     let resolved = spec
       .resolve(&vars_map)
       .map_err(|m| Self::cmd_err("commands.exec", format!("{name}: {m}")))?;
-    let result = Box::pin(session_procs::exec_oneshot(&resolved))
+    let registry = self.registry("commands.exec")?;
+    let result = Box::pin(registry.exec_oneshot(&resolved))
       .await
       .map_err(|m| Self::cmd_err("commands.exec", format!("{name}: {m}")))?;
     let value = serde_json::to_value(result).map_err(|m| Self::cmd_err("commands.exec", m))?;
@@ -133,7 +134,8 @@ impl ExtensionCommandsJs {
     let resolved = spec
       .resolve(&vars_map)
       .map_err(|m| Self::cmd_err("commands.run", format!("{name}: {m}")))?;
-    let value = Box::pin(session_procs::run_oneshot(&resolved))
+    let registry = self.registry("commands.run")?;
+    let value = Box::pin(registry.run_oneshot(&resolved))
       .await
       .map_err(|m| Self::cmd_err("commands.run", format!("{name}: {m}")))?;
     json_to_js(&ctx, &value)
@@ -231,10 +233,11 @@ impl ExtensionCommandsJs {
 
   /// Persistent: kill the process group.
   #[qjs(rename = "stop")]
-  pub fn stop(&self, name: String) -> rquickjs::Result<()> {
+  pub async fn stop(&self, name: String) -> rquickjs::Result<()> {
     self
       .registry("commands.stop")?
       .stop(&name)
+      .await
       .map_err(|m| Self::cmd_err("commands.stop", m))
   }
 }

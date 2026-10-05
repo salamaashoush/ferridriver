@@ -15,7 +15,7 @@ pub struct SessionArgs {
 
 #[derive(Subcommand)]
 pub enum SessionCommand {
-  /// Launch a browser, bind it under `id`, and serve it in the background.
+  /// Provision a browser or device, bind it under `id`, and serve it in the background.
   /// Spawns a detached host process and returns once the session is live.
   #[command(after_help = "Examples:\n  \
     ferridriver session open dev\n  \
@@ -42,8 +42,7 @@ pub enum SessionCommand {
   )]
   List(SessionListArgs),
 
-  /// Close a session: prune its registry entry (and stop its server if this
-  /// process owns it).
+  /// Close the browser and wait for provider cleanup before retiring its session.
   Close(SessionTargetArgs),
 
   /// Close every live session.
@@ -57,6 +56,10 @@ pub struct SessionOpenArgs {
 
   /// URL to open in the session's first page (defaults to `about:blank`).
   pub url: Option<String>,
+
+  /// Configured browser or device instance to host.
+  #[arg(long)]
+  pub instance: Option<String>,
 
   /// Extension file(s), directory(ies), or ESM package specifiers the
   /// session's scripts get as `tools.*`. Repeatable; merged with the
@@ -76,6 +79,13 @@ pub struct SessionHostArgs {
 
   /// URL to open in the session's first page.
   pub url: Option<String>,
+
+  /// Configured browser or device instance to host.
+  #[arg(long)]
+  pub instance: Option<String>,
+
+  #[arg(long, hide = true)]
+  pub startup_error: Option<std::path::PathBuf>,
 
   /// Extensions to load for this session's scripts (see `session open`).
   #[arg(long = "extension")]

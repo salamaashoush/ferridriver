@@ -18,6 +18,9 @@
 //! installer.install_system_deps(|p| { /* handle progress */ }).await?;
 //! ```
 
+mod android;
+mod ios;
+
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
@@ -29,6 +32,24 @@ use crate::error::{FerriError, Result};
 
 fn backend_err(context: impl std::fmt::Display) -> FerriError {
   FerriError::backend(context.to_string())
+}
+
+async fn install_lock(path: &Path) -> Result<std::fs::File> {
+  let lock = std::fs::OpenOptions::new()
+    .create(true)
+    .truncate(false)
+    .write(true)
+    .open(path)?;
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(30);
+  loop {
+    match lock.try_lock() {
+      Ok(()) => return Ok(lock),
+      Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+      },
+      Err(error) => return Err(backend_err(format!("locking device dependencies: {error}"))),
+    }
+  }
 }
 
 /// Lowercase hex SHA-256, for pinning a downloaded artifact to its
@@ -161,6 +182,47 @@ pub struct BrowserInstaller {
 }
 
 impl BrowserInstaller {
+  /// # Errors
+  /// Safari and its driver are supplied by macOS; other hosts require a remote endpoint.
+  pub async fn install_safari<F>(&self, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress) + Send + Sync,
+  {
+    if !cfg!(target_os = "macos") {
+      return Err(FerriError::unsupported(
+        "Safari and safaridriver are bundled with macOS; use a remote Safari endpoint on this platform",
+      ));
+    }
+    let path = "/usr/bin/safaridriver";
+    let output = tokio::time::timeout(
+      std::time::Duration::from_secs(10),
+      tokio::process::Command::new(path)
+        .arg("--version")
+        .kill_on_drop(true)
+        .output(),
+    )
+    .await
+    .map_err(|_| FerriError::timeout("detecting safaridriver", 10_000))??;
+    if !output.status.success() {
+      return Err(FerriError::backend(format!(
+        "safaridriver detection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+      )));
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if version.is_empty() {
+      return Err(FerriError::protocol(
+        "safaridriver --version",
+        "driver returned no version",
+      ));
+    }
+    progress(InstallProgress::AlreadyInstalled {
+      version,
+      path: path.to_owned(),
+    });
+    Ok(path.to_owned())
+  }
+
   /// Create a new installer with the default cache directory.
   ///
   /// Cache locations:
@@ -449,73 +511,73 @@ impl BrowserInstaller {
   /// # Errors
   ///
   /// Returns an error if the Linux distribution is unsupported or `apt-get`/`pacman` fails.
-  #[allow(clippy::unused_async)] // async needed on linux cfg, not on macOS/Windows
+  #[cfg(target_os = "linux")]
   pub async fn install_system_deps<F>(&self, progress: F) -> Result<()>
   where
     F: Fn(InstallProgress),
   {
-    #[cfg(not(target_os = "linux"))]
-    {
-      let _ = progress;
-      Ok(())
+    let distro = detect_linux_distro();
+    let (pkg_manager, packages) = system_packages_for_distro(&distro);
+
+    if packages.is_empty() {
+      return Err(FerriError::unsupported(format!(
+        "Linux distribution {distro}: cannot determine required packages"
+      )));
     }
 
-    #[cfg(target_os = "linux")]
-    {
-      let distro = detect_linux_distro();
-      let (pkg_manager, packages) = system_packages_for_distro(&distro);
+    progress(InstallProgress::InstallingDeps { distro: distro.clone() });
 
-      if packages.is_empty() {
-        return Err(FerriError::unsupported(format!(
-          "Linux distribution {distro}: cannot determine required packages"
-        )));
-      }
+    // Build the install command based on the package manager
+    let commands = match pkg_manager {
+      PackageManager::Apt => format!(
+        "apt-get update && apt-get install -y --no-install-recommends {}",
+        packages.join(" ")
+      ),
+      PackageManager::Pacman => format!("pacman -Sy --noconfirm --needed {}", packages.join(" ")),
+    };
 
-      progress(InstallProgress::InstallingDeps { distro: distro.clone() });
+    // Determine if we need sudo (getuid is always safe, just FFI-marked unsafe).
+    #[allow(unsafe_code)]
+    let uid = unsafe { libc::getuid() };
+    let (cmd, args) = if uid == 0 {
+      ("sh".to_string(), vec!["-c".to_string(), commands])
+    } else {
+      (
+        "sudo".to_string(),
+        vec!["--".to_string(), "sh".to_string(), "-c".to_string(), commands],
+      )
+    };
 
-      // Build the install command based on the package manager
-      let commands = match pkg_manager {
-        PackageManager::Apt => format!(
-          "apt-get update && apt-get install -y --no-install-recommends {}",
-          packages.join(" ")
-        ),
-        PackageManager::Pacman => format!("pacman -Sy --noconfirm --needed {}", packages.join(" ")),
+    let status = tokio::process::Command::new(&cmd)
+      .args(&args)
+      .stdin(std::process::Stdio::inherit())
+      .stdout(std::process::Stdio::inherit())
+      .stderr(std::process::Stdio::inherit())
+      .status()
+      .await?;
+
+    if !status.success() {
+      let tool = match pkg_manager {
+        PackageManager::Apt => "apt-get",
+        PackageManager::Pacman => "pacman",
       };
-
-      // Determine if we need sudo (getuid is always safe, just FFI-marked unsafe).
-      #[allow(unsafe_code)]
-      let uid = unsafe { libc::getuid() };
-      let (cmd, args) = if uid == 0 {
-        ("sh".to_string(), vec!["-c".to_string(), commands])
-      } else {
-        (
-          "sudo".to_string(),
-          vec!["--".to_string(), "sh".to_string(), "-c".to_string(), commands],
-        )
-      };
-
-      let status = tokio::process::Command::new(&cmd)
-        .args(&args)
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await?;
-
-      if !status.success() {
-        let tool = match pkg_manager {
-          PackageManager::Apt => "apt-get",
-          PackageManager::Pacman => "pacman",
-        };
-        return Err(backend_err(format!(
-          "{tool} exited with code: {}",
-          status.code().unwrap_or(-1)
-        )));
-      }
-
-      progress(InstallProgress::DepsInstalled);
-      Ok(())
+      return Err(backend_err(format!(
+        "{tool} exited with code: {}",
+        status.code().unwrap_or(-1)
+      )));
     }
+
+    progress(InstallProgress::DepsInstalled);
+    Ok(())
+  }
+
+  /// No system dependencies are required on this platform.
+  #[cfg(not(target_os = "linux"))]
+  pub fn install_system_deps<F>(&self, progress: F) -> impl std::future::Future<Output = Result<()>>
+  where
+    F: Fn(InstallProgress),
+  {
+    futures::FutureExt::map(std::future::ready((self, progress)), |_| Ok(()))
   }
 
   /// Return the path to an installed chromium, or `None` if not installed.

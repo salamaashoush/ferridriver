@@ -1543,3 +1543,48 @@ async fn dispatch_dialog(
     crate::state::DIALOG_LOG_CAP,
   );
 }
+
+#[cfg(test)]
+mod frame_event_tests {
+  use super::*;
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn navigation_notification_preserves_children_restored_after_the_wire_event() {
+    let cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default()));
+    let observed = Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default()));
+    let emitter = crate::events::EventEmitter::new();
+    assert!(emitter.set_state_observer(Arc::new(crate::page::page_state_observer(
+      crate::backend::BackendKind::WebKit,
+      Arc::clone(&cache),
+      observed,
+    ))));
+    let mut events = emitter.subscribe();
+    let root = crate::backend::FrameInfo {
+      frame_id: "main".into(),
+      parent_frame_id: None,
+      name: String::new(),
+      url: "https://example.com/restored".into(),
+    };
+    handle_frame_navigated(
+      &serde_json::json!({"frame": {"id": root.frame_id, "url": root.url}}),
+      &cache,
+      &emitter,
+    );
+    cache.lock().unwrap().seed(vec![
+      root,
+      crate::backend::FrameInfo {
+        frame_id: "child".into(),
+        parent_frame_id: Some("main".into()),
+        name: "child".into(),
+        url: "about:srcdoc".into(),
+      },
+    ]);
+    assert!(matches!(
+      events.recv().await,
+      Some(crate::events::PageEvent::FrameNavigated(_))
+    ));
+    let current = cache.lock().unwrap();
+    assert_eq!(current.live_ids().count(), 2);
+    assert!(!current.record("child").unwrap().detached);
+  }
+}

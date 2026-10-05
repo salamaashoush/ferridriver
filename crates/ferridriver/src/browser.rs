@@ -181,6 +181,27 @@ impl Browser {
     Ok(browser)
   }
 
+  pub(crate) async fn from_ready_state(state: Arc<RwLock<BrowserState>>, instance: &str) -> Result<Self> {
+    let guard = state.read().await;
+    guard.ensure_not_disposed()?;
+    let backend = guard
+      .instance_browser(instance)
+      .ok_or_else(|| crate::FerriError::target_closed(None))?;
+    Ok(Self {
+      state: Arc::clone(&state),
+      version: Arc::from(backend.version()),
+      backend_kind: backend.kind(),
+      instance: Arc::from(instance),
+      isolated_contexts: backend.supports_isolated_contexts(),
+      headless: guard.headless,
+      context_options: Arc::clone(&guard.context_options),
+      record_video: Arc::clone(&guard.record_video),
+      context_names: default_context_registry(),
+      connected: Arc::clone(&guard.connected),
+      events: crate::events::BrowserEventEmitter::new(),
+    })
+  }
+
   /// Wrap an existing shared state as a Browser handle.
   /// Used by MCP server and other contexts that already manage browser state.
   ///
@@ -535,7 +556,14 @@ impl Browser {
   /// Returns an error if page creation or navigation fails.
   pub async fn new_page_with_url(&self, url: &str) -> Result<Arc<Page>> {
     let page = Box::pin(self.new_page()).await?;
-    page.goto_impl(url, None).await?;
+    if let Err(error) = page.goto_impl(url, None).await {
+      if let Err(cleanup) = page.close().await {
+        return Err(crate::error::FerriError::backend(format!(
+          "Opening page failed: {error}; closing its window failed: {cleanup}"
+        )));
+      }
+      return Err(error);
+    }
     Ok(page)
   }
 
@@ -577,7 +605,7 @@ impl Browser {
     if let Some(reason) = opts.and_then(|o| o.reason) {
       state.set_close_reason(reason);
     }
-    state.shutdown_result().await
+    state.shutdown().await
   }
 
   /// Access the internal state (for MCP server integration).

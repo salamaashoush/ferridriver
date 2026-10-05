@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 ferridriver-heap = { workspace = true }
 tokio = { workspace = true }
+pin-project-lite = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
@@ -45,8 +46,12 @@ tokio-stream = "0.1"
 dirs = "7"
 tempfile = "3"
 tar = "0.4"
+flate2.workspace = true
 xz2 = "0.1"
 bzip2 = "0.6"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }
@@ -56,6 +61,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 ferrijs-permissions = { workspace = true }
 criterion = { version = "0.8", features = ["html_reports"] }
 tracing-subscriber = { workspace = true }
@@ -67,4 +73,3 @@ harness = false
 [[bench]]
 name = "event_bench"
 harness = false
-

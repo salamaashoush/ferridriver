@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{Result, SessionError};
+use sha2::{Digest as _, Sha256};
 
 /// A persisted record of one bound browser.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,9 +28,11 @@ pub struct SessionDescriptor {
   /// Socket path (Unix domain socket / Windows named pipe) the session
   /// server listens on, or a `ws://` URL when bound over TCP.
   pub endpoint: String,
+  #[serde(default)]
+  pub generation: String,
   /// PID of the process that owns the bound browser.
   pub pid: u32,
-  /// Browser engine: `chromium`, `firefox`, or `webkit`.
+  /// Reported browser product, normalized for Chromium, Firefox, Safari and `WebKit`.
   pub browser_name: String,
   /// ferridriver version of the process that bound the session. A client
   /// speaking a different build's wire gets a "reopen the session" message
@@ -78,6 +81,17 @@ impl Registry {
   /// Returns [`crate::SessionError::Io`] if the directory cannot be created.
   pub fn open_at(dir: impl Into<PathBuf>) -> Result<Self> {
     let dir = dir.into();
+    if let Ok(metadata) = std::fs::symlink_metadata(&dir)
+      && (!metadata.is_dir() || metadata.file_type().is_symlink())
+    {
+      return Err(
+        std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "session registry must be a directory, not a symlink",
+        )
+        .into(),
+      );
+    }
     std::fs::create_dir_all(&dir)?;
     restrict_to_owner(&dir)?;
     Ok(Self { dir })
@@ -90,24 +104,55 @@ impl Registry {
   }
 
   fn path_for(&self, id: &str) -> PathBuf {
-    self.dir.join(format!("{id}.json"))
+    self.dir.join(format!("{}.json", storage_key(id)))
   }
 
-  /// Write (or overwrite) the descriptor for a session.
+  /// Publish a descriptor without replacing another session.
   ///
   /// # Errors
-  ///
-  /// Returns [`crate::SessionError::Json`] if the descriptor fails to serialize or
-  /// [`crate::SessionError::Io`] on a write/rename failure.
+  /// Returns a filesystem or serialization error, or an error if the id is already claimed.
   pub fn put(&self, descriptor: &SessionDescriptor) -> Result<()> {
-    let path = self.path_for(&descriptor.id);
-    let json = serde_json::to_vec_pretty(descriptor)?;
-    // Write to a temp file then rename so a concurrent reader never observes
-    // a half-written descriptor.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, &path)?;
+    let mut claim = self.claim(&descriptor.id)?;
+    claim.publish(descriptor)?;
+    claim.published = false;
     Ok(())
+  }
+
+  fn lock(&self, id: &str) -> Result<std::fs::File> {
+    let path = self.dir.join(format!("{}.lock", storage_key(id)));
+    if let Ok(metadata) = std::fs::symlink_metadata(&path)
+      && (!metadata.is_file() || metadata.file_type().is_symlink())
+    {
+      return Err(SessionError::Dispatch(
+        "session claim path is not a regular file".to_owned(),
+      ));
+    }
+    let file = std::fs::OpenOptions::new()
+      .create(true)
+      .truncate(false)
+      .read(true)
+      .write(true)
+      .open(path)?;
+    file.try_lock().map_err(|error| match error {
+      std::fs::TryLockError::WouldBlock => SessionError::Dispatch(format!("session '{id}' is already claimed")),
+      std::fs::TryLockError::Error(error) => error.into(),
+    })?;
+    Ok(file)
+  }
+
+  pub(crate) fn claim(&self, id: &str) -> Result<RegistryClaim> {
+    let lock = self.lock(id)?;
+    if self.get(id)?.is_some() {
+      return Err(SessionError::Dispatch(format!(
+        "session '{id}' already has a descriptor"
+      )));
+    }
+    Ok(RegistryClaim {
+      registry: self.clone(),
+      id: id.to_owned(),
+      _lock: lock,
+      published: false,
+    })
   }
 
   /// Read the descriptor for `id`, or `None` if no such file exists.
@@ -119,7 +164,15 @@ impl Registry {
   pub fn get(&self, id: &str) -> Result<Option<SessionDescriptor>> {
     let path = self.path_for(id);
     match std::fs::read(&path) {
-      Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+      Ok(bytes) => {
+        let descriptor: SessionDescriptor = serde_json::from_slice(&bytes)?;
+        if descriptor.id != id {
+          return Err(SessionError::Dispatch(
+            "session descriptor identity does not match its storage key".to_owned(),
+          ));
+        }
+        Ok(Some(descriptor))
+      },
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
       Err(e) => Err(e.into()),
     }
@@ -132,6 +185,11 @@ impl Registry {
   ///
   /// Returns [`crate::SessionError::Io`] on a delete failure other than "not found".
   pub fn remove(&self, id: &str) -> Result<()> {
+    let _claim = self.lock(id)?;
+    self.remove_claimed(id)
+  }
+
+  fn remove_claimed(&self, id: &str) -> Result<()> {
     match std::fs::remove_file(self.path_for(id)) {
       Ok(()) => Ok(()),
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -170,6 +228,67 @@ impl Registry {
   }
 }
 
+pub(crate) struct RegistryClaim {
+  registry: Registry,
+  id: String,
+  _lock: std::fs::File,
+  published: bool,
+}
+
+impl RegistryClaim {
+  pub(crate) fn publish(&mut self, descriptor: &SessionDescriptor) -> Result<()> {
+    use std::io::Write as _;
+    if descriptor.id != self.id {
+      return Err(SessionError::Dispatch(
+        "session publication does not match its claim".to_owned(),
+      ));
+    }
+    let mut file = tempfile::NamedTempFile::new_in(self.registry.dir())?;
+    file.write_all(&serde_json::to_vec_pretty(descriptor)?)?;
+    file
+      .persist_noclobber(self.registry.path_for(&self.id))
+      .map_err(|error| error.error)?;
+    self.published = true;
+    Ok(())
+  }
+
+  pub(crate) fn remove(&mut self) -> Result<()> {
+    if self.published {
+      self.registry.remove_claimed(&self.id)?;
+      self.published = false;
+    }
+    Ok(())
+  }
+}
+
+impl Drop for RegistryClaim {
+  fn drop(&mut self) {
+    if let Err(error) = self.remove() {
+      tracing::warn!(%error, session = %self.id, "session descriptor cleanup failed");
+    }
+  }
+}
+
+pub(crate) fn storage_key(id: &str) -> String {
+  if !id.is_empty()
+    && id.len() <= 64
+    && id
+      .bytes()
+      .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+  {
+    id.to_owned()
+  } else {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut key = String::with_capacity(65);
+    key.push('~');
+    for byte in Sha256::digest(id.as_bytes()) {
+      key.push(char::from(HEX[usize::from(byte >> 4)]));
+      key.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    key
+  }
+}
+
 /// Default registry directory: `<user-cache>/ferridriver/sessions`, falling
 /// back to the system temp dir when no cache dir is resolvable (headless CI).
 /// Restrict `dir` to its owner (`0700`). A session socket lives inside it and
@@ -177,7 +296,17 @@ impl Registry {
 /// process, so directory traversal is the access boundary.
 #[cfg(unix)]
 fn restrict_to_owner(dir: &Path) -> Result<()> {
-  use std::os::unix::fs::PermissionsExt as _;
+  use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+  let metadata = std::fs::symlink_metadata(dir)?;
+  if !metadata.is_dir() || metadata.uid() != rustix::process::geteuid().as_raw() {
+    return Err(
+      std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "session registry must be owned by the current user",
+      )
+      .into(),
+    );
+  }
   std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
   Ok(())
 }
@@ -204,12 +333,48 @@ mod tests {
     SessionDescriptor {
       id: id.to_string(),
       endpoint: format!("/tmp/ferri-{id}.sock"),
+      generation: "test-generation".into(),
       pid: 4242,
       browser_name: "chromium".into(),
       version: crate::WIRE_VERSION.to_string(),
       workspace_dir: Some("/work/proj".into()),
       metadata: Some(serde_json::json!({ "owner": "agent" })),
     }
+  }
+
+  #[test]
+  fn session_titles_cannot_escape_or_collide_on_case_insensitive_filesystems() {
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = Registry::open_at(tmp.path().join("registry")).unwrap();
+    let outside = tmp.path().join("outside.json");
+    std::fs::write(&outside, "sashoush sentinel").unwrap();
+    for id in ["../outside", "/absolute/session", "Safari", "safari", "", "a/b"] {
+      reg.put(&descriptor(id)).unwrap();
+      assert_eq!(reg.get(id).unwrap().unwrap().id, id);
+      assert_eq!(reg.path_for(id).parent(), Some(reg.dir()));
+    }
+    assert_ne!(
+      storage_key("Safari").to_lowercase(),
+      storage_key("safari").to_lowercase()
+    );
+    assert_eq!(reg.list().unwrap().len(), 6);
+    reg.remove("../outside").unwrap();
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "sashoush sentinel");
+  }
+
+  #[test]
+  fn a_live_claim_prevents_replacement_and_external_removal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let reg = Registry::open_at(tmp.path()).unwrap();
+    let mut claim = reg.claim("safari").unwrap();
+    claim.publish(&descriptor("safari")).unwrap();
+    assert!(reg.claim("safari").is_err());
+    assert!(reg.put(&descriptor("safari")).is_err());
+    assert!(reg.remove("safari").is_err());
+    assert!(reg.get("safari").unwrap().is_some());
+    drop(claim);
+    assert!(reg.get("safari").unwrap().is_none());
+    reg.put(&descriptor("safari")).unwrap();
   }
 
   #[test]

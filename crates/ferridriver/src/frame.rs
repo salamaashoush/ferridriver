@@ -30,6 +30,11 @@ pub struct Frame {
 }
 
 impl Frame {
+  #[must_use]
+  pub fn webmcp(&self) -> crate::web_mcp::WebMcp {
+    crate::web_mcp::WebMcp::new(self.clone())
+  }
+
   /// Create a frame handle pointing at an id present in the page's
   /// frame cache. The cache is the source of truth for name/url/parent.
   pub(crate) fn new(page: Arc<Page>, id: Arc<str>) -> Self {
@@ -1137,7 +1142,7 @@ impl Frame {
     let source = source.to_string();
     let target = target.to_string();
     crate::action::Action::new(move |opts| {
-      Box::pin(async move { frame.drag_and_drop_impl(&source, &target, Some(opts)).await })
+      Box::pin(async move { Box::pin(frame.drag_and_drop_impl(&source, &target, Some(opts))).await })
     })
   }
 

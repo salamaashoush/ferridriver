@@ -27,6 +27,7 @@ pub mod accessibility;
 pub mod action;
 pub mod audits;
 pub mod browser;
+pub mod browser_resources;
 pub mod browser_type;
 pub mod cdp_session;
 pub mod clock;
@@ -50,6 +51,7 @@ pub mod locator_builder;
 pub mod locator_handler;
 pub mod network;
 pub mod observed;
+mod operation_budget;
 pub mod options;
 pub mod page;
 pub mod page_tools;
@@ -59,10 +61,12 @@ pub mod response;
 pub(crate) mod snapshotter;
 pub mod url_matcher;
 pub mod web_error;
+pub mod web_mcp;
 
 pub use action::Action;
 pub use browser::Browser;
-pub use browser_type::{BrowserType, chromium, firefox, webkit};
+pub use browser_resources::BrowserResources;
+pub use browser_type::{BrowserType, chromium, firefox, safari, webkit};
 pub use cdp_session::CdpSession;
 pub use clock::Clock;
 pub use context::{BrowserContext, ContextRef};
@@ -92,7 +96,10 @@ pub mod tracing;
 pub mod web_socket_route;
 
 // ── Browser installation ──
+pub mod android;
+pub mod device;
 pub mod install;
+pub mod ios;
 
 // ── Implementation modules (used by MCP server, will be internalized) ──
 pub mod actions;

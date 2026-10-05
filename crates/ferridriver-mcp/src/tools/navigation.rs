@@ -196,7 +196,7 @@ impl McpServer {
             let mut state = self.state.write().await;
             Box::pin(state.remove_context(&s)).await;
             drop(state);
-            self.release_context(&s);
+            self.release_context(&s).await.map_err(Self::err)?;
             Ok(self.ok_text(format!(
               "Closed context '{s}'. Its pages, cookies and storage are gone; the browser stays up."
             )))
@@ -208,7 +208,13 @@ impl McpServer {
         let _guard = self.session_guard(s).await;
         let known = self.state.known_instances().await;
         let instance = ferridriver::state::SessionKey::parse_with(s, &known).instance;
-        let closed = self.state.write().await.close_instance(&instance).await;
+        let closed = self
+          .state
+          .write()
+          .await
+          .close_instance(&instance)
+          .await
+          .map_err(Self::err)?;
         self.invalidate_all_caches();
         // Session names are free-form, so match the way they are routed:
         // everything before ':' (or the whole name for the default
@@ -217,7 +223,9 @@ impl McpServer {
         // would keep a VM bound to the browser that just died.
         self
           .sessions
-          .remove_matching(|name| *ferridriver::state::SessionKey::parse_with(name, &known).instance == *instance);
+          .remove_matching(|name| *ferridriver::state::SessionKey::parse_with(name, &known).instance == *instance)
+          .await
+          .map_err(Self::err)?;
         let msg = if closed {
           format!(
             "Closed browser instance '{instance}'. Other instances keep running; \
@@ -229,7 +237,7 @@ impl McpServer {
         Ok(self.ok_text(msg))
       },
       PageAction::CloseBrowser => {
-        self.shutdown_browsers().await;
+        self.shutdown_browsers().await.map_err(Self::err)?;
         Ok(self.ok_text("Browser closed."))
       },
     }

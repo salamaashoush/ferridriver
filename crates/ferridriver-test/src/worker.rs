@@ -724,7 +724,7 @@ fn build_worker_browser_def(handle: Arc<crate::runner::BrowserHandle>) -> Fixtur
       })
     }),
     teardown: None,
-    timeout: Duration::from_secs(30),
+    timeout: Duration::ZERO,
     auto: false,
   }
 }
@@ -1134,11 +1134,17 @@ impl Worker {
       }
     }
 
+    let mut cleanup_errors = Vec::new();
     for state in active_suites.values() {
-      state.fixture_pool.teardown_all().await;
+      if let Err(error) = state.fixture_pool.teardown_all().await {
+        cleanup_errors.push(error.to_string());
+      }
     }
-    custom_fixture_pool.teardown_all().await;
-    root_fixture_pool.teardown_all().await;
+    for pool in [&custom_fixture_pool, &root_fixture_pool] {
+      if let Err(error) = pool.teardown_all().await {
+        cleanup_errors.push(error.to_string());
+      }
+    }
 
     // Close contexts pre-created for tests that never arrived, before
     // the browser shuts down under them.
@@ -1153,8 +1159,14 @@ impl Worker {
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::WorkerFinished { worker_id: self.id });
     }
-    cleanup?;
-    Ok(pending)
+    if let Err(error) = cleanup {
+      cleanup_errors.push(error.to_string());
+    }
+    if cleanup_errors.is_empty() {
+      Ok(pending)
+    } else {
+      Err(ferridriver::FerriError::backend(cleanup_errors.join("; ")))
+    }
   }
 
   /// Run a serial batch: all tests in order, skip rest on failure.
@@ -1547,12 +1559,21 @@ impl Worker {
     modifiers.timeout_updates.send_replace(timeout_dur);
     test_pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
+    let mut before_each_err = test_pool
+      .resolve_worker_dependencies(&fixture_requests)
+      .await
+      .err()
+      .map(TestFailure::from);
+
     // Playwright `auto: true` fixtures resolve regardless of whether
     // the test body destructured them. Walk the full def graph for
     // this scope (and any narrower parents) and pre-resolve.
     for name in test_pool.auto_fixture_names_for(FixtureScope::Test) {
+      if before_each_err.is_some() {
+        break;
+      }
       if let Err(e) = test_pool.resolve(&name).await {
-        tracing::warn!(target: "ferridriver::worker", "auto fixture '{name}' failed: {e}");
+        before_each_err = Some(TestFailure::from(e));
       }
     }
 
@@ -1563,7 +1584,7 @@ impl Worker {
 
     let mut page_for_artifacts = None;
     let video_mode = self.config.video.mode;
-    let video_handle: Option<VideoHandle> = if !video_mode.should_record(attempt) {
+    let video_handle: Option<VideoHandle> = if before_each_err.is_some() || !video_mode.should_record(attempt) {
       None
     } else {
       match test_pool.get::<ferridriver::Page>("page").await {
@@ -1643,8 +1664,10 @@ impl Worker {
       }
     };
 
-    let mut before_each_err = None;
     for (i, hook) in hooks.before_each.iter().enumerate() {
+      if before_each_err.is_some() {
+        break;
+      }
       let title = if hooks.before_each.len() == 1 {
         "beforeEach".to_string()
       } else {

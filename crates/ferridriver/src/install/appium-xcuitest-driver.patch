@@ -1,0 +1,353 @@
+diff --git c/lib/commands/automation-session.ts w/lib/commands/automation-session.ts
+index 920b562..e5cbc49 100644
+--- c/lib/commands/automation-session.ts
++++ w/lib/commands/automation-session.ts
+@@ -34,6 +34,9 @@ export async function mobileStartAutomationSession(this: XCUITestDriver): Promis
+   if (this.implicitWaitMs != null) {
+     session.implicitWaitTimeoutMs = this.implicitWaitMs;
+   }
++  if (this._preAutomationSessionContext && this.curContext !== this._preAutomationSessionContext) {
++    await this.setContext(this._preAutomationSessionContext, undefined, true);
++  }
+ }
+ 
+ /**
+diff --git c/lib/commands/context.ts w/lib/commands/context.ts
+index cb142f3..4bbff0c 100644
+--- c/lib/commands/context.ts
++++ w/lib/commands/context.ts
+@@ -246,6 +246,10 @@ export async function onPageChange(
+     }
+   }
+ 
++  if (this._remote?.automationSession?.isStarted && this.curContext === this._preAutomationSessionContext) {
++    return;
++  }
++
+   if (!keyId) {
+     // if there is no key id, pull the first id from the page array and use that
+     // as a stand in
+diff --git c/lib/commands/window.ts w/lib/commands/window.ts
+index ccea520..97ad7c3 100644
+--- c/lib/commands/window.ts
++++ w/lib/commands/window.ts
+@@ -1,4 +1,4 @@
+-import type {Rect, Size} from '@appium/types';
++import type {NewWindow, NewWindowType, Rect, Size} from '@appium/types';
+ import {errors, isErrorType} from 'appium/driver.js';
+ 
+ import type {XCUITestDriver} from '../driver.js';
+@@ -17,6 +17,11 @@ import {requireAutomationSessionActive, requireWebContext} from './helpers/index
+ 
+ const DEFAULT_NATIVE_WINDOW_HANDLE = '1';
+ 
++export async function createNewWindow(this: XCUITestDriver, type?: NewWindowType): Promise<NewWindow> {
++  requireWebContext(this);
++  return await this._webExecutionBackend.createWindow(type);
++}
++
+ /**
+  * Window/tab handles have no native-context equivalent, so the window-handle commands below
+  * return a fixed placeholder (or no-op) there instead of throwing.
+diff --git c/lib/driver.ts w/lib/driver.ts
+index 6c1d97e..0fbcb8d 100644
+--- c/lib/driver.ts
++++ w/lib/driver.ts
+@@ -758,6 +758,7 @@ export class XCUITestDriver
+    +--------+*/
+ 
+   setWindow = windowCommands.setWindow;
++  createNewWindow = windowCommands.createNewWindow;
+   getWindowHandle = windowCommands.getWindowHandle;
+   getWindowHandles = windowCommands.getWindowHandles;
+   getWindowSize = windowCommands.getWindowSize;
+diff --git c/lib/web-execution/atoms-backend.ts w/lib/web-execution/atoms-backend.ts
+index b683ba2..d6c45e3 100644
+--- c/lib/web-execution/atoms-backend.ts
++++ w/lib/web-execution/atoms-backend.ts
+@@ -1,4 +1,6 @@
+-import type {ActionSequence, Cookie, Element, Position, Rect, Size} from '@appium/types';
++import {randomUUID} from 'node:crypto';
++
++import type {ActionSequence, Cookie, Element, NewWindow, Position, Rect, Size} from '@appium/types';
+ import type {AtomName} from 'appium-remote-debugger';
+ import {errors} from 'appium/driver.js';
+ import {waitForCondition} from 'asyncbox';
+@@ -280,6 +282,58 @@ export class AtomsBackend implements WebExecutionBackend {
+     throw new errors.NotImplementedError();
+   }
+ 
++  async createWindow(): Promise<NewWindow> {
++    const original = await this.driver.getWindowHandle();
++    const previous = new Set(await this.driver.getWindowHandles());
++    const marker = `__fd_window_${randomUUID()}`;
++    const key = JSON.stringify(marker);
++    let handle: string | undefined;
++    let succeeded = false;
++    try {
++      await this.driver.remote.execute(
++        `(() => {
++        const child = window.open('about:blank', ${key});
++        if (!child) throw new Error('Safari refused to create a browsing context');
++        window[${key}] = child;
++        child.opener = null;
++        return {value: true};
++      })()`,
++        undefined,
++        {emulateUserGesture: true},
++      );
++      await waitForCondition(
++        async () => {
++          for (const candidate of await this.driver.getWindowHandles()) {
++            if (previous.has(candidate)) {
++              continue;
++            }
++            await this.driver.setWindow(candidate);
++            if ((await this.driver.remote.execute('({value: window.name})')) === marker) {
++              handle = candidate;
++              return true;
++            }
++          }
++          return false;
++        },
++        {waitMs: 5000, intervalMs: 100},
++      );
++      if (!handle) {
++        throw new errors.NoSuchWindowError('The created Safari tab was not discovered');
++      }
++      await this.driver.remote.execute('window.name = ""; ({value: true})');
++      succeeded = true;
++      return {handle, type: 'tab'};
++    } finally {
++      await this.driver.setWindow(original);
++      await this.driver.remote.execute(`(() => {
++        const child = window[${key}];
++        delete window[${key}];
++        if (${!succeeded} && child && !child.closed) child.close();
++        return {value: true};
++      })()`);
++    }
++  }
++
+   async closeWindow(): Promise<void> {
+     // since the window will be closed and the execution context gone, return
+     // first before closing. Waiting for close will happen in the finally block
+diff --git c/lib/web-execution/automation-session-backend.ts w/lib/web-execution/automation-session-backend.ts
+index 6a41dfc..8db3531 100644
+--- c/lib/web-execution/automation-session-backend.ts
++++ w/lib/web-execution/automation-session-backend.ts
+@@ -1,4 +1,4 @@
+-import type {ActionSequence, Cookie, Element, Rect} from '@appium/types';
++import type {ActionSequence, Cookie, Element, NewWindow, NewWindowType, Rect} from '@appium/types';
+ import type {AutomationSession, LocatorStrategy} from 'appium-remote-debugger';
+ import {errors} from 'appium/driver.js';
+ import {util} from 'appium/support.js';
+@@ -164,6 +164,11 @@ export class AutomationSessionBackend implements WebExecutionBackend {
+     return await this.session.getWindowHandles();
+   }
+ 
++  async createWindow(type: NewWindowType = 'tab'): Promise<NewWindow> {
++    const handle = await this.session.createWindow(type === 'window' ? 'Window' : 'Tab');
++    return {handle, type};
++  }
++
+   async switchToWindow(handle: string): Promise<void> {
+     await this.session.switchToWindow(handle);
+   }
+diff --git c/lib/web-execution/types.ts w/lib/web-execution/types.ts
+index d389746..b0013c1 100644
+--- c/lib/web-execution/types.ts
++++ w/lib/web-execution/types.ts
+@@ -1,4 +1,4 @@
+-import type {ActionSequence, Cookie, Element, Rect} from '@appium/types';
++import type {ActionSequence, Cookie, Element, NewWindow, NewWindowType, Rect} from '@appium/types';
+ 
+ /**
+  * A WebDriver-shaped backend for the commands that run against a web view: element
+@@ -50,6 +50,7 @@ export interface WebExecutionBackend {
+   getActiveElement(): Promise<Element | null>;
+   getWindowHandle(): Promise<string>;
+   getWindowHandles(): Promise<string[]>;
++  createWindow(type?: NewWindowType): Promise<NewWindow>;
+   /**
+    * Switches the driven window/tab to the one identified by `handle` - a value previously
+    * returned by {@linkcode getWindowHandle}/{@linkcode getWindowHandles} from the *same* backend.
+diff --git c/test/unit/commands/automation-session.spec.ts w/test/unit/commands/automation-session.spec.ts
+index 78a4e3d..e368a6e 100644
+--- c/test/unit/commands/automation-session.spec.ts
++++ w/test/unit/commands/automation-session.spec.ts
+@@ -24,6 +24,27 @@ describe('automation-session commands', function () {
+   });
+ 
+   describe('mobileStartAutomationSession', function () {
++    it('keeps automation routing when tab discovery changes the inspected context during startup', async function () {
++      sandbox.stub(driver, 'isWebContext').returns(true);
++      sandbox.stub(driver, 'isSimulator').returns(true);
++      driver.curContext = 'PID:123.4';
++      const session = {isStarted: true};
++      driver._remote = {
++        automationSession: session,
++        startAutomationSession: async () => {
++          driver.curContext = 'PID:123.5';
++          return session;
++        },
++      } as any;
++      const restore = sandbox.stub(driver, 'setContext').callsFake(async (name) => {
++        driver.curContext = String(name);
++      });
++      await driver.mobileStartAutomationSession();
++      assert.equal(restore.calledOnceWithExactly('PID:123.4', undefined, true), true);
++      assert.equal(driver.curContext, driver._preAutomationSessionContext);
++      assert.ok(driver._webExecutionBackend instanceof AutomationSessionBackend);
++    });
++
+     it('throws when not in a web context', async function () {
+       sandbox.stub(driver, 'isWebContext').returns(false);
+       await assert.rejects(driver.mobileStartAutomationSession(), errors.NotImplementedError);
+diff --git c/test/unit/commands/context.spec.ts w/test/unit/commands/context.spec.ts
+index b8cec1e..6b422f1 100644
+--- c/test/unit/commands/context.spec.ts
++++ w/test/unit/commands/context.spec.ts
+@@ -58,6 +58,30 @@ describe('context', function () {
+   });
+ 
+   describe('onPageChange', function () {
++    it('tracks discovered pages without changing the active automation backend', async function () {
++      const driver = new XCUITestDriver({} as any);
++      driver.curContext = driver._preAutomationSessionContext = '5191.1';
++      driver.contexts = ['5191.1'];
++      let selected = false;
++      driver._remote = {
++        isConnected: true,
++        automationSession: {isStarted: true},
++        selectPage: async () => {
++          selected = true;
++        },
++      } as any;
++      await driver.onPageChange({
++        appIdKey: '5191',
++        pageArray: [
++          {id: 1, url: 'about:blank', isKey: false},
++          {id: 2, url: 'https://example.com/', isKey: true},
++        ],
++      });
++      assert.equal(driver.curContext, '5191.1');
++      assert.equal(selected, false);
++      assert.ok(driver.contexts.includes('5191.2'));
++    });
++
+     const pageChangeNotification = {
+       appIdKey: '5191',
+       pageArray: [
+diff --git 1/test/unit/new-window.spec.ts 2/test/unit/new-window.spec.ts
+new file mode 100644
+index 0000000..913851c
+--- /dev/null
++++ 2/test/unit/new-window.spec.ts
+@@ -0,0 +1,106 @@
++import assert from 'node:assert/strict';
++import {it} from 'node:test';
++import {runInNewContext} from 'node:vm';
++
++import {RemoteDebugger} from 'appium-remote-debugger';
++
++import * as windowCommands from '../../lib/commands/window.js';
++import {AtomsBackend} from '../../lib/web-execution/atoms-backend.js';
++
++it('creates and identifies its own tab without changing the selected window', async () => {
++  let selected = 'original';
++  let marker = '';
++  const calls: any[] = [];
++  const driver: any = {
++    isWebContext: () => true,
++    getWindowHandle: async () => 'original',
++    getWindowHandles: async () => (marker ? ['unrelated', 'original', 'created'] : ['original']),
++    setWindow: async (handle: string) => {
++      selected = handle;
++    },
++    remote: {
++      execute: async (script: string, _override?: boolean, options?: any) => {
++        calls.push({script, selected, options});
++        if (options?.emulateUserGesture) {
++          marker = script.match(/__fd_window_[a-f0-9-]+/)![0];
++          return true;
++        }
++        if (script === '({value: window.name})') {
++          return selected === 'created' ? marker : 'another-popup';
++        }
++        return true;
++      },
++    },
++  };
++  driver._webExecutionBackend = new AtomsBackend(driver);
++  const result = await windowCommands.createNewWindow.call(driver, 'tab');
++  assert.deepEqual(result, {handle: 'created', type: 'tab'});
++  assert.equal(selected, 'original');
++  assert.equal(calls.filter((call) => call.options?.emulateUserGesture).length, 1);
++  assert.ok(calls.some((call) => call.selected === 'created' && call.script.includes('window.name =')));
++  assert.ok(calls.at(-1).script.includes('delete window['));
++});
++
++it('closes its opened tab and restores selection when identification fails', async () => {
++  let selected = 'original';
++  let created = false;
++  let cleanup = '';
++  const driver: any = {
++    isWebContext: () => true,
++    getWindowHandle: async () => 'original',
++    getWindowHandles: async () => (created ? ['created', 'original'] : ['original']),
++    setWindow: async (handle: string) => {
++      selected = handle;
++    },
++    remote: {
++      execute: async (script: string, _override?: boolean, options?: any) => {
++        if (options?.emulateUserGesture) {
++          created = true;
++          return true;
++        }
++        if (script === '({value: window.name})') {
++          throw new Error('inspection failed');
++        }
++        cleanup = script;
++        return true;
++      },
++    },
++  };
++  driver._webExecutionBackend = new AtomsBackend(driver);
++  await assert.rejects(windowCommands.createNewWindow.call(driver, 'tab'), /inspection failed/);
++  assert.equal(selected, 'original');
++  assert.ok(cleanup.includes('delete window['));
++  assert.ok(cleanup.includes('if (true && child && !child.closed) child.close()'));
++});
++
++it('uses value envelopes accepted by the real remote debugger converter', async () => {
++  let selected = 'original';
++  const windows: Record<string, any> = {original: {name: '', closed: false}};
++  windows.original.open = (_url: string, name: string) => {
++    windows.created = {name, opener: windows.original, closed: false};
++    return windows.created;
++  };
++  const remote: any = new RemoteDebugger({});
++  remote._appIdKey = 'app';
++  remote._pageIdKey = 'page';
++  remote.requireRpcClient = () => ({
++    waitForPage: async () => {},
++    send: async (_method: string, opts: any) =>
++      JSON.parse(JSON.stringify(runInNewContext(opts.expression, {window: windows[selected]}))),
++  });
++  const driver: any = {
++    isWebContext: () => true,
++    getWindowHandle: async () => selected,
++    getWindowHandles: async () => Object.keys(windows),
++    setWindow: async (handle: string) => {
++      selected = handle;
++    },
++    remote,
++  };
++  driver._webExecutionBackend = new AtomsBackend(driver);
++  assert.deepEqual(await windowCommands.createNewWindow.call(driver), {handle: 'created', type: 'tab'});
++  assert.equal(selected, 'original');
++  assert.equal(windows.created.opener, null);
++  assert.equal(windows.created.name, '');
++  assert.deepEqual(Object.keys(windows.original).sort(), ['closed', 'name', 'open']);
++});

@@ -49,7 +49,7 @@ mod tests {
     }
   }
 
-  async fn server(hang: bool, reject: bool) -> Server {
+  async fn server(hang: bool, rejection: Option<&'static str>) -> Server {
     let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/wd/hub", http.local_addr().unwrap());
@@ -104,8 +104,8 @@ mod tests {
         if hang {
           continue;
         }
-        let response = if reject {
-          serde_json::json!({"type":"error", "id":command["id"], "error":"unknown command", "message":"contract rejection"})
+        let response = if let Some(error) = rejection {
+          serde_json::json!({"type":"error", "id":command["id"], "error":error, "message":"contract rejection"})
         } else {
           serde_json::json!({"type":"success", "id":command["id"], "result":{}})
         };
@@ -139,7 +139,7 @@ mod tests {
 
   #[tokio::test]
   async fn close_deletes_the_http_session_once_across_clones() {
-    let mut server = server(false, false).await;
+    let mut server = server(false, None).await;
     let mut browser = BidiBrowser::connect_webdriver(&server.endpoint, "safari", None, None, Some(1000))
       .await
       .unwrap();
@@ -157,7 +157,7 @@ mod tests {
 
   #[tokio::test]
   async fn rejected_bidi_initialization_deletes_the_http_session() {
-    let mut server = server(false, true).await;
+    let mut server = server(false, Some("unknown error")).await;
     let result = BidiBrowser::connect_webdriver(&server.endpoint, "safari", None, None, Some(1000)).await;
     assert!(matches!(result, Err(FerriError::Protocol { .. })));
     server.requests.recv().await.unwrap();
@@ -166,7 +166,7 @@ mod tests {
 
   #[tokio::test]
   async fn connect_timeout_covers_bidi_initialization_and_cleans_up() {
-    let mut server = server(true, false).await;
+    let mut server = server(true, None).await;
     let result = BidiBrowser::connect_webdriver(&server.endpoint, "safari", None, None, Some(100)).await;
     assert!(matches!(result, Err(FerriError::Timeout { .. })));
     server.requests.recv().await.unwrap();
@@ -175,7 +175,7 @@ mod tests {
 
   #[tokio::test]
   async fn cancelled_bidi_initialization_deletes_the_http_session() {
-    let mut server = server(true, false).await;
+    let mut server = server(true, None).await;
     let endpoint = server.endpoint.clone();
     let connect =
       tokio::spawn(async move { BidiBrowser::connect_webdriver(&endpoint, "safari", None, None, Some(0)).await });
@@ -183,6 +183,15 @@ mod tests {
     assert_eq!(server.commands.recv().await.unwrap(), "session.subscribe");
     connect.abort();
     assert!(matches!(connect.await, Err(error) if error.is_cancelled()));
+    deleted(&mut server).await;
+  }
+
+  #[tokio::test]
+  async fn unsupported_bidi_initialization_deletes_the_http_session() {
+    let mut server = server(false, Some("unknown command")).await;
+    let result = BidiBrowser::connect_webdriver(&server.endpoint, "safari", None, None, Some(1000)).await;
+    assert!(matches!(result, Err(FerriError::Unsupported { .. })));
+    server.requests.recv().await.unwrap();
     deleted(&mut server).await;
   }
 }

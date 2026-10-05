@@ -526,6 +526,7 @@ const FERRIDRIVER_EXPORTS: &[&str] = &[
   "chromium",
   "firefox",
   "webkit",
+  "safari",
 ];
 
 fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
@@ -563,7 +564,7 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   )?;
   ns.set("defineTool", fd_prop(ctx, "tool")?)?;
   for name in [
-    "page", "context", "browser", "request", "expect", "chromium", "firefox", "webkit",
+    "page", "context", "browser", "request", "expect", "chromium", "firefox", "webkit", "safari",
   ] {
     ns.set(name, global(ctx, name)?)?;
   }
@@ -608,6 +609,7 @@ const TEST_EXPORTS: &[&str] = &[
   "chromium",
   "firefox",
   "webkit",
+  "safari",
   "request",
 ];
 
@@ -631,6 +633,7 @@ fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     ("chromium", global(ctx, "chromium")?),
     ("firefox", global(ctx, "firefox")?),
     ("webkit", global(ctx, "webkit")?),
+    ("safari", global(ctx, "safari")?),
     ("request", global(ctx, "request")?),
   ];
   let ns = test.as_object().cloned().unwrap_or(Object::new(ctx.clone())?);

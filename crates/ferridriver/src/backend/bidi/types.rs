@@ -380,10 +380,10 @@ pub enum EvaluateResult {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExceptionDetails {
   #[serde(rename = "columnNumber")]
-  pub column_number: Option<u32>,
+  pub column_number: Option<i64>,
   pub exception: Option<RemoteValue>,
   #[serde(rename = "lineNumber")]
-  pub line_number: Option<u32>,
+  pub line_number: Option<i64>,
   #[serde(rename = "stackTrace")]
   pub stack_trace: Option<StackTrace>,
   pub text: String,
@@ -398,11 +398,11 @@ pub struct StackTrace {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StackFrame {
   #[serde(rename = "columnNumber")]
-  pub column_number: u32,
+  pub column_number: i64,
   #[serde(rename = "functionName")]
   pub function_name: String,
   #[serde(rename = "lineNumber")]
-  pub line_number: u32,
+  pub line_number: i64,
   pub url: String,
 }
 

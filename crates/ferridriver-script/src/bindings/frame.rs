@@ -42,6 +42,11 @@ impl FrameJs {
 
 #[rquickjs::methods]
 impl FrameJs {
+  #[qjs(get)]
+  pub fn webmcp(&self) -> crate::bindings::native_web_mcp::NativeWebMcpJs {
+    crate::bindings::native_web_mcp::NativeWebMcpJs::new(self.inner.webmcp())
+  }
+
   // ── Sync frame-tree accessors (Playwright parity, task 3.8) ────────
 
   /// Frame name (from the `<iframe name=...>` attribute). Sync.

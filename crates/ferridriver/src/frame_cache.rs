@@ -111,6 +111,7 @@ impl FrameCache {
     if let Some(rec) = self.by_id.get_mut(&key) {
       rec.detached = true;
     }
+    self.detach_descendants(id);
   }
 
   /// Apply a `Page.frameNavigated` event — update name/url but preserve
@@ -174,7 +175,7 @@ impl FrameCache {
     }
   }
 
-  fn detach_descendants(&mut self, parent: &str) {
+  pub(crate) fn detach_descendants(&mut self, parent: &str) {
     let children: Vec<Arc<str>> = self
       .by_id
       .iter()

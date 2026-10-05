@@ -17,9 +17,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use ferridriver::state::BrowserState;
 use ferridriver_session::{ActionDetail, ActionPhase, EventSink, ScriptHost, ScriptKind, ScriptRequest};
-use tokio::sync::RwLock;
 
 use crate::bindings::ExtensionBinding;
 use crate::engine::{ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngineConfig};
@@ -50,7 +48,7 @@ pub struct SessionScriptConfig {
 
 /// Runs scripts against one bound browser.
 pub struct SessionScriptHost {
-  state: Arc<RwLock<BrowserState>>,
+  browser: Arc<ferridriver::Browser>,
   sessions: SessionTable,
   config: SessionScriptConfig,
   /// Session id, so `session` inside a script (and any extension reading it)
@@ -76,13 +74,13 @@ unsafe impl rquickjs::JsLifetime<'_> for ScriptEnvUd {
 impl SessionScriptHost {
   /// Build a host over the browser state behind a bound [`ferridriver::Browser`].
   #[must_use]
-  pub fn new(state: Arc<RwLock<BrowserState>>, id: impl Into<String>, mut config: SessionScriptConfig) -> Self {
+  pub fn new(browser: Arc<ferridriver::Browser>, id: impl Into<String>, mut config: SessionScriptConfig) -> Self {
     // Whatever sink the caller's config carried wrote to the caller's own
     // terminal; every run here routes to its own client instead.
     config.engine.console_sink = None;
     let sessions = SessionTable::new(config.engine.max_session_vms, config.engine.session_idle_ttl);
     Self {
-      state,
+      browser,
       sessions,
       config,
       id: id.into(),
@@ -106,12 +104,11 @@ impl SessionScriptHost {
   /// the latter is the session id the client addressed, which extensions read,
   /// while actions and trace recorders are keyed by the state's own composite.
   async fn run_context(&self, context: &str) -> Result<(RunContext, String), String> {
-    let page = ferridriver_session::page_for(&self.state, context)
+    let page = ferridriver_session::page_for(&self.browser, context)
       .await
       .map_err(|e| format!("opening a page for context '{context}': {e}"))?;
-    let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(&self.state), context.to_string());
+    let ctx_ref = page.context().cloned().ok_or("session page has no browser context")?;
     let composite = ctx_ref.composite();
-    let browser = Arc::new(ferridriver::Browser::from_shared_state(Arc::clone(&self.state)));
     let run_context = RunContext {
       // Replaced with the session slot's durable store before the run, the
       // same way the MCP server does it: `vars` belong to the session, not
@@ -122,7 +119,7 @@ impl SessionScriptHost {
       page: Some(page),
       browser_context: Some(Arc::new(ctx_ref)),
       request: None,
-      browser: Some(browser),
+      browser: Some(Arc::clone(&self.browser)),
       extensions: self.config.extensions.clone(),
       host: ExtensionHost::Script,
       caps: self.config.caps.clone(),
@@ -134,7 +131,19 @@ impl SessionScriptHost {
 
 #[async_trait]
 impl ScriptHost for SessionScriptHost {
+  async fn close(&self, release: ferridriver_session::ReleaseFuture<'_>) -> Result<(), String> {
+    self
+      .sessions
+      .close_after(async { release.await.map_err(crate::ScriptError::internal) })
+      .await
+      .map_err(|error| error.message)?;
+    self.routers.clear();
+    Ok(())
+  }
+
   async fn run(&self, context: &str, request: ScriptRequest, events: EventSink) -> Result<serde_json::Value, String> {
+    let key = ferridriver_session::context_key_for(&self.browser, context).map_err(|error| error.to_string())?;
+    let context = key.context.as_ref();
     let router = self.router_for(context);
     let mut engine = self.config.engine.clone();
     engine.console_sink = Some(router.clone() as Arc<dyn ConsoleSink>);
@@ -161,7 +170,7 @@ impl ScriptHost for SessionScriptHost {
       },
     };
 
-    let slot = self.sessions.acquire(context);
+    let slot = self.sessions.acquire(context).await.map_err(|error| error.message)?;
     let mut session = slot.lock().await;
     // Contexts whose VM the table has reaped no longer need a console router;
     // sweeping here keeps the map bounded by LIVE contexts rather than by

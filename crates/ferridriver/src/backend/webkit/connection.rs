@@ -19,10 +19,11 @@
 
 use super::protocol::{Envelope, ErrorPayload};
 use super::transport::{ReaderHandle, Transport, TransportError, WriterHandle};
+use crate::operation_budget::OperationBudget;
 use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
 use std::collections::hash_map::Entry;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -82,26 +83,72 @@ enum Route {
   Live(Vec<mpsc::UnboundedSender<Envelope>>),
 }
 
+struct PendingCallback<'a> {
+  connection: &'a Connection,
+  id: Option<i64>,
+}
+
+impl Drop for PendingCallback<'_> {
+  fn drop(&mut self) {
+    if let Some(id) = self.id {
+      self.connection.forget_callback(id);
+    }
+  }
+}
+
 pub struct Connection {
   writer: Arc<WriterHandle>,
   next_id: AtomicI64,
   callbacks: Mutex<FxHashMap<i64, (RouteKey, ResponseSlot)>>,
   routes: Mutex<FxHashMap<RouteKey, Route>>,
+  closed: AtomicBool,
+  tasks: crate::backend::transport_tasks::TransportTasks,
 }
 
 impl Connection {
   /// Spawn the reader task and return a shared connection handle.
   #[must_use]
   pub fn spawn(transport: Transport) -> Arc<Self> {
-    let Transport { reader, writer } = transport;
+    let Transport {
+      reader,
+      writer,
+      shutdown,
+      mut tasks,
+    } = transport;
+    let (ready, connection) = oneshot::channel();
+    tasks.push(tokio::spawn(async move {
+      if let Ok(connection) = connection.await {
+        reader_loop(connection, reader).await;
+      }
+    }));
     let conn = Arc::new(Connection {
       writer: Arc::new(writer),
       next_id: AtomicI64::new(1),
       callbacks: Mutex::new(FxHashMap::default()),
       routes: Mutex::new(FxHashMap::default()),
+      closed: AtomicBool::new(false),
+      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, tasks),
     });
-    tokio::spawn(reader_loop(Arc::clone(&conn), reader));
+    let _ = ready.send(Arc::downgrade(&conn));
     conn
+  }
+
+  pub(crate) fn start_close(&self) {
+    self.drain_all();
+    self.tasks.start_close();
+  }
+
+  pub(crate) fn request_browser_close(&self) -> Result<(), ConnectionError> {
+    let result = self.send_raw(&json!({
+      "id": BROWSER_CLOSE_ID, "method": super::protocol::PLAYWRIGHT_CLOSE, "params": {},
+    }));
+    self.drain_all();
+    result
+  }
+
+  pub async fn close(&self) -> crate::Result<()> {
+    self.start_close();
+    self.tasks.close().await
   }
 
   /// Handle on the root browser session.
@@ -174,17 +221,21 @@ impl Connection {
   /// Used by `Playwright.close`, which the child answers by closing
   /// the pipe rather than replying.
   pub fn send_raw(&self, envelope: &Value) -> Result<(), ConnectionError> {
+    if self.closed.load(Ordering::Acquire) {
+      return Err(TransportError::Closed.into());
+    }
     self.writer.send(envelope).map_err(ConnectionError::from)
   }
 
   fn alloc_callback(&self, key: RouteKey) -> (i64, oneshot::Receiver<Result<Value, ErrorPayload>>) {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
-    self
-      .callbacks
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .insert(id, (key, tx));
+    let mut callbacks = self.callbacks.lock().unwrap_or_else(PoisonError::into_inner);
+    if self.closed.load(Ordering::Acquire) {
+      let _ = tx.send(Err(closed_error()));
+    } else {
+      callbacks.insert(id, (key, tx));
+    }
     (id, rx)
   }
 
@@ -213,13 +264,11 @@ impl Connection {
   /// Deliver an event to its route, creating a `Buffering` entry if no
   /// subscriber has claimed the route yet.
   fn route_event(&self, key: RouteKey, env: Envelope) {
-    match self
-      .routes
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .entry(key)
-      .or_insert_with(|| Route::Buffering(Vec::new()))
-    {
+    let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
+    if self.closed.load(Ordering::Acquire) {
+      return;
+    }
+    match routes.entry(key).or_insert_with(|| Route::Buffering(Vec::new())) {
       Route::Buffering(buf) => buf.push(env),
       Route::Live(txs) => {
         txs.retain(|tx| tx.send(env.clone()).is_ok());
@@ -234,6 +283,9 @@ impl Connection {
   fn subscribe(&self, key: RouteKey) -> mpsc::UnboundedReceiver<Envelope> {
     let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
     let (tx, rx) = mpsc::unbounded_channel();
+    if self.closed.load(Ordering::Acquire) {
+      return rx;
+    }
     match routes.entry(key) {
       Entry::Occupied(mut e) => match e.get_mut() {
         Route::Live(txs) => txs.push(tx),
@@ -253,6 +305,7 @@ impl Connection {
 
   /// Reject every pending call. Invoked on transport EOF.
   fn drain_all(&self) {
+    self.closed.store(true, Ordering::Release);
     let drained: Vec<ResponseSlot> = self
       .callbacks
       .lock()
@@ -263,6 +316,7 @@ impl Connection {
     for slot in drained {
       let _ = slot.send(Err(closed_error()));
     }
+    self.routes.lock().unwrap_or_else(PoisonError::into_inner).clear();
   }
 }
 
@@ -274,8 +328,9 @@ fn closed_error() -> ErrorPayload {
   }
 }
 
-async fn reader_loop(conn: Arc<Connection>, mut reader: ReaderHandle) {
+async fn reader_loop(conn: std::sync::Weak<Connection>, mut reader: ReaderHandle) {
   while let Some(frame) = reader.recv().await {
+    let Some(conn) = conn.upgrade() else { return };
     let raw = match frame {
       Ok(v) => v,
       Err(e) => {
@@ -289,7 +344,9 @@ async fn reader_loop(conn: Arc<Connection>, mut reader: ReaderHandle) {
       Err(e) => tracing::warn!(target: "ferridriver::webkit", "skip un-parseable frame: {e}"),
     }
   }
-  conn.drain_all();
+  if let Some(conn) = conn.upgrade() {
+    conn.start_close();
+  }
 }
 
 /// Route one inbound envelope. A frame carrying an `id` is a response
@@ -391,28 +448,36 @@ impl Session {
 
   /// Send `method` and await its reply.
   pub async fn send(&self, method: &str, params: Value) -> Result<Value, ConnectionError> {
+    let budget =
+      OperationBudget::current(REPLY_TIMEOUT_MS).map_err(|error| ConnectionError::Protocol(error.to_string()))?;
+    budget.remaining_ms().map_err(|error| ConnectionError::Timeout {
+      method: method.into(),
+      ms: error.timeout_ms,
+    })?;
     match &self.kind {
       SessionKind::Browser => {
         let (id, rx) = self.conn.alloc_callback(RouteKey::Browser);
-        if let Err(e) = self
-          .conn
-          .writer
-          .send(&json!({ "id": id, "method": method, "params": params }))
-        {
-          self.conn.forget_callback(id);
-          return Err(e.into());
-        }
-        wait_for(&self.conn, id, rx, method).await
+        let pending = PendingCallback {
+          connection: &self.conn,
+          id: Some(id),
+        };
+        self.send_envelope(method, budget, &json!({ "id": id, "method": method, "params": params }))?;
+        wait_for(pending, rx, method, &budget).await
       },
       SessionKind::PageProxy { page_proxy_id } => {
         let (id, rx) = self.conn.alloc_callback(RouteKey::PageProxy(page_proxy_id.clone()));
-        if let Err(e) = self.conn.writer.send(&json!({
-          "id": id, "method": method, "params": params, "pageProxyId": page_proxy_id,
-        })) {
-          self.conn.forget_callback(id);
-          return Err(e.into());
-        }
-        wait_for(&self.conn, id, rx, method).await
+        let pending = PendingCallback {
+          connection: &self.conn,
+          id: Some(id),
+        };
+        self.send_envelope(
+          method,
+          budget,
+          &json!({
+            "id": id, "method": method, "params": params, "pageProxyId": page_proxy_id,
+          }),
+        )?;
+        wait_for(pending, rx, method, &budget).await
       },
       SessionKind::Target {
         page_proxy_id,
@@ -425,34 +490,45 @@ impl Session {
         // wrapper-level rejection (target gone) surfaces instead of
         // hanging on the inner reply.
         let (id, rx) = self.conn.alloc_callback(RouteKey::Target(target_id.clone()));
-        let inner = match serde_json::to_string(&json!({ "id": id, "method": method, "params": params })) {
-          Ok(s) => s,
-          Err(e) => {
-            self.conn.forget_callback(id);
-            return Err(e.into());
-          },
+        let pending = PendingCallback {
+          connection: &self.conn,
+          id: Some(id),
         };
+        let inner = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?;
         let (wrap_id, wrap_rx) = self.conn.alloc_callback(RouteKey::PageProxy(page_proxy_id.clone()));
-        if let Err(e) = self.conn.writer.send(&json!({
-          "id": wrap_id,
-          "method": "Target.sendMessageToTarget",
-          "params": { "message": inner, "targetId": target_id },
-          "pageProxyId": page_proxy_id,
-        })) {
-          self.conn.forget_callback(id);
-          self.conn.forget_callback(wrap_id);
-          return Err(e.into());
-        }
-        if let Err(e) = wait_for(&self.conn, wrap_id, wrap_rx, "Target.sendMessageToTarget").await {
-          // The inner reply will never arrive once the wrapper is
-          // rejected — drop its slot instead of waiting for the
-          // route to close.
-          self.conn.forget_callback(id);
-          return Err(e);
-        }
-        wait_for(&self.conn, id, rx, method).await
+        let wrapper = PendingCallback {
+          connection: &self.conn,
+          id: Some(wrap_id),
+        };
+        self.send_envelope(
+          method,
+          budget,
+          &json!({
+            "id": wrap_id,
+            "method": "Target.sendMessageToTarget",
+            "params": { "message": inner, "targetId": target_id },
+            "pageProxyId": page_proxy_id,
+          }),
+        )?;
+        wait_for(wrapper, wrap_rx, "Target.sendMessageToTarget", &budget).await?;
+        wait_for(pending, rx, method, &budget).await
       },
     }
+  }
+
+  fn send_envelope(&self, method: &str, budget: OperationBudget, envelope: &Value) -> Result<(), ConnectionError> {
+    self.conn.writer.send_checked(envelope, || {
+      if self.conn.closed.load(Ordering::Acquire) {
+        return Err(ConnectionError::Closed { method: method.into() });
+      }
+      budget
+        .remaining_ms()
+        .map(|_| ())
+        .map_err(|error| ConnectionError::Timeout {
+          method: method.into(),
+          ms: error.timeout_ms,
+        })
+    })
   }
 
   /// Subscribe to this session's events.
@@ -470,29 +546,157 @@ impl Session {
   }
 }
 
-/// Reply timeout for a single protocol call. Matches the CDP
-/// transport's 30s cap — without it a wedged (alive but unresponsive)
-/// child hangs the caller forever, since `drain_all` only fires on
-/// pipe EOF.
+/// Default reply budget without an explicit operation scope. A wedged child
+/// otherwise leaves calls pending until `drain_all` runs on pipe EOF.
 const REPLY_TIMEOUT_MS: u64 = 30_000;
-const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(REPLY_TIMEOUT_MS);
 
 async fn wait_for(
-  conn: &Connection,
-  id: i64,
+  mut pending: PendingCallback<'_>,
   rx: oneshot::Receiver<Result<Value, ErrorPayload>>,
   method: &str,
+  budget: &OperationBudget,
 ) -> Result<Value, ConnectionError> {
-  match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-    Ok(Ok(Ok(v))) => Ok(v),
-    Ok(Ok(Err(err))) => Err(ConnectionError::Protocol(err.message)),
-    Ok(Err(_)) => Err(ConnectionError::Closed { method: method.into() }),
-    Err(_) => {
-      conn.forget_callback(id);
-      Err(ConnectionError::Timeout {
-        method: method.into(),
-        ms: REPLY_TIMEOUT_MS,
-      })
+  match budget.wait(rx).await {
+    Ok(Ok(result)) => {
+      pending.id = None;
+      result.map_err(|error| ConnectionError::Protocol(error.message))
     },
+    Ok(Err(_)) => Err(ConnectionError::Closed { method: method.into() }),
+    Err(error) => Err(ConnectionError::Timeout {
+      method: method.into(),
+      ms: error.timeout_ms,
+    }),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn close_cancels_blocked_io_and_rejects_retained_sessions() {
+    use tokio::io::AsyncReadExt;
+    let (read, _input) = tokio::io::duplex(1);
+    let (write, mut output) = tokio::io::duplex(1);
+    let connection = Connection::spawn(Transport::new(read, write));
+    let session = connection.browser_session();
+    let mut events = session.events();
+    let mut request = Box::pin(session.send("Playwright.getInfo", json!({})));
+    assert!(futures::poll!(&mut request).is_pending());
+    let mut byte = [0];
+    output.read_exact(&mut byte).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), connection.close())
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(request.await.is_err());
+    assert!(session.send("Playwright.getInfo", json!({})).await.is_err());
+    assert!(events.recv().await.is_none());
+    assert!(session.events().recv().await.is_none());
+    assert!(connection.callbacks.lock().unwrap().is_empty());
+    assert!(connection.routes.lock().unwrap().is_empty());
+    connection.close().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn malformed_frame_retires_io_with_a_retained_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (read, mut input) = tokio::io::duplex(128);
+    let (write, mut output) = tokio::io::duplex(128);
+    let connection = Connection::spawn(Transport::new(read, write));
+    let mut events = connection.browser_session().events();
+    input.write_all(b"invalid json\0").await.unwrap();
+    let mut byte = [0];
+    assert_eq!(
+      tokio::time::timeout(std::time::Duration::from_secs(1), output.read(&mut byte))
+        .await
+        .unwrap()
+        .unwrap(),
+      0
+    );
+    assert!(events.recv().await.is_none());
+    assert!(connection.closed.load(Ordering::Acquire));
+    connection.close().await.unwrap();
+  }
+
+  fn connection() -> (Arc<Connection>, mpsc::UnboundedReceiver<Vec<u8>>) {
+    let (writer, queued) = WriterHandle::test_queue();
+    (
+      Arc::new(Connection {
+        writer: Arc::new(writer),
+        next_id: AtomicI64::new(1),
+        callbacks: Mutex::new(FxHashMap::default()),
+        routes: Mutex::new(FxHashMap::default()),
+        closed: AtomicBool::new(false),
+        tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+      }),
+      queued,
+    )
+  }
+
+  async fn ids(queued: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> (i64, i64) {
+    let mut frame = queued.recv().await.unwrap();
+    assert_eq!(frame.pop(), Some(0));
+    let envelope: Value = serde_json::from_slice(&frame).unwrap();
+    let inner: Value = serde_json::from_str(envelope["params"]["message"].as_str().unwrap()).unwrap();
+    (envelope["id"].as_i64().unwrap(), inner["id"].as_i64().unwrap())
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn operation_budgets_allow_long_and_unlimited_nested_replies() {
+    for timeout in [0, 90_000] {
+      let (connection, mut queued) = connection();
+      let session = connection.target_session("page", "target");
+      let mut command = Box::pin(
+        OperationBudget::new(timeout)
+          .unwrap()
+          .scope(session.send("Runtime.evaluate", json!({}))),
+      );
+      assert!(futures::poll!(&mut command).is_pending());
+      let (wrapper, inner) = ids(&mut queued).await;
+      tokio::time::advance(std::time::Duration::from_secs(31)).await;
+      assert!(futures::poll!(&mut command).is_pending());
+      connection.complete(wrapper, Ok(json!({})));
+      assert!(futures::poll!(&mut command).is_pending());
+      tokio::time::advance(std::time::Duration::from_secs(31)).await;
+      assert!(futures::poll!(&mut command).is_pending());
+      connection.complete(inner, Ok(json!({"value":42})));
+      assert_eq!(command.await.unwrap()["value"], 42);
+      assert!(connection.callbacks.lock().unwrap().is_empty());
+    }
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn operation_budget_is_shared_and_cancelled_nested_callbacks_are_removed() {
+    let (connection, mut queued) = connection();
+    let session = connection.target_session("page", "target");
+    let mut command = Box::pin(
+      OperationBudget::new(1000)
+        .unwrap()
+        .scope(session.send("Runtime.evaluate", json!({}))),
+    );
+    assert!(futures::poll!(&mut command).is_pending());
+    let (wrapper, inner) = ids(&mut queued).await;
+    tokio::time::advance(std::time::Duration::from_millis(700)).await;
+    connection.complete(wrapper, Ok(json!({})));
+    assert!(futures::poll!(&mut command).is_pending());
+    tokio::time::advance(std::time::Duration::from_millis(300)).await;
+    assert!(matches!(command.await, Err(ConnectionError::Timeout { ms: 1000, .. })));
+    assert!(connection.callbacks.lock().unwrap().is_empty());
+    connection.complete(inner, Ok(json!({})));
+    for complete_wrapper in [false, true] {
+      let mut command = Box::pin(session.send("Runtime.evaluate", json!({})));
+      assert!(futures::poll!(&mut command).is_pending());
+      let (wrapper, inner) = ids(&mut queued).await;
+      if complete_wrapper {
+        connection.complete(wrapper, Ok(json!({})));
+        assert!(futures::poll!(&mut command).is_pending());
+      }
+      drop(command);
+      assert!(connection.callbacks.lock().unwrap().is_empty());
+      connection.complete(wrapper, Ok(json!({})));
+      connection.complete(inner, Ok(json!({})));
+      assert!(connection.callbacks.lock().unwrap().is_empty());
+    }
   }
 }

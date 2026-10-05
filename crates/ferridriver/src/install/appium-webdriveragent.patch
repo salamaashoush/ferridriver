@@ -1,0 +1,96 @@
+diff --git i/lib/xcodebuild.ts w/lib/xcodebuild.ts
+index 5b37847..506be47 100644
+--- i/lib/xcodebuild.ts
++++ w/lib/xcodebuild.ts
+@@ -49,6 +49,7 @@ export class XcodeBuild {
+   readonly iosSdkVersion?: string;
+   readonly xcodeSigningId: string;
+   private xcodebuild?: SubProcess;
++  private readonly detachProcess = process.env.APPIUM_WDA_INHERIT_PROCESS_GROUP !== '1';
+   private usePrebuiltWDA?: boolean;
+   private derivedDataPath?: string;
+   private readonly log: AppiumLogger;
+@@ -277,7 +278,7 @@ export class XcodeBuild {
+           if (!xcodebuild) {
+             throw new Error('xcodebuild subprocess was not created');
+           }
+-          await xcodebuild.start(true);
++          await xcodebuild.start(this.detachProcess ? true : null);
+           if (!buildOnly) {
+             const result = await this.waitForStart(timer);
+             resolve(result ?? undefined);
+@@ -471,7 +472,7 @@ export class XcodeBuild {
+     const xcodebuild = new SubProcess(cmd, args, {
+       cwd: this.bootstrapPath,
+       env,
+-      detached: true,
++      detached: this.detachProcess,
+       stdio: ['ignore', 'pipe', 'pipe'],
+     });
+ 
+diff --git a/test/unit/xcodebuild-ownership.spec.ts b/test/unit/xcodebuild-ownership.spec.ts
+new file mode 100644
+--- /dev/null
++++ b/test/unit/xcodebuild-ownership.spec.ts
+@@ -0,0 +1,61 @@
++import assert from 'node:assert/strict';
++import {EventEmitter} from 'node:events';
++import {afterEach, describe, it, mock} from 'node:test';
++
++const processes: ProbeProcess[] = [];
++class ProbeProcess extends EventEmitter {
++  detector?: boolean | null;
++  constructor(
++    _command: string,
++    _args: string[],
++    readonly options: {detached: boolean},
++  ) {
++    super();
++    processes.push(this);
++  }
++  async start(detector: boolean | null) {
++    if (detector === true && !this.options.detached) {
++      throw new Error('Cannot detach an inherited process');
++    }
++    this.detector = detector;
++    queueMicrotask(() => this.emit('exit', 0, null));
++  }
++}
++
++const teenProcess = await import('teen_process');
++mock.module('teen_process', {namedExports: {...teenProcess, SubProcess: ProbeProcess}});
++const {XcodeBuild} = await import('../../lib/xcodebuild.js');
++
++describe('xcodebuild process ownership', () => {
++  const original = process.env.APPIUM_WDA_INHERIT_PROCESS_GROUP;
++  afterEach(() => {
++    if (original === undefined) {
++      delete process.env.APPIUM_WDA_INHERIT_PROCESS_GROUP;
++    } else {
++      process.env.APPIUM_WDA_INHERIT_PROCESS_GROUP = original;
++    }
++    processes.length = 0;
++  });
++
++  for (const inherited of [false, true]) {
++    it(inherited ? 'retains the managed parent process group' : 'preserves standalone detachment', async () => {
++      if (inherited) {
++        process.env.APPIUM_WDA_INHERIT_PROCESS_GROUP = '1';
++      } else {
++        delete process.env.APPIUM_WDA_INHERIT_PROCESS_GROUP;
++      }
++      const build = new XcodeBuild(
++        {udid: 'sashoush-simulator'},
++        {
++          realDevice: false,
++          agentPath: 'WebDriverAgent.xcodeproj',
++          bootstrapPath: '.',
++        },
++      );
++      await build.start(true);
++      assert.equal(processes.length, 1);
++      assert.equal(processes[0].options.detached, !inherited);
++      assert.equal(processes[0].detector, inherited ? null : true);
++    });
++  }
++});

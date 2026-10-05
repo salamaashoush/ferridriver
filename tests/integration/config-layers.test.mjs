@@ -166,7 +166,7 @@ test('environment overrides beat files and retain their environment provenance',
     },
   });
   assert.equal(r.headless, true);
-  assert.equal(r.config.mcp.browser.backend, 'cdp-raw');
+  assert.equal(r.config.mcp.browser.backend, 'cdp-ws');
   assert.equal(r.config.mcp.browser.instanceArgsCommand.run, 'echo --from-env');
   assert.deepEqual(r.provenance['mcp.browser.headless'], { from: 'env', source: 'FERRIDRIVER_MCP__BROWSER__HEADLESS' });
 });
@@ -368,7 +368,7 @@ test('shared browser values reach both hosts while section overrides retain prec
     'browser:\n  backend: cdp-raw\n  headless: true\ntest:\n  browser:\n    backend: webkit\n' });
   assert.equal(r.config.mcp.browser.headless, true);
   assert.equal(r.config.test.browser.headless, true);
-  assert.equal(r.config.mcp.browser.backend, 'cdp-raw');
+  assert.equal(r.config.mcp.browser.backend, 'cdp-ws');
   assert.equal(r.config.test.browser.backend, 'webkit');
   assert.ok(Object.hasOwn(r.provenance, 'mcp.browser.backend'));
 });

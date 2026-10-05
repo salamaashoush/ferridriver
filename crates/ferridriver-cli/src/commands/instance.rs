@@ -30,6 +30,7 @@ pub async fn provision_instance(
   instance: &str,
   headed: bool,
   fresh: bool,
+  connection: Option<ferridriver::state::ConnectMode>,
 ) -> anyhow::Result<Provisioned> {
   let mcp_config: Arc<dyn ferridriver_mcp::server::McpServerConfig> = Arc::new(mcp_config);
   mcp_config
@@ -45,14 +46,29 @@ pub async fn provision_instance(
   // default here would silently ignore it. `--headed` is the operator asking
   // to watch this one run, so it wins over both.
   let headless = !headed && overrides.headless.unwrap_or(false);
-  let mode = mcp_config
-    .resolve_instance(instance)
+  let mode = connection
+    .clone()
+    .or_else(|| mcp_config.resolve_instance(instance))
     .unwrap_or(ferridriver::state::ConnectMode::Launch);
   // Read before `mode` is handed to the state builder.
   let launched = matches!(mode, ferridriver::state::ConnectMode::Launch);
-  let created_session = matches!(mode, ferridriver::state::ConnectMode::WebDriver { .. });
+  let created_session = matches!(
+    mode,
+    ferridriver::state::ConnectMode::WebDriver { .. } | ferridriver::state::ConnectMode::Device { .. }
+  );
 
   let mut state = ferridriver_mcp::server::browser_state_for(mode, backend, headless, &mcp_config);
+  if let Some(connection) = connection {
+    let selected = instance.to_owned();
+    let config = Arc::clone(&mcp_config);
+    state.set_instance_resolver_fn(Arc::new(move |name| {
+      if name == selected {
+        Some(connection.clone())
+      } else {
+        config.resolve_instance(name)
+      }
+    }));
+  }
   if headed {
     // The per-instance callback re-asserts the section's `headless`, and it is
     // applied after the base plan -- so clearing it there is the only place

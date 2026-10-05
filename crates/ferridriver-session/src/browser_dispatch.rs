@@ -13,7 +13,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ferridriver::backend::BackendKind;
 use ferridriver::state::{BrowserState, SessionKey};
 use ferridriver::{Browser, Page};
 use tokio::sync::RwLock;
@@ -23,18 +22,18 @@ use crate::protocol::{Command, RUN_VERB, Response, ScriptRequest};
 
 /// Runs session commands against a live browser.
 pub struct BrowserDispatcher {
-  state: Arc<RwLock<BrowserState>>,
-  backend: BackendKind,
+  browser: Browser,
+  browser_name: String,
   script_host: Option<Arc<dyn ScriptHost>>,
 }
 
 impl BrowserDispatcher {
-  /// Build a dispatcher over the given shared browser state.
+  /// Build a dispatcher retaining the bound browser's product identity.
   #[must_use]
-  pub fn new(state: Arc<RwLock<BrowserState>>, backend: BackendKind) -> Self {
+  pub fn new(browser: &Browser) -> Self {
     Self {
-      state,
-      backend,
+      browser: browser.clone(),
+      browser_name: browser_name_for(browser).to_owned(),
       script_host: None,
     }
   }
@@ -51,14 +50,14 @@ impl BrowserDispatcher {
 
   /// The browser-engine name for the registry descriptor.
   #[must_use]
-  pub fn browser_name(&self) -> &'static str {
-    browser_name_for(self.backend)
+  pub fn browser_name(&self) -> &str {
+    &self.browser_name
   }
 
   /// The shared browser state this dispatcher drives.
   #[must_use]
   pub fn state(&self) -> &Arc<RwLock<BrowserState>> {
-    &self.state
+    self.browser.state()
   }
 
   fn context_of(command: &Command) -> &str {
@@ -91,28 +90,48 @@ impl Dispatcher for BrowserDispatcher {
     }
   }
 
+  async fn close(&self) -> std::result::Result<(), String> {
+    let release = Box::pin(async { self.browser.close().await.map_err(|error| error.to_string()) });
+    match &self.script_host {
+      Some(host) => host.close(release).await,
+      None => release.await,
+    }
+  }
+
   fn verbs(&self) -> Vec<&'static str> {
     vec![RUN_VERB]
   }
 }
 
-/// Resolve the browser-engine name for a [`SessionKey`]'s instance from a
-/// backend kind. Used by [`crate::bind()`] to fill the registry descriptor.
+/// Normalize the reported browser product for the registry descriptor.
 #[must_use]
-pub fn browser_name_for(backend: BackendKind) -> &'static str {
-  match backend {
-    BackendKind::Bidi => "firefox",
-    BackendKind::WebKit => "webkit",
-    _ => "chromium",
+pub fn browser_name_for(browser: &Browser) -> &str {
+  let product = browser.version().split('/').next().unwrap_or(browser.version());
+  if ["Chrome", "HeadlessChrome", "Chromium"]
+    .iter()
+    .any(|name| product.eq_ignore_ascii_case(name))
+  {
+    "chromium"
+  } else if product.eq_ignore_ascii_case("firefox") {
+    "firefox"
+  } else if product.eq_ignore_ascii_case("safari") {
+    "safari"
+  } else if ["webkit", "webkit-playwright"]
+    .iter()
+    .any(|name| product.eq_ignore_ascii_case(name))
+  {
+    "webkit"
+  } else {
+    product
   }
 }
 
 /// Build a dispatcher straight from a [`Browser`] handle, reading its backend
-/// kind and sharing its state. The most common construction path for a host
+/// identity and sharing its state. The most common construction path for a host
 /// that already holds a `Browser`.
 #[must_use]
 pub fn dispatcher_for(browser: &Browser) -> BrowserDispatcher {
-  BrowserDispatcher::new(Arc::clone(browser.state()), browser.backend_kind())
+  BrowserDispatcher::new(browser)
 }
 
 /// Resolve a context name to a live `Page` on `state`, opening one on first
@@ -122,17 +141,37 @@ pub fn dispatcher_for(browser: &Browser) -> BrowserDispatcher {
 /// # Errors
 ///
 /// Returns whatever launching the instance or opening the page failed with.
-pub async fn page_for(state: &Arc<RwLock<BrowserState>>, context: &str) -> ferridriver::Result<Arc<Page>> {
+pub async fn page_for(browser: &Browser, context: &str) -> ferridriver::Result<Arc<Page>> {
+  let state = browser.state();
+  let key = context_key_for(browser, context)?;
+  let context = key.to_composite();
+  let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(state), context.clone()).with_browser(browser.clone());
   {
     let guard = state.read().await;
-    if let Ok(any_page) = guard.active_page(context) {
+    if let Ok(any_page) = guard.active_page(&context) {
       let any_page = any_page.clone();
-      let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(state), context.to_string());
       return Ok(Page::with_context(any_page, ctx_ref));
     }
   }
-  let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(state), context.to_string());
   Box::pin(ctx_ref.new_page()).await
+}
+
+/// # Errors
+/// Rejects a qualified context that belongs to a different bound browser instance.
+pub fn context_key_for(browser: &Browser, context: &str) -> ferridriver::Result<SessionKey> {
+  let mut key = SessionKey::parse(&browser.default_context().composite());
+  if context.contains(':') {
+    let requested = SessionKey::parse(context);
+    if requested.instance != key.instance {
+      return Err(ferridriver::FerriError::invalid_argument(
+        "context",
+        "context belongs to another browser instance",
+      ));
+    }
+    return Ok(requested);
+  }
+  key.context = Arc::from(context);
+  Ok(key)
 }
 
 /// Parse a session key into its `instance:context` halves. Re-exported so the

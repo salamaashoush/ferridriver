@@ -1,0 +1,67 @@
+diff --git c/lib/simulator-xcode-14.ts w/lib/simulator-xcode-14.ts
+index 11007fa..d95d087 100644
+--- c/lib/simulator-xcode-14.ts
++++ w/lib/simulator-xcode-14.ts
+@@ -476,6 +476,13 @@ export class SimulatorXcode14
+     const timer = new timing.Timer().start();
+     const shouldWaitForBoot = await STARTUP_LOCK.acquire(this.uiClientBundleId, async () => {
+       const isServerRunning = await this.isRunning();
++      // The global UI client may belong to another device set.
++      if (runOpts.isHeadless && this.devicesSetPath) {
++        if (!isServerRunning) {
++          await this.boot();
++        }
++        return !isServerRunning;
++      }
+       const uiClientPid = await this.getUIClientPid();
+       if (runOpts.isHeadless) {
+         if (isServerRunning && !uiClientPid) {
+diff --git c/test/unit/private-device-set.spec.ts w/test/unit/private-device-set.spec.ts
+new file mode 100644
+index 0000000..d9642be
+--- /dev/null
++++ w/test/unit/private-device-set.spec.ts
+@@ -0,0 +1,43 @@
++import assert from 'node:assert/strict';
++import {it, mock} from 'node:test';
++
++import sinon from 'sinon';
++
++import * as settings from '../../lib/extensions/settings.js';
++
++mock.module('../../lib/extensions/settings.js', {
++  namedExports: {
++    ...settings,
++    compileSimulatorPreferences: () => [{}, {}],
++    updatePreferences: async () => {},
++  },
++});
++
++const {SimulatorXcode14} = await import('../../lib/simulator-xcode-14.js');
++
++for (const booted of [false, true]) {
++  it(`keeps unrelated Simulator UI untouched for private headless devices, booted=${booted}`, async () => {
++    const simulator = new SimulatorXcode14('sashoush-device', {
++      major: 14,
++      minor: 0,
++      versionFloat: 14,
++      versionString: '14.0',
++    });
++    simulator.devicesSetPath = '/tmp/sashoush-private-devices';
++    const sandbox = sinon.createSandbox();
++    try {
++      sandbox.stub(simulator, 'isRunning').resolves(booted);
++      sandbox.stub(simulator, 'getUIClientPid').rejects(new Error('Must not inspect the global UI client'));
++      const kill = sandbox.stub(simulator, 'killUIClient').rejects(new Error('Must not kill the global UI client'));
++      const boot = sandbox.stub(simulator, 'boot').resolves();
++      const wait = sandbox.stub(simulator, 'waitForBoot').resolves();
++      sandbox.stub(simulator, 'disableKeyboardIntroduction').resolves();
++      await simulator.run({isHeadless: true});
++      assert.equal(kill.callCount, 0);
++      assert.equal(boot.callCount, booted ? 0 : 1);
++      assert.equal(wait.callCount, booted ? 0 : 1);
++    } finally {
++      sandbox.restore();
++    }
++  });
++}

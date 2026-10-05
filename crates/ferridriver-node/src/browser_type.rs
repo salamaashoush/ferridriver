@@ -229,7 +229,7 @@ fn lower_connect_over_cdp_options(opts: ConnectOverCdpOptions) -> core_opts::Con
 ///
 /// `chromium()` returns a Chromium `BrowserType` configured with the
 /// CDP-pipe transport. Pass `{ transport: 'ws' }` to drive CDP over
-/// WebSocket (CdpRaw backend) — a ferridriver extension over
+/// WebSocket (CdpWs backend) — a ferridriver extension over
 /// Playwright's pipe-only `chromium`.
 #[napi(ts_args_type = "options?: { transport?: 'pipe' | 'ws' }")]
 pub fn chromium(options: Option<BrowserTypeOptions>) -> BrowserType {
@@ -256,4 +256,9 @@ pub fn firefox() -> BrowserType {
 #[napi]
 pub fn webkit() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::webkit())
+}
+
+#[napi]
+pub fn safari() -> BrowserType {
+  BrowserType::wrap(ferridriver::BrowserType::safari())
 }

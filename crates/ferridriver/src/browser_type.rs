@@ -47,6 +47,7 @@ use crate::state::{BrowserState, ConnectMode};
 pub struct BrowserType {
   kind: BrowserKind,
   transport: Option<ChromiumTransport>,
+  backend: Option<BackendKind>,
 }
 
 impl BrowserType {
@@ -57,17 +58,19 @@ impl BrowserType {
     Self {
       kind: BrowserKind::Chromium,
       transport: None,
+      backend: None,
     }
   }
 
   /// Construct a Chromium `BrowserType` with explicit
   /// [`BrowserTypeOptions`]. `transport: Some(Ws)` switches to the
-  /// CDP-over-WebSocket backend (`CdpRaw`) instead of the pipe default.
+  /// CDP-over-WebSocket backend (`CdpWs`) instead of the pipe default.
   #[must_use]
   pub fn chromium_with(opts: &BrowserTypeOptions) -> Self {
     Self {
       kind: BrowserKind::Chromium,
       transport: opts.transport,
+      backend: None,
     }
   }
 
@@ -78,33 +81,46 @@ impl BrowserType {
     Self {
       kind: BrowserKind::Firefox,
       transport: None,
+      backend: None,
     }
   }
 
-  /// Construct a `WebKit` `BrowserType`. Equivalent to the top-level
-  /// [`webkit`] function. Only meaningfully usable on macOS — the
-  /// `Self::launch` path returns a typed error elsewhere.
+  /// Construct a `WebKit` `BrowserType`. Equivalent to the top-level [`webkit`] function.
   #[must_use]
   pub fn webkit() -> Self {
     Self {
       kind: BrowserKind::WebKit,
       transport: None,
+      backend: None,
+    }
+  }
+
+  #[must_use]
+  pub fn safari() -> Self {
+    Self {
+      kind: BrowserKind::Safari,
+      transport: None,
+      backend: None,
     }
   }
 
   /// Rust-only escape hatch used by the test runner to pin both the
   /// product and the wire backend explicitly. NOT exposed in the JS
   /// bindings — it's intended for the test scaffolding that needs to
-  /// hold `BrowserKind::Chromium + BackendKind::CdpRaw` (etc.) without
+  /// hold `BrowserKind::Chromium + BackendKind::CdpWs` (etc.) without
   /// going through `chromium_with({ transport: Ws })`.
   #[must_use]
   pub fn with_backend(kind: BrowserKind, backend: BackendKind) -> Self {
     let transport = match (kind, backend) {
-      (BrowserKind::Chromium, BackendKind::CdpRaw) => Some(ChromiumTransport::Ws),
+      (BrowserKind::Chromium, BackendKind::CdpWs) => Some(ChromiumTransport::Ws),
       (BrowserKind::Chromium, BackendKind::CdpPipe) => Some(ChromiumTransport::Pipe),
       _ => None,
     };
-    Self { kind, transport }
+    Self {
+      kind,
+      transport,
+      backend: Some(backend),
+    }
   }
 
   /// Playwright `BrowserType.name()` — `"chromium"` / `"firefox"` /
@@ -132,9 +148,10 @@ impl BrowserType {
         .map(std::path::PathBuf::from)
         .or_else(|| crate::state::detect_firefox().ok().map(std::path::PathBuf::from)),
       BrowserKind::Chromium => Some(std::path::PathBuf::from(crate::state::resolve_chromium(true))),
-      // WebKit on macOS uses the host process bundled with ferridriver
-      // — no separate executable path is exposed.
-      BrowserKind::WebKit => None,
+      BrowserKind::WebKit => crate::backend::webkit::locate_binary().ok(),
+      BrowserKind::Safari => {
+        cfg!(target_os = "macos").then(|| std::path::PathBuf::from("/Applications/Safari.app/Contents/MacOS/Safari"))
+      },
     }
   }
 
@@ -144,28 +161,56 @@ impl BrowserType {
   ///
   /// Returns an error if the browser process fails to start.
   pub async fn launch(self, options: LaunchOptions) -> Result<Browser> {
-    let plan = LaunchPlan::from_public(self.kind, self.transport, options);
-    let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
-    Box::pin(state.ensure_browser()).await?;
-    Ok(Browser::from_state(state))
+    self.launch_with_resources(options, None).await
+  }
+
+  pub(crate) async fn launch_with_resources(
+    self,
+    options: LaunchOptions,
+    resources: Option<&crate::BrowserResources>,
+  ) -> Result<Browser> {
+    let mut plan = LaunchPlan::from_public(self.kind, self.transport, options);
+    plan.backend =
+      crate::options::BrowserSelection::resolve(Some(self.kind), self.backend.or(Some(plan.backend)))?.backend;
+    let state = BrowserState::with_plan(ConnectMode::Launch, plan)
+      .start_owned(resources)?
+      .await?;
+    Browser::from_ready_state(state, "default").await
   }
 
   /// Playwright: `browserType.connect(wsEndpoint, options?) -> Browser`.
   ///
   /// A `ws://` endpoint uses the product's native protocol. An HTTP endpoint
-  /// is treated as a W3C `WebDriver` server and negotiated onto its `BiDi`
-  /// WebSocket, using `ConnectOptions::capabilities` for vendor options.
+  /// is treated as a W3C `WebDriver` server, using `BiDi` when advertised and
+  /// Classic otherwise. `capabilities.webSocketUrl` explicitly selects either
+  /// protocol; Safari defaults to Classic.
   ///
   /// # Errors
   ///
   /// Returns an error if the WebSocket handshake fails.
   pub async fn connect(self, ws_endpoint: &str, options: ConnectOptions) -> Result<Browser> {
+    self.connect_with_resources(ws_endpoint, options, None).await
+  }
+
+  pub(crate) async fn connect_with_resources(
+    self,
+    ws_endpoint: &str,
+    options: ConnectOptions,
+    resources: Option<&crate::BrowserResources>,
+  ) -> Result<Browser> {
     if ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://") {
+      if self.kind == BrowserKind::WebKit {
+        return Err(crate::error::FerriError::unsupported(
+          "Playwright WebKit cannot connect through WebDriver; use safari().connect() for real Safari",
+        ));
+      }
       let plan = LaunchPlan {
         backend: if self.kind == BrowserKind::Chromium
           && crate::backend::webdriver::uses_android_chrome(options.capabilities.as_ref())
         {
-          BackendKind::CdpRaw
+          BackendKind::CdpWs
+        } else if self.kind == BrowserKind::Safari {
+          BackendKind::WebDriver
         } else {
           BackendKind::Bidi
         },
@@ -177,36 +222,41 @@ impl BrowserType {
       let browser_name = match self.kind {
         BrowserKind::Chromium => "chrome",
         BrowserKind::Firefox => "firefox",
-        BrowserKind::WebKit => "safari",
+        BrowserKind::WebKit | BrowserKind::Safari => "safari",
       };
       let mode = ConnectMode::WebDriver {
         endpoint: ws_endpoint.to_string(),
         browser_name: browser_name.to_string(),
+        protocol: crate::backend::webdriver::WebDriverProtocol::from_backend(self.backend),
         capabilities: options.capabilities,
         headers: options.headers,
         timeout: options.timeout,
       };
-      let mut state = BrowserState::with_plan(mode, plan);
-      Box::pin(state.ensure_browser()).await?;
-      return Ok(Browser::from_state(state));
+      let state = BrowserState::with_plan(mode, plan).start_owned(resources)?.await?;
+      return Browser::from_ready_state(state, "default").await;
     }
-    if self.kind == BrowserKind::Firefox {
+    if matches!(self.kind, BrowserKind::Firefox | BrowserKind::Safari) {
       let plan = LaunchPlan {
         backend: BackendKind::Bidi,
-        kind: BrowserKind::Firefox,
+        kind: self.kind,
         ws_endpoint: Some(ws_endpoint.to_string()),
+        connection_headers: options.headers,
+        timeout: options.timeout,
         ..LaunchPlan::default()
       };
-      let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan);
-      Box::pin(state.ensure_browser()).await?;
-      return Ok(Browser::from_state(state));
+      let state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan)
+        .start_owned(resources)?
+        .await?;
+      return Browser::from_ready_state(state, "default").await;
     }
     let cdp_opts = ConnectOverCdpOptions {
       headers: options.headers,
       slow_mo: options.slow_mo,
       timeout: options.timeout,
     };
-    self.connect_over_cdp(ws_endpoint, cdp_opts).await
+    self
+      .connect_over_cdp_with_resources(ws_endpoint, cdp_opts, resources)
+      .await
   }
 
   /// Playwright: `browserType.connectOverCDP(endpointURL, options?) -> Browser`.
@@ -216,7 +266,16 @@ impl BrowserType {
   ///
   /// Returns an error if the WebSocket handshake fails or the product
   /// is not Chromium.
-  pub async fn connect_over_cdp(self, endpoint_url: &str, _options: ConnectOverCdpOptions) -> Result<Browser> {
+  pub async fn connect_over_cdp(self, endpoint_url: &str, options: ConnectOverCdpOptions) -> Result<Browser> {
+    self.connect_over_cdp_with_resources(endpoint_url, options, None).await
+  }
+
+  pub(crate) async fn connect_over_cdp_with_resources(
+    self,
+    endpoint_url: &str,
+    options: ConnectOverCdpOptions,
+    resources: Option<&crate::BrowserResources>,
+  ) -> Result<Browser> {
     if self.kind != BrowserKind::Chromium {
       return Err(crate::error::FerriError::Unsupported(format!(
         "connectOverCDP is only supported for Chromium ({} cannot use the Chrome DevTools Protocol)",
@@ -224,15 +283,18 @@ impl BrowserType {
       )));
     }
     let plan = LaunchPlan {
-      backend: BackendKind::CdpRaw,
+      backend: BackendKind::CdpWs,
       kind: BrowserKind::Chromium,
       ws_endpoint: Some(endpoint_url.to_string()),
+      connection_headers: options.headers,
+      timeout: options.timeout,
       default_viewport: None,
       ..LaunchPlan::default()
     };
-    let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(endpoint_url.to_string()), plan);
-    Box::pin(state.ensure_browser()).await?;
-    Ok(Browser::from_state(state))
+    let state = BrowserState::with_plan(ConnectMode::ConnectUrl(endpoint_url.to_string()), plan)
+      .start_owned(resources)?
+      .await?;
+    Browser::from_ready_state(state, "default").await
   }
 
   /// Playwright: `browserType.launchPersistentContext(userDataDir, options?) -> BrowserContext`.
@@ -250,13 +312,26 @@ impl BrowserType {
     user_data_dir: &Path,
     options: LaunchPersistentContextOptions,
   ) -> Result<ContextRef> {
+    self
+      .launch_persistent_context_with_resources(user_data_dir, options, None)
+      .await
+  }
+
+  pub(crate) async fn launch_persistent_context_with_resources(
+    &self,
+    user_data_dir: &Path,
+    options: LaunchPersistentContextOptions,
+    resources: Option<&crate::BrowserResources>,
+  ) -> Result<ContextRef> {
     let LaunchPersistentContextOptions { launch, context } = options;
     let mut plan = LaunchPlan::from_public(self.kind, self.transport, launch);
+    plan.backend =
+      crate::options::BrowserSelection::resolve(Some(self.kind), self.backend.or(Some(plan.backend)))?.backend;
     plan.user_data_dir = Some(user_data_dir.to_string_lossy().into_owned());
     let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
     state.persistent_context = true;
-    Box::pin(state.ensure_browser()).await?;
-    let browser = Browser::from_state(state);
+    let state = state.start_owned(resources)?.await?;
+    let browser = Browser::from_ready_state(state, "default").await?;
     let default_ctx = browser.default_context();
     // Persist the options bag against the composite key for the
     // default context so subsequent `new_page()` calls in the
@@ -290,4 +365,9 @@ pub fn firefox() -> BrowserType {
 #[must_use]
 pub fn webkit() -> BrowserType {
   BrowserType::webkit()
+}
+
+#[must_use]
+pub fn safari() -> BrowserType {
+  BrowserType::safari()
 }

@@ -3,7 +3,7 @@
 //!
 //! Provides a unified API across multiple browser backends:
 //! - `CdpPipe`: Chrome `DevTools` Protocol over pipes (--remote-debugging-pipe, fd 3/4)
-//! - `CdpRaw`: Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
+//! - `CdpWs`: Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
 //! - `BiDi`: `WebDriver` `BiDi` over WebSocket (Firefox)
 //! - `WebKit`: Playwright's `WebKit` build over `pw_run.sh` (NUL-delimited JSON
 //!   inspector pipe, fd 3/4); cross-platform (Linux + macOS), not native `WKWebView`
@@ -15,6 +15,7 @@ pub mod cdp;
 pub(crate) mod json_scan;
 pub mod process;
 pub mod reaper;
+mod transport_tasks;
 pub mod webdriver;
 pub mod webkit;
 
@@ -41,29 +42,17 @@ pub(crate) fn empty_params() -> serde_json::Value {
 }
 
 use crate::console_message::ConsoleMessage;
-use crate::error::Result;
+use crate::error::{FerriError, Result};
 use crate::events::EventEmitter;
 use crate::network::Request as NetworkRequest;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Mutable weak back-reference to the outer `Arc<Page>`. Every backend
-/// page struct carries one of these so async event listeners
-/// (file-chooser, future per-frame probes) can upgrade the weak on
-/// demand and build `ElementHandle`s without threading the page
-/// through the backend.
-///
-/// Why `Mutex<Weak<Page>>` and not `OnceLock<Weak<Page>>`: callers
-/// like the MCP server construct a fresh `Arc<Page>` on every tool
-/// invocation and drop it when the tool returns. A one-shot slot
-/// would lock in the first `Arc<Page>`'s weak — whose target dies as
-/// soon as that tool call completes, leaving every subsequent event
-/// unable to resolve. The mutex lets successive `Page::new` calls
-/// overwrite the slot with a weak that tracks the currently-live
-/// outer page.
+/// Event delivery prefers the newest live wrapper, while retaining weak
+/// fallbacks when a temporary `context.pages()` wrapper is dropped.
 #[derive(Clone, Default)]
 pub struct PageBackref {
-  inner: Arc<std::sync::Mutex<std::sync::Weak<crate::page::Page>>>,
+  inner: Arc<std::sync::Mutex<Vec<std::sync::Weak<crate::page::Page>>>>,
 }
 
 impl PageBackref {
@@ -72,45 +61,28 @@ impl PageBackref {
     Self::default()
   }
 
-  /// Set the stored weak reference. Called by `Page::new` /
-  /// `Page::with_context` on every construction.
-  ///
-  /// **Always overwrites.** Earlier behaviour was "skip overwrite if
-  /// the existing weak still upgrades" to protect against transient
-  /// `Page` wrappers (`ContextRef::pages()`, `frame.page()`) clobbering
-  /// a long-lived persistent wrapper. In the MCP / script-engine path
-  /// there IS no persistent outer `Page` -- every script call mints a
-  /// new wrapper via `page_and_context` and drops it when the
-  /// `RunContext` drops. With skip-on-upgrade, the very first transient
-  /// wrapper "won" and stayed pinned in `page_backref`; once GC reaped
-  /// its JS heap reference, the weak dangled while the listener thread
-  /// kept silently dropping every console / file-chooser / dialog event
-  /// for the rest of the session (reproduced via
-  /// `test_file_chooser_multiple_string_array` running after
-  /// `test_file_chooser_single_string_path`). Last-writer-wins matches
-  /// the actual lifetime story: the wrapper most recently registered is
-  /// the one the current call is using.
   pub fn set(&self, weak: std::sync::Weak<crate::page::Page>) {
     if let Ok(mut guard) = self.inner.lock() {
-      *guard = weak;
+      guard.retain(|existing| existing.strong_count() > 0 && !existing.ptr_eq(&weak));
+      guard.push(weak);
     }
   }
 
-  /// Upgrade to an `Arc<Page>` if the outer page is still alive.
-  /// Backend listeners call this per event and silently skip events
-  /// that arrive when no outer page wraps this backend page.
   #[must_use]
   pub fn upgrade(&self) -> Option<Arc<crate::page::Page>> {
-    self.inner.lock().ok()?.upgrade()
+    let mut guard = self.inner.lock().ok()?;
+    while let Some(weak) = guard.last() {
+      if let Some(page) = weak.upgrade() {
+        return Some(page);
+      }
+      guard.pop();
+    }
+    None
   }
 
-  /// Clone the stored `Weak<Page>` without upgrading. Used to hand a
-  /// page back-reference to live handles (e.g.
-  /// [`crate::dialog::Dialog`]) whose `page()` accessor resolves the
-  /// page lazily.
   #[must_use]
   pub fn weak(&self) -> std::sync::Weak<crate::page::Page> {
-    self.inner.lock().map(|g| g.clone()).unwrap_or_default()
+    self.upgrade().as_ref().map(Arc::downgrade).unwrap_or_default()
   }
 }
 
@@ -583,16 +555,62 @@ impl NavLifecycle {
 }
 
 /// Which backend to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
   /// Chrome `DevTools` Protocol over pipes (--remote-debugging-pipe)
   CdpPipe,
   /// Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
-  CdpRaw,
+  #[serde(rename = "cdp-ws", alias = "cdp-raw")]
+  CdpWs,
   /// Playwright `WebKit` Inspector protocol (cross-platform, bundled binary)
+  #[serde(rename = "webkit")]
   WebKit,
   /// `WebDriver` `BiDi` protocol (cross-browser: Chrome, Firefox, future Safari)
   Bidi,
+  #[serde(rename = "webdriver", alias = "web-driver")]
+  WebDriver,
+}
+
+impl BackendKind {
+  pub const ALL: &'static [&'static str] = &["cdp-pipe", "cdp-ws", "bidi", "webkit", "webdriver"];
+
+  /// # Errors
+  /// Rejects unknown protocol names.
+  pub fn parse(value: &str) -> Result<Self> {
+    match value {
+      "cdp-pipe" => Ok(Self::CdpPipe),
+      "cdp-ws" | "cdp-raw" => Ok(Self::CdpWs),
+      "bidi" => Ok(Self::Bidi),
+      "webkit" => Ok(Self::WebKit),
+      "web-driver" | "webdriver" => Ok(Self::WebDriver),
+      _ => Err(FerriError::invalid_argument(
+        "backend",
+        format!("unknown backend {value:?}; expected {}", Self::ALL.join(", ")),
+      )),
+    }
+  }
+
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    self.name()
+  }
+
+  #[must_use]
+  pub fn kind(self) -> Self {
+    self
+  }
+
+  #[must_use]
+  pub fn name(self) -> &'static str {
+    match self {
+      Self::CdpPipe => "cdp-pipe",
+      Self::CdpWs => "cdp-ws",
+      Self::WebKit => "webkit",
+      Self::Bidi => "bidi",
+      Self::WebDriver => "webdriver",
+    }
+  }
 }
 
 // ─── AnyBrowser ─────────────────────────────────────────────────────────────
@@ -601,9 +619,10 @@ pub enum BackendKind {
 #[derive(Clone)]
 pub enum AnyBrowser {
   CdpPipe(cdp::CdpBrowser<cdp::pipe::PipeTransport>),
-  CdpRaw(cdp::CdpBrowser<cdp::ws::WsTransport>),
+  CdpWs(cdp::CdpBrowser<cdp::ws::WsTransport>),
   WebKit(webkit::WebKitBrowser),
   Bidi(bidi::BidiBrowser),
+  WebDriver(webdriver::browser::WebDriverBrowser),
 }
 
 /// A page the BROWSER created (a `window.open` / `target=_blank`
@@ -752,17 +771,19 @@ impl AnyBrowser {
   pub(crate) fn kind(&self) -> BackendKind {
     match self {
       Self::CdpPipe(_) => BackendKind::CdpPipe,
-      Self::CdpRaw(_) => BackendKind::CdpRaw,
+      Self::CdpWs(_) => BackendKind::CdpWs,
       Self::WebKit(_) => BackendKind::WebKit,
       Self::Bidi(_) => BackendKind::Bidi,
+      Self::WebDriver(_) => BackendKind::WebDriver,
     }
   }
 
   pub(crate) fn supports_isolated_contexts(&self) -> bool {
     match self {
       Self::CdpPipe(browser) => browser.isolated_contexts,
-      Self::CdpRaw(browser) => browser.isolated_contexts,
+      Self::CdpWs(browser) => browser.isolated_contexts,
       Self::WebKit(_) | Self::Bidi(_) => true,
+      Self::WebDriver(_) => false,
     }
   }
 
@@ -773,9 +794,10 @@ impl AnyBrowser {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let taps = match self {
       Self::CdpPipe(b) => b.popup_taps(),
-      Self::CdpRaw(b) => b.popup_taps(),
+      Self::CdpWs(b) => b.popup_taps(),
       Self::WebKit(b) => b.popup_taps(),
       Self::Bidi(b) => b.popup_taps(),
+      Self::WebDriver(b) => b.popup_taps.clone(),
     };
     taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(tx);
     rx
@@ -793,8 +815,8 @@ impl AnyBrowser {
     use crate::cdp_session::{CdpSession, SessionTransportSource};
     match self {
       Self::CdpPipe(b) => CdpSession::attach_to_browser_target(SessionTransportSource::Pipe(b.transport_arc())).await,
-      Self::CdpRaw(b) => CdpSession::attach_to_browser_target(SessionTransportSource::Ws(b.transport_arc())).await,
-      Self::WebKit(_) | Self::Bidi(_) => Err(crate::error::FerriError::unsupported(
+      Self::CdpWs(b) => CdpSession::attach_to_browser_target(SessionTransportSource::Ws(b.transport_arc())).await,
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => Err(crate::error::FerriError::unsupported(
         "CDP session is only available on Chromium (cdp-pipe / cdp-raw backends)",
       )),
     }
@@ -808,9 +830,10 @@ impl AnyBrowser {
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     match self {
       Self::CdpPipe(b) => Box::pin(b.pages()).await,
-      Self::CdpRaw(b) => Box::pin(b.pages()).await,
+      Self::CdpWs(b) => Box::pin(b.pages()).await,
       Self::WebKit(b) => Box::pin(b.pages()).await,
       Self::Bidi(b) => Box::pin(b.pages()).await,
+      Self::WebDriver(b) => Ok(b.pages().await?.into_iter().map(AnyPage::WebDriver).collect()),
     }
   }
 
@@ -837,9 +860,10 @@ impl AnyBrowser {
   pub fn is_alive(&self) -> bool {
     match self {
       Self::CdpPipe(b) => b.is_alive() && b.child_is_running().unwrap_or(true),
-      Self::CdpRaw(b) => b.is_alive() && b.child_is_running().unwrap_or(true),
+      Self::CdpWs(b) => b.is_alive() && b.child_is_running().unwrap_or(true),
       Self::WebKit(b) => b.child_is_running(),
       Self::Bidi(b) => b.child_is_running().unwrap_or(true),
+      Self::WebDriver(b) => !b.session.is_closed(),
     }
   }
 
@@ -847,9 +871,12 @@ impl AnyBrowser {
     let proxy = options.and_then(|o| o.proxy.as_ref());
     match self {
       Self::CdpPipe(b) => b.new_context(proxy).await,
-      Self::CdpRaw(b) => b.new_context(proxy).await,
+      Self::CdpWs(b) => b.new_context(proxy).await,
       Self::WebKit(b) => b.new_context_with_options(options).await,
       Self::Bidi(b) => b.new_context(proxy).await,
+      Self::WebDriver(_) => Err(FerriError::unsupported(
+        "A Classic WebDriver session has one browser context; use the session's default context",
+      )),
     }
   }
 
@@ -861,9 +888,12 @@ impl AnyBrowser {
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     match self {
       Self::CdpPipe(b) => b.dispose_context(browser_context_id).await,
-      Self::CdpRaw(b) => b.dispose_context(browser_context_id).await,
+      Self::CdpWs(b) => b.dispose_context(browser_context_id).await,
       Self::WebKit(b) => b.dispose_context(browser_context_id).await,
       Self::Bidi(b) => b.dispose_context(browser_context_id).await,
+      Self::WebDriver(_) => Err(FerriError::unsupported(
+        "Classic WebDriver cannot dispose a browser context independently of its session",
+      )),
     }
   }
 
@@ -880,9 +910,23 @@ impl AnyBrowser {
   ) -> Result<AnyPage> {
     match self {
       Self::CdpPipe(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
-      Self::CdpRaw(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
+      Self::CdpWs(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
       Self::WebKit(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
       Self::Bidi(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
+      Self::WebDriver(b) => {
+        if browser_context_id.is_some() {
+          return Err(FerriError::unsupported(
+            "Classic WebDriver cannot select an isolated browser context",
+          ));
+        }
+        let page = b.new_page(url).await?;
+        if let Some(viewport) = viewport
+          && page.supports_window_resize()
+        {
+          page.emulate_viewport(viewport).await?;
+        }
+        Ok(AnyPage::WebDriver(page))
+      },
     }
   }
 
@@ -894,9 +938,10 @@ impl AnyBrowser {
   pub async fn close(&mut self) -> Result<()> {
     match self {
       Self::CdpPipe(b) => b.close().await,
-      Self::CdpRaw(b) => b.close().await,
+      Self::CdpWs(b) => b.close().await,
       Self::WebKit(b) => b.close().await,
       Self::Bidi(b) => b.close().await,
+      Self::WebDriver(b) => b.close().await,
     }
   }
 
@@ -914,9 +959,10 @@ impl AnyBrowser {
   pub fn version(&self) -> String {
     match self {
       Self::CdpPipe(b) => b.version().to_string(),
-      Self::CdpRaw(b) => b.version().to_string(),
+      Self::CdpWs(b) => b.version().to_string(),
       Self::WebKit(b) => b.version(),
       Self::Bidi(b) => b.version(),
+      Self::WebDriver(b) => b.product.clone(),
     }
   }
 }
@@ -927,9 +973,10 @@ impl AnyBrowser {
 #[derive(Clone)]
 pub enum AnyPage {
   CdpPipe(cdp::CdpPage<cdp::pipe::PipeTransport>),
-  CdpRaw(cdp::CdpPage<cdp::ws::WsTransport>),
+  CdpWs(cdp::CdpPage<cdp::ws::WsTransport>),
   WebKit(webkit::WebKitPage),
   Bidi(bidi::BidiPage),
+  WebDriver(webdriver::page::WebDriverPage),
 }
 
 /// Macro to dispatch a method call across all `AnyPage` variants.
@@ -937,9 +984,10 @@ macro_rules! page_dispatch {
     ($self:expr, $method:ident ( $($arg:expr),* $(,)? )) => {
         match $self {
             AnyPage::CdpPipe(p) => p.$method($($arg),*).await,
-            AnyPage::CdpRaw(p) => p.$method($($arg),*).await,
+            AnyPage::CdpWs(p) => p.$method($($arg),*).await,
             AnyPage::WebKit(p) => p.$method($($arg),*).await,
             AnyPage::Bidi(p) => p.$method($($arg),*).await,
+            AnyPage::WebDriver(p) => p.$method($($arg),*).await,
         }
     };
 }
@@ -952,10 +1000,11 @@ impl AnyPage {
   pub fn events(&self) -> &EventEmitter {
     match self {
       AnyPage::CdpPipe(p) => &p.events,
-      AnyPage::CdpRaw(p) => &p.events,
+      AnyPage::CdpWs(p) => &p.events,
       AnyPage::WebKit(p) => &p.events,
 
       AnyPage::Bidi(p) => &p.events,
+      AnyPage::WebDriver(p) => &p.events,
     }
   }
 
@@ -968,9 +1017,10 @@ impl AnyPage {
   pub fn dialog_manager(&self) -> &crate::dialog::DialogManager {
     match self {
       AnyPage::CdpPipe(p) => &p.dialog_manager,
-      AnyPage::CdpRaw(p) => &p.dialog_manager,
+      AnyPage::CdpWs(p) => &p.dialog_manager,
       AnyPage::WebKit(p) => &p.dialog_manager,
       AnyPage::Bidi(p) => &p.dialog_manager,
+      AnyPage::WebDriver(p) => &p.dialog_manager,
     }
   }
 
@@ -983,9 +1033,10 @@ impl AnyPage {
   pub fn file_chooser_manager(&self) -> &crate::file_chooser::FileChooserManager {
     match self {
       AnyPage::CdpPipe(p) => &p.file_chooser_manager,
-      AnyPage::CdpRaw(p) => &p.file_chooser_manager,
+      AnyPage::CdpWs(p) => &p.file_chooser_manager,
       AnyPage::WebKit(p) => &p.file_chooser_manager,
       AnyPage::Bidi(p) => &p.file_chooser_manager,
+      AnyPage::WebDriver(p) => &p.file_chooser_manager,
     }
   }
 
@@ -998,9 +1049,10 @@ impl AnyPage {
   pub fn download_manager(&self) -> &crate::download::DownloadManager {
     match self {
       AnyPage::CdpPipe(p) => &p.download_manager,
-      AnyPage::CdpRaw(p) => &p.download_manager,
+      AnyPage::CdpWs(p) => &p.download_manager,
       AnyPage::WebKit(p) => &p.download_manager,
       AnyPage::Bidi(p) => &p.download_manager,
+      AnyPage::WebDriver(p) => &p.download_manager,
     }
   }
 
@@ -1014,9 +1066,12 @@ impl AnyPage {
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.enable_file_chooser_intercept().await,
-      AnyPage::CdpRaw(p) => p.enable_file_chooser_intercept().await,
+      AnyPage::CdpWs(p) => p.enable_file_chooser_intercept().await,
       AnyPage::WebKit(p) => p.enable_file_chooser_intercept().await,
       AnyPage::Bidi(_) => Ok(()),
+      AnyPage::WebDriver(_) => Err(FerriError::unsupported(
+        "Classic WebDriver does not expose file chooser interception; use locator.setInputFiles",
+      )),
     }
   }
 
@@ -1027,9 +1082,12 @@ impl AnyPage {
   pub async fn enable_download_behavior(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.enable_download_behavior().await,
-      AnyPage::CdpRaw(p) => p.enable_download_behavior().await,
+      AnyPage::CdpWs(p) => p.enable_download_behavior().await,
       AnyPage::WebKit(p) => p.enable_download_behavior().await,
       AnyPage::Bidi(_) => Ok(()),
+      AnyPage::WebDriver(_) => Err(FerriError::unsupported(
+        "Classic WebDriver does not expose download events or browser download controls",
+      )),
     }
   }
 
@@ -1037,14 +1095,15 @@ impl AnyPage {
   /// Called by [`crate::page::Page::new`] / `Page::with_context`
   /// every time a new `Arc<Page>` is constructed — callers like the
   /// MCP server wrap the same backend page fresh on every tool
-  /// invocation, so successive calls must be able to overwrite the
-  /// slot. See [`PageBackref`] for the rationale.
+  /// invocation, so successive calls register their wrapper without
+  /// invalidating older wrappers that remain alive.
   pub fn set_page_backref(&self, weak: std::sync::Weak<crate::page::Page>) {
     let slot = match self {
       AnyPage::CdpPipe(p) => &p.page_backref,
-      AnyPage::CdpRaw(p) => &p.page_backref,
+      AnyPage::CdpWs(p) => &p.page_backref,
       AnyPage::WebKit(p) => &p.page_backref,
       AnyPage::Bidi(p) => &p.page_backref,
+      AnyPage::WebDriver(p) => &p.page_backref,
     };
     slot.set(weak);
   }
@@ -1069,9 +1128,10 @@ impl AnyPage {
   pub(crate) fn page_backref_handle(&self) -> PageBackref {
     match self {
       AnyPage::CdpPipe(p) => p.page_backref.clone(),
-      AnyPage::CdpRaw(p) => p.page_backref.clone(),
+      AnyPage::CdpWs(p) => p.page_backref.clone(),
       AnyPage::WebKit(p) => p.page_backref.clone(),
       AnyPage::Bidi(p) => p.page_backref.clone(),
+      AnyPage::WebDriver(p) => p.page_backref.clone(),
     }
   }
 
@@ -1082,9 +1142,10 @@ impl AnyPage {
   pub(crate) fn backend_target_id(&self) -> String {
     match self {
       AnyPage::CdpPipe(p) => p.target_id.to_string(),
-      AnyPage::CdpRaw(p) => p.target_id.to_string(),
+      AnyPage::CdpWs(p) => p.target_id.to_string(),
       AnyPage::WebKit(p) => p.page_proxy_id().to_string(),
       AnyPage::Bidi(p) => p.context_id.to_string(),
+      AnyPage::WebDriver(p) => p.page_guid(),
     }
   }
 
@@ -1097,9 +1158,9 @@ impl AnyPage {
   pub(crate) async fn resume_popup(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.resume_popup().await,
-      AnyPage::CdpRaw(p) => p.resume_popup().await,
+      AnyPage::CdpWs(p) => p.resume_popup().await,
       AnyPage::WebKit(p) => p.resume_popup().await,
-      AnyPage::Bidi(_) => Ok(()),
+      AnyPage::Bidi(_) | AnyPage::WebDriver(_) => Ok(()),
     }
   }
 
@@ -1113,9 +1174,10 @@ impl AnyPage {
   pub(crate) fn frame_cache(&self) -> &std::sync::Arc<std::sync::Mutex<crate::frame_cache::FrameCache>> {
     match self {
       AnyPage::CdpPipe(p) => &p.frame_cache,
-      AnyPage::CdpRaw(p) => &p.frame_cache,
+      AnyPage::CdpWs(p) => &p.frame_cache,
       AnyPage::WebKit(p) => &p.frame_cache,
       AnyPage::Bidi(p) => &p.frame_cache,
+      AnyPage::WebDriver(p) => &p.frame_cache,
     }
   }
 
@@ -1137,9 +1199,10 @@ impl AnyPage {
   pub(crate) fn observed(&self) -> &std::sync::Arc<std::sync::Mutex<crate::observed::ObservedBuffers>> {
     match self {
       AnyPage::CdpPipe(p) => &p.observed,
-      AnyPage::CdpRaw(p) => &p.observed,
+      AnyPage::CdpWs(p) => &p.observed,
       AnyPage::WebKit(p) => &p.observed,
       AnyPage::Bidi(p) => &p.observed,
+      AnyPage::WebDriver(p) => &p.observed,
     }
   }
 
@@ -1156,9 +1219,10 @@ impl AnyPage {
   pub(crate) fn frame_listener_started(&self) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
     match self {
       AnyPage::CdpPipe(p) => &p.frame_listener_started,
-      AnyPage::CdpRaw(p) => &p.frame_listener_started,
+      AnyPage::CdpWs(p) => &p.frame_listener_started,
       AnyPage::WebKit(p) => &p.frame_listener_started,
       AnyPage::Bidi(p) => &p.frame_listener_started,
+      AnyPage::WebDriver(p) => &p.frame_listener_started,
     }
   }
 
@@ -1170,9 +1234,10 @@ impl AnyPage {
   pub fn kind(&self) -> BackendKind {
     match self {
       AnyPage::CdpPipe(_) => BackendKind::CdpPipe,
-      AnyPage::CdpRaw(_) => BackendKind::CdpRaw,
+      AnyPage::CdpWs(_) => BackendKind::CdpWs,
       AnyPage::WebKit(_) => BackendKind::WebKit,
       AnyPage::Bidi(_) => BackendKind::Bidi,
+      AnyPage::WebDriver(_) => BackendKind::WebDriver,
     }
   }
 
@@ -1193,7 +1258,7 @@ impl AnyPage {
   pub fn peek_main_frame_id(&self) -> Option<String> {
     match self {
       Self::CdpPipe(p) => p.peek_main_frame_id(),
-      Self::CdpRaw(p) => p.peek_main_frame_id(),
+      Self::CdpWs(p) => p.peek_main_frame_id(),
       Self::WebKit(p) => p.peek_main_frame_id(),
       // BiDi's top-level browsing context id IS the page's main-frame
       // identifier — `browsingContext.navigate` / `browsingContext.tree`
@@ -1201,11 +1266,16 @@ impl AnyPage {
       // hook so `Page::main_frame()` can seed the frame cache without
       // an extra `browsingContext.getTree` RTT.
       Self::Bidi(p) => Some(p.context_id.to_string()),
+      Self::WebDriver(p) => Some(p.frame_id()),
     }
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     page_dispatch!(self, evaluate_in_frame(expression, frame_id))
+  }
+
+  pub async fn bring_to_front(&self) -> Result<()> {
+    page_dispatch!(self, bring_to_front())
   }
 
   /// Mark a child frame's `<iframe>` element in its parent frame with
@@ -1234,9 +1304,10 @@ impl AnyPage {
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     match self {
       AnyPage::CdpPipe(p) => p.content_frame_id(object_id).await,
-      AnyPage::CdpRaw(p) => p.content_frame_id(object_id).await,
+      AnyPage::CdpWs(p) => p.content_frame_id(object_id).await,
       AnyPage::WebKit(p) => p.content_frame_id(object_id).await,
       AnyPage::Bidi(_) => Ok(None),
+      AnyPage::WebDriver(p) => p.content_frame_id(object_id).await,
     }
   }
 
@@ -1262,7 +1333,7 @@ impl AnyPage {
   pub fn nav_snapshot(&self) -> (u64, u64) {
     match self {
       AnyPage::CdpPipe(p) => p.nav_snapshot(),
-      AnyPage::CdpRaw(p) => p.nav_snapshot(),
+      AnyPage::CdpWs(p) => p.nav_snapshot(),
       _ => (0, 0),
     }
   }
@@ -1274,7 +1345,7 @@ impl AnyPage {
   pub async fn settle_navigation(&self, snap: (u64, u64), timeout_ms: u64) {
     match self {
       AnyPage::CdpPipe(p) => p.settle_navigation(snap, timeout_ms).await,
-      AnyPage::CdpRaw(p) => p.settle_navigation(snap, timeout_ms).await,
+      AnyPage::CdpWs(p) => p.settle_navigation(snap, timeout_ms).await,
       _ => {},
     }
   }
@@ -1318,7 +1389,13 @@ impl AnyPage {
   // ── Elements ──
 
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
-    page_dispatch!(self, find_element(selector))
+    match self {
+      Self::CdpPipe(page) => page.find_element(selector).await,
+      Self::CdpWs(page) => page.find_element(selector).await,
+      Self::WebKit(page) => page.find_element(selector).await,
+      Self::Bidi(page) => page.find_element(selector).await,
+      Self::WebDriver(page) => page.find_element(selector).await.map(AnyElement::WebDriver),
+    }
   }
 
   /// Evaluate `js` and return the resulting DOM element, resolving in
@@ -1331,7 +1408,17 @@ impl AnyPage {
   /// non-main `frame_id` values fall back to the main page (DOM access
   /// via `WKFrameInfo` is a separate gap).
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
-    page_dispatch!(self, evaluate_to_element(js, frame_id))
+    match self {
+      Self::CdpPipe(page) => page.evaluate_to_element(js, frame_id).await,
+      Self::CdpWs(page) => page.evaluate_to_element(js, frame_id).await,
+      Self::WebKit(page) => page.evaluate_to_element(js, frame_id).await,
+      Self::Bidi(page) => page.evaluate_to_element(js, frame_id).await,
+      Self::WebDriver(page) => page
+        .in_frame(frame_id)?
+        .evaluate_to_element(js)
+        .await
+        .map(AnyElement::WebDriver),
+    }
   }
 
   // ── Content ──
@@ -1545,8 +1632,8 @@ impl AnyPage {
   pub async fn take_heap_snapshot(&self) -> Result<String> {
     match self {
       Self::CdpPipe(p) => p.take_heap_snapshot().await,
-      Self::CdpRaw(p) => p.take_heap_snapshot().await,
-      Self::WebKit(_) | Self::Bidi(_) => Err(crate::error::FerriError::unsupported(
+      Self::CdpWs(p) => p.take_heap_snapshot().await,
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => Err(crate::error::FerriError::unsupported(
         "heap snapshots are V8's format, so they are only available on Chromium (cdp-pipe / cdp-raw backends)",
       )),
     }
@@ -1582,10 +1669,11 @@ impl AnyPage {
   ) {
     match self {
       Self::CdpPipe(p) => p.attach_listeners(console_log, network_log, dialog_log),
-      Self::CdpRaw(p) => p.attach_listeners(console_log, network_log, dialog_log),
+      Self::CdpWs(p) => p.attach_listeners(console_log, network_log, dialog_log),
       Self::WebKit(p) => p.attach_listeners(console_log, network_log, dialog_log),
 
       Self::Bidi(p) => p.attach_listeners(console_log, network_log, dialog_log),
+      Self::WebDriver(p) => p.attach_listeners(console_log, network_log, dialog_log),
     }
   }
 
@@ -1613,8 +1701,11 @@ impl AnyPage {
     tokio::sync::oneshot::Sender<()>,
   )> {
     match self {
+      AnyPage::WebDriver(_) => Err(FerriError::unsupported(
+        "Classic WebDriver does not expose a screencast stream",
+      )),
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
-      AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
+      AnyPage::CdpWs(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::WebKit(p) => {
         let rx = p.start_screencast(quality, max_width, max_height).await?;
         let (tx, _rx_shutdown) = tokio::sync::oneshot::channel();
@@ -1635,10 +1726,11 @@ impl AnyPage {
   pub async fn stop_screencast(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.stop_screencast().await,
-      AnyPage::CdpRaw(p) => p.stop_screencast().await,
+      AnyPage::CdpWs(p) => p.stop_screencast().await,
       AnyPage::WebKit(p) => p.stop_screencast().await,
 
       AnyPage::Bidi(p) => p.stop_screencast().await,
+      AnyPage::WebDriver(p) => p.stop_screencast().await,
     }
   }
 
@@ -1655,9 +1747,10 @@ impl AnyPage {
   pub async fn set_input_files_element(&self, element: &AnyElement, paths: &[String]) -> Result<()> {
     match (self, element) {
       (AnyPage::CdpPipe(_), AnyElement::CdpPipe(e)) => e.set_input_files(paths).await,
-      (AnyPage::CdpRaw(_), AnyElement::CdpRaw(e)) => e.set_input_files(paths).await,
+      (AnyPage::CdpWs(_), AnyElement::CdpWs(e)) => e.set_input_files(paths).await,
       (AnyPage::WebKit(p), AnyElement::WebKit(e)) => p.set_input_files_element(e, paths).await,
       (AnyPage::Bidi(p), AnyElement::Bidi(e)) => p.set_input_files_element(e, paths).await,
+      (AnyPage::WebDriver(_), AnyElement::WebDriver(e)) => e.set_input_files(paths).await,
       _ => Err(crate::error::FerriError::backend(
         "set_input_files: element does not belong to this page's backend",
       )),
@@ -1690,9 +1783,10 @@ impl AnyPage {
   pub fn page_guid(&self) -> String {
     match self {
       Self::CdpPipe(p) => p.session_parts().1.to_string(),
-      Self::CdpRaw(p) => p.session_parts().1.to_string(),
+      Self::CdpWs(p) => p.session_parts().1.to_string(),
       Self::WebKit(p) => p.page_proxy_id().to_string(),
       Self::Bidi(p) => p.page_guid(),
+      Self::WebDriver(p) => p.page_guid(),
     }
   }
 
@@ -1703,11 +1797,11 @@ impl AnyPage {
         let (transport, target_id) = p.session_parts();
         CdpSession::attach_to_target(SessionTransportSource::Pipe(transport), target_id).await
       },
-      Self::CdpRaw(p) => {
+      Self::CdpWs(p) => {
         let (transport, target_id) = p.session_parts();
         CdpSession::attach_to_target(SessionTransportSource::Ws(transport), target_id).await
       },
-      Self::WebKit(_) | Self::Bidi(_) => Err(crate::error::FerriError::unsupported(
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => Err(crate::error::FerriError::unsupported(
         "CDP session is only available on Chromium (cdp-pipe / cdp-raw backends)",
       )),
     }
@@ -1747,9 +1841,10 @@ impl AnyPage {
   pub fn dispose_local(&self) {
     match self {
       Self::CdpPipe(p) => p.dispose_local(),
-      Self::CdpRaw(p) => p.dispose_local(),
+      Self::CdpWs(p) => p.dispose_local(),
       Self::WebKit(p) => p.dispose_local(),
       Self::Bidi(p) => p.dispose_local(),
+      Self::WebDriver(p) => p.dispose_local(),
     }
   }
 
@@ -1757,10 +1852,11 @@ impl AnyPage {
   pub fn is_closed(&self) -> bool {
     match self {
       Self::CdpPipe(p) => p.is_closed(),
-      Self::CdpRaw(p) => p.is_closed(),
+      Self::CdpWs(p) => p.is_closed(),
       Self::WebKit(p) => p.is_closed(),
 
       Self::Bidi(p) => p.is_closed(),
+      Self::WebDriver(p) => p.is_closed(),
     }
   }
 
@@ -1784,9 +1880,10 @@ impl AnyPage {
   pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.expose_binding_pre_doc(name, binding).await,
-      AnyPage::CdpRaw(p) => p.expose_binding_pre_doc(name, binding).await,
+      AnyPage::CdpWs(p) => p.expose_binding_pre_doc(name, binding).await,
       AnyPage::WebKit(p) => p.expose_binding_pre_doc(name, binding).await,
       AnyPage::Bidi(p) => p.expose_binding(name, binding).await,
+      AnyPage::WebDriver(p) => p.expose_binding(name, binding).await,
     }
   }
 
@@ -1862,7 +1959,7 @@ impl AnyPage {
         p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
           .await
       },
-      Self::CdpRaw(p) => {
+      Self::CdpWs(p) => {
         p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
           .await
       },
@@ -1874,16 +1971,27 @@ impl AnyPage {
         p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
           .await
       },
+      Self::WebDriver(p) => {
+        p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
+          .await
+      },
     }
   }
 
   pub async fn release_handle(&self, remote: &crate::js_handle::HandleRemote) -> crate::error::Result<()> {
     use crate::js_handle::HandleRemote;
     match (self, remote) {
-      (Self::CdpPipe(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
-      (Self::CdpRaw(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
+      (Self::CdpPipe(p), HandleRemote::Cdp { object_id, session_id }) => {
+        p.release_object_in_session(object_id, session_id.as_deref()).await
+      },
+      (Self::CdpWs(p), HandleRemote::Cdp { object_id, session_id }) => {
+        p.release_object_in_session(object_id, session_id.as_deref()).await
+      },
       (Self::WebKit(p), HandleRemote::WebKit(obj)) => p.release_object(obj).await,
       (Self::Bidi(p), HandleRemote::Bidi { shared_id, handle }) => p.release_handle(shared_id, handle.as_deref()).await,
+      (Self::WebDriver(p), HandleRemote::WebDriver { id, frame, element }) => {
+        p.release_handle(id, frame, *element).await
+      },
       // A HandleRemote shape that doesn't match the backend kind is a
       // programming error — mixed-backend handle use.
       (page, remote) => Err(crate::error::FerriError::Backend(format!(
@@ -1933,14 +2041,29 @@ pub fn element_from_remote(
 ) -> crate::error::Result<AnyElement> {
   use crate::js_handle::HandleRemote;
   match (page, remote) {
-    (AnyPage::CdpPipe(p), HandleRemote::Cdp(obj)) => Ok(AnyElement::CdpPipe(p.element_from_object_id(obj.clone()))),
-    (AnyPage::CdpRaw(p), HandleRemote::Cdp(obj)) => Ok(AnyElement::CdpRaw(p.element_from_object_id(obj.clone()))),
+    (AnyPage::CdpPipe(p), HandleRemote::Cdp { object_id, session_id }) => Ok(AnyElement::CdpPipe(
+      p.element_from_object_id(object_id.clone(), session_id.clone()),
+    )),
+    (AnyPage::CdpWs(p), HandleRemote::Cdp { object_id, session_id }) => Ok(AnyElement::CdpWs(
+      p.element_from_object_id(object_id.clone(), session_id.clone()),
+    )),
     (AnyPage::WebKit(p), HandleRemote::WebKit(obj)) => {
       Ok(AnyElement::WebKit(p.element_from_object_id(obj.to_string())))
     },
     (AnyPage::Bidi(p), HandleRemote::Bidi { shared_id, .. }) => {
       Ok(AnyElement::Bidi(p.element_from_shared_id(shared_id.clone())))
     },
+    (
+      AnyPage::WebDriver(p),
+      HandleRemote::WebDriver {
+        id,
+        frame,
+        element: true,
+      },
+    ) => Ok(AnyElement::WebDriver(webdriver::element::WebDriverElement::new(
+      p.in_frame(Some(frame))?,
+      id.clone(),
+    ))),
     (page, remote) => Err(crate::error::FerriError::Backend(format!(
       "element_from_remote: backend mismatch — {:?} remote on {:?} backend",
       remote,
@@ -1954,16 +2077,27 @@ pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result
   match element {
     AnyElement::CdpPipe(e) => {
       let obj = e.ensure_object_id().await?;
-      Ok(HandleRemote::Cdp(obj))
+      Ok(HandleRemote::Cdp {
+        object_id: obj,
+        session_id: e.session_id(),
+      })
     },
-    AnyElement::CdpRaw(e) => {
+    AnyElement::CdpWs(e) => {
       let obj = e.ensure_object_id().await?;
-      Ok(HandleRemote::Cdp(obj))
+      Ok(HandleRemote::Cdp {
+        object_id: obj,
+        session_id: e.session_id(),
+      })
     },
     AnyElement::WebKit(e) => Ok(HandleRemote::WebKit(std::sync::Arc::from(e.object_id()))),
     AnyElement::Bidi(e) => Ok(HandleRemote::Bidi {
       shared_id: e.shared_id.clone(),
       handle: None,
+    }),
+    AnyElement::WebDriver(e) => Ok(HandleRemote::WebDriver {
+      id: e.id.clone(),
+      frame: e.page.frame_id(),
+      element: true,
     }),
   }
 }
@@ -1973,19 +2107,21 @@ pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result
 /// Element handle — enum dispatch across backends.
 pub enum AnyElement {
   CdpPipe(cdp::CdpElement<cdp::pipe::PipeTransport>),
-  CdpRaw(cdp::CdpElement<cdp::ws::WsTransport>),
+  CdpWs(cdp::CdpElement<cdp::ws::WsTransport>),
   WebKit(webkit::WebKitElement),
   Bidi(bidi::BidiElement),
+  WebDriver(webdriver::element::WebDriverElement),
 }
 
 macro_rules! element_dispatch {
     ($self:expr, $method:ident ( $($arg:expr),* $(,)? )) => {
         match $self {
             AnyElement::CdpPipe(e) => e.$method($($arg),*).await,
-            AnyElement::CdpRaw(e) => e.$method($($arg),*).await,
+            AnyElement::CdpWs(e) => e.$method($($arg),*).await,
             AnyElement::WebKit(e) => e.$method($($arg),*).await,
 
             AnyElement::Bidi(e) => e.$method($($arg),*).await,
+            AnyElement::WebDriver(e) => e.$method($($arg),*).await,
         }
     };
 }

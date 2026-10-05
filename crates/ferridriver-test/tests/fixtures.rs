@@ -83,11 +83,186 @@ async fn fixture_guard_registers_teardown() {
     "teardown must not run while the scope is alive"
   );
   drop(value);
-  pool.teardown_all().await;
+  pool.teardown_all().await.expect("fixture cleanup");
   assert!(
     TORN_DOWN.load(std::sync::atomic::Ordering::SeqCst),
     "teardown_all must invoke the fixture's on_teardown"
   );
+}
+
+#[tokio::test]
+async fn cancelled_fixture_teardown_resumes_the_original_continuation() {
+  let pool = pool_with_custom_fixtures(FixtureScope::Worker);
+  let started = Arc::new(tokio::sync::Notify::new());
+  let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+  let (release, released) = tokio::sync::oneshot::channel();
+  let began = Arc::clone(&started);
+  let ended = Arc::clone(&finished);
+  let (value, teardown) = Fixture::new("sashoush".to_string())
+    .on_teardown(move |_| async move {
+      began.notify_one();
+      released.await.expect("release cleanup");
+      ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })
+    .into_parts();
+  let value = Arc::new(value);
+  pool.inject("held", Arc::clone(&value));
+  pool.register_teardown("held", value, teardown.expect("teardown"));
+  let closing = pool.clone();
+  let task = tokio::spawn(async move { closing.teardown_all().await });
+  started.notified().await;
+  task.abort();
+  assert!(task.await.expect_err("cancel caller").is_cancelled());
+  pool.inject("held", Arc::new("replacement".to_string()));
+  assert!(
+    release.send(()).is_ok(),
+    "caller cancellation dropped the fixture continuation"
+  );
+  pool.teardown_all().await.expect("fixture cleanup");
+  assert_eq!(
+    pool.try_get_cached::<String>("held").as_deref().map(String::as_str),
+    Some("replacement")
+  );
+  assert_eq!(finished.load(std::sync::atomic::Ordering::SeqCst), 1);
+  pool.teardown_all().await.expect("fixture cleanup");
+  assert_eq!(finished.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_fixture_cleanup_retains_its_value_and_dependencies_for_retry() {
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  let pool = pool_with_custom_fixtures(FixtureScope::Worker);
+  let attempts = Arc::new(AtomicUsize::new(0));
+  let dependencies_closed = Arc::new(AtomicUsize::new(0));
+  let provider = Arc::new(());
+  pool.inject("provider", Arc::clone(&provider));
+  let closed = Arc::clone(&dependencies_closed);
+  pool.register_teardown(
+    "provider",
+    provider,
+    Arc::new(move |_| {
+      let closed = Arc::clone(&closed);
+      Box::pin(async move {
+        closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+      })
+    }),
+  );
+  pool.inject("consumer", Arc::clone(&attempts));
+  pool.register_teardown(
+    "consumer",
+    attempts.clone(),
+    Arc::new(move |value| {
+      Box::pin(async move {
+        let attempts = value.downcast::<AtomicUsize>().expect("same owned value");
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+          Err(ferridriver::FerriError::backend("sashoush cleanup unavailable"))
+        } else {
+          Ok(())
+        }
+      })
+    }),
+  );
+  let error = pool.teardown_all().await.expect_err("failed consumer");
+  assert!(error.to_string().contains("sashoush cleanup unavailable"));
+  assert_eq!(dependencies_closed.load(Ordering::SeqCst), 0);
+  assert!(Arc::ptr_eq(
+    &pool.try_get_cached::<AtomicUsize>("consumer").expect("retained"),
+    &attempts
+  ));
+  pool.inject("consumer", Arc::new("replacement".to_string()));
+  pool.teardown_all().await.expect("retry");
+  assert_eq!(attempts.load(Ordering::SeqCst), 2);
+  assert_eq!(dependencies_closed.load(Ordering::SeqCst), 1);
+  assert!(pool.try_get_cached::<()>("provider").is_none());
+  assert!(pool.try_get_cached::<String>("consumer").is_some());
+}
+
+#[tokio::test]
+async fn panicked_oneshot_fixture_cleanup_cannot_report_success_on_retry() {
+  let pool = pool_with_custom_fixtures(FixtureScope::Worker);
+  let (value, teardown) = Fixture::new("sashoush".to_string())
+    .on_teardown(|_| async move { panic!("sashoush cleanup panic") })
+    .into_parts();
+  let value = Arc::new(value);
+  pool.inject("panicked", Arc::clone(&value));
+  pool.register_teardown("panicked", value, teardown.expect("teardown"));
+  let error = pool.teardown_all().await.expect_err("panic reported");
+  assert!(error.to_string().contains("sashoush cleanup panic"));
+  assert!(pool.try_get_cached::<String>("panicked").is_some());
+  let error = pool
+    .teardown_all()
+    .await
+    .expect_err("consumed callback cannot confirm cleanup");
+  assert!(error.to_string().contains("consumed"));
+  assert!(pool.try_get_cached::<String>("panicked").is_some());
+}
+
+#[tokio::test]
+async fn replaced_fixture_values_each_receive_their_own_teardown() {
+  let pool = pool_with_custom_fixtures(FixtureScope::Worker);
+  let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+  for name in ["sashoush first", "sashoush second"] {
+    let value = Arc::new(name.to_string());
+    pool.inject("replaced", Arc::clone(&value));
+    let observed = Arc::clone(&observed);
+    pool.register_teardown(
+      "replaced",
+      value,
+      Arc::new(move |value| {
+        let observed = Arc::clone(&observed);
+        Box::pin(async move {
+          let value = value.downcast::<String>().expect("registered string");
+          observed.lock().expect("observed").push(value.to_string());
+          Ok(())
+        })
+      }),
+    );
+  }
+  pool.teardown_all().await.expect("both generations close");
+  assert_eq!(
+    *observed.lock().expect("observed"),
+    ["sashoush second", "sashoush first"]
+  );
+  assert!(pool.try_get_cached::<String>("replaced").is_none());
+}
+
+#[tokio::test]
+async fn worker_completion_propagates_fixture_cleanup_failure() {
+  use ferridriver_test::{runner::BrowserHandle, worker::Worker};
+  let pool = pool_with_custom_fixtures(FixtureScope::Worker);
+  let value = Arc::new(());
+  pool.inject("sashoush", Arc::clone(&value));
+  pool.register_teardown(
+    "sashoush",
+    value,
+    Arc::new(|_| Box::pin(async { Err(ferridriver::FerriError::backend("sashoush worker cleanup failed")) })),
+  );
+  let worker = Worker::new(
+    0,
+    0,
+    Arc::new(ferridriver_test::config::TestConfig::default()),
+    None,
+    false,
+  );
+  let browser = Arc::new(BrowserHandle::new(ferridriver::options::LaunchPlan::default()));
+  let (send, receive) = async_channel::unbounded();
+  drop(send);
+  let (results, _) = tokio::sync::mpsc::channel(1);
+  let error = worker
+    .run(
+      browser,
+      pool.clone(),
+      receive,
+      results,
+      Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      None,
+    )
+    .await
+    .err()
+    .expect("worker must not acknowledge failed cleanup");
+  assert!(error.to_string().contains("sashoush worker cleanup failed"));
+  assert!(pool.try_get_cached::<()>("sashoush").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

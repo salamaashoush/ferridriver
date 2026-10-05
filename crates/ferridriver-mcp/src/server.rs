@@ -536,6 +536,8 @@ pub fn browser_state_for(
   // twice — invisible for last-wins switches, wrong for repeatable ones
   // like `--host-resolver-rules`.
   let base = config.base_overrides();
+  let kind = base.kind.unwrap_or(kind);
+  let backend = base.backend.unwrap_or(backend);
   let mut browser_state = BrowserState::with_plan(
     mode,
     ferridriver::options::LaunchPlan {
@@ -1171,7 +1173,10 @@ impl McpServer {
     options: ferridriver_script::RunOptions,
     mut context: ferridriver_script::RunContext,
   ) -> ferridriver_script::ScriptResult {
-    let slot = self.sessions.acquire(session);
+    let slot = match self.sessions.acquire(session).await {
+      Ok(slot) => slot,
+      Err(error) => return ferridriver_script::ScriptResult::err(error, 0, Vec::new()),
+    };
     let mut bs = slot.lock().await;
     context.vars = bs.vars();
     context.request = Some(bs.request());
@@ -1199,7 +1204,10 @@ impl McpServer {
     options: ferridriver_script::RunOptions,
     mut context: ferridriver_script::RunContext,
   ) -> ferridriver_script::ScriptResult {
-    let slot = self.sessions.acquire(session);
+    let slot = match self.sessions.acquire(session).await {
+      Ok(slot) => slot,
+      Err(error) => return ferridriver_script::ScriptResult::err(error, 0, Vec::new()),
+    };
     let mut bs = slot.lock().await;
     context.vars = bs.vars();
     context.request = Some(bs.request());
@@ -1228,7 +1236,10 @@ impl McpServer {
     options: ferridriver_script::RunOptions,
     mut context: ferridriver_script::RunContext,
   ) -> ferridriver_script::ScriptResult {
-    let slot = self.sessions.acquire(session);
+    let slot = match self.sessions.acquire(session).await {
+      Ok(slot) => slot,
+      Err(error) => return ferridriver_script::ScriptResult::err(error, 0, Vec::new()),
+    };
     let mut bs = slot.lock().await;
     context.vars = bs.vars();
     context.request = Some(bs.request());
@@ -1364,9 +1375,9 @@ impl McpServer {
   /// (its `QuickJS` VM, `vars`, and HTTP client). Without the session
   /// drop, closing a context left a warm VM alive until the LRU cap or
   /// the idle TTL got to it.
-  pub(crate) fn release_context(&self, context: &str) {
+  pub(crate) async fn release_context(&self, context: &str) -> Result<(), String> {
     self.invalidate_context(context);
-    self.sessions.remove(context);
+    self.sessions.remove(context).await.map_err(|error| error.message)
   }
 
   /// Close every browser this server launched and drop all per-context
@@ -1377,10 +1388,33 @@ impl McpServer {
   /// browsers exit on their own when the process dies. A `cdp-raw`
   /// Chrome or a `bidi` Firefox does not: it is reparented to pid 1 and
   /// stays, which is why every exit path has to come through here.
-  pub async fn shutdown_browsers(&self) {
-    self.state.write().await.shutdown().await;
+  /// # Errors
+  /// Failed cleanup retains its owners and keeps script admission closed for retry.
+  pub async fn shutdown_browsers(&self) -> Result<(), String> {
+    self.close_browsers(false).await
+  }
+
+  pub(crate) async fn shutdown(&self) -> Result<(), String> {
+    self.close_browsers(true).await
+  }
+
+  async fn close_browsers(&self, terminal: bool) -> Result<(), String> {
+    let browsers = async {
+      self
+        .state
+        .write()
+        .await
+        .shutdown()
+        .await
+        .map_err(|error| ferridriver_script::ScriptError::internal(error.to_string()))
+    };
+    let result = if terminal {
+      self.sessions.close_after(browsers).await
+    } else {
+      self.sessions.clear_after(browsers).await
+    };
     self.invalidate_all_caches();
-    self.sessions.clear();
+    result.map_err(|error| error.message)
   }
 
   /// Build the JSON snapshot returned by the `network` MCP resource.

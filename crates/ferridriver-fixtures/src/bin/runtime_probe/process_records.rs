@@ -51,7 +51,7 @@ pub async fn run() -> Result<Value> {
   done.store(true, Ordering::Release);
   let observations = reader.join();
   let alive = child.is_running();
-  child.shutdown().await;
+  child.shutdown().await?;
   let (reads, malformed, io_errors) = observations.map_err(|_| anyhow::anyhow!("record reader panicked"))?;
   Ok(json!({ "reads": reads, "malformed": malformed, "ioErrors": io_errors, "alive": alive, "writes": 64 }))
 }

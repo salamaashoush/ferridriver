@@ -43,13 +43,22 @@ pub struct McpArgs {
 #[derive(Args)]
 pub struct InstallArgs {
   /// Browsers to install: `chromium`, `chromium-headless-shell`,
-  /// `firefox`, `webkit`. Defaults to `chromium` when omitted.
+  /// `firefox`, `webkit`, `safari`, `android`, `ios`, or `axe`. Defaults to `chromium`.
   pub browsers: Vec<String>,
 
   /// Also install required system libraries (Linux only; uses the
   /// platform package manager and may require sudo).
   #[arg(long)]
   pub with_deps: bool,
+
+  #[arg(long)]
+  pub accept_licenses: bool,
+
+  #[arg(long, default_value_t = 35)]
+  pub android_api_level: u32,
+
+  #[arg(long)]
+  pub android_sdk: Option<PathBuf>,
 }
 
 #[derive(Args)]

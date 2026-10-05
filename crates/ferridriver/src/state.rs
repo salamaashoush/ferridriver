@@ -15,6 +15,8 @@ use crate::context::BrowserContext;
 use crate::error::{FerriError, Result};
 use rustc_hash::FxHashMap as HashMap;
 
+pub(crate) mod allocation;
+
 /// Playwright's default viewport, applied unless a caller asks for a
 /// size of its own or opts out with `viewport: null`
 /// (`server/browserContext.ts::validateBrowserContextOptions`).
@@ -149,6 +151,43 @@ struct BrowserInstance {
   generation: u64,
 }
 
+enum PendingOwner {
+  Browser(Box<BrowserInstance>),
+  Allocation {
+    generation: u64,
+    owner: Arc<allocation::Allocation>,
+  },
+}
+
+impl PendingOwner {
+  fn generation(&self) -> u64 {
+    match self {
+      Self::Browser(instance) => instance.generation,
+      Self::Allocation { generation, .. } => *generation,
+    }
+  }
+
+  fn instance(&self) -> Option<&BrowserInstance> {
+    match self {
+      Self::Browser(instance) => Some(instance),
+      Self::Allocation { .. } => None,
+    }
+  }
+
+  fn instance_mut(&mut self) -> Option<&mut BrowserInstance> {
+    match self {
+      Self::Browser(instance) => Some(instance),
+      Self::Allocation { .. } => None,
+    }
+  }
+}
+
+impl From<BrowserInstance> for PendingOwner {
+  fn from(instance: BrowserInstance) -> Self {
+    Self::Browser(Box::new(instance))
+  }
+}
+
 #[derive(Clone)]
 pub struct PageOpenPlan {
   pub browser: AnyBrowser,
@@ -245,6 +284,9 @@ pub type ContextInitScripts = HashMap<String, Vec<(u64, String)>>;
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
+  pending_cleanup: Vec<(String, PendingOwner)>,
+  shutdown_generation: u64,
+  disposed: bool,
   /// Instance name → browser generation whose popup pump is running
   /// (see [`Self::claim_popup_pump`]).
   popup_pumps: HashMap<String, u64>,
@@ -259,6 +301,11 @@ pub struct BrowserState {
   chromium_path: String,
   connect_mode: ConnectMode,
   backend_kind: BackendKind,
+  browser_kind: crate::options::BrowserKind,
+  launch_timeout: Option<u64>,
+  connection_headers: Option<rustc_hash::FxHashMap<String, String>>,
+  launch_env: rustc_hash::FxHashMap<String, String>,
+  firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
   /// Base Chrome flags applied to ALL instances.
   pub extra_args: Vec<String>,
   /// The switch list `launch({ ignoreDefaultArgs })` asked to drop. A
@@ -413,14 +460,19 @@ pub struct BrowserState {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectMode {
+  Device {
+    target: crate::device::DeviceTarget,
+    headless: bool,
+  },
   /// Launch a new browser (default)
   Launch,
   /// Connect to browser at explicit ws:// or http:// URL
   ConnectUrl(String),
-  /// Create a W3C `WebDriver` session and attach to its negotiated `BiDi` socket.
+  /// Create a W3C `WebDriver` session and use its negotiated protocol.
   WebDriver {
     endpoint: String,
     browser_name: String,
+    protocol: crate::backend::webdriver::WebDriverProtocol,
     capabilities: Option<serde_json::Value>,
     headers: Option<rustc_hash::FxHashMap<String, String>>,
     timeout: Option<u64>,
@@ -455,22 +507,23 @@ impl BrowserState {
   /// plan from public options.
   #[must_use]
   pub fn with_plan(connect_mode: ConnectMode, plan: crate::options::LaunchPlan) -> Self {
-    let chromium_path = if let Some(path) = plan.executable_path {
-      path
-    } else {
-      match plan.kind {
-        crate::options::BrowserKind::Firefox => std::env::var("FIREFOX_PATH")
-          .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
-          .unwrap_or_else(|_| resolve_chromium(plan.headless)),
-        _ => resolve_chromium(plan.headless),
-      }
-    };
+    let chromium_path = plan
+      .executable_path
+      .unwrap_or_else(|| browser_executable(plan.kind, plan.headless));
     Self {
       instances: HashMap::default(),
+      pending_cleanup: Vec::new(),
+      shutdown_generation: 0,
+      disposed: false,
       instance_generation_counter: 0,
       chromium_path,
       connect_mode,
       backend_kind: plan.backend,
+      browser_kind: plan.kind,
+      launch_timeout: plan.timeout,
+      connection_headers: plan.connection_headers,
+      launch_env: plan.env.unwrap_or_default(),
+      firefox_user_prefs: plan.firefox_user_prefs,
       extra_args: plan.args,
       base_ignore_default_args: plan.ignore_default_args,
       proxy: plan.proxy,
@@ -572,6 +625,14 @@ impl BrowserState {
   #[must_use]
   pub fn backend_kind(&self) -> BackendKind {
     self.backend_kind
+  }
+
+  pub(crate) fn engine_name(&self) -> &'static str {
+    match self.browser_kind {
+      crate::options::BrowserKind::Chromium => "chromium",
+      crate::options::BrowserKind::Firefox => "firefox",
+      crate::options::BrowserKind::WebKit | crate::options::BrowserKind::Safari => "webkit",
+    }
   }
 
   /// Claim the one-time `recordHar` registration for a context.
@@ -798,6 +859,11 @@ impl BrowserState {
   fn launch_spec(&self) -> LaunchSpec {
     LaunchSpec {
       backend_kind: self.backend_kind,
+      browser_kind: self.browser_kind,
+      launch_timeout: self.launch_timeout,
+      connection_headers: self.connection_headers.clone(),
+      launch_env: self.launch_env.clone(),
+      firefox_user_prefs: self.firefox_user_prefs.clone(),
       headless: self.headless,
       chromium_path: self.chromium_path.clone(),
       user_data_dir: self.user_data_dir.clone(),
@@ -838,21 +904,29 @@ impl BrowserState {
   /// the whole launch — process spawn, protocol handshake, and any
   /// configured args/discovery subprocess — which stalls every other
   /// session in the server, including ones on a different browser. This
-  /// takes the write lock only to install the finished instance.
+  /// takes the write lock to register ownership and install the finished instance.
   ///
   /// # Errors
   ///
   /// Returns an error if the browser process fails to start or the
   /// connection fails.
   pub async fn ensure_instance_shared(state: &Arc<tokio::sync::RwLock<Self>>, instance: &str) -> Result<()> {
-    if state.read().await.instance_is_live(instance) {
-      return Ok(());
-    }
-    let permit = state.read().await.launch_permit(instance);
-    let _permit = permit.lock().await;
-    {
-      // The winner of the race installed it while we waited.
+    let permit = {
       let guard = state.read().await;
+      guard.ensure_not_disposed()?;
+      if guard.instance_is_live(instance) {
+        return Ok(());
+      }
+      guard.launch_permit(instance)
+    };
+    let held = Arc::clone(&permit).lock_owned().await;
+    let runtime = tokio::runtime::Handle::try_current().map_err(|error| FerriError::backend(error.to_string()))?;
+    let allocation = {
+      let mut guard = state.write().await;
+      guard.ensure_not_disposed()?;
+      if !Arc::ptr_eq(&permit, &guard.launch_permit(instance)) {
+        return Err(allocation::Allocation::closed_error());
+      }
       if guard.instance_is_live(instance) {
         return Ok(());
       }
@@ -863,44 +937,210 @@ impl BrowserState {
           "browser instance is gone; relaunching",
         );
       }
+      guard.check_cleanup_pending(instance)?;
+      guard.prepare_allocation(instance)
+    };
+    allocation
+      .spawn(&runtime, Arc::clone(state), instance.to_owned(), Some(held))
+      .await
+      .map_err(|error| FerriError::backend(format!("Browser initialization task stopped: {error}")))?
+  }
+
+  fn prepare_allocation(&mut self, instance: &str) -> allocation::Start {
+    let (generation, owner, completion) = self.begin_allocation(instance);
+    allocation::Start {
+      spec: self.launch_spec(),
+      shutdown_generation: self.shutdown_generation,
+      generation,
+      owner,
+      completion,
     }
+  }
 
-    let (spec, backend_kind) = {
-      let guard = state.read().await;
-      (guard.launch_spec(), guard.backend_kind)
-    };
-    let (mode, effective) = spec.resolve_off_lock(instance).await?;
-    let browser = match &mode {
-      ConnectMode::Launch => spec.launch_browser(&effective).await?,
-      other => connect_browser(other, backend_kind).await?,
-    };
-    let adopt_pages = !matches!(mode, ConnectMode::Launch);
+  pub(crate) fn start_owned(
+    mut self,
+    resources: Option<&crate::BrowserResources>,
+  ) -> Result<impl std::future::Future<Output = Result<Arc<tokio::sync::RwLock<Self>>>> + Send + 'static> {
+    self.ensure_not_disposed()?;
+    let runtime = tokio::runtime::Handle::try_current().map_err(|error| FerriError::backend(error.to_string()))?;
+    let allocation = self.prepare_allocation("default");
+    let state = Arc::new(tokio::sync::RwLock::new(self));
+    if let Some(resources) = resources {
+      resources.retain(Arc::clone(&state))?;
+    }
+    let completed = allocation.spawn(&runtime, Arc::clone(&state), "default".into(), None);
+    Ok(async move {
+      completed
+        .await
+        .map_err(|error| FerriError::backend(format!("Browser initialization task stopped: {error}")))??;
+      Ok(state)
+    })
+  }
 
+  pub(crate) fn ensure_not_disposed(&self) -> Result<()> {
+    if self.disposed {
+      Err(FerriError::target_closed(Some(
+        "browser resources have been disposed".into(),
+      )))
+    } else {
+      Ok(())
+    }
+  }
+
+  fn begin_allocation(&mut self, instance: &str) -> (u64, Arc<allocation::Allocation>, allocation::Completion) {
+    let generation = self.next_instance_generation();
+    let (allocation, completion) = allocation::Allocation::new();
+    self.pending_cleanup.push((
+      instance.to_owned(),
+      PendingOwner::Allocation {
+        generation,
+        owner: Arc::clone(&allocation),
+      },
+    ));
+    (generation, allocation, completion)
+  }
+
+  async fn finish_allocation(
+    state: &Arc<tokio::sync::RwLock<Self>>,
+    instance: &str,
+    shutdown_generation: u64,
+    generation: u64,
+    allocation: &allocation::Allocation,
+    created: Result<ConnectMode>,
+  ) -> Result<()> {
     let mut guard = state.write().await;
-    Box::pin(guard.install_instance(
+    if guard.shutdown_generation != shutdown_generation || allocation.is_closing() {
+      return Err(allocation::Allocation::closed_error());
+    }
+    Box::pin(guard.install_allocation(instance, generation, allocation, created)).await
+  }
+
+  async fn install_allocation(
+    &mut self,
+    instance: &str,
+    generation: u64,
+    allocation: &allocation::Allocation,
+    created: Result<ConnectMode>,
+  ) -> Result<()> {
+    let index = self.pending_instance_index(generation)?;
+    let mode = match created {
+      Ok(mode) => mode,
+      Err(error) => {
+        if !allocation.has_partial_resources() {
+          self.pending_cleanup.swap_remove(index);
+        }
+        return Err(error);
+      },
+    };
+    self.pending_cleanup[index].1 = BrowserInstance {
+      browser: allocation.take_browser().await?,
+      contexts: HashMap::default(),
+      generation,
+    }
+    .into();
+    let install = Box::pin(self.finish_install_instance(
       instance,
-      browser,
-      adopt_pages,
-      matches!(mode, ConnectMode::WebDriver { .. }),
-    ))
-    .await
+      generation,
+      !matches!(mode, ConnectMode::Launch),
+      matches!(mode, ConnectMode::WebDriver { .. } | ConnectMode::Device { .. }),
+    ));
+    if let Some(budget) = allocation.connection_budget() {
+      budget
+        .scope(budget.wait(install))
+        .await
+        .map_err(|error| error.error("adopting browser pages"))?
+    } else {
+      install.await
+    }
   }
 
   /// Evict a dead entry, adopt existing pages when connecting, and
   /// register `browser` as `instance_name`.
-  async fn install_instance(
+  fn install_instance(
     &mut self,
     instance_name: &str,
     browser: AnyBrowser,
     adopt_pages: bool,
     preserve_viewport: bool,
+  ) -> impl std::future::Future<Output = Result<()>> {
+    let generation = self.next_instance_generation();
+    // Registration must survive even when the returned future is never polled.
+    self.pending_cleanup.push((
+      instance_name.to_owned(),
+      BrowserInstance {
+        browser,
+        contexts: HashMap::default(),
+        generation,
+      }
+      .into(),
+    ));
+    self.finish_install_instance(instance_name, generation, adopt_pages, preserve_viewport)
+  }
+
+  async fn finish_install_instance(
+    &mut self,
+    instance_name: &str,
+    generation: u64,
+    adopt_pages: bool,
+    preserve_viewport: bool,
   ) -> Result<()> {
-    self.evict_instance(instance_name).await;
-    let mut inst = BrowserInstance {
-      browser,
-      contexts: HashMap::default(),
-      generation: 0,
-    };
+    if let Some(instance) = self.instances.remove(instance_name) {
+      self.pending_cleanup.push((instance_name.to_owned(), instance.into()));
+    }
+    self
+      .connected
+      .store(!self.instances.is_empty(), std::sync::atomic::Ordering::Relaxed);
+    self
+      .cleanup_instances_except(Some(instance_name), Some(generation))
+      .await?;
+    if adopt_pages {
+      let viewport = if preserve_viewport {
+        None
+      } else {
+        self.default_viewport.clone()
+      };
+      let index = self.pending_instance_index(generation)?;
+      let instance = self.pending_cleanup[index]
+        .1
+        .instance_mut()
+        .ok_or_else(|| FerriError::backend("browser is not ready for adoption"))?;
+      if let Err(error) = Self::adopt_instance_pages(instance_name, instance, viewport.as_ref()).await {
+        return match self.cleanup_instances(Some(instance_name)).await {
+          Ok(()) => Err(error),
+          Err(cleanup) => Err(FerriError::backend(format!(
+            "{error}; browser cleanup failed: {cleanup}"
+          ))),
+        };
+      }
+    }
+    let index = self.pending_instance_index(generation)?;
+    let (name, owner) = self.pending_cleanup.swap_remove(index);
+    match owner {
+      PendingOwner::Browser(instance) => {
+        self.instances.insert(name, *instance);
+      },
+      owner @ PendingOwner::Allocation { .. } => {
+        self.pending_cleanup.push((name, owner));
+        return Err(FerriError::backend("browser is not ready for installation"));
+      },
+    }
+    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+  }
+
+  fn pending_instance_index(&self, generation: u64) -> Result<usize> {
+    self
+      .pending_cleanup
+      .iter()
+      .position(|(_, instance)| instance.generation() == generation)
+      .ok_or_else(|| FerriError::backend("incoming browser disappeared during installation"))
+  }
+
+  async fn adopt_instance_pages(
+    instance_name: &str,
+    inst: &mut BrowserInstance,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<()> {
     // Adopt existing pages into the "default" context of this instance.
     // For launch mode, pages are created on demand by the caller (the
     // test runner creates isolated contexts, MCP creates pages lazily).
@@ -915,50 +1155,91 @@ impl BrowserState {
     // `viewport: null` is how a config asks to leave it alone; the
     // explicit `connect` tool ([`Self::connect_to_url`]) never touches
     // it, matching Playwright's `connectOverCDP`.
-    if adopt_pages {
-      let existing_pages = Box::pin(inst.browser.pages()).await?;
-      let viewport = if preserve_viewport {
-        None
-      } else {
-        self.default_viewport.clone()
-      };
-      let ctx = inst.context_mut("default");
-      for page in existing_pages {
-        page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-        ctx.pages.push(page);
-      }
-      if let Some(ref vp) = viewport {
-        for page in &inst.context_mut("default").pages {
-          if let Err(e) = page.emulate_viewport(vp).await {
-            tracing::warn!(
-              target: "ferridriver::state",
-              instance = instance_name,
-              error = %e,
-              "could not emulate the configured viewport on an adopted page",
-            );
-          }
+    let existing_pages = Box::pin(inst.browser.pages()).await?;
+    let ctx = inst.context_mut("default");
+    for page in existing_pages {
+      page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+      ctx.pages.push(page);
+    }
+    if let Some(vp) = viewport {
+      for page in &inst.context_mut("default").pages {
+        if let Err(e) = page.emulate_viewport(vp).await {
+          tracing::warn!(
+            target: "ferridriver::state",
+            instance = instance_name,
+            error = %e,
+            "could not emulate the configured viewport on an adopted page",
+          );
         }
       }
     }
-    inst.generation = self.next_instance_generation();
-    self.instances.insert(instance_name.to_string(), inst);
-    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
   }
 
-  /// Drop a live-or-dead instance entry, releasing its pages' listener
-  /// tasks and closing its browser.
-  async fn evict_instance(&mut self, instance_name: &str) {
-    let Some(mut dead) = self.instances.remove(instance_name) else {
-      return;
-    };
-    for ctx in dead.contexts.values() {
-      for page in &ctx.pages {
-        page.dispose_local();
+  fn check_cleanup_pending(&self, name: &str) -> Result<()> {
+    if self.pending_cleanup.iter().any(|(pending, _)| pending == name) {
+      return Err(FerriError::backend(format!(
+        "instance '{name}' has unfinished cleanup; retry closing it"
+      )));
+    }
+    Ok(())
+  }
+
+  async fn evict_instance(&mut self, instance_name: &str) -> Result<()> {
+    if let Some(instance) = self.instances.remove(instance_name) {
+      self.pending_cleanup.push((instance_name.to_owned(), instance.into()));
+    }
+    self.cleanup_instances(Some(instance_name)).await
+  }
+
+  async fn cleanup_instances(&mut self, only: Option<&str>) -> Result<()> {
+    self.cleanup_instances_except(only, None).await
+  }
+
+  async fn cleanup_instances_except(&mut self, only: Option<&str>, retained_generation: Option<u64>) -> Result<()> {
+    let mut errors = Vec::new();
+    let mut index = 0;
+    while index < self.pending_cleanup.len() {
+      let (name, instance) = &self.pending_cleanup[index];
+      if only.is_some_and(|only| only != name) || retained_generation == Some(instance.generation()) {
+        index += 1;
+        continue;
+      }
+      let mut composites = Vec::new();
+      if let Some(instance) = instance.instance() {
+        composites.extend(instance.contexts.keys().map(|context| format!("{name}:{context}")));
+        for context in instance.contexts.values() {
+          for page in &context.pages {
+            page.dispose_local();
+          }
+        }
+      }
+      for composite in composites {
+        self.purge_context_registries(&composite).await;
+      }
+      let (name, instance) = &mut self.pending_cleanup[index];
+      let result = match instance {
+        PendingOwner::Browser(instance) => {
+          instance.contexts.clear();
+          instance.browser.close().await
+        },
+        PendingOwner::Allocation { owner, .. } => owner.close().await,
+      };
+      match result {
+        Ok(()) => {
+          self.pending_cleanup.swap_remove(index);
+        },
+        Err(error) => {
+          errors.push(format!("{name}: {error}"));
+          index += 1;
+        },
       }
     }
-    dead.contexts.clear();
-    let _ = dead.browser.close().await;
+    if errors.is_empty() {
+      Ok(())
+    } else {
+      Err(FerriError::backend(errors.join("; ")))
+    }
   }
 }
 
@@ -966,6 +1247,11 @@ impl BrowserState {
 /// guard so the launch runs unlocked.
 struct LaunchSpec {
   backend_kind: BackendKind,
+  browser_kind: crate::options::BrowserKind,
+  launch_timeout: Option<u64>,
+  connection_headers: Option<rustc_hash::FxHashMap<String, String>>,
+  launch_env: rustc_hash::FxHashMap<String, String>,
+  firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
   headless: bool,
   chromium_path: String,
   user_data_dir: Option<String>,
@@ -982,7 +1268,10 @@ struct LaunchSpec {
 /// to the state's base plan.
 #[derive(Debug)]
 struct EffectiveLaunch {
+  firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
   backend_kind: BackendKind,
+  browser_kind: crate::options::BrowserKind,
+  launch_timeout: Option<u64>,
   headless: bool,
   chromium_path: String,
   user_data_dir: Option<String>,
@@ -1059,34 +1348,61 @@ impl LaunchSpec {
       }
     };
 
+    let mode = mode.unwrap_or_else(|| self.connect_mode.clone());
+    let selection = crate::options::BrowserSelection::resolve(
+      overrides
+        .kind
+        .or_else(|| overrides.backend.is_none().then_some(self.browser_kind)),
+      overrides
+        .backend
+        .or_else(|| overrides.kind.is_none().then_some(self.backend_kind)),
+    )?;
+    let browser_kind = selection.browser;
+    let headless = overrides.headless.unwrap_or(self.headless);
     let mut args = self.base_args.clone();
     args.extend(overrides.args);
 
     // Match the browser window to the viewport unless the caller
     // already pinned a size.
-    if overrides.backend.unwrap_or(self.backend_kind) != BackendKind::WebKit
+    if !matches!(&mode, ConnectMode::Device { .. })
+      && browser_kind != crate::options::BrowserKind::Safari
+      && selection.backend != BackendKind::WebKit
       && !args.iter().any(|a| a.starts_with("--window-size"))
       && let Some(ref vp) = self.default_viewport
     {
       args.push(format!("--window-size={},{}", vp.width, vp.height));
     }
 
+    let mut env = self.launch_env.clone();
+    env.extend(overrides.env);
     let effective = EffectiveLaunch {
-      backend_kind: overrides.backend.unwrap_or(self.backend_kind),
-      headless: overrides.headless.unwrap_or(self.headless),
-      chromium_path: overrides.executable_path.unwrap_or_else(|| self.chromium_path.clone()),
+      firefox_user_prefs: self.firefox_user_prefs.clone(),
+      backend_kind: selection.backend,
+      browser_kind,
+      launch_timeout: self.launch_timeout,
+      headless,
+      chromium_path: overrides.executable_path.unwrap_or_else(|| {
+        if browser_kind == self.browser_kind {
+          self.chromium_path.clone()
+        } else {
+          browser_executable(browser_kind, headless)
+        }
+      }),
       user_data_dir: overrides.user_data_dir.or_else(|| self.user_data_dir.clone()),
       args,
-      env: overrides.env,
+      env,
       ignore_default_args: overrides
         .ignore_default_args
         .or_else(|| self.base_ignore_default_args.clone()),
       proxy: self.proxy.clone(),
     };
-    Ok((mode.unwrap_or_else(|| self.connect_mode.clone()), effective))
+    Ok((mode, effective))
   }
 
   async fn launch_browser(&self, eff: &EffectiveLaunch) -> Result<AnyBrowser> {
+    if eff.browser_kind == crate::options::BrowserKind::Safari {
+      return launch_safari(eff).await;
+    }
     // `launch({ proxy })` is a per-process setting on every engine that has
     // one, so it is lowered here rather than at context creation: a context
     // that names no proxy of its own inherits it.
@@ -1097,6 +1413,11 @@ impl LaunchSpec {
       .unwrap_or_default();
 
     Ok(match eff.backend_kind {
+      BackendKind::WebDriver => {
+        return Err(FerriError::unsupported(
+          "Local Classic WebDriver launching currently requires Safari; use a WebDriver endpoint for other installed drivers",
+        ));
+      },
       BackendKind::CdpPipe => {
         use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
         let mut args = eff.args.clone();
@@ -1116,7 +1437,7 @@ impl LaunchSpec {
         };
         AnyBrowser::CdpPipe(browser)
       },
-      BackendKind::CdpRaw => {
+      BackendKind::CdpWs => {
         use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
         let mut args = eff.args.clone();
         args.extend(proxy_flags);
@@ -1133,12 +1454,13 @@ impl LaunchSpec {
           },
           None => CdpBrowser::<WsTransport>::launch_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
         };
-        AnyBrowser::CdpRaw(browser)
+        AnyBrowser::CdpWs(browser)
       },
       BackendKind::WebKit => {
         use crate::backend::webkit::{LaunchConfig, WebKitBrowser};
         eff.reject_ignore_default_args("webkit")?;
         let config = LaunchConfig {
+          executable_path: (!eff.chromium_path.is_empty()).then(|| std::path::PathBuf::from(&eff.chromium_path)),
           headless: eff.headless,
           env: eff.env.clone(),
           user_data_dir: eff.user_data_dir.as_ref().map(std::path::PathBuf::from),
@@ -1164,11 +1486,50 @@ impl LaunchSpec {
             &eff.env,
             eff.user_data_dir.as_deref().map(std::path::Path::new),
             eff.proxy.as_ref(),
+            eff.firefox_user_prefs.as_ref(),
           ))
           .await?,
         )
       },
     })
+  }
+}
+
+async fn launch_safari(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
+  eff.reject_ignore_default_args("safari")?;
+  if eff.headless || eff.user_data_dir.is_some() || !eff.args.is_empty() || eff.proxy.is_some() {
+    return Err(FerriError::unsupported(
+      "Safari does not support headless mode, custom profiles, browser arguments, or a launch proxy",
+    ));
+  }
+  if eff.backend_kind == BackendKind::WebDriver {
+    Ok(AnyBrowser::WebDriver(
+      Box::pin(crate::backend::webdriver::browser::WebDriverBrowser::launch_safari(
+        &eff.env,
+        eff.launch_timeout,
+      ))
+      .await?,
+    ))
+  } else {
+    Ok(AnyBrowser::Bidi(
+      Box::pin(crate::backend::bidi::BidiBrowser::launch_safari(
+        &eff.env,
+        eff.launch_timeout,
+      ))
+      .await?,
+    ))
+  }
+}
+
+fn browser_executable(kind: crate::options::BrowserKind, headless: bool) -> String {
+  match kind {
+    crate::options::BrowserKind::Chromium => resolve_chromium(headless),
+    crate::options::BrowserKind::Firefox => std::env::var("FIREFOX_PATH")
+      .ok()
+      .or_else(|| detect_firefox().ok())
+      .unwrap_or_else(|| "firefox".to_owned()),
+    crate::options::BrowserKind::Safari => "/usr/bin/safaridriver".to_owned(),
+    crate::options::BrowserKind::WebKit => String::new(),
   }
 }
 
@@ -1185,53 +1546,79 @@ fn resolve_with_prefix(resolver: &InstanceResolverFn, instance_name: &str) -> Op
   resolver(prefix)
 }
 
+async fn connect_classic(mode: &ConnectMode) -> Result<AnyBrowser> {
+  let browser = match mode {
+    ConnectMode::WebDriver {
+      endpoint,
+      browser_name,
+      capabilities,
+      headers,
+      timeout,
+      ..
+    } => {
+      crate::backend::webdriver::browser::WebDriverBrowser::connect(
+        endpoint,
+        browser_name,
+        capabilities.as_ref(),
+        headers.as_ref(),
+        *timeout,
+      )
+      .await?
+    },
+    ConnectMode::ConnectUrl(endpoint) => {
+      crate::backend::webdriver::browser::WebDriverBrowser::connect(endpoint, "safari", None, None, None).await?
+    },
+    _ => {
+      return Err(FerriError::invalid_argument(
+        "endpoint",
+        "Classic WebDriver requires an HTTP endpoint",
+      ));
+    },
+  };
+  Ok(AnyBrowser::WebDriver(browser))
+}
+
 /// Attach to a browser someone else is running. CDP uses discovery for HTTP
 /// endpoints; `BiDi` accepts either its direct WebSocket endpoint or a W3C
 /// `WebDriver` endpoint that negotiates `webSocketUrl` during session creation.
-async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Result<AnyBrowser> {
+async fn connect_browser(
+  mode: &ConnectMode,
+  backend_kind: BackendKind,
+  headers: Option<&rustc_hash::FxHashMap<String, String>>,
+  args: &[String],
+) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
+  if let ConnectMode::Device { target, headless } = mode {
+    return match target {
+      crate::device::DeviceTarget::Android(options) => crate::android::launch(options, *headless, args).await,
+      crate::device::DeviceTarget::Ios(options) => Box::pin(crate::ios::launch(options, *headless)).await,
+    };
+  }
   if let ConnectMode::WebDriver {
     endpoint,
     browser_name,
+    protocol,
     capabilities,
     headers,
     timeout,
   } = mode
-    && browser_name.eq_ignore_ascii_case("chrome")
-    && crate::backend::webdriver::uses_android_chrome(capabilities.as_ref())
   {
-    return Box::pin(crate::backend::webdriver::connect_android_chrome(
+    return Box::pin(crate::backend::webdriver::connect(
       endpoint,
-      capabilities
-        .as_ref()
-        .ok_or_else(|| FerriError::invalid_argument("capabilities", "Appium capabilities are required"))?,
+      browser_name,
+      capabilities.as_ref(),
       headers.as_ref(),
       *timeout,
+      *protocol,
     ))
     .await;
   }
-
-  if backend_kind == BackendKind::Bidi || matches!(mode, ConnectMode::WebDriver { .. }) {
+  if backend_kind == BackendKind::WebDriver {
+    return connect_classic(mode).await;
+  }
+  if backend_kind == BackendKind::Bidi {
     let endpoint = match mode {
-      ConnectMode::WebDriver {
-        endpoint,
-        browser_name,
-        capabilities,
-        headers,
-        timeout,
-      } => {
-        return Ok(AnyBrowser::Bidi(
-          Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
-            endpoint,
-            browser_name,
-            capabilities.as_ref(),
-            headers.as_ref(),
-            *timeout,
-          ))
-          .await?,
-        ));
-      },
       ConnectMode::ConnectUrl(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
         return Ok(AnyBrowser::Bidi(
           Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
@@ -1244,22 +1631,33 @@ async fn connect_browser(mode: &ConnectMode, backend_kind: BackendKind) -> Resul
       _ => return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint")),
     };
     return Ok(AnyBrowser::Bidi(
-      Box::pin(crate::backend::bidi::BidiBrowser::connect(endpoint)).await?,
+      Box::pin(crate::backend::bidi::BidiBrowser::connect_with_headers(
+        endpoint, headers,
+      ))
+      .await?,
     ));
   }
   let ws_url = match mode {
     ConnectMode::ConnectUrl(url) if url.starts_with("ws://") || url.starts_with("wss://") => url.clone(),
-    ConnectMode::ConnectUrl(url) => discover_ws_from_http(url).await?,
+    ConnectMode::ConnectUrl(url) => discover_ws_with_headers(url, headers).await?,
     ConnectMode::AutoConnect { channel, user_data_dir } => discover_chrome_ws(channel, user_data_dir.as_deref())?,
-    ConnectMode::WebDriver { .. } => {
+    ConnectMode::Device { .. } | ConnectMode::WebDriver { .. } => {
       return Err(FerriError::unsupported(
         "WebDriver HTTP sessions require the BiDi backend",
       ));
     },
     ConnectMode::Launch => return Err(FerriError::backend("connect_browser called with Launch mode")),
   };
-  Ok(AnyBrowser::CdpRaw(
-    Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?,
+  Ok(AnyBrowser::CdpWs(
+    Box::pin(CdpBrowser::<WsTransport>::connect_with_headers(
+      &ws_url,
+      &headers
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect(),
+    ))
+    .await?,
   ))
 }
 
@@ -1274,6 +1672,8 @@ impl BrowserState {
   ///
   /// Returns an error if the browser process fails to start or connection fails.
   pub async fn ensure_instance(&mut self, instance_name: &str) -> Result<()> {
+    self.ensure_not_disposed()?;
+    self.check_cleanup_pending(instance_name)?;
     if self.instance_is_live(instance_name) {
       return Ok(());
     }
@@ -1289,20 +1689,23 @@ impl BrowserState {
       );
     }
 
+    let runtime = tokio::runtime::Handle::try_current().map_err(|error| FerriError::backend(error.to_string()))?;
     let spec = self.launch_spec();
-    let (mode, effective) = spec.resolve_off_lock(instance_name).await?;
-    let browser = match &mode {
-      ConnectMode::Launch => spec.launch_browser(&effective).await?,
-      other => connect_browser(other, self.backend_kind).await?,
-    };
-    let adopt_pages = !matches!(mode, ConnectMode::Launch);
-    Box::pin(self.install_instance(
-      instance_name,
-      browser,
-      adopt_pages,
-      matches!(mode, ConnectMode::WebDriver { .. }),
-    ))
-    .await
+    let (generation, allocation, completion) = self.begin_allocation(instance_name);
+    let owner = Arc::clone(&allocation);
+    let name = instance_name.to_owned();
+    let (reply, completed) = tokio::sync::oneshot::channel();
+    runtime.spawn(async move {
+      let result = owner.produce(spec, &name).await;
+      drop(completion);
+      if let Err(Err(error)) = reply.send(result) {
+        tracing::debug!(%error, instance = name, "Browser allocation finished after its caller disconnected");
+      }
+    });
+    let created = completed
+      .await
+      .map_err(|error| FerriError::backend(format!("Browser allocation task stopped: {error}")))?;
+    Box::pin(self.install_allocation(instance_name, generation, &allocation, created)).await
   }
 
   /// Backwards-compat: ensure the "default" instance.
@@ -1315,17 +1718,18 @@ impl BrowserState {
   }
 
   /// Connect to a running browser at the given WebSocket or HTTP URL.
-  /// Creates a new instance with the given name using `CdpRaw` backend.
+  /// Creates a new instance with the given name using `CdpWs` backend.
   ///
   /// # Errors
   ///
   /// Returns an error if the WebSocket connection or page discovery fails.
   pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize> {
     use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+    self.ensure_not_disposed()?;
 
     // Drop existing instance if any. A bare `remove` would orphan a browser this
     // server launched, leaving the process alive with no handle to close it.
-    self.evict_instance(instance_name).await;
+    self.evict_instance(instance_name).await?;
 
     let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
       url.to_string()
@@ -1333,27 +1737,11 @@ impl BrowserState {
       discover_ws_from_http(url).await?
     };
 
-    let browser = AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?);
-    let mut inst = BrowserInstance {
-      browser,
-      contexts: HashMap::default(),
-      generation: 0,
-    };
-
+    let browser = AnyBrowser::CdpWs(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?);
     // Skip viewport override for existing pages — connect_to_url attaches to a
     // user-managed browser whose window size should not be touched.
-    let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
-    let ctx = inst.context_mut("default");
-    let page_count = existing_pages.len();
-    for page in existing_pages {
-      page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-      ctx.pages.push(page);
-    }
-
-    inst.generation = self.next_instance_generation();
-    self.instances.insert(instance_name.to_string(), inst);
-    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(page_count)
+    Box::pin(self.install_instance(instance_name, browser, true, true)).await?;
+    Ok(self.instance(instance_name)?.context("default")?.pages.len())
   }
 
   /// Auto-discover and connect to a running Chrome instance.
@@ -1407,7 +1795,7 @@ impl BrowserState {
   async fn connect_with_resolved_mode(&mut self, instance_name: &str, mode: ConnectMode) -> Result<usize> {
     match mode {
       ConnectMode::ConnectUrl(url) => Box::pin(self.connect_to_url(instance_name, &url)).await,
-      ConnectMode::WebDriver { .. } => Err(FerriError::unsupported(
+      ConnectMode::Device { .. } | ConnectMode::WebDriver { .. } => Err(FerriError::unsupported(
         "connect_to_url cannot be used with a WebDriver session mode",
       )),
       ConnectMode::AutoConnect { channel, user_data_dir } => {
@@ -1471,6 +1859,7 @@ impl BrowserState {
   ///
   /// Returns an error if the browser instance does not exist.
   pub fn page_open_plan(&self, key: &SessionKey) -> Result<PageOpenPlan> {
+    self.ensure_not_disposed()?;
     let inst = self.instance(&key.instance)?;
     let browser_context_id = if &*key.context == "default" {
       None
@@ -1499,6 +1888,10 @@ impl BrowserState {
     page: AnyPage,
     browser_context_id: Option<String>,
   ) -> Result<()> {
+    if let Err(error) = self.ensure_not_disposed() {
+      page.dispose_local();
+      return Err(error);
+    }
     // Pull the context-event emitter for this session key BEFORE
     // taking the mutable instance borrow, so we can hand it to the
     // per-page → per-context `PageError` → `WebError` bridge spawned
@@ -1919,21 +2312,28 @@ impl BrowserState {
     let viewport = self.default_viewport.clone();
     let inst = self.instance_mut(&key.instance)?;
     let current_pages = Box::pin(inst.browser.pages()).await?;
+    let owned_pages: rustc_hash::FxHashSet<_> = inst
+      .contexts
+      .values()
+      .flat_map(|context| {
+        context
+          .pages
+          .iter()
+          .filter(|page| !page.is_closed())
+          .map(AnyPage::page_guid)
+      })
+      .collect();
     let ctx = inst.context_mut_checked(&key.context)?;
-    // A refresh exists to reconcile with what the browser actually has
-    // open, so the closed tabs go first — counting them would make
-    // `current_pages.len() > existing_count` false and silently skip the
-    // adoption of pages that really are new.
     ctx.prune_closed_pages();
 
-    let existing_count = ctx.pages.len();
     let mut adopted = Vec::new();
-    if current_pages.len() > existing_count {
-      for page in current_pages.into_iter().skip(existing_count) {
-        page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-        adopted.push(page.clone());
-        ctx.pages.push(page);
+    for page in current_pages {
+      if owned_pages.contains(&page.page_guid()) {
+        continue;
       }
+      page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+      adopted.push(page.clone());
+      ctx.pages.push(page);
     }
     let total = ctx.pages.len();
 
@@ -1941,7 +2341,7 @@ impl BrowserState {
     // is as new to this context as the ones adopted at connect time, and
     // needs the same emulation — otherwise the one tab a user opened by
     // hand is the one that reports the browser's own window size.
-    if let Some(ref vp) = viewport {
+    if let Some(ref vp) = viewport.filter(|_| inst.browser.kind() != BackendKind::WebDriver) {
       for page in &adopted {
         if let Err(e) = page.emulate_viewport(vp).await {
           tracing::warn!(
@@ -1965,41 +2365,26 @@ impl BrowserState {
     Ok(ctx.dialog_messages(limit).await)
   }
 
-  pub async fn shutdown(&mut self) {
-    if let Err(error) = self.shutdown_result().await {
-      tracing::warn!(%error, "browser shutdown failed");
-    }
+  /// # Errors
+  /// Retains incomplete instance cleanup and reports its failure for a later retry.
+  pub async fn shutdown(&mut self) -> Result<()> {
+    self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
+    self.shutdown_generation = self.shutdown_generation.wrapping_add(1);
+    self
+      .launch_permits
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
+    self
+      .pending_cleanup
+      .extend(self.instances.drain().map(|(name, instance)| (name, instance.into())));
+    self.popup_pumps.clear();
+    self.cleanup_instances(None).await
   }
 
-  pub(crate) async fn shutdown_result(&mut self) -> Result<()> {
-    self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
-    let mut composites = Vec::new();
-    let mut errors = Vec::new();
-    for (name, mut inst) in self.instances.drain() {
-      for (ctx_name, ctx) in &inst.contexts {
-        composites.push(format!("{name}:{ctx_name}"));
-        for page in &ctx.pages {
-          page.dispose_local();
-        }
-      }
-      inst.contexts.clear();
-      if let Err(error) = inst.browser.close().await {
-        errors.push(format!("{name}: {error}"));
-      }
-    }
-    // Every per-context registry is keyed by composite session key and
-    // nothing else drops those entries on a browser-wide shutdown; a
-    // long-lived server that cycles browsers would keep the storage
-    // state, HAR recorders and route tables of every dead context.
-    for composite in composites {
-      self.purge_context_registries(&composite).await;
-    }
-    self.popup_pumps.clear();
-    if errors.is_empty() {
-      Ok(())
-    } else {
-      Err(FerriError::backend(errors.join("; ")))
-    }
+  pub(crate) async fn dispose_result(&mut self) -> Result<()> {
+    self.disposed = true;
+    self.shutdown().await
   }
 
   /// Close one browser instance, leaving the others running. Returns
@@ -2008,20 +2393,22 @@ impl BrowserState {
   /// The next session routed to the name launches a fresh browser, so
   /// this is also how an operator picks up changed per-instance chrome
   /// args without taking down every other instance in the server.
-  pub async fn close_instance(&mut self, instance: &str) -> bool {
-    let Some(inst) = self.instances.get(instance) else {
-      return false;
-    };
-    let composites: Vec<String> = inst.contexts.keys().map(|c| format!("{instance}:{c}")).collect();
-    self.evict_instance(instance).await;
-    for composite in composites {
-      self.purge_context_registries(&composite).await;
-    }
+  ///
+  /// # Errors
+  /// Returns a provider cleanup error while retaining the owner for another close attempt.
+  pub async fn close_instance(&mut self, instance: &str) -> Result<bool> {
+    self
+      .launch_permits
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(instance);
+    let exists = self.instances.contains_key(instance) || self.pending_cleanup.iter().any(|(name, _)| name == instance);
     self.popup_pumps.remove(instance);
+    let result = self.evict_instance(instance).await;
     if self.instances.is_empty() {
       self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
     }
-    true
+    result.map(|()| exists)
   }
 
   #[must_use]
@@ -2063,129 +2450,40 @@ pub struct PageInfo {
   pub active: bool,
 }
 
-/// How long the whole `/json/version` exchange may take before we give up.
-const HTTP_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Discover the WebSocket URL from an HTTP debug endpoint.
 async fn discover_ws_from_http(http_url: &str) -> Result<String> {
-  let url = http_url.trim_end_matches('/');
-  let host_port = url
-    .strip_prefix("http://")
-    .ok_or_else(|| FerriError::invalid_argument("url", format!("Expected http:// URL, got {http_url}")))?;
-
-  tokio::time::timeout(HTTP_DISCOVERY_TIMEOUT, http_discovery_exchange(host_port))
-    .await
-    .map_err(|_| {
-      FerriError::backend(format!(
-        "Timed out after {}s reading /json/version from {host_port}. If this is Chrome 136+ with \
-         'Allow remote debugging for this browser instance' enabled, that endpoint is not served: pass the \
-         browser WebSocket URL directly (the second line of the profile's DevToolsActivePort file), or use \
-         auto_discover with user_data_dir pointing at that profile.",
-        HTTP_DISCOVERY_TIMEOUT.as_secs()
-      ))
-    })?
+  discover_ws_with_headers(http_url, None).await
 }
 
-/// One `GET /json/version` over a raw socket. Split out so the caller can bound it.
-async fn http_discovery_exchange(host_port: &str) -> Result<String> {
-  use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-
-  let stream = tokio::net::TcpStream::connect(host_port)
-    .await
-    .map_err(|e| FerriError::backend(format!("Cannot connect to {host_port}: {e}")))?;
-  // Chrome advertises `webSocketDebuggerUrl` as `ws://localhost:PORT/...` even
-  // though it binds only the loopback address it actually listens on. On a
-  // dual-stack host `localhost` resolves to `::1` first, so following the
-  // advertised host stalls the ws upgrade. Pin the ws authority to the address
-  // this HTTP request actually reached.
-  let peer_addr = stream
-    .peer_addr()
-    .map_err(|e| FerriError::backend(format!("peer_addr for {host_port}: {e}")))?;
-  let (reader, mut writer) = stream.into_split();
-  let req = format!("GET /json/version HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
-  writer
-    .write_all(req.as_bytes())
-    .await
-    .map_err(|e| FerriError::backend(format!("Write: {e}")))?;
-
-  let mut buf_reader = BufReader::new(reader);
-
-  let mut status_line = String::new();
-  buf_reader
-    .read_line(&mut status_line)
-    .await
-    .map_err(|e| FerriError::backend(format!("Read status line: {e}")))?;
-  let status: u16 = status_line
-    .split_whitespace()
-    .nth(1)
-    .and_then(|c| c.parse().ok())
-    .ok_or_else(|| FerriError::backend(format!("Malformed HTTP status line from {host_port}: {status_line:?}")))?;
-
-  // `Content-Length` is absent on an HTTP/1.0-style close-delimited body, which is
-  // why `None` means "read to EOF" and `Some(0)` means "there is no body at all".
-  let mut content_length: Option<usize> = None;
-  loop {
-    let mut line = String::new();
-    let read = buf_reader
-      .read_line(&mut line)
-      .await
-      .map_err(|e| FerriError::backend(format!("Read header: {e}")))?;
-    if read == 0 {
-      break;
+async fn discover_ws_with_headers(
+  http_url: &str,
+  headers: Option<&rustc_hash::FxHashMap<String, String>>,
+) -> Result<String> {
+  let budget = crate::operation_budget::OperationBudget::current(10_000)?;
+  budget.wait(async {
+    let mut url = reqwest::Url::parse(http_url).map_err(|error| FerriError::invalid_argument("url", error.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+      return Err(FerriError::invalid_argument("url", "CDP discovery requires an HTTP or HTTPS endpoint"));
     }
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-      break;
-    }
-    if let Some((name, val)) = trimmed.split_once(':')
-      && name.eq_ignore_ascii_case("content-length")
-    {
-      content_length = val.trim().parse().ok();
-    }
-  }
-
-  if status != 200 {
-    return Err(FerriError::backend(format!(
-      "{host_port} answered HTTP {status} for /json/version. Chrome 136+ with 'Allow remote debugging for this \
-       browser instance' serves only the browser WebSocket, not the HTTP JSON endpoints: pass that ws:// URL \
-       directly (the second line of the profile's DevToolsActivePort file), or use auto_discover with \
-       user_data_dir pointing at that profile."
-    )));
-  }
-
-  let body_str = match content_length {
-    Some(0) => {
+    url.set_path(&format!("{}/json/version", url.path().trim_end_matches('/')));
+    let response = crate::backend::webdriver::http_client(headers)?.get(url.clone()).send().await
+      .map_err(|error| FerriError::backend(format!("CDP discovery request failed: {error}")))?;
+    if !response.status().is_success() {
       return Err(FerriError::backend(format!(
-        "{host_port} returned an empty /json/version body"
+        "CDP discovery returned HTTP {}. Pass the browser WebSocket URL directly or use the profile's DevToolsActivePort file.", response.status()
       )));
-    },
-    Some(len) => {
-      let mut body = vec![0u8; len];
-      buf_reader
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| FerriError::backend(format!("Read body: {e}")))?;
-      String::from_utf8_lossy(&body).into_owned()
-    },
-    None => {
-      let mut body = Vec::new();
-      buf_reader
-        .read_to_end(&mut body)
-        .await
-        .map_err(|e| FerriError::backend(format!("Read body: {e}")))?;
-      String::from_utf8_lossy(&body).into_owned()
-    },
-  };
-
-  let json: serde_json::Value =
-    serde_json::from_str(&body_str).map_err(|e| FerriError::Backend(format!("Parse /json/version: {e}")))?;
-
-  let ws_url = json
-    .get("webSocketDebuggerUrl")
-    .and_then(|v| v.as_str())
-    .ok_or_else(|| FerriError::backend("No webSocketDebuggerUrl in /json/version"))?;
-
-  Ok(pin_ws_authority(ws_url, peer_addr))
+    }
+    let peer = response.remote_addr();
+    let body: serde_json::Value = response.json().await.map_err(|error| FerriError::backend(format!("Parse /json/version: {error}")))?;
+    let endpoint = body["webSocketDebuggerUrl"].as_str().ok_or_else(|| FerriError::backend("No webSocketDebuggerUrl in /json/version"))?;
+    let websocket = reqwest::Url::parse(endpoint).map_err(|error| FerriError::backend(format!("Invalid debugger endpoint: {error}")))?;
+    // Local Chrome can advertise localhost despite listening on only one IP family.
+    if websocket.scheme() == "ws" && websocket.host_str() == Some("localhost")
+      && let Some(peer) = peer.filter(|address| address.ip().is_loopback())
+      && (url.host_str() == Some("localhost") || url.host_str().is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()))) {
+      return Ok(pin_ws_authority(endpoint, peer));
+    }
+    Ok(endpoint.to_owned())
+  }).await.map_err(|error| error.error("discovering CDP endpoint"))?
 }
 
 /// Replace the host:port authority of a `ws://`/`wss://` URL with `addr`,
@@ -3072,6 +3370,10 @@ mod discovery_tests {
 }
 
 #[cfg(test)]
+#[path = "state/adoption_tests.rs"]
+mod adoption_tests;
+
+#[cfg(test)]
 mod tests {
   use super::cached_chromium_in;
 
@@ -3168,20 +3470,182 @@ mod tests {
   /// needed to exercise the resolver/args plumbing. Using
   /// `LaunchPlan::default()` keeps these tests in lock-step with the
   /// single production construction path ([`BrowserState::with_plan`]).
-  fn test_state(backend: BackendKind) -> BrowserState {
-    let kind = match backend {
-      BackendKind::Bidi => crate::options::BrowserKind::Firefox,
-      _ => crate::options::BrowserKind::Chromium,
-    };
+  pub(super) fn test_state(backend: BackendKind) -> BrowserState {
+    let selection = crate::options::BrowserSelection::resolve(None, Some(backend)).expect("backend selection");
     BrowserState::with_plan(
       ConnectMode::Launch,
       crate::options::LaunchPlan {
         backend,
-        kind,
+        kind: selection.browser,
         headless: false,
         ..Default::default()
       },
     )
+  }
+
+  #[tokio::test]
+  async fn configured_safari_connection_uses_its_backend_in_both_state_paths() {
+    use tokio::io::AsyncWriteExt;
+
+    for shared in [false, true] {
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let endpoint = format!("http://{}", listener.local_addr().unwrap());
+      let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for value in [
+          serde_json::json!({"sessionId":"configured-safari","capabilities":{"browserName":"Safari","browserVersion":"26.2"}}),
+          serde_json::json!(["device"]),
+          serde_json::Value::Null,
+        ] {
+          let (mut socket, _) = listener.accept().await.unwrap();
+          requests.push(crate::backend::webdriver::session::tests::request(&mut socket).await);
+          let body = serde_json::json!({"value":value}).to_string();
+          socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        }
+        requests
+      });
+      let mut state = test_state(BackendKind::CdpPipe);
+      state.set_instance_overrides_fn(Arc::new(|_| {
+        Ok(crate::options::InstanceOverrides {
+          kind: Some(crate::options::BrowserKind::Safari),
+          ..Default::default()
+        })
+      }));
+      state.set_instance_resolver_fn(Arc::new(move |_| {
+        Some(ConnectMode::WebDriver {
+          endpoint: endpoint.clone(),
+          browser_name: "safari".into(),
+          protocol: crate::backend::webdriver::WebDriverProtocol::Auto,
+          capabilities: None,
+          headers: None,
+          timeout: Some(1000),
+        })
+      }));
+      let state = Arc::new(tokio::sync::RwLock::new(state));
+      if shared {
+        BrowserState::ensure_instance_shared(&state, "safari").await.unwrap();
+      } else {
+        state.write().await.ensure_instance("safari").await.unwrap();
+      }
+      assert!(matches!(
+        state.read().await.instances["safari"].browser,
+        AnyBrowser::WebDriver(_)
+      ));
+      state.write().await.shutdown().await.unwrap();
+      let requests = server.await.unwrap();
+      assert!(
+        requests[0].1["capabilities"]["alwaysMatch"]
+          .get("webSocketUrl")
+          .is_none()
+      );
+      assert_eq!(requests[1].0, "GET /session/configured-safari/window/handles HTTP/1.1");
+      assert_eq!(requests[2].0, "DELETE /session/configured-safari HTTP/1.1");
+    }
+  }
+
+  #[tokio::test]
+  async fn failed_or_cancelled_shutdown_retains_the_provider_for_retry() {
+    use tokio::io::AsyncWriteExt as _;
+
+    for cancelled in [false, true] {
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let endpoint = format!("http://{}", listener.local_addr().unwrap());
+      let (received, receipt) = tokio::sync::oneshot::channel();
+      let server = tokio::spawn(async move {
+        let mut received = Some(received);
+        let mut held = Vec::new();
+        let mut requests = Vec::new();
+        for (index, value) in [
+          serde_json::json!({"sessionId":"cleanup","capabilities":{"browserName":"Safari","browserVersion":"26.2"}}),
+          serde_json::json!(["page"]),
+          serde_json::json!({"error":"unknown error","message":"provider cleanup unavailable"}),
+          serde_json::Value::Null,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+          let (mut socket, _) = listener.accept().await.unwrap();
+          requests.push(crate::backend::webdriver::session::tests::request(&mut socket).await);
+          if index == 2 && cancelled {
+            held.push(socket);
+            received.take().unwrap().send(()).unwrap();
+            continue;
+          }
+          let status = if index == 2 {
+            "500 Internal Server Error"
+          } else {
+            "200 OK"
+          };
+          let body = serde_json::json!({"value":value}).to_string();
+          socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        }
+        requests
+      });
+      let mut state = test_state(BackendKind::WebDriver);
+      state.connect_mode = ConnectMode::WebDriver {
+        endpoint,
+        browser_name: "safari".into(),
+        protocol: crate::backend::webdriver::WebDriverProtocol::Classic,
+        capabilities: None,
+        headers: None,
+        timeout: Some(1000),
+      };
+      state.ensure_instance("default").await.unwrap();
+      if cancelled {
+        tokio::select! {
+          result = state.shutdown() => panic!("cleanup completed before cancellation: {result:?}"),
+          result = receipt => result.unwrap(),
+        }
+      } else {
+        assert!(
+          state
+            .shutdown()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("provider cleanup unavailable")
+        );
+      }
+      assert!(!state.is_connected());
+      assert_eq!(state.pending_cleanup.len(), 1);
+      assert!(
+        state
+          .ensure_instance("default")
+          .await
+          .unwrap_err()
+          .to_string()
+          .contains("unfinished cleanup")
+      );
+      let state = Arc::new(tokio::sync::RwLock::new(state));
+      assert!(
+        BrowserState::ensure_instance_shared(&state, "default")
+          .await
+          .unwrap_err()
+          .to_string()
+          .contains("unfinished cleanup")
+      );
+      state.write().await.shutdown().await.unwrap();
+      assert!(state.read().await.pending_cleanup.is_empty());
+      state.write().await.shutdown().await.unwrap();
+      let requests = server.await.unwrap();
+      assert_eq!(requests.len(), 4);
+      assert_eq!(requests[2].0, "DELETE /session/cleanup HTTP/1.1");
+      assert_eq!(requests[3].0, requests[2].0);
+    }
+  }
+
+  #[tokio::test]
+  async fn webkit_browser_override_does_not_inherit_chromium_window_flags() {
+    let mut state = test_state(BackendKind::CdpPipe);
+    state.set_instance_overrides_fn(Arc::new(|_| {
+      Ok(crate::options::InstanceOverrides {
+        kind: Some(crate::options::BrowserKind::WebKit),
+        ..Default::default()
+      })
+    }));
+    let (_, effective) = state.launch_spec().resolve_off_lock("webkit").await.unwrap();
+    assert_eq!(effective.backend_kind, BackendKind::WebKit);
+    assert!(!effective.args.iter().any(|arg| arg.starts_with("--window-size")));
   }
 
   #[test]
@@ -3288,7 +3752,8 @@ mod tests {
         user_data_dir: Some(format!("/profiles/{instance}")),
         executable_path: Some("/bin/other-chrome".into()),
         headless: Some(true),
-        backend: Some(BackendKind::CdpRaw),
+        backend: Some(BackendKind::CdpWs),
+        kind: None,
         env: [("APP_ENV".to_string(), instance.to_string())].into_iter().collect(),
         ignore_default_args: Some(crate::options::IgnoreDefaultArgs::Some(vec!["--no-sandbox".into()])),
       })
@@ -3302,7 +3767,7 @@ mod tests {
     assert_eq!(eff.user_data_dir.as_deref(), Some("/profiles/staging"));
     assert_eq!(eff.chromium_path, "/bin/other-chrome");
     assert!(eff.headless, "instance override beats the state default");
-    assert_eq!(eff.backend_kind, BackendKind::CdpRaw);
+    assert_eq!(eff.backend_kind, BackendKind::CdpWs);
     assert_eq!(eff.env.get("APP_ENV").map(String::as_str), Some("staging"));
 
     // `ignoreDefaultArgs` must actually drop the switch.
@@ -3435,6 +3900,24 @@ mod tests {
     assert!(config.extra_args.contains(&"--instance-flag".to_string()));
   }
 
+  #[tokio::test]
+  async fn managed_devices_keep_browser_arguments_without_desktop_window_flags() {
+    let state = BrowserState::with_plan(
+      ConnectMode::Device {
+        target: crate::device::DeviceTarget::Android(crate::android::AndroidOptions::default()),
+        headless: true,
+      },
+      crate::options::LaunchPlan {
+        backend: BackendKind::CdpWs,
+        args: vec!["--enable-features=WebMCP".into()],
+        ..Default::default()
+      },
+    );
+    let (mode, effective) = state.launch_spec().resolve_off_lock("phone").await.unwrap();
+    assert!(matches!(mode, ConnectMode::Device { .. }));
+    assert_eq!(effective.args, ["--enable-features=WebMCP"]);
+  }
+
   #[test]
   fn ignore_default_args_matches_on_switch_name() {
     // A default carrying a value is dropped by its bare name.
@@ -3461,7 +3944,7 @@ mod tests {
       // listener drops here, port is free
     };
 
-    let mut state = test_state(BackendKind::CdpRaw);
+    let mut state = test_state(BackendKind::CdpWs);
     state.set_instance_resolver_fn(Arc::new(move |instance| {
       if instance == "test-resolved" {
         Some(ConnectMode::ConnectUrl(format!(

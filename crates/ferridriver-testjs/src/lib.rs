@@ -334,10 +334,12 @@ impl SessionPool {
         let sessions = Arc::clone(self);
         owner.register_teardown(
           &key,
+          session.clone(),
           Arc::new(move |_| {
             let sessions = Arc::clone(&sessions);
             Box::pin(async move {
               sessions.teardown_worker(worker_index).await;
+              Ok(())
             })
           }),
         );

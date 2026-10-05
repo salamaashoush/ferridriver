@@ -38,9 +38,21 @@ fn live_sessions() -> &'static Mutex<HashMap<String, BoundSession>> {
 /// to the session id it is currently bound under. Lets `browser.unbind()`
 /// take no argument (Playwright parity) by recovering the id from the browser
 /// even after its JS wrapper has been rebuilt.
-fn browser_bindings() -> &'static Mutex<HashMap<usize, String>> {
-  static MAP: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
+fn browser_bindings() -> &'static Mutex<HashMap<usize, BrowserBinding>> {
+  static MAP: OnceLock<Mutex<HashMap<usize, BrowserBinding>>> = OnceLock::new();
   MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct BrowserBinding {
+  id: String,
+  server: std::sync::Weak<SessionServer>,
+}
+
+fn clear_browser_binding(server: &Arc<SessionServer>) {
+  browser_bindings()
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .retain(|_, binding| binding.server.as_ptr() != Arc::as_ptr(server));
 }
 
 /// A stable per-process identity for a browser handle: the address of its
@@ -50,24 +62,47 @@ fn browser_identity(browser: &Browser) -> usize {
   Arc::as_ptr(browser.state()).cast::<()>() as usize
 }
 
-/// Park a binding in the process-global table, replacing (and tearing down)
-/// any previous binding under the same id.
-fn store_live(session: BoundSession) {
-  let id = session.id().to_string();
-  let mut table = live_sessions()
+fn store_live(session: BoundSession, browser: usize) -> Result<()> {
+  let mut sessions = live_sessions()
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner);
-  table.insert(id, session);
+  let mut bindings = browser_bindings()
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  if bindings
+    .get(&browser)
+    .and_then(|binding| binding.server.upgrade())
+    .is_some_and(|server| !server.is_stopped())
+  {
+    return Err(crate::SessionError::Dispatch(
+      "browser already has a bound session".to_owned(),
+    ));
+  }
+  bindings.insert(
+    browser,
+    BrowserBinding {
+      id: session.id.clone(),
+      server: Arc::downgrade(session.server()),
+    },
+  );
+  if let Some(previous) = sessions.insert(session.id.clone(), session) {
+    bindings.retain(|_, binding| binding.server.as_ptr() != Arc::as_ptr(previous.server()));
+  }
+  Ok(())
 }
 
 /// Stop and remove the process-global binding for `id`, if one exists.
 /// Returns `true` when a binding was found and torn down.
 #[must_use]
 fn take_live(id: &str) -> bool {
-  let mut table = live_sessions()
+  let session = live_sessions()
     .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  table.remove(id).is_some()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .remove(id);
+  if let Some(session) = &session {
+    clear_browser_binding(session.server());
+  }
+  session.is_some()
 }
 
 /// Options for [`bind`], mirroring Playwright's `Browser.bind` option bag.
@@ -92,9 +127,8 @@ pub struct BindOptions {
 pub struct BoundSession {
   id: String,
   endpoint: String,
-  registry: Registry,
   server: Arc<SessionServer>,
-  serve_task: tokio::task::JoinHandle<()>,
+  serve_task: tokio::task::JoinHandle<Result<()>>,
 }
 
 impl BoundSession {
@@ -110,11 +144,18 @@ impl BoundSession {
     &self.endpoint
   }
 
-  /// The running server backing this session. Its listener stays open until
-  /// the binding is dropped.
+  /// The server backing this session. Cooperative shutdown also releases its listener.
   #[must_use]
   pub fn server(&self) -> &Arc<SessionServer> {
     &self.server
+  }
+
+  /// # Errors
+  /// Returns listener or server-task failures.
+  pub async fn wait(&mut self) -> Result<()> {
+    (&mut self.serve_task)
+      .await
+      .map_err(|error| crate::SessionError::Dispatch(error.to_string()))?
   }
 
   /// Stop serving and remove the registry descriptor. Idempotent — a second
@@ -125,14 +166,16 @@ impl BoundSession {
   /// Returns [`crate::SessionError::Io`] if the descriptor cannot be removed.
   pub fn unbind(&self) -> Result<()> {
     self.serve_task.abort();
-    self.registry.remove(&self.id)
+    self.server.unpublish()
   }
 }
 
 impl Drop for BoundSession {
   fn drop(&mut self) {
     self.serve_task.abort();
-    let _ = self.registry.remove(&self.id);
+    if let Err(error) = self.server.unpublish() {
+      tracing::warn!(%error, session = %self.id, "session descriptor cleanup failed");
+    }
   }
 }
 
@@ -175,11 +218,28 @@ pub async fn bind_global(
 ) -> Result<String> {
   let session = bind(browser, id, options, script_host).await?;
   let endpoint = session.endpoint().to_string();
-  browser_bindings()
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .insert(browser_identity(browser), id.to_string());
-  store_live(session);
+  let server = Arc::clone(session.server());
+  let binding_id = id.to_owned();
+  store_live(session, browser_identity(browser))?;
+  tokio::spawn(async move {
+    server.stopped().await;
+    let removed = {
+      let mut sessions = live_sessions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if sessions
+        .get(&binding_id)
+        .is_some_and(|binding| Arc::ptr_eq(binding.server(), &server))
+      {
+        sessions.remove(&binding_id)
+      } else {
+        None
+      }
+    };
+    if let Some(session) = &removed {
+      clear_browser_binding(session.server());
+    }
+  });
   Ok(endpoint)
 }
 
@@ -209,14 +269,30 @@ pub fn unbind(id: &str) -> Result<()> {
 /// Returns [`crate::SessionError::Io`] if the descriptor
 /// cannot be removed.
 pub fn unbind_browser(browser: &Browser) -> Result<()> {
-  let id = browser_bindings()
+  let binding = browser_bindings()
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .remove(&browser_identity(browser));
-  match id {
-    Some(id) => unbind(&id),
-    None => Ok(()),
+  if let Some(binding) = binding {
+    let removed = {
+      let mut sessions = live_sessions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if sessions
+        .get(&binding.id)
+        .is_some_and(|session| Arc::as_ptr(session.server()) == binding.server.as_ptr())
+      {
+        sessions.remove(&binding.id)
+      } else {
+        None
+      }
+    };
+    if let Some(session) = &removed {
+      clear_browser_binding(session.server());
+      session.unbind()?;
+    }
   }
+  Ok(())
 }
 
 /// Like [`bind`], but publishes into an explicit registry (used by tests and
@@ -236,7 +312,7 @@ pub async fn bind_in(
   if let Some(host) = script_host {
     dispatcher = dispatcher.with_script_host(host);
   }
-  let browser_name = browser_name_for(browser.backend_kind()).to_string();
+  let browser_name = browser_name_for(browser).to_string();
   bind_dispatcher(registry, id, Arc::new(dispatcher), browser_name, options).await
 }
 
@@ -254,10 +330,11 @@ pub async fn bind_dispatcher(
   browser_name: String,
   options: BindOptions,
 ) -> Result<BoundSession> {
+  let mut claim = registry.claim(id)?;
   let endpoint = match (&options.host, options.port) {
     (Some(host), port) => Endpoint::Tcp(format!("{host}:{}", port.unwrap_or(0))),
     (None, Some(port)) => Endpoint::Tcp(format!("127.0.0.1:{port}")),
-    (None, None) => default_socket_endpoint(registry, id),
+    (None, None) => default_socket_endpoint(registry)?,
   };
 
   let server = SessionServer::bind(endpoint, dispatcher).await?;
@@ -267,25 +344,22 @@ pub async fn bind_dispatcher(
   let descriptor = SessionDescriptor {
     id: id.to_string(),
     endpoint: resolved_endpoint.clone(),
+    generation: server.generation().to_owned(),
     pid: std::process::id(),
     browser_name,
     version: crate::WIRE_VERSION.to_string(),
     workspace_dir: options.workspace_dir,
     metadata: options.metadata,
   };
-  registry.put(&descriptor)?;
+  claim.publish(&descriptor)?;
+  server.publish(claim);
 
   let serve_handle = Arc::clone(&server);
-  let serve_task = tokio::spawn(async move {
-    if let Err(e) = serve_handle.serve().await {
-      tracing::debug!(error = %e, "session server stopped");
-    }
-  });
+  let serve_task = tokio::spawn(async move { serve_handle.serve().await });
 
   Ok(BoundSession {
     id: id.to_string(),
     endpoint: resolved_endpoint,
-    registry: registry.clone(),
     server,
     serve_task,
   })
@@ -309,49 +383,30 @@ pub fn unbind_id(registry: &Registry, id: &str) -> Result<()> {
 const MAX_SOCKET_PATH: usize = 100;
 
 #[cfg(unix)]
-fn default_socket_endpoint(registry: &Registry, id: &str) -> Endpoint {
-  let direct = registry.dir().join(format!("{id}.sock"));
-  if direct.as_os_str().len() <= MAX_SOCKET_PATH {
-    return Endpoint::Unix(direct);
+fn default_socket_endpoint(registry: &Registry) -> Result<Endpoint> {
+  let root = if registry.dir().as_os_str().len() + 32 <= MAX_SOCKET_PATH {
+    registry.dir().to_owned()
+  } else {
+    let root = std::env::var_os("XDG_RUNTIME_DIR")
+      .map(std::path::PathBuf::from)
+      .filter(|path| path.is_dir())
+      .unwrap_or_else(std::env::temp_dir)
+      .join("ferridriver");
+    Registry::open_at(root)?.dir().to_owned()
+  };
+  let directory = tempfile::Builder::new().prefix("s-").tempdir_in(root)?;
+  let path = directory.path().join("ipc.sock");
+  if path.as_os_str().len() > MAX_SOCKET_PATH {
+    return Err(crate::SessionError::Dispatch(
+      "session socket directory exceeds the platform path limit".to_owned(),
+    ));
   }
-  // A deep registry directory (or a long id) would overflow `sun_path` and
-  // fail the bind outright. Fall back to a short hashed name in a per-user
-  // runtime directory; the descriptor carries the resolved path, so discovery
-  // is unaffected.
-  Endpoint::Unix(hashed_socket_path(registry, id).unwrap_or(direct))
-}
-
-/// `<runtime-dir>/ferridriver/<hash>.sock`, where the runtime dir is
-/// `$XDG_RUNTIME_DIR` (per-user, `0700` by systemd) or the OS temp dir (which
-/// is already per-user on macOS). The `ferridriver` subdirectory is created
-/// `0700` either way, because on BSD-derived kernels the socket file's own
-/// mode is not consulted on connect — the directory is the boundary.
-#[cfg(unix)]
-fn hashed_socket_path(registry: &Registry, id: &str) -> Option<std::path::PathBuf> {
-  use std::hash::{Hash as _, Hasher as _};
-  use std::os::unix::fs::PermissionsExt as _;
-
-  let root = std::env::var_os("XDG_RUNTIME_DIR")
-    .map(std::path::PathBuf::from)
-    .filter(|p| p.is_dir())
-    .unwrap_or_else(std::env::temp_dir)
-    .join("ferridriver");
-  std::fs::create_dir_all(&root).ok()?;
-  std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).ok()?;
-
-  // FxHasher is seed-free, so every process derives the same name for the
-  // same (registry dir, id) pair.
-  let mut hasher = rustc_hash::FxHasher::default();
-  registry.dir().hash(&mut hasher);
-  id.hash(&mut hasher);
-  let path = root.join(format!("{:016x}.sock", hasher.finish()));
-  (path.as_os_str().len() <= MAX_SOCKET_PATH).then_some(path)
+  Ok(Endpoint::OwnedUnix(Arc::new(directory)))
 }
 
 #[cfg(not(unix))]
-fn default_socket_endpoint(_registry: &Registry, _id: &str) -> Endpoint {
-  // No Unix sockets: fall back to an OS-assigned loopback TCP port.
-  Endpoint::Tcp("127.0.0.1:0".to_string())
+fn default_socket_endpoint(_registry: &Registry) -> Result<Endpoint> {
+  Ok(Endpoint::Tcp("127.0.0.1:0".to_string()))
 }
 
 impl std::fmt::Debug for BoundSession {
@@ -369,6 +424,77 @@ mod tests {
   use crate::client::SessionClient;
   use crate::dispatch::test_support::EchoDispatcher;
   use crate::protocol::Command;
+
+  struct RetryCleanup(std::sync::atomic::AtomicUsize);
+
+  #[async_trait::async_trait]
+  impl crate::Dispatcher for RetryCleanup {
+    async fn dispatch(&self, command: Command, _events: crate::EventSink) -> crate::Response {
+      crate::Response::ok(command.id, "running")
+    }
+
+    async fn close(&self) -> std::result::Result<(), String> {
+      if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        Err("provider cleanup unavailable".into())
+      } else {
+        Ok(())
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn close_acknowledges_cleanup_and_keeps_failed_cleanup_retryable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = Registry::open_at(tmp.path()).unwrap();
+    let dispatcher = Arc::new(RetryCleanup(std::sync::atomic::AtomicUsize::new(0)));
+    let mut session = bind_dispatcher(
+      &registry,
+      "safari",
+      dispatcher.clone(),
+      "safari".into(),
+      BindOptions::default(),
+    )
+    .await
+    .unwrap();
+    let descriptor = registry.get("safari").unwrap().unwrap();
+    let close = Command::new(
+      1,
+      crate::CLOSE_VERB,
+      serde_json::json!({"endpoint": descriptor.endpoint, "generation": descriptor.generation}),
+    );
+    let mut client = SessionClient::attach(&registry, "safari").await.unwrap();
+    let mut wrong = close.clone();
+    wrong.args["generation"] = "another-generation".into();
+    assert!(!client.call(wrong).await.unwrap().ok);
+    assert_eq!(dispatcher.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let failed = client.call(close.clone()).await.unwrap();
+    assert_eq!(failed.error.as_deref(), Some("provider cleanup unavailable"));
+    assert_eq!(registry.get("safari").unwrap(), Some(descriptor));
+    assert!(
+      !client
+        .call(Command::new(2, crate::RUN_VERB, serde_json::json!({})))
+        .await
+        .unwrap()
+        .ok
+    );
+    assert!(client.call(close).await.unwrap().ok);
+    assert!(registry.get("safari").unwrap().is_none());
+    session.wait().await.unwrap();
+    assert!(SessionClient::connect(session.endpoint()).await.is_err());
+    assert_eq!(dispatcher.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let replacement = bind_dispatcher(
+      &registry,
+      "safari",
+      Arc::new(EchoDispatcher),
+      "safari".into(),
+      BindOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(replacement.endpoint(), session.endpoint());
+    drop(session);
+    assert!(registry.get("safari").unwrap().is_some());
+  }
 
   #[tokio::test]
   async fn bind_publishes_descriptor_and_serves_until_unbound() {

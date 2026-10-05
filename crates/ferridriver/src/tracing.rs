@@ -182,11 +182,7 @@ impl Tracing {
     let composite = self.ctx.composite();
     let (browser_name, context_options, traces_dir) = {
       let state = self.ctx.state().read().await;
-      let browser_name = match state.backend_kind() {
-        crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw => "chromium",
-        crate::backend::BackendKind::WebKit => "webkit",
-        crate::backend::BackendKind::Bidi => "firefox",
-      };
+      let browser_name = state.engine_name();
       let mut context_options = serde_json::Map::new();
       if let Some(viewport) = state.default_viewport.as_ref() {
         context_options.insert(

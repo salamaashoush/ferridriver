@@ -2,6 +2,10 @@
 
 use serde_json::json;
 use std::sync::Arc;
+
+#[cfg(test)]
+#[path = "close_tests.rs"]
+mod close_tests;
 use tracing::debug;
 
 use super::page::BidiPage;
@@ -95,6 +99,7 @@ impl BidiBrowser {
     env: &rustc_hash::FxHashMap<String, String>,
     user_data_dir: Option<&std::path::Path>,
     proxy: Option<&crate::options::ProxyConfig>,
+    firefox_user_prefs: Option<&rustc_hash::FxHashMap<String, serde_json::Value>>,
   ) -> Result<Self> {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
@@ -105,6 +110,7 @@ impl BidiBrowser {
       env,
       user_data_dir,
       proxy,
+      firefox_user_prefs,
     ))
     .await?;
     let session = Arc::new(session);
@@ -127,9 +133,36 @@ impl BidiBrowser {
     })
   }
 
+  /// # Errors
+  /// Reports unsupported hosts, driver startup failures, and session negotiation errors.
+  pub async fn launch_safari(env: &rustc_hash::FxHashMap<String, String>, timeout_ms: Option<u64>) -> Result<Self> {
+    let timeout_ms = timeout_ms.unwrap_or(30_000);
+    let (mut browser, group) =
+      crate::backend::webdriver::launcher::launch_safari(env, timeout_ms, |endpoint| async move {
+        Box::pin(Self::connect_webdriver(
+          &endpoint,
+          "safari",
+          None,
+          None,
+          Some(timeout_ms),
+        ))
+        .await
+      })
+      .await?;
+    browser.child = group;
+    Ok(browser)
+  }
+
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    let session = Arc::new(Box::pin(BidiSession::connect(ws_url)).await?);
+    Self::connect_with_headers(ws_url, None).await
+  }
+
+  pub(crate) async fn connect_with_headers(
+    ws_url: &str,
+    headers: Option<&rustc_hash::FxHashMap<String, String>>,
+  ) -> Result<Self> {
+    let session = Arc::new(Box::pin(BidiSession::connect_with_options(ws_url, None, headers)).await?);
     Self::from_session(session)
   }
 
@@ -153,7 +186,7 @@ impl BidiBrowser {
     }
     let session_url = webdriver_session_url(endpoint)?;
     let always_match = webdriver_capabilities(browser_name, extra_capabilities);
-    let client = super::webdriver::http_client(headers, timeout_ms)?;
+    let client = super::webdriver::http_client(headers)?;
     let created = crate::backend::webdriver::session::WebDriverSession::create(
       client,
       session_url,
@@ -162,21 +195,8 @@ impl BidiBrowser {
       headers,
     )
     .await?;
-    let owner = created.session;
-    let session_id = created.id;
-    let capabilities = created.capabilities;
-    let attach = Box::pin(async {
-      let ws_url = capabilities
-        .get("webSocketUrl")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-          FerriError::unsupported("WebDriver server created a Classic session without a BiDi webSocketUrl capability")
-        })?
-        .to_string();
-      let socket_headers = headers.filter(|_| super::webdriver::same_origin(endpoint, &ws_url));
-      let session = Arc::new(BidiSession::connect_existing(&ws_url, session_id, capabilities, socket_headers).await?);
-      Self::from_session(session)
-    });
+    let owner = created.session.clone();
+    let attach = Box::pin(Self::from_created(created, endpoint, headers));
     let result = if timeout_ms == 0 {
       attach.await
     } else {
@@ -185,10 +205,7 @@ impl BidiBrowser {
         .unwrap_or_else(|_| Err(FerriError::timeout("connecting WebDriver BiDi session", timeout_ms)))
     };
     match result {
-      Ok(mut browser) => {
-        browser.webdriver = Some(owner);
-        Ok(browser)
-      },
+      Ok(browser) => Ok(browser),
       Err(error) => {
         if let Err(cleanup) = owner.close().await {
           return Err(FerriError::backend(format!("{error}; cleanup failed: {cleanup}")));
@@ -196,6 +213,29 @@ impl BidiBrowser {
         Err(error)
       },
     }
+  }
+
+  pub(crate) async fn from_created(
+    created: crate::backend::webdriver::session::CreatedSession,
+    endpoint: &str,
+    headers: Option<&rustc_hash::FxHashMap<String, String>>,
+  ) -> Result<Self> {
+    let ws_url = created
+      .capabilities
+      .get("webSocketUrl")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| {
+        FerriError::unsupported("WebDriver server created a Classic session without a BiDi webSocketUrl capability")
+      })?
+      .to_owned();
+    let socket_headers = headers.filter(|_| super::webdriver::same_origin(endpoint, &ws_url));
+    let owner = created.session;
+    let session = Arc::new(
+      BidiSession::connect_existing(&ws_url, created.id, created.capabilities, socket_headers, owner.clone()).await?,
+    );
+    let mut browser = Self::from_session(session)?;
+    browser.webdriver = Some(owner);
+    Ok(browser)
   }
 
   fn from_session(session: Arc<BidiSession>) -> Result<Self> {
@@ -419,12 +459,14 @@ impl BidiBrowser {
   /// profiles can be killed directly because they are discarded.
   pub async fn close(&mut self) -> Result<()> {
     if let Some(owner) = &self.webdriver {
-      owner.close().await?;
+      let result = owner.close().await;
       self.session.transport.start_close();
+      result?;
     }
-    if let Some(mut group) = self.child.lock().await.take() {
+    let mut child = self.child.lock().await;
+    if let Some(group) = child.as_mut() {
       let mut flushed = true;
-      if self.profile_dir.is_none() {
+      if self.profile_dir.is_none() && self.webdriver.is_none() {
         let timeout = std::time::Duration::from_secs(5);
         let _ = tokio::time::timeout(timeout, self.session.transport.send_command("browser.close", json!({}))).await;
         flushed = group.wait_for_exit(timeout).await;
@@ -435,17 +477,19 @@ impl BidiBrowser {
       self.session.transport.start_close();
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime carries no zombie.
-      group.shutdown().await;
+      group.shutdown().await?;
+      child.take();
       if !flushed {
         return Err(FerriError::Backend(
           "Firefox did not close cleanly while flushing its persistent profile".into(),
         ));
       }
     }
+    drop(child);
     if let Some(dir) = self.profile_dir.as_ref() {
-      dir.remove_now().await;
+      dir.remove_now().await?;
     }
-    Ok(())
+    self.session.transport.close().await
   }
 
   /// Whether the launched Firefox is still running. `None` when this
@@ -456,25 +500,9 @@ impl BidiBrowser {
   }
 }
 
-pub(crate) fn webdriver_session_url(endpoint: &str) -> Result<reqwest::Url> {
-  let mut url = reqwest::Url::parse(endpoint)
-    .map_err(|e| FerriError::invalid_argument("endpoint", format!("invalid WebDriver endpoint: {e}")))?;
-  if !matches!(url.scheme(), "http" | "https") {
-    return Err(FerriError::invalid_argument(
-      "endpoint",
-      "WebDriver requires an HTTP or HTTPS endpoint",
-    ));
-  }
-  let mut path = url.path().trim_end_matches('/').to_string();
-  if !path.ends_with("/session") {
-    path.push_str("/session");
-  }
-  url.set_path(&path);
-  url.set_fragment(None);
-  Ok(url)
-}
+pub(crate) use crate::backend::webdriver::session_url as webdriver_session_url;
 
-fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
+pub(crate) fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
   let mut always_match = serde_json::json!({
     "browserName": browser_name,
     "acceptInsecureCerts": true,
@@ -488,6 +516,16 @@ fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>)
     // Ferridriver drives the returned BiDi socket; a caller cannot disable
     // the capability without making the negotiated session unusable.
     target.insert("webSocketUrl".into(), serde_json::Value::Bool(true));
+  }
+  if always_match
+    .get("browserName")
+    .and_then(serde_json::Value::as_str)
+    .is_some_and(|name| name.eq_ignore_ascii_case("safari"))
+    && let Some(target) = always_match.as_object_mut()
+  {
+    target
+      .entry("safari:experimentalWebSocketUrl")
+      .or_insert(serde_json::Value::Bool(true));
   }
   always_match
 }

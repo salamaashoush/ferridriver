@@ -172,11 +172,7 @@ impl Clock {
     }
     let browser_name = {
       let state = self.ctx.state().read().await;
-      match state.backend_kind() {
-        crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpRaw => "chromium",
-        crate::backend::BackendKind::WebKit => "webkit",
-        crate::backend::BackendKind::Bidi => "firefox",
-      }
+      state.engine_name()
     };
     let engine = format!("{CLOCK_JS}\nglobalThis.__ferriClockInstall({browser_name:?});");
     self.ctx.add_init_script_source(engine.clone()).await?;

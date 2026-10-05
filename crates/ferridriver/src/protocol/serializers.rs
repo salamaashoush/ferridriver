@@ -939,10 +939,21 @@ impl Default for SerializedValue {
 /// native remote-object reference on marshal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HandleId {
-  /// CDP `Runtime.RemoteObjectId` — an opaque string.
-  Cdp(String),
+  WebDriver {
+    id: String,
+    frame: String,
+    element: bool,
+  },
+  /// CDP remote object and the renderer session that owns it.
+  Cdp {
+    object_id: String,
+    session_id: Option<String>,
+  },
   /// `WebDriver` `BiDi` shared reference — `{ sharedId, handle? }`.
-  Bidi { shared_id: String, handle: Option<String> },
+  Bidi {
+    shared_id: String,
+    handle: Option<String>,
+  },
   /// Playwright `WebKit` `Runtime.RemoteObjectId` — an opaque string.
   WebKit(String),
 }
@@ -1414,7 +1425,10 @@ mod tests {
     let arg = SerializedArgument {
       value: SerializedValue::array(1, vec![SerializedValue::handle(0), SerializedValue::handle(1)]),
       handles: vec![
-        HandleId::Cdp("obj-1".into()),
+        HandleId::Cdp {
+          object_id: "obj-1".into(),
+          session_id: Some("session-sashoush".into()),
+        },
         HandleId::Bidi {
           shared_id: "shared-1".into(),
           handle: None,
@@ -1427,7 +1441,7 @@ mod tests {
       json!({
         "value": {"a": [{"h": 0}, {"h": 1}], "id": 1},
         "handles": [
-          {"Cdp": "obj-1"},
+          {"Cdp": {"object_id": "obj-1", "session_id": "session-sashoush"}},
           {"Bidi": {"shared_id": "shared-1", "handle": null}}
         ]
       })

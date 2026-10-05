@@ -134,6 +134,8 @@ impl IgnoreDefaultArgsConfig {
 #[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct InstanceConfig {
+  pub browser: Option<ferridriver::options::BrowserKind>,
+  pub device: Option<ferridriver::device::DeviceTarget>,
   /// Extra browser arguments for this instance.
   #[serde(alias = "chrome_args", alias = "chromeArgs")]
   pub args: Vec<String>,
@@ -200,17 +202,31 @@ pub fn instance_overrides_from(
   instance: &str,
   section_backend: BackendKind,
 ) -> Result<InstanceOverrides, String> {
-  let backend = cfg.backend.map_or(section_backend, BackendChoice::kind);
+  let selection = ferridriver::options::BrowserSelection::resolve(
+    cfg.browser,
+    cfg
+      .backend
+      .map(BackendChoice::kind)
+      .or_else(|| cfg.browser.is_none().then_some(section_backend)),
+  )
+  .map_err(|error| error.to_string())?;
+  let backend = selection.backend;
   let mut args = cfg.args.clone();
   if let Some(proxy) = &cfg.proxy {
     args.extend(proxy_args(proxy, backend)?);
   }
   Ok(InstanceOverrides {
+    kind: cfg.browser.map(|_| selection.browser),
     args,
     user_data_dir: expand_instance_path(cfg.user_data_dir.as_deref(), instance),
     executable_path: cfg.executable_path.clone(),
-    headless: cfg.headless,
-    backend: cfg.backend.map(BackendChoice::kind),
+    headless: cfg
+      .headless
+      .or_else(|| (cfg.browser == Some(ferridriver::options::BrowserKind::Safari)).then_some(false)),
+    backend: cfg
+      .backend
+      .map(BackendChoice::kind)
+      .or_else(|| cfg.browser.map(ferridriver::options::BrowserKind::default_backend)),
     env: cfg.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
     ignore_default_args: cfg
       .ignore_default_args
@@ -302,6 +318,7 @@ where
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BrowserSectionConfig {
+  pub browser: Option<ferridriver::options::BrowserKind>,
   /// Transport every host launches over unless its section says otherwise.
   pub backend: Option<BackendChoice>,
   /// Headed/headless default every host inherits unless its section says
@@ -332,6 +349,7 @@ pub struct BrowserSectionConfig {
 /// Borrowed view of a section's instance-routing config, so one
 /// implementation serves `[mcp.browser]` and `[test.browser]`.
 pub struct RoutingView<'a> {
+  pub browser: Option<ferridriver::options::BrowserKind>,
   pub instances: &'a std::collections::HashMap<String, InstanceConfig>,
   /// The top-level `[browser]` registry, consulted when the section does not
   /// claim a name. A section entry of the same name wins outright.
@@ -348,7 +366,7 @@ pub struct RoutingView<'a> {
 impl RoutingView<'_> {
   /// The entry that claims `instance`: the section's own first, then the
   /// top-level registry, then whichever default is declared.
-  fn config_for(&self, instance: &str) -> Option<&InstanceConfig> {
+  pub(crate) fn config_for(&self, instance: &str) -> Option<&InstanceConfig> {
     self
       .instances
       .get(instance)
@@ -409,7 +427,7 @@ impl RoutingView<'_> {
   /// template like `--env ${INSTANCE}` surfaces the failure as that command's
   /// own error — a clap usage message from a binary the caller may never have
   /// heard of — while the configured set, which is the answer, goes unmentioned.
-  fn reject_unknown_instance(&self, instance: &str) -> Result<(), String> {
+  pub(crate) fn reject_unknown_instance(&self, instance: &str) -> Result<(), String> {
     if !self.has_declared_instances() || self.config_for(instance).is_some() {
       return Ok(());
     }
@@ -439,6 +457,16 @@ impl RoutingView<'_> {
     self.reject_unknown_instance(instance)?;
     self.validate_connection(instance)?;
 
+    if let Some(cfg) = self.config_for(instance)
+      && let Some(device) = &cfg.device
+    {
+      return Ok(InstanceOverrides {
+        kind: Some(device.browser()),
+        backend: Some(device.backend()),
+        args: cfg.args.clone(),
+        ..InstanceOverrides::default()
+      });
+    }
     let mut out = match self.config_for(instance) {
       Some(cfg) => instance_overrides_from(cfg, instance, self.backend)?,
       None => InstanceOverrides::default(),
@@ -479,6 +507,9 @@ impl RoutingView<'_> {
     // configuration the caller asked for.
     self.reject_unknown_instance(instance)?;
     self.validate_connection(instance)?;
+    if self.config_for(instance).is_some_and(|cfg| cfg.device.is_some()) {
+      return Ok(());
+    }
     let Some(spec) = self.section_args_command() else {
       return Ok(());
     };
@@ -499,6 +530,26 @@ impl RoutingView<'_> {
 
   fn validate_connection(&self, instance: &str) -> Result<(), String> {
     if let Some(cfg) = self.config_for(instance)
+      && let Some(device) = &cfg.device
+      && (cfg.connect_url.is_some()
+        || cfg.connect_options.is_some()
+        || cfg.discover_command.is_some()
+        || cfg.discover_profile.is_some()
+        || cfg.user_data_dir.is_some()
+        || cfg.executable_path.is_some()
+        || (!cfg.args.is_empty() && !matches!(device, ferridriver::device::DeviceTarget::Android(_)))
+        || cfg.args_command.is_some()
+        || !cfg.env.is_empty()
+        || cfg.proxy.is_some()
+        || cfg.ignore_default_args.is_some()
+        || cfg.browser.is_some_and(|browser| browser != device.browser())
+        || cfg.backend.is_some_and(|backend| backend.kind() != device.backend()))
+    {
+      return Err(format!(
+        "instance '{instance}': a managed device cannot specify a remote endpoint, desktop launch options, discovery command, or conflicting browser/backend"
+      ));
+    }
+    if let Some(cfg) = self.config_for(instance)
       && cfg.connect_options.is_some()
       && cfg.connect_url.is_none()
     {
@@ -516,25 +567,58 @@ impl RoutingView<'_> {
     }
 
     let cfg = self.config_for(instance);
+    if let Some(cfg) = cfg
+      && let Some(target) = &cfg.device
+    {
+      return Some(ConnectMode::Device {
+        target: target.clone(),
+        headless: cfg
+          .headless
+          .or_else(|| self.global.and_then(|g| g.headless))
+          .unwrap_or(false),
+      });
+    }
 
     if let Some(cfg) = cfg
       && let Some(url) = &cfg.connect_url
     {
-      if let Some(options) = &cfg.connect_options {
+      let inherited_browser = self.browser.or_else(|| self.global.and_then(|global| global.browser));
+      let browser = cfg.browser.or(inherited_browser.filter(|_| cfg.backend.is_none()));
+      if cfg.connect_options.is_some()
+        || ((matches!(
+          cfg.backend.or_else(|| cfg.browser.is_none().then_some(self.backend)),
+          Some(BackendKind::WebDriver | BackendKind::Bidi)
+        ) || matches!(
+          browser,
+          Some(ferridriver::options::BrowserKind::Safari | ferridriver::options::BrowserKind::Firefox)
+        )) && (url.starts_with("http://") || url.starts_with("https://")))
+      {
+        let options = cfg.connect_options.clone().unwrap_or_default();
         let browser_name = options
           .capabilities
           .as_ref()
           .and_then(|caps| caps.get("browserName"))
           .and_then(serde_json::Value::as_str)
-          .unwrap_or_else(|| match cfg.backend.map_or(self.backend, BackendChoice::kind) {
-            BackendKind::WebKit => "safari",
-            BackendKind::Bidi => "firefox",
-            _ => "chrome",
+          .unwrap_or_else(|| match browser {
+            Some(ferridriver::options::BrowserKind::Safari | ferridriver::options::BrowserKind::WebKit) => "safari",
+            Some(ferridriver::options::BrowserKind::Firefox) => "firefox",
+            Some(ferridriver::options::BrowserKind::Chromium) => "chrome",
+            None => match cfg.backend.map_or(self.backend, BackendChoice::kind) {
+              BackendKind::WebKit => "safari",
+              BackendKind::Bidi => "firefox",
+              _ => "chrome",
+            },
           })
           .to_owned();
         return Some(ConnectMode::WebDriver {
           endpoint: url.clone(),
           browser_name,
+          protocol: ferridriver::backend::webdriver::WebDriverProtocol::from_backend(
+            cfg
+              .backend
+              .map(BackendChoice::kind)
+              .or_else(|| cfg.browser.is_none().then_some(self.backend)),
+          ),
           capabilities: options.capabilities.clone(),
           headers: options.headers.clone(),
           timeout: options.timeout,
@@ -1049,6 +1133,7 @@ mod tests {
     cache: &'a CommandCache,
   ) -> RoutingView<'a> {
     RoutingView {
+      browser: None,
       instances,
       global: None,
       default_instance: None,
@@ -1511,6 +1596,109 @@ mod tests {
   }
 
   #[test]
+  fn android_instance_resolves_without_an_endpoint_or_device_identifier() {
+    let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+      "device": {"platform":"android", "apiLevel":35, "model":"pixel_7"}, "headless":true
+    }))
+    .unwrap();
+    let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+    let cache = CommandCache::default();
+    let routing = view(&instances, None, None, &cache);
+    routing.health("phone").unwrap();
+    assert_eq!(
+      routing.resolve_connect("phone"),
+      Some(ConnectMode::Device {
+        target: ferridriver::android::DeviceTarget::Android(ferridriver::android::AndroidOptions::default()),
+        headless: true,
+      })
+    );
+  }
+
+  #[test]
+  fn android_package_selection_preserves_browser_arguments() {
+    let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+      "args":["--enable-features=WebMCP"],
+      "device":{"platform":"android", "pkg":"org.chromium.chrome", "apkPath":"browser.apk"}
+    }))
+    .unwrap();
+    let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+    let cache = CommandCache::default();
+    let routing = view(&instances, None, None, &cache);
+    routing.health("phone").unwrap();
+    assert_eq!(
+      routing.overrides_for("phone").unwrap().args,
+      ["--enable-features=WebMCP"]
+    );
+    let Some(ConnectMode::Device {
+      target: ferridriver::device::DeviceTarget::Android(options),
+      ..
+    }) = routing.resolve_connect("phone")
+    else {
+      panic!("expected an Android target");
+    };
+    assert_eq!(options.pkg, "org.chromium.chrome");
+    assert_eq!(options.apk_path, Some(std::path::PathBuf::from("browser.apk")));
+  }
+
+  #[test]
+  fn ios_rejects_browser_arguments_it_cannot_apply() {
+    let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
+      "args":["--enable-features=WebMCP"], "device":{"platform":"ios"}
+    }))
+    .unwrap();
+    let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+    let cache = CommandCache::default();
+    assert!(view(&instances, None, None, &cache).health("phone").is_err());
+  }
+
+  #[test]
+  fn mobile_targets_select_their_browser_and_backend() {
+    for (platform, browser, backend) in [
+      (
+        "android",
+        ferridriver::options::BrowserKind::Chromium,
+        BackendKind::CdpWs,
+      ),
+      ("ios", ferridriver::options::BrowserKind::Safari, BackendKind::WebDriver),
+    ] {
+      let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({"device":{"platform":platform}})).unwrap();
+      let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+      let cache = CommandCache::default();
+      let routing = view(&instances, None, None, &cache);
+      let overrides = routing.overrides_for("phone").unwrap();
+      assert_eq!(overrides.kind, Some(browser));
+      assert_eq!(overrides.backend, Some(backend));
+      assert!(matches!(
+        routing.resolve_connect("phone"),
+        Some(ConnectMode::Device { .. })
+      ));
+    }
+  }
+
+  #[test]
+  fn mobile_targets_reject_conflicting_browser_choices() {
+    for platform in ["android", "ios"] {
+      let cfg: InstanceConfig =
+        serde_json::from_value(serde_json::json!({"browser":"firefox","device":{"platform":platform}})).unwrap();
+      let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+      let cache = CommandCache::default();
+      assert!(view(&instances, None, None, &cache).overrides_for("phone").is_err());
+    }
+  }
+
+  #[test]
+  fn android_instance_rejects_conflicting_desktop_or_remote_settings() {
+    for field in ["connectUrl", "discoverProfile", "userDataDir", "executablePath"] {
+      let mut value = serde_json::json!({"device":{"platform":"android"}});
+      value[field] = serde_json::json!("example");
+      let cfg: InstanceConfig = serde_json::from_value(value).unwrap();
+      let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+      let cache = CommandCache::default();
+      assert!(view(&instances, None, None, &cache).health("phone").is_err(), "{field}");
+    }
+  }
+
+  #[test]
   fn instance_connection_options_select_a_managed_remote_session() {
     let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({
       "connectUrl": "http://127.0.0.1:4725/wd/hub",
@@ -1535,6 +1723,7 @@ mod tests {
       capabilities,
       headers,
       timeout,
+      ..
     }) = routing.resolve_connect("remote")
     else {
       panic!("expected a managed WebDriver session");
@@ -1544,6 +1733,93 @@ mod tests {
     assert_eq!(timeout, Some(120_000));
     assert_eq!(headers.unwrap()["authorization"], "Bearer contract-token");
     assert_eq!(capabilities.unwrap()["appium:options"]["deviceName"], "example-device");
+  }
+
+  #[test]
+  fn remote_protocol_selection_follows_instance_and_section_precedence() {
+    use ferridriver::backend::webdriver::WebDriverProtocol;
+    for (section, browser, instance_backend, expected, name) in [
+      (BackendKind::WebDriver, None, None, WebDriverProtocol::Classic, "chrome"),
+      (BackendKind::Bidi, None, None, WebDriverProtocol::Bidi, "firefox"),
+      (
+        BackendKind::Bidi,
+        None,
+        Some(BackendKind::WebDriver),
+        WebDriverProtocol::Classic,
+        "chrome",
+      ),
+      (
+        BackendKind::WebDriver,
+        None,
+        Some(BackendKind::Bidi),
+        WebDriverProtocol::Bidi,
+        "firefox",
+      ),
+      (
+        BackendKind::Bidi,
+        Some(ferridriver::options::BrowserKind::Safari),
+        None,
+        WebDriverProtocol::Auto,
+        "safari",
+      ),
+      (
+        BackendKind::WebDriver,
+        Some(ferridriver::options::BrowserKind::Firefox),
+        None,
+        WebDriverProtocol::Auto,
+        "firefox",
+      ),
+    ] {
+      let cfg = InstanceConfig {
+        browser,
+        backend: instance_backend,
+        connect_url: Some("http://127.0.0.1:4444".into()),
+        connect_options: Some(ferridriver::options::ConnectOptions::default()),
+        ..Default::default()
+      };
+      let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+      let cache = CommandCache::default();
+      let global = BrowserSectionConfig {
+        backend: Some(BackendKind::Bidi),
+        ..Default::default()
+      };
+      let mut routing = view(&instances, None, None, &cache);
+      routing.backend = section;
+      routing.global = Some(&global);
+      let Some(ConnectMode::WebDriver {
+        protocol, browser_name, ..
+      }) = routing.resolve_connect("remote")
+      else {
+        panic!("expected WebDriver connection");
+      };
+      assert_eq!(protocol, expected);
+      assert_eq!(browser_name, name);
+    }
+  }
+
+  #[test]
+  fn remote_instance_backend_resets_the_inherited_browser() {
+    use ferridriver::options::BrowserKind;
+    for (inherited, backend, expected) in [
+      (BrowserKind::Chromium, BackendKind::Bidi, "firefox"),
+      (BrowserKind::Firefox, BackendKind::WebDriver, "chrome"),
+    ] {
+      let cfg = InstanceConfig {
+        backend: Some(backend),
+        connect_url: Some("http://127.0.0.1:4444".into()),
+        connect_options: Some(ferridriver::options::ConnectOptions::default()),
+        ..Default::default()
+      };
+      let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+      let cache = CommandCache::default();
+      let mut routing = view(&instances, None, None, &cache);
+      routing.browser = Some(inherited);
+      routing.backend = inherited.default_backend();
+      let Some(ConnectMode::WebDriver { browser_name, .. }) = routing.resolve_connect("remote") else {
+        panic!("expected WebDriver connection");
+      };
+      assert_eq!(browser_name, expected);
+    }
   }
 
   #[test]

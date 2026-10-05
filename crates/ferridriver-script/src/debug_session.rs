@@ -213,7 +213,7 @@ impl SessionDebugHook {
     // and stopping the inspector would leave nobody to resume it.
     engine.script_id = Some(id.clone());
     let host = Arc::new(crate::SessionScriptHost::new(
-      Arc::clone(test.browser.state()),
+      Arc::clone(&test.browser),
       &id,
       crate::SessionScriptConfig {
         script_root: self.script.script_root.clone(),

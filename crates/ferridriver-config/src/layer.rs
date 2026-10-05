@@ -475,7 +475,7 @@ fn apply_global_browser_defaults(document: &mut Value, provenance: &mut Provenan
   // explicit `viewport: null` has to reach the section as a null, not be
   // lost as "absent", because that is how Playwright spells "no fixed
   // viewport".
-  const INHERITED: [&str; 3] = ["backend", "headless", "viewport"];
+  const INHERITED: [&str; 4] = ["browser", "backend", "headless", "viewport"];
 
   let Some(global) = document.get("browser").and_then(Value::as_object).cloned() else {
     return;
@@ -495,6 +495,13 @@ fn apply_global_browser_defaults(document: &mut Value, provenance: &mut Provenan
         continue;
       };
       if browser.contains_key(key) {
+        continue;
+      }
+      if key == "backend"
+        && browser
+          .get("browser")
+          .is_some_and(|product| Some(product) != global.get("browser"))
+      {
         continue;
       }
       browser.insert(key.to_string(), value.clone());

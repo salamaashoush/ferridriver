@@ -37,7 +37,6 @@ impl BidiElement {
   async fn call_fn(&self, func: &str) -> Result<serde_json::Value> {
     self
       .session
-      .transport
       .send_command(
         "script.callFunction",
         json!({
@@ -107,7 +106,6 @@ impl BidiElement {
     tracing::debug!(target: "ferridriver::bidi", x, y, w, h, cx, cy, shared_id = %self.shared_id, "BiDi element click");
     self
       .session
-      .transport
       .send_command("input.performActions", input::click(&self.context_id, cx, cy))
       .await?;
     Ok(())
@@ -120,7 +118,6 @@ impl BidiElement {
     let cy = y + h / 2.0;
     self
       .session
-      .transport
       .send_command(
         "input.performActions",
         input::click_button(&self.context_id, cx, cy, 0, 2),
@@ -136,7 +133,6 @@ impl BidiElement {
     let cy = y + h / 2.0;
     self
       .session
-      .transport
       .send_command("input.performActions", input::pointer_move(&self.context_id, cx, cy))
       .await?;
     Ok(())
@@ -147,7 +143,6 @@ impl BidiElement {
     self.click().await?;
     self
       .session
-      .transport
       .send_command("input.performActions", input::type_text(&self.context_id, text))
       .await?;
     Ok(())
@@ -187,7 +182,6 @@ impl BidiElement {
 
     let result = self
       .session
-      .transport
       .send_command(
         "browsingContext.captureScreenshot",
         json!({

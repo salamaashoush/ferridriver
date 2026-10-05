@@ -59,6 +59,7 @@ pub const EVT_PAGE_PROXY_DESTROYED: &str = "Playwright.pageProxyDestroyed";
 // ── Per-page-session methods (subset) ──────────────────────────────────
 
 pub const PAGE_RELOAD: &str = "Page.reload";
+pub const TARGET_ACTIVATE: &str = "Target.activate";
 pub const PAGE_GO_BACK: &str = "Page.goBack";
 pub const PAGE_GO_FORWARD: &str = "Page.goForward";
 pub const PAGE_NAVIGATE_WITHIN: &str = "Page.navigatedWithinDocument";

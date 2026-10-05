@@ -10,9 +10,13 @@
 //! when the reader task sees Page.loadEventFired for that session.
 
 pub mod pipe;
+mod renderer;
 mod screenshot;
 pub mod transport;
 pub mod ws;
+
+#[cfg(test)]
+mod startup_tests;
 
 use base64::Engine as _;
 
@@ -51,10 +55,10 @@ impl CdpWrap for pipe::PipeTransport {
 
 impl CdpWrap for ws::WsTransport {
   fn wrap_page(page: CdpPage<Self>) -> AnyPage {
-    AnyPage::CdpRaw(page)
+    AnyPage::CdpWs(page)
   }
   fn wrap_element(elem: CdpElement<Self>) -> AnyElement {
-    AnyElement::CdpRaw(elem)
+    AnyElement::CdpWs(elem)
   }
 }
 
@@ -110,8 +114,25 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// alive and the tasks keep the transport alive. Closing the browser has
   /// to cut that cycle, or the transport, its reader/writer tasks and its
   /// connection fd survive every closed browser.
-  attach_tasks: Arc<Vec<tokio::task::AbortHandle>>,
+  attach_tasks: Arc<AttachTasks>,
   webdriver: Option<Arc<super::webdriver::session::WebDriverSession>>,
+  pub(crate) android: Option<Arc<crate::android::AndroidOwner>>,
+}
+
+struct AttachTasks(Vec<tokio::task::AbortHandle>);
+
+impl AttachTasks {
+  fn abort(&self) {
+    for handle in &self.0 {
+      handle.abort();
+    }
+  }
+}
+
+impl Drop for AttachTasks {
+  fn drop(&mut self) {
+    self.abort();
+  }
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
@@ -152,6 +173,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       downloads_dir: Arc::clone(&self.downloads_dir),
       attach_tasks: Arc::clone(&self.attach_tasks),
       webdriver: self.webdriver.clone(),
+      android: self.android.clone(),
     }
   }
 }
@@ -416,6 +438,15 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .and_then(serde_json::Value::as_str)
       .is_some_and(|agent| agent.contains("Android"));
 
+    let downloads_dir = new_downloads_dir()?;
+    let mut child = child;
+    if let Some(ref mut group) = child {
+      group.own_dir(downloads_dir.path());
+    }
+    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let (popup_taps, create_ledger, attach_tasks) =
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
+
     transport
       .send_command(
         None,
@@ -427,15 +458,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
         }),
       )
       .await?;
-
-    let downloads_dir = new_downloads_dir()?;
-    let mut child = child;
-    if let Some(ref mut group) = child {
-      group.own_dir(downloads_dir.path());
-    }
-    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
-    let (popup_taps, create_ledger, attach_tasks) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
 
     Ok(Self {
       transport,
@@ -450,6 +472,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       create_ledger,
       attach_tasks: Arc::new(attach_tasks),
       webdriver: None,
+      android: None,
     })
   }
 
@@ -478,11 +501,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     downloads_dir: &Arc<tempfile::TempDir>,
     attached: &AttachedTargets,
     headful: bool,
-  ) -> (
-    crate::backend::PopupTaps,
-    Arc<CreateLedger>,
-    Vec<tokio::task::AbortHandle>,
-  ) {
+  ) -> (crate::backend::PopupTaps, Arc<CreateLedger>, AttachTasks) {
     let popup_taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
     let ledger = Arc::new(CreateLedger::default());
     let mut attach_rx = transport.tap_event_methods(
@@ -550,7 +569,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           Self::maybe_claim_popup(&claim_ctx, &mut claimed_popups, params, waiting, session_id);
           continue;
         }
-        if !waiting {
+        if target_type == "iframe" || !waiting {
           continue;
         }
         // Fire-and-forget (Playwright's `_sendMayFail`): a worker can
@@ -574,7 +593,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     (
       popup_taps,
       ledger,
-      vec![flush_task.abort_handle(), attach_task.abort_handle()],
+      AttachTasks(vec![flush_task.abort_handle(), attach_task.abort_handle()]),
     )
   }
 
@@ -733,13 +752,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
       target_id: Arc::from(target_id),
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
-      frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
+      renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
@@ -764,14 +784,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
-      fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
       drag_manager: DragManagerState::new(),
     };
     page.transport.register_lifecycle_tracker(
       page.session_id.as_deref().unwrap_or(""),
       page.lifecycle.clone(),
       page.lifecycle_notify.clone(),
-      transport::frame_state_observer(page.frame_cache.clone(), page.events.clone()),
+      page.frame_observer(),
     );
     let _ = page.main_frame_id.set(page.target_id.to_string());
     Ok(page)
@@ -794,7 +813,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .cloned()
       .unwrap_or_default();
 
-    let mut pages = Vec::new();
+    let mut pages = renderer::AdoptedPages::new();
     for target in targets {
       if target.get("type").and_then(|v| v.as_str()) != Some("page") {
         continue;
@@ -845,52 +864,56 @@ impl<T: CdpWrap> CdpBrowser<T> {
         sid
       };
 
-      let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
-      let lc_notify = Arc::new(tokio::sync::Notify::new());
-      let page = CdpPage {
-        transport: self.transport.clone(),
-        session_id: sid.map(Arc::from),
-        target_id: Arc::from(target_id),
-        browser_context_id: None,
-        events: crate::events::EventEmitter::new(),
-        frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-        frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
-        exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-        binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
-        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
-        main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
-        last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
-        headful: self.headful,
-        window_id: Arc::new(tokio::sync::OnceCell::new()),
-        context_screen: Arc::new(std::sync::Mutex::new(None)),
-        seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
-        last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
-        lifecycle: lc_state.clone(),
-        lifecycle_notify: lc_notify.clone(),
-        injected_script: Arc::new(InjectedScriptManager::new()),
-        nav_request_slot: crate::network::NavRequestSlot::new(),
-        dialog_manager: crate::dialog::DialogManager::new(),
-        file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
-        file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        download_manager: crate::download::DownloadManager::new(),
-        download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        downloads_dir: Arc::clone(&self.downloads_dir),
-        page_backref: crate::backend::PageBackref::new(),
-        frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
-        frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
-        listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
-        fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
-        drag_manager: DragManagerState::new(),
-      };
+      let page = self.adopted_page(target_id, sid);
+      pages.track(page.clone());
       page.initialize_adopted_frame().await?;
-      pages.push(T::wrap_page(page));
     }
-    Ok(pages)
+    Ok(pages.finish())
+  }
+
+  fn adopted_page(&self, target_id: String, sid: Option<String>) -> CdpPage<T> {
+    let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
+    let lc_notify = Arc::new(tokio::sync::Notify::new());
+    CdpPage {
+      transport: self.transport.clone(),
+      session_id: sid.map(Arc::from),
+      target_id: Arc::from(target_id),
+      browser_context_id: None,
+      events: crate::events::EventEmitter::new(),
+      frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
+      frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
+      renderers: Arc::default(),
+      exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
+      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+      fetch: Arc::default(),
+      http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
+      main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+      last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+      headful: self.headful,
+      window_id: Arc::new(tokio::sync::OnceCell::new()),
+      context_screen: Arc::new(std::sync::Mutex::new(None)),
+      seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
+      last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
+      lifecycle: lc_state.clone(),
+      lifecycle_notify: lc_notify.clone(),
+      injected_script: Arc::new(InjectedScriptManager::new()),
+      nav_request_slot: crate::network::NavRequestSlot::new(),
+      dialog_manager: crate::dialog::DialogManager::new(),
+      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      download_manager: crate::download::DownloadManager::new(),
+      download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+      downloads_dir: Arc::clone(&self.downloads_dir),
+      page_backref: crate::backend::PageBackref::new(),
+      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+      drag_manager: DragManagerState::new(),
+    }
   }
 
   /// Create a new browser context (isolated cookies, storage, cache).
@@ -1044,13 +1067,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
       target_id: Arc::from(target_id),
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
-      frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
+      renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       // Seed the metrics cache with the exact params `enable_domains`
@@ -1079,7 +1103,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
-      fetch_interceptor: Arc::new(std::sync::Mutex::new(None)),
       drag_manager: DragManagerState::new(),
     };
 
@@ -1088,7 +1111,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page.session_id.as_deref().unwrap_or(""),
       page.lifecycle.clone(),
       page.lifecycle_notify.clone(),
-      transport::frame_state_observer(page.frame_cache.clone(), page.events.clone()),
+      page.frame_observer(),
     );
 
     // Seed `main_frame_id` from `target_id`. For regular page targets
@@ -1113,10 +1136,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// Caller-owned profiles must flush before exit. Throwaway profiles
   /// can be killed directly because their contents are being discarded.
   pub async fn close(&mut self) -> Result<()> {
-    for handle in self.attach_tasks.iter() {
-      handle.abort();
-    }
-    if let Some(mut group) = self.child.lock().await.take() {
+    self.attach_tasks.abort();
+    let mut child = self.child.lock().await;
+    if let Some(group) = child.as_mut() {
       let mut flushed = true;
       if self.user_data_dir.is_none() {
         let timeout = std::time::Duration::from_secs(5);
@@ -1129,24 +1151,29 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime doesn't carry a zombie.
-      group.shutdown().await;
+      group.shutdown().await?;
+      child.take();
       if !flushed {
         return Err(FerriError::Backend(
           "Chromium did not close cleanly while flushing its persistent profile".into(),
         ));
       }
     }
+    drop(child);
     // Reclaim the profile directory here rather than leaving it to the
     // last `Arc` drop: at process teardown the runtime may never run
     // the deferred removal, which leaked one multi-megabyte Chromium
     // profile per session.
     if let Some(dir) = self.user_data_dir.as_ref() {
-      dir.remove_now().await;
+      dir.remove_now().await?;
     }
     if let Some(session) = &self.webdriver {
       session.close().await?;
     }
-    Ok(())
+    if let Some(android) = &self.android {
+      android.close().await?;
+    }
+    self.transport.close().await
   }
 
   /// Whether the launched browser process is still running. `None` when
@@ -1318,7 +1345,10 @@ impl CdpBrowser<ws::WsTransport> {
     Ok(browser)
   }
 
-  async fn connect_with_headers(ws_url: &str, headers: &std::collections::HashMap<String, String>) -> Result<Self> {
+  pub(crate) async fn connect_with_headers(
+    ws_url: &str,
+    headers: &std::collections::HashMap<String, String>,
+  ) -> Result<Self> {
     let transport = Arc::new(Box::pin(ws::WsTransport::connect_with_headers(ws_url, headers)).await?);
 
     // Capture product version for `browser.version()` — same handshake
@@ -1344,11 +1374,13 @@ impl CdpBrowser<ws::WsTransport> {
       )
       .await?;
 
-    // Browser-level auto-attach, exactly like the launch flow (and
-    // Playwright's connectOverCDP): without it browser-created pages —
-    // window.open popups, user-opened tabs — never attach and stay
-    // invisible. Existing targets are unaffected (they attach below,
-    // unpaused); new ones flow through the popup claim listener.
+    let downloads_dir = new_downloads_dir()?;
+    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let (popup_taps, create_ledger, attach_tasks) =
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
+
+    // CDP can emit attachedToTarget before setAutoAttach replies. The
+    // listener must already own its tap or paused startup targets are lost.
     transport
       .send_command(
         None,
@@ -1360,10 +1392,6 @@ impl CdpBrowser<ws::WsTransport> {
         }),
       )
       .await?;
-    let downloads_dir = new_downloads_dir()?;
-    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
-    let (popup_taps, create_ledger, attach_tasks) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
 
     // Find existing page targets
     let result = transport
@@ -1427,6 +1455,7 @@ impl CdpBrowser<ws::WsTransport> {
       create_ledger,
       user_data_dir: None,
       webdriver: None,
+      android: None,
     })
   }
 }
@@ -1439,11 +1468,15 @@ impl CdpBrowser<ws::WsTransport> {
 /// from objects with `objectId`; value-backed handles come from inline
 /// primitives. Mirrors Playwright's
 /// `crProtocolHelper.ts::createHandle(context, arg)` behaviour.
-fn cdp_remote_object_to_backing(arg: &serde_json::Value) -> crate::js_handle::JSHandleBacking {
+fn cdp_remote_object_to_backing(
+  arg: &serde_json::Value,
+  session_id: Option<Arc<str>>,
+) -> crate::js_handle::JSHandleBacking {
   if let Some(obj_id) = arg.get("objectId").and_then(|v| v.as_str()) {
-    return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp(std::sync::Arc::from(
-      obj_id,
-    )));
+    return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp {
+      object_id: Arc::from(obj_id),
+      session_id,
+    });
   }
   let value = arg.get("value").cloned().unwrap_or(serde_json::Value::Null);
   let ty = arg.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -1781,8 +1814,9 @@ pub struct CdpPage<T: CdpTransport> {
   /// Event emitter for page events (console, dialog, network, frame lifecycle).
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
-  frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
-  /// Notified by the frame-context tracker after each map insert so
+  frame_contexts: Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
+  renderers: Arc<renderer::Renderers>,
+  /// Notified by the wire observer after each map insert so
   /// [`Self::resolve_frame_context`] wakes on the exact event instead
   /// of polling on a 10ms tick.
   frame_contexts_notify: Arc<tokio::sync::Notify>,
@@ -1802,8 +1836,7 @@ pub struct CdpPage<T: CdpTransport> {
   closed: Arc<std::sync::atomic::AtomicBool>,
   /// Registered route handlers for network interception.
   routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
-  /// Whether Fetch domain is enabled for interception.
-  fetch_enabled: Arc<std::sync::atomic::AtomicBool>,
+  fetch: Arc<renderer::FetchState>,
   /// HTTP credentials for Fetch.authRequired handling (digest/NTLM/basic).
   http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
@@ -1963,14 +1996,6 @@ pub struct CdpPage<T: CdpTransport> {
   /// wake on every subsequent CDP event and pin the page's state
   /// (emitter, managers, logs) until the browser exits.
   listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
-  /// The live `Fetch.*` interceptor task, if interception is enabled.
-  /// `unroute`/`unroute_all` MUST abort it when they `Fetch.disable` on
-  /// the last route: a later `route` re-enables and spawns a fresh
-  /// loop, and a surviving old loop would double-process every
-  /// `Fetch.requestPaused` — its chain sees a `times`-consumed route as
-  /// gone and its `Fetch.continueRequest` races (and can beat) the real
-  /// handler's fulfill.
-  fetch_interceptor: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
   /// Native drag-and-drop interception state. See [`DragManagerState`].
   drag_manager: Arc<DragManagerState>,
 }
@@ -2159,11 +2184,12 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       events: self.events.clone(),
       frame_contexts: self.frame_contexts.clone(),
       frame_contexts_notify: self.frame_contexts_notify.clone(),
+      renderers: self.renderers.clone(),
       exposed_fns: self.exposed_fns.clone(),
       binding_initialized: self.binding_initialized.clone(),
       closed: self.closed.clone(),
       routes: self.routes.clone(),
-      fetch_enabled: self.fetch_enabled.clone(),
+      fetch: self.fetch.clone(),
       http_credentials: self.http_credentials.clone(),
       main_frame_id: self.main_frame_id.clone(),
       last_metrics_params: self.last_metrics_params.clone(),
@@ -2188,7 +2214,6 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       frame_listener_started: self.frame_listener_started.clone(),
       observed: self.observed.clone(),
       listener_tasks: self.listener_tasks.clone(),
-      fetch_interceptor: self.fetch_interceptor.clone(),
       drag_manager: self.drag_manager.clone(),
     }
   }
@@ -2200,9 +2225,26 @@ impl<T: CdpWrap> CdpPage<T> {
       self.session_id.as_deref().unwrap_or(""),
       self.lifecycle.clone(),
       self.lifecycle_notify.clone(),
-      transport::frame_state_observer(self.frame_cache.clone(), self.events.clone()),
+      self.frame_observer(),
     );
     let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
+    let mut frames = Vec::new();
+    if let Some(tree) = tree.get("frameTree") {
+      collect_frames(tree, &mut frames);
+    }
+    {
+      let mut cache = self
+        .frame_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      for frame in &frames {
+        cache.attach(frame.clone());
+      }
+    }
+    *self
+      .seeded_frame_tree
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(frames);
     if let Some(frame) = tree.pointer("/frameTree/frame") {
       if let Some(id) = frame.get("id").and_then(serde_json::Value::as_str) {
         let _ = self.main_frame_id.set(id.to_owned());
@@ -2214,7 +2256,7 @@ impl<T: CdpWrap> CdpPage<T> {
         }
       }
     }
-    Ok(())
+    self.initialize_existing_renderers().await
   }
 
   /// Send a CDP command to this page's session.
@@ -2456,6 +2498,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `crPage.requestGC` (`HeapProfiler.collectGarbage`).
   pub async fn request_gc(&self) -> Result<()> {
     self.cmd("HeapProfiler.collectGarbage", serde_json::json!({})).await?;
+    Ok(())
+  }
+
+  pub async fn bring_to_front(&self) -> Result<()> {
+    self.cmd("Page.bringToFront", serde_json::json!({})).await?;
     Ok(())
   }
 
@@ -2743,6 +2790,41 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }
 
+  fn peek_frame_context(&self, frame_id: &str) -> Option<i64> {
+    self
+      .frame_contexts
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(frame_id)
+      .copied()
+  }
+
+  async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+      // Register the waiter BEFORE checking the map (pin + enable, same
+      // idiom as `settle_navigation`) so an insert landing between the
+      // check and the await still wakes us.
+      let notified = self.frame_contexts_notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      if let Some(id) = self
+        .frame_contexts
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(frame_id)
+        .copied()
+      {
+        return Ok(id);
+      }
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return Err(FerriError::Backend(format!(
+          "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
+        )));
+      }
+    }
+  }
+
   /// ferridriver's equivalent of Playwright's
   /// `evaluateExpression(context, expr, { returnByValue, isFunction }, ...args)`
   /// (`/tmp/playwright/packages/playwright-core/src/server/javascript.ts:248`).
@@ -2757,41 +2839,42 @@ impl<T: CdpWrap> CdpPage<T> {
   ///
   /// Returns a String error on protocol failure, `exceptionDetails`
   /// from the page, or backend/handle mismatch.
-  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-  /// Resolve the execution-context id for `frame_id`, waiting briefly
-  /// for the frame-context tracker to observe the context. The tracker
-  /// consumes `Runtime.executionContextCreated` on its own task, so a
-  /// frame-scoped call issued right after a navigation (or right after
-  /// the frame cache learned about the frame via `Page.getFrameTree`)
-  /// can race the map update. Erroring instead of falling back keeps a
-  /// frame-scoped evaluate from silently running in the MAIN frame —
-  /// wrong-realm results are far worse than a typed failure.
-  /// The frame's default context if it is already known — no waiting.
-  async fn peek_frame_context(&self, frame_id: &str) -> Option<i64> {
-    self.frame_contexts.read().await.get(frame_id).copied()
-  }
-
-  async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-      // Register the waiter BEFORE checking the map (pin + enable, same
-      // idiom as `settle_navigation`) so an insert landing between the
-      // check and the await still wakes us.
-      let notified = self.frame_contexts_notify.notified();
-      tokio::pin!(notified);
-      notified.as_mut().enable();
-      if let Some(id) = self.frame_contexts.read().await.get(frame_id).copied() {
-        return Ok(id);
-      }
-      if tokio::time::timeout_at(deadline, notified).await.is_err() {
-        return Err(FerriError::Backend(format!(
-          "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
-        )));
-      }
-    }
-  }
-
   pub async fn call_utility_evaluate(
+    &self,
+    fn_source: &str,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
+    frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult> {
+    if let Some(frame) = frame_id
+      && let Some(renderer) = self.page_for_frame(frame).await?
+    {
+      return Box::pin(renderer.call_utility_evaluate(
+        fn_source,
+        args,
+        handles,
+        frame_id,
+        is_function,
+        return_by_value,
+      ))
+      .await;
+    }
+    if frame_id.is_none()
+      && let Some(crate::protocol::HandleId::Cdp { session_id, .. }) = handles.first()
+      && session_id.as_deref() != self.session_id.as_deref()
+    {
+      let renderer = self.page_for_session(session_id.as_deref())?;
+      return Box::pin(renderer.call_utility_evaluate(fn_source, args, handles, None, is_function, return_by_value))
+        .await;
+    }
+    self
+      .call_utility_in_renderer(fn_source, args, handles, frame_id, is_function, return_by_value)
+      .await
+  }
+
+  async fn call_utility_in_renderer(
     &self,
     fn_source: &str,
     args: &[crate::protocol::SerializedValue],
@@ -2807,6 +2890,68 @@ impl<T: CdpWrap> CdpPage<T> {
       None => None,
     };
 
+    Box::pin(self.call_utility_in_context(fn_source, args, handles, context_id, is_function, return_by_value)).await
+  }
+
+  pub(crate) async fn evaluate_isolated(
+    &self,
+    source: &str,
+    arg: &crate::protocol::SerializedArgument,
+    frame_id: &str,
+  ) -> Result<crate::protocol::SerializedValue> {
+    if let Some(renderer) = self.page_for_frame(frame_id).await? {
+      return Box::pin(renderer.evaluate_isolated(source, arg, frame_id)).await;
+    }
+    let world = self
+      .cmd(
+        "Page.createIsolatedWorld",
+        serde_json::json!({
+          "frameId":frame_id, "worldName":"__ferridriver_webmcp",
+        }),
+      )
+      .await?;
+    let context = world["executionContextId"]
+      .as_i64()
+      .ok_or_else(|| FerriError::protocol("Page.createIsolatedWorld", "missing execution context"))?;
+    let injected = self
+      .cmd(
+        "Runtime.evaluate",
+        serde_json::json!({
+          "expression":crate::selectors::UTILITY_SCRIPT_JS, "contextId":context,
+          "returnByValue":true, "awaitPromise":true,
+        }),
+      )
+      .await?;
+    if let Some(exception) = injected.get("exceptionDetails") {
+      return Err(FerriError::evaluation(cdp_get_exception_message(exception)));
+    }
+    match self
+      .call_utility_in_context(
+        source,
+        std::slice::from_ref(&arg.value),
+        &arg.handles,
+        Some(context),
+        Some(true),
+        true,
+      )
+      .await?
+    {
+      crate::js_handle::EvaluateResult::Value(value) => Ok(value),
+      crate::js_handle::EvaluateResult::Handle(..) => {
+        Err(FerriError::protocol("isolated evaluation", "expected a value"))
+      },
+    }
+  }
+
+  async fn call_utility_in_context(
+    &self,
+    fn_source: &str,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
+    context_id: Option<i64>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult> {
     let args_json = serde_json::to_string(args)?;
     let is_fn_json: serde_json::Value = match is_function {
       Some(true) => serde_json::Value::Bool(true),
@@ -2825,7 +2970,16 @@ impl<T: CdpWrap> CdpPage<T> {
     ];
     for handle in handles {
       match handle {
-        crate::protocol::HandleId::Cdp(obj_id) => {
+        crate::protocol::HandleId::Cdp {
+          object_id: obj_id,
+          session_id,
+        } => {
+          if session_id.as_deref() != self.session_id.as_deref() {
+            return Err(FerriError::invalid_argument(
+              "handles",
+              "handles belong to different renderer sessions",
+            ));
+          }
           arguments.push(serde_json::json!({"objectId": obj_id}));
         },
         _ => {
@@ -2865,14 +3019,14 @@ impl<T: CdpWrap> CdpPage<T> {
         "executionContextId": ctx_id,
       });
       let response = self.cmd("Runtime.callFunctionOn", params).await?;
-      return Self::parse_eval_response(&response, return_by_value);
+      return self.parse_eval_response(&response, return_by_value);
     }
 
     if !handles.is_empty() {
       // Anchor on the first handle's objectId — gives Chrome the
       // execution context for free, no extra RTT.
       let anchor = match &handles[0] {
-        crate::protocol::HandleId::Cdp(obj_id) => obj_id.clone(),
+        crate::protocol::HandleId::Cdp { object_id, .. } => object_id.clone(),
         _ => {
           return Err(FerriError::invalid_argument(
             "handles",
@@ -2888,7 +3042,7 @@ impl<T: CdpWrap> CdpPage<T> {
         "objectId": anchor,
       });
       let response = self.cmd("Runtime.callFunctionOn", params).await?;
-      return Self::parse_eval_response(&response, return_by_value);
+      return self.parse_eval_response(&response, return_by_value);
     }
 
     // No contextId, no handles — use Runtime.evaluate IIFE. Chrome
@@ -2916,7 +3070,7 @@ impl<T: CdpWrap> CdpPage<T> {
         }),
       )
       .await?;
-    Self::parse_eval_response(&response, return_by_value)
+    self.parse_eval_response(&response, return_by_value)
   }
 
   /// Decode a `Runtime.evaluate` / `Runtime.callFunctionOn` response
@@ -2925,6 +3079,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Both shapes return the same `{ result: { value, objectId, type,
   /// subtype, ... } }` envelope, so the decoder is shared.
   fn parse_eval_response(
+    &self,
     response: &serde_json::Value,
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
@@ -2958,7 +3113,10 @@ impl<T: CdpWrap> CdpPage<T> {
     } else if let Some(obj_id) = result_obj.get("objectId").and_then(|v| v.as_str()) {
       let is_node = result_obj.get("subtype").and_then(|v| v.as_str()) == Some("node");
       Ok(crate::js_handle::EvaluateResult::Handle(
-        crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp(Arc::from(obj_id))),
+        crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp {
+          object_id: Arc::from(obj_id),
+          session_id: self.session_id.clone(),
+        }),
         is_node,
       ))
     } else {
@@ -3089,7 +3247,7 @@ impl<T: CdpWrap> CdpPage<T> {
     // will never arrive cost the full resolve timeout on every snapshot
     // of every action on a page with an iframe.
     let mut params = serde_json::json!({ "backendNodeId": backend_node_id });
-    if let Some(ctx_id) = self.peek_frame_context(parent_frame_id).await {
+    if let Some(ctx_id) = self.peek_frame_context(parent_frame_id) {
       params["executionContextId"] = serde_json::json!(ctx_id);
     }
     let resolved = self.cmd("DOM.resolveNode", params).await?;
@@ -3119,6 +3277,9 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
+    if let Some(renderer) = self.page_for_frame(frame_id).await? {
+      return Box::pin(renderer.evaluate_in_frame(expression, frame_id)).await;
+    }
     // The main frame's default context often never reaches the map: its
     // `Runtime.executionContextCreated` fires while the page is being
     // set up, before the tracker subscribes, and `setContent` replaces
@@ -3126,7 +3287,11 @@ impl<T: CdpWrap> CdpPage<T> {
     // full resolve timeout and then fails — an evaluate in the main
     // frame is a plain evaluate, which is what the default context is.
     if self.peek_main_frame_id().as_deref() == Some(frame_id)
-      && !self.frame_contexts.read().await.contains_key(frame_id)
+      && !self
+        .frame_contexts
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(frame_id)
     {
       return self.evaluate(expression).await;
     }
@@ -3196,10 +3361,10 @@ impl<T: CdpWrap> CdpPage<T> {
   /// [`crate::element_handle::ElementHandle`] — the remote is already
   /// addressable, so we can skip a round-trip by seeding the element's
   /// `object_id` slot directly.
-  pub(crate) fn element_from_object_id(&self, object_id: Arc<str>) -> CdpElement<T> {
+  pub(crate) fn element_from_object_id(&self, object_id: Arc<str>, session_id: Option<Arc<str>>) -> CdpElement<T> {
     CdpElement {
       transport: self.transport.clone(),
-      session_id: self.session_id.clone(),
+      session_id,
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
         node_id: None,
         object_id: Some(object_id),
@@ -3212,6 +3377,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// element. Used by `Locator` to scope action-method resolution to
   /// the locator's bound `Frame` — Playwright parity.
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
+    if let Some(frame) = frame_id
+      && let Some(renderer) = self.page_for_frame(frame).await?
+    {
+      return Box::pin(renderer.evaluate_to_element(js, frame_id)).await;
+    }
     // Note: previously fired `DOM.getDocument` here but discarded the
     // result. It was a leftover from when this path used
     // `DOM.querySelector` (which DOES require the agent's DOM tree
@@ -3222,10 +3392,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
     // Resolve the frame's execution context id (None → main page).
     let context_id = match frame_id {
-      Some(fid) => {
-        let contexts = self.frame_contexts.read().await;
-        contexts.get(fid).copied()
-      },
+      Some(fid) => Some(self.resolve_frame_context(fid).await?),
       None => None,
     };
 
@@ -4154,7 +4321,12 @@ impl<T: CdpWrap> CdpPage<T> {
       "awaitPromise": await_promise,
     });
     let mut params = vec![base.clone()];
-    for ctx_id in self.frame_contexts.read().await.values() {
+    for ctx_id in self
+      .frame_contexts
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .values()
+    {
       let mut p = base.clone();
       p["contextId"] = serde_json::json!(ctx_id);
       params.push(p);
@@ -5495,20 +5667,8 @@ impl<T: CdpWrap> CdpPage<T> {
       self.downloads_dir.clone(),
       self.page_backref.clone(),
     ));
-    tasks.push(Self::spawn_frame_context_tracker(
-      self.transport.clone(),
-      self.session_id.clone(),
-      self.frame_contexts.clone(),
-      self.frame_contexts_notify.clone(),
-      self.exposed_fns.clone(),
-      self.target_id.clone(),
-    ));
-    tasks.push(Self::spawn_target_gone_listener(
-      self.transport.clone(),
-      self.target_id.clone(),
-      self.closed.clone(),
-      self.events.clone(),
-    ));
+    tasks.extend(self.spawn_renderer_tracker());
+    tasks.push(self.spawn_target_gone_listener());
 
     if let Ok(mut guard) = self.listener_tasks.lock() {
       guard.extend(tasks);
@@ -5551,7 +5711,7 @@ impl<T: CdpWrap> CdpPage<T> {
           .unwrap_or_default();
         let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
         for arg in &args_json {
-          let backing = cdp_remote_object_to_backing(arg);
+          let backing = cdp_remote_object_to_backing(arg, session_id.clone());
           let is_node = arg.get("subtype").and_then(|v| v.as_str()) == Some("node");
           args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing, is_node));
         }
@@ -5635,28 +5795,24 @@ impl<T: CdpWrap> CdpPage<T> {
   ///
   /// These are browser-level events (no `sessionId` filter), so the tap is
   /// unfiltered and matched on `targetId` instead.
-  fn spawn_target_gone_listener(
-    transport: Arc<T>,
-    target_id: Arc<str>,
-    closed: Arc<std::sync::atomic::AtomicBool>,
-    emitter: crate::events::EventEmitter,
-  ) -> tokio::task::AbortHandle {
+  fn spawn_target_gone_listener(&self) -> tokio::task::AbortHandle {
+    let page = self.clone();
+    let mut rx = self
+      .transport
+      .tap_event_methods(&["Target.targetDestroyed", "Target.detachedFromTarget"], None);
     tokio::spawn(async move {
-      let mut rx = transport.tap_event_methods(&["Target.targetDestroyed", "Target.detachedFromTarget"], None);
       while let Some(event) = rx.recv().await {
-        let matches_target = event
-          .get("params")
-          .and_then(|p| p.get("targetId"))
-          .and_then(|v| v.as_str())
-          .is_some_and(|id| id == &*target_id);
-        if !matches_target {
-          continue;
+        let destroyed =
+          event["method"] == "Target.targetDestroyed" && event["params"]["targetId"].as_str() == Some(&*page.target_id);
+        let detached = event["method"] == "Target.detachedFromTarget"
+          && page
+            .session_id
+            .as_deref()
+            .is_some_and(|session| event["params"]["sessionId"] == session);
+        if destroyed || detached {
+          page.dispose_local();
+          return;
         }
-        // `swap` so the Close event fires once even if both events arrive.
-        if !closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-          emitter.emit(crate::events::PageEvent::Close);
-        }
-        return;
       }
     })
     .abort_handle()
@@ -6115,58 +6271,43 @@ impl<T: CdpWrap> CdpPage<T> {
     .abort_handle()
   }
 
-  fn spawn_frame_context_tracker(
-    transport: Arc<T>,
-    session_id: Option<Arc<str>>,
-    frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
-    contexts_notify: Arc<tokio::sync::Notify>,
-    exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
-    target_id: Arc<str>,
-  ) -> tokio::task::AbortHandle {
-    tokio::spawn(async move {
-      // One tap across both domains: `Runtime.bindingCalled` stays
-      // ordered against `Runtime.executionContextCreated/Destroyed`
-      // AND `Page.frameNavigated/Detached` exactly as they arrived on
-      // the wire, and nothing is ever dropped.
-      let mut rx = transport.tap_event_domains(&["Runtime", "Page"], session_id.as_deref());
-      // Exposed bindings run on ONE serial task fed in wire order. A
-      // page that calls the same exposed function twice must see the
-      // calls in that order (`page.exposeFunction('log', …)` plus a
-      // listener that records each call is a standard pattern); handing
-      // each call straight to `tokio::spawn` let the multi-threaded
-      // scheduler reorder them. The queue is unbounded, so a slow
-      // binding still never stalls frame-context tracking, and it
-      // closes with the tracker when `binding_tx` drops.
-      let (binding_tx, mut binding_rx) = tokio::sync::mpsc::unbounded_channel::<BindingCall>();
-      {
-        let fns = exposed_fns.clone();
-        let t = transport.clone();
-        let sid = session_id.clone();
-        tokio::spawn(async move {
-          while let Some(call) = binding_rx.recv().await {
-            Self::run_binding_call(call, &fns, &t, sid.as_ref()).await;
-          }
-        });
+  fn context_observer(&self) -> transport::FrameStateObserver {
+    let (binding_tx, mut binding_rx) = tokio::sync::mpsc::unbounded_channel::<BindingCall>();
+    let transport = Arc::downgrade(&self.transport);
+    let exposed_fns = self.exposed_fns.clone();
+    let session_id = self.session_id.clone();
+    let worker = tokio::spawn(async move {
+      while let Some(call) = binding_rx.recv().await {
+        let Some(transport) = transport.upgrade() else { break };
+        Self::run_binding_call(call, &exposed_fns, &transport, session_id.as_ref()).await;
       }
-      while let Some(event) = rx.recv().await {
-        if let Some(ref expected_sid) = session_id {
-          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(&**expected_sid) {
-            continue;
-          }
-        }
-
-        Self::handle_tracker_event(&event, &frame_contexts, &contexts_notify, &target_id, &binding_tx).await;
+    });
+    self
+      .listener_tasks
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(worker.abort_handle());
+    let contexts = self.frame_contexts.clone();
+    let notify = self.frame_contexts_notify.clone();
+    let target = self.target_id.clone();
+    Arc::new(move |raw, method| {
+      if matches!(
+        method,
+        "Runtime.executionContextCreated"
+          | "Runtime.executionContextDestroyed"
+          | "Runtime.executionContextsCleared"
+          | "Runtime.bindingCalled"
+          | "Page.frameDetached"
+      ) && let Ok(event) = serde_json::from_slice(raw)
+      {
+        Self::handle_tracker_event(&event, &contexts, &notify, &target, &binding_tx);
       }
     })
-    .abort_handle()
   }
 
-  /// Route one tapped `Runtime.*` / `Page.*` event into the frame-context
-  /// map, the exposed-binding queue, or the page emitter.
-  async fn handle_tracker_event(
+  fn handle_tracker_event(
     event: &serde_json::Value,
-    frame_contexts: &Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
+    frame_contexts: &Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
     contexts_notify: &Arc<tokio::sync::Notify>,
     target_id: &Arc<str>,
     binding_tx: &tokio::sync::mpsc::UnboundedSender<BindingCall>,
@@ -6183,7 +6324,10 @@ impl<T: CdpWrap> CdpPage<T> {
               .and_then(serde_json::Value::as_bool)
               .unwrap_or(false);
             if is_default && !frame_id.is_empty() {
-              frame_contexts.write().await.insert(frame_id.to_string(), ctx_id);
+              frame_contexts
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(frame_id.to_string(), ctx_id);
               contexts_notify.notify_waiters();
             }
           }
@@ -6195,12 +6339,17 @@ impl<T: CdpWrap> CdpPage<T> {
           .and_then(|p| p.get("executionContextId"))
           .and_then(serde_json::Value::as_i64)
         {
-          let mut contexts = frame_contexts.write().await;
+          let mut contexts = frame_contexts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
           contexts.retain(|_, &mut v| v != ctx_id);
         }
       },
       "Runtime.executionContextsCleared" => {
-        frame_contexts.write().await.clear();
+        frame_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .clear();
         // Init scripts registered via `Page.addScriptToEvaluateOnNewDocument`
         // are page-session-scoped, not context-scoped — they
         // survive context clears (which happen on every navigation
@@ -6209,7 +6358,7 @@ impl<T: CdpWrap> CdpPage<T> {
       },
       "Runtime.bindingCalled" => {
         if let Some(params) = event.get("params") {
-          let contexts = frame_contexts.read().await;
+          let contexts = frame_contexts.read().unwrap_or_else(std::sync::PoisonError::into_inner);
           if let Some(call) = Self::parse_binding_called(params, &contexts, target_id) {
             let _ = binding_tx.send(call);
           }
@@ -6221,7 +6370,10 @@ impl<T: CdpWrap> CdpPage<T> {
           .and_then(|p| p.get("frameId"))
           .and_then(|v| v.as_str())
         {
-          frame_contexts.write().await.remove(fid);
+          frame_contexts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(fid);
         }
       },
       _ => {},
@@ -6231,28 +6383,11 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- Init Scripts ----
 
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
-    let result = self
-      .cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        serde_json::json!({"source": source}),
-      )
-      .await?;
-    let id = result
-      .get("identifier")
-      .and_then(|v| v.as_str())
-      .unwrap_or("")
-      .to_string();
-    Ok(id)
+    self.install_init_script(source).await
   }
 
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
-    self
-      .cmd(
-        "Page.removeScriptToEvaluateOnNewDocument",
-        serde_json::json!({"identifier": identifier}),
-      )
-      .await?;
-    Ok(())
+    self.uninstall_init_script(identifier).await
   }
 
   // ---- Exposed Functions ----
@@ -6278,12 +6413,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 })()";
 
   /// Arm the page-side binding channel (`Runtime.addBinding` + the
-  /// `__fd_bc` controller). `Runtime.bindingCalled` events are handled
-  /// by the frame-context tracker task — the SAME ordered consumer that
-  /// applies `executionContextCreated`/`Destroyed` — so a binding call
-  /// never resolves its calling frame against a map that hasn't caught
-  /// up yet (a separate subscription raced the tracker and misrouted
-  /// iframe callers to the main frame).
+  /// `__fd_bc` controller). The synchronous context observer associates
+  /// each binding call with its frame before queuing the callback, so later
+  /// context changes cannot reattribute an earlier call.
   async fn ensure_binding_channel(&self) -> Result<()> {
     // Hold the lock across the whole bootstrap so a concurrent caller
     // blocks here until `__fd_bc` is actually defined, instead of racing
@@ -6295,14 +6427,19 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     self
       .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
       .await?;
+    for renderer in &self.renderer_pages() {
+      renderer
+        .cmd("Runtime.addBinding", serde_json::json!({"name":"__fd_binding__"}))
+        .await?;
+    }
     self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
-    self.evaluate(Self::BINDING_CONTROLLER_JS).await?;
+    self.evaluate_in_renderer_frames(Self::BINDING_CONTROLLER_JS).await?;
     *initialized = true;
     Ok(())
   }
 
   /// Parse one `Runtime.bindingCalled` into a dispatchable call. Frame
-  /// resolution happens here, inline in the tracker loop, so it reads a
+  /// resolution happens here, inline in the wire observer, so it reads a
   /// `frame_contexts` map that is exactly as up to date as the wire —
   /// an iframe's first binding call must not resolve against a map that
   /// has not seen its `executionContextCreated` yet.
@@ -6420,7 +6557,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
     self.add_init_script(&register_js).await?;
-    self.evaluate(&register_js).await?;
+    self.evaluate_in_renderer_frames(&register_js).await?;
     Ok(())
   }
 
@@ -6468,7 +6605,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       "if(globalThis.__fd_bc)globalThis.__fd_bc.del('{}')",
       crate::steps::js_escape(name)
     );
-    self.evaluate(&js).await?;
+    self.evaluate_in_renderer_frames(&js).await?;
     Ok(())
   }
 
@@ -6476,6 +6613,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      self.dispose_local();
       return Ok(());
     }
     // Two CDP paths, matching Playwright's crPage.ts:
@@ -6507,11 +6645,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     // its tasks pin (emitter senders, managers, logs). The `Close`
     // emitted above already sits in the broadcast ring, so page-event
     // subscribers (frame cache, page→context bridge) still observe it.
-    if let Ok(mut guard) = self.listener_tasks.lock() {
-      for handle in guard.drain(..) {
-        handle.abort();
-      }
-    }
+    self.dispose_local();
     Ok(())
   }
 
@@ -6529,13 +6663,23 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// the transport (and its connection fd) alive after the browser is
   /// gone.
   pub fn dispose_local(&self) {
-    if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
-      return;
+    if !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      self.events.emit(crate::events::PageEvent::Close);
     }
-    self.events.emit(crate::events::PageEvent::Close);
     if let Ok(mut guard) = self.listener_tasks.lock() {
       for handle in guard.drain(..) {
         handle.abort();
+      }
+    }
+    self.dispose_renderers();
+    {
+      let mut cache = self
+        .frame_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if let Some(main) = cache.main_frame_id() {
+        cache.detach_descendants(&main);
+        cache.detach(&main);
       }
     }
     if let Some(sid) = self.session_id.as_deref() {
@@ -6551,8 +6695,17 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   // ---- Network Interception ----
 
   async fn ensure_fetch_enabled(&self) -> Result<()> {
+    self.ensure_fetch_enabled_current().await?;
+    for renderer in &self.renderer_pages() {
+      renderer.ensure_fetch_enabled_current().await?;
+    }
+    Ok(())
+  }
+
+  async fn ensure_fetch_enabled_current(&self) -> Result<()> {
+    let _transition = self.fetch.transition.lock().await;
     let has_creds = self.http_credentials.read().await.is_some();
-    if self.fetch_enabled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       // Already enabled — but may need to re-enable with auth handling.
       if has_creds {
         let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
@@ -6578,7 +6731,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     // Dedicated slot so the disable path can abort exactly this loop;
     // also on `listener_tasks` for page-close cleanup (abort is
     // idempotent). A stale handle in the slot is already-aborted.
-    if let Ok(mut slot) = self.fetch_interceptor.lock() {
+    if let Ok(mut slot) = self.fetch.interceptor.lock() {
       *slot = Some(handle.clone());
     }
     if let Ok(mut guard) = self.listener_tasks.lock() {
@@ -6594,11 +6747,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       )
       .await
     {
-      self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+      self.fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       handle.abort();
       return Err(error);
     }
 
+    self.fetch.enabled.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
   }
 
@@ -6621,9 +6775,17 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// alive would double-process `Fetch.requestPaused` after the next
   /// `route` call re-enables interception (see `fetch_interceptor`).
   async fn disable_fetch_interception(&self) {
-    self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+    self.disable_fetch_interception_current().await;
+    for renderer in &self.renderer_pages() {
+      renderer.disable_fetch_interception_current().await;
+    }
+  }
+
+  async fn disable_fetch_interception_current(&self) {
+    let _transition = self.fetch.transition.lock().await;
+    self.fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
     let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
-    if let Ok(mut slot) = self.fetch_interceptor.lock()
+    if let Ok(mut slot) = self.fetch.interceptor.lock()
       && let Some(handle) = slot.take()
     {
       handle.abort();
@@ -6923,7 +7085,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       });
       routes.is_empty()
     };
-    if now_empty && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+    if now_empty && self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.disable_fetch_interception().await;
     }
     Ok(())
@@ -6942,7 +7104,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
       routes.is_empty()
     };
-    if now_empty && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+    if now_empty && self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.disable_fetch_interception().await;
     }
     Ok(())
@@ -6962,6 +7124,18 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// as success — the dispose path here forwards the error as-is so
   /// idempotence is handled client-side by the `disposed` flag, not by
   /// swallowing protocol failures.
+  pub(crate) async fn release_object_in_session(&self, object_id: &str, session_id: Option<&str>) -> Result<()> {
+    self
+      .transport
+      .send_command(
+        session_id,
+        "Runtime.releaseObject",
+        &serde_json::json!({"objectId":object_id}),
+      )
+      .await
+      .map(|_| ())
+  }
+
   pub async fn release_object(&self, object_id: &str) -> Result<()> {
     self
       .cmd("Runtime.releaseObject", serde_json::json!({"objectId": object_id}))
@@ -6994,6 +7168,9 @@ impl<T: CdpTransport> Clone for CdpElement<T> {
 }
 
 impl<T: CdpTransport> CdpElement<T> {
+  pub(crate) fn session_id(&self) -> Option<Arc<str>> {
+    self.session_id.clone()
+  }
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self
       .transport
