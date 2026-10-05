@@ -10,6 +10,10 @@ let testUrl: string;
 beforeAll(async () => {
   testServer = createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/html" });
+    if (req.url === '/frames') {
+      res.end('<iframe name="child" srcdoc="<p>child</p>"></iframe>');
+      return;
+    }
     res.end(`<!DOCTYPE html><html><head><title>Test Page</title></head><body><h1>Test Page</h1><p>More information...</p><a href="/about">More information</a></body></html>`);
   });
   await new Promise<void>((resolve) => {
@@ -60,6 +64,88 @@ for (const backend of BACKENDS) {
     it("navigates to a URL", async () => {
       const url = await page.url();
       expect(url).toContain("127.0.0.1");
+    });
+
+    it("closes a new page when its initial URL is invalid", async () => {
+      const context = browser.contexts()[0];
+      const before = (await context.pages()).length;
+      await expect(browser.newPageWithUrl("http://[")).rejects.toThrow();
+      expect((await context.pages()).length).toBe(before);
+      expect(await page.title()).toContain("Test Page");
+    });
+
+    it("activates pages and rejects activation after closure", async () => {
+      const activated = await browser.newPage();
+      try {
+        await activated.evaluate(() => {
+          window.focus = () => { throw new Error('Page focus override must not run'); };
+        });
+        await activated.bringToFront();
+        expect(await activated.evaluate(() => document.visibilityState)).toBe('visible');
+      } finally {
+        await activated.close();
+      }
+      await expect(activated.bringToFront()).rejects.toThrow();
+    });
+
+    it("refreshes frames across history navigation and reload", async () => {
+      const history = await browser.newPage();
+      const framed = `${testUrl}/frames`;
+      const empty = `${testUrl}/empty`;
+      try {
+        await history.goto(framed);
+        await history.goto(empty);
+        await history.goBack();
+        expect(history.url()).toBe(framed);
+        expect(history.frames().length).toBe(2);
+        expect(await history.frame('child')!.locator('p').textContent()).toBe('child');
+        await history.reload();
+        const child = history.frame('child');
+        expect(history.frames().length).toBe(2);
+        expect(await child!.locator('p').textContent()).toBe('child');
+        await history.goForward();
+        expect(history.url()).toBe(empty);
+        expect(history.frames().length).toBe(1);
+        expect(child!.isDetached()).toBe(true);
+      } finally {
+        await history.close();
+      }
+    });
+
+    it("refreshes named frames after navigation", async () => {
+      const framed = await browser.newPage();
+      try {
+        await framed.goto('data:text/html,' + encodeURIComponent('<iframe name="child" srcdoc="<p>child</p>"></iframe>'));
+        expect(framed.frames().length).toBe(2);
+        const child = framed.frame('child');
+        expect(child).not.toBeNull();
+        expect(child!.url()).toBe('about:srcdoc');
+        expect(await child!.locator('p').textContent()).toBe('child');
+        await framed.goto('data:text/html,<title>No frames</title>');
+        expect(framed.frames().length).toBe(1);
+        expect(child!.isDetached()).toBe(true);
+        expect(framed.frame('child')).toBeNull();
+      } finally {
+        await framed.close();
+      }
+    });
+
+    it("resolves query and fragment references against the base document", async () => {
+      const context = await browser.newContext({baseURL: `${testUrl}/nested/leaf?old=1#before`});
+      try {
+        const relativePage = await context.newPage();
+        for (const [given, expected] of [
+          ["?next=2", `${testUrl}/nested/leaf?next=2`],
+          ["#after", `${testUrl}/nested/leaf?old=1#after`],
+          ["", `${testUrl}/nested/leaf?old=1`],
+          ["../other", `${testUrl}/other`],
+        ]) {
+          await relativePage.goto(given);
+          expect(await relativePage.url()).toBe(expected);
+        }
+      } finally {
+        await context.close();
+      }
     });
 
     it("gets the page title", async () => {
