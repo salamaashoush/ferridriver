@@ -75,6 +75,15 @@ test('extension commands reject persistent specs in run and one-shot specs in st
   assert.match(error(results[1]), /not declared `persistent`/);
 });
 
+test('one-shot commands retain the leader result while cleaning up inherited output pipes', async () => {
+  const [result] = await invoke(`
+    defineTool({ name: 't', allow: { commands: { c: {
+      run: 'sleep 30 & printf sashoush; exit 7', timeoutMs: 2000
+    } } }, handler: async ({ commands }) => commands.exec('c') });
+  `, ['return await tools.t();']);
+  assert.deepEqual(value(result), { exitCode: 7, success: false, stdout: 'sashoush', stderr: '' });
+});
+
 test('extension persistent commands retain output across calls and remove their record on stop', async () => {
   const results = await invoke(`
     const spec = { run: 'echo up; mkfifo hold; exec 3<> hold; read signal <&3', persistent: true };

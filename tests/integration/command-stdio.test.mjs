@@ -63,3 +63,12 @@ test('a process wait timeout leaves the process available for a subsequent wait'
     assert.equal(await commands.wait('stdio'), 0);
   } finally { await commands.stop('stdio'); }
 });
+
+test('leader exit closes inherited output pipes before the descendant finishes sleeping', async () => {
+  await commands.open('stdio', { command: 'sleep 30 & printf sashoush; exit 7' });
+  try {
+    assert.equal(await commands.read('stdio', 2000), 'sashoush');
+    assert.equal(await commands.read('stdio', 2000), null);
+    assert.equal(await commands.wait('stdio', 2000), 7);
+  } finally { await commands.stop('stdio'); }
+});

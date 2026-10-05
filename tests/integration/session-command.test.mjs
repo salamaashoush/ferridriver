@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from '@ferridriver/test';
-import { passed, run, workspace } from './support.mjs';
+import { passed, quote, run, workspace } from './support.mjs';
 
 async function openSession(id, url = 'data:text/html,<p>seed</p>', files = {}, flags = []) {
   const cwd = await workspace(files);
   const registry = await workspace({});
   const command = args => run(args, { cwd, env: { FERRIDRIVER_SESSION_DIR: registry, FERRIDRIVER_NO_INHERIT: '1' } });
-  const opened = await command(['session', 'open', id, '--headless', ...flags, url]);
+  const opened = await command(['session', 'open', id, '--headless', ...flags, ...(url === null ? [] : [url])]);
   passed(opened);
   let closed = false;
   return { cwd, command, opened,
@@ -21,6 +21,109 @@ async function openSession(id, url = 'data:text/html,<p>seed</p>', files = {}, f
       return result;
     },
   };
+}
+
+for (const [backend, product] of [['cdp-pipe', 'Chrome/'], ['bidi', 'firefox/'], ['webkit', 'webkit-playwright/']]) {
+  test(`session host uses its configured ${backend} instance across script calls`, async () => {
+    const session = await openSession(`configured-${backend}`, undefined, {
+      'ferridriver.json': JSON.stringify({browser: {instances: {target: {backend, headless: true}}}}),
+    }, ['--instance', 'target']);
+    try {
+      const result = await session.script('return {version: browser.version(), parent: context.browser().version(), pageParent: page.context().browser().version()};', ['--json']);
+      passed(result);
+      const value = JSON.parse(result.stdout).value;
+      assert.ok(value.version.includes(product), JSON.stringify(value));
+      assert.equal(value.parent, value.version);
+      assert.equal(value.pageParent, value.version);
+      passed(await session.script('globalThis.saved = 41;'));
+      const next = await session.script('return globalThis.saved + 1;', ['--json']);
+      passed(next);
+      assert.equal(JSON.parse(next.stdout).value, 42);
+    } finally { await session.close(); }
+  });
+}
+
+for (const [direct, retry] of [[false, false], [true, false], [false, true]]) {
+  test(`session host adopts one Classic session and preserves its identity, direct=${direct}, retry=${retry}`, async () => {
+    const root = await workspace({});
+    const recorded = join(root, 'requests.json');
+    const name = direct ? 'chrome' : 'safari';
+    const source = `
+import json, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+requests = []
+class Handler(BaseHTTPRequestHandler):
+ def log_message(self, *args): pass
+ def record(self):
+  body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+  body = json.loads(body) if body else None
+  requests.append({'method': self.command, 'path': self.path, 'body': body})
+  return body
+ def reply(self, value, status=200):
+  requests[-1]["status"] = status
+  with open(${JSON.stringify(recorded)}, 'w') as output: json.dump(requests, output)
+  body = json.dumps({'value': value}).encode()
+  self.send_response(status)
+  self.send_header('Content-Type', 'application/json')
+  self.send_header('Content-Length', len(body))
+  self.end_headers()
+  self.wfile.write(body)
+ def do_POST(self):
+  body = self.record()
+  if self.path == '/wd/hub/session': return self.reply({'sessionId':'owned','capabilities':{'browserName':${JSON.stringify(name)},'browserVersion':'contract'}})
+  if self.path.endswith('/execute/sync'): return self.reply({'name':'','url':'about:blank','children':[]})
+  self.reply(None)
+ def do_GET(self):
+  self.record()
+  if self.path.endswith('/window/handles'): return self.reply(['page'])
+  if self.path.endswith('/window'): return self.reply('page')
+  self.reply('sashoush session')
+ def do_DELETE(self):
+  self.record()
+  if ${retry ? 'True' : 'False'} and sum(request['method'] == 'DELETE' for request in requests) == 1:
+   return self.reply({'error':'unknown error','message':'provider cleanup unavailable'}, 500)
+  time.sleep(0.1)
+  self.reply(None)
+  print('DELETED', flush=True)
+server = HTTPServer(('127.0.0.1',0),Handler)
+print(server.server_port,flush=True)
+server.serve_forever()
+`;
+    await commands.start('stdio', {command: `python3 -u -c ${quote(source)}`});
+    let session;
+    try {
+      const port = Number((await commands.waitForOutput('stdio', '\n')).trim());
+      const endpoint = `http://127.0.0.1:${port}/wd/hub`;
+      const files = direct ? {} : {'ferridriver.json': JSON.stringify({browser: {instances: {remote: {browser: 'safari', connectUrl: endpoint}}}})};
+      const flags = direct ? ['--backend', 'webdriver', '--connect', endpoint] : ['--instance', 'remote'];
+      session = await openSession(`classic-${direct}`, null, files, flags);
+      const result = await session.script('return {version: browser.version(), parent: context.browser().version(), title: await page.title()};', ['--json']);
+      passed(result);
+      assert.deepEqual(JSON.parse(result.stdout).value, {version: `${name}/contract`, parent: `${name}/contract`, title: 'sashoush session'});
+      const listed = await session.command(['session', 'list', '--json']);
+      passed(listed);
+      assert.equal(JSON.parse(listed.stdout)[0].browser_name, direct ? 'chromium' : 'safari');
+      if (retry) {
+        const failed = await session.command(['session', 'close', `classic-${direct}`]);
+        assert.notEqual(failed.code, 0);
+        assert.ok(failed.text.includes('provider cleanup unavailable'), failed.text);
+        const retained = await session.command(['session', 'list', '--json']);
+        passed(retained);
+        assert.equal(JSON.parse(retained.stdout).length, 1);
+        const rejected = await session.script('return 1;');
+        assert.notEqual(rejected.code, 0);
+        assert.ok(rejected.text.includes('session is closing'), rejected.text);
+      }
+      await session.close();
+      const requests = JSON.parse(await readFile(recorded, 'utf8'));
+      assert.equal(requests.filter(request => request.path === '/wd/hub/session').length, 1);
+      assert.equal(requests.some(request => request.path.endsWith('/window/new')), false);
+      assert.deepEqual(requests.filter(request => request.method === 'DELETE').map(request => [request.path, request.status]), retry ? [['/wd/hub/session/owned', 500], ['/wd/hub/session/owned', 200]] : [['/wd/hub/session/owned', 200]]);
+    } finally {
+      if (session) await session.close();
+      await commands.stop('stdio');
+    }
+  });
 }
 
 test('named sessions preserve the live page, console and VM state until closed', async () => {
@@ -130,6 +233,18 @@ test('opening an existing session ID fails without replacing its owner', async (
     assert.notEqual(result.code, 0);
     assert.ok(result.stderr.includes('already exists'));
   } finally { await session.close(); }
+});
+
+test('session startup reports the host failure instead of waiting for a missing descriptor', async () => {
+  const cwd = await workspace({});
+  const registry = await workspace({});
+  const result = await run(['session', 'open', 'missing-browser', '--headless', '--executable-path', '/no/ferridriver-browser-sashoush'], {
+    cwd, env: {FERRIDRIVER_SESSION_DIR: registry, FERRIDRIVER_NO_INHERIT: '1'},
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /host exited/);
+  assert.match(result.stderr, /No such file|not found|cannot execute/i);
+  assert.doesNotMatch(result.stderr, /did not come up/);
 });
 
 for (const [title, args, message] of [
