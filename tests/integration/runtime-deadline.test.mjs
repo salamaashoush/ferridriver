@@ -2,14 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from '@ferridriver/test';
 import { passed, run, workspace } from './support.mjs';
 
-for (const modifier of ['test.setTimeout(1000)', 'testInfo.setTimeout(1000)', 'test.slow()', 'test.setTimeout(0)']) {
+// The body outlasts the 500ms budget only through the modifier. The budget
+// is not shorter because reaching the body's first line already took over
+// 100ms on a loaded CI runner, before any modifier could act.
+for (const modifier of ['test.setTimeout(5000)', 'testInfo.setTimeout(5000)', 'test.slow()', 'test.setTimeout(0)']) {
   test(`runtime deadline honors ${modifier} while the body is pending`, async () => {
     const cwd = await workspace({
-      'ferridriver.toml': '[test]\ntestMatch = ["*.test.ts"]\ntimeout = 100\nworkers = 1\n',
+      'ferridriver.toml': '[test]\ntestMatch = ["*.test.ts"]\ntimeout = 500\nworkers = 1\n',
       'deadline.test.ts': `import { test } from '@ferridriver/test';
 test('extends its active deadline', async ({ testInfo }) => {
   ${modifier};
-  await new Promise(resolve => setTimeout(resolve, 200));
+  await new Promise(resolve => setTimeout(resolve, 1000));
 });`,
     });
     const result = await run(['test', '--no-inherit', '--headless'], { cwd });

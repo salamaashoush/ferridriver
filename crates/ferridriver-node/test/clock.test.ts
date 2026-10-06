@@ -59,11 +59,15 @@ for (const backend of BACKENDS) {
           const original = window.setTimeout.bind(window);
           window.setTimeout = (handler, timeout, ...args) => original(handler, timeout ?? 100, ...args);
         })()`);
+        // The installed clock runs in real time and pauseAt cannot move it
+        // backwards, so pausing at the install instant raced every
+        // millisecond between the two calls.
+        const pausedAt = 1000000001000;
         await context.clock.install({ time: 1000000000000 });
-        await context.clock.pauseAt(1000000000000);
+        await context.clock.pauseAt(pausedAt);
         await target.evaluate("setTimeout(() => {}, 1000)");
         await context.clock.runFor(2000);
-        expect(Number(await target.evaluate("Date.now()"))).toBe(1000000002000);
+        expect(Number(await target.evaluate("Date.now()"))).toBe(pausedAt + 2000);
       } finally {
         await context.close();
       }
