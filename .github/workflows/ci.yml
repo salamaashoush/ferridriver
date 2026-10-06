@@ -87,7 +87,7 @@ jobs:
             libclang-dev pkg-config
       - run: |
           cargo clippy --workspace --all-targets \
-            --exclude bdd-example
+            --exclude bdd-example -- -D warnings
 
   doc:
     name: Documentation
@@ -135,7 +135,7 @@ jobs:
     name: Test (${{ matrix.os }})
     needs: [basics]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -172,8 +172,13 @@ jobs:
       - name: Install browsers and accessibility engine
         run: target/debug/ferridriver install --with-deps chromium firefox webkit axe
 
+      # Format, lint and docs already ran in the basics jobs. The gate's
+      # default of 32 browser slots is sized for a desktop; on a 4-vCPU
+      # runner it oversubscribes the browsers until tests time out.
       - name: Run the headless gate
-        run: cargo gate ready
+        run: cargo gate test
+        env:
+          FERRIDRIVER_GATE_WORKERS: 4
 
       - name: Upload gate logs
         if: always()
