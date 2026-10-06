@@ -16,7 +16,7 @@ Feature: Test annotations
   @fail
   Scenario: Unconditional fail — inverts deliberate failure to pass
     Given I navigate to "/empty.html"
-    Then the page title should contain "THIS TITLE DOES NOT EXIST"
+    Then I evaluate "document.title" and expect "THIS TITLE DOES NOT EXIST"
 
   # ── Conditional skip: browser-based ──
 
@@ -55,10 +55,10 @@ Feature: Test annotations
   # On Firefox: condition doesn't match → this is a genuine failure → we guard with @skip(!chromium).
   # This is how Playwright users would write it: guard non-applicable browsers with @skip.
 
-  @fail
+  @fail(chromium) @skip(!chromium)
   Scenario: Fail annotation inverts a deliberate failure
     Given I navigate to "/empty.html"
-    Then the page title should contain "NONEXISTENT"
+    Then I evaluate "document.title" and expect "NONEXISTENT"
 
   # ── Conjunction conditions ──
 
