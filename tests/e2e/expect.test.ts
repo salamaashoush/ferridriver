@@ -287,7 +287,7 @@ describe('locator handler', () => {
     // it times out instead of landing through the overlay.
     let msg = '';
     try {
-      await page.click('#target', { timeout: 2000 });
+      await page.click('#target', { timeout: 500 });
     } catch (e) {
       msg = String((e as Error).message ?? e);
     }
@@ -322,7 +322,7 @@ describe('locator handler', () => {
     );
     let msg = '';
     try {
-      await page.click('#target', { timeout: 2000 });
+      await page.click('#target', { timeout: 500 });
     } catch (e) {
       msg = String((e as Error).message ?? e);
     }
