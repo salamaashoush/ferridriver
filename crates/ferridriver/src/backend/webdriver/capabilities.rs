@@ -20,7 +20,7 @@ impl WebDriverPage {
 }
 
 macro_rules! unavailable {
-  ($name:ident($($arg:ident: $ty:ty),*) -> $output:ty, $reason:literal) => {
+  ($name:ident($($arg:ident: $ty:ty),* $(,)?) -> $output:ty, $reason:literal) => {
     pub fn $name(&self, $($arg: $ty),*) -> impl std::future::Future<Output = Result<$output>> + Send {
       std::future::ready(Err(FerriError::unsupported($reason)))
     }
