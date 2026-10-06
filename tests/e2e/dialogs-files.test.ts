@@ -15,6 +15,7 @@ async function pollTitle(page: Page, pred: (title: string) => boolean, timeoutMs
     if (pred(title)) {
       return title;
     }
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return title;
 }
@@ -72,13 +73,15 @@ async function gotoDownloadPage(page: Page, href: string): Promise<void> {
 
 describe('dialogs and files', () => {
   test('dialog_accept_confirm', async ({ page }) => {
-    // The page schedules the confirm inside a setTimeout so JS has a
-    // chance to yield back to the binding, let waitForEvent register,
-    // and capture the dialog.
+    // The wait is armed before the navigation. The page's dialog fires
+    // 80ms after load, and an action that only started listening once
+    // goto returned lost that race on a loaded machine: the backend
+    // auto-dismissed the dialog and the wait ran out.
+    const dialogEvent = page.waitForEvent('dialog', { timeout: 10000 });
     await page.goto(
       dataUrl("<script>setTimeout(()=>{document.title = confirm('sure?') ? 'yes' : 'no'}, 80)</script>"),
     );
-    const dialog = (await page.waitForEvent('dialog', { timeout: 10000 })) as Dialog;
+    const dialog = (await dialogEvent) as Dialog;
     expect(dialog.type()).toBe('confirm');
     expect(dialog.message().includes('sure')).toBe(true);
     await dialog.accept();
@@ -87,10 +90,11 @@ describe('dialogs and files', () => {
   });
 
   test('dialog_dismiss_confirm', async ({ page }) => {
+    const dialogEvent = page.waitForEvent('dialog', { timeout: 10000 });
     await page.goto(
       dataUrl("<script>setTimeout(()=>{document.title = confirm('ok?') ? 'yes' : 'no'}, 80)</script>"),
     );
-    const dialog = (await page.waitForEvent('dialog', { timeout: 10000 })) as Dialog;
+    const dialog = (await dialogEvent) as Dialog;
     await dialog.dismiss();
     const title = await pollTitle(page, (t) => t === 'yes' || t === 'no');
     expect(title).toBe('no');
@@ -99,10 +103,11 @@ describe('dialogs and files', () => {
   test('dialog_prompt_with_text', async ({ page }) => {
     // prompt dialog — accept with custom text, the page sees it; also
     // exercises the defaultValue() accessor.
+    const dialogEvent = page.waitForEvent('dialog', { timeout: 10000 });
     await page.goto(
       dataUrl("<script>setTimeout(()=>{document.title = prompt('name?', 'alice') || 'null'}, 80)</script>"),
     );
-    const dialog = (await page.waitForEvent('dialog', { timeout: 10000 })) as Dialog;
+    const dialog = (await dialogEvent) as Dialog;
     expect(dialog.type()).toBe('prompt');
     expect(dialog.defaultValue()).toBe('alice');
     await dialog.accept('bob');
@@ -113,8 +118,9 @@ describe('dialogs and files', () => {
   test('dialog_double_accept_rejects', async ({ page }) => {
     // Second accept on the same Dialog rejects with the
     // Playwright-exact message (one-shot contract).
+    const dialogEvent = page.waitForEvent('dialog', { timeout: 10000 });
     await page.goto(dataUrl("<script>setTimeout(()=>{alert('once')}, 80)</script>"));
-    const dialog = (await page.waitForEvent('dialog', { timeout: 10000 })) as Dialog;
+    const dialog = (await dialogEvent) as Dialog;
     await dialog.accept();
     let msg = '';
     let threw = false;
@@ -138,10 +144,11 @@ describe('dialogs and files', () => {
   });
 
   test('dialog_page_accessor', async ({ page }) => {
+    const dialogEvent = page.waitForEvent('dialog', { timeout: 10000 });
     await page.goto(
       dataUrl("<title>dlg</title><script>setTimeout(()=>{document.title = confirm('p?') ? 'y' : 'n'}, 80)</script>"),
     );
-    const dialog = (await page.waitForEvent('dialog', { timeout: 10000 })) as Dialog;
+    const dialog = (await dialogEvent) as Dialog;
     const dlgPage = dialog.page();
     expect(dlgPage != null).toBe(true);
     expect(dlgPage!.url()).toBe(page.url());
