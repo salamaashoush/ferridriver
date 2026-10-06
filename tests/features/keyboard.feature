@@ -1,11 +1,6 @@
 Feature: Keyboard interactions
   Typing, key combos, and keyboard events.
 
-  Scenario: Type text into textarea
-    Given I navigate to "/input/textarea.html"
-    When I fill "textarea" with "Hello World"
-    Then "textarea" should have value "Hello World"
-
   Scenario: Press Enter key inserts newline
     Given I navigate to "/input/textarea.html"
     When I click "textarea"

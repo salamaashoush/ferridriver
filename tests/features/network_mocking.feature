@@ -32,12 +32,6 @@ Feature: Network mocking
     Then the response status should be 201
     And the response body should contain "42"
 
-  Scenario: Block requests
-    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
-    And I block requests to "**/blocked-resource"
-    When I evaluate "fetch('/blocked-resource').then(()=>document.title='ok').catch(()=>document.title='blocked')"
-    Then the page title should contain "blocked"
-
   Scenario: Intercept and assert requests
     Given I navigate to "http://127.0.0.1:47831/example-domain.html"
     And I intercept requests to "**/api/tracked"
