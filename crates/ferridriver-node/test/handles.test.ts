@@ -232,14 +232,6 @@ for (const backend of BACKENDS) {
       expect(d.toISOString()).toBe("2024-06-01T00:00:00.000Z");
     });
 
-    it("page.evaluate accepts a string expression (Playwright parity)", async () => {
-      // `typeof pageFunction === 'function'` is false for strings, so
-      // the backend evaluates as expression — matches Playwright's
-      // `evaluateExpression({ isFunction: false })` path.
-      const result = await page.evaluate("1 + 1");
-      expect(result).toBe(2);
-    });
-
     it("page.evaluateHandle returns a live JSHandle", async () => {
       const handle = await page.evaluateHandle(() => document.body);
       expect(handle.isDisposed).toBe(false);

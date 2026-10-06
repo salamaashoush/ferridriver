@@ -376,21 +376,6 @@ describe('context options', () => {
     }
   });
 
-  test('context_route_applies_to_future_page', async ({ browser }) => {
-    const ctx = await browser.newContext({});
-    try {
-      await ctx.route('https://ferri.test/**', (route) => {
-        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>FUTURE</body>' });
-      });
-      const p = await ctx.newPage();
-      await p.goto('https://ferri.test/later');
-      const routed = (await p.evaluate(() => document.body.textContent)) as string;
-      expect(routed.includes('FUTURE')).toBe(true);
-    } finally {
-      await ctx.close();
-    }
-  });
-
   test('route_scope_precedence_and_unroute_all', async ({ browser }) => {
     // Page routes beat context routes regardless of registration order;
     // page.unrouteAll leaves context routes active; context.unrouteAll

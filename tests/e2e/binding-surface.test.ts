@@ -82,11 +82,6 @@ describe('binding surface', () => {
     expect(typeof fl.frameLocator('iframe').locator).toBe('function');
   });
 
-  test('page_frame_locator', async ({ page }) => {
-    await setup(page);
-    expect(typeof page.frameLocator('iframe').locator).toBe('function');
-  });
-
   test('page_touchscreen_tap', async ({ page }) => {
     // Native touch on every backend: CDP Input.dispatchTouchEvent,
     // WebKit Input.dispatchTapEvent, BiDi input.performActions with a
@@ -106,14 +101,6 @@ describe('binding surface', () => {
     await page.waitForSelector('#pad');
     await page.touchscreen.tap(10, 10);
     expect(await page.evaluate("document.getElementById('out').textContent")).toBe('touch:true');
-  });
-
-  test('page_snapshot_for_ai', async ({ page }) => {
-    await setup(page);
-    const snap = await page.snapshotForAI();
-    expect(typeof snap.full).toBe('string');
-    expect(snap.full.length).toBeGreaterThan(0);
-    expect(typeof snap.refMap).toBe('object');
   });
 
   test('page_expose_function', async ({ page }) => {

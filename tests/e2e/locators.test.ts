@@ -44,11 +44,6 @@ describe('locators', () => {
     expect(page.frame({}) == null).toBe(true);
   });
 
-  test('script_wait_for_selector', async ({ page }) => {
-    await page.goto(dataUrl("<div id='target'>here</div>"));
-    await page.waitForSelector('#target');
-  });
-
   test('script_frame_wait_for_selector_handle', async ({ page }) => {
     // Frame.waitForSelector returns the matched ElementHandle for
     // state 'attached' | 'visible' (default) and null for

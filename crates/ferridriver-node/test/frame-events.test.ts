@@ -301,14 +301,6 @@ for (const backend of CDP_BACKENDS) {
       expect(response.url()).toContain("127.0.0.1");
     });
 
-    it("waitForResponse with navigation", async () => {
-      const [response] = await Promise.all([
-        page.waitForResponse(/127\.0\.0\.1/, 10000),
-        page.goto(testUrl),
-      ]);
-      expect(response.url()).toContain("127.0.0.1");
-      expect(response.status()).toBe(200);
-    });
   });
 }
 

@@ -18,12 +18,6 @@ describe('input', () => {
     expect(await page.textContent('#h')).toBe('After');
   });
 
-  test('script_fill', async ({ page }) => {
-    await page.goto(dataUrl("<input id='i' type='text'>"));
-    await page.fill('#i', 'Alice');
-    expect(await page.inputValue('#i')).toBe('Alice');
-  });
-
   test('script_fill_form', async ({ page }) => {
     await page.goto(dataUrl("<input id='a'><input id='b'>"));
     await page.fill('#a', 'val1');

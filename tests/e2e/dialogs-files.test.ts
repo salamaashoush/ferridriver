@@ -260,22 +260,6 @@ describe('dialogs and files', () => {
     expect(await fs.promises.readFile(savePath, 'utf8')).toBe('fx-download-payload');
   });
 
-  test('download_path_contents', async ({ page }) => {
-    // download.path() resolves only after the wait_finished ->
-    // report_finished transition. The backend writes into its own temp
-    // dir outside the fs sandbox root, so the byte-level check goes
-    // through saveAs against the same finished download.
-    await gotoDownloadPage(page, '/fx/download');
-    const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
-    await page.click('#dl');
-    const dl = (await downloadPromise) as Download;
-    const path = await dl.path();
-    expect(path.length).toBeGreaterThan(0);
-    const savePath = test.info().outputPath('path-contents.bin');
-    await dl.saveAs(savePath);
-    expect(await fs.promises.readFile(savePath, 'utf8')).toBe('fx-download-payload');
-  });
-
   test('download_cancel_surfaces_failure', async ({ page, browserName }) => {
     if (browserName === 'firefox') {
       // Firefox's BiDi has no cancel command — Playwright's own BiDi

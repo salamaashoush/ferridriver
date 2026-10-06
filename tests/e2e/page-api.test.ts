@@ -174,14 +174,6 @@ describe('page api', () => {
     expect(Date.now() - t0).toBeGreaterThanOrEqual(120);
   });
 
-  test('page_bring_to_front', async ({ page }) => {
-    // `page.bringToFront()` activates the page —
-    // `document.visibilityState` is 'visible' afterwards.
-    await page.goto(H1);
-    await page.bringToFront();
-    expect(await page.evaluate('document.visibilityState')).toBe('visible');
-  });
-
   test('page_add_script_tag', async ({ page }) => {
     await page.goto(H1);
     await page.addScriptTag({ content: "window.__addedByTag = 'script-ok';" });

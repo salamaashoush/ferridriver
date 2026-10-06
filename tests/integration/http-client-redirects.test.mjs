@@ -49,6 +49,7 @@ test('redirect metadata counts followed hops rather than appended query paramete
     assert.equal(response.status(), 200);
     assert.equal(await response.text(), 'done');
     assert.equal(response.redirected(), true);
+    assert.equal(response.unfollowedRedirect(), false);
     const plain = await request.get(`${base}/fx/http-client/echo`, { params: { a: '1' } });
     assert.equal(plain.redirected(), false);
   });

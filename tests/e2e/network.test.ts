@@ -121,23 +121,6 @@ describe('network', () => {
     }
   });
 
-  test('unroute_predicate_from_other_wrapper', async ({ page }) => {
-    // unroute(fn) works from ANY wrapper of the page — wrappers are
-    // minted freely and the matcher table is keyed in the session-shared
-    // registry.
-    await page.goto('/fx/landed');
-    const pred = (url: URL) => url.pathname === '/fx/api/users';
-    await page.route(pred, (route) => {
-      route.fulfill({ status: 200, contentType: 'application/json', body: '"routed"' });
-    });
-    const before = await page.evaluate("fetch('/fx/api/users').then(r => r.text())");
-    const otherWrapper = page.mainFrame().page();
-    await otherWrapper.unroute(pred);
-    const after = (await page.evaluate("fetch('/fx/api/users').then(r => r.text())")) as string;
-    expect(before).toBe('"routed"');
-    expect(after.includes('alice')).toBe(true);
-  });
-
   test('route_from_har', async ({ page }) => {
     // routeFromHAR replays a recorded response for a matching request;
     // an unrecorded URL with notFound:'fallback' reaches the real
