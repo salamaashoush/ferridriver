@@ -598,9 +598,23 @@ pub fn resolve(opts: &LoadOptions) -> anyhow::Result<Resolved> {
 
 /// Build the ordered list of files to apply, before `extends`
 /// expansion.
+/// The `--config` file, made absolute against the run's cwd. Relative
+/// paths inside a layer anchor to the layer's directory, and a directory
+/// taken from a relative `--config` stayed relative to the cwd: `testDir`
+/// came out cwd-relative, and the snapshot template, which resolves a
+/// relative `{testDir}` against the config's directory, prefixed it again.
+fn explicit_layer_path(opts: &LoadOptions) -> Option<PathBuf> {
+  let path = opts.explicit.as_ref()?;
+  Some(if path.is_absolute() {
+    path.clone()
+  } else {
+    normalize_path(&opts.cwd.join(path))
+  })
+}
+
 fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec<ConfigLayer> {
   if !opts.inherit {
-    return match opts.explicit.clone() {
+    return match explicit_layer_path(opts) {
       Some(path) => vec![ConfigLayer {
         kind: LayerKind::Explicit,
         path,
@@ -665,7 +679,7 @@ fn discover_layers(opts: &LoadOptions, warnings: &mut Vec<ConfigWarning>) -> Vec
     });
   }
 
-  if let Some(path) = &opts.explicit {
+  if let Some(path) = &explicit_layer_path(opts) {
     if path.exists() {
       layers.push(ConfigLayer {
         kind: LayerKind::Explicit,

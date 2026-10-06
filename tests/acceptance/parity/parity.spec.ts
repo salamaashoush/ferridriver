@@ -72,6 +72,13 @@ describe('parity acceptance', () => {
     // that keep baselines from colliding across a matrix.
     expect(declared.includes(`/${testInfo.project.name}/`)).toBe(true);
     expect(declared.endsWith('shot.png')).toBe(true);
+    // `testDir: '.'` is this spec's directory, and it appears once: a
+    // relative `--config` once had the template join it in three times.
+    const specDir = testInfo.file.slice(0, testInfo.file.lastIndexOf('/'));
+    expect(declared.endsWith(`${specDir}/__screenshots__/${testInfo.project.name}/${process.platform}/shot.png`)).toBe(
+      true,
+    );
+    expect(declared.split(specDir).length).toBe(2);
 
     await page.setContent('<div style="width:40px;height:40px;background:#123456"></div>');
     await expect(page.locator('div')).toHaveScreenshot('shot.png');
