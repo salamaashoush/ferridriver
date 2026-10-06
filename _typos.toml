@@ -6,6 +6,8 @@ extend-exclude = [
   "crates/ferridriver/src/injected/injectedScript.ts",
   "crates/ferridriver/src/injected/webSocketMock.ts",
   "crates/ferridriver/src/injected/isomorphic/",
+  # Diffs against upstream Appium; their hunk headers cut upstream code mid-word
+  "crates/ferridriver/src/install/*.patch",
 ]
 
 [default.extend-words]
@@ -39,6 +41,8 @@ caf = "caf"
 clonable = "clonable"
 # "unparseable" — UK/CS variant matches "parse"/"parseable" idiom in our code
 unparseable = "unparseable"
+# "UDID" is Apple's unique device identifier, named so by simctl and Appium
+udid = "udid"
 
 [default.extend-identifiers]
 # Intentional misspelling in Playwright-ported code
@@ -48,5 +52,10 @@ deperecated = "deperecated"
 IIFEs = "IIFEs"
 
 [default]
-# Deliberately invalid keys and values exercise schema error messages.
-extend-ignore-re = ['''["'](?:entrys|testIdAttribut|netwrok)["']''', '"(?:más|mas) informacion"']
+# Deliberately invalid keys and values exercise schema error messages, and
+# `--disable-fre` is Chrome's first-run-experience switch.
+extend-ignore-re = [
+  '''["'](?:entrys|testIdAttribut|netwrok|apiLevl)["']''',
+  '"(?:más|mas) informacion"',
+  '--disable-fre',
+]
