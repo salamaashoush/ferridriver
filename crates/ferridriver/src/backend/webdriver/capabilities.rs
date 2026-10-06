@@ -29,19 +29,56 @@ macro_rules! unavailable {
 
 impl WebDriverPage {
   unavailable!(request_gc() -> (), "Classic WebDriver does not expose JavaScript garbage collection");
-  unavailable!(emulate_media(_options: &crate::options::EmulateMediaOptions) -> (), "Classic WebDriver does not expose media emulation");
-  unavailable!(set_extra_http_headers(_headers: &rustc_hash::FxHashMap<String, String>) -> (), "Classic WebDriver does not expose request header overrides");
-  unavailable!(set_http_credentials(_credentials: Option<crate::options::HttpCredentials>) -> (), "Classic WebDriver does not expose HTTP authentication interception");
+  unavailable!(
+    emulate_media(_options: &crate::options::EmulateMediaOptions) -> (),
+    "Classic WebDriver does not expose media emulation"
+  );
+  unavailable!(
+    set_extra_http_headers(_headers: &rustc_hash::FxHashMap<String, String>) -> (),
+    "Classic WebDriver does not expose request header overrides"
+  );
+  unavailable!(
+    set_http_credentials(_credentials: Option<crate::options::HttpCredentials>) -> (),
+    "Classic WebDriver does not expose HTTP authentication interception"
+  );
   unavailable!(reset_permissions() -> (), "Classic WebDriver does not expose browser permission overrides");
-  unavailable!(start_tracing(_categories: Option<&[String]>) -> (), "Classic WebDriver does not expose engine tracing");
+  unavailable!(
+    start_tracing(_categories: Option<&[String]>) -> (),
+    "Classic WebDriver does not expose engine tracing"
+  );
   unavailable!(stop_tracing() -> Vec<serde_json::Value>, "Classic WebDriver does not expose engine tracing");
   unavailable!(metrics() -> Vec<crate::backend::MetricData>, "Classic WebDriver does not expose engine performance metrics");
-  unavailable!(route(_route: crate::route::RegisteredRoute) -> (), "Classic WebDriver does not expose network interception");
-  unavailable!(unroute(_matcher: &crate::url_matcher::UrlMatcher, _scope: crate::route::RouteScope, _handler_id: Option<usize>) -> (), "Classic WebDriver does not expose network interception");
-  unavailable!(unroute_all(_behavior: crate::options::UnrouteBehavior, _scope: Option<crate::route::RouteScope>) -> (), "Classic WebDriver does not expose network interception");
-  unavailable!(expose_binding(_name: &str, _binding: crate::events::ExposedBinding) -> (), "Classic WebDriver does not expose browser-to-host script channels");
-  unavailable!(remove_exposed_function(_name: &str) -> (), "Classic WebDriver does not expose browser-to-host script channels");
-  unavailable!(add_init_script(_source: &str) -> String, "Classic WebDriver cannot register scripts before document execution");
-  unavailable!(remove_init_script(_identifier: &str) -> (), "Classic WebDriver cannot register scripts before document execution");
+  unavailable!(
+    route(_route: crate::route::RegisteredRoute) -> (),
+    "Classic WebDriver does not expose network interception"
+  );
+  unavailable!(
+    unroute(
+      _matcher: &crate::url_matcher::UrlMatcher,
+      _scope: crate::route::RouteScope,
+      _handler_id: Option<usize>,
+    ) -> (),
+    "Classic WebDriver does not expose network interception"
+  );
+  unavailable!(
+    unroute_all(_behavior: crate::options::UnrouteBehavior, _scope: Option<crate::route::RouteScope>) -> (),
+    "Classic WebDriver does not expose network interception"
+  );
+  unavailable!(
+    expose_binding(_name: &str, _binding: crate::events::ExposedBinding) -> (),
+    "Classic WebDriver does not expose browser-to-host script channels"
+  );
+  unavailable!(
+    remove_exposed_function(_name: &str) -> (),
+    "Classic WebDriver does not expose browser-to-host script channels"
+  );
+  unavailable!(
+    add_init_script(_source: &str) -> String,
+    "Classic WebDriver cannot register scripts before document execution"
+  );
+  unavailable!(
+    remove_init_script(_identifier: &str) -> (),
+    "Classic WebDriver cannot register scripts before document execution"
+  );
   unavailable!(stop_screencast() -> (), "Classic WebDriver does not expose a screencast stream");
 }
