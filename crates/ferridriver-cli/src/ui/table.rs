@@ -185,6 +185,6 @@ mod tests {
     if !t.rows.is_empty() {
       sink.push_str(&t.render(80));
     }
-    assert!(sink.is_empty());
+    assert_eq!(sink, "");
   }
 }

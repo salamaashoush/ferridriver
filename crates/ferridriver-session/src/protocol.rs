@@ -284,7 +284,7 @@ mod tests {
   fn script_request_defaults_to_source_kind() {
     let req: ScriptRequest = serde_json::from_value(serde_json::json!({ "code": "return 1" })).unwrap();
     assert_eq!(req.kind, ScriptKind::Source);
-    assert!(req.args.is_empty());
+    assert_eq!(req.args, [] as [serde_json::Value; 0]);
     assert!(req.timeout_ms.is_none());
   }
 

@@ -167,7 +167,7 @@ mod tests {
 
   #[test]
   fn a_stack_with_no_module_frame_yields_nothing() {
-    assert!(parse_js_frames("    at native\n").is_empty());
+    assert_eq!(parse_js_frames("    at native\n"), [] as [(String, u32, u32); 0]);
   }
 
   #[test]

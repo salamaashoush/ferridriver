@@ -92,7 +92,7 @@ mod tests {
     let mut pending = Vec::new();
     let got: Command = read_frame(&mut b, &mut pending).await.unwrap().unwrap();
     assert_eq!(got.verb, "snapshot");
-    assert!(pending.is_empty());
+    assert_eq!(pending, [] as [u8; 0]);
   }
 
   #[tokio::test]

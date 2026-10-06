@@ -407,8 +407,11 @@ mod tests {
     let config = McpConfig::default();
     assert_eq!(config.server_name(), "ferridriver");
     assert_eq!(config.server_instructions(TEST_DEFAULTS), TEST_DEFAULTS);
-    assert!(config.chrome_args().is_empty());
-    assert!(config.instance_overrides("dev").expect("overrides").args.is_empty());
+    assert_eq!(config.chrome_args(), [] as [String; 0]);
+    assert_eq!(
+      config.instance_overrides("dev").expect("overrides").args,
+      [] as [String; 0]
+    );
     assert!(config.resolve_instance("dev").is_none());
     assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
     assert!(!config.headless());

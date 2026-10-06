@@ -2100,7 +2100,7 @@ mod tests {
     // Googlebot is blocked, the other four are not, so the page passes.
     let one_bot = crawlable(&served(200, vec![header("X-Robots-Tag", "Googlebot: noindex")]));
     assert!(one_bot.passed);
-    assert!(one_bot.items.is_empty());
+    assert_eq!(one_bot.items, [] as [crate::audits::AuditItem; 0]);
   }
 
   #[test]

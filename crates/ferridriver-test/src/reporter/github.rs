@@ -316,7 +316,10 @@ mod tests {
         outcome: Arc::clone(&outcome),
       })
       .await;
-    assert!(reporter.failure_commands(&base::TestKey::of(&outcome)).is_empty());
+    assert_eq!(
+      reporter.failure_commands(&base::TestKey::of(&outcome)),
+      [] as [String; 0]
+    );
   }
 
   #[test]

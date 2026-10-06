@@ -856,7 +856,7 @@ mod tests {
   fn default_root_is_empty() {
     let root = FerridriverConfig::default();
     assert_eq!(root.mcp.server_name(), "ferridriver");
-    assert!(root.test.test_match.is_empty());
+    assert_eq!(root.test.test_match, [] as [String; 0]);
   }
 
   #[test]
@@ -981,8 +981,8 @@ aliasFields = [["browser"]]
     // rolldown's own default for a neutral platform is EMPTY, which
     // leaves a package that has only `main` unresolvable.
     assert_eq!(BundlerConfig::default().main_fields, vec!["module", "main"]);
-    assert!(BundlerConfig::default().conditions.is_empty());
-    assert!(BundlerConfig::default().alias_fields.is_empty());
+    assert_eq!(BundlerConfig::default().conditions, [] as [String; 0]);
+    assert_eq!(BundlerConfig::default().alias_fields, [] as [Vec<String>; 0]);
   }
 
   #[test]

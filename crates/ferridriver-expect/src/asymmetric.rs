@@ -423,7 +423,7 @@ mod tests {
     impl CustomAsymmetric for EvenOnly {
       fn matches(&self, name: &str, args: &[Value], actual: &Value) -> bool {
         assert_eq!(name, "toBeEven");
-        assert!(args.is_empty());
+        assert_eq!(args, [] as [Value; 0]);
         actual.as_i64().is_some_and(|n| n % 2 == 0)
       }
     }

@@ -2967,13 +2967,13 @@ mod drag_option_tests {
   #[test]
   fn default_drop_options_and_payload_are_empty() {
     let opts = DropOptions::default();
-    assert!(opts.modifiers.is_empty());
+    assert_eq!(opts.modifiers, [] as [crate::options::Modifier; 0]);
     assert!(opts.position.is_none());
     assert!(opts.timeout.is_none());
 
     let payload = DropPayload::default();
     assert!(payload.files.is_none());
-    assert!(payload.data.is_empty());
+    assert_eq!(payload.data, [] as [(String, String); 0]);
   }
 
   #[test]
@@ -3186,7 +3186,7 @@ mod click_option_tests {
     assert_eq!(opts.resolved_steps(), 1);
     assert!(!opts.is_force());
     assert!(!opts.is_trial());
-    assert!(opts.modifiers.is_empty());
+    assert_eq!(opts.modifiers, [] as [crate::options::Modifier; 0]);
     assert!(opts.position.is_none());
     assert!(opts.timeout.is_none());
     assert!(opts.no_wait_after.is_none());

@@ -2035,6 +2035,6 @@ mod use_options_tests {
       projects: vec![ProjectConfig::default()],
       ..TestConfig::default()
     };
-    assert!(bare.open_use_keys().is_empty());
+    assert_eq!(bare.open_use_keys(), [] as [&String; 0]);
   }
 }

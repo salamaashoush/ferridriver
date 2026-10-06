@@ -677,7 +677,7 @@ mod tests {
     .unwrap();
 
     let (files, errors) = resolve_extension_specs(&["./pkg".to_string()], tmp.path());
-    assert!(files.is_empty());
+    assert_eq!(files, [] as [std::path::PathBuf; 0]);
     assert_eq!(errors.len(), 1);
     assert!(errors[0].1.message.contains("gone.ts"), "{errors:?}");
   }
@@ -747,7 +747,7 @@ mod tests {
     std::fs::write(pkg.join("index.js"), "module.exports = {};").unwrap();
 
     let (files, errors) = resolve_extension_specs(&["cjs-ext".to_string()], tmp.path());
-    assert!(files.is_empty());
+    assert_eq!(files, [] as [std::path::PathBuf; 0]);
     assert_eq!(errors.len(), 1);
     assert!(errors[0].1.message.contains("type is not \"module\""), "{errors:?}");
   }

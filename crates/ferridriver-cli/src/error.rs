@@ -147,7 +147,7 @@ mod tests {
 
   #[test]
   fn an_unrecognised_failure_offers_nothing() {
-    assert!(hints_for_text("the disk is on fire").is_empty());
+    assert_eq!(hints_for_text("the disk is on fire"), [] as [(&str, String); 0]);
   }
 
   #[test]
@@ -168,7 +168,10 @@ mod tests {
   fn a_routine_disconnect_does_not_offer_doctor() {
     // "connect" as a substring matches "disconnected", which page teardown
     // says on every clean run.
-    assert!(hints_for_text("target disconnected while closing the page").is_empty());
+    assert_eq!(
+      hints_for_text("target disconnected while closing the page"),
+      [] as [(&str, String); 0]
+    );
   }
 
   #[test]

@@ -421,7 +421,7 @@ mod tests {
     let frames = vec![at("spec.ts", 9), at("spec.ts", 15)];
     let (location, boxed) = resolve_location(&StepOptions::default(), &frames, &[]);
     assert_eq!(location.map(|l| l.line), Some(9));
-    assert!(boxed.is_empty());
+    assert_eq!(boxed, [] as [crate::model::StepLocation; 0]);
   }
 
   #[test]
@@ -465,14 +465,14 @@ mod tests {
     );
     // Still boxed: the error attribution and the reported location are
     // separate decisions.
-    assert!(!boxed.is_empty());
+    assert_ne!(boxed, [] as [crate::model::StepLocation; 0]);
   }
 
   #[test]
   fn a_step_with_no_frames_and_no_option_has_no_location() {
     let (location, boxed) = resolve_location(&StepOptions::default(), &[], &[]);
     assert!(location.is_none());
-    assert!(boxed.is_empty());
+    assert_eq!(boxed, [] as [crate::model::StepLocation; 0]);
   }
 
   #[test]

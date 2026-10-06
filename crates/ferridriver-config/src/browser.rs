@@ -1240,7 +1240,7 @@ mod tests {
     // A field we do not know must not break a launcher that adds one.
     let fwd = parse_command_result(&serde_json::json!({ "args": [], "environment": "staging", "somethingNew": 7 }))
       .expect("unknown keys are ignored");
-    assert!(fwd.args.is_empty());
+    assert_eq!(fwd.args, [] as [String; 0]);
 
     // A wrong type is an error naming the key, not a dropped setting.
     let err = parse_command_result(&serde_json::json!({ "args": "not-a-list" })).expect_err("typed");

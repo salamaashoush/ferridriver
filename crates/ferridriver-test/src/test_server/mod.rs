@@ -382,7 +382,7 @@ mod tests {
     assert_eq!(request.string("grep").as_deref(), Some("smoke"));
     assert!(request.flag("headed"));
     assert!(!request.flag("missing"));
-    assert!(request.string_list("locations").is_empty());
+    assert_eq!(request.string_list("locations"), [] as [String; 0]);
   }
 
   #[tokio::test]

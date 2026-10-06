@@ -305,7 +305,7 @@ async fn caches_within_scope() {
 async fn typed_fixture_params_declare_dependencies() {
   let defs = ferridriver_test::collect_rust_fixtures();
   assert_eq!(defs["user_count"].dependencies, vec!["seeded_users".to_string()]);
-  assert!(defs["seeded_users"].dependencies.is_empty());
+  assert_eq!(defs["seeded_users"].dependencies, [] as [String; 0]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -315,7 +315,10 @@ mod tests {
       manifest: None,
       files: vec![PathBuf::from("/base/tool.ts").into()],
     };
-    assert!(check(&[loose], &env(&p, &a, &s, &st), crate::ExtensionHost::Mcp).is_empty());
+    assert_eq!(
+      check(&[loose], &env(&p, &a, &s, &st), crate::ExtensionHost::Mcp),
+      [] as [crate::requirements::RequirementIssue; 0]
+    );
   }
 
   #[test]
@@ -534,7 +537,10 @@ mod tests {
 
     // The conforming block passes.
     let good = BTreeMap::from([("acme".to_string(), serde_json::json!({ "origin": "https://x" }))]);
-    assert!(check(&[pkg(manifest)], &env(&p, &a, &s, &good), crate::ExtensionHost::Mcp).is_empty());
+    assert_eq!(
+      check(&[pkg(manifest)], &env(&p, &a, &s, &good), crate::ExtensionHost::Mcp),
+      [] as [crate::requirements::RequirementIssue; 0]
+    );
   }
 
   #[test]
