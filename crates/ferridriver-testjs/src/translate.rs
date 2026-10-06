@@ -433,6 +433,28 @@ async fn build_world_data(
   Ok(world)
 }
 
+/// Drops a worker's VM unless its test's run came back without a halt, so
+/// the next test gets one rebuilt from the bundle rather than one whose
+/// state is whatever the halt left behind.
+///
+/// It is a guard rather than a check after the run because the runner
+/// drops the whole test future when its own timeout fires, and that timer
+/// races the VM deadline it mirrors. When the runner wins, nothing after
+/// the run executes, and a check there would leave the halted VM in place.
+struct PoisonUnlessClean {
+  sessions: Arc<crate::SessionPool>,
+  worker_index: u32,
+  clean: bool,
+}
+
+impl Drop for PoisonUnlessClean {
+  fn drop(&mut self) {
+    if !self.clean {
+      self.sessions.poison(self.worker_index);
+    }
+  }
+}
+
 fn make_test_fn(p: TestFnParams) -> TestFn {
   let p = Arc::new(p);
   Arc::new(move |pool| {
@@ -481,15 +503,15 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       // binding drops.
       let console = session.capture_console(Arc::clone(&test_info));
       session.session().arm_deadline(base_timeout);
+      let mut halt = PoisonUnlessClean {
+        sessions: Arc::clone(&p.sessions),
+        worker_index: test_info.worker_index,
+        clean: false,
+      };
       let result = ferridriver_script::run_test(&session.vm_handle(), spec, world, bridge.clone() as _).await;
-      let force_halted = session.session().deadline().force_halted();
+      halt.clean = !session.session().deadline().force_halted();
       session.session().disarm_deadline();
-      if force_halted {
-        // The interpreter was stopped mid-run. Drop this worker's VM so
-        // the next test gets one rebuilt from the bundle rather than one
-        // whose state is whatever the halt left behind.
-        p.sessions.poison(test_info.worker_index);
-      }
+      drop(halt);
       drop(console);
       bridge.flush().await;
 
