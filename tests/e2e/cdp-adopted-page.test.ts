@@ -1,9 +1,11 @@
 import { test, expect } from '@ferridriver/test';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 for (const hostname of ['127.0.0.1', 'localhost']) {
 test(`attaching an existing ${hostname === 'localhost' ? 'cross-process' : 'same-process'} frame retains its document and ownership`, async () => {
+  runOnceAcrossProjects();
   const owner = await chromium({transport: 'ws'}).launch({headless: true});
   try {
     const existing = await owner.newPage();
@@ -42,6 +44,7 @@ test(`attaching an existing ${hostname === 'localhost' ? 'cross-process' : 'same
 }
 
 test('an attached existing tab has a main frame and completes navigation', async () => {
+  runOnceAcrossProjects();
   const owner = await chromium({ transport: 'ws' }).launch({ headless: true });
   try {
     await owner.newPage();

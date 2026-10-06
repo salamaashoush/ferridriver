@@ -1,7 +1,9 @@
 import {test, expect} from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 for (const transport of ['pipe', 'ws'] as const) {
   test(`remote renderer inherits scripts and later routes over ${transport}`, async () => {
+    runOnceAcrossProjects();
     const browser = await chromium({transport}).launch({headless: true});
     try {
       const page = await browser.newPage();

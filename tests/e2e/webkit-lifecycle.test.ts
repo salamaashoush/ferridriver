@@ -1,8 +1,10 @@
 import { test, expect, type Browser, type Download } from '@ferridriver/test';
 import { promises as fs } from 'node:fs';
 import { dirname } from 'node:path';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 test('independent WebKit browsers retain independent downloads after one closes', async ({ baseURL }) => {
+  runOnceAcrossProjects();
   const first = await webkit().launch({ headless: true });
   let second: Browser | undefined;
   try {
@@ -34,6 +36,7 @@ test('independent WebKit browsers retain independent downloads after one closes'
 
 
 test('WebKit launches the explicit executable and reports its installed launcher', async () => {
+  runOnceAcrossProjects();
   const binary = webkit().executablePath();
   expect(binary).toBeTruthy();
   const executable = test.info().outputPath('custom-webkit.sh');
@@ -55,6 +58,7 @@ test('WebKit launches the explicit executable and reports its installed launcher
 });
 
 test('WebKit rejects a missing explicit executable without falling back', async () => {
+  runOnceAcrossProjects();
   await expect(webkit().launch({headless:true, executablePath:test.info().outputPath('missing-webkit')}))
     .rejects.toThrow(/No such file|not found/);
 });

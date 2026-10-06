@@ -5,9 +5,11 @@
 // Rust fn names.
 
 import { test, describe, expect, safari as safariFactory } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 describe('browser type', () => {
   test('browser_type_name', async () => {
+    runOnceAcrossProjects();
     // The factories exist regardless of which backend the current
     // project drives — Playwright likewise exposes all three.
     expect(chromium().name()).toBe('chromium');
@@ -18,12 +20,14 @@ describe('browser type', () => {
   });
 
   test('browser_type_executable_path', async () => {
+    runOnceAcrossProjects();
     const path = chromium().executablePath();
     expect(typeof path).toBe('string');
     expect(path!.length).toBeGreaterThan(0);
   });
 
   test('browser_type_chromium_launch', async () => {
+    runOnceAcrossProjects();
     // Drives BrowserType -> Browser -> handshake plumbing end-to-end;
     // the handshake captures a real product string.
     test.slow();
@@ -37,6 +41,7 @@ describe('browser type', () => {
   });
 
   test('browser_type_chromium_transport_ws', async () => {
+    runOnceAcrossProjects();
     // The transport override actually selects the WebSocket backend.
     test.slow();
     const browser = await chromium({ transport: 'ws' }).launch({ headless: true });
@@ -49,6 +54,7 @@ describe('browser type', () => {
   });
 
   test('browser_type_connect_over_cdp_chromium_only', async () => {
+    runOnceAcrossProjects();
     // connectOverCDP is a real protocol-level Chromium constraint — the
     // rejection is typed, not a stub.
     let firefoxErr = '';
@@ -68,6 +74,7 @@ describe('browser type', () => {
   });
 
   test('browser_type_launch_persistent_context', async () => {
+    runOnceAcrossProjects();
     // Launching with a userDataDir populates the profile; a second
     // launch against the SAME dir must succeed (proves the first
     // browser shut down, releasing the SingletonLock) and produce a

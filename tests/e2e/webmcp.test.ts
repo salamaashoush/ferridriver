@@ -1,9 +1,11 @@
 import {test, expect} from '@ferridriver/test';
 import {verifyWebMcp} from '../shared/webmcp';
 import {verifyWebMcpConcurrency} from '../shared/webmcp-concurrency';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 for (const transport of ['pipe', 'ws'] as const) {
   test(`native Chromium WebMCP ignores main-world method shadows: ${transport}`, async ({baseURL}) => {
+    runOnceAcrossProjects();
     const browser = await chromium({transport}).launch({headless:true,
       args:['--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport']});
     try {
@@ -31,6 +33,7 @@ for (const transport of ['pipe', 'ws'] as const) {
 
 for (const product of ['chromium-pipe', 'chromium-ws', 'firefox'] as const) {
   test(`native WebMCP allows concurrent discovery and trusted input: ${product}`, async ({baseURL}) => {
+    runOnceAcrossProjects();
     const browser = product === 'firefox'
       ? await firefox().launch({headless: true, firefoxUserPrefs: {
         'dom.modelcontext.enabled': true, 'dom.modelcontext.testing.enabled': true,
@@ -55,6 +58,7 @@ test('native WebMCP reports unavailable documents explicitly', async ({page}) =>
 
 for (const transport of ['pipe', 'ws'] as const) {
   test(`native WebMCP tools and results over ${transport}`, async () => {
+    runOnceAcrossProjects();
     const browser = await chromium({transport}).launch({headless: true,
       args: ['--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport']});
     try {
@@ -71,6 +75,7 @@ for (const transport of ['pipe', 'ws'] as const) {
 }
 
 test('native Firefox WebMCP preserves top-level tool results, failures and lifecycle', async () => {
+  runOnceAcrossProjects();
   const browser = await firefox().launch({headless: true, firefoxUserPrefs: {
     'dom.modelcontext.enabled': true,
     'dom.modelcontext.testing.enabled': true,
@@ -138,6 +143,7 @@ test('native Firefox WebMCP preserves top-level tool results, failures and lifec
 });
 
 test('native Firefox WebMCP discovers tools outside the main realm', async ({baseURL}) => {
+  runOnceAcrossProjects();
   const browser = await firefox().launch({headless:true, firefoxUserPrefs:{
     'dom.modelcontext.enabled':true, 'dom.modelcontext.testing.enabled':true,
   }});
@@ -158,6 +164,7 @@ test('native Firefox WebMCP discovers tools outside the main realm', async ({bas
 });
 
 test('native Firefox exposes its current WebMCP registration limits', async () => {
+  runOnceAcrossProjects();
   const browser = await firefox().launch({headless: true, firefoxUserPrefs: {
     'dom.modelcontext.enabled': true,
     'dom.modelcontext.testing.enabled': true,

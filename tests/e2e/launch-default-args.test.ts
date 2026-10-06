@@ -10,6 +10,7 @@
 // gone is gone, and nothing has to be reasoned about to see it.
 
 import { test, describe, expect } from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 /** What Chrome says it was started with. */
 async function argv(options: Record<string, unknown>): Promise<string[] | 'refused'> {
@@ -32,12 +33,8 @@ async function argv(options: Record<string, unknown>): Promise<string[] | 'refus
 }
 
 describe('ignoreDefaultArgs', () => {
-  test('a named switch is dropped and the rest are kept', async ({ browserName }) => {
-    if (browserName !== 'chromium') {
-      // `chromium()` is always Chromium, so there is nothing
-      // project-specific here beyond not running it four times.
-      return;
-    }
+  test('a named switch is dropped and the rest are kept', async () => {
+    runOnceAcrossProjects();
 
     const all = await argv({});
     expect(Array.isArray(all)).toBe(true);
@@ -56,10 +53,8 @@ describe('ignoreDefaultArgs', () => {
     expect(untouched.length).toBe(before.length);
   });
 
-  test('true drops the lot, and the browser still starts', async ({ browserName }) => {
-    if (browserName !== 'chromium') {
-      return;
-    }
+  test('true drops the lot, and the browser still starts', async () => {
+    runOnceAcrossProjects();
     // `--enable-automation` is one of the defaults, so a browser
     // launched without them will not report its command line at all.
     // The refusal IS the evidence that they went.
@@ -77,10 +72,8 @@ describe('ignoreDefaultArgs', () => {
     }
   });
 
-  test('the backends with no switch list to drop say so', async ({ browserName }) => {
-    if (browserName !== 'chromium') {
-      return;
-    }
+  test('the backends with no switch list to drop say so', async () => {
+    runOnceAcrossProjects();
     // Named for the backend rather than the product: `firefox()` is the
     // BiDi launch path, and the error says which one refused. Neither
     // injects a switch list, so filtering one is a request there is no

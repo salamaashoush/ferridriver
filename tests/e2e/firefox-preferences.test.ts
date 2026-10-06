@@ -1,6 +1,7 @@
 import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {test, expect} from '@ferridriver/test';
+import { runOnceAcrossProjects } from './helpers/projects';
 
 const preferences = {
   'general.useragent.override': 'sashoush-pref-probe',
@@ -17,6 +18,7 @@ async function observe(page: any) {
 }
 
 test('Firefox launch applies string, number and boolean preferences without leaking to a fresh profile', async () => {
+  runOnceAcrossProjects();
   const browser = await firefox().launch({headless: true, firefoxUserPrefs: preferences});
   try {
     expect(await observe(await browser.newPage())).toEqual({agent: 'sashoush-pref-probe', cores: 1, notifications: 'undefined'});
@@ -34,6 +36,7 @@ test('Firefox launch applies string, number and boolean preferences without leak
 });
 
 test('Firefox persistent preferences preserve caller content and reject a second live profile owner', async () => {
+  runOnceAcrossProjects();
   const profile = test.info().outputPath('firefox-profile');
   await mkdir(profile, {recursive: true});
   const prefsFile = join(profile, 'user.js');
@@ -60,6 +63,7 @@ test('Firefox persistent preferences preserve caller content and reject a second
 });
 
 test('Firefox launch rejects non-scalar preferences through native scripting', async () => {
+  runOnceAcrossProjects();
   for (const invalid of [null, [], {}, 1.5, 2147483648, -2147483649, 'sashoush\0pref']) {
     await expect(firefox().launch({headless: true, firefoxUserPrefs: {invalid: invalid as any}})).rejects.toThrow(/firefoxUserPrefs/);
   }
