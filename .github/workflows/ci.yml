@@ -132,32 +132,60 @@ jobs:
   # Tests: run after basics gate passes
   # ---------------------------------------------------------------------------
   test:
-    name: Test (${{ matrix.os }})
+    # One job per suite, each running the same `cargo gate test --only`
+    # a developer runs locally. A suite alone on its runner gets every
+    # browser slot, so a slow suite cannot starve the others or run into
+    # the gate's per-suite limit, and a failure names its suite. macOS
+    # covers WebKit, Chromium, the addon and the Rust tests; Firefox runs
+    # on Linux.
+    name: Test (${{ matrix.os }}, ${{ matrix.id }})
     needs: [basics]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - { os: ubuntu-latest, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
+          - { os: ubuntu-latest, id: e2e-cdp-raw, gate: --only e2e --project cdp-raw }
+          - { os: ubuntu-latest, id: e2e-bidi, gate: --only e2e --project bidi }
+          - { os: ubuntu-latest, id: e2e-webkit, gate: --only e2e --project webkit }
+          - { os: ubuntu-latest, id: integration, gate: --only integration }
+          - { os: ubuntu-latest, id: bdd, gate: --only bdd }
+          - { os: ubuntu-latest, id: acceptance, gate: --only acceptance --only acceptance-bdd }
+          - { os: ubuntu-latest, id: napi, gate: --only napi }
+          - { os: ubuntu-latest, id: rust, gate: --only rust-build --only doc-tests }
+          - { os: macos-latest, id: e2e-webkit, gate: --only e2e --project webkit }
+          - { os: macos-latest, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
+          - { os: macos-latest, id: napi, gate: --only napi }
+          - { os: macos-latest, id: rust, gate: --only rust-build --only doc-tests }
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      # The browser suites all build the same binaries and share one
+      # cache; the Rust suite builds every test target and keeps its own.
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ${{ matrix.id == 'rust' && 'rust' || 'browser' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && (matrix.id == 'rust' || matrix.id == 'e2e-webkit') }}
       - uses: oven-sh/setup-bun@v2
 
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
         # Build-time deps only — browser runtime deps come from
-        # `ferridriver install --with-deps chromium webkit` below.
+        # `ferridriver install --with-deps` below.
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libclang-dev pkg-config ffmpeg
+
+      # Ubuntu 24.04 denies unprivileged user namespaces, which Chromium's
+      # sandbox needs whenever `--no-sandbox` is not among its arguments.
+      - name: Allow Chromium's sandbox (Linux)
+        if: runner.os == 'Linux'
+        run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
@@ -172,19 +200,19 @@ jobs:
       - name: Install browsers and accessibility engine
         run: target/debug/ferridriver install --with-deps chromium firefox webkit axe
 
-      # Format, lint and docs already ran in the basics jobs. The gate's
-      # default of 32 browser slots is sized for a desktop; on a 4-vCPU
-      # runner it oversubscribes the browsers until tests time out.
-      - name: Run the headless gate
-        run: cargo gate test
+      # The gate's default of 32 browser slots is sized for a desktop. The
+      # hosted runners have 4 vCPUs on Linux and 3 on macOS.
+      - name: Run ${{ matrix.id }}
+        run: cargo gate test ${{ matrix.gate }}
         env:
-          FERRIDRIVER_GATE_WORKERS: 4
+          FERRIDRIVER_GATE_WORKERS: ${{ runner.os == 'macOS' && 3 || 4 }}
+          FERRIDRIVER_GATE_TIMEOUT: 1800
 
       - name: Upload gate logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gate-${{ matrix.os }}
+          name: gate-${{ matrix.os }}-${{ matrix.id }}
           path: target/gate/
           if-no-files-found: ignore
 
