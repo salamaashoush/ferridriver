@@ -2,6 +2,7 @@ mod process;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -28,10 +29,27 @@ impl Job {
       dependencies: dependencies.iter().map(|s| (*s).into()).collect(),
       browsers: 0,
       cargo: command.first() == Some(&"cargo"),
-      timeout: 900,
+      timeout: job_timeout(),
     }
   }
 }
+
+/// Seconds any one check may run. 900 fits a desktop running the whole
+/// gate at once; a slower machine running one suite alone sets
+/// `FERRIDRIVER_GATE_TIMEOUT` rather than having the suite cut short.
+fn job_timeout() -> u64 {
+  static TIMEOUT: OnceLock<u64> = OnceLock::new();
+  *TIMEOUT.get_or_init(|| {
+    std::env::var("FERRIDRIVER_GATE_TIMEOUT")
+      .ok()
+      .and_then(|value| value.parse().ok())
+      .filter(|&seconds| seconds > 0)
+      .unwrap_or(900)
+  })
+}
+
+/// The suites that drive browsers, as `--only` names them.
+const BROWSER_SUITES: [&str; 5] = ["e2e", "integration", "bdd", "acceptance", "acceptance-bdd"];
 
 fn positive(value: &str) -> Result<usize> {
   let n = value.parse::<usize>().context("expected a positive worker count")?;
@@ -67,7 +85,14 @@ fn select_jobs(jobs: Vec<Job>, selected: &[String]) -> Result<Vec<Job>> {
   Ok(jobs.into_iter().filter(|job| required.contains(&job.name)).collect())
 }
 
-fn jobs(root: &Path, workers: usize, ready: bool, overlap_ready_prerequisites: bool) -> Result<Vec<Job>> {
+fn jobs(
+  root: &Path,
+  workers: usize,
+  ready: bool,
+  overlap_ready_prerequisites: bool,
+  exclusive: bool,
+  projects: &[String],
+) -> Result<Vec<Job>> {
   let mut jobs = vec![
     Job::new(
       "build",
@@ -124,9 +149,11 @@ fn jobs(root: &Path, workers: usize, ready: bool, overlap_ready_prerequisites: b
         .iter()
         .any(|suffix| name.ends_with(suffix))
     {
+      // bun's default of 5s per test is less than a cold Firefox launch
+      // takes on a CI runner, and these tests launch their own browsers.
       jobs.push(Job::new(
         &format!("napi/{name}"),
-        &["bun", "test", &format!("test/{name}")],
+        &["bun", "test", &format!("test/{name}"), "--timeout", "30000"],
         &["napi-build", "types"],
       ));
     }
@@ -140,7 +167,7 @@ fn jobs(root: &Path, workers: usize, ready: bool, overlap_ready_prerequisites: b
   if ready {
     jobs.extend(ready_jobs());
   }
-  jobs.extend(suite_jobs(workers));
+  jobs.extend(suite_jobs(workers, exclusive, projects));
   for job in &mut jobs {
     if job.name.starts_with("napi") {
       job.cwd = "crates/ferridriver-node".into();
@@ -194,13 +221,16 @@ fn ready_jobs() -> Vec<Job> {
   jobs
 }
 
-fn suite_jobs(workers: usize) -> Vec<Job> {
+/// `exclusive` is true when one browser suite was selected on its own,
+/// which is how CI runs them: that suite then owns every browser slot
+/// instead of the share it gets beside the others in a full gate run.
+fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> {
   let mut jobs = Vec::new();
   // Browser work is mostly waiting on independent renderer processes. The
   // one-CPU CI quota otherwise collapses the E2E suite to a serial run; 16
   // workers is the measured throughput knee for this suite.
   let e2e_workers = workers.clamp(1, 16);
-  let shared_workers = (workers / 8).max(1);
+  let shared_workers = if exclusive { workers } else { (workers / 8).max(1) };
   let worker_count = shared_workers.to_string();
   let mut e2e = Job::new(
     "e2e",
@@ -216,6 +246,9 @@ fn suite_jobs(workers: usize) -> Vec<Job> {
     ],
     &["build", "types"],
   );
+  for project in projects {
+    e2e.command.extend(["--project".to_string(), project.clone()]);
+  }
   e2e.browsers = e2e_workers;
   jobs.push(e2e);
   for (name, command) in [
@@ -369,6 +402,7 @@ async fn main() -> Result<()> {
   let mut parallel = 4;
   let mut mode = "ready".to_string();
   let mut selected = Vec::new();
+  let mut projects = Vec::new();
   let mut args = std::env::args().skip(1);
   while let Some(arg) = args.next() {
     match arg.as_str() {
@@ -376,10 +410,28 @@ async fn main() -> Result<()> {
       "--workers" => workers = positive(&args.next().context("--workers needs a value")?)?,
       "--jobs" | "-j" => parallel = positive(&args.next().context("--jobs needs a value")?)?,
       "--only" => selected.push(args.next().context("--only needs a check name")?),
-      _ => bail!("unknown argument {arg}; usage: cargo gate [ready|test] [--workers N] [--jobs N] [--only NAME]"),
+      "--project" => projects.push(args.next().context("--project needs a project name")?),
+      _ => bail!(
+        "unknown argument {arg}; usage: cargo gate [ready|test] [--workers N] [--jobs N] [--only NAME] [--project NAME]"
+      ),
     }
   }
-  let jobs = select_jobs(jobs(&root, workers, mode == "ready", selected.is_empty())?, &selected)?;
+  let exclusive = selected
+    .iter()
+    .filter(|name| BROWSER_SUITES.contains(&name.as_str()))
+    .count()
+    == 1;
+  let jobs = select_jobs(
+    jobs(
+      &root,
+      workers,
+      mode == "ready",
+      selected.is_empty(),
+      exclusive,
+      &projects,
+    )?,
+    &selected,
+  )?;
   run_gate(&root, workers, parallel, jobs).await
 }
 
