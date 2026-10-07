@@ -112,13 +112,30 @@ mod tests {
       result = &mut server => panic!("server unexpectedly stopped: {result:?}"),
       () = client => {},
     }
-    // Linux can connect a TCP socket to itself if both ephemeral endpoints coincide.
-    let probe = tokio::net::TcpSocket::new_v4().unwrap();
-    probe.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    assert_ne!(probe.local_addr().unwrap(), address);
     drop(server);
-    assert!(probe.connect(address).await.is_err());
-    assert!(TcpListener::bind(address).await.is_ok());
+    // The released listener must stop accepting. macOS still completes a
+    // connect for a moment after the close, so refusal is awaited rather
+    // than expected on the first attempt; a listener left open keeps
+    // accepting and fails the wait. Rebinding the address is no proof
+    // there: the probe's own closes leave TIME_WAIT on the port, which
+    // blocks a new bind on macOS whichever reuse options it sets.
+    let refused = tokio::time::timeout(Duration::from_secs(2), async {
+      loop {
+        // Linux can connect a TCP socket to itself if both ephemeral endpoints coincide.
+        let probe = tokio::net::TcpSocket::new_v4().unwrap();
+        probe.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        assert_ne!(probe.local_addr().unwrap(), address);
+        if probe.connect(address).await.is_err() {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await;
+    assert!(
+      refused.is_ok(),
+      "the probe's listener kept accepting after cancellation"
+    );
   }
 
   #[tokio::test]
