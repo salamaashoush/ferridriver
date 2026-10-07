@@ -332,13 +332,14 @@ impl SessionProcs {
     if rc.persistent {
       return Err("this command is declared `persistent`: use commands.start/status/stop, not run".into());
     }
-    let (job, out, err) = {
+    let (job, out, err, pid) = {
       let mut jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       if self.closing.load(std::sync::atomic::Ordering::Acquire) {
         return Err("session processes are closing".into());
       }
       jobs.retain(|job| job.exit.borrow().is_none());
       let mut child = build(rc).spawn().map_err(|e| format!("spawn command: {e}"))?;
+      let pid = child.id();
       let out = child.stdout.take();
       let err = child.stderr.take();
       let group = ChildGroup::unregistered(child);
@@ -350,7 +351,7 @@ impl SessionProcs {
       let job = Job { control, exit, failure };
       jobs.push(job.clone());
       tokio::spawn(own_process(group, requests, Vec::new(), exit_w, failure_w));
-      (job, out, err)
+      (job, out, err, pid)
     };
     let mut cancel = StopOnDrop(Some(job.control.clone()));
     let legs = [
@@ -374,8 +375,19 @@ impl SessionProcs {
           .filter(|(done, _)| !done.load(Ordering::Relaxed))
           .map(|(_, leg)| *leg)
           .collect();
+        // An exit that happened but was never observed is a different bug
+        // from a command that is still running; say which one this was.
+        let exited = if legs[0].0.load(Ordering::Relaxed) {
+          ""
+        } else {
+          match pid.map(ferridriver::backend::process::child_exited) {
+            Some(Ok(true)) => " (the process had exited, but its owner never saw it)",
+            Some(Ok(false)) => " (the process is still running)",
+            _ => "",
+          }
+        };
         Err(format!(
-          "command timed out after {ms}ms waiting for {}",
+          "command timed out after {ms}ms waiting for {}{exited}",
           pending.join(", ")
         ))
       });
@@ -796,6 +808,7 @@ mod tests {
       error.contains("timed out after 20ms waiting for the process to exit"),
       "{error}"
     );
+    assert!(error.contains("(the process is still running)"), "{error}");
     assert!(procs.jobs.lock().expect("jobs").is_empty());
     let error = procs
       .exec_oneshot(&command("exec yes sashoush", false))

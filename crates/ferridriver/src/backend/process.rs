@@ -251,6 +251,29 @@ pub struct ChildGroup {
   record: Option<ProcRecord>,
 }
 
+/// Whether our child `pid` has exited, without reaping it: the exit
+/// status stays for its owner to collect.
+///
+/// # Errors
+/// Fails when `pid` is not a waitable child of this process.
+#[cfg(unix)]
+pub fn child_exited(pid: u32) -> std::io::Result<bool> {
+  use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+  let pid = Pid::from_raw(i32::try_from(pid).map_err(std::io::Error::other)?)
+    .filter(|pid| *pid != Pid::INIT)
+    .ok_or_else(|| std::io::Error::other("child has no owned process id"))?;
+  loop {
+    match waitid(
+      WaitId::Pid(pid),
+      WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
+    ) {
+      Ok(status) => return Ok(status.is_some()),
+      Err(rustix::io::Errno::INTR) => {},
+      Err(error) => return Err(error.into()),
+    }
+  }
+}
+
 impl ChildGroup {
   #[must_use]
   pub fn new(child: tokio::process::Child) -> Self {
@@ -322,20 +345,7 @@ impl ChildGroup {
 
   #[cfg(unix)]
   fn exit_observed(&self) -> std::io::Result<bool> {
-    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
-    let pid = Pid::from_raw(i32::try_from(self.pid).map_err(std::io::Error::other)?)
-      .filter(|pid| *pid != Pid::INIT)
-      .ok_or_else(|| std::io::Error::other("child has no owned process id"))?;
-    loop {
-      match waitid(
-        WaitId::Pid(pid),
-        WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG,
-      ) {
-        Ok(status) => return Ok(status.is_some()),
-        Err(rustix::io::Errno::INTR) => {},
-        Err(error) => return Err(error.into()),
-      }
-    }
+    child_exited(self.pid)
   }
 
   #[cfg(unix)]
