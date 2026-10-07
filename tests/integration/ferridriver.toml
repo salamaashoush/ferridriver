@@ -37,10 +37,14 @@ run = ["${binary}", "--port", "0"]
 persistent = true
 env = ["TOKIO_WORKER_THREADS"]
 
+# `rust-test --ui` runs cargo, so it gets the build environment the gate
+# prebuilt the example under. Without CI's CARGO_INCREMENTAL=0 the
+# profile no longer matched the prebuild, and the test spent its whole
+# budget recompiling the workspace.
 [scripting.allow.commands.ui]
 run = ["sh", "-c", "${command}"]
 persistent = true
-env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "TOKIO_WORKER_THREADS"]
+env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "TOKIO_WORKER_THREADS", "CARGO_HOME", "CARGO_INCREMENTAL", "CARGO_TARGET_DIR", "RUSTFLAGS", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
 
 [scripting.allow.commands.websocket]
 run = ["${binary}", "${url}"]
