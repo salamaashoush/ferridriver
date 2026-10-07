@@ -24,6 +24,14 @@ run = ["sh", "-c", "${command}"]
 persistent = true
 env = ["TOKIO_WORKER_THREADS"]
 
+# ChromeDriver starts a browser, so it gets the environment the other
+# browser-launching commands pass. Started through `stdio` it had none,
+# and on the CI image Chrome logged an unwritable /.cache and never came up.
+[scripting.allow.commands.chromedriver]
+run = ["sh", "-c", "${command}"]
+persistent = true
+env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "LD_LIBRARY_PATH", "TOKIO_WORKER_THREADS"]
+
 [scripting.allow.commands.fixtures]
 run = ["${binary}", "--port", "0"]
 persistent = true

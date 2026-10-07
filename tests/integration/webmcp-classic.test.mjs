@@ -19,11 +19,11 @@ test(`WebDriver native WebMCP concurrency, results and traces, bidi=${bidi}`, as
   // ChromeDriver's own log is the only record of why a session did not
   // start; it is attached to the failure rather than kept on disk.
   const driverLog = test.info().outputPath('chromedriver.log');
-  await commands.start('stdio', {command: `${quote(driver)} --port=0 --verbose --log-path=${quote(driverLog)}`});
+  await commands.start('chromedriver', {command: `${quote(driver)} --port=0 --verbose --log-path=${quote(driverLog)}`});
   try {
-    const output = await commands.waitForOutput('stdio', 'ChromeDriver was started successfully on port');
+    const output = await commands.waitForOutput('chromedriver', 'ChromeDriver was started successfully on port');
     const line = output.match(/started successfully on port (\d+)/)
-      ?? (await commands.waitForOutput('stdio', '\n')).match(/started successfully on port (\d+)/);
+      ?? (await commands.waitForOutput('chromedriver', '\n')).match(/started successfully on port (\d+)/);
     assert.ok(line, output);
     await fixtureServer(async base => {
       const cwd = await workspace({'main.ts': `
@@ -78,7 +78,7 @@ export default 'passed';
       assert.equal(calls.filter(action => action.error).length, 2, JSON.stringify(calls));
     });
   } finally {
-    await commands.stop('stdio');
+    await commands.stop('chromedriver');
   }
 });
 }
