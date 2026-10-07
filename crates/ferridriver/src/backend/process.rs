@@ -431,10 +431,19 @@ impl ChildGroup {
 
   /// Wait for a browser to exit by itself after a graceful close. `Err`
   /// says why it did not, so a failed flush names the cause.
+  ///
+  /// A browser that exits on its own has finished its shutdown, so a
+  /// non-zero status is logged rather than failed, as Playwright does.
+  /// Chromium on Apple Silicon CI runners exits with 2, its hang code, at
+  /// the end of every persistent-profile close.
   pub(crate) async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> Result<(), String> {
     match tokio::time::timeout(timeout, self.wait()).await {
-      Ok(Ok(status)) if status.success() => Ok(()),
-      Ok(Ok(status)) => Err(format!("it exited with {status}")),
+      Ok(Ok(status)) => {
+        if !status.success() {
+          tracing::warn!(%status, "browser exited with a failure status after a graceful close");
+        }
+        Ok(())
+      },
       Ok(Err(error)) => Err(format!("waiting for it failed: {error}")),
       Err(_) => Err(format!("it was still running after {}s", timeout.as_secs())),
     }
