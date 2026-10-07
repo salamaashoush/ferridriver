@@ -733,6 +733,15 @@ fn build_browser_fixture_defs(
   resources: Arc<TestBrowserResources>,
   scope: FixtureScope,
 ) -> FxHashMap<String, FixtureDef> {
+  // A test-scoped context or page is set up under the test's own budget,
+  // as Playwright's are: a cold browser start the test timeout allows must
+  // not fail on a shorter cap of the fixture's own. Suite hooks run under
+  // no budget, so their fixtures keep one.
+  let timeout = if scope == FixtureScope::Test {
+    Duration::ZERO
+  } else {
+    Duration::from_secs(10)
+  };
   let mut defs = FxHashMap::default();
 
   defs.insert(
@@ -752,7 +761,7 @@ fn build_browser_fixture_defs(
         }
       }),
       teardown: None,
-      timeout: Duration::from_secs(10),
+      timeout,
       auto: false,
     },
   );
@@ -774,7 +783,7 @@ fn build_browser_fixture_defs(
         }
       }),
       teardown: None,
-      timeout: Duration::from_secs(10),
+      timeout,
       auto: false,
     },
   );
@@ -1559,21 +1568,34 @@ impl Worker {
     modifiers.timeout_updates.send_replace(timeout_dur);
     test_pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
+    // Worker-scoped fixtures (the browser) are set up outside the test's
+    // budget, as Playwright gives them a slot of their own.
     let mut before_each_err = test_pool
       .resolve_worker_dependencies(&fixture_requests)
       .await
       .err()
       .map(TestFailure::from);
 
-    // Playwright `auto: true` fixtures resolve regardless of whether
-    // the test body destructured them. Walk the full def graph for
-    // this scope (and any narrower parents) and pre-resolve.
-    for name in test_pool.auto_fixture_names_for(FixtureScope::Test) {
-      if before_each_err.is_some() {
-        break;
-      }
-      if let Err(e) = test_pool.resolve(&name).await {
-        before_each_err = Some(TestFailure::from(e));
+    // Test-scoped fixture setup, beforeEach and the body then spend one
+    // budget, as they do in Playwright (`workerMain.ts` runs them in the
+    // test's default slot).
+    let budget = ferridriver::pause::BudgetStart::now();
+    let mut timed_out_while: Option<&'static str> = None;
+    if before_each_err.is_none() {
+      let setup = ferridriver::pause::run_within_updates_from(budget, modifiers.timeout_updates.subscribe(), async {
+        // Playwright `auto: true` fixtures resolve regardless of whether
+        // the test body destructured them. Walk the full def graph for
+        // this scope (and any narrower parents) and pre-resolve.
+        for name in test_pool.auto_fixture_names_for(FixtureScope::Test) {
+          test_pool.resolve(&name).await?;
+        }
+        Ok::<(), ferridriver::FerriError>(())
+      })
+      .await;
+      if let Ok(result) = setup {
+        before_each_err = result.err().map(TestFailure::from);
+      } else {
+        timed_out_while = Some("setting up fixtures");
       }
     }
 
@@ -1584,88 +1606,99 @@ impl Worker {
 
     let mut page_for_artifacts = None;
     let video_mode = self.config.video.mode;
-    let video_handle: Option<VideoHandle> = if before_each_err.is_some() || !video_mode.should_record(attempt) {
-      None
-    } else {
-      match test_pool.get::<ferridriver::Page>("page").await {
-        Ok(page) => {
-          page_for_artifacts = Some(Arc::clone(&page));
-          let _ = std::fs::create_dir_all(&test_info.output_dir);
-          // Eager when the recording is kept even on a pass; buffered
-          // when only a failure keeps it.
-          if video_mode.records_eagerly(attempt) {
-            let ext = ferridriver::video::video_extension();
-            let video_path =
-              test_info
-                .output_dir
-                .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-            match ferridriver::video::start_recording(
-              &page,
-              video_path,
-              self.config.video.width,
-              self.config.video.height,
-              80,
-            )
-            .await
-            {
-              Ok(h) => Some(VideoHandle::Eager(h)),
-              Err(e) => {
-                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                None
-              },
+    let video_handle: Option<VideoHandle> =
+      if before_each_err.is_some() || timed_out_while.is_some() || !video_mode.should_record(attempt) {
+        None
+      } else {
+        match ferridriver::pause::run_within_updates_from(
+          budget,
+          modifiers.timeout_updates.subscribe(),
+          test_pool.get::<ferridriver::Page>("page"),
+        )
+        .await
+        {
+          Err(ferridriver::pause::Timedout) => {
+            timed_out_while = Some("setting up fixtures");
+            None
+          },
+          Ok(Ok(page)) => {
+            page_for_artifacts = Some(Arc::clone(&page));
+            let _ = std::fs::create_dir_all(&test_info.output_dir);
+            // Eager when the recording is kept even on a pass; buffered
+            // when only a failure keeps it.
+            if video_mode.records_eagerly(attempt) {
+              let ext = ferridriver::video::video_extension();
+              let video_path =
+                test_info
+                  .output_dir
+                  .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
+              match ferridriver::video::start_recording(
+                &page,
+                video_path,
+                self.config.video.width,
+                self.config.video.height,
+                80,
+              )
+              .await
+              {
+                Ok(h) => Some(VideoHandle::Eager(h)),
+                Err(e) => {
+                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                  None
+                },
+              }
+            } else {
+              match ferridriver::video::start_buffered_recording(
+                &page,
+                self.config.video.width,
+                self.config.video.height,
+                80,
+              )
+              .await
+              {
+                Ok(h) => Some(VideoHandle::Buffered(h)),
+                Err(e) => {
+                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                  None
+                },
+              }
             }
-          } else {
-            match ferridriver::video::start_buffered_recording(
-              &page,
-              self.config.video.width,
-              self.config.video.height,
-              80,
-            )
-            .await
-            {
-              Ok(h) => Some(VideoHandle::Buffered(h)),
-              Err(e) => {
-                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                None
-              },
-            }
-          }
-        },
-        Err(e) => {
-          let () = resources.close().await;
-          let duration = start.elapsed();
-          let failure = TestFailure::wrap("failed to create page", e);
-          let outcome = Arc::new(TestOutcome {
-            test_id: test_id.clone(),
-            status: TestStatus::Failed,
-            duration,
-            attempt,
-            max_attempts,
-            errors: vec![failure.clone()],
-            error: Some(failure),
-            annotations: test.annotations.clone(),
-            ..self.outcome_base(test, started_at)
-          });
-          if let Some(event_bus) = &self.event_bus {
-            event_bus.emit(ReporterEvent::TestFinished {
-              outcome: Arc::clone(&outcome),
+          },
+          Ok(Err(e)) => {
+            let () = resources.close().await;
+            let duration = start.elapsed();
+            let failure = TestFailure::wrap("failed to create page", e);
+            let outcome = Arc::new(TestOutcome {
+              test_id: test_id.clone(),
+              status: TestStatus::Failed,
+              duration,
+              attempt,
+              max_attempts,
+              errors: vec![failure.clone()],
+              error: Some(failure),
+              annotations: test.annotations.clone(),
+              ..self.outcome_base(test, started_at)
             });
-          }
-          return WorkerTestResult {
-            outcome,
-            should_retry: attempt <= max_retries,
-            test_fn,
-            test_id,
-            fixture_requests,
-            suite_key,
-            hooks,
-          };
-        },
-      }
-    };
+            if let Some(event_bus) = &self.event_bus {
+              event_bus.emit(ReporterEvent::TestFinished {
+                outcome: Arc::clone(&outcome),
+              });
+            }
+            return WorkerTestResult {
+              outcome,
+              should_retry: attempt <= max_retries,
+              test_fn,
+              test_id,
+              fixture_requests,
+              suite_key,
+              hooks,
+            };
+          },
+        }
+      };
 
     for (i, hook) in hooks.before_each.iter().enumerate() {
-      if before_each_err.is_some() {
+      if before_each_err.is_some() || timed_out_while.is_some() {
         break;
       }
       let title = if hooks.before_each.len() == 1 {
@@ -1674,11 +1707,23 @@ impl Worker {
         format!("beforeEach [{i}]")
       };
       let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let result = ferridriver_expect::with_sink(
-        Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-        run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+      let Ok(result) = ferridriver::pause::run_within_updates_from(
+        budget,
+        modifiers.timeout_updates.subscribe(),
+        ferridriver_expect::with_sink(
+          Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+          run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+        ),
       )
-      .await;
+      .await
+      else {
+        let limit = *modifiers.timeout_updates.borrow();
+        step_handle
+          .end(Some(format!("Test timeout of {}ms exceeded.", limit.as_millis())))
+          .await;
+        timed_out_while = Some("running beforeEach hooks");
+        break;
+      };
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
       step_handle.end(err_msg).await;
       if let Err(e) = result {
@@ -1705,12 +1750,15 @@ impl Worker {
       }
     }
 
-    let timeout_result = if let Some(err) = before_each_err {
+    let timeout_result = if timed_out_while.is_some() {
+      Err(ferridriver::pause::Timedout)
+    } else if let Some(err) = before_each_err {
       Ok(Err(err))
     } else {
       // Soft assertions raised anywhere in the body land on this test's
       // own collector and fail it at the end, instead of stopping here.
-      ferridriver::pause::run_within_updates(
+      ferridriver::pause::run_within_updates_from(
+        budget,
         modifiers.timeout_updates.subscribe(),
         ferridriver_expect::with_sink(
           Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
@@ -1737,6 +1785,17 @@ impl Worker {
       }
     }
 
+    // After hooks get a budget of their own, the larger of the configured
+    // and the test's timeout (Playwright's `calculateMaxTimeout`), so a
+    // test that timed out still cleans up and a hung hook still ends.
+    let configured = Duration::from_millis(self.config.timeout);
+    let after_limit = if configured.is_zero() || timeout_dur.is_zero() {
+      Duration::ZERO
+    } else {
+      configured.max(timeout_dur)
+    };
+    let (_after_limit_tx, after_limit_rx) = tokio::sync::watch::channel(after_limit);
+    let after_budget = ferridriver::pause::BudgetStart::now();
     for (i, hook) in hooks.after_each.iter().enumerate() {
       let title = if hooks.after_each.len() == 1 {
         "afterEach".to_string()
@@ -1744,11 +1803,21 @@ impl Worker {
         format!("afterEach [{i}]")
       };
       let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let result = ferridriver_expect::with_sink(
-        Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-        run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+      let Ok(result) = ferridriver::pause::run_within_updates_from(
+        after_budget,
+        after_limit_rx.clone(),
+        ferridriver_expect::with_sink(
+          Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+          run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+        ),
       )
-      .await;
+      .await
+      else {
+        let message = format!("afterEach timeout of {}ms exceeded.", after_limit.as_millis());
+        tracing::warn!(target: "ferridriver::worker", "{message}");
+        step_handle.end(Some(message)).await;
+        break;
+      };
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
       step_handle.end(err_msg).await;
       if let Err(e) = result {
@@ -1812,7 +1881,13 @@ impl Worker {
     if test_failed {
       let message = match &timeout_result {
         Ok(Err(e)) => Some(e.message.clone()),
-        Err(_) => Some(format!("Test timeout of {}ms exceeded.", timeout_dur.as_millis())),
+        Err(_) => Some(format!(
+          "Test timeout of {}ms exceeded{}.",
+          timeout_dur.as_millis(),
+          timed_out_while
+            .map(|phase| format!(" while {phase}"))
+            .unwrap_or_default()
+        )),
         Ok(Ok(())) => None,
       };
       let composite = trace_composite
@@ -1981,7 +2056,12 @@ impl Worker {
       Err(_) => (
         TestStatus::TimedOut,
         Some(TestFailure {
-          message: format!("test timed out after {timeout_dur:?}"),
+          message: format!(
+            "test timed out after {timeout_dur:?}{}",
+            timed_out_while
+              .map(|phase| format!(" while {phase}"))
+              .unwrap_or_default()
+          ),
           stack: None,
           diff: None,
           screenshot,

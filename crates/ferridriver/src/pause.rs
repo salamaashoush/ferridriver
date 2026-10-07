@@ -252,25 +252,55 @@ impl<F: Future, D: Borrow<Deadline>> Future for DeadlineFuture<F, D> {
   }
 }
 
+/// The moment a budget started counting. Phases that run one after
+/// another under one budget each pass the same start, so the time the
+/// earlier ones spent is already gone when the later ones begin.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetStart {
+  started: Instant,
+  parked_before: Duration,
+}
+
+impl BudgetStart {
+  #[must_use]
+  pub fn now() -> Self {
+    Self {
+      started: Instant::now(),
+      parked_before: pause_clock().parked_now(),
+    }
+  }
+}
+
 /// Updates replace the total budget, including time already spent. Zero
 /// disables the deadline; debugger parks never consume the budget.
 ///
 /// # Errors
 /// Returns [`Timedout`] when the current budget expires outside a debugger park.
 pub async fn run_within_updates<F: Future>(
+  updates: tokio::sync::watch::Receiver<Duration>,
+  fut: F,
+) -> Result<F::Output, Timedout> {
+  run_within_updates_from(BudgetStart::now(), updates, fut).await
+}
+
+/// [`run_within_updates`] against a budget that started at `start`.
+///
+/// # Errors
+/// Returns [`Timedout`] when the current budget expires outside a debugger park.
+pub async fn run_within_updates_from<F: Future>(
+  start: BudgetStart,
   mut updates: tokio::sync::watch::Receiver<Duration>,
   fut: F,
 ) -> Result<F::Output, Timedout> {
   let clock = pause_clock();
-  let started = Instant::now();
-  let parked_before = clock.parked_now();
   let mut fut = std::pin::pin!(fut);
   let mut updates_open = true;
   loop {
     let limit = *updates.borrow_and_update();
-    let elapsed = started
+    let elapsed = start
+      .started
       .elapsed()
-      .saturating_sub(clock.parked_now().saturating_sub(parked_before));
+      .saturating_sub(clock.parked_now().saturating_sub(start.parked_before));
     let remaining = limit.saturating_sub(elapsed);
     if !limit.is_zero() && remaining.is_zero() {
       return Err(Timedout);
@@ -295,7 +325,23 @@ pub async fn run_within_updates<F: Future>(
 mod tests {
   use std::time::Duration;
 
-  use super::{pause_clock, run_within};
+  use super::{BudgetStart, pause_clock, run_within, run_within_updates_from};
+
+  #[tokio::test(flavor = "multi_thread")]
+  async fn phases_from_one_start_share_its_budget() {
+    super::with_test_clock(async {
+      let (_tx, updates) = tokio::sync::watch::channel(Duration::from_millis(200));
+      let start = BudgetStart::now();
+      let first = run_within_updates_from(start, updates.clone(), tokio::time::sleep(Duration::from_millis(120))).await;
+      assert!(first.is_ok(), "the first phase fits the budget on its own");
+      let second = run_within_updates_from(start, updates, tokio::time::sleep(Duration::from_millis(120))).await;
+      assert!(
+        second.is_err(),
+        "the second phase only has what the first one left, so it must time out"
+      );
+    })
+    .await;
+  }
 
   #[tokio::test(flavor = "multi_thread")]
   async fn parks_suspend_a_deadline_without_disabling_it() {
