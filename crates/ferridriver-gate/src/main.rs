@@ -130,6 +130,14 @@ fn jobs(
       &[],
     ),
     Job::new("napi-build", &["bun", "run", "build:debug"], &["build"]),
+    // The Rust harness UI test drives `cargo test -p rust-e2e-example` and
+    // has 600s for its runs. A cold compile of that target ate the whole
+    // budget on a CI runner, so it is compiled here, outside the test.
+    Job::new(
+      "ui-example-build",
+      &["cargo", "test", "--locked", "-p", "rust-e2e-example", "--no-run"],
+      &["build"],
+    ),
     Job::new(
       "doc-tests",
       &["cargo", "test", "--locked", "--workspace", "--doc"],
@@ -301,7 +309,12 @@ fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> 
       ],
     ),
   ] {
-    let mut job = Job::new(name, &command, &["build", "types"]);
+    let dependencies: &[&str] = if name == "integration" {
+      &["build", "types", "ui-example-build"]
+    } else {
+      &["build", "types"]
+    };
+    let mut job = Job::new(name, &command, dependencies);
     // The Rust UI integration test invokes Cargo for discovery and execution.
     // Reserve its build slot so other feature sets cannot rebuild between them.
     job.cargo = name == "integration";
