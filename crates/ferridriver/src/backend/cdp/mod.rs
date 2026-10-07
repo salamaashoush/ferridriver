@@ -1139,9 +1139,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     self.attach_tasks.abort();
     let mut child = self.child.lock().await;
     if let Some(group) = child.as_mut() {
-      let mut flushed = true;
+      let mut flushed = Ok(());
       if self.user_data_dir.is_none() {
-        let timeout = std::time::Duration::from_secs(5);
+        let timeout = crate::backend::process::PROFILE_FLUSH_TIMEOUT;
         let _ = tokio::time::timeout(
           timeout,
           self.transport.send_command(None, "Browser.close", &super::EMPTY_PARAMS),
@@ -1153,10 +1153,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
       // the enclosing runtime doesn't carry a zombie.
       group.shutdown().await?;
       child.take();
-      if !flushed {
-        return Err(FerriError::Backend(
-          "Chromium did not close cleanly while flushing its persistent profile".into(),
-        ));
+      if let Err(reason) = flushed {
+        return Err(FerriError::Backend(format!(
+          "Chromium did not close cleanly while flushing its persistent profile: {reason}"
+        )));
       }
     }
     drop(child);

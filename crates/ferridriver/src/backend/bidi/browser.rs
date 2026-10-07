@@ -465,9 +465,9 @@ impl BidiBrowser {
     }
     let mut child = self.child.lock().await;
     if let Some(group) = child.as_mut() {
-      let mut flushed = true;
+      let mut flushed = Ok(());
       if self.profile_dir.is_none() && self.webdriver.is_none() {
-        let timeout = std::time::Duration::from_secs(5);
+        let timeout = crate::backend::process::PROFILE_FLUSH_TIMEOUT;
         let _ = tokio::time::timeout(timeout, self.session.transport.send_command("browser.close", json!({}))).await;
         flushed = group.wait_for_exit(timeout).await;
       }
@@ -479,10 +479,10 @@ impl BidiBrowser {
       // the enclosing runtime carries no zombie.
       group.shutdown().await?;
       child.take();
-      if !flushed {
-        return Err(FerriError::Backend(
-          "Firefox did not close cleanly while flushing its persistent profile".into(),
-        ));
+      if let Err(reason) = flushed {
+        return Err(FerriError::Backend(format!(
+          "Firefox did not close cleanly while flushing its persistent profile: {reason}"
+        )));
       }
     }
     drop(child);

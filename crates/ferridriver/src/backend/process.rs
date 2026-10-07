@@ -402,7 +402,7 @@ impl ChildGroup {
       match kill_process_group(pid, Signal::KILL) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {},
         #[cfg(target_os = "macos")]
-        Err(rustix::io::Errno::PERM) if process_group_exiting(self.pid) => {},
+        Err(rustix::io::Errno::PERM) if process_group_exiting_settled(self.pid) => {},
         Err(error) => return Err(error.into()),
       }
     }
@@ -429,8 +429,15 @@ impl ChildGroup {
     self.child.wait().await
   }
 
-  pub(crate) async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> bool {
-    matches!(tokio::time::timeout(timeout, self.wait()).await, Ok(Ok(status)) if status.success())
+  /// Wait for a browser to exit by itself after a graceful close. `Err`
+  /// says why it did not, so a failed flush names the cause.
+  pub(crate) async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+    match tokio::time::timeout(timeout, self.wait()).await {
+      Ok(Ok(status)) if status.success() => Ok(()),
+      Ok(Ok(status)) => Err(format!("it exited with {status}")),
+      Ok(Err(error)) => Err(format!("waiting for it failed: {error}")),
+      Err(_) => Err(format!("it was still running after {}s", timeout.as_secs())),
+    }
   }
 
   /// Kill the whole process group, then reap the parent. The group
@@ -740,6 +747,28 @@ fn proc_bsdinfo_including_exited(pid: u32, include_exited: bool) -> Option<libc:
     )
   };
   (written == size).then_some(info)
+}
+
+/// How long a browser holding a caller-owned profile gets to flush it and
+/// exit after a graceful close. Playwright allows its launch timeout, 30s;
+/// 5s ran out on a 3-vCPU macOS runner while Chromium was still closing.
+pub(crate) const PROFILE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// XNU's `killpg` answers EPERM when no member can be signalled, which is
+/// what a group whose leader is mid-exit looks like. That leader is visible
+/// to neither `proc_listpgrppids` nor `proc_pidinfo` until it settles into a
+/// zombie, so the snapshot taken straight after the EPERM can miss it and
+/// the close failed. A few milliseconds later it is a zombie the snapshot
+/// accepts; this blocks only on that error path, for at most 100ms.
+#[cfg(target_os = "macos")]
+fn process_group_exiting_settled(pid: u32) -> bool {
+  for _ in 0..20 {
+    if process_group_exiting(pid) {
+      return true;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+  }
+  false
 }
 
 #[cfg(target_os = "macos")]
