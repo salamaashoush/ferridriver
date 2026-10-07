@@ -661,25 +661,25 @@ impl WebKitPage {
   }
 
   async fn eval_value_in_context(&self, expression: &str, context_id: Option<i64>) -> Result<Value> {
-    let anchor = match context_id {
-      Some(id) => self.frame_context_anchor(id).await?,
-      None => self.global_anchor().await?,
-    };
     // Runtime.evaluate cannot await promises, including clock advancement.
-    let resp = self
-      .target_session()
-      .send(
-        protocol::RUNTIME_CALL_FUNCTION_ON,
-        json!({
-          "objectId": anchor,
-          "functionDeclaration": "function(expression) { return (0, eval)(expression); }",
-          "arguments": [{ "value": expression }],
-          "returnByValue": true,
-          "awaitPromise": true,
-        }),
-      )
-      .await
-      .map_err(conn_err)?;
+    let params = json!({
+      "functionDeclaration": "function(expression) { return (0, eval)(expression); }",
+      "arguments": [{ "value": expression }],
+      "returnByValue": true,
+      "awaitPromise": true,
+    });
+    let resp = match context_id {
+      Some(id) => {
+        let mut params = params;
+        params["objectId"] = Value::String(self.frame_context_anchor(id).await?);
+        self
+          .target_session()
+          .send(protocol::RUNTIME_CALL_FUNCTION_ON, params)
+          .await
+          .map_err(conn_err)?
+      },
+      None => self.call_on_global(params, false).await?,
+    };
     if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
       let text = resp
         .get("result")
@@ -731,6 +731,35 @@ impl WebKitPage {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
     Ok(id)
+  }
+
+  /// `Runtime.callFunctionOn` anchored on the main-world global. A
+  /// browser-initiated navigation can commit before its event resets the
+  /// cached anchor, and `WebKit` then answers "Missing injected script for
+  /// given objectId" without running the function. The realm caches are
+  /// dropped and the call is made once more on a fresh anchor, with the
+  /// engine re-injected first when the function needs `window.__fd`.
+  async fn call_on_global(&self, mut params: Value, needs_engine: bool) -> Result<Value> {
+    let mut retried = false;
+    loop {
+      if needs_engine {
+        self.ensure_engine_injected().await?;
+      }
+      params["objectId"] = Value::String(self.global_anchor().await?);
+      match self
+        .target_session()
+        .send(protocol::RUNTIME_CALL_FUNCTION_ON, params.clone())
+        .await
+      {
+        Err(super::connection::ConnectionError::Protocol(message))
+          if !retried && message.contains("Missing injected script for given objectId") =>
+        {
+          retried = true;
+          self.reset_realm();
+        },
+        result => return result.map_err(conn_err),
+      }
+    }
   }
 
   /// Resolve the execution-context id for `frame_id`, waiting briefly for
@@ -1079,22 +1108,18 @@ impl WebKitPage {
     // `Runtime.evaluate` has no `awaitPromise`; route the call through
     // `Runtime.callFunctionOn` (which does) anchored on the global, so
     // we synchronously block until `window.__fd` is live.
-    let anchor = self.global_anchor().await?;
     let js = crate::selectors::build_lazy_inject_js();
     let wrapper = format!("function(){{ return ({js}); }}");
-    let resp = self
-      .target_session()
-      .send(
-        protocol::RUNTIME_CALL_FUNCTION_ON,
-        json!({
-          "objectId": anchor,
-          "functionDeclaration": wrapper,
-          "returnByValue": false,
-          "awaitPromise": true,
-        }),
-      )
-      .await
-      .map_err(conn_err)?;
+    // Boxed: `call_on_global` may call back into this function.
+    let resp = Box::pin(self.call_on_global(
+      json!({
+        "functionDeclaration": wrapper,
+        "returnByValue": false,
+        "awaitPromise": true,
+      }),
+      false,
+    ))
+    .await?;
     if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
       let text = resp
         .get("result")
@@ -1115,21 +1140,17 @@ impl WebKitPage {
   /// `Runtime.callFunctionOn` because `WebKit`'s `Runtime.evaluate` has
   /// no `awaitPromise`.
   pub(crate) async fn wait_for_compositor_frame(&self) -> Result<()> {
-    let anchor = self.global_anchor().await?;
     self
-      .target_session()
-      .send(
-        protocol::RUNTIME_CALL_FUNCTION_ON,
+      .call_on_global(
         json!({
-          "objectId": anchor,
           "functionDeclaration":
             "function(){ return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }",
           "returnByValue": true,
           "awaitPromise": true,
         }),
+        false,
       )
-      .await
-      .map_err(conn_err)?;
+      .await?;
     Ok(())
   }
 
@@ -2449,30 +2470,34 @@ impl WebKitPage {
         {
           self.ensure_engine_in_context(ctx_id).await?;
         }
-        a
+        Some(a)
       },
       None => match frame_ctx_id {
         Some(ctx_id) => {
           self.ensure_engine_in_context(ctx_id).await?;
-          self.anchor_in_context(ctx_id).await?
+          Some(self.anchor_in_context(ctx_id).await?)
         },
-        None => self.global_anchor().await?,
+        None => None,
       },
     };
-    let resp = self
-      .target_session()
-      .send(
-        protocol::RUNTIME_CALL_FUNCTION_ON,
-        json!({
-          "objectId": anchor,
-          "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
-          "arguments": arguments,
-          "returnByValue": return_by_value,
-          "awaitPromise": true,
-        }),
-      )
-      .await
-      .map_err(conn_err)?;
+    let params = json!({
+      "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
+      "arguments": arguments,
+      "returnByValue": return_by_value,
+      "awaitPromise": true,
+    });
+    let resp = match anchor {
+      Some(anchor) => {
+        let mut params = params;
+        params["objectId"] = Value::String(anchor);
+        self
+          .target_session()
+          .send(protocol::RUNTIME_CALL_FUNCTION_ON, params)
+          .await
+          .map_err(conn_err)?
+      },
+      None => self.call_on_global(params, true).await?,
+    };
     parse_eval_response(&resp, return_by_value)
   }
 
