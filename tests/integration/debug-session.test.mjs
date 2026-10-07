@@ -20,7 +20,9 @@ async function debugRun(files, args, body) {
       },
       async evaluate(source) {
         const result = await run(['run', '--no-inherit', '--session', session, '--context', 'context-0', '--json', '--eval', source], { cwd, env });
-        passed(result);
+        // The client only sees its connection drop; why it dropped is in the
+        // stopped run's own output.
+        assert.equal(result.code, 0, `${result.text}\n--- debug run output ---\n${commands.status('ui').stdout}`);
         return JSON.parse(result.stdout).value;
       },
       async stopped(location) {
