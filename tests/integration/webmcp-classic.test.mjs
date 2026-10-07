@@ -6,6 +6,9 @@ import {fixtureServer, passed, quote, repo, run, workspace} from './support.mjs'
 
 for (const bidi of [false, true]) {
 test(`WebDriver native WebMCP concurrency, results and traces, bidi=${bidi}`, async () => {
+  // ChromeDriver cold-starts its own Chromium while the rest of the suite
+  // runs browsers in parallel; on CI that launch alone has taken 8s.
+  test.slow();
   const driver = process.env.FERRIDRIVER_CHROMEDRIVER ?? 'chromedriver';
   let browserBinary = process.env.FERRIDRIVER_WEBDRIVER_CHROME;
   if (!browserBinary) {
@@ -30,7 +33,6 @@ test(`WebDriver native WebMCP concurrency, results and traces, bidi=${bidi}`, as
 import assert from 'node:assert/strict';
 import {verifyWebMcpConcurrency} from ${JSON.stringify(join(repo, 'tests/shared/webmcp-concurrency.ts'))};
 const browser = await chromium().connect('http://127.0.0.1:${line[1]}', {
-  timeout: 10000,
   capabilities: {webSocketUrl:${bidi}, 'goog:chromeOptions': ${JSON.stringify(chromeOptions)}},
 });
 const context = browser.contexts()[0];
