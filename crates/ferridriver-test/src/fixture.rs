@@ -689,7 +689,7 @@ mod setup_tests {
       setup: Arc::new(move |_| {
         let count = count.clone();
         Box::pin(async move {
-          tokio::time::sleep(Duration::from_millis(20)).await;
+          tokio::time::sleep(Duration::from_millis(200)).await;
           count.fetch_add(1, Ordering::SeqCst);
           Ok(Arc::new(42_u32) as ArcValue)
         })
@@ -716,7 +716,9 @@ mod setup_tests {
     assert!(pool.try_get_cached::<u32>("page").is_none());
     pool.resolve_worker_dependencies(&["page".into()]).await.unwrap();
     assert_eq!(starts.load(Ordering::SeqCst), 1);
-    let browser = ferridriver::pause::run_within(Duration::from_millis(1), pool.get::<u32>("browser"))
+    // A rerun setup takes 200ms; a cached read fits in 100ms even on a
+    // 3-vCPU macOS runner, where a 1ms budget timed out.
+    let browser = ferridriver::pause::run_within(Duration::from_millis(100), pool.get::<u32>("browser"))
       .await
       .unwrap()
       .unwrap();
