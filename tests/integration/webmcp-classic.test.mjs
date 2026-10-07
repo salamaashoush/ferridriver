@@ -63,7 +63,9 @@ export default 'passed';
 `});
       const result = await run(['run', '--no-inherit', '--json', 'main.ts'], {cwd});
       if (result.code !== 0 && existsSync(driverLog)) {
-        result.text += `\n--- chromedriver log tail ---\n${readFileSync(driverLog, 'utf8').split('\n').slice(-60).join('\n')}`;
+        const lines = readFileSync(driverLog, 'utf8').split('\n');
+        const notable = lines.filter(line => /Launching|DevToolsActivePort|ERROR|SEVERE|exited|binary/i.test(line));
+        result.text += `\n--- chromedriver log ---\n${[...notable, '...', ...lines.slice(-20)].join('\n')}`;
       }
       passed(result);
       assert.equal(JSON.parse(result.stdout).value, 'passed');
