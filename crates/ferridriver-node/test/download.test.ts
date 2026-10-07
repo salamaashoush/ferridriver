@@ -53,9 +53,21 @@ async function startDownloadServer(payload: Buffer): Promise<{ base: string; clo
       res.end(payload);
       return;
     }
+    if (req.url && req.url.startsWith("/hang.bin")) {
+      // Promises one more byte than it sends, so the download is still in
+      // flight when a test cancels it.
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-disposition": 'attachment; filename="hang.bin"',
+        "content-length": String(payload.length + 1),
+      });
+      res.write(payload);
+      return;
+    }
     const html =
       '<!doctype html><html><body>' +
       '<a id="dl" href="/file.bin">download</a>' +
+      '<a id="dl-hang" href="/hang.bin">hanging download</a>' +
       '</body></html>';
     res.writeHead(200, {
       "content-type": "text/html",
@@ -73,6 +85,7 @@ async function startDownloadServer(payload: Buffer): Promise<{ base: string; clo
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
+        server.closeAllConnections();
       }),
   };
 }
@@ -141,7 +154,9 @@ for (const backend of BACKENDS) {
       try {
         await page.goto(base, null);
         const waiter = page.waitForEvent("download", 15_000);
-        const clickPromise = page.click("#dl");
+        // The whole 16-byte file could land before cancel() did, leaving
+        // nothing to cancel; this download never finishes on its own.
+        const clickPromise = page.click("#dl-hang");
         const download = (await waiter) as unknown as Download;
         await download.cancel();
         await clickPromise.catch(() => {});
