@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -81,6 +82,12 @@ fn build(rc: &ResolvedCommand) -> Command {
 
 fn pid_of(id: Option<u32>) -> i32 {
   id.and_then(|p| i32::try_from(p).ok()).unwrap_or(0)
+}
+
+async fn finished<T>(done: &AtomicBool, leg: impl std::future::Future<Output = T>) -> T {
+  let output = leg.await;
+  done.store(true, Ordering::Relaxed);
+  output
 }
 
 /// Read up to `cap` bytes; `Err` if the stream exceeds it (the process
@@ -346,17 +353,32 @@ impl SessionProcs {
       (job, out, err)
     };
     let mut cancel = StopOnDrop(Some(job.control.clone()));
+    let legs = [
+      (AtomicBool::new(false), "the process to exit"),
+      (AtomicBool::new(false), "stdout to close"),
+      (AtomicBool::new(false), "stderr to close"),
+    ];
     let work = Box::pin(async {
       tokio::try_join!(
-        wait_process(job.exit.clone(), job.failure.clone()),
-        read_capped(out, OUTPUT_CAP),
-        read_capped(err, OUTPUT_CAP),
+        finished(&legs[0].0, wait_process(job.exit.clone(), job.failure.clone())),
+        finished(&legs[1].0, read_capped(out, OUTPUT_CAP)),
+        finished(&legs[2].0, read_capped(err, OUTPUT_CAP)),
       )
     });
     let ms = rc.timeout_ms.unwrap_or(DEFAULT_ONESHOT_TIMEOUT_MS);
     let result = tokio::time::timeout(Duration::from_millis(ms), work)
       .await
-      .unwrap_or_else(|_| Err(format!("command timed out after {ms}ms")));
+      .unwrap_or_else(|_| {
+        let pending: Vec<&str> = legs
+          .iter()
+          .filter(|(done, _)| !done.load(Ordering::Relaxed))
+          .map(|(_, leg)| *leg)
+          .collect();
+        Err(format!(
+          "command timed out after {ms}ms waiting for {}",
+          pending.join(", ")
+        ))
+      });
     let cleanup = stop_process(&job.control, &job.exit).await;
     cancel.0 = None;
     if cleanup.is_ok() {
@@ -770,7 +792,10 @@ mod tests {
     let mut spec = command("exec sleep 30", false);
     spec.timeout_ms = Some(20);
     let error = procs.exec_oneshot(&spec).await.err().expect("timeout");
-    assert!(error.contains("timed out after 20ms"), "{error}");
+    assert!(
+      error.contains("timed out after 20ms waiting for the process to exit"),
+      "{error}"
+    );
     assert!(procs.jobs.lock().expect("jobs").is_empty());
     let error = procs
       .exec_oneshot(&command("exec yes sashoush", false))
