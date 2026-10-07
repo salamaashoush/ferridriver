@@ -325,8 +325,14 @@ describe('actions', () => {
     }))) as { print: boolean; screen: boolean; dark: boolean; reduced: boolean; forced: boolean; contrast: boolean };
     expect(result.print).toBe(true);
     expect(result.screen).toBe(false);
-    // Linux WebKit honors dark mode in print; macOS WebKit forces light.
-    expect(result.dark).toBe(browserName !== 'webkit' || process.platform === 'linux');
+    // WebKit's answer to prefers-color-scheme under a print override
+    // differs by host and platform: Linux runs have reported both, and
+    // macOS reports dark on CI and on an Intel Mac. Playwright's own
+    // emulateMedia spec never asserts print with dark, so only the
+    // engine that defines it is held to it.
+    if (browserName !== 'webkit') {
+      expect(result.dark).toBe(true);
+    }
     expect(result.reduced).toBe(true);
     expect(result.forced).toBe(true);
     expect(result.contrast).toBe(true);
