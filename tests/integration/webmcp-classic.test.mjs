@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {existsSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {test} from '@ferridriver/test';
 import {fixtureServer, passed, quote, repo, run, workspace} from './support.mjs';
@@ -15,7 +16,10 @@ test(`WebDriver native WebMCP concurrency, results and traces, bidi=${bidi}`, as
     ...(browserBinary ? {binary:browserBinary} : {}),
     args:['--headless=new','--no-sandbox','--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport'],
   };
-  await commands.start('stdio', {command: `${quote(driver)} --port=0`});
+  // ChromeDriver's own log is the only record of why a session did not
+  // start; it is attached to the failure rather than kept on disk.
+  const driverLog = test.info().outputPath('chromedriver.log');
+  await commands.start('stdio', {command: `${quote(driver)} --port=0 --verbose --log-path=${quote(driverLog)}`});
   try {
     const output = await commands.waitForOutput('stdio', 'ChromeDriver was started successfully on port');
     const line = output.match(/started successfully on port (\d+)/)
@@ -58,6 +62,9 @@ try {
 export default 'passed';
 `});
       const result = await run(['run', '--no-inherit', '--json', 'main.ts'], {cwd});
+      if (result.code !== 0 && existsSync(driverLog)) {
+        result.text += `\n--- chromedriver log tail ---\n${readFileSync(driverLog, 'utf8').split('\n').slice(-60).join('\n')}`;
+      }
       passed(result);
       assert.equal(JSON.parse(result.stdout).value, 'passed');
       const trace = await run(['trace', 'show', 'webmcp.trace.zip', '--no-inherit', '--json'], {cwd});
