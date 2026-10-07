@@ -72,6 +72,8 @@ test('navigation completes a local address without a scheme', async ({ browser, 
 });
 
 test('navigation completes with the current page and main-frame URL', async ({ browser }) => {
+  // Sixteen contexts at once is the point; a 3-vCPU runner needs longer than 30s for them.
+  test.slow();
   await Promise.all(Array.from({ length: 16 }, async (_, index) => {
     const context = await browser.newContext();
     try {

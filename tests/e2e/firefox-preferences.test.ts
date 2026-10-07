@@ -19,6 +19,8 @@ async function observe(page: any) {
 
 test('Firefox launch applies string, number and boolean preferences without leaking to a fresh profile', async () => {
   runOnceAcrossProjects();
+  // Each launches Firefox two or three times, about 4s apiece on 8 cores.
+  test.slow();
   const browser = await firefox().launch({headless: true, firefoxUserPrefs: preferences});
   try {
     expect(await observe(await browser.newPage())).toEqual({agent: 'sashoush-pref-probe', cores: 1, notifications: 'undefined'});
@@ -37,6 +39,8 @@ test('Firefox launch applies string, number and boolean preferences without leak
 
 test('Firefox persistent preferences preserve caller content and reject a second live profile owner', async () => {
   runOnceAcrossProjects();
+  // Each launches Firefox two or three times, about 4s apiece on 8 cores.
+  test.slow();
   const profile = test.info().outputPath('firefox-profile');
   await mkdir(profile, {recursive: true});
   const prefsFile = join(profile, 'user.js');

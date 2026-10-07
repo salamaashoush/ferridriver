@@ -32,6 +32,8 @@ function firstPixel(bytes: Uint8Array): number[] {
 
 for (const subject of ['page', 'locator']) {
   test(`first ${subject} screenshots contain rendered pixels during concurrent creation`, async ({ browser }) => {
+    // Sixteen contexts at once is the point; a 3-vCPU runner needs longer than 30s for them.
+    test.slow();
     await Promise.all(Array.from({ length: 16 }, async (_, index) => {
       const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
       try {
