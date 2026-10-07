@@ -207,6 +207,9 @@ jobs:
         env:
           FERRIDRIVER_GATE_WORKERS: ${{ runner.os == 'macOS' && 3 || 4 }}
           FERRIDRIVER_GATE_TIMEOUT: 1800
+          # The image's `chromium` is a snapshot build that never came up
+          # under its ChromeDriver; Google Chrome ships with that driver.
+          FERRIDRIVER_WEBDRIVER_CHROME: ${{ runner.os == 'Linux' && '/usr/bin/google-chrome' || '' }}
 
       - name: Upload gate logs
         if: always()
