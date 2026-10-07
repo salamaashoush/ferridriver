@@ -251,13 +251,16 @@ for (const backend of BACKENDS) {
     it("setDefaultTimeout makes a never-matching waitForSelector reject", async () => {
       const ctx = browser.newContext({});
       try {
-        ctx.setDefaultTimeout(50);
-        ctx.setDefaultNavigationTimeout(50);
         const page = await ctx.newPage();
         await page.goto("data:text/html,<body>probe</body>");
+        // Set after the navigation: a 50ms navigation budget raced the goto
+        // itself on a 3-vCPU macOS runner. The wait passes no timeout of its
+        // own, so only the context default can end it.
+        ctx.setDefaultTimeout(50);
+        ctx.setDefaultNavigationTimeout(50);
         let err: string | null = null;
         try {
-          await page.waitForSelector("#never-ever", { timeout: 50 });
+          await page.waitForSelector("#never-ever");
         } catch (e) {
           err = String((e as Error)?.message ?? e);
         }
