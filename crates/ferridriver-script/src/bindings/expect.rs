@@ -23,6 +23,7 @@ use rquickjs::{
 };
 use serde_json::Value as JsonValue;
 
+use crate::bindings::convert::type_error;
 use crate::bindings::convert::{json_to_js, serde_from_js};
 use crate::bindings::http_client::HttpResponseJs;
 use crate::bindings::locator::LocatorJs;
@@ -252,9 +253,10 @@ impl<'js> LiveValue for JsLive<'js> {
         let iter: rquickjs::JsIterator<'js, Value<'js>> = rquickjs::FromJs::from_js(self.ctx(), self.0.clone())?;
         for pair in iter {
           let pair = pair?;
-          let pair = pair.as_array().cloned().ok_or_else(|| {
-            rquickjs::Error::new_from_js_message("expect", "toEqual", "a Map entry was not a [key, value] pair")
-          })?;
+          let pair = pair
+            .as_array()
+            .cloned()
+            .ok_or_else(|| type_error(self.ctx(), "expect.toEqual: a Map entry was not a [key, value] pair"))?;
           entries.push((Self(pair.get::<Value<'js>>(0)?), Self(pair.get::<Value<'js>>(1)?)));
         }
         return Ok(Shape::Map(entries));
@@ -607,9 +609,9 @@ impl ExpectJs {
       SubjectKind::Value => match self.snapshot(ctx) {
         Ok(JsonValue::String(s)) => Ok(SnapshotTarget::Value(s)),
         Ok(other) => Ok(SnapshotTarget::Value(other.to_string())),
-        Err(_) => Err(unsupported_snapshot_subject(matcher)),
+        Err(_) => Err(unsupported_snapshot_subject(ctx, matcher)),
       },
-      SubjectKind::ApiResponse(_) => Err(unsupported_snapshot_subject(matcher)),
+      SubjectKind::ApiResponse(_) => Err(unsupported_snapshot_subject(ctx, matcher)),
     }
   }
 
@@ -689,11 +691,10 @@ impl ExpectJs {
   }
 }
 
-fn unsupported_snapshot_subject(matcher: &'static str) -> rquickjs::Error {
-  rquickjs::Error::new_from_js_message(
-    "expect",
-    matcher,
-    "snapshot matchers apply to a locator, a page, or a serializable value",
+fn unsupported_snapshot_subject(ctx: &Ctx<'_>, matcher: &'static str) -> rquickjs::Error {
+  type_error(
+    ctx,
+    format!("expect.{matcher}: snapshot matchers apply to a locator, a page, or a serializable value"),
   )
 }
 
@@ -784,10 +785,9 @@ fn reject_unsupported_option(obj: Option<&Object<'_>>, matcher: &'static str, ke
   if let Some(o) = obj
     && o.contains_key(key).unwrap_or(false)
   {
-    return Err(rquickjs::Error::new_from_js_message(
-      "expect",
-      matcher,
-      format!("the \"{key}\" option is not supported yet"),
+    return Err(type_error(
+      o.ctx(),
+      format!("expect.{matcher}: the \"{key}\" option is not supported yet"),
     ));
   }
   Ok(())
@@ -814,7 +814,7 @@ fn text_match_options(obj: Option<&Object<'_>>) -> ferridriver_expect::TextMatch
   }
 }
 
-fn parse_string_or_regex<'js>(_ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<StringOrRegex> {
+fn parse_string_or_regex<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<StringOrRegex> {
   if let Some(s) = value.as_string() {
     return Ok(StringOrRegex::String(s.to_string()?));
   }
@@ -828,15 +828,11 @@ fn parse_string_or_regex<'js>(_ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::
       let pat = s.to_string()?;
       let flg = f.to_string()?;
       let re = ferridriver_expect::asymmetric::compile_js_regex(&pat, &flg)
-        .map_err(|e| rquickjs::Error::new_from_js_message("expect", "RegExp", e.to_string()))?;
+        .map_err(|e| type_error(ctx, format!("expect: invalid RegExp: {e}")))?;
       return Ok(StringOrRegex::Regex(re));
     }
   }
-  Err(rquickjs::Error::new_from_js_message(
-    "expect",
-    "argument",
-    "expected a string or RegExp",
-  ))
+  Err(type_error(ctx, "expected a string or RegExp"))
 }
 
 /// The `(string | RegExp)[]` half of the text matchers' overload.
@@ -1488,10 +1484,9 @@ impl ExpectJs {
         let mut values = Vec::with_capacity(expected.len());
         for v in &expected {
           let Some(s) = v.as_string() else {
-            return Err(rquickjs::Error::new_from_js_message(
-              "expect",
-              "toHaveValues",
-              "RegExp entries are not supported yet — pass strings",
+            return Err(type_error(
+              &ctx,
+              "expect.toHaveValues: RegExp entries are not supported yet — pass strings",
             ));
           };
           values.push(s.to_string()?);
@@ -1585,10 +1580,9 @@ impl ExpectJs {
     call_site
       .scope(async move {
         if expected.as_array().is_some() {
-          return Err(rquickjs::Error::new_from_js_message(
-            "expect",
-            "toHaveClass",
-            "the array form is not supported yet — pass a string or RegExp",
+          return Err(type_error(
+            &ctx,
+            "expect.toHaveClass: the array form is not supported yet — pass a string or RegExp",
           ));
         }
         let exp = parse_string_or_regex(&ctx, &expected)?;
@@ -1922,10 +1916,9 @@ impl ExpectJs {
       .scope(async move {
         let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchSnapshot()")?;
         if self.is_not {
-          return Err(rquickjs::Error::new_from_js_message(
-            "expect",
-            "toMatchSnapshot",
-            "not.toMatchSnapshot is not supported",
+          return Err(type_error(
+            &ctx,
+            "expect.toMatchSnapshot: not.toMatchSnapshot is not supported",
           ));
         }
         let target = self.snapshot_target(&ctx, "toMatchSnapshot")?;
@@ -1951,10 +1944,9 @@ impl ExpectJs {
       .scope(async move {
         let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toHaveScreenshot()")?;
         if self.is_not {
-          return Err(rquickjs::Error::new_from_js_message(
-            "expect",
-            "toHaveScreenshot",
-            "not.toHaveScreenshot is not supported",
+          return Err(type_error(
+            &ctx,
+            "expect.toHaveScreenshot: not.toHaveScreenshot is not supported",
           ));
         }
         let (name, opts_val) = match name_or_options.0 {
@@ -2036,7 +2028,7 @@ fn parse_throw_matcher<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resu
         .unwrap_or_default();
       let pat = s.to_string()?;
       let re = ferridriver_expect::asymmetric::compile_js_regex(&pat, &flags)
-        .map_err(|e| rquickjs::Error::new_from_js_message("expect", "RegExp", e.to_string()))?;
+        .map_err(|e| type_error(ctx, format!("expect: invalid RegExp: {e}")))?;
       return Ok(ThrowMatcher::Regex(re));
     }
     // Plain object → treat as match-against-{message,name}
@@ -2518,11 +2510,7 @@ fn create_expect<'js>(
           obj.set("flags", f.to_string()?)?;
         }
       } else {
-        return Err(rquickjs::Error::new_from_js_message(
-          "expect",
-          "argument",
-          "expect.stringMatching expects a string or RegExp",
-        ));
+        return Err(type_error(&ctx, "expect.stringMatching expects a string or RegExp"));
       }
       make_asymmetric(&ctx, "stringMatching", obj)
     },
@@ -2562,9 +2550,9 @@ fn create_expect<'js>(
   install_not_asym(ctx, &not_obj, "arrayOf")?;
 
   // Attach the helpers to expect()'s own properties.
-  let expect_obj = expect_fn.as_object().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("expect", "install", "expect Function has no object representation")
-  })?;
+  let expect_obj = expect_fn
+    .as_object()
+    .ok_or_else(|| type_error(ctx, "expect.install: expect Function has no object representation"))?;
   expect_obj.set("poll", poll_fn)?;
   expect_obj.set("any", any_fn)?;
   expect_obj.set("anything", anything_fn)?;
@@ -2924,9 +2912,8 @@ const MATCHER_TABLES: &str = "_matcherTables";
 const EXPECT_TABLE: &str = "_matcherTable";
 
 fn matcher_tables<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Array<'js>> {
-  let proto = Class::<ExpectJs>::prototype(ctx)?.ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("expect", "extend", "the Expect class has no prototype in this context")
-  })?;
+  let proto = Class::<ExpectJs>::prototype(ctx)?
+    .ok_or_else(|| type_error(ctx, "expect.extend: the Expect class has no prototype in this context"))?;
   let existing: Value<'js> = proto.get(MATCHER_TABLES)?;
   if let Some(arr) = existing.as_array() {
     return Ok(arr.clone());
@@ -2962,7 +2949,7 @@ fn matcher_table<'js>(ctx: &Ctx<'js>, index: u32) -> rquickjs::Result<Object<'js
   entry
     .as_object()
     .cloned()
-    .ok_or_else(|| rquickjs::Error::new_from_js_message("expect", "extend", "this expect's matcher table is missing"))
+    .ok_or_else(|| type_error(ctx, "expect.extend: this expect's matcher table is missing"))
 }
 
 /// The `this` a matcher body reads — Playwright's `MatcherContext`.
@@ -3253,10 +3240,9 @@ fn matcher_names<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Vec<String>> {
   let object_global: Object<'js> = ctx.globals().get("Object")?;
   let own_names: Function<'js> = object_global.get("getOwnPropertyNames")?;
   let proto = Class::<ExpectJs>::prototype(ctx)?.ok_or_else(|| {
-    rquickjs::Error::new_from_js_message(
-      "expect",
-      "resolves",
-      "the Expect class has no prototype in this context",
+    type_error(
+      ctx,
+      "expect.resolves: the Expect class has no prototype in this context",
     )
   })?;
   let names: Vec<String> = own_names.call((proto,))?;
@@ -3272,10 +3258,9 @@ async fn settled_call<'js>(
   args: Vec<Value<'js>>,
 ) -> rquickjs::Result<()> {
   let holder = this.as_object().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message(
-      "expect",
-      "resolves",
-      "a settled matcher was called without its receiver",
+    type_error(
+      &ctx,
+      "expect.resolves: a settled matcher was called without its receiver",
     )
   })?;
   let source: Value<'js> = holder.get(SETTLED_SOURCE)?;
@@ -3354,9 +3339,7 @@ async fn settled_call<'js>(
   let matcher: Function<'js> = instance
     .as_object()
     .and_then(|o| o.get(name.as_str()).ok())
-    .ok_or_else(|| {
-      rquickjs::Error::new_from_js_message("expect", "resolves", "no such matcher on the settled assertion")
-    })?;
+    .ok_or_else(|| type_error(&ctx, "expect.resolves: no such matcher on the settled assertion"))?;
   let outcome: Value<'js> = matcher.call((
     rquickjs::function::This(instance.clone()),
     rquickjs::function::Rest(args),
@@ -3442,7 +3425,10 @@ fn mask_selectors<'js>(obj: &rquickjs::Object<'js>) -> rquickjs::Result<Option<V
     return Ok(None);
   }
   let arr = v.into_array().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("toHaveScreenshot options", "mask", "expected an array of Locator")
+    type_error(
+      obj.ctx(),
+      "toHaveScreenshot options: mask: expected an array of Locator",
+    )
   })?;
   let mut out = Vec::with_capacity(arr.len());
   for item in arr.iter::<rquickjs::Value<'js>>() {
@@ -3454,10 +3440,9 @@ fn mask_selectors<'js>(obj: &rquickjs::Object<'js>) -> rquickjs::Result<Option<V
         class.borrow().inner_ref().selector().to_string(),
       ));
     } else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "toHaveScreenshot options",
-        "mask",
-        "each mask entry must be a Locator or a selector string",
+      return Err(type_error(
+        obj.ctx(),
+        "toHaveScreenshot options: mask: each mask entry must be a Locator or a selector string",
       ));
     }
   }

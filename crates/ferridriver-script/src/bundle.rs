@@ -11,6 +11,7 @@ use ferrijs::rquickjs;
 use ferrijs_bundle::{BundlerOptions, BytecodeCache};
 use rquickjs::CatchResultExt;
 
+use crate::bindings::convert::type_error;
 use crate::error::ScriptError;
 
 pub use ferrijs::source_map::{LazyMap, SourceMapper, resolve_source};
@@ -1081,11 +1082,10 @@ impl ferrijs::Extension for ExtractionExtension {
     crate::bindings::install_bdd(ctx)?;
     crate::bindings::define_classes(ctx)?;
     crate::bindings::runtime::mirror_global(ctx, "process")?;
-    let refusing = rquickjs::Function::new(ctx.clone(), || -> rquickjs::Result<()> {
-      Err(rquickjs::Error::new_from_js_message(
-        "fetch",
-        "extraction",
-        "no HTTP during extension extraction: move the call into a handler or a hook, \
+    let refusing = rquickjs::Function::new(ctx.clone(), |ctx: rquickjs::Ctx<'_>| -> rquickjs::Result<()> {
+      Err(type_error(
+        &ctx,
+        "fetch: no HTTP during extension extraction: move the call into a handler or a hook, \
          where the session's client and its `allow.net` grant exist",
       ))
     })?;

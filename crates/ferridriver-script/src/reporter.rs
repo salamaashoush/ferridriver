@@ -26,6 +26,7 @@ use rquickjs::{CatchResultExt, Ctx, Function, IntoJs, JsLifetime, Object, Persis
 use ferridriver_test::config::{ReporterConfig, TestConfig};
 use ferridriver_test::reporter::{Reporter, ReporterEvent, RunStatus, api};
 
+use crate::bindings::convert::type_error;
 use crate::bundle::{CompiledBundle, bundle_and_compile_named, eval_bundle_with};
 use crate::engine::{ExtensionHost, RunContext, ScriptCaps, ScriptEngineConfig, Session};
 use crate::error::ScriptError;
@@ -534,7 +535,7 @@ fn js_date<'js>(ctx: &Ctx<'js>, epoch_ms: i64) -> rquickjs::Result<Value<'js>> {
   let raw: Value<'js> = ctx.globals().get("Date")?;
   let ctor = raw
     .try_into_constructor()
-    .map_err(|_| rquickjs::Error::new_from_js_message("reporter", "Date", "global Date is not a constructor"))?;
+    .map_err(|_| type_error(ctx, "reporter: global Date is not a constructor"))?;
   ctor.construct((epoch_ms,))
 }
 

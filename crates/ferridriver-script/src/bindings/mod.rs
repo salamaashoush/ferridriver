@@ -14,7 +14,7 @@
 //! # Error mapping
 //!
 //! `ferridriver::FerriError` is converted to `rquickjs::Error` at every
-//! binding boundary via [`convert::to_rq_error`]. The resulting JS exception
+//! binding boundary via [`convert::ferri_throw`]. The resulting JS exception
 //! carries the error message and, where applicable, a `name` matching
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 

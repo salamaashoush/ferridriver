@@ -31,8 +31,9 @@ use ferridriver_test::model::StepLocation;
 use ferridriver_test::step::{StepBodyError, StepExpectation, StepFrame, StepOptions, StepSpec};
 
 use crate::bindings::call_site;
+use crate::bindings::convert::throw_named;
 use crate::bindings::convert::{ferri_throw, serde_from_js};
-use crate::bindings::registry::{as_function, rq, throw_script_error};
+use crate::bindings::registry::{as_function, throw_script_error};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
@@ -377,7 +378,8 @@ fn parse_details<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Result<ParsedDetails, r
     let tags: Vec<String> = if let Some(s) = t.as_string() {
       vec![s.to_string()?]
     } else {
-      serde_from_js(ctx, t).map_err(|e| rq(&ScriptError::internal(format!("test details `tag`: {e}"))))?
+      serde_from_js(ctx, t)
+        .map_err(|e| throw_script_error(ctx, &ScriptError::internal(format!("test details `tag`: {e}"))))?
     };
     for tag in tags {
       out.annotations.push(CollectedAnnotation {
@@ -392,9 +394,13 @@ fn parse_details<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Result<ParsedDetails, r
     && !a.is_null()
   {
     let list: Vec<serde_json::Value> = if a.is_array() {
-      serde_from_js(ctx, a).map_err(|e| rq(&ScriptError::internal(format!("test details `annotation`: {e}"))))?
+      serde_from_js(ctx, a)
+        .map_err(|e| throw_script_error(ctx, &ScriptError::internal(format!("test details `annotation`: {e}"))))?
     } else {
-      vec![serde_from_js(ctx, a).map_err(|e| rq(&ScriptError::internal(format!("test details `annotation`: {e}"))))?]
+      vec![
+        serde_from_js(ctx, a)
+          .map_err(|e| throw_script_error(ctx, &ScriptError::internal(format!("test details `annotation`: {e}"))))?,
+      ]
     };
     for ann in list {
       out.annotations.push(CollectedAnnotation {
@@ -425,14 +431,14 @@ fn parse_registration<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> Result<Regist
   let title = args
     .first()
     .and_then(Value::as_string)
-    .ok_or_else(|| rq(&ScriptError::internal("test title must be a string".to_string())))?
+    .ok_or_else(|| throw_script_error(ctx, &ScriptError::internal("test title must be a string".to_string())))?
     .to_string()?;
-  let body = args
-    .iter()
-    .skip(1)
-    .rev()
-    .find_map(as_function)
-    .ok_or_else(|| rq(&ScriptError::internal(format!("test `{title}` has no function body"))))?;
+  let body = args.iter().skip(1).rev().find_map(as_function).ok_or_else(|| {
+    throw_script_error(
+      ctx,
+      &ScriptError::internal(format!("test `{title}` has no function body")),
+    )
+  })?;
   let details = match args.get(1) {
     Some(v) if v.as_function().is_none() && v.as_object().is_some() => parse_details(ctx, v)?,
     _ => ParsedDetails {
@@ -484,7 +490,7 @@ fn push_test<'js>(
   let mut annotations = extra.to_vec();
   annotations.extend(reg.details.annotations);
   if annotations.iter().any(|a| a.kind == "only") {
-    with_test_registry(ctx, |r| r.has_only = true).map_err(|e| rq(&e))?;
+    with_test_registry(ctx, |r| r.has_only = true).map_err(|e| throw_script_error(ctx, &e))?;
   }
   with_test_registry(ctx, |r| {
     r.tests.push(TestReg {
@@ -501,7 +507,7 @@ fn push_test<'js>(
       col,
     });
   })
-  .map_err(|e| rq(&e))
+  .map_err(|e| throw_script_error(ctx, &e))
 }
 
 /// One registration-form modifier annotation (`test.skip('t', fn)`).
@@ -541,14 +547,17 @@ fn modifier_call<'js>(
     return push_test(ctx, fixture_set, &[modifier_annotation(kind, None)], reg, None, None);
   }
 
-  let collecting = with_test_registry(ctx, |r| r.current.is_none()).map_err(|e| rq(&e))?;
+  let collecting = with_test_registry(ctx, |r| r.current.is_none()).map_err(|e| throw_script_error(ctx, &e))?;
   let callback = args.first().and_then(as_function);
 
   if !collecting {
     if callback.is_some() {
-      return Err(rq(&ScriptError::internal(format!(
-        "test.{kind}() with a function can only be called inside describe block"
-      ))));
+      return Err(throw_script_error(
+        ctx,
+        &ScriptError::internal(format!(
+          "test.{kind}() with a function can only be called inside describe block"
+        )),
+      ));
     }
     return runtime_modifier(ctx, kind, args);
   }
@@ -573,7 +582,7 @@ fn modifier_call<'js>(
         col,
       });
     })
-    .map_err(|e| rq(&e));
+    .map_err(|e| throw_script_error(ctx, &e));
   }
 
   // Static form. Playwright returns early on an explicitly falsy
@@ -588,7 +597,7 @@ fn modifier_call<'js>(
     Some(idx) => r.suites[idx].annotations.push(annotation),
     None => r.file_annotations.push(FileAnnotationReg { annotation, line, col }),
   })
-  .map_err(|e| rq(&e))
+  .map_err(|e| throw_script_error(ctx, &e))
 }
 
 /// JS truthiness for a modifier condition. `test.skip(0)` and
@@ -620,11 +629,12 @@ pub(crate) fn optional_bridge(ctx: &Ctx<'_>) -> Option<Arc<dyn TestHostBridge>> 
 
 pub(crate) fn current_bridge(ctx: &Ctx<'_>, what: &str) -> rquickjs::Result<Arc<dyn TestHostBridge>> {
   with_test_registry(ctx, |r| r.current.as_ref().map(|c| Arc::clone(&c.bridge)))
-    .map_err(|e| rq(&e))?
+    .map_err(|e| throw_script_error(ctx, &e))?
     .ok_or_else(|| {
-      rq(&ScriptError::internal(format!(
-        "{what} can only be called while a test is running"
-      )))
+      throw_script_error(
+        ctx,
+        &ScriptError::internal(format!("{what} can only be called while a test is running")),
+      )
     })
 }
 
@@ -644,9 +654,9 @@ fn runtime_modifier(ctx: &Ctx<'_>, kind: &str, args: &[Value<'_>]) -> rquickjs::
   match kind {
     "skip" | "fixme" => {
       bridge.set_skip(reason.clone());
-      Err(rquickjs::Error::new_from_js_message(
-        "test",
-        "skip",
+      Err(throw_named(
+        ctx,
+        "Error",
         format!("{TEST_SKIP_SENTINEL}{}", reason.unwrap_or_default()),
       ))
     },
@@ -658,9 +668,10 @@ fn runtime_modifier(ctx: &Ctx<'_>, kind: &str, args: &[Value<'_>]) -> rquickjs::
       bridge.set_slow();
       Ok(())
     },
-    other => Err(rq(&ScriptError::internal(format!(
-      "unknown runtime modifier `{other}`"
-    )))),
+    other => Err(throw_script_error(
+      ctx,
+      &ScriptError::internal(format!("unknown runtime modifier `{other}`")),
+    )),
   }
 }
 
@@ -727,9 +738,12 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       scope = match FixtureScope::from_label(&s) {
         Some(s @ (FixtureScope::Worker | FixtureScope::Test)) => s,
         _ => {
-          return Err(rq(&ScriptError::internal(format!(
-            "fixture `{name}`: unknown scope `{s}` (expected \"test\" or \"worker\")"
-          ))));
+          return Err(throw_script_error(
+            ctx,
+            &ScriptError::internal(format!(
+              "fixture `{name}`: unknown scope `{s}` (expected \"test\" or \"worker\")"
+            )),
+          ));
         },
       };
     }
@@ -744,9 +758,12 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       Ok(v) if v.is_string() => match v.as_string().and_then(|s| s.to_string().ok()).as_deref() {
         Some("self") => Some(FixtureBox::SelfOnly),
         Some(other) => {
-          return Err(rq(&ScriptError::internal(format!(
-            "fixture `{name}`: unknown box `{other}` (expected true, false or \"self\")"
-          ))));
+          return Err(throw_script_error(
+            ctx,
+            &ScriptError::internal(format!(
+              "fixture `{name}`: unknown box `{other}` (expected true, false or \"self\")"
+            )),
+          ));
         },
         None => None,
       },
@@ -864,13 +881,13 @@ fn merge_tests<'js>(ctx: Ctx<'js>, tests: Rest<Value<'js>>) -> rquickjs::Result<
   let mut merged: Vec<usize> = Vec::new();
   for test in &tests.0 {
     let Some(set) = fixture_set_of(&ctx, test) else {
-      return Err(rq(&ScriptError::internal(
+      return Err(throw_script_error(&ctx, &ScriptError::internal(
         "mergeTests() accepts \"test\" functions as parameters.\nDid you mean to call test.extend() with fixtures instead?"
           .to_string(),
       )));
     };
-    let visible =
-      with_test_registry(&ctx, |r| r.fixture_sets.get(set).cloned().unwrap_or_default()).map_err(|e| rq(&e))?;
+    let visible = with_test_registry(&ctx, |r| r.fixture_sets.get(set).cloned().unwrap_or_default())
+      .map_err(|e| throw_script_error(&ctx, &e))?;
     for index in visible {
       if !merged.contains(&index) {
         merged.push(index);
@@ -881,7 +898,7 @@ fn merge_tests<'js>(ctx: Ctx<'js>, tests: Rest<Value<'js>>) -> rquickjs::Result<
     r.fixture_sets.push(merged);
     r.fixture_sets.len() - 1
   })
-  .map_err(|e| rq(&e))?;
+  .map_err(|e| throw_script_error(&ctx, &e))?;
   make_test_object(&ctx, new_set)
 }
 
@@ -918,7 +935,7 @@ fn define_fixtures<'js>(ctx: Ctx<'js>, fixtures: Object<'js>) -> rquickjs::Resul
       ),
     ));
   }
-  if with_test_registry(&ctx, |r| r.base_sealed).map_err(|e| rq(&e))? {
+  if with_test_registry(&ctx, |r| r.base_sealed).map_err(|e| throw_script_error(&ctx, &e))? {
     return Err(throw_script_error(
       &ctx,
       &ScriptError::internal(
@@ -955,7 +972,7 @@ fn define_fixtures<'js>(ctx: Ctx<'js>, fixtures: Object<'js>) -> rquickjs::Resul
     }
     Ok(())
   })
-  .map_err(|e| rq(&e))?
+  .map_err(|e| throw_script_error(&ctx, &e))?
   .map_err(|e: ScriptError| throw_script_error(&ctx, &e))?;
 
   crate::bindings::runtime::ensure_ferridriver(&ctx)?.get::<_, Value<'js>>("test")
@@ -995,9 +1012,12 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
     },
   )?;
   test_fn.set_name("test")?;
-  let obj = test_fn
-    .as_object()
-    .ok_or_else(|| rq(&ScriptError::internal("test function has no object form".to_string())))?;
+  let obj = test_fn.as_object().ok_or_else(|| {
+    throw_script_error(
+      ctx,
+      &ScriptError::internal("test function has no object form".to_string()),
+    )
+  })?;
 
   for kind in ["skip", "fixme", "fail", "slow"] {
     let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
@@ -1018,8 +1038,12 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
   let each = Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, rows: Value<'js>| -> rquickjs::Result<Function<'js>> {
-      let rows: Vec<serde_json::Value> = serde_from_js(&ctx, rows)
-        .map_err(|e| rq(&ScriptError::internal(format!("test.each rows must be an array: {e}"))))?;
+      let rows: Vec<serde_json::Value> = serde_from_js(&ctx, rows).map_err(|e| {
+        throw_script_error(
+          &ctx,
+          &ScriptError::internal(format!("test.each rows must be an array: {e}")),
+        )
+      })?;
       Function::new(
         ctx.clone(),
         move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
@@ -1040,11 +1064,12 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
       ctx.clone(),
       move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
         // `(fn)` or `(title, fn)` — the optional title is display-only.
-        let func = args
-          .0
-          .iter()
-          .find_map(as_function)
-          .ok_or_else(|| rq(&ScriptError::internal(format!("test.{kind} has no function body"))))?;
+        let func = args.0.iter().find_map(as_function).ok_or_else(|| {
+          throw_script_error(
+            &ctx,
+            &ScriptError::internal(format!("test.{kind} has no function body")),
+          )
+        })?;
         let (line, col) = capture_location(&ctx);
         let requested = destructured_keys(&ctx, &func);
         let saved = Persistent::save(&ctx, func);
@@ -1059,7 +1084,7 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
             col,
           });
         })
-        .map_err(|e| rq(&e))
+        .map_err(|e| throw_script_error(&ctx, &e))
       },
     )?;
     obj.set(kind, f)?;
@@ -1067,21 +1092,23 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
 
   let use_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, bag: Value<'js>| -> rquickjs::Result<()> {
     let options: serde_json::Value = serde_from_js(&ctx, bag).map_err(|e| {
-      rq(&ScriptError::internal(format!(
-        "test.use options must be a plain object: {e}"
-      )))
+      throw_script_error(
+        &ctx,
+        &ScriptError::internal(format!("test.use options must be a plain object: {e}")),
+      )
     })?;
     if !options.is_object() {
-      return Err(rq(&ScriptError::internal(
-        "test.use options must be a plain object".to_string(),
-      )));
+      return Err(throw_script_error(
+        &ctx,
+        &ScriptError::internal("test.use options must be a plain object".to_string()),
+      ));
     }
     let (line, col) = capture_location(&ctx);
     with_test_registry(&ctx, |r| match r.describe_stack.last().copied() {
       Some(idx) => merge_use(&mut r.suites[idx].use_options, &options),
       None => r.file_use.push(FileUseReg { options, line, col }),
     })
-    .map_err(|e| rq(&e))
+    .map_err(|e| throw_script_error(&ctx, &e))
   })?;
   obj.set("use", use_fn)?;
 
@@ -1092,15 +1119,17 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
   obj.set("setTimeout", set_timeout)?;
 
   let info = Function::new(ctx.clone(), |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
-    let saved = with_test_registry(&ctx, |r| r.current.as_ref().map(|c| c.test_info.clone())).map_err(|e| rq(&e))?;
+    let saved = with_test_registry(&ctx, |r| r.current.as_ref().map(|c| c.test_info.clone()))
+      .map_err(|e| throw_script_error(&ctx, &e))?;
     let saved = saved.ok_or_else(|| {
-      rq(&ScriptError::internal(
-        "test.info() can only be called while a test is running".to_string(),
-      ))
+      throw_script_error(
+        &ctx,
+        &ScriptError::internal("test.info() can only be called while a test is running".to_string()),
+      )
     })?;
     saved
       .restore(&ctx)
-      .map_err(|e| rq(&ScriptError::internal(e.to_string())))
+      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))
   })?;
   obj.set("info", info)?;
 
@@ -1110,9 +1139,12 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
     ctx.clone(),
     move |ctx: Ctx<'js>, fixtures: Object<'js>| -> rquickjs::Result<Function<'js>> {
       if fixture_set_of(&ctx, fixtures.as_value()).is_some() {
-        return Err(rq(&ScriptError::internal(
-          "test.extend() accepts fixtures object, not a test object.\nDid you mean to call mergeTests()?".to_string(),
-        )));
+        return Err(throw_script_error(
+          &ctx,
+          &ScriptError::internal(
+            "test.extend() accepts fixtures object, not a test object.\nDid you mean to call mergeTests()?".to_string(),
+          ),
+        ));
       }
       let mut new_regs = Vec::new();
       for key in fixtures.keys::<String>() {
@@ -1128,8 +1160,8 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
         r.fixture_sets.push(visible);
         Ok(r.fixture_sets.len() - 1)
       })
-      .map_err(|e| rq(&e))?
-      .map_err(|e: ScriptError| rq(&e))?;
+      .map_err(|e| throw_script_error(&ctx, &e))?
+      .map_err(|e: ScriptError| throw_script_error(&ctx, &e))?;
       make_test_object(&ctx, new_set)
     },
   )?;
@@ -1167,7 +1199,7 @@ fn register_suite(
 ) -> rquickjs::Result<usize> {
   let (line, col) = capture_location(ctx);
   if annotations.iter().any(|a| a.kind == "only") {
-    with_test_registry(ctx, |r| r.has_only = true).map_err(|e| rq(&e))?;
+    with_test_registry(ctx, |r| r.has_only = true).map_err(|e| throw_script_error(ctx, &e))?;
   }
   with_test_registry(ctx, |r| {
     let parent = r.describe_stack.last().copied();
@@ -1186,7 +1218,7 @@ fn register_suite(
     r.describe_stack.push(idx);
     idx
   })
-  .map_err(|e| rq(&e))
+  .map_err(|e| throw_script_error(ctx, &e))
 }
 
 fn pop_suite(ctx: &Ctx<'_>) {
@@ -1206,12 +1238,18 @@ fn describe_call<'js>(
   let name = args
     .first()
     .and_then(Value::as_string)
-    .ok_or_else(|| rq(&ScriptError::internal("describe title must be a string".to_string())))?
+    .ok_or_else(|| {
+      throw_script_error(
+        ctx,
+        &ScriptError::internal("describe title must be a string".to_string()),
+      )
+    })?
     .to_string()?;
   let body = args.iter().skip(1).find_map(as_function).ok_or_else(|| {
-    rq(&ScriptError::internal(format!(
-      "describe `{name}` has no function body"
-    )))
+    throw_script_error(
+      ctx,
+      &ScriptError::internal(format!("describe `{name}` has no function body")),
+    )
   })?;
   register_suite(ctx, &name, mode, annotations)?;
   let result = body.call::<_, ()>(());
@@ -1226,9 +1264,10 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
   )?;
   describe_fn.set_name("describe")?;
   let obj = describe_fn.as_object().ok_or_else(|| {
-    rq(&ScriptError::internal(
-      "describe function has no object form".to_string(),
-    ))
+    throw_script_error(
+      ctx,
+      &ScriptError::internal("describe function has no object form".to_string()),
+    )
   })?;
 
   for (name, mode) in [
@@ -1252,9 +1291,10 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
     ctx.clone(),
     |ctx: Ctx<'js>, rows: Value<'js>| -> rquickjs::Result<Function<'js>> {
       let rows: Vec<serde_json::Value> = serde_from_js(&ctx, rows).map_err(|e| {
-        rq(&ScriptError::internal(format!(
-          "describe.each rows must be an array: {e}"
-        )))
+        throw_script_error(
+          &ctx,
+          &ScriptError::internal(format!("describe.each rows must be an array: {e}")),
+        )
       })?;
       Function::new(
         ctx.clone(),
@@ -1264,15 +1304,17 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
             .first()
             .and_then(Value::as_string)
             .ok_or_else(|| {
-              rq(&ScriptError::internal(
-                "describe.each title must be a string".to_string(),
-              ))
+              throw_script_error(
+                &ctx,
+                &ScriptError::internal("describe.each title must be a string".to_string()),
+              )
             })?
             .to_string()?;
           let body = args.0.iter().skip(1).find_map(as_function).ok_or_else(|| {
-            rq(&ScriptError::internal(format!(
-              "describe.each `{template}` has no function body"
-            )))
+            throw_script_error(
+              &ctx,
+              &ScriptError::internal(format!("describe.each `{template}` has no function body")),
+            )
           })?;
           for row in &rows {
             let title = interpolate_title(&template, row);
@@ -1298,9 +1340,10 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
           "parallel" => CollectedSuiteMode::Parallel,
           "default" => return Ok(()),
           other => {
-            return Err(rq(&ScriptError::internal(format!(
-              "describe.configure: unknown mode `{other}`"
-            ))));
+            return Err(throw_script_error(
+              &ctx,
+              &ScriptError::internal(format!("describe.configure: unknown mode `{other}`")),
+            ));
           },
         }),
         Err(_) => None,
@@ -1329,7 +1372,7 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
           col,
         }),
       })
-      .map_err(|e| rq(&e))
+      .map_err(|e| throw_script_error(&ctx, &e))
     },
   )?;
   obj.set("configure", configure)?;
@@ -1392,9 +1435,10 @@ fn make_selectors_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
         let source: String = func
           .as_object()
           .ok_or_else(|| {
-            rq(&ScriptError::internal(
-              "selectors.register: script must be a function".to_string(),
-            ))
+            throw_script_error(
+              &ctx,
+              &ScriptError::internal("selectors.register: script must be a function".to_string()),
+            )
           })?
           .get::<_, Function<'js>>("toString")?
           .call((rquickjs::function::This(func.clone()),))?;
@@ -1409,15 +1453,19 @@ fn make_selectors_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
           (Some(content), _) => ferridriver::selectors::SelectorScript::Source(content),
           (None, Some(path)) => ferridriver::selectors::SelectorScript::Path(std::path::PathBuf::from(path)),
           (None, None) => {
-            return Err(rq(&ScriptError::internal(
-              "Either path or content property must be present".to_string(),
-            )));
+            return Err(throw_script_error(
+              &ctx,
+              &ScriptError::internal("Either path or content property must be present".to_string()),
+            ));
           },
         }
       } else {
-        return Err(rq(&ScriptError::internal(
-          "selectors.register: script must be a function, a string, or { path } / { content }".to_string(),
-        )));
+        return Err(throw_script_error(
+          &ctx,
+          &ScriptError::internal(
+            "selectors.register: script must be a function, a string, or { path } / { content }".to_string(),
+          ),
+        ));
       };
 
       let content_script = options
@@ -1580,9 +1628,12 @@ fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rqui
       .map(|ms| std::time::Duration::from_millis(ms as u64)),
   };
   if let Some(location) = options.get::<_, Option<Object<'js>>>("location")? {
-    let file: String = location
-      .get("file")
-      .map_err(|_| rq(&ScriptError::internal("test.step: location needs a `file`".to_string())))?;
+    let file: String = location.get("file").map_err(|_| {
+      throw_script_error(
+        ctx,
+        &ScriptError::internal("test.step: location needs a `file`".to_string()),
+      )
+    })?;
     parsed.location = Some(StepLocation {
       file,
       line: location.get::<_, Option<f64>>("line")?.unwrap_or(0.0) as u32,
@@ -1642,9 +1693,12 @@ fn build_step_info<'js>(
           let (name, content_type, source) = parse_attach_args(&ctx, &args.0)?;
           let bytes = match source {
             AttachSource::Bytes(b) => b,
-            AttachSource::Path(p) => tokio::fs::read(&p)
-              .await
-              .map_err(|e| rq(&ScriptError::internal(format!("stepInfo.attach: reading {p}: {e}"))))?,
+            AttachSource::Path(p) => tokio::fs::read(&p).await.map_err(|e| {
+              throw_script_error(
+                &ctx,
+                &ScriptError::internal(format!("stepInfo.attach: reading {p}: {e}")),
+              )
+            })?,
           };
           bridge.attach(name, content_type, bytes, Some(step_id)).await;
           Ok(())
@@ -1753,9 +1807,12 @@ fn build_test_info<'js>(
           let (name, content_type, source) = parse_attach_args(&ctx, &args.0)?;
           let bytes = match source {
             AttachSource::Bytes(b) => b,
-            AttachSource::Path(p) => tokio::fs::read(&p)
-              .await
-              .map_err(|e| rq(&ScriptError::internal(format!("testInfo.attach: reading {p}: {e}"))))?,
+            AttachSource::Path(p) => tokio::fs::read(&p).await.map_err(|e| {
+              throw_script_error(
+                &ctx,
+                &ScriptError::internal(format!("testInfo.attach: reading {p}: {e}")),
+              )
+            })?,
           };
           bridge.attach(name, content_type, bytes, None).await;
           Ok(())
@@ -1800,28 +1857,31 @@ fn build_test_info<'js>(
   // Playwright: `snapshotPath(...name: string[])` and
   // `snapshotPath(name, { kind })` (`worker/testInfo.ts:644-662`) — a
   // trailing object is the options bag, everything before it is a path.
-  let snapshot_path = Function::new(ctx.clone(), move |args: Rest<Value<'js>>| -> rquickjs::Result<String> {
-    let mut parts: Vec<String> = Vec::with_capacity(args.0.len());
-    let mut kind = "snapshot".to_string();
-    let last = args.0.len().saturating_sub(1);
-    for (index, value) in args.0.iter().enumerate() {
-      if index == last
-        && let Some(obj) = value.as_object()
-        && !value.is_string()
-      {
-        if let Some(k) = obj.get::<_, Option<String>>("kind")? {
-          kind = k;
+  let snapshot_path = Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<String> {
+      let mut parts: Vec<String> = Vec::with_capacity(args.0.len());
+      let mut kind = "snapshot".to_string();
+      let last = args.0.len().saturating_sub(1);
+      for (index, value) in args.0.iter().enumerate() {
+        if index == last
+          && let Some(obj) = value.as_object()
+          && !value.is_string()
+        {
+          if let Some(k) = obj.get::<_, Option<String>>("kind")? {
+            kind = k;
+          }
+          break;
         }
-        break;
+        if let Some(s) = value.as_string() {
+          parts.push(s.to_string()?);
+        }
       }
-      if let Some(s) = value.as_string() {
-        parts.push(s.to_string()?);
-      }
-    }
-    snap_bridge
-      .snapshot_path(&parts, &kind)
-      .map_err(|message| rq(&ScriptError::internal(message)))
-  })
+      snap_bridge
+        .snapshot_path(&parts, &kind)
+        .map_err(|message| throw_script_error(&ctx, &ScriptError::internal(message)))
+    },
+  )
   .map_err(se)?;
   obj.set("snapshotPath", snapshot_path).map_err(se)?;
 
@@ -1854,9 +1914,10 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
     .first()
     .and_then(Value::as_string)
     .ok_or_else(|| {
-      rq(&ScriptError::internal(
-        "testInfo.attach: name must be a string".to_string(),
-      ))
+      throw_script_error(
+        ctx,
+        &ScriptError::internal("testInfo.attach: name must be a string".to_string()),
+      )
     })?
     .to_string()?;
   // Positional: (name, contentType, body[, opts]).
@@ -1864,15 +1925,18 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
     let content_type = ct.to_string()?;
     let body = args
       .get(2)
-      .ok_or_else(|| rq(&ScriptError::internal("testInfo.attach: missing body".to_string())))?;
+      .ok_or_else(|| throw_script_error(ctx, &ScriptError::internal("testInfo.attach: missing body".to_string())))?;
     let bytes = ferrijs::std::node::bytes::value_to_bytes(ctx, body, None)?;
     return Ok((name, content_type, AttachSource::Bytes(bytes)));
   }
   // Option bag: (name, { body?, contentType?, path? }).
   let Some(opts) = args.get(1).and_then(Value::as_object) else {
-    return Err(rq(&ScriptError::internal(
-      "testInfo.attach: second argument must be a content type or an options object".to_string(),
-    )));
+    return Err(throw_script_error(
+      ctx,
+      &ScriptError::internal(
+        "testInfo.attach: second argument must be a content type or an options object".to_string(),
+      ),
+    ));
   };
   let content_type = opts
     .get::<_, Value<'js>>("contentType")
@@ -1883,9 +1947,10 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
     return Ok((name, content_type, AttachSource::Path(path)));
   }
   let body: Value<'js> = opts.get("body").map_err(|_| {
-    rq(&ScriptError::internal(
-      "testInfo.attach: options need `body` or `path`".to_string(),
-    ))
+    throw_script_error(
+      ctx,
+      &ScriptError::internal("testInfo.attach: options need `body` or `path`".to_string()),
+    )
   })?;
   let default_ct = if body.as_string().is_some() {
     "text/plain"
@@ -2280,7 +2345,7 @@ async fn run_fixture_factory<'js>(
         }
         r.current.as_ref().map(|c| c.world.clone())
       })
-      .map_err(|e| rq(&e))?;
+      .map_err(|e| throw_script_error(&ctx, &e))?;
       if let Some(w) = world {
         let w = w.restore(&ctx)?;
         w.set(use_name.as_str(), value)?;

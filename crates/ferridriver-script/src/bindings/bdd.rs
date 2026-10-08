@@ -32,8 +32,11 @@ use rquickjs::class::{Class, Trace};
 use rquickjs::function::{Args, Constructor, Opt, Rest};
 use rquickjs::{ArrayBuffer, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, TypedArray, Value};
 
+use crate::bindings::convert::throw_named;
 use crate::bindings::convert::{serde_from_js, serde_to_js};
-use crate::bindings::registry::{HookReg, ParamTypeReg, ScriptAttachment, StepReg, as_function, rq, with_registry};
+use crate::bindings::registry::{
+  HookReg, ParamTypeReg, ScriptAttachment, StepReg, as_function, throw_script_error, with_registry,
+};
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
 use ferridriver_test::host::TestWorldData;
@@ -198,7 +201,7 @@ fn ctx_of<'js>(args: &[Value<'js>]) -> Result<Ctx<'js>, rquickjs::Error> {
   args
     .first()
     .map(|v| v.ctx().clone())
-    .ok_or_else(|| rq(&ScriptError::internal("missing arguments".to_string())))
+    .ok_or(rquickjs::Error::MissingArgs { expected: 1, given: 0 })
 }
 
 fn register_step(kind: StepKind, args: &[Value<'_>]) -> rquickjs::Result<()> {
@@ -209,16 +212,16 @@ fn register_step_in(kind: StepKind, args: &[Value<'_>], fixture_set: Option<usiz
   let ctx = ctx_of(args)?;
   let pattern = args
     .first()
-    .ok_or_else(|| rq(&ScriptError::internal("step pattern missing".to_string())))?;
-  let (pat, is_regex) = pattern_of(pattern).map_err(|e| rq(&e))?;
+    .ok_or_else(|| throw_script_error(&ctx, &ScriptError::internal("step pattern missing".to_string())))?;
+  let (pat, is_regex) = pattern_of(pattern).map_err(|e| throw_script_error(&ctx, &e))?;
   // `Given(pattern, fn)` or `Given(pattern, options, fn)`: the body is
   // the last function argument.
-  let func = args
-    .iter()
-    .skip(1)
-    .rev()
-    .find_map(as_function)
-    .ok_or_else(|| rq(&ScriptError::internal(format!("step `{pat}` has no function body"))))?;
+  let func = args.iter().skip(1).rev().find_map(as_function).ok_or_else(|| {
+    throw_script_error(
+      &ctx,
+      &ScriptError::internal(format!("step `{pat}` has no function body")),
+    )
+  })?;
   let timeout_ms = timeout_from_opts(&args[1..]);
   let requested = crate::bindings::test::destructured_keys(&ctx, &func);
   note_unnamed_fixtures(fixture_set, requested.as_ref(), "step", &pat);
@@ -234,7 +237,7 @@ fn register_step_in(kind: StepKind, args: &[Value<'_>], fixture_set: Option<usiz
       requested,
     });
   })
-  .map_err(|e| rq(&e))
+  .map_err(|e| throw_script_error(&ctx, &e))
 }
 
 /// A body bound to a fixture chain takes its fixtures from the object
@@ -269,22 +272,26 @@ fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) 
   let ctx = ctx_of(args)?;
   let first = args
     .first()
-    .ok_or_else(|| rq(&ScriptError::internal(format!("{kind} hook missing"))))?;
+    .ok_or_else(|| throw_script_error(&ctx, &ScriptError::internal(format!("{kind} hook missing"))))?;
   let (tags, func) = if let Some(f) = as_function(first) {
     (None, f)
   } else {
     let tags = if let Some(s) = first.as_string() {
-      Some(s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?)
+      Some(
+        s.to_string()
+          .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?,
+      )
     } else if let Some(o) = first.as_object() {
       o.get::<_, String>("tags").ok()
     } else {
       None
     };
-    let f = args
-      .iter()
-      .skip(1)
-      .find_map(as_function)
-      .ok_or_else(|| rq(&ScriptError::internal(format!("{kind} hook has no function body"))))?;
+    let f = args.iter().skip(1).find_map(as_function).ok_or_else(|| {
+      throw_script_error(
+        &ctx,
+        &ScriptError::internal(format!("{kind} hook has no function body")),
+      )
+    })?;
     (tags, f)
   };
   let timeout_ms = timeout_from_opts(args);
@@ -306,7 +313,7 @@ fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) 
       requested,
     });
   })
-  .map_err(|e| rq(&e))
+  .map_err(|e| throw_script_error(&ctx, &e))
 }
 
 // 0.13 forbids running JS while a buffer borrow is alive; these copy out
@@ -357,12 +364,15 @@ fn register_attachment(args: &[Value<'_>], is_log: bool) -> rquickjs::Result<()>
       .cloned()
       .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
     if let Some(s) = data.as_string() {
-      let s = s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+      let s = s
+        .to_string()
+        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
       (s.into_bytes(), media_arg.unwrap_or_else(|| "text/plain".to_string()))
     } else if let Some(b) = value_bytes(&data) {
       (b, media_arg.unwrap_or_else(|| "application/octet-stream".to_string()))
     } else {
-      let j: serde_json::Value = serde_from_js(&ctx, data).map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+      let j: serde_json::Value =
+        serde_from_js(&ctx, data).map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
       (
         serde_json::to_vec(&j).unwrap_or_default(),
         media_arg.unwrap_or_else(|| "application/json".to_string()),
@@ -376,7 +386,7 @@ fn register_attachment(args: &[Value<'_>], is_log: bool) -> rquickjs::Result<()>
       bytes,
     });
   })
-  .map_err(|e| rq(&e))
+  .map_err(|e| throw_script_error(&ctx, &e))
 }
 
 /// Drain the scenario's queued attachments (and clear the queue). The
@@ -420,7 +430,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     ctx.clone(),
     |ctx: Ctx<'js>, test: Value<'js>| -> rquickjs::Result<Object<'js>> {
       let Some(set) = crate::bindings::test::fixture_set_of(&ctx, &test) else {
-        return Err(rq(&ScriptError::internal(
+        return Err(throw_script_error(&ctx, &ScriptError::internal(
           "bindSteps() accepts a \"test\" function as its parameter.\nDid you mean to pass the object `test.extend()`            returned?"
             .to_string(),
         )));
@@ -463,19 +473,23 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
 
   let define_parameter_type = Function::new(ctx.clone(), |def: Object<'_>| -> rquickjs::Result<()> {
     let ctx = def.ctx().clone();
-    let name: String = def.get("name").map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+    let name: String = def
+      .get("name")
+      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
     let rx_val: Value<'_> = def
       .get("regexp")
-      .map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
     let regexp = if let Some(s) = rx_val.as_string() {
-      s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?
+      s.to_string()
+        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?
     } else if let Some(o) = rx_val.as_object() {
       o.get::<_, String>("source")
-        .map_err(|e| rq(&ScriptError::internal(e.to_string())))?
+        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?
     } else {
-      return Err(rq(&ScriptError::internal(
-        "parameter type regexp must be string or RegExp".to_string(),
-      )));
+      return Err(throw_script_error(
+        &ctx,
+        &ScriptError::internal("parameter type regexp must be string or RegExp".to_string()),
+      ));
     };
     let transformer = def
       .get::<_, Value<'_>>("transformer")
@@ -489,13 +503,13 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
         transformer,
       });
     })
-    .map_err(|e| rq(&e))
+    .map_err(|e| throw_script_error(&ctx, &e))
   })?;
   g.set("defineParameterType", define_parameter_type.clone())?;
   bdd.set("defineParameterType", define_parameter_type)?;
 
   let set_default_timeout = Function::new(ctx.clone(), |ctx: Ctx<'_>, ms: f64| -> rquickjs::Result<()> {
-    with_registry(&ctx, |reg| reg.default_timeout_ms = ms.max(0.0) as u64).map_err(|e| rq(&e))
+    with_registry(&ctx, |reg| reg.default_timeout_ms = ms.max(0.0) as u64).map_err(|e| throw_script_error(&ctx, &e))
   })?;
   g.set("setDefaultTimeout", set_default_timeout.clone())?;
   bdd.set("setDefaultTimeout", set_default_timeout)?;
@@ -503,7 +517,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   let set_definition_function_wrapper = Function::new(ctx.clone(), |w: Function<'_>| -> rquickjs::Result<()> {
     let ctx = w.ctx().clone();
     let saved = Persistent::save(&ctx, w);
-    with_registry(&ctx, |reg| reg.def_fn_wrapper = Some(saved)).map_err(|e| rq(&e))
+    with_registry(&ctx, |reg| reg.def_fn_wrapper = Some(saved)).map_err(|e| throw_script_error(&ctx, &e))
   })?;
   g.set("setDefinitionFunctionWrapper", set_definition_function_wrapper.clone())?;
   bdd.set("setDefinitionFunctionWrapper", set_definition_function_wrapper)?;
@@ -511,7 +525,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   let set_world_constructor = Function::new(ctx.clone(), |c: Constructor<'_>| -> rquickjs::Result<()> {
     let ctx = c.ctx().clone();
     let saved = Persistent::save(&ctx, c);
-    with_registry(&ctx, |reg| reg.world_ctor = Some(saved)).map_err(|e| rq(&e))
+    with_registry(&ctx, |reg| reg.world_ctor = Some(saved)).map_err(|e| throw_script_error(&ctx, &e))
   })?;
   g.set("setWorldConstructor", set_world_constructor.clone())?;
   bdd.set("setWorldConstructor", set_world_constructor)?;
@@ -723,12 +737,8 @@ fn install_world_surface<'js>(
   obj.set("log", log).map_err(|e| ScriptError::internal(e.to_string()))?;
   // Cucumber `this.skip()` — throws a sentinel the step bridge maps
   // to `Skipped` (cucumber aborts the step as skipped on throw).
-  let skip = Function::new(ctx.clone(), || -> rquickjs::Result<()> {
-    Err(rquickjs::Error::new_from_js_message(
-      "World",
-      "Error",
-      SKIP_SENTINEL.to_string(),
-    ))
+  let skip = Function::new(ctx.clone(), |ctx: Ctx<'_>| -> rquickjs::Result<()> {
+    Err(throw_named(&ctx, "Error", SKIP_SENTINEL))
   })
   .map_err(|e| ScriptError::internal(e.to_string()))?;
   obj

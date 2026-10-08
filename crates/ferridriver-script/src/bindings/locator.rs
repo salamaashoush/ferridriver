@@ -7,6 +7,7 @@ use rquickjs::class::Trace;
 use rquickjs::function::Opt;
 
 use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::type_error;
 
 /// Shape of filter options read out of a JS object via prototype-aware
 /// property lookup. `has`/`hasNot` may be either a selector string or a
@@ -29,11 +30,7 @@ fn get_string<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<O
   }
   match v.as_string() {
     Some(s) => Ok(Some(s.to_string()?)),
-    None => Err(rquickjs::Error::new_from_js_message(
-      "filter options",
-      "field",
-      format!("{key}: expected string"),
-    )),
+    None => Err(type_error(obj.ctx(), format!("filter options: {key}: expected string"))),
   }
 }
 
@@ -50,9 +47,7 @@ fn get_text_matcher<'js>(
   }
   crate::bindings::page::options::string_or_regex_from_js(v)
     .map(Some)
-    .map_err(|_| {
-      rquickjs::Error::new_from_js_message("filter options", "field", format!("{key}: expected string | RegExp"))
-    })
+    .map_err(|_| type_error(obj.ctx(), format!("filter options: {key}: expected string | RegExp")))
 }
 
 /// Pull a `LocatorLike` from a JS object property. Accepts either a
@@ -83,10 +78,9 @@ fn get_locator_like<'js>(
   {
     return Ok(Some(LocatorLike::Selector(sel)));
   }
-  Err(rquickjs::Error::new_from_js_message(
-    "filter options",
-    "field",
-    format!("{key}: expected Locator instance or {{ selector: string }}"),
+  Err(type_error(
+    ctx,
+    format!("filter options: {key}: expected Locator instance or {{ selector: string }}"),
   ))
 }
 
@@ -144,7 +138,7 @@ fn get_bool<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<Opt
   }
   v.as_bool()
     .map(Some)
-    .ok_or_else(|| rquickjs::Error::new_from_js_message("filter options", "field", format!("{key}: expected boolean")))
+    .ok_or_else(|| type_error(obj.ctx(), format!("filter options: {key}: expected boolean")))
 }
 
 pub(crate) fn parse_locator_options_public<'js>(
@@ -172,7 +166,7 @@ pub(crate) fn parse_locator_options_public<'js>(
   }
   let obj = val
     .as_object()
-    .ok_or_else(|| rquickjs::Error::new_from_js_message("locator options", "", "expected an options object"))?;
+    .ok_or_else(|| type_error(ctx, "locator options: expected an options object"))?;
   Ok(ParsedLocatorOptions {
     has_text: get_text_matcher(obj, "hasText")?,
     has_not_text: get_text_matcher(obj, "hasNotText")?,
@@ -313,18 +307,16 @@ impl LocatorJs {
       match get_string(obj, "selector")? {
         Some(sel) => ferridriver::options::LocatorLike::Selector(sel),
         None => {
-          return Err(rquickjs::Error::new_from_js_message(
-            "Locator",
-            "locator",
-            "expected a selector string or Locator instance",
+          return Err(type_error(
+            &ctx,
+            "Locator.locator: expected a selector string or Locator instance",
           ));
         },
       }
     } else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "Locator",
-        "locator",
-        "expected a selector string or Locator instance",
+      return Err(type_error(
+        &ctx,
+        "Locator.locator: expected a selector string or Locator instance",
       ));
     };
 
@@ -380,7 +372,7 @@ impl LocatorJs {
   pub fn and<'js>(&self, ctx: rquickjs::Ctx<'js>, other: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
     let _ = ctx;
     let class = rquickjs::Class::<LocatorJs>::from_value(&other)
-      .map_err(|_| rquickjs::Error::new_from_js_message("Locator", "and", "expected a Locator instance"))?;
+      .map_err(|_| type_error(&ctx, "Locator.and: expected a Locator instance"))?;
     Ok(LocatorJs::new(self.inner.and(&class.borrow().inner)))
   }
 
@@ -390,7 +382,7 @@ impl LocatorJs {
   pub fn or<'js>(&self, ctx: rquickjs::Ctx<'js>, other: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
     let _ = ctx;
     let class = rquickjs::Class::<LocatorJs>::from_value(&other)
-      .map_err(|_| rquickjs::Error::new_from_js_message("Locator", "or", "expected a Locator instance"))?;
+      .map_err(|_| type_error(&ctx, "Locator.or: expected a Locator instance"))?;
     Ok(LocatorJs::new(self.inner.or(&class.borrow().inner)))
   }
 
@@ -903,7 +895,10 @@ impl LocatorJs {
               .as_deref()
               .map(|s| {
                 ferridriver::options::WaitState::try_from_str(s).map_err(|bad| {
-                  crate::bindings::registry::rq(&crate::ScriptError::internal(format!("unknown wait state: {bad}")))
+                  crate::bindings::registry::throw_script_error(
+                    &ctx,
+                    &crate::ScriptError::internal(format!("unknown wait state: {bad}")),
+                  )
                 })
               })
               .transpose()?,

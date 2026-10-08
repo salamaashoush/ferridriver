@@ -23,6 +23,7 @@ use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 use super::browser::BrowserJs;
 use super::context::BrowserContextJs;
 use crate::bindings::convert::serde_from_js;
+use crate::bindings::convert::throw_named;
 
 #[derive(JsLifetime)]
 pub(crate) struct BrowserResourcesUd(pub(crate) Arc<ferridriver::BrowserResources>);
@@ -31,9 +32,7 @@ fn resources(ctx: &Ctx<'_>) -> rquickjs::Result<Arc<ferridriver::BrowserResource
   ctx
     .userdata::<BrowserResourcesUd>()
     .map(|resources| Arc::clone(&resources.0))
-    .ok_or_else(|| {
-      rquickjs::Error::new_from_js_message("BrowserType", "Error", "browser resource owner is unavailable")
-    })
+    .ok_or_else(|| throw_named(ctx, "Error", "BrowserType: browser resource owner is unavailable"))
 }
 
 #[derive(JsLifetime, Trace)]

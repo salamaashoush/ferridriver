@@ -25,7 +25,8 @@ use rquickjs::promise::{MaybePromise, Promised};
 use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
 use super::http_client::HttpClientJs;
-use super::registry::{tool_dispatch, tool_names};
+use super::registry::{throw_script_error, tool_dispatch, tool_names};
+use crate::bindings::convert::type_error;
 use crate::bindings::convert::{json_to_js, serde_from_js, throw_named};
 use crate::command_spec::CommandSpec;
 use crate::engine::SessionProcsUd;
@@ -349,10 +350,6 @@ mod contribution_point_tests {
   }
 }
 
-fn rq(e: &ScriptError) -> rquickjs::Error {
-  rquickjs::Error::new_from_js_message("extensions", "Error", e.message.clone())
-}
-
 /// Log target every extension event carries, so an operator can filter
 /// exactly these (`RUST_LOG=ferridriver::extension=debug`) without
 /// turning on the rest of the engine.
@@ -485,7 +482,7 @@ fn extension_logger<'js>(ctx: &Ctx<'js>, tool: &str) -> rquickjs::Result<Value<'
 /// whole session VM (and with it every `run_script` for the session).
 pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rquickjs::Result<()> {
   for file in files {
-    let before = crate::bindings::registry::registration_counts(ctx).map_err(|e| rq(&e))?;
+    let before = crate::bindings::registry::registration_counts(ctx).map_err(|e| throw_script_error(ctx, &e))?;
     if let Err(e) = install_one_extension(ctx, file).await {
       let (detail, refused_by_policy) = match e {
         rquickjs::Error::Exception => {
@@ -506,35 +503,44 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
       // ceiling denied a part of — quietly, with only a warning line
       // between the operator and authority they withheld.
       if refused_by_policy {
-        return Err(rq(&ScriptError::internal(format!(
-          "extension.policy.refused: `{}` was refused by the operator policy: {detail}",
-          file.name
-        ))));
+        return Err(throw_script_error(
+          ctx,
+          &ScriptError::internal(format!(
+            "extension.policy.refused: `{}` was refused by the operator policy: {detail}",
+            file.name
+          )),
+        ));
       }
       // A PROVIDER that does not evaluate cannot be skipped: every
       // consumer's `import` of its specifier resolves to a module that
       // is not there, so the session would come up with a specifier
       // that silently answers nothing.
       if let Some(specifier) = &file.provides {
-        return Err(rq(&ScriptError::internal(format!(
-          "extension.provider.failed: `{}` serves `{specifier}` and failed to evaluate: {detail}. \
+        return Err(throw_script_error(
+          ctx,
+          &ScriptError::internal(format!(
+            "extension.provider.failed: `{}` serves `{specifier}` and failed to evaluate: {detail}. \
            Every module importing `{specifier}` depends on it, so the session cannot start",
-          file.name
-        ))));
+            file.name
+          )),
+        ));
       }
-      let after = crate::bindings::registry::registration_counts(ctx).map_err(|e| rq(&e))?;
+      let after = crate::bindings::registry::registration_counts(ctx).map_err(|e| throw_script_error(ctx, &e))?;
       if after > before {
         // Skipping is only safe while the file left nothing behind.
         // Having registered and THEN thrown, it owns entries every
         // consumer addresses by index — a manifest extracted from a
         // clean run, a plan built from a collection VM — so continuing
         // means running against registrations that no longer line up.
-        return Err(rq(&ScriptError::internal(format!(
-          "extension.install.partial: `{}` registered {} item(s) and then failed: {detail}. \
+        return Err(throw_script_error(
+          ctx,
+          &ScriptError::internal(format!(
+            "extension.install.partial: `{}` registered {} item(s) and then failed: {detail}. \
            Its registrations are addressed by position, so the session cannot continue without them",
-          file.name,
-          after - before
-        ))));
+            file.name,
+            after - before
+          )),
+        ));
       }
       tracing::warn!(extension = %file.name, error = %detail, "extension install failed; skipping file");
     }
@@ -552,7 +558,7 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
 /// Cheap (one closure per tool) and idempotent, so every bundle
 /// evaluation ends with it.
 pub fn rebuild_tool_bindings(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-  let names = tool_names(ctx).map_err(|e| rq(&e))?;
+  let names = tool_names(ctx).map_err(|e| throw_script_error(ctx, &e))?;
   let tools_obj = Object::new(ctx.clone())?;
   let mut created_global_roots = BTreeSet::new();
   for (idx, name) in names.into_iter().enumerate() {
@@ -692,7 +698,7 @@ fn dispatch_tool<'js>(
 /// invoke ([`invoke_tool_by_name`], which backs the MCP `invoke_extension_tool`
 /// path without synthesizing a script).
 async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-  let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
+  let d = tool_dispatch(&ctx, idx).map_err(|e| throw_script_error(&ctx, &e))?;
 
   let arg = Object::new(ctx.clone())?;
   let undef = Value::new_undefined(ctx.clone());
@@ -789,8 +795,8 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
     Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
       Ok(cls) => {
         let inner = cls.borrow().inner_arc();
-        let guarded = HttpClientJs::with_net(inner, net)
-          .map_err(|m| rquickjs::Error::new_from_js_message("extensions", "allow.net", m))?;
+        let guarded =
+          HttpClientJs::with_net(inner, net).map_err(|m| type_error(&ctx, format!("extensions.allow.net: {m}")))?;
         Class::instance(ctx.clone(), guarded)?.into_js(&ctx)?
       },
       Err(_) => req_val,
@@ -803,7 +809,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
     (Some(net), Some(session_fetch)) => {
       let declared = ferrijs::Permissions::none()
         .allow_net(net)
-        .map_err(|m| rquickjs::Error::new_from_js_message("extensions", "allow.net", m))?;
+        .map_err(|m| type_error(&ctx, format!("extensions.allow.net: {m}")))?;
       let backend: Arc<dyn ferrijs::fetch::FetchBackend> = Arc::new(session_fetch.0.attenuated(Arc::new(declared)));
       ferrijs::fetch::function(&ctx, backend)?.into_value()
     },
@@ -853,7 +859,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
             ferrijs::std::exceptions::DOMExceptionName::TimeoutError,
             &msg,
           );
-          Err(rquickjs::Error::new_from_js_message("extensions", "Error", msg))
+          Err(throw_named(&ctx, "Error", msg))
         }
       },
       None => fut.await,

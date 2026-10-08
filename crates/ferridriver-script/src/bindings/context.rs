@@ -9,6 +9,7 @@ use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::{init_script_from_js, serde_from_js, serde_to_js};
+use crate::bindings::convert::{throw_named, type_error};
 use crate::bindings::page::{
   PageCallbacks, RouteOwner, call_predicate_truthy, url_value_to_matcher, with_page_callbacks,
 };
@@ -135,13 +136,9 @@ impl BrowserContextJs {
           None => self.inner.clear_cookies().await.into_js_with(&ctx),
           Some(v) if v.is_undefined() || v.is_null() => self.inner.clear_cookies().await.into_js_with(&ctx),
           Some(v) => {
-            let obj = v.as_object().ok_or_else(|| {
-              rquickjs::Error::new_from_js_message(
-                "BrowserContext.clearCookies",
-                "options",
-                "expected an options object".to_string(),
-              )
-            })?;
+            let obj = v
+              .as_object()
+              .ok_or_else(|| type_error(&ctx, "BrowserContext.clearCookies: expected an options object"))?;
             let field = |key: &str| -> rquickjs::Result<Option<ferridriver::options::StringOrRegex>> {
               let value: rquickjs::Value<'_> = obj.get(key)?;
               if value.is_undefined() || value.is_null() {
@@ -419,10 +416,10 @@ impl BrowserContextJs {
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let times = crate::bindings::page::parse_route_times(&options)?;
     let Some(vm) = ferrijs::vm_handle(&ctx) else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "context.route",
+      return Err(throw_named(
+        &ctx,
         "Error",
-        "context.route requires the script engine's VM handle".to_string(),
+        "context.route requires the script engine's VM handle",
       ));
     };
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
@@ -446,7 +443,7 @@ impl BrowserContextJs {
         let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           if has_predicate {
             let saved_pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
-              .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route predicate gone".to_string()))?;
+              .ok_or_else(|| throw_named(&ctx, "Error", "context.route: route predicate gone"))?;
             let pred = saved_pred.restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
@@ -458,7 +455,7 @@ impl BrowserContextJs {
             }
           }
           let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
-            .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route handler gone".to_string()))?;
+            .ok_or_else(|| throw_named(&ctx, "Error", "context.route: route handler gone"))?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
           // `call_bracketed_async`: an async route handler's `fetch`
           // runs in a continuation off the synchronous call (see
@@ -505,10 +502,10 @@ impl BrowserContextJs {
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let Some(vm) = ferrijs::vm_handle(&ctx) else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "context.routeWebSocket",
+      return Err(throw_named(
+        &ctx,
         "Error",
-        "context.routeWebSocket requires the script engine's VM handle".to_string(),
+        "context.routeWebSocket requires the script engine's VM handle",
       ));
     };
     let matcher = url_value_to_matcher(&ctx, url)?;
@@ -610,7 +607,7 @@ impl BrowserContextJs {
       .scope(async move {
         let behavior = match options.0.and_then(rquickjs::Value::into_object) {
           Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
-            Some(b) => Some(crate::bindings::page::options::parse_unroute_behavior(&b)?),
+            Some(b) => Some(crate::bindings::page::options::parse_unroute_behavior(&ctx, &b)?),
             None => None,
           },
           None => None,
@@ -1110,10 +1107,10 @@ impl BrowserContextJs {
     with_source: bool,
   ) -> rquickjs::Result<ferridriver::ExposedBinding> {
     let Some(vm) = ferrijs::vm_handle(ctx) else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "BrowserContext.exposeBinding",
+      return Err(throw_named(
+        ctx,
         "Error",
-        "exposeBinding requires the script engine's VM handle".to_string(),
+        "BrowserContext.exposeBinding requires the script engine's VM handle",
       ));
     };
     let saved = crate::bindings::page::SavedCallback::save(ctx, callback);
@@ -1127,11 +1124,7 @@ impl BrowserContextJs {
         let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           let saved = crate::bindings::page::get_exposed_callback(&ctx, &name)?
             .ok_or_else(|| {
-              rquickjs::Error::new_from_js_message(
-                "BrowserContext.exposeBinding",
-                "Error",
-                "exposed callback gone".to_string(),
-              )
+              throw_named(&ctx, "Error", "BrowserContext.exposeBinding: exposed callback gone")
             })?;
           let f = saved.restore(&ctx)?;
           // Playwright spreads the page-side call args into the
@@ -1230,9 +1223,9 @@ fn with_context_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ContextCallbacks
   if ctx.userdata::<ContextCallbacksUd>().is_none() {
     let _ = ctx.store_userdata(ContextCallbacksUd(std::cell::RefCell::new(ContextCallbacks::default())));
   }
-  let ud = ctx.userdata::<ContextCallbacksUd>().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("context", "Error", "context callbacks registry missing".to_string())
-  })?;
+  let ud = ctx
+    .userdata::<ContextCallbacksUd>()
+    .ok_or_else(|| throw_named(ctx, "Error", "context callbacks registry missing"))?;
   let mut reg = ud.0.borrow_mut();
   Ok(f(&mut reg))
 }

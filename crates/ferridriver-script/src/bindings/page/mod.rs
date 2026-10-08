@@ -2,7 +2,7 @@
 //!
 //! Methods mirror `ferridriver::Page`'s public surface one-for-one; each is a
 //! small delegation that converts `FerriError` into `rquickjs::Error` at the
-//! boundary via [`super::convert::FerriResultExt`].
+//! boundary via [`super::convert::FerriResultCtxExt`].
 
 pub(crate) mod callbacks;
 mod events;
@@ -27,6 +27,7 @@ use crate::bindings::convert::{
   extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serde_to_js,
   serialized_value_to_quickjs,
 };
+use crate::bindings::convert::{throw_named, type_error};
 use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
 use crate::bindings::mouse::MouseJs;
@@ -109,11 +110,7 @@ impl PageJs {
   ) -> rquickjs::Result<()> {
     let ctx = ctx.clone();
     let Some(event) = target.as_string() else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "page.off",
-        "TypeError",
-        "off(event, listener) expects an event name".to_string(),
-      ));
+      return Err(type_error(&ctx, "page.off: off(event, listener) expects an event name"));
     };
     let event = event.to_string()?;
     let listener_fn = listener.0.as_ref().and_then(|v| v.as_function().cloned());
@@ -2048,10 +2045,10 @@ impl PageJs {
           .into_js_with(&ctx)?;
         let mut coverage = self.coverage_session.lock().await;
         if coverage.is_some() {
-          return Err(rquickjs::Error::new_from_js_message(
-            "page.startJSCoverage",
+          return Err(throw_named(
+            &ctx,
             "Error",
-            "JavaScript coverage is already started".to_string(),
+            "page.startJSCoverage: JavaScript coverage is already started",
           ));
         }
         let session = context.new_cdp_session(&self.inner).await.into_js_with(&ctx)?;
@@ -2090,10 +2087,10 @@ impl PageJs {
       .scope(async move {
         let coverage = self.coverage_session.lock().await;
         let Some(session) = coverage.as_ref() else {
-          return Err(rquickjs::Error::new_from_js_message(
-            "page.takeJSCoverage",
+          return Err(throw_named(
+            &ctx,
             "Error",
-            "JavaScript coverage has not been started".to_string(),
+            "page.takeJSCoverage: JavaScript coverage has not been started",
           ));
         };
         let result = session
@@ -2116,10 +2113,10 @@ impl PageJs {
       .scope(async move {
         let mut coverage = self.coverage_session.lock().await;
         let Some(session) = coverage.take() else {
-          return Err(rquickjs::Error::new_from_js_message(
-            "page.stopJSCoverage",
+          return Err(throw_named(
+            &ctx,
             "Error",
-            "JavaScript coverage has not been started".to_string(),
+            "page.stopJSCoverage: JavaScript coverage has not been started",
           ));
         };
         let result = session
@@ -2151,10 +2148,10 @@ impl PageJs {
           .into_js_with(&ctx)?;
         let mut profiler = self.cpu_profile_session.lock().await;
         if profiler.is_some() {
-          return Err(rquickjs::Error::new_from_js_message(
-            "page.startCPUProfile",
+          return Err(throw_named(
+            &ctx,
             "Error",
-            "CPU profiling is already started".to_string(),
+            "page.startCPUProfile: CPU profiling is already started",
           ));
         }
         let session = context.new_cdp_session(&self.inner).await.into_js_with(&ctx)?;
@@ -2183,10 +2180,10 @@ impl PageJs {
       .scope(async move {
         let mut profiler = self.cpu_profile_session.lock().await;
         let Some(session) = profiler.take() else {
-          return Err(rquickjs::Error::new_from_js_message(
-            "page.stopCPUProfile",
+          return Err(throw_named(
+            &ctx,
             "Error",
-            "CPU profiling has not been started".to_string(),
+            "page.stopCPUProfile: CPU profiling has not been started",
           ));
         };
         let result = session
@@ -2289,10 +2286,10 @@ impl PageJs {
   > {
     let times = parse_route_times(&options)?;
     let vm = self.vm.clone().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "page.route",
+      throw_named(
+        &ctx,
         "Error",
-        "page.route requires the script engine's VM handle (install_page)".to_string(),
+        "page.route requires the script engine's VM handle (install_page)",
       )
     })?;
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
@@ -2338,7 +2335,7 @@ impl PageJs {
         let _: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
           if has_predicate {
             let saved_pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
-              .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?;
+              .ok_or_else(|| throw_named(&ctx, "Error", "page.route: route predicate gone"))?;
             let pred = saved_pred.restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
@@ -2350,7 +2347,7 @@ impl PageJs {
             }
           }
           let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
-            .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route handler gone".to_string()))?;
+            .ok_or_else(|| throw_named(&ctx, "Error", "page.route: route handler gone"))?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
           // `call_bracketed_async`, not `call_bracketed`: a route handler
           // is typically `async`, so its `fetch`/`request` runs in a
@@ -2400,10 +2397,10 @@ impl PageJs {
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let vm = self.vm.clone().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "page.routeWebSocket",
+      throw_named(
+        &ctx,
         "Error",
-        "page.routeWebSocket requires the script engine's VM handle (install_page)".to_string(),
+        "page.routeWebSocket requires the script engine's VM handle (install_page)",
       )
     })?;
     let matcher = url_value_to_matcher(&ctx, url)?;
@@ -2518,7 +2515,7 @@ impl PageJs {
       .scope(async move {
         let behavior = match options.0.and_then(rquickjs::Value::into_object) {
           Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
-            Some(b) => Some(parse_unroute_behavior(&b)?),
+            Some(b) => Some(parse_unroute_behavior(&ctx, &b)?),
             None => None,
           },
           None => None,
@@ -2563,10 +2560,10 @@ impl PageJs {
       }
     }
     let vm = self.vm.clone().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "page.addLocatorHandler",
+      throw_named(
+        &ctx,
         "Error",
-        "page.addLocatorHandler requires the script engine's VM handle (install_page)".to_string(),
+        "page.addLocatorHandler requires the script engine's VM handle (install_page)",
       )
     })?;
     let id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
@@ -2582,11 +2579,7 @@ impl PageJs {
           use rquickjs::class::Class;
           let result: Result<rquickjs::Result<()>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
             let f = with_page_callbacks(&ctx, |r| r.get_locator_handler(id))?.ok_or_else(|| {
-              rquickjs::Error::new_from_js_message(
-                "page.addLocatorHandler",
-                "Error",
-                "locator handler gone".to_string(),
-              )
+              throw_named(&ctx, "Error", "page.addLocatorHandler: locator handler gone")
             })?;
             let loc_class = Class::instance(ctx.clone(), LocatorJs::new(loc))?;
             let _: rquickjs::Value<'_> = f.call_bracketed_async(&ctx, (loc_class,)).await?;
@@ -3141,10 +3134,10 @@ impl PageJs {
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let vm = self.vm.clone().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "page.exposeFunction",
+      throw_named(
+        &ctx,
         "Error",
-        "page.exposeFunction requires the script engine's VM handle (install_page)".to_string(),
+        "page.exposeFunction requires the script engine's VM handle (install_page)",
       )
     })?;
     // Snapshot the registrar's net grant NOW, synchronously — a `#[qjs]`
@@ -3182,11 +3175,7 @@ impl PageJs {
             crate::vm_with!(vm => |ctx| {
               let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
                 .ok_or_else(|| {
-                  rquickjs::Error::new_from_js_message(
-                    "page.exposeFunction",
-                    "Error",
-                    "exposed callback gone".to_string(),
-                  )
+                  throw_named(&ctx, "Error", "page.exposeFunction: exposed callback gone")
                 })?;
               let f = saved.restore(&ctx)?;
               // Playwright spreads the page-side call arguments into the
@@ -3243,10 +3232,10 @@ impl PageJs {
     callback: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let vm = self.vm.clone().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "page.exposeBinding",
+      throw_named(
+        &ctx,
         "Error",
-        "page.exposeBinding requires the script engine's VM handle (install_page)".to_string(),
+        "page.exposeBinding requires the script engine's VM handle (install_page)",
       )
     })?;
     let saved = SavedCallback::save(&ctx, callback);
@@ -3265,7 +3254,7 @@ impl PageJs {
           let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> =
             crate::vm_with!(vm => |ctx| {
               let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?.ok_or_else(|| {
-                rquickjs::Error::new_from_js_message("page.exposeBinding", "Error", "exposed callback gone".to_string())
+                throw_named(&ctx, "Error", "page.exposeBinding: exposed callback gone")
               })?;
               let f = saved.restore(&ctx)?;
               let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());

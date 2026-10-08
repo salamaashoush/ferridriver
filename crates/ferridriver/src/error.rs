@@ -143,7 +143,7 @@ impl FerriError {
   /// Render the error message with the Playwright-style class prefix
   /// for distinguishable variants, plain `Display` output otherwise.
   /// Single source of truth — every boundary helper (`to_napi`,
-  /// `to_rq_error`, `TestFailure::from`/`wrap`) routes through this.
+  /// `TestFailure::from`/`wrap`) routes through this.
   #[must_use]
   pub fn display_named(&self) -> String {
     if self.has_named_prefix() {

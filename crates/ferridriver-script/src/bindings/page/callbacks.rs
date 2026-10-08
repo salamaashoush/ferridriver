@@ -8,6 +8,7 @@ use ferridriver::Page;
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::bindings::convert::throw_named;
 
 /// A persisted JS callback. Every callback dispatched outside its
 /// registrar's own poll (event pump, route/exposeFunction jobs,
@@ -507,9 +508,9 @@ pub(crate) fn with_page_callbacks<R>(
   f: impl FnOnce(&mut PageCallbacks) -> R,
 ) -> rquickjs::Result<R> {
   ensure_page_callbacks(ctx);
-  let ud = ctx.userdata::<PageCallbacksUd>().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("page", "Error", "page callbacks registry missing".to_string())
-  })?;
+  let ud = ctx
+    .userdata::<PageCallbacksUd>()
+    .ok_or_else(|| throw_named(ctx, "Error", "page callbacks registry missing"))?;
   let mut reg = ud.0.borrow_mut();
   Ok(f(&mut reg))
 }

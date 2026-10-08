@@ -204,7 +204,7 @@ fn parse_filter<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Resu
     _ => JsNodeFilter::default(),
   };
   ferridriver::heap::NodeFilter::parse(parsed.filter_name.as_deref(), parsed.object_id.map(node_id_of)).map_err(|e| {
-    crate::bindings::convert::to_rq_error(&ferridriver::FerriError::invalid_argument("filter", e.to_string()))
+    crate::bindings::convert::ferri_throw(ctx, &ferridriver::FerriError::invalid_argument("filter", e.to_string()))
   })
 }
 

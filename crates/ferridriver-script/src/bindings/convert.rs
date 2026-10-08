@@ -6,24 +6,9 @@ use rquickjs::{Ctx, Function, Object, Value};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Convert a [`FerriError`] into an `rquickjs::Error` suitable for throwing
-/// out of a binding method.
-///
-/// The JS-visible `message` is the `Display` output of the core error, which
-/// already matches Playwright's phrasing for the variants that have a
-/// Playwright analogue (see `ferridriver::error`). The `from` / `to` labels
-/// are static strings used by `rquickjs` for its own error rendering.
-pub fn to_rq_error(err: &FerriError) -> rquickjs::Error {
-  rquickjs::Error::new_from_js_message("ferridriver", err.name(), err.to_string())
-}
-
 /// Lower a [`FerriError`] into a thrown JS exception whose `name`
 /// mirrors the core error name (`"TimeoutError"`, `"TargetClosedError"`,
-/// ...). The ctx-free [`to_rq_error`] path can only produce a
-/// conversion-error shape, which surfaces in scripts as a `TypeError`
-/// with a mangled "Error converting from js ..." message; this builds a
-/// real `Error` instance so `e.name === 'TimeoutError'` holds, matching
-/// Playwright.
+/// ...), so `e.name === 'TimeoutError'` holds, matching Playwright.
 pub fn ferri_throw(ctx: &Ctx<'_>, e: &FerriError) -> rquickjs::Error {
   throw_named(ctx, e.name(), e.to_string())
 }
@@ -37,6 +22,24 @@ pub fn ferri_throw(ctx: &Ctx<'_>, e: &FerriError) -> rquickjs::Error {
 /// as a `TypeError` with a mangled "Error converting from js ..."
 /// message and a fixed name.
 pub use ferrijs::std::node::throw_named;
+
+/// Throw a real `TypeError` carrying the whole message: the error for an
+/// argument a binding cannot use.
+///
+/// `rquickjs::Error::new_from_js_message` is banned in `clippy.toml`:
+/// rquickjs throws it through QuickJS's 256-byte format buffer, so a longer
+/// message was cut, and every one read "Error converting from js ...".
+pub fn type_error(ctx: &Ctx<'_>, message: impl Into<String>) -> rquickjs::Error {
+  let message = message.into();
+  let built: rquickjs::Result<Value<'_>> = (|| {
+    let ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("TypeError")?;
+    ctor.construct((message.as_str(),))
+  })();
+  match built {
+    Ok(error) => ctx.throw(error),
+    Err(_) => throw_named(ctx, "TypeError", message),
+  }
+}
 
 /// [`throw_named`] with the `stack` the thrower decided on, rather than
 /// the one the engine captured at the `Error` construction site.
@@ -62,8 +65,7 @@ pub fn throw_named_with_stack(ctx: &Ctx<'_>, name: &str, message: String, stack:
 }
 
 /// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>` with a
-/// properly-named thrown `Error` (see [`ferri_throw`]). Preferred over
-/// [`FerriResultExt::into_js`] wherever a `Ctx` is in scope.
+/// properly-named thrown `Error` (see [`ferri_throw`]).
 pub trait FerriResultCtxExt<T> {
   fn into_js_with(self, ctx: &Ctx<'_>) -> rquickjs::Result<T>;
 }
@@ -118,24 +120,12 @@ pub fn parse_timeout_number_or_bag<'js>(
   }
 }
 
-/// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>`.
-pub trait FerriResultExt<T> {
-  fn into_js(self) -> rquickjs::Result<T>;
-}
-
-impl<T> FerriResultExt<T> for Result<T, FerriError> {
-  fn into_js(self) -> rquickjs::Result<T> {
-    self.map_err(|e| to_rq_error(&e))
-  }
-}
-
 /// Convert any `serde::Serialize` value into a JS value via
 /// `ferrijs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
 /// and no `serde_json::Value` middle allocation. Used for binding
 /// returns (cookies, storage state, parsed JSON bodies).
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
-  ferrijs_serde::to_value(ctx.clone(), value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))
+  ferrijs_serde::to_value(ctx.clone(), value).map_err(|e| type_error(ctx, format!("cannot convert the value: {e}")))
 }
 
 /// Build a JS `Array<{ name, value }>` straight from name/value pairs
@@ -164,9 +154,8 @@ pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S
 /// cycle handling all hold (covered by the ferrijs-serde test suite),
 /// so the option-bag call sites keep their prior semantics without our
 /// own hand-rolled walker.
-pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
-  ferrijs_serde::from_value(value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
+pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
+  ferrijs_serde::from_value(value).map_err(|e| type_error(ctx, format!("invalid argument: {e}")))
 }
 
 /// Deserialize an optional JS option bag straight into a core options
@@ -322,11 +311,7 @@ fn js_value_to_serialized(
   use ferridriver::protocol::{SerializedValue, SpecialValue};
 
   if depth > MAX_ARG_DEPTH {
-    return Err(rquickjs::Error::new_from_js_message(
-      "serde",
-      "serialize",
-      "argument too deeply nested or cyclic".to_string(),
-    ));
+    return Err(type_error(v.ctx(), "argument too deeply nested or cyclic"));
   }
 
   if v.is_undefined() {
@@ -353,11 +338,7 @@ fn js_value_to_serialized(
     // not represent BigInt at all, so erroring is not a regression).
     return match bi.clone().to_i64() {
       Ok(n) => Ok(SerializedValue::BigInt(n.to_string())),
-      Err(_) => Err(rquickjs::Error::new_from_js_message(
-        "serde",
-        "serialize",
-        "BigInt argument out of i64 range".to_string(),
-      )),
+      Err(_) => Err(type_error(v.ctx(), "BigInt argument out of i64 range")),
     };
   }
   if let Some(arr) = v.as_array() {
@@ -409,24 +390,28 @@ fn handle_value_to_serialized(
 ) -> rquickjs::Result<Option<ferridriver::protocol::SerializedValue>> {
   if let Ok(class) = rquickjs::Class::<crate::bindings::js_handle::JSHandleJs>::from_value(v) {
     let inner = class.borrow();
-    return Ok(Some(handle_backing_to_serialized(inner.inner().backing(), handles)?));
+    return Ok(Some(handle_backing_to_serialized(
+      v.ctx(),
+      inner.inner().backing(),
+      handles,
+    )?));
   }
   if let Ok(class) = rquickjs::Class::<crate::bindings::element_handle::ElementHandleJs>::from_value(v) {
     let inner = class.borrow();
     let handle = inner.inner().as_js_handle();
-    return Ok(Some(handle_backing_to_serialized(handle.backing(), handles)?));
+    return Ok(Some(handle_backing_to_serialized(v.ctx(), handle.backing(), handles)?));
   }
   Ok(None)
 }
 
 fn handle_backing_to_serialized(
+  ctx: &Ctx<'_>,
   backing: &ferridriver::js_handle::JSHandleBacking,
   handles: &mut Vec<ferridriver::protocol::HandleId>,
 ) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
   match backing {
     ferridriver::js_handle::JSHandleBacking::Remote(remote) => {
-      let idx = u32::try_from(handles.len())
-        .map_err(|_| rquickjs::Error::new_from_js_message("serde", "serialize", "too many JS handles"))?;
+      let idx = u32::try_from(handles.len()).map_err(|_| type_error(ctx, "too many JS handles"))?;
       handles.push(remote.to_handle_id());
       Ok(ferridriver::protocol::SerializedValue::Handle(idx))
     },
@@ -485,20 +470,20 @@ fn rehydrate<'js>(
       let err: Value<'js> = construct_global(ctx, "Error", (m.clone(),))?;
       let obj = err
         .as_object()
-        .ok_or_else(|| rquickjs::Error::new_from_js_message("Error", "", "not an object"))?;
+        .ok_or_else(|| type_error(ctx, "cannot convert the value: not an object"))?;
       obj.set("name", n.clone())?;
       obj.set("stack", s.clone())?;
       Ok(err)
     },
     SerializedValue::TypedArray(ta) => rehydrate_typed_array(ctx, ta.k, &ta.b),
     SerializedValue::ArrayBuffer(ab) => {
-      let len = u32::try_from(ab.b.len())
-        .map_err(|_| rquickjs::Error::new_from_js_message("rehydrate", "ArrayBuffer", "length exceeds u32"))?;
+      let len =
+        u32::try_from(ab.b.len()).map_err(|_| type_error(ctx, "cannot convert the value: length exceeds u32"))?;
       let buf: Value<'js> = construct_global(ctx, "ArrayBuffer", (len,))?;
       let view: Value<'js> = construct_global(ctx, "Uint8Array", (buf.clone(),))?;
       let view_obj = view
         .as_object()
-        .ok_or_else(|| rquickjs::Error::new_from_js_message("ArrayBuffer", "", "view not an object"))?;
+        .ok_or_else(|| type_error(ctx, "cannot convert the value: view not an object"))?;
       for (i, byte) in ab.b.iter().enumerate() {
         view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
       }
@@ -530,11 +515,10 @@ fn rehydrate<'js>(
     SerializedValue::Reference(id) => refs
       .get(id)
       .cloned()
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("rehydrate", "ref", format!("unknown back-ref id {id}"))),
-    SerializedValue::Handle(_) => Err(rquickjs::Error::new_from_js_message(
-      "rehydrate",
-      "handle",
-      "bare Handle in return value — use evaluateHandle()",
+      .ok_or_else(|| type_error(ctx, format!("cannot convert the value: unknown back-ref id {id}"))),
+    SerializedValue::Handle(_) => Err(type_error(
+      ctx,
+      "cannot convert the value: bare Handle in return value — use evaluateHandle()",
     )),
   }
 }
@@ -556,7 +540,7 @@ where
   let raw: Value<'js> = ctx.globals().get(ctor_name)?;
   let ctor = raw
     .try_into_constructor()
-    .map_err(|_| rquickjs::Error::new_from_js_message("construct", ctor_name, "global is not a constructor"))?;
+    .map_err(|_| type_error(ctx, "cannot convert the value: global is not a constructor"))?;
   ctor.construct(args)
 }
 
@@ -569,13 +553,12 @@ fn rehydrate_typed_array<'js>(
   // Build the backing ArrayBuffer first (as bytes), then construct the
   // typed-array view via `new <Kind>Array(buffer)` so each variant
   // reuses one code path.
-  let len = u32::try_from(bytes.len())
-    .map_err(|_| rquickjs::Error::new_from_js_message("rehydrate", "TypedArray", "length exceeds u32"))?;
+  let len = u32::try_from(bytes.len()).map_err(|_| type_error(ctx, "cannot convert the value: length exceeds u32"))?;
   let ab: Value<'js> = construct_global(ctx, "ArrayBuffer", (len,))?;
   let view: Value<'js> = construct_global(ctx, "Uint8Array", (ab.clone(),))?;
   let view_obj = view
     .as_object()
-    .ok_or_else(|| rquickjs::Error::new_from_js_message("TypedArray", "", "view not an object"))?;
+    .ok_or_else(|| type_error(ctx, "cannot convert the value: view not an object"))?;
   for (i, byte) in bytes.iter().enumerate() {
     view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
   }
@@ -643,13 +626,7 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
       for idx in 0..len {
         let el: Value<'js> = arr.get(idx)?;
         let s: String = el.into_string().map_or_else(
-          || {
-            Err(rquickjs::Error::new_from_js_message(
-              "ferridriver",
-              "setInputFiles",
-              "array elements must be strings",
-            ))
-          },
+          || Err(type_error(ctx, "setInputFiles: array elements must be strings")),
           |s| s.to_string(),
         )?;
         paths.push(std::path::PathBuf::from(s));
@@ -668,10 +645,9 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
       ctx, value,
     )?]));
   }
-  Err(rquickjs::Error::new_from_js_message(
-    "ferridriver",
-    "setInputFiles",
-    "files must be string | string[] | FilePayload | FilePayload[]",
+  Err(type_error(
+    ctx,
+    "setInputFiles: files must be string | string[] | FilePayload | FilePayload[]",
   ))
 }
 
@@ -719,7 +695,7 @@ pub fn parse_drop_payload<'js>(
 ) -> rquickjs::Result<ferridriver::options::DropPayload> {
   let obj = value
     .into_object()
-    .ok_or_else(|| rquickjs::Error::new_from_js_message("ferridriver", "drop", "payload must be an object"))?;
+    .ok_or_else(|| type_error(ctx, "drop: payload must be an object"))?;
 
   let files = match obj.get::<_, Value<'js>>("files") {
     Ok(v) if !v.is_undefined() && !v.is_null() => Some(parse_input_files(ctx, v)?),
@@ -760,10 +736,9 @@ pub fn parse_select_option_values<'js>(
         let desc: ferridriver::options::SelectOptionValue = serde_from_js(ctx, el)?;
         out.push(desc);
       } else {
-        return Err(rquickjs::Error::new_from_js_message(
-          "ferridriver",
-          "selectOption",
-          "array entries must be string or { value?, label?, index? } object",
+        return Err(type_error(
+          ctx,
+          "selectOption: array entries must be string or { value?, label?, index? } object",
         ));
       }
     }
@@ -773,10 +748,9 @@ pub fn parse_select_option_values<'js>(
     let desc: ferridriver::options::SelectOptionValue = serde_from_js(ctx, value)?;
     return Ok(vec![desc]);
   }
-  Err(rquickjs::Error::new_from_js_message(
-    "ferridriver",
-    "selectOption",
-    "values must be string | string[] | object | object[]",
+  Err(type_error(
+    ctx,
+    "selectOption: values must be string | string[] | object | object[]",
   ))
 }
 
@@ -896,23 +870,21 @@ pub fn init_script_from_js<'js>(
   } else if script.is_object() {
     let obj = script
       .as_object()
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("ferridriver", "addInitScript", "expected object"))?;
+      .ok_or_else(|| type_error(ctx, "addInitScript: expected object"))?;
     if let Ok(content) = obj.get::<_, String>("content") {
       ferridriver::options::InitScriptSource::Content(content)
     } else if let Ok(path) = obj.get::<_, String>("path") {
       ferridriver::options::InitScriptSource::Path(path.into())
     } else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "ferridriver",
-        "addInitScript",
-        "Either path or content property must be present",
+      return Err(type_error(
+        ctx,
+        "addInitScript: Either path or content property must be present",
       ));
     }
   } else {
-    return Err(rquickjs::Error::new_from_js_message(
-      "ferridriver",
-      "addInitScript",
-      "script must be Function | string | { path?, content? }",
+    return Err(type_error(
+      ctx,
+      "addInitScript: script must be Function | string | { path?, content? }",
     ));
   };
 

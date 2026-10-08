@@ -345,9 +345,10 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
 fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
   let ctx = ctx_of(args)?;
   let manifest = args.first().and_then(Value::as_object).ok_or_else(|| {
-    rq(&ScriptError::internal(
-      "tool: first arg must be a tool/manifest object".to_string(),
-    ))
+    throw_script_error(
+      &ctx,
+      &ScriptError::internal("tool: first arg must be a tool/manifest object".to_string()),
+    )
   })?;
   // Handler: an explicit 2nd-arg function wins; otherwise the tool
   // object's own `handler` method.
@@ -362,9 +363,12 @@ fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
         .and_then(|v| v.as_function().cloned())
     })
     .ok_or_else(|| {
-      rq(&ScriptError::internal(
-        "tool: no handler — pass tool(manifest) with a `handler` method or tool(manifest, fn)".to_string(),
-      ))
+      throw_script_error(
+        &ctx,
+        &ScriptError::internal(
+          "tool: no handler — pass tool(manifest) with a `handler` method or tool(manifest, fn)".to_string(),
+        ),
+      )
     })?;
   register_tool(&ctx, manifest, handler).map_err(|e| throw_script_error(&ctx, &e))
 }
@@ -638,7 +642,7 @@ fn define_defaults<'js>(ctx: Ctx<'js>, defaults: Value<'js>) -> rquickjs::Result
       )),
     ));
   }
-  with_registry(&ctx, |reg| reg.defaults.push(payload)).map_err(|e| rq(&e))
+  with_registry(&ctx, |reg| reg.defaults.push(payload)).map_err(|e| throw_script_error(&ctx, &e))
 }
 
 fn type_word(value: &serde_json::Value) -> &'static str {
@@ -673,14 +677,8 @@ pub(crate) fn install<'js>(ctx: &Ctx<'js>, default_timeout_ms: u64) -> rquickjs:
   Ok(Some(tool))
 }
 
-pub(crate) fn rq(e: &ScriptError) -> rquickjs::Error {
-  rquickjs::Error::new_from_js_message("bdd", "Error", e.message.clone())
-}
-
-/// Throw `e` as a real JS `Error` carrying its own `name`.
+/// Throw `e` as a real JS `Error` carrying its own `name` and whole message.
 ///
-/// [`rq`] cannot: it has no `Ctx`, so rquickjs materialises it as a
-/// conversion failure whose message is prefixed and whose name is fixed.
 /// A refusal by `[extensions.policy]` has to stay recognisable all the
 /// way out to `install_extensions`, which decides whether a failing
 /// extension may be skipped — so every path that can raise one throws
@@ -705,7 +703,7 @@ fn ctx_of<'js>(args: &[Value<'js>]) -> Result<Ctx<'js>, rquickjs::Error> {
   args
     .first()
     .map(|v| v.ctx().clone())
-    .ok_or_else(|| rq(&ScriptError::internal("missing arguments".to_string())))
+    .ok_or(rquickjs::Error::MissingArgs { expected: 1, given: 0 })
 }
 
 #[cfg(test)]

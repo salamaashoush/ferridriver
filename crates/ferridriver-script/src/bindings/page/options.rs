@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::serde_from_js;
+use crate::bindings::convert::type_error;
 use crate::bindings::locator::LocatorJs;
 
 pub(crate) fn parse_wait_options<'js>(
@@ -69,10 +70,9 @@ pub(crate) fn parse_emulate_media_field<'js>(
   } else if let Some(s) = val.as_string() {
     Ok(MediaOverride::Set(s.to_string()?))
   } else {
-    Err(rquickjs::Error::new_from_js_message(
-      "emulateMedia options",
-      "field",
-      format!("{key}: expected null, undefined, or string"),
+    Err(type_error(
+      obj.ctx(),
+      format!("emulateMedia options: {key}: expected null, undefined, or string"),
     ))
   }
 }
@@ -132,15 +132,17 @@ pub(crate) fn opt_timeout_ms(options: &Opt<rquickjs::Value<'_>>) -> rquickjs::Re
   Ok(field.as_number().map(|n| if n < 0.0 { 0 } else { n as u64 }))
 }
 
-pub(crate) fn parse_unroute_behavior(behavior: &str) -> rquickjs::Result<ferridriver::options::UnrouteBehavior> {
+pub(crate) fn parse_unroute_behavior(
+  ctx: &rquickjs::Ctx<'_>,
+  behavior: &str,
+) -> rquickjs::Result<ferridriver::options::UnrouteBehavior> {
   match behavior {
     "default" => Ok(ferridriver::options::UnrouteBehavior::Default),
     "wait" => Ok(ferridriver::options::UnrouteBehavior::Wait),
     "ignoreErrors" => Ok(ferridriver::options::UnrouteBehavior::IgnoreErrors),
-    other => Err(rquickjs::Error::new_from_js_message(
-      "unrouteAll options",
-      "behavior",
-      format!("invalid behavior {other:?} (expected 'wait', 'ignoreErrors', or 'default')"),
+    other => Err(type_error(
+      ctx,
+      format!("unrouteAll options: invalid behavior {other:?} (expected 'wait', 'ignoreErrors', or 'default')"),
     )),
   }
 }
@@ -184,10 +186,9 @@ pub(crate) fn parse_har_options<'js>(
       "fallback" => out.not_found = ferridriver::har::HarNotFound::Fallback,
       "abort" => out.not_found = ferridriver::har::HarNotFound::Abort,
       other => {
-        return Err(rquickjs::Error::new_from_js_message(
-          "routeFromHAR",
-          "notFound",
-          format!("invalid notFound {other:?} (expected 'abort' or 'fallback')"),
+        return Err(type_error(
+          ctx,
+          format!("routeFromHAR.notFound: invalid notFound {other:?} (expected 'abort' or 'fallback')"),
         ));
       },
     }
@@ -198,10 +199,9 @@ pub(crate) fn parse_har_options<'js>(
     Some("embed") => Some(ferridriver::tracing::HarContentPolicy::Embed),
     None => None,
     Some(other) => {
-      return Err(rquickjs::Error::new_from_js_message(
-        "routeFromHAR",
-        "updateContent",
-        format!("invalid updateContent {other:?} (expected 'attach' or 'embed')"),
+      return Err(type_error(
+        ctx,
+        format!("routeFromHAR.updateContent: invalid updateContent {other:?} (expected 'attach' or 'embed')"),
       ));
     },
   };
@@ -210,10 +210,9 @@ pub(crate) fn parse_har_options<'js>(
     Some("full") => Some(ferridriver::tracing::HarMode::Full),
     None => None,
     Some(other) => {
-      return Err(rquickjs::Error::new_from_js_message(
-        "routeFromHAR",
-        "updateMode",
-        format!("invalid updateMode {other:?} (expected 'minimal' or 'full')"),
+      return Err(type_error(
+        ctx,
+        format!("routeFromHAR.updateMode: invalid updateMode {other:?} (expected 'minimal' or 'full')"),
       ));
     },
   };
@@ -295,19 +294,18 @@ pub(crate) fn parse_mask_locators<'js>(obj: &rquickjs::Object<'js>) -> rquickjs:
   if v.is_undefined() || v.is_null() {
     return Ok(Vec::new());
   }
-  let arr = v.into_array().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("screenshot options", "mask", "expected an array of Locator")
-  })?;
+  let arr = v
+    .into_array()
+    .ok_or_else(|| type_error(obj.ctx(), "screenshot options: mask: expected an array of Locator"))?;
   let mut out = Vec::with_capacity(arr.len());
   for item in arr.iter::<rquickjs::Value<'js>>() {
     let item = item?;
     if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(&item) {
       out.push(class.borrow().inner_ref().clone());
     } else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "screenshot options",
-        "mask",
-        "each mask entry must be a Locator instance",
+      return Err(type_error(
+        obj.ctx(),
+        "screenshot options: mask: each mask entry must be a Locator instance",
       ));
     }
   }
@@ -415,11 +413,7 @@ pub(crate) fn url_value_to_matcher<'js>(
     }
   }
   let _ = ctx;
-  Err(rquickjs::Error::new_from_js_message(
-    "Page.waitFor*",
-    "url",
-    "expected string | RegExp".to_string(),
-  ))
+  Err(type_error(ctx, "url: expected string | RegExp"))
 }
 
 /// Lower a JS `string | RegExp` value into a Rust
@@ -440,11 +434,7 @@ pub(crate) fn string_or_regex_from_js(
       return Ok(ferridriver::options::StringOrRegex::Regex { source, flags });
     }
   }
-  Err(rquickjs::Error::new_from_js_message(
-    "getBy*",
-    "text",
-    "expected string | RegExp".to_string(),
-  ))
+  Err(type_error(value.ctx(), "getBy*: text: expected string | RegExp"))
 }
 
 /// Parse `{ exact?: boolean }` options for `getByText` / `getByLabel` / etc.

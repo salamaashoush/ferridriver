@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::serde_from_js;
+use crate::bindings::convert::type_error;
 
 /// Shape of per-request options accepted from JS. Playwright's
 /// option-bag shapes (`packages/playwright-core/src/client/fetch.ts`,
@@ -119,7 +120,7 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
       let parsed: JsRequestOptions = serde_from_js(ctx, v)?;
       let core = parsed
         .into_core()
-        .map_err(|m| rquickjs::Error::new_from_js_message("options", "RequestOptions", m))?;
+        .map_err(|m| type_error(ctx, format!("request options: {m}")))?;
       Ok(Some(core))
     },
     _ => Ok(None),

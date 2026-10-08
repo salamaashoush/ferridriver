@@ -13,6 +13,7 @@ use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::bindings::convert::{FerriResultCtxExt, Null, serde_from_js, serde_to_js};
+use crate::bindings::convert::{throw_named, type_error};
 
 // ── RequestJs ────────────────────────────────────────────────────────────────
 
@@ -331,11 +332,7 @@ impl ResponseJs {
   pub async fn finished<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.finished().await {
       Ok(()) => Ok(Value::new_null(ctx.clone())),
-      Err(e) => Err(rquickjs::Error::new_from_js_message(
-        "Response.finished failure",
-        "Error",
-        e.to_string(),
-      )),
+      Err(e) => Err(throw_named(&ctx, "Error", format!("response.finished: {e}"))),
     }
   }
 
@@ -619,10 +616,9 @@ fn fulfill_body_bytes<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resul
     return Ok(text.to_string()?.into_bytes());
   }
   ferrijs::std::node::bytes::buffer_source_bytes(ctx, &value).map_err(|e| {
-    rquickjs::Error::new_from_js_message(
-      "route.fulfill",
-      "TypeError",
-      format!("`body` must be a string or a byte source: {e}"),
+    type_error(
+      ctx,
+      format!("route.fulfill: `body` must be a string or a byte source: {e}"),
     )
   })
 }
@@ -783,7 +779,7 @@ impl RouteJs {
       .lock()
       .ok()
       .and_then(|mut route| route.take())
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled"))?;
+      .ok_or_else(|| throw_named(&ctx, "Error", "Route already handled"))?;
     route.fulfill(response);
     Ok(())
   }
@@ -811,7 +807,7 @@ impl RouteJs {
       .lock()
       .ok()
       .and_then(|mut g| g.take())
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
+      .ok_or_else(|| throw_named(&ctx, "Error", "Route already handled"))?;
     route.continue_route(ContinueOverrides {
       url: opts.url,
       method: opts.method,
@@ -839,7 +835,7 @@ impl RouteJs {
       .lock()
       .ok()
       .and_then(|mut g| g.take())
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
+      .ok_or_else(|| throw_named(&ctx, "Error", "Route already handled"))?;
     route.fallback(ContinueOverrides {
       url: opts.url,
       method: opts.method,
@@ -851,13 +847,13 @@ impl RouteJs {
 
   /// Mirrors Playwright `route.abort(errorCode?)`.
   #[qjs(rename = "abort")]
-  pub fn abort(&self, error_code: Option<String>) -> rquickjs::Result<()> {
+  pub fn abort(&self, ctx: Ctx<'_>, error_code: Option<String>) -> rquickjs::Result<()> {
     let route = self
       .inner
       .lock()
       .ok()
       .and_then(|mut g| g.take())
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
+      .ok_or_else(|| throw_named(&ctx, "Error", "Route already handled"))?;
     route.abort(&error_code.unwrap_or_else(|| "blockedbyclient".to_string()));
     Ok(())
   }

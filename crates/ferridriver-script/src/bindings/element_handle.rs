@@ -10,6 +10,7 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use crate::bindings::convert::FerriResultCtxExt;
+use crate::bindings::convert::type_error;
 use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
 
 /// Parse Playwright's `options?: { timeout?: number }` bag into a
@@ -35,7 +36,7 @@ fn parse_timeout_options<'js>(
 /// bag or the `type` field. Matches Playwright's
 /// `elementHandle.screenshot(options?)` surface.
 fn parse_screenshot_format<'js>(
-  _ctx: &rquickjs::Ctx<'js>,
+  ctx: &rquickjs::Ctx<'js>,
   options: rquickjs::function::Opt<rquickjs::Value<'js>>,
 ) -> rquickjs::Result<ImageFormat> {
   let Some(opts_val) = options.0 else {
@@ -52,10 +53,9 @@ fn parse_screenshot_format<'js>(
     None | Some("" | "png") => Ok(ImageFormat::Png),
     Some("jpeg" | "jpg") => Ok(ImageFormat::Jpeg),
     Some("webp") => Ok(ImageFormat::Webp),
-    Some(other) => Err(rquickjs::Error::new_from_js_message(
-      "screenshot",
-      "invalid format",
-      &format!("unsupported screenshot type {other:?}; expected 'png' | 'jpeg' | 'webp'"),
+    Some(other) => Err(type_error(
+      ctx,
+      format!("screenshot: unsupported screenshot type {other:?}; expected 'png' | 'jpeg' | 'webp'"),
     )),
   }
 }

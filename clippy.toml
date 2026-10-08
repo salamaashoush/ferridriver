@@ -21,3 +21,12 @@ allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 avoid-breaking-exported-api = false
 future-size-threshold = 4096
+# rquickjs throws these through QuickJS's 256-byte format buffer, so a
+# longer message is cut, and each one reads "Error converting from js ...".
+# Bindings throw through `convert::type_error` / `throw_named` instead.
+disallowed-methods = [
+  { path = "rquickjs::Error::new_from_js_message", reason = "cut at 255 bytes and mislabelled; use convert::type_error or throw_named" },
+  { path = "rquickjs::Error::new_from_js", reason = "mislabelled conversion error; use convert::type_error or throw_named" },
+  { path = "rquickjs::Error::new_into_js_message", reason = "cut at 255 bytes and mislabelled; use convert::type_error or throw_named" },
+  { path = "rquickjs::Error::new_into_js", reason = "mislabelled conversion error; use convert::type_error or throw_named" },
+]

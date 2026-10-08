@@ -20,6 +20,7 @@ use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 use super::context::BrowserContextJs;
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::serde_from_js;
+use crate::bindings::convert::throw_named;
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "Browser")]
@@ -658,9 +659,9 @@ fn with_browser_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut BrowserCallbacks
   if ctx.userdata::<BrowserCallbacksUd>().is_none() {
     let _ = ctx.store_userdata(BrowserCallbacksUd(std::cell::RefCell::new(BrowserCallbacks::default())));
   }
-  let ud = ctx.userdata::<BrowserCallbacksUd>().ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("browser", "Error", "browser callbacks registry missing".to_string())
-  })?;
+  let ud = ctx
+    .userdata::<BrowserCallbacksUd>()
+    .ok_or_else(|| throw_named(ctx, "Error", "browser callbacks registry missing"))?;
   let mut reg = ud.0.borrow_mut();
   Ok(f(&mut reg))
 }

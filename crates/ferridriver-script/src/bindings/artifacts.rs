@@ -11,9 +11,10 @@
 
 use std::sync::Arc;
 
-use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
+use rquickjs::{Ctx, JsLifetime};
 
+use crate::bindings::convert::throw_named;
 use crate::error::ScriptError;
 use crate::output_dir::OutputDir;
 
@@ -30,12 +31,12 @@ impl ArtifactsJs {
     Self { sandbox }
   }
 
-  fn io_err(op: &'static str, msg: String) -> rquickjs::Error {
-    rquickjs::Error::new_from_js_message("artifacts", op, msg)
+  fn io_err(ctx: &Ctx<'_>, op: &'static str, msg: String) -> rquickjs::Error {
+    throw_named(ctx, "Error", format!("artifacts.{op}: {msg}"))
   }
 
-  fn path_err(err: &ScriptError) -> rquickjs::Error {
-    rquickjs::Error::new_from_js_message("artifacts", "sandbox", err.message.clone())
+  fn path_err(ctx: &Ctx<'_>, err: &ScriptError) -> rquickjs::Error {
+    throw_named(ctx, "Error", err.message.clone())
   }
 }
 
@@ -54,12 +55,12 @@ impl ArtifactsJs {
   /// process's working directory rather than the caller's, so a bare "ok" left
   /// no way to find the file from a shell.
   #[qjs(rename = "write")]
-  pub async fn write(&self, name: String, contents: String) -> rquickjs::Result<String> {
+  pub async fn write(&self, ctx: Ctx<'_>, name: String, contents: String) -> rquickjs::Result<String> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&e))?;
+    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::write(&resolved, contents)
       .await
-      .map_err(|e| Self::io_err("write", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "write", e.to_string()))?;
     Ok(resolved.to_string_lossy().into_owned())
   }
 
@@ -69,47 +70,47 @@ impl ArtifactsJs {
   /// Returns the absolute path written, for the same reason [`Self::write`]
   /// does.
   #[qjs(rename = "writeBytes")]
-  pub async fn write_bytes(&self, name: String, bytes: Vec<u8>) -> rquickjs::Result<String> {
+  pub async fn write_bytes(&self, ctx: Ctx<'_>, name: String, bytes: Vec<u8>) -> rquickjs::Result<String> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&e))?;
+    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::write(&resolved, bytes)
       .await
-      .map_err(|e| Self::io_err("writeBytes", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "writeBytes", e.to_string()))?;
     Ok(resolved.to_string_lossy().into_owned())
   }
 
   /// Read `name` as UTF-8 text.
   #[qjs(rename = "read")]
-  pub async fn read(&self, name: String) -> rquickjs::Result<String> {
+  pub async fn read(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<String> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&e))?;
+    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::read_to_string(&resolved)
       .await
-      .map_err(|e| Self::io_err("read", e.to_string()))
+      .map_err(|e| Self::io_err(&ctx, "read", e.to_string()))
   }
 
   /// Read `name` as raw bytes (Uint8Array in JS).
   #[qjs(rename = "readBytes")]
-  pub async fn read_bytes(&self, name: String) -> rquickjs::Result<Vec<u8>> {
+  pub async fn read_bytes(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<Vec<u8>> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&e))?;
+    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::read(&resolved)
       .await
-      .map_err(|e| Self::io_err("readBytes", e.to_string()))
+      .map_err(|e| Self::io_err(&ctx, "readBytes", e.to_string()))
   }
 
   /// List entries at the artifacts root (or a subdirectory).
   #[qjs(rename = "list")]
-  pub async fn list(&self) -> rquickjs::Result<Vec<String>> {
+  pub async fn list(&self, ctx: Ctx<'_>) -> rquickjs::Result<Vec<String>> {
     let root = self.sandbox.root().to_path_buf();
     let mut entries = tokio::fs::read_dir(&root)
       .await
-      .map_err(|e| Self::io_err("list", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "list", e.to_string()))?;
     let mut names = Vec::new();
     while let Some(entry) = entries
       .next_entry()
       .await
-      .map_err(|e| Self::io_err("list", e.to_string()))?
+      .map_err(|e| Self::io_err(&ctx, "list", e.to_string()))?
     {
       names.push(entry.file_name().to_string_lossy().into_owned());
     }
@@ -118,17 +119,17 @@ impl ArtifactsJs {
 
   /// List entries in a subdirectory of the artifacts root.
   #[qjs(rename = "readdir")]
-  pub async fn readdir(&self, subpath: String) -> rquickjs::Result<Vec<String>> {
+  pub async fn readdir(&self, ctx: Ctx<'_>, subpath: String) -> rquickjs::Result<Vec<String>> {
     let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&subpath).map_err(|e| Self::path_err(&e))?;
+    let resolved = sb.resolve_read(&subpath).map_err(|e| Self::path_err(&ctx, &e))?;
     let mut entries = tokio::fs::read_dir(&resolved)
       .await
-      .map_err(|e| Self::io_err("readdir", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "readdir", e.to_string()))?;
     let mut names = Vec::new();
     while let Some(entry) = entries
       .next_entry()
       .await
-      .map_err(|e| Self::io_err("readdir", e.to_string()))?
+      .map_err(|e| Self::io_err(&ctx, "readdir", e.to_string()))?
     {
       names.push(entry.file_name().to_string_lossy().into_owned());
     }
@@ -150,7 +151,7 @@ impl ArtifactsJs {
 
   /// Remove a file at `name`. Returns `false` if the file did not exist.
   #[qjs(rename = "remove")]
-  pub async fn remove(&self, name: String) -> rquickjs::Result<bool> {
+  pub async fn remove(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<bool> {
     let sb = self.sandbox.clone();
     let Ok(resolved) = sb.resolve_read(&name) else {
       return Ok(false);
@@ -158,7 +159,7 @@ impl ArtifactsJs {
     match tokio::fs::remove_file(&resolved).await {
       Ok(()) => Ok(true),
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-      Err(e) => Err(Self::io_err("remove", e.to_string())),
+      Err(e) => Err(Self::io_err(&ctx, "remove", e.to_string())),
     }
   }
 }
