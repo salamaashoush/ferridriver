@@ -4026,7 +4026,10 @@ mod tests {
       enabled(&["--enable-features=HttpsUpgrades"]),
       ["CDPScreenshotNewSurface,HttpsUpgrades"]
     );
-    assert!(enabled(&["--disable-features=CDPScreenshotNewSurface"]).is_empty());
+    assert_eq!(
+      enabled(&["--disable-features=CDPScreenshotNewSurface"]),
+      Vec::<String>::new()
+    );
     let args = ["--enable-features=WebMCP", "--disable-features=WebMCPTesting"];
     assert_eq!(enabled(&args), ["CDPScreenshotNewSurface,WebMCP,DevToolsWebMCPSupport"]);
     assert!(disabled(&args)[0].ends_with(",WebMCPTesting"));
