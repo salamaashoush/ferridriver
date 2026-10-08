@@ -694,3 +694,29 @@ pub struct ConnectParams {
   #[serde(flatten)]
   pub session: SessionParam,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WebMcpToolsParams {
+  #[schemars(description = "Milliseconds to wait for the page to answer. Default: the page's default timeout.")]
+  pub timeout: Option<u64>,
+  #[serde(flatten)]
+  pub session: SessionParam,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WebMcpCallParams {
+  #[schemars(description = "Tool name, as `webmcp_tools` lists it.")]
+  pub name: String,
+  #[schemars(description = "Tool input: a JSON object matching the tool's input schema. Default: {}.")]
+  pub input: Option<serde_json::Map<String, serde_json::Value>>,
+  #[schemars(
+    description = "Name or URL of the frame that registers the tool, from `webmcp_tools`. Needed only when several frames register the same name."
+  )]
+  pub frame: Option<String>,
+  #[schemars(
+    description = "Milliseconds before the call is canceled in the page. Default: the page's default timeout; 0 waits without limit."
+  )]
+  pub timeout: Option<u64>,
+  #[serde(flatten)]
+  pub session: SessionParam,
+}

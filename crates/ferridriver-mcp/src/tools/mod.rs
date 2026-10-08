@@ -13,6 +13,8 @@
 //! - **bdd** — `run_bdd`: Gherkin features (inline or files) through the
 //!   same engine as the `ferridriver bdd` CLI (JS/TS steps included)
 //! - **extensions** — `ferridriver_extensions`: introspect loaded extensions
+//! - **webmcp** — `webmcp_tools`, `webmcp_call`: the tools a page registers
+//!   for agents through `WebMCP`
 //!
 //! Browser interaction flows through `run_script`, which exposes `page`,
 //! `context`, and `request` globals over the ferridriver core.
@@ -23,6 +25,7 @@ pub mod extensions;
 pub mod navigation;
 pub mod network;
 pub mod script;
+pub mod webmcp;
 
 use crate::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -41,5 +44,6 @@ impl McpServer {
       + Self::script_router()
       + Self::bdd_router()
       + Self::extensions_router()
+      + Self::webmcp_router()
   }
 }

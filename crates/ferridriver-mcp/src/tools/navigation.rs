@@ -139,7 +139,8 @@ impl McpServer {
             }
             self.invalidate_context(&s);
             let snap = self.snap(&page, &s).await;
-            Ok(self.ok_text(format!("Opened new page in session '{s}'.\n\n{snap}")))
+            let tools = self.webmcp_section(&page).await;
+            Ok(self.ok_text(format!("Opened new page in session '{s}'.\n\n{snap}{tools}")))
           })
           .await
       },

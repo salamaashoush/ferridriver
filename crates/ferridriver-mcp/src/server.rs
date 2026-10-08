@@ -1730,7 +1730,8 @@ impl McpServer {
   pub async fn action_ok(&self, page: &Arc<Page>, context: &str, msg: &str) -> Result<CallToolResult, ErrorData> {
     self.settle(page).await;
     let snap = self.snap(page, context).await;
-    Ok(self.ok_text(format!("{msg}\n\n{snap}")))
+    let tools = self.webmcp_section(page).await;
+    Ok(self.ok_text(format!("{msg}\n\n{snap}{tools}")))
   }
 
   /// Let work the action triggered finish before anyone looks at the page.
