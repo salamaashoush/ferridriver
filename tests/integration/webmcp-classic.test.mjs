@@ -71,7 +71,7 @@ export default 'passed';
       };
       // A script that outlives the probe's limit throws rather than exiting
       // non-zero; its ChromeDriver log is the evidence either way.
-      const result = await run(['run', '--no-inherit', '--json', 'main.ts'], {cwd}).catch(error => {
+      const result = await run(['run', '--no-inherit', '--json', '--trace', 'main.ts'], {cwd}).catch(error => {
         error.message += driverNotes();
         throw error;
       });
