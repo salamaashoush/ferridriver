@@ -90,6 +90,19 @@ async fn finished<T>(done: &AtomicBool, leg: impl std::future::Future<Output = T
   output
 }
 
+#[cfg(target_os = "linux")]
+fn running_detail(pid: Option<u32>) -> String {
+  pid
+    .and_then(ferridriver::backend::process::describe_process)
+    .map(|detail| format!(": {detail}"))
+    .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_detail(_pid: Option<u32>) -> String {
+  String::new()
+}
+
 /// Read up to `cap` bytes; `Err` if the stream exceeds it (the process
 /// group is killed by the caller).
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> Result<Vec<u8>, String> {
@@ -378,12 +391,12 @@ impl SessionProcs {
         // An exit that happened but was never observed is a different bug
         // from a command that is still running; say which one this was.
         let exited = if legs[0].0.load(Ordering::Relaxed) {
-          ""
+          String::new()
         } else {
           match pid.map(ferridriver::backend::process::child_exited) {
-            Some(Ok(true)) => " (the process had exited, but its owner never saw it)",
-            Some(Ok(false)) => " (the process is still running)",
-            _ => "",
+            Some(Ok(true)) => " (the process had exited, but its owner never saw it)".to_string(),
+            Some(Ok(false)) => format!(" (the process is still running{})", running_detail(pid)),
+            _ => String::new(),
           }
         };
         Err(format!(
@@ -808,7 +821,9 @@ mod tests {
       error.contains("timed out after 20ms waiting for the process to exit"),
       "{error}"
     );
-    assert!(error.contains("(the process is still running)"), "{error}");
+    assert!(error.contains("(the process is still running"), "{error}");
+    #[cfg(target_os = "linux")]
+    assert!(error.contains(" state "), "{error}");
     assert!(procs.jobs.lock().expect("jobs").is_empty());
     let error = procs
       .exec_oneshot(&command("exec yes sashoush", false))

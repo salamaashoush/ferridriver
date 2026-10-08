@@ -909,6 +909,37 @@ fn parse_procargs2(buf: &[u8]) -> String {
     .join(" ")
 }
 
+/// What a live process is doing, from procfs: its command, its scheduler
+/// state, the kernel function it sleeps in, and the same for its
+/// children. `None` when the process is gone or procfs is unreadable.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn describe_process(pid: u32) -> Option<String> {
+  fn describe(pid: u32, depth: usize) -> Option<String> {
+    use std::fmt::Write as _;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state = stat.rsplit_once(')')?.1.split_whitespace().next()?.to_string();
+    let command = process_command(pid).unwrap_or_default();
+    let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
+    let mut text = format!("{pid} `{command}` state {state}");
+    if !wchan.is_empty() && wchan != "0" {
+      let _ = write!(text, " in {wchan}");
+    }
+    if depth < 2 {
+      let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default();
+      let children: Vec<String> = children
+        .split_whitespace()
+        .filter_map(|child| describe(child.parse().ok()?, depth + 1))
+        .collect();
+      if !children.is_empty() {
+        let _ = write!(text, ", children [{}]", children.join("; "));
+      }
+    }
+    Some(text)
+  }
+  describe(pid, 0)
+}
+
 #[cfg(target_os = "linux")]
 fn process_command(pid: u32) -> Option<String> {
   let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
