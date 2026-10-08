@@ -147,6 +147,8 @@ pub async fn run(
     result = child.wait() => result?.success(),
     () = tokio::time::sleep(Duration::from_secs(job.timeout)) => {
       eprintln!("{} exceeded {}s", job.name, job.timeout);
+      #[cfg(target_os = "macos")]
+      sample_stacks(group.0, logs, &job.name).await;
       false
     }
     _ = cancellation.changed() => false,
@@ -160,6 +162,27 @@ pub async fn run(
     elapsed: started.elapsed().as_secs_f64(),
     log,
   })
+}
+
+/// Where a job that ran out of time is stuck: every thread's stack, beside
+/// its log so CI uploads both. A thread blocked outright is invisible to
+/// any timer inside the job; only a sampler from outside can name it.
+#[cfg(target_os = "macos")]
+async fn sample_stacks(pid: u32, logs: &Path, name: &str) {
+  let out = logs.join(format!("{}-stacks.txt", name.replace('/', "-")));
+  match Command::new("/usr/bin/sample")
+    .args([pid.to_string().as_str(), "2", "-file"])
+    .arg(&out)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
+    .await
+  {
+    Ok(status) if status.success() => eprintln!("{name} stacks: {}", out.display()),
+    Ok(status) => eprintln!("{name} stacks: sample exited with {status}"),
+    Err(error) => eprintln!("{name} stacks: {error}"),
+  }
 }
 
 use std::os::unix::process::CommandExt;
