@@ -2730,7 +2730,36 @@ pub fn chrome_flags_with(
     flags.push(arg.clone());
   }
 
+  enable_webmcp_companions(&mut flags);
   flags
+}
+
+/// Chromium has moved the pieces an automation client needs behind their
+/// own features, `WebMCPTesting` for `getTools()` and
+/// `DevToolsWebMCPSupport` for the `DevTools` domain. Chrome 153 already
+/// has both with `WebMCP`; `chrome-devtools-mcp` still launches with the
+/// second. Enabling them keeps `WebMCP` alone enough on builds that gate
+/// them. Chromium reads only the last `--enable-features`, so the
+/// companions join that one.
+fn enable_webmcp_companions(flags: &mut [String]) {
+  const SWITCH: &str = "--enable-features=";
+  let Some(last) = flags.iter_mut().rev().find(|flag| flag.starts_with(SWITCH)) else {
+    return;
+  };
+  let mut features: Vec<String> = last[SWITCH.len()..]
+    .split(',')
+    .filter(|feature| !feature.is_empty())
+    .map(str::to_owned)
+    .collect();
+  if !features.iter().any(|feature| feature == "WebMCP") {
+    return;
+  }
+  for companion in ["WebMCPTesting", "DevToolsWebMCPSupport"] {
+    if !features.iter().any(|feature| feature == companion) {
+      features.push(companion.to_owned());
+    }
+  }
+  *last = format!("{SWITCH}{}", features.join(","));
 }
 
 /// Chrome switches matching Playwright's `chromiumSwitches()` exactly.
@@ -3916,6 +3945,38 @@ mod tests {
     let (mode, effective) = state.launch_spec().resolve_off_lock("phone").await.unwrap();
     assert!(matches!(mode, ConnectMode::Device { .. }));
     assert_eq!(effective.args, ["--enable-features=WebMCP"]);
+  }
+
+  #[test]
+  fn webmcp_brings_the_features_automation_needs_into_the_effective_switch() {
+    let enabled = |args: &[&str]| {
+      let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+      chrome_flags(true, &args)
+        .into_iter()
+        .filter(|flag| flag.starts_with("--enable-features="))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+      enabled(&["--enable-features=WebMCP"]).last().map(String::as_str),
+      Some("--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport")
+    );
+    assert_eq!(
+      enabled(&["--enable-features=Foo,DevToolsWebMCPSupport,WebMCP"])
+        .last()
+        .map(String::as_str),
+      Some("--enable-features=Foo,DevToolsWebMCPSupport,WebMCP,WebMCPTesting")
+    );
+    // Chromium reads only the last switch, so an earlier one that names
+    // WebMCP has not enabled it and nothing is added.
+    assert_eq!(
+      enabled(&["--enable-features=WebMCP", "--enable-features=Foo"]),
+      [
+        "--enable-features=CDPScreenshotNewSurface",
+        "--enable-features=WebMCP",
+        "--enable-features=Foo"
+      ]
+    );
+    assert_eq!(enabled(&[]), ["--enable-features=CDPScreenshotNewSurface"]);
   }
 
   #[test]
