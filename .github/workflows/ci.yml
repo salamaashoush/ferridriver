@@ -200,6 +200,23 @@ jobs:
       - name: Install browsers and accessibility engine
         run: target/debug/ferridriver install --with-deps chromium firefox webkit axe
 
+      # The WebDriver tests drive ChromeDriver. Under it the image's own
+      # Chromium sat 20s and more in startup, past the test's budget, with
+      # both test variants' browsers released at the same instant. The
+      # Chrome for Testing build every other suite launches gets the
+      # ChromeDriver published for that exact version instead.
+      - name: Pair ChromeDriver with the installed Chromium (Linux)
+        if: runner.os == 'Linux' && matrix.id == 'integration'
+        run: |
+          chrome=$(ls -d "$HOME"/.cache/ferridriver/chromium-*/chrome-linux64/chrome | sort -V | tail -1)
+          version=$(basename "$(dirname "$(dirname "$chrome")")")
+          version=${version#chromium-}
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/chromedriver.zip" \
+            "https://storage.googleapis.com/chrome-for-testing-public/$version/linux64/chromedriver-linux64.zip"
+          unzip -q -o "$RUNNER_TEMP/chromedriver.zip" -d "$RUNNER_TEMP"
+          echo "FERRIDRIVER_CHROMEDRIVER=$RUNNER_TEMP/chromedriver-linux64/chromedriver" >> "$GITHUB_ENV"
+          echo "FERRIDRIVER_WEBDRIVER_CHROME=$chrome" >> "$GITHUB_ENV"
+
       # The gate's default of 32 browser slots is sized for a desktop. The
       # hosted runners have 4 vCPUs on Linux and 3 on macOS.
       - name: Run ${{ matrix.id }}
