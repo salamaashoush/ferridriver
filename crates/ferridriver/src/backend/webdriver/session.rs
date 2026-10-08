@@ -183,12 +183,19 @@ impl WebDriverSession {
     let budget = OperationBudget::current(timeout_ms)?;
     let timeout_ms = budget.timeout_ms();
     let (caller_alive, caller_cancelled) = tokio::sync::oneshot::channel::<()>();
+    let (reply, replied) = tokio::sync::oneshot::channel::<Result<Value>>();
     // The remote command can continue after its caller is cancelled. Keep the
     // selection lock until its response so another target cannot overtake it.
-    let task = tokio::spawn(budget.scope(async move {
+    tokio::spawn(budget.scope(async move {
+      let mut reply = Some(reply);
       let mut shutdown = session.shutdown.subscribe();
       if *shutdown.borrow() {
-        return Err(FerriError::target_closed(Some("WebDriver session is closing".into())));
+        if let Some(reply) = reply.take() {
+          let _ = reply.send(Err(FerriError::target_closed(Some(
+            "WebDriver session is closing".into(),
+          ))));
+        }
+        return;
       }
       let execute = async {
         let _selection = session.lock_selection(caller_cancelled, budget).await?;
@@ -236,23 +243,34 @@ impl WebDriverSession {
           }
           Ok(result)
         };
-        match budget.wait(operation).await {
+        let mut operation = std::pin::pin!(operation);
+        match budget.wait(operation.as_mut()).await {
           Ok(result) => result,
           Err(error) => {
-            session.uncertain.store(true, std::sync::atomic::Ordering::Release);
-            Err(error.error("executing WebDriver command"))
+            // The caller's time is up, but a command is already on the wire.
+            // Dropping it left the session's command state unknown, and the
+            // whole session unusable after one timed-out call. Answer the
+            // caller now and let that command finish under the selection;
+            // `request` dispatches nothing further once the budget is spent.
+            if let Some(reply) = reply.take() {
+              let _ = reply.send(Err(error.error("executing WebDriver command")));
+            }
+            operation.await
           },
         }
       };
-      tokio::select! {
+      let result = tokio::select! {
         biased;
         _ = shutdown.changed() => Err(FerriError::target_closed(Some("WebDriver session is closing".into()))),
         result = execute => result,
+      };
+      if let Some(reply) = reply.take() {
+        let _ = reply.send(result);
       }
     }));
-    let result = task
+    let result = replied
       .await
-      .map_err(|error| FerriError::backend(format!("WebDriver command task failed: {error}")));
+      .map_err(|_| FerriError::backend("WebDriver command task ended without a reply"));
     drop(caller_alive);
     result?
   }
@@ -1006,6 +1024,51 @@ pub(crate) mod tests {
       .unwrap()
       .unwrap();
     assert_eq!(task.await.unwrap().unwrap_err().name(), "TargetClosedError");
+    server.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn a_command_that_outlives_its_caller_finishes_and_the_session_stays_usable() {
+    async fn answer(socket: &mut tokio::net::TcpStream, value: &str) {
+      let payload = format!("{{\"value\":{value}}}");
+      socket
+        .write_all(
+          format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+          )
+          .as_bytes(),
+        )
+        .await
+        .unwrap();
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/session", listener.local_addr().unwrap())).unwrap();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+      let (mut first, _) = listener.accept().await.unwrap();
+      assert!(request(&mut first).await.0.contains("/execute/sync"));
+      release_rx.await.unwrap();
+      answer(&mut first, "\"first\"").await;
+      let (mut second, _) = listener.accept().await.unwrap();
+      assert!(request(&mut second).await.0.contains("/execute/sync"));
+      answer(&mut second, "\"second\"").await;
+    });
+    let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "drain-session").unwrap());
+    let command = || Command::post(&["execute", "sync"], json!({"script":"return 1", "args":[]}));
+    let timed_out = tokio::time::timeout(
+      std::time::Duration::from_secs(1),
+      session.execute(Target::default(), command(), 50),
+    )
+    .await
+    .expect("the caller is answered at its deadline, not when the command returns")
+    .unwrap_err();
+    assert_eq!(timed_out.name(), "TimeoutError", "{timed_out}");
+    release_tx.send(()).unwrap();
+    assert_eq!(
+      session.execute(Target::default(), command(), 5000).await.unwrap(),
+      json!("second")
+    );
     server.await.unwrap();
   }
 
