@@ -14,9 +14,11 @@ WebMCP is still behind a flag in browsers.
 
 - **Chromium**: launch with `--enable-features=WebMCP`. Some Chromium
   builds keep listing and the DevTools calls behind their own features,
-  `WebMCPTesting` and `DevToolsWebMCPSupport`; ferridriver adds both to
-  the same switch so `WebMCP` alone is enough. Chromium reads only the
-  last `--enable-features` it is given, so put `WebMCP` in that one.
+  `WebMCPTesting` and `DevToolsWebMCPSupport`; ferridriver enables both
+  with `WebMCP` so it alone is enough. Chromium reads only the last
+  `--enable-features` it is given; ferridriver merges every one, its own
+  defaults included, into a single switch, so `WebMCP` can go in any of
+  them.
 - **Firefox**: set the preferences `dom.modelcontext.enabled` and
   `dom.modelcontext.testing.enabled`.
 

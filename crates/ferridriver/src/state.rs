@@ -2730,36 +2730,75 @@ pub fn chrome_flags_with(
     flags.push(arg.clone());
   }
 
-  enable_webmcp_companions(&mut flags);
+  merge_feature_switches(&mut flags);
   flags
 }
 
-/// Chromium has moved the pieces an automation client needs behind their
-/// own features, `WebMCPTesting` for `getTools()` and
-/// `DevToolsWebMCPSupport` for the `DevTools` domain. Chrome 153 already
-/// has both with `WebMCP`; `chrome-devtools-mcp` still launches with the
-/// second. Enabling them keeps `WebMCP` alone enough on builds that gate
-/// them. Chromium reads only the last `--enable-features`, so the
-/// companions join that one.
-fn enable_webmcp_companions(flags: &mut [String]) {
-  const SWITCH: &str = "--enable-features=";
-  let Some(last) = flags.iter_mut().rev().find(|flag| flag.starts_with(SWITCH)) else {
-    return;
-  };
-  let mut features: Vec<String> = last[SWITCH.len()..]
-    .split(',')
-    .filter(|feature| !feature.is_empty())
-    .map(str::to_owned)
-    .collect();
-  if !features.iter().any(|feature| feature == "WebMCP") {
-    return;
+/// Chromium reads only the last `--enable-features` and the last
+/// `--disable-features`, so a caller's own switch would silently drop the
+/// defaults (Playwright appends them the same way and loses them too). Each
+/// kind becomes one switch where it first appeared, and a feature named
+/// again later moves to that later list, so the caller wins feature by
+/// feature over the defaults before it.
+///
+/// `WebMCP` also brings what an automation client needs from it on builds
+/// that gate those separately: `WebMCPTesting` for `getTools()` and
+/// `DevToolsWebMCPSupport` for the `DevTools` domain. Chrome 153 enables both
+/// with `WebMCP` already; a caller who disables one keeps it disabled.
+fn merge_feature_switches(flags: &mut Vec<String>) {
+  const ENABLE: &str = "--enable-features=";
+  const DISABLE: &str = "--disable-features=";
+  // A feature may carry a field trial or parameters: `Name<Trial:key/value`.
+  fn name(feature: &str) -> &str {
+    let feature = feature.trim_start_matches('*');
+    feature.split(['<', ':']).next().unwrap_or(feature)
   }
-  for companion in ["WebMCPTesting", "DevToolsWebMCPSupport"] {
-    if !features.iter().any(|feature| feature == companion) {
-      features.push(companion.to_owned());
+  let mut lists: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+  let mut slots: [Option<usize>; 2] = [None, None];
+  let mut kept = Vec::with_capacity(flags.len());
+  for flag in flags.drain(..) {
+    let (kind, value) = if let Some(value) = flag.strip_prefix(ENABLE) {
+      (0, value)
+    } else if let Some(value) = flag.strip_prefix(DISABLE) {
+      (1, value)
+    } else {
+      kept.push(flag);
+      continue;
+    };
+    slots[kind].get_or_insert(kept.len());
+    for feature in value.split(',').filter(|feature| !feature.is_empty()) {
+      for list in &mut lists {
+        list.retain(|named| name(named) != name(feature));
+      }
+      lists[kind].push(feature.to_owned());
     }
   }
-  *last = format!("{SWITCH}{}", features.join(","));
+  let [enabled, disabled] = &mut lists;
+  if enabled.iter().any(|feature| name(feature) == "WebMCP") {
+    for companion in ["WebMCPTesting", "DevToolsWebMCPSupport"] {
+      if !enabled
+        .iter()
+        .chain(disabled.iter())
+        .any(|feature| name(feature) == companion)
+      {
+        enabled.push(companion.to_owned());
+      }
+    }
+  }
+  let mut switches = Vec::new();
+  for (slot, switch, list) in [(slots[0], ENABLE, enabled), (slots[1], DISABLE, disabled)] {
+    if let Some(slot) = slot
+      && !list.is_empty()
+    {
+      switches.push((slot, format!("{switch}{}", list.join(","))));
+    }
+  }
+  // Later slots first, so inserting one does not shift the other.
+  switches.sort_by_key(|(slot, _)| std::cmp::Reverse(*slot));
+  for (slot, switch) in switches {
+    kept.insert(slot, switch);
+  }
+  *flags = kept;
 }
 
 /// Chrome switches matching Playwright's `chromiumSwitches()` exactly.
@@ -3948,35 +3987,49 @@ mod tests {
   }
 
   #[test]
-  fn webmcp_brings_the_features_automation_needs_into_the_effective_switch() {
-    let enabled = |args: &[&str]| {
+  fn feature_switches_merge_so_defaults_survive_and_the_caller_wins() {
+    let switches = |prefix: &str, args: &[&str]| {
       let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
       chrome_flags(true, &args)
         .into_iter()
-        .filter(|flag| flag.starts_with("--enable-features="))
+        .filter_map(|flag| flag.strip_prefix(prefix).map(str::to_owned))
         .collect::<Vec<_>>()
     };
+    let enabled = |args: &[&str]| switches("--enable-features=", args);
+    let disabled = |args: &[&str]| switches("--disable-features=", args);
+
+    assert_eq!(enabled(&[]), ["CDPScreenshotNewSurface"]);
     assert_eq!(
-      enabled(&["--enable-features=WebMCP"]).last().map(String::as_str),
-      Some("--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport")
+      enabled(&["--enable-features=WebMCP"]),
+      ["CDPScreenshotNewSurface,WebMCP,WebMCPTesting,DevToolsWebMCPSupport"]
     );
     assert_eq!(
-      enabled(&["--enable-features=Foo,DevToolsWebMCPSupport,WebMCP"])
-        .last()
-        .map(String::as_str),
-      Some("--enable-features=Foo,DevToolsWebMCPSupport,WebMCP,WebMCPTesting")
+      enabled(&["--enable-features=Foo,DevToolsWebMCPSupport,WebMCP"]),
+      ["CDPScreenshotNewSurface,Foo,DevToolsWebMCPSupport,WebMCP,WebMCPTesting"]
     );
-    // Chromium reads only the last switch, so an earlier one that names
-    // WebMCP has not enabled it and nothing is added.
     assert_eq!(
-      enabled(&["--enable-features=WebMCP", "--enable-features=Foo"]),
-      [
-        "--enable-features=CDPScreenshotNewSurface",
-        "--enable-features=WebMCP",
-        "--enable-features=Foo"
-      ]
+      enabled(&["--enable-features=WebMCP", "--enable-features=Foo<Trial:sashoush/1"]),
+      ["CDPScreenshotNewSurface,WebMCP,Foo<Trial:sashoush/1,WebMCPTesting,DevToolsWebMCPSupport"]
     );
-    assert_eq!(enabled(&[]), ["--enable-features=CDPScreenshotNewSurface"]);
+
+    let defaults = disabled(&[]);
+    assert_eq!(defaults.len(), 1);
+    assert!(defaults[0].contains("HttpsUpgrades"), "{defaults:?}");
+    assert_eq!(
+      disabled(&["--disable-features=Sashoush"]),
+      [format!("{},Sashoush", defaults[0])]
+    );
+
+    // A later mention wins: the caller can turn a default either way.
+    assert!(!disabled(&["--enable-features=HttpsUpgrades"])[0].contains("HttpsUpgrades"));
+    assert_eq!(
+      enabled(&["--enable-features=HttpsUpgrades"]),
+      ["CDPScreenshotNewSurface,HttpsUpgrades"]
+    );
+    assert!(enabled(&["--disable-features=CDPScreenshotNewSurface"]).is_empty());
+    let args = ["--enable-features=WebMCP", "--disable-features=WebMCPTesting"];
+    assert_eq!(enabled(&args), ["CDPScreenshotNewSurface,WebMCP,DevToolsWebMCPSupport"]);
+    assert!(disabled(&args)[0].ends_with(",WebMCPTesting"));
   }
 
   #[test]
