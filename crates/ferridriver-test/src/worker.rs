@@ -1796,6 +1796,11 @@ impl Worker {
     };
     let (_after_limit_tx, after_limit_rx) = tokio::sync::watch::channel(after_limit);
     let after_budget = ferridriver::pause::BudgetStart::now();
+    // What ran the after-hooks budget out. Artifact capture and context
+    // teardown spend the same budget, as Playwright's fixture teardown
+    // shares the after-hooks slot, so a page that wedged the test cannot
+    // wedge the run.
+    let mut teardown_stuck: Option<&'static str> = None;
     for (i, hook) in hooks.after_each.iter().enumerate() {
       let title = if hooks.after_each.len() == 1 {
         "afterEach".to_string()
@@ -1816,6 +1821,7 @@ impl Worker {
         let message = format!("afterEach timeout of {}ms exceeded.", after_limit.as_millis());
         tracing::warn!(target: "ferridriver::worker", "{message}");
         step_handle.end(Some(message)).await;
+        teardown_stuck = Some("running afterEach hooks");
         break;
       };
       let err_msg = result.as_ref().err().map(|e| e.message.clone());
@@ -1838,43 +1844,62 @@ impl Worker {
     let test_failed = timeout_result.as_ref().is_err() || timeout_result.as_ref().is_ok_and(|r| r.is_err());
     let screenshot = if self.config.screenshot.mode.should_capture(test_failed, attempt) {
       if let Some(ref page) = page_for_artifacts {
-        capture_screenshot(page, &self.config.screenshot).await
+        after_hooks_step(
+          after_budget,
+          &after_limit_rx,
+          &mut teardown_stuck,
+          "capturing the failure screenshot",
+          capture_screenshot(page, &self.config.screenshot),
+        )
+        .await
+        .flatten()
       } else {
         None
       }
     } else {
       None
     };
-    let video_path = match (video_handle, page_for_artifacts.as_ref()) {
-      (Some(VideoHandle::Eager(handle)), Some(page)) => match handle.stop(page).await {
-        Ok(path) => Some(path),
-        Err(e) => {
-          tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
-          None
+    let video = async {
+      match (video_handle, page_for_artifacts.as_ref()) {
+        (Some(VideoHandle::Eager(handle)), Some(page)) => match handle.stop(page).await {
+          Ok(path) => Some(path),
+          Err(e) => {
+            tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
+            None
+          },
         },
-      },
-      (Some(VideoHandle::Buffered(handle)), Some(page)) => {
-        if test_failed {
-          let ext = ferridriver::video::video_extension();
-          let video_path =
-            test_info
-              .output_dir
-              .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-          let _ = std::fs::create_dir_all(&test_info.output_dir);
-          match handle.encode(page, video_path).await {
-            Ok(path) => Some(path),
-            Err(e) => {
-              tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
-              None
-            },
+        (Some(VideoHandle::Buffered(handle)), Some(page)) => {
+          if test_failed {
+            let ext = ferridriver::video::video_extension();
+            let video_path =
+              test_info
+                .output_dir
+                .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
+            let _ = std::fs::create_dir_all(&test_info.output_dir);
+            match handle.encode(page, video_path).await {
+              Ok(path) => Some(path),
+              Err(e) => {
+                tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
+                None
+              },
+            }
+          } else {
+            handle.discard(page).await;
+            None
           }
-        } else {
-          handle.discard(page).await;
-          None
-        }
-      },
-      _ => None,
+        },
+        _ => None,
+      }
     };
+    let video_path = after_hooks_step(
+      after_budget,
+      &after_limit_rx,
+      &mut teardown_stuck,
+      "saving the video",
+      video,
+    )
+    .await
+    .flatten();
     // The failure itself goes into the trace, not just the call that
     // raised it: the viewer's Errors tab is built from these, and an
     // assertion message is what a reader is looking for first.
@@ -1953,7 +1978,7 @@ impl Worker {
         crate::ui_server::unregister_live_trace(&test_id.execution_key());
       }
       match (started, resources.current_context().await) {
-        (true, Some(ctx)) => {
+        (true, Some(ctx)) if teardown_stuck.is_none() => {
           let path = self.config.trace.should_write(attempt, test_failed).then(|| {
             let _ = std::fs::create_dir_all(&test_info.output_dir);
             test_info.output_dir.join(format!(
@@ -1962,22 +1987,47 @@ impl Worker {
               attempt
             ))
           });
-          match ctx
-            .tracing()
-            .stop(ferridriver::trace::TracingStopOptions { path: path.clone() })
-            .await
+          let tracing = ctx.tracing();
+          let stop = tracing.stop(ferridriver::trace::TracingStopOptions { path: path.clone() });
+          match Box::pin(after_hooks_step(
+            after_budget,
+            &after_limit_rx,
+            &mut teardown_stuck,
+            "saving the trace",
+            stop,
+          ))
+          .await
           {
-            Ok(()) => path,
-            Err(e) => {
+            Some(Ok(())) => path,
+            Some(Err(e)) => {
               tracing::warn!(target: "ferridriver::worker", "trace stop failed: {e}");
               None
             },
+            None => None,
           }
         },
         _ => None,
       }
     };
-    resources.close().await;
+    // Out of budget, the context is left to the browser's own shutdown:
+    // closing it is the step most likely to wait on whatever wedged.
+    Box::pin(after_hooks_step(
+      after_budget,
+      &after_limit_rx,
+      &mut teardown_stuck,
+      "closing the browser context",
+      resources.close(),
+    ))
+    .await;
+    let teardown_failure = teardown_stuck.map(|phase| TestFailure {
+      message: format!(
+        "Tearing down the test exceeded the after-hooks timeout of {}ms while {phase}.",
+        after_limit.as_millis()
+      ),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    });
 
     let duration = start.elapsed();
     let result = (timeout_result, screenshot, video_path, Some(test_pool));
@@ -2172,6 +2222,17 @@ impl Worker {
     // `error` stays the first for the ones that show one.
     let mut errors: Vec<TestFailure> = error.iter().cloned().collect();
     errors.extend(soft_errors);
+    let (status, error) = match teardown_failure {
+      Some(failure) => {
+        errors.push(failure.clone());
+        if status == TestStatus::Passed {
+          (TestStatus::TimedOut, Some(failure))
+        } else {
+          (status, error.or(Some(failure)))
+        }
+      },
+      None => (status, error),
+    };
     let outcome = Arc::new(TestOutcome {
       test_id: test_id.clone(),
       status,
@@ -2210,6 +2271,27 @@ impl Worker {
       suite_key,
       hooks,
     }
+  }
+}
+
+/// One teardown step on the after-hooks budget. Once a step has run the
+/// budget out, the steps after it are skipped rather than started on
+/// nothing.
+async fn after_hooks_step<F: std::future::Future>(
+  budget: ferridriver::pause::BudgetStart,
+  limit: &tokio::sync::watch::Receiver<Duration>,
+  stuck: &mut Option<&'static str>,
+  phase: &'static str,
+  step: F,
+) -> Option<F::Output> {
+  if stuck.is_some() {
+    return None;
+  }
+  if let Ok(output) = ferridriver::pause::run_within_updates_from(budget, limit.clone(), step).await {
+    Some(output)
+  } else {
+    *stuck = Some(phase);
+    None
   }
 }
 
@@ -2394,8 +2476,42 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
 mod tests {
   #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-  use super::{EffectiveContextConfig, build_context_options, config_viewport};
+  use super::{EffectiveContextConfig, after_hooks_step, build_context_options, config_viewport};
   use crate::config::{ContextConfig, ViewportConfig, expand_device_keys};
+
+  #[tokio::test]
+  async fn a_wedged_teardown_step_names_itself_and_skips_the_rest() {
+    let (_limit_tx, limit) = tokio::sync::watch::channel(std::time::Duration::from_millis(50));
+    let budget = ferridriver::pause::BudgetStart::now();
+    let mut stuck = None;
+    assert_eq!(
+      after_hooks_step(budget, &limit, &mut stuck, "capturing the failure screenshot", async {
+        1
+      })
+      .await,
+      Some(1)
+    );
+    assert_eq!(
+      after_hooks_step(
+        budget,
+        &limit,
+        &mut stuck,
+        "saving the trace",
+        std::future::pending::<()>()
+      )
+      .await,
+      None
+    );
+    assert_eq!(stuck, Some("saving the trace"));
+    let polled = std::sync::atomic::AtomicBool::new(false);
+    let close = async { polled.store(true, std::sync::atomic::Ordering::SeqCst) };
+    assert_eq!(
+      after_hooks_step(budget, &limit, &mut stuck, "closing the browser context", close).await,
+      None
+    );
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(stuck, Some("saving the trace"));
+  }
 
   /// A `use` block as a config layer leaves it: the device expanded,
   /// then deserialized into the typed bag.
