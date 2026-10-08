@@ -101,5 +101,6 @@ test('waits for an element that never appears', async () => {
   });
   const result = await run(['test', '--no-inherit', '--headless'], { cwd });
   assert.equal(result.code, 1, result.text);
-  assert.match(result.text, /test timed out after 1\.5s\n\n {4}locator\.click had not finished\n {4}Call log:\n {4} {2}- waiting for locator\('#nope'\)/);
+  assert.match(result.text,
+    /test timed out after 1\.5s\n\n {4}locator\.click had not finished \(stuck\.spec\.ts:7\)\n {4}Call log:\n {4} {2}- waiting for locator\('#nope'\)/);
 });

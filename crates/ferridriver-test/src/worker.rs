@@ -2134,7 +2134,7 @@ impl Worker {
             timed_out_while
               .map(|phase| format!(" while {phase}"))
               .unwrap_or_default(),
-            describe_pending_calls(&interrupted),
+            describe_pending_calls(&interrupted, &test_info.config_dir),
           ),
           stack: None,
           diff: None,
@@ -2300,13 +2300,15 @@ impl Worker {
 
 /// What a timed-out test was waiting on, as Playwright reports the
 /// interrupted action: each call that had not finished, with its call log.
-fn describe_pending_calls(calls: &[ferridriver::trace::PendingCall]) -> String {
+fn describe_pending_calls(calls: &[ferridriver::trace::PendingCall], root: &std::path::Path) -> String {
   use std::fmt::Write as _;
   let mut out = String::new();
   for call in calls {
     let _ = write!(out, "\n\n{} had not finished", call.title);
     if let Some(at) = &call.location {
-      let _ = write!(out, " ({at})");
+      let file = std::path::Path::new(&at.file);
+      let file = file.strip_prefix(root).unwrap_or(file);
+      let _ = write!(out, " ({}:{})", file.display(), at.line);
     }
     if call.log.is_empty() {
       continue;

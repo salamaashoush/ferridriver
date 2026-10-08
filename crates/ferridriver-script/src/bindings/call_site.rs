@@ -109,16 +109,12 @@ impl<'js> FromParam<'js> for CallFrames {
 /// Capture the calling JS frame, mapped back to the original source.
 #[must_use]
 pub fn capture(ctx: &Ctx<'_>) -> CallOrigin {
-  if !ferridriver::trace::call_scripts_wanted() {
-    return CallOrigin::default();
-  }
-  let script = ctx.userdata::<ScriptIdUd>().map(|ud| Arc::clone(&ud.0));
   if !ferridriver::trace::call_origins_wanted() {
-    return CallOrigin { location: None, script };
+    return CallOrigin::default();
   }
   CallOrigin {
     location: capture_frame(ctx).and_then(|(file, line, column)| remap(ctx, &file, line, column)),
-    script,
+    script: ctx.userdata::<ScriptIdUd>().map(|ud| Arc::clone(&ud.0)),
   }
 }
 

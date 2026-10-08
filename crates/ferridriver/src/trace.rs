@@ -1551,13 +1551,7 @@ pub fn call_origins_wanted() -> bool {
   RECORDING_ACTIVE.load(Ordering::Acquire)
     || ACTION_GATE_INSTALLED.load(Ordering::Acquire)
     || ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire)
-}
-
-/// Whether anything reads which script issued a call. Unlike the call's
-/// location this costs a host no stack walk, so it has its own switch.
-#[must_use]
-pub fn call_scripts_wanted() -> bool {
-  call_origins_wanted() || PENDING_TRACKING.load(Ordering::Acquire)
+    || PENDING_TRACKING.load(Ordering::Acquire)
 }
 
 fn current_call_origin() -> CallOrigin {
@@ -2334,19 +2328,26 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
 mod tests {
   use super::*;
 
-  #[tokio::test]
-  async fn pending_calls_keep_what_their_owner_left_running() {
+  /// Held by tests that flip the process-wide switches (observers, call
+  /// tracking): each asserts on what those switches imply, so two at once
+  /// would see each other's.
+  static PROCESS_SWITCHES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+  #[test]
+  fn pending_calls_keep_what_their_owner_left_running() {
+    let _switches = PROCESS_SWITCHES
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
     track_pending_calls();
     let owner: Arc<str> = Arc::from("worker 0: sashoush stuck test");
     let before = Instant::now();
-    let (finished, dropped, running) = with_call_owner(Arc::clone(&owner), async {
+    let (finished, dropped, running) = CALL_OWNER.sync_scope(Arc::clone(&owner), || {
       let finished = begin_action(None, "Page", "goto", None, serde_json::json!({})).expect("owned call is tracked");
       let dropped = begin_action(None, "Locator", "click", None, serde_json::json!({})).expect("tracked");
       dropped.log("waiting for locator('#nope')");
       let running = begin_action(None, "Page", "waitForURL", None, serde_json::json!({})).expect("tracked");
       (finished, dropped, running)
-    })
-    .await;
+    });
     finished.finish(None);
     drop(dropped);
     let titles = |deadline| {
@@ -2372,6 +2373,7 @@ mod tests {
     forget_pending_calls(&owner);
     assert!(pending_calls(&owner, before).is_empty());
     drop(running);
+    PENDING_TRACKING.store(false, Ordering::Release);
   }
 
   /// Stands in for a public action builder: `#[track_caller]` makes
@@ -2408,6 +2410,9 @@ mod tests {
   // separate #[test] fns would race each other under the default harness.
   #[test]
   fn session_observers_scope_actions_and_unregister_on_drop() {
+    let _switches = PROCESS_SWITCHES
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
     let unobserved = begin_action(Some("s:a"), "Page", "goto", None, serde_json::json!({}));
     assert!(unobserved.is_none(), "no observer, no recorder => no span at all");
 
