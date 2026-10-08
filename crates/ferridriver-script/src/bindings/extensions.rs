@@ -26,7 +26,7 @@ use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Module, Object, Value, class::
 
 use super::http_client::HttpClientJs;
 use super::registry::{tool_dispatch, tool_names};
-use crate::bindings::convert::{json_to_js, serde_from_js};
+use crate::bindings::convert::{json_to_js, serde_from_js, throw_named};
 use crate::command_spec::CommandSpec;
 use crate::engine::SessionProcsUd;
 use crate::error::ScriptError;
@@ -81,13 +81,17 @@ impl ExtensionCommandsJs {
     Self { allowed, procs }
   }
 
-  fn cmd_err(verb: &'static str, msg: impl std::fmt::Display) -> rquickjs::Error {
-    rquickjs::Error::new_from_js_message(verb, "Error", msg.to_string())
+  /// A real `Error`: the ctx-free conversion error is rendered through
+  /// QuickJS's 256-byte format buffer, which cut process diagnostics and
+  /// output tails short.
+  fn cmd_err(ctx: &Ctx<'_>, verb: &str, msg: impl std::fmt::Display) -> rquickjs::Error {
+    throw_named(ctx, "Error", format!("{verb}: {msg}"))
   }
 
-  fn spec(&self, verb: &'static str, name: &str) -> rquickjs::Result<CommandSpec> {
+  fn spec(&self, ctx: &Ctx<'_>, verb: &str, name: &str) -> rquickjs::Result<CommandSpec> {
     self.allowed.get(name).cloned().ok_or_else(|| {
       Self::cmd_err(
+        ctx,
         verb,
         format!("\"{name}\" is not in the commands allow-list for this tool"),
       )
@@ -101,11 +105,11 @@ impl ExtensionCommandsJs {
     }
   }
 
-  fn registry(&self, verb: &'static str) -> rquickjs::Result<&Arc<SessionProcs>> {
+  fn registry(&self, ctx: &Ctx<'_>, verb: &str) -> rquickjs::Result<&Arc<SessionProcs>> {
     self
       .procs
       .as_ref()
-      .ok_or_else(|| Self::cmd_err(verb, "persistent commands are unavailable in this context"))
+      .ok_or_else(|| Self::cmd_err(ctx, verb, "persistent commands are unavailable in this context"))
   }
 }
 
@@ -113,31 +117,31 @@ impl ExtensionCommandsJs {
 impl ExtensionCommandsJs {
   #[qjs(rename = "exec")]
   pub async fn exec<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-    let spec = self.spec("commands.exec", &name)?;
+    let spec = self.spec(&ctx, "commands.exec", &name)?;
     let vars_map = Self::vars_of(&ctx, vars)?;
     let resolved = spec
       .resolve(&vars_map)
-      .map_err(|m| Self::cmd_err("commands.exec", format!("{name}: {m}")))?;
-    let registry = self.registry("commands.exec")?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.exec", format!("{name}: {m}")))?;
+    let registry = self.registry(&ctx, "commands.exec")?;
     let result = Box::pin(registry.exec_oneshot(&resolved))
       .await
-      .map_err(|m| Self::cmd_err("commands.exec", format!("{name}: {m}")))?;
-    let value = serde_json::to_value(result).map_err(|m| Self::cmd_err("commands.exec", m))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.exec", format!("{name}: {m}")))?;
+    let value = serde_json::to_value(result).map_err(|m| Self::cmd_err(&ctx, "commands.exec", m))?;
     json_to_js(&ctx, &value)
   }
 
   /// One-shot: run to completion and return shaped stdout.
   #[qjs(rename = "run")]
   pub async fn run<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-    let spec = self.spec("commands.run", &name)?;
+    let spec = self.spec(&ctx, "commands.run", &name)?;
     let vars_map = Self::vars_of(&ctx, vars)?;
     let resolved = spec
       .resolve(&vars_map)
-      .map_err(|m| Self::cmd_err("commands.run", format!("{name}: {m}")))?;
-    let registry = self.registry("commands.run")?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.run", format!("{name}: {m}")))?;
+    let registry = self.registry(&ctx, "commands.run")?;
     let value = Box::pin(registry.run_oneshot(&resolved))
       .await
-      .map_err(|m| Self::cmd_err("commands.run", format!("{name}: {m}")))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.run", format!("{name}: {m}")))?;
     json_to_js(&ctx, &value)
   }
 
@@ -145,38 +149,38 @@ impl ExtensionCommandsJs {
   /// `{ name, pid }`.
   #[qjs(rename = "start")]
   pub fn start<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-    let spec = self.spec("commands.start", &name)?;
+    let spec = self.spec(&ctx, "commands.start", &name)?;
     let vars_map = Self::vars_of(&ctx, vars)?;
     let resolved = spec
       .resolve(&vars_map)
-      .map_err(|m| Self::cmd_err("commands.start", format!("{name}: {m}")))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.start", format!("{name}: {m}")))?;
     let pid = self
-      .registry("commands.start")?
+      .registry(&ctx, "commands.start")?
       .start(&name, &resolved)
-      .map_err(|m| Self::cmd_err("commands.start", format!("{name}: {m}")))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.start", format!("{name}: {m}")))?;
     json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
   }
 
   #[qjs(rename = "open")]
   pub fn open<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let resolved = self
-      .spec("commands.open", &name)?
+      .spec(&ctx, "commands.open", &name)?
       .resolve(&Self::vars_of(&ctx, vars)?)
-      .map_err(|m| Self::cmd_err("commands.open", m))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.open", m))?;
     let pid = self
-      .registry("commands.open")?
+      .registry(&ctx, "commands.open")?
       .open(&name, &resolved)
-      .map_err(|m| Self::cmd_err("commands.open", m))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.open", m))?;
     json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
   }
 
   #[qjs(rename = "write")]
-  pub async fn write(&self, name: String, data: Option<String>) -> rquickjs::Result<()> {
+  pub async fn write(&self, ctx: Ctx<'_>, name: String, data: Option<String>) -> rquickjs::Result<()> {
     self
-      .registry("commands.write")?
+      .registry(&ctx, "commands.write")?
       .write(&name, data)
       .await
-      .map_err(|m| Self::cmd_err("commands.write", m))
+      .map_err(|m| Self::cmd_err(&ctx, "commands.write", m))
   }
 
   #[qjs(rename = "read")]
@@ -184,61 +188,76 @@ impl ExtensionCommandsJs {
     let ms = timeout_ms.0.unwrap_or(30_000);
     let line = tokio::time::timeout(
       std::time::Duration::from_millis(ms),
-      self.registry("commands.read")?.read(&name),
+      self.registry(&ctx, "commands.read")?.read(&name),
     )
     .await
-    .map_err(|_| Self::cmd_err("commands.read", format!("stdout timed out after {ms}ms")))?
-    .map_err(|m| Self::cmd_err("commands.read", m))?;
+    .map_err(|_| Self::cmd_err(&ctx, "commands.read", format!("stdout timed out after {ms}ms")))?
+    .map_err(|m| Self::cmd_err(&ctx, "commands.read", m))?;
     json_to_js(&ctx, &serde_json::json!(line))
   }
 
   #[qjs(rename = "waitForOutput")]
-  pub async fn wait_for_output(&self, name: String, text: String, timeout_ms: Opt<u64>) -> rquickjs::Result<String> {
+  pub async fn wait_for_output(
+    &self,
+    ctx: Ctx<'_>,
+    name: String,
+    text: String,
+    timeout_ms: Opt<u64>,
+  ) -> rquickjs::Result<String> {
     let ms = timeout_ms.0.unwrap_or(30_000);
     tokio::time::timeout(
       std::time::Duration::from_millis(ms),
-      self.registry("commands.waitForOutput")?.wait_for_output(&name, &text),
+      self
+        .registry(&ctx, "commands.waitForOutput")?
+        .wait_for_output(&name, &text),
     )
     .await
     .map_err(|_| {
       Self::cmd_err(
+        &ctx,
         "commands.waitForOutput",
         format!("process `{name}` did not emit {text:?} within {ms}ms"),
       )
     })?
-    .map_err(|m| Self::cmd_err("commands.waitForOutput", m))
+    .map_err(|m| Self::cmd_err(&ctx, "commands.waitForOutput", m))
   }
 
   #[qjs(rename = "wait")]
-  pub async fn wait(&self, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<i32> {
+  pub async fn wait(&self, ctx: Ctx<'_>, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<i32> {
     let ms = timeout_ms.0.unwrap_or(30_000);
     tokio::time::timeout(
       std::time::Duration::from_millis(ms),
-      self.registry("commands.wait")?.wait(&name),
+      self.registry(&ctx, "commands.wait")?.wait(&name),
     )
     .await
-    .map_err(|_| Self::cmd_err("commands.wait", format!("process `{name}` did not exit within {ms}ms")))?
-    .map_err(|m| Self::cmd_err("commands.wait", m))
+    .map_err(|_| {
+      Self::cmd_err(
+        &ctx,
+        "commands.wait",
+        format!("process `{name}` did not exit within {ms}ms"),
+      )
+    })?
+    .map_err(|m| Self::cmd_err(&ctx, "commands.wait", m))
   }
 
   /// Persistent: running?/exit code + the buffered stdout/stderr tail.
   #[qjs(rename = "status")]
   pub fn status<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
     let value = self
-      .registry("commands.status")?
+      .registry(&ctx, "commands.status")?
       .status(&name)
-      .map_err(|m| Self::cmd_err("commands.status", m))?;
+      .map_err(|m| Self::cmd_err(&ctx, "commands.status", m))?;
     json_to_js(&ctx, &value)
   }
 
   /// Persistent: kill the process group.
   #[qjs(rename = "stop")]
-  pub async fn stop(&self, name: String) -> rquickjs::Result<()> {
+  pub async fn stop(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<()> {
     self
-      .registry("commands.stop")?
+      .registry(&ctx, "commands.stop")?
       .stop(&name)
       .await
-      .map_err(|m| Self::cmd_err("commands.stop", m))
+      .map_err(|m| Self::cmd_err(&ctx, "commands.stop", m))
   }
 }
 

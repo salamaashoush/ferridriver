@@ -53,6 +53,17 @@ test('extension commands reject missing placeholders and undeclared command name
   assert.match(error(results[1]), /not in the commands allow-list/);
 });
 
+test('extension command errors keep messages past the engine format buffer', async () => {
+  const tail = 'sashoush '.repeat(60) + 'end';
+  const [result] = await invoke(`
+    defineTool({ name: 't', allow: { commands: { c: { run: ['sh', '-c', 'printf %s "$0" >&2; exit 3', '\${m}'] } } },
+      handler: async ({ args, commands }) => commands.run('c', { m: args.m }) });
+  `, [`return await tools.t({ m: ${JSON.stringify(tail)} });`]);
+  const message = error(result);
+  assert.match(message, /commands\.run: c: command failed \(exit 3\): sashoush/);
+  assert.ok(message.endsWith(tail), message);
+});
+
 test('extension command timeouts terminate a blocked process within two seconds', async () => {
   const started = performance.now();
   const [result] = await invoke(`
