@@ -224,6 +224,10 @@ impl TestHostBridge for InfoBridge {
     self.test_info.soft_error_messages()
   }
 
+  fn call_owner(&self) -> Option<String> {
+    Some(self.test_info.call_owner())
+  }
+
   fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
     let info = Arc::clone(&self.test_info);
     // An unnamed snapshot is NOT given a name here: the resolver owns

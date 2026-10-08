@@ -1974,6 +1974,9 @@ pub(crate) fn set_current_test(
   world: &TestWorldData,
   bridge: Arc<dyn TestHostBridge>,
 ) -> Result<(), ScriptError> {
+  if let Some(owner) = bridge.call_owner() {
+    crate::bindings::call_site::set_script_id(ctx, &owner);
+  }
   let obj = Object::new(ctx.clone()).map_err(se)?;
   obj.set("browserName", world.browser_name.clone()).map_err(se)?;
   obj.set("headless", world.headless).map_err(se)?;

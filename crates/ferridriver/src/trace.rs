@@ -1553,8 +1553,19 @@ pub fn call_origins_wanted() -> bool {
     || ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire)
 }
 
+/// Whether anything reads which script issued a call. Unlike the call's
+/// location this costs a host no stack walk, so it has its own switch.
+#[must_use]
+pub fn call_scripts_wanted() -> bool {
+  call_origins_wanted() || PENDING_TRACKING.load(Ordering::Acquire)
+}
+
 fn current_call_origin() -> CallOrigin {
-  CALL_ORIGIN.try_with(Clone::clone).unwrap_or_default()
+  let mut origin = CALL_ORIGIN.try_with(Clone::clone).unwrap_or_default();
+  if origin.script.is_none() {
+    origin.script = CALL_OWNER.try_with(Arc::clone).ok();
+  }
+  origin
 }
 
 /// The Rust call site of whoever called this.
@@ -1583,6 +1594,138 @@ pub fn call_origin_here() -> CallOrigin {
       column: caller.column(),
     }),
     script: None,
+  }
+}
+
+// ── Pending calls ──────────────────────────────────────────────────────
+//
+// A test that runs out of time should say which call it was stuck in, as
+// Playwright reports the interrupted action with its call log. A test may
+// drive a browser it launched itself, so calls are filed by who issued them
+// (the script identity of a [`CallOrigin`], or [`with_call_owner`] for a
+// host with no script), not by the context they ran in.
+
+static PENDING_TRACKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+static PENDING_CALLS: std::sync::Mutex<Option<rustc_hash::FxHashMap<String, PendingCallEntry>>> =
+  std::sync::Mutex::new(None);
+
+tokio::task_local! {
+  /// Who issued the calls of a host that has no script identity: a Rust
+  /// test body, filed under its test.
+  static CALL_OWNER: Arc<str>;
+}
+
+struct PendingCallEntry {
+  owner: Arc<str>,
+  call: PendingCall,
+  /// When the call was dropped unfinished. A timed-out test is torn down
+  /// by dropping its body, so its calls end this way; the entry outlives
+  /// the drop until the owner reads or forgets it.
+  dropped_at: Option<Instant>,
+}
+
+/// A call that had not finished.
+#[derive(Clone)]
+pub struct PendingCall {
+  /// `page.click`, `locator.fill`, ...
+  pub title: String,
+  /// Where it was written, when the host captured it.
+  pub location: Option<StackFrame>,
+  /// Its call log so far, oldest first.
+  pub log: Vec<String>,
+}
+
+/// Start filing calls by their owner. Off by default: only a host that can
+/// report on a stuck owner pays for the bookkeeping.
+pub fn track_pending_calls() {
+  PENDING_TRACKING.store(true, Ordering::Release);
+}
+
+/// Run `fut` with `owner` as the issuer of the calls it makes, for a host
+/// whose calls carry no script identity.
+pub fn with_call_owner<F: std::future::Future>(
+  owner: Arc<str>,
+  fut: F,
+) -> impl std::future::Future<Output = F::Output> {
+  CALL_OWNER.scope(owner, fut)
+}
+
+/// The calls `owner` had in flight at `deadline`: those still running, and
+/// those dropped at or after it.
+#[must_use]
+pub fn pending_calls(owner: &str, deadline: Instant) -> Vec<PendingCall> {
+  let guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  let Some(map) = guard.as_ref() else { return Vec::new() };
+  let mut calls: Vec<(&String, &PendingCallEntry)> = map
+    .iter()
+    .filter(|(_, entry)| &*entry.owner == owner && entry.dropped_at.is_none_or(|at| at >= deadline))
+    .collect();
+  calls.sort_by_key(|(id, _)| call_number(id));
+  calls.into_iter().map(|(_, entry)| entry.call.clone()).collect()
+}
+
+/// Drop every record `owner` left behind.
+pub fn forget_pending_calls(owner: &str) {
+  let mut guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  if let Some(map) = guard.as_mut() {
+    map.retain(|_, entry| &*entry.owner != owner);
+  }
+}
+
+fn call_number(call_id: &str) -> u64 {
+  call_id.rsplit('@').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
+/// A span's hold on its registry entry: removed when the call finishes,
+/// stamped as dropped when the span goes without finishing.
+struct PendingGuard {
+  call_id: String,
+}
+
+impl PendingGuard {
+  fn open(call_id: &str, title: &str, origin: &CallOrigin) -> Option<Self> {
+    let owner = Arc::clone(origin.script.as_ref()?);
+    let mut guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.get_or_insert_with(rustc_hash::FxHashMap::default).insert(
+      call_id.to_string(),
+      PendingCallEntry {
+        owner,
+        call: PendingCall {
+          title: title.to_string(),
+          location: origin.location.clone(),
+          log: Vec::new(),
+        },
+        dropped_at: None,
+      },
+    );
+    Some(Self {
+      call_id: call_id.to_string(),
+    })
+  }
+
+  fn log(&self, message: &str) {
+    let mut guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = guard.as_mut().and_then(|map| map.get_mut(&self.call_id)) {
+      entry.call.log.push(message.to_string());
+    }
+  }
+
+  fn finished(self) {
+    let mut guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(map) = guard.as_mut() {
+      map.remove(&self.call_id);
+    }
+    std::mem::forget(self);
+  }
+}
+
+impl Drop for PendingGuard {
+  fn drop(&mut self) {
+    let mut guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = guard.as_mut().and_then(|map| map.get_mut(&self.call_id)) {
+      entry.dropped_at = Some(Instant::now());
+    }
   }
 }
 
@@ -1768,6 +1911,8 @@ pub struct ActionSpan {
   before_snapshot: Option<String>,
   after_snapshot: Option<String>,
   attachments: Vec<TraceAttachment>,
+  /// This call's entry in the pending-call registry, while it runs.
+  pending: Option<PendingGuard>,
 }
 
 impl ActionSpan {
@@ -1820,6 +1965,9 @@ impl ActionSpan {
   /// Append one line to this action's call log (the viewer's Log pane).
   pub fn log(&self, message: impl Into<String>) {
     let message = message.into();
+    if let Some(pending) = &self.pending {
+      pending.log(&message);
+    }
     if let (Some(observed), Some(info)) = (&self.observed, &self.info) {
       observed.observer.action_log(info, &message);
     }
@@ -1880,7 +2028,10 @@ impl ActionSpan {
     }));
   }
 
-  fn finish_error_info(self, error: Option<ActionErrorInfo>) {
+  fn finish_error_info(mut self, error: Option<ActionErrorInfo>) {
+    if let Some(pending) = self.pending.take() {
+      pending.finished();
+    }
     if let (Some(observed), Some(info)) = (&self.observed, &self.info) {
       observed.observer.action_end(
         info,
@@ -1960,9 +2111,16 @@ pub(crate) fn begin_action(
   let recorder = composite.and_then(recorder_for);
   let observer = action_observer(composite);
   let gate = action_gate();
-  // Neither recording, observing nor gating: the common case, and the only
-  // cost is the map probe plus two relaxed atomic loads.
-  if recorder.is_none() && observer.is_none() && gate.is_none() {
+  let watched = recorder.is_some() || observer.is_some() || gate.is_some();
+  // Neither recording, observing, gating nor tracking: the common case,
+  // and the only cost is the map probe plus three relaxed atomic loads.
+  if !watched && !PENDING_TRACKING.load(Ordering::Acquire) {
+    return None;
+  }
+  let origin = current_call_origin();
+  // Tracking alone opens a span only for a call someone owns.
+  let tracked = PENDING_TRACKING.load(Ordering::Acquire) && origin.script.is_some();
+  if !watched && !tracked {
     return None;
   }
   // `BrowserContext` reads as `browserContext`, not `browsercontext`:
@@ -1972,7 +2130,24 @@ pub(crate) fn begin_action(
   let call_id = recorder
     .as_ref()
     .map_or_else(next_unrecorded_call_id, |r| r.next_call_id());
-  let origin = current_call_origin();
+  let pending = if tracked {
+    PendingGuard::open(&call_id, &title, &origin)
+  } else {
+    None
+  };
+  if !watched {
+    return Some(ActionSpan {
+      recorder: None,
+      info: None,
+      observed: None,
+      gate: None,
+      call_id,
+      before_snapshot: None,
+      after_snapshot: None,
+      attachments: Vec::new(),
+      pending,
+    });
+  }
   let info = Arc::new(ActionInfo {
     call_id: call_id.clone(),
     class: class.to_string(),
@@ -2002,6 +2177,7 @@ pub(crate) fn begin_action(
       before_snapshot: None,
       after_snapshot: None,
       attachments: Vec::new(),
+      pending,
     });
   };
 
@@ -2041,6 +2217,7 @@ pub(crate) fn begin_action(
     before_snapshot,
     after_snapshot: None,
     attachments: Vec::new(),
+    pending,
   })
 }
 
@@ -2149,12 +2326,53 @@ pub fn begin_custom_action(composite: &str, action: CustomAction) -> Option<Acti
     before_snapshot: None,
     after_snapshot: None,
     attachments: Vec::new(),
+    pending: None,
   })
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn pending_calls_keep_what_their_owner_left_running() {
+    track_pending_calls();
+    let owner: Arc<str> = Arc::from("worker 0: sashoush stuck test");
+    let before = Instant::now();
+    let (finished, dropped, running) = with_call_owner(Arc::clone(&owner), async {
+      let finished = begin_action(None, "Page", "goto", None, serde_json::json!({})).expect("owned call is tracked");
+      let dropped = begin_action(None, "Locator", "click", None, serde_json::json!({})).expect("tracked");
+      dropped.log("waiting for locator('#nope')");
+      let running = begin_action(None, "Page", "waitForURL", None, serde_json::json!({})).expect("tracked");
+      (finished, dropped, running)
+    })
+    .await;
+    finished.finish(None);
+    drop(dropped);
+    let titles = |deadline| {
+      pending_calls(&owner, deadline)
+        .into_iter()
+        .map(|call| (call.title, call.log))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+      titles(before),
+      [
+        (
+          "locator.click".to_string(),
+          vec!["waiting for locator('#nope')".to_string()]
+        ),
+        ("page.waitForURL".to_string(), Vec::new()),
+      ]
+    );
+    // A call dropped before the deadline was abandoned by the test, not
+    // interrupted by its timeout.
+    assert_eq!(titles(Instant::now()), [("page.waitForURL".to_string(), Vec::new())]);
+    assert!(pending_calls("worker 1: someone else", before).is_empty());
+    forget_pending_calls(&owner);
+    assert!(pending_calls(&owner, before).is_empty());
+    drop(running);
+  }
 
   /// Stands in for a public action builder: `#[track_caller]` makes
   /// `call_origin_here` report this function's CALLER, which is what puts a

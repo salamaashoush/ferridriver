@@ -1580,6 +1580,11 @@ impl Worker {
     // budget, as they do in Playwright (`workerMain.ts` runs them in the
     // test's default slot).
     let budget = ferridriver::pause::BudgetStart::now();
+    let budget_started = Instant::now();
+    // Calls are filed under the test that made them, so a timeout can name
+    // the one it interrupted, on whichever browser it ran.
+    ferridriver::trace::track_pending_calls();
+    let call_owner: Arc<str> = Arc::from(test_info.call_owner());
     let mut timed_out_while: Option<&'static str> = None;
     if before_each_err.is_none() {
       let setup = ferridriver::pause::run_within_updates_from(budget, modifiers.timeout_updates.subscribe(), async {
@@ -1710,9 +1715,12 @@ impl Worker {
       let Ok(result) = ferridriver::pause::run_within_updates_from(
         budget,
         modifiers.timeout_updates.subscribe(),
-        ferridriver_expect::with_sink(
-          Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-          run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+        ferridriver::trace::with_call_owner(
+          Arc::clone(&call_owner),
+          ferridriver_expect::with_sink(
+            Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+            run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+          ),
         ),
       )
       .await
@@ -1760,14 +1768,25 @@ impl Worker {
       ferridriver::pause::run_within_updates_from(
         budget,
         modifiers.timeout_updates.subscribe(),
-        ferridriver_expect::with_sink(
-          Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-          run_caught((test.test_fn)(test_pool.clone())),
+        ferridriver::trace::with_call_owner(
+          Arc::clone(&call_owner),
+          ferridriver_expect::with_sink(
+            Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+            run_caught((test.test_fn)(test_pool.clone())),
+          ),
         ),
       )
       .await
     };
     timeout_dur = *modifiers.timeout_updates.borrow();
+    // Read before teardown: closing the context fails the stuck call, which
+    // then finishes and leaves the registry.
+    let interrupted = if timeout_result.is_err() {
+      ferridriver::trace::pending_calls(&call_owner, budget_started + timeout_dur)
+    } else {
+      Vec::new()
+    };
+    ferridriver::trace::forget_pending_calls(&call_owner);
 
     // Hold here, before `afterEach` and before the context closes, so
     // whoever attaches sees the page the failure left rather than its
@@ -1811,9 +1830,12 @@ impl Worker {
       let Ok(result) = ferridriver::pause::run_within_updates_from(
         after_budget,
         after_limit_rx.clone(),
-        ferridriver_expect::with_sink(
-          Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-          run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+        ferridriver::trace::with_call_owner(
+          Arc::clone(&call_owner),
+          ferridriver_expect::with_sink(
+            Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+            run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
+          ),
         ),
       )
       .await
@@ -2019,6 +2041,7 @@ impl Worker {
       resources.close(),
     ))
     .await;
+    ferridriver::trace::forget_pending_calls(&call_owner);
     let teardown_failure = teardown_stuck.map(|phase| TestFailure {
       message: format!(
         "Tearing down the test exceeded the after-hooks timeout of {}ms while {phase}.",
@@ -2107,10 +2130,11 @@ impl Worker {
         TestStatus::TimedOut,
         Some(TestFailure {
           message: format!(
-            "test timed out after {timeout_dur:?}{}",
+            "test timed out after {timeout_dur:?}{}{}",
             timed_out_while
               .map(|phase| format!(" while {phase}"))
-              .unwrap_or_default()
+              .unwrap_or_default(),
+            describe_pending_calls(&interrupted),
           ),
           stack: None,
           diff: None,
@@ -2272,6 +2296,37 @@ impl Worker {
       hooks,
     }
   }
+}
+
+/// What a timed-out test was waiting on, as Playwright reports the
+/// interrupted action: each call that had not finished, with its call log.
+fn describe_pending_calls(calls: &[ferridriver::trace::PendingCall]) -> String {
+  use std::fmt::Write as _;
+  let mut out = String::new();
+  for call in calls {
+    let _ = write!(out, "\n\n{} had not finished", call.title);
+    if let Some(at) = &call.location {
+      let _ = write!(out, " ({at})");
+    }
+    if call.log.is_empty() {
+      continue;
+    }
+    out.push_str("\nCall log:");
+    // A retrying wait logs the same line on every attempt.
+    let mut lines = call.log.iter().peekable();
+    while let Some(line) = lines.next() {
+      let mut repeats = 1;
+      while lines.peek() == Some(&line) {
+        lines.next();
+        repeats += 1;
+      }
+      let _ = write!(out, "\n  - {line}");
+      if repeats > 1 {
+        let _ = write!(out, " (x{repeats})");
+      }
+    }
+  }
+  out
 }
 
 /// One teardown step on the after-hooks budget. Once a step has run the

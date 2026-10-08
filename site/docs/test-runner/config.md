@@ -359,7 +359,7 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | Field                  | Type      | Default | Notes |
 |------------------------|-----------|---------|-------|
 | `testMatch`            | `Vec<String>` | `[]` | Glob patterns for test files (JS / TS path) |
-| `timeout`              | `u64`     | 30000   | Per-test timeout (ms) |
+| `timeout`              | `u64`     | 30000   | Per-test timeout (ms). A timed-out test names each browser call still running, with its call log |
 | `expectTimeout`        | `u64`     | 5000    | Assertion polling timeout (ms). Older spelling of `expect.timeout`; the nested key wins when both are set |
 | `expect`               | object    | `{}`    | Matcher defaults — see [Expect block](#expect-block) |
 | `workers`              | `u32`     | 0       | 0 = number of logical CPUs |

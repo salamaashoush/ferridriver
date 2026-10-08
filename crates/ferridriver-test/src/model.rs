@@ -569,6 +569,14 @@ impl ferridriver_expect::SoftSink for TestInfo {
 }
 
 impl TestInfo {
+  /// Who issued this attempt's browser calls, as the pending-call registry
+  /// files them (`ferridriver::trace::pending_calls`). The worker index
+  /// keeps two projects running the same test apart.
+  #[must_use]
+  pub fn call_owner(&self) -> String {
+    format!("worker {}: {}", self.worker_index, self.test_id.execution_key())
+  }
+
   /// Create a minimal TestInfo for non-test-runner contexts (MCP, standalone).
   pub fn new_anonymous() -> Self {
     Self {

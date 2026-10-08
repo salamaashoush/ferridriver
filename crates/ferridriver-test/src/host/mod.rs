@@ -65,6 +65,11 @@ pub trait TestHostBridge: crate::step::StepDriver {
   /// the host throws.
   fn snapshot_path(&self, name: &[String], kind: &str) -> Result<String, String>;
   fn errors(&self) -> Vec<String>;
+  /// The identity the test's calls are filed under, so a timeout can name
+  /// the call it interrupted ([`crate::model::TestInfo::call_owner`]).
+  fn call_owner(&self) -> Option<String> {
+    None
+  }
   /// `toMatchSnapshot(name?)` — text snapshot against the run's
   /// snapshot directory/update mode. `Err(message)` = assertion failed.
   fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>>;

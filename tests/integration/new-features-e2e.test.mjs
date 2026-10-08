@@ -85,3 +85,21 @@ test('native JS runner writes the HTML reporter artifact', async () => {
   const report = await stat(join(cwd, 'test-results', 'report.html'));
   assert.ok(report.size > 1000);
 });
+
+test('a timed-out test names the call it was stuck in, on a browser it launched itself', async () => {
+  const cwd = await workspace({
+    'ferridriver.toml': '[test]\ntestMatch = ["stuck.spec.ts"]\nworkers = 1\nretries = 0\ntimeout = 1500\n',
+    'stuck.spec.ts': `
+import { test } from '@ferridriver/test';
+test('waits for an element that never appears', async () => {
+  const browser = await chromium().launch({ headless: true });
+  const page = await browser.newPage();
+  await page.goto('data:text/html,<h1>sashoush</h1>');
+  await page.locator('#nope').click();
+});
+`,
+  });
+  const result = await run(['test', '--no-inherit', '--headless'], { cwd });
+  assert.equal(result.code, 1, result.text);
+  assert.match(result.text, /test timed out after 1\.5s\n\n {4}locator\.click had not finished\n {4}Call log:\n {4} {2}- waiting for locator\('#nope'\)/);
+});
