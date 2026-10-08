@@ -172,20 +172,34 @@ impl SessionServer {
     let _serving = Serving(Arc::clone(&self.lifecycle));
     let mut connections = tokio::task::JoinSet::new();
     let mut stopped = self.lifecycle.stopped.subscribe();
+    let mut draining = self.lifecycle.draining();
     loop {
       tokio::select! {
         biased;
         _ = stopped.wait_for(|stopped| *stopped) => return Ok(()),
-        Some(result) = connections.join_next() => {
-          match result {
-            Ok(Ok(())) => {},
-            Ok(Err(error)) => tracing::debug!(%error, "session connection ended"),
-            Err(error) => tracing::warn!(%error, "session connection task failed"),
-          }
-        },
+        _ = draining.wait_for(|draining| *draining) => break,
+        Some(result) = connections.join_next() => connection_ended(result),
         result = self.accept(&listener) => { connections.spawn(result?); },
       }
     }
+    drop(listener);
+    loop {
+      tokio::select! {
+        biased;
+        _ = stopped.wait_for(|stopped| *stopped) => return Ok(()),
+        result = connections.join_next() => match result {
+          Some(result) => connection_ended(result),
+          None => return Ok(()),
+        },
+      }
+    }
+  }
+
+  /// Accept no more connections or commands, and let each connection answer
+  /// the command it is running before [`SessionServer::serve`] returns.
+  pub(crate) fn drain(&self) -> Result<()> {
+    self.lifecycle.drain();
+    self.lifecycle.unpublish()
   }
 
   async fn accept(
@@ -233,8 +247,16 @@ impl Drop for Listener {
   }
 }
 
+fn connection_ended(result: std::result::Result<Result<()>, tokio::task::JoinError>) {
+  match result {
+    Ok(Ok(())) => {},
+    Ok(Err(error)) => tracing::debug!(%error, "session connection ended"),
+    Err(error) => tracing::warn!(%error, "session connection task failed"),
+  }
+}
+
 /// Read commands from one connection and answer each via the dispatcher,
-/// until the peer hangs up.
+/// until the peer hangs up or the session drains.
 ///
 /// A command's events are written as they are emitted — that is what makes a
 /// remote `run` stream its console like a local one — and the response frame
@@ -245,11 +267,16 @@ where
 {
   let (mut reader, mut writer) = tokio::io::split(stream);
   let mut pending = Vec::new();
+  let mut draining = lifecycle.draining();
   loop {
-    let command: Option<Command> = match read_frame(&mut reader, &mut pending).await {
-      Ok(c) => c,
-      Err(SessionError::ConnectionClosed) => break,
-      Err(e) => return Err(e),
+    let command: Option<Command> = tokio::select! {
+      biased;
+      _ = draining.wait_for(|draining| *draining) => break,
+      command = read_frame(&mut reader, &mut pending) => match command {
+        Ok(c) => c,
+        Err(SessionError::ConnectionClosed) => break,
+        Err(e) => return Err(e),
+      },
     };
     let Some(command) = command else { break };
 
@@ -371,6 +398,50 @@ mod tests {
     assert!(reply.ok);
     assert!(dispatcher.closed.load(std::sync::atomic::Ordering::SeqCst));
     serving.await.unwrap().unwrap();
+  }
+
+  struct DrainingDispatcher {
+    server: std::sync::OnceLock<std::sync::Weak<SessionServer>>,
+  }
+
+  #[async_trait::async_trait]
+  impl Dispatcher for DrainingDispatcher {
+    async fn dispatch(&self, command: Command, _events: EventSink) -> crate::Response {
+      let server = self.server.get().and_then(std::sync::Weak::upgrade).unwrap();
+      server.drain().unwrap();
+      tokio::task::yield_now().await;
+      crate::Response::ok(command.id, "drained by sashoush")
+    }
+  }
+
+  #[tokio::test]
+  async fn a_command_that_drains_the_session_still_gets_its_reply() {
+    let dispatcher = Arc::new(DrainingDispatcher {
+      server: std::sync::OnceLock::new(),
+    });
+    let server = Arc::new(
+      SessionServer::bind(Endpoint::Tcp("127.0.0.1:0".into()), dispatcher.clone())
+        .await
+        .unwrap(),
+    );
+    dispatcher.server.set(Arc::downgrade(&server)).unwrap();
+    let serving = tokio::spawn({
+      let server = server.clone();
+      async move { server.serve().await }
+    });
+    let mut client = SessionClient::connect(server.endpoint_string()).await.unwrap();
+    let reply = client
+      .call(Command::new(1, "resume", serde_json::json!({})))
+      .await
+      .unwrap();
+    assert!(reply.ok);
+    assert_eq!(reply.text, "drained by sashoush");
+    tokio::time::timeout(std::time::Duration::from_secs(5), serving)
+      .await
+      .expect("a drained server stops once its connections have answered")
+      .unwrap()
+      .unwrap();
+    assert!(SessionClient::connect(server.endpoint_string()).await.is_err());
   }
 
   #[cfg(unix)]

@@ -12,6 +12,7 @@ pub(crate) struct Lifecycle {
   cleaned: std::sync::atomic::AtomicBool,
   dispatcher: Arc<dyn Dispatcher>,
   closing: watch::Sender<bool>,
+  draining: watch::Sender<bool>,
   pub(crate) stopped: watch::Sender<bool>,
   runs: RwLock<()>,
   cleanup: Mutex<()>,
@@ -31,6 +32,7 @@ impl Lifecycle {
       endpoint,
       dispatcher,
       closing: watch::channel(false).0,
+      draining: watch::channel(false).0,
       stopped: watch::channel(false).0,
       runs: RwLock::new(()),
       cleanup: Mutex::new(()),
@@ -64,6 +66,14 @@ impl Lifecycle {
 
   pub(crate) fn closing(&self) -> watch::Receiver<bool> {
     self.closing.subscribe()
+  }
+
+  pub(crate) fn draining(&self) -> watch::Receiver<bool> {
+    self.draining.subscribe()
+  }
+
+  pub(crate) fn drain(&self) {
+    self.draining.send_replace(true);
   }
 
   pub(crate) async fn run(&self, command: Command, events: EventSink) -> Response {

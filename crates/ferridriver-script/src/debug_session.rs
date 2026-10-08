@@ -307,7 +307,9 @@ impl DebugHook for SessionDebugHook {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     eprintln!("  resumed; the run continues\n");
-    drop(published);
+    // The script that resumed is still answering; dropping the session here
+    // would cut its reply off.
+    published.bound.finish().await;
   }
 
   async fn test_finished(&self) {
@@ -317,7 +319,7 @@ impl DebugHook for SessionDebugHook {
     };
     // Anything still blocked in the gate belongs to a test that is over.
     published.stopped.resume();
-    drop(published.bound);
+    published.bound.finish().await;
   }
 }
 

@@ -158,6 +158,22 @@ impl BoundSession {
       .map_err(|error| crate::SessionError::Dispatch(error.to_string()))?
   }
 
+  /// Remove the registry descriptor and stop taking commands, then wait for
+  /// every connection to answer the command it is running before unbinding.
+  ///
+  /// Dropping a binding cuts those commands off instead, which loses the
+  /// reply to a command whose own effect is what ends the binding.
+  pub async fn finish(mut self) {
+    if let Err(error) = self.server.drain() {
+      tracing::warn!(%error, session = %self.id, "session descriptor cleanup failed");
+    }
+    match (&mut self.serve_task).await {
+      Ok(Ok(())) => {},
+      Ok(Err(error)) => tracing::debug!(%error, session = %self.id, "session server ended"),
+      Err(error) => tracing::warn!(%error, session = %self.id, "session server task failed"),
+    }
+  }
+
   /// Stop serving and remove the registry descriptor. Idempotent — a second
   /// call (or the `Drop` impl) is a no-op.
   ///
