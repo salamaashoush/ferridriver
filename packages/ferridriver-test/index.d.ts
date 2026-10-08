@@ -839,40 +839,46 @@ export interface PageToolGroup {
   tools: PageTool[];
 }
 
-/** Chromium WebMCP control surface backed by the page's CDP target. */
-export interface WebMCPAnnotation {
+/** Hints a page attaches to a WebMCP tool. Only hints that are set appear. */
+export interface WebMCPAnnotations {
   readOnly?: boolean;
   untrustedContent?: boolean;
   consequential?: boolean;
+  debugging?: boolean;
+  /** A declarative form tool that submits itself instead of waiting for the user. */
   autosubmit?: boolean;
 }
 
+/** A tool registered through `document.modelContext` or a `<form toolname>`. */
 export interface WebMCPTool {
   name: string;
+  title?: string;
   description: string;
   inputSchema?: Record<string, unknown>;
-  annotations?: WebMCPAnnotation;
-  frameId: string;
-  backendNodeId?: number;
+  annotations?: WebMCPAnnotations;
+  /** The origin of the document that registered the tool. */
+  origin?: string;
+  /** Registered by a `<form toolname>` rather than by script. */
+  declarative?: boolean;
+  /** The frame that registered the tool, as it was when the tools were listed. */
+  frame: { name: string; url: string };
 }
 
-export interface WebMCPProtocol {
-  /** Discover the tools currently registered in the page's WebMCP domain. */
-  listTools(): Promise<WebMCPTool[]>;
-  enable(): Promise<Record<string, unknown>>;
-  disable(): Promise<Record<string, unknown>>;
-  invokeTool(toolName: string, input?: Record<string, unknown>): Promise<{ invocationId: string }>;
-  cancelInvocation(invocationId: string): Promise<Record<string, unknown>>;
+export interface WebMCPOptions {
+  timeout?: number;
+  /** Also reach the tools of descendant frames, not only this frame's. */
+  allFrames?: boolean;
 }
 
+/**
+ * The WebMCP tools a frame registers. A call that outlives its timeout is
+ * canceled in the page: the tool's `AbortSignal` aborts.
+ */
 export interface WebMCP {
-  tools(options?: { timeout?: number }): Promise<Array<{
-    name: string;
-    description: string;
-    inputSchema?: unknown;
-    annotations?: { readOnly?: boolean; untrustedContent?: boolean; consequential?: boolean };
-  }>>;
-  callTool(name: string, input?: unknown, options?: { timeout?: number }): Promise<unknown>;
+  tools(options?: WebMCPOptions): Promise<WebMCPTool[]>;
+  callTool(name: string, input?: Record<string, unknown>, options?: WebMCPOptions): Promise<unknown>;
+  /** Resolve once a tool named `name` is registered. */
+  waitForTool(name: string, options?: WebMCPOptions): Promise<WebMCPTool>;
 }
 
 /**
@@ -1762,7 +1768,6 @@ export interface Page {
   // so it answers the same on every backend.
   developerTools(): Promise<PageToolGroup[]>;
   executeDeveloperTool(name: string, params?: Record<string, unknown>): Promise<unknown>;
-  readonly webMcp: WebMCPProtocol;
 
   // Highlight elements under the cursor and resolve with a Locator for
   // whichever one is clicked. Waits as long as the reader takes;

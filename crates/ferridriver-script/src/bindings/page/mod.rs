@@ -56,8 +56,6 @@ pub struct PageJs {
   #[qjs(skip_trace)]
   locator_handler_ids: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Vec<u64>>>>,
   #[qjs(skip_trace)]
-  web_mcp: crate::bindings::web_mcp::WebMcpJs,
-  #[qjs(skip_trace)]
   coverage_session: Arc<tokio::sync::Mutex<Option<ferridriver::CdpSession>>>,
   #[qjs(skip_trace)]
   cpu_profile_session: Arc<tokio::sync::Mutex<Option<ferridriver::CdpSession>>>,
@@ -70,7 +68,6 @@ impl PageJs {
       inner: inner.clone(),
       vm: None,
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
       coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
       cpu_profile_session: Arc::new(tokio::sync::Mutex::new(None)),
     }
@@ -82,7 +79,6 @@ impl PageJs {
       inner: inner.clone(),
       vm: Some(vm),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      web_mcp: crate::bindings::web_mcp::WebMcpJs::new(inner.clone()),
       coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
       cpu_profile_session: Arc::new(tokio::sync::Mutex::new(None)),
     }
@@ -1879,16 +1875,8 @@ impl PageJs {
   }
 
   #[qjs(get)]
-  pub fn webmcp(&self) -> crate::bindings::native_web_mcp::NativeWebMcpJs {
-    crate::bindings::native_web_mcp::NativeWebMcpJs::new(self.inner.webmcp())
-  }
-
-  /// Chromium WebMCP commands backed by the page's existing CDP session.
-  #[qjs(get, rename = "webMcp")]
-  pub fn web_mcp<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let wrapper = self.web_mcp.clone();
-    let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
-    rquickjs::IntoJs::into_js(instance, &ctx)
+  pub fn webmcp(&self) -> crate::bindings::web_mcp::WebMcpJs {
+    crate::bindings::web_mcp::WebMcpJs::new(self.inner.webmcp())
   }
 
   /// ferridriver extension: `page.takeHeapSnapshot()`.

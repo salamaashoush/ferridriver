@@ -45,7 +45,6 @@ pub mod keyboard;
 pub mod locator;
 pub mod mouse;
 pub mod native_modules;
-pub mod native_web_mcp;
 pub mod net_policy;
 pub mod network;
 pub mod page;

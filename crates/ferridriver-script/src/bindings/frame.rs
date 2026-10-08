@@ -43,8 +43,8 @@ impl FrameJs {
 #[rquickjs::methods]
 impl FrameJs {
   #[qjs(get)]
-  pub fn webmcp(&self) -> crate::bindings::native_web_mcp::NativeWebMcpJs {
-    crate::bindings::native_web_mcp::NativeWebMcpJs::new(self.inner.webmcp())
+  pub fn webmcp(&self) -> crate::bindings::web_mcp::WebMcpJs {
+    crate::bindings::web_mcp::WebMcpJs::new(self.inner.webmcp())
   }
 
   // ── Sync frame-tree accessors (Playwright parity, task 3.8) ────────

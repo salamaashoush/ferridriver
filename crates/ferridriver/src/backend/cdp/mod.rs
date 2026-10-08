@@ -2893,6 +2893,60 @@ impl<T: CdpWrap> CdpPage<T> {
     Box::pin(self.call_utility_in_context(fn_source, args, handles, context_id, is_function, return_by_value)).await
   }
 
+  /// `WebMCP.invokeTool` on the session that owns `frame_id`, answered by
+  /// its `toolResponded` event. `None` when the browser has no `WebMCP`
+  /// domain (Chromium without `DevToolsWebMCPSupport`). Dropping the future
+  /// before the answer cancels the invocation in the page.
+  pub(crate) async fn webmcp_invoke(
+    &self,
+    frame_id: &str,
+    name: &str,
+    input: &serde_json::Value,
+  ) -> Result<Option<serde_json::Value>> {
+    if let Some(renderer) = self.page_for_frame(frame_id).await? {
+      return Box::pin(renderer.webmcp_invoke(frame_id, name, input)).await;
+    }
+    if let Err(error) = self.cmd("WebMCP.enable", serde_json::json!({})).await {
+      if error.to_string().contains("wasn't found") {
+        return Ok(None);
+      }
+      return Err(error);
+    }
+    // Chromium answers `invokeTool` before the tool runs, so the response
+    // event can only be matched once the id is known; tap before invoking.
+    let mut responses = self
+      .transport
+      .tap_event_methods(&["WebMCP.toolResponded"], self.session_id.as_deref());
+    let invoked = self
+      .cmd(
+        "WebMCP.invokeTool",
+        serde_json::json!({"frameId": frame_id, "toolName": name, "input": input}),
+      )
+      .await?;
+    let id = invoked["invocationId"]
+      .as_str()
+      .ok_or_else(|| FerriError::protocol("WebMCP.invokeTool", "missing invocationId"))?
+      .to_owned();
+    let mut pending = PendingWebMcpInvocation {
+      transport: Arc::clone(&self.transport),
+      session_id: self.session_id.clone(),
+      id: Some(id.clone()),
+    };
+    while let Some(event) = responses.recv().await {
+      if event.get("sessionId").and_then(serde_json::Value::as_str) != self.session_id.as_deref() {
+        continue;
+      }
+      let params = &event["params"];
+      if params["invocationId"].as_str() == Some(id.as_str()) {
+        pending.id = None;
+        return Ok(Some(params.clone()));
+      }
+    }
+    Err(FerriError::target_closed(Some(
+      "the browser connection closed while a WebMCP tool was running".into(),
+    )))
+  }
+
   pub(crate) async fn evaluate_isolated(
     &self,
     source: &str,
@@ -8039,5 +8093,36 @@ fn parse_websocket_frame(params: &serde_json::Value) -> WebSocketPayload {
     WebSocketPayload::Binary(bytes)
   } else {
     WebSocketPayload::Text(payload.to_string())
+  }
+}
+
+/// Cancels a `WebMCP` invocation whose caller stopped waiting, so the page's
+/// tool sees its signal abort instead of running on unobserved.
+struct PendingWebMcpInvocation<T: CdpTransport> {
+  transport: Arc<T>,
+  session_id: Option<Arc<str>>,
+  id: Option<String>,
+}
+
+impl<T: CdpTransport> Drop for PendingWebMcpInvocation<T> {
+  fn drop(&mut self) {
+    let Some(id) = self.id.take() else { return };
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+      return;
+    };
+    let transport = Arc::clone(&self.transport);
+    let session_id = self.session_id.clone();
+    runtime.spawn(async move {
+      if let Err(error) = transport
+        .send_command(
+          session_id.as_deref(),
+          "WebMCP.cancelInvocation",
+          &serde_json::json!({"invocationId": id}),
+        )
+        .await
+      {
+        tracing::debug!(%error, "WebMCP invocation could not be canceled");
+      }
+    });
   }
 }

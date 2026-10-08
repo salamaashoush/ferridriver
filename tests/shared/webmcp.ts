@@ -16,7 +16,7 @@ export async function verifyWebMcp(page: any, assert: Assertions) {
     (window as any).toolCalls = 0;
     const registration = new AbortController();
     (window as any).removeMessageTool = () => registration.abort();
-    model.registerTool({name: 'set_message', description: 'Updates the message',
+    model.registerTool({name: 'set_message', title: 'Set message', description: 'Updates the message',
       inputSchema: {type: 'object', properties: {message: {type: 'string'}}, required: ['message']},
       annotations: {readOnlyHint: true},
       execute: async ({message}: any) => {
@@ -31,23 +31,38 @@ export async function verifyWebMcp(page: any, assert: Assertions) {
     model.registerTool({name: 'error_result', description: 'Returns an error result', execute: async () => ({isError: true})});
     const pending = new Promise(resolve => { (window as any).finishTool = resolve; });
     model.registerTool({name: 'pending', description: 'Waits for release', execute: () => pending});
+    model.registerTool({name: 'cancellable', description: 'Waits for its signal', execute: (_input: unknown, {signal}: any) =>
+      new Promise(() => signal.addEventListener('abort', () => { (window as any).canceled = signal.reason?.name ?? 'aborted'; }))});
   });
   const tools = await page.webmcp.tools();
-  assert.equal(tools.length, 5);
+  assert.equal(tools.length, 6);
   assert.deepEqual(tools.find((tool: any) => tool.name === 'set_message'), {
-    name: 'set_message', description: 'Updates the message',
+    name: 'set_message', title: 'Set message', description: 'Updates the message',
     inputSchema: {type: 'object', properties: {message: {type: 'string'}}, required: ['message']},
     annotations: {readOnly: true},
+    origin: 'http://127.0.0.1:47839',
+    frame: {name: '', url: 'http://127.0.0.1:47839/'},
   });
   assert.deepEqual(await page.webmcp.callTool('set_message', {message: 'sashoush'}, {timeout: 2000}), {message: 'sashoush'});
   assert.equal(await page.locator('#result').textContent(), 'sashoush');
   assert.equal(await page.webmcp.callTool('no_input'), undefined);
   assert.deepEqual(await page.webmcp.callTool('error_result'), {isError: true});
   await assert.rejects(() => page.webmcp.callTool('missing'), /No WebMCP tool named "missing"/);
-  await assert.rejects(() => page.webmcp.callTool('throws_once'), /the invocation failed/);
+  await assert.rejects(() => page.webmcp.callTool('throws_once'),
+    /WebMCP tool "throws_once" failed: Error: Failed to parse input arguments: sashoush/);
   assert.equal(Number(await page.evaluate(() => (window as any).toolCalls)), 1);
   await assert.rejects(() => page.webmcp.callTool('pending', undefined, {timeout: 100}), /Timeout|timeout/);
   await page.evaluate(() => (window as any).finishTool({released: true}));
+  // Giving up on a call cancels it in the page: the tool's signal aborts.
+  await assert.rejects(() => page.webmcp.callTool('cancellable', undefined, {timeout: 100}), /Timeout|timeout/);
+  await page.waitForFunction(() => (window as any).canceled);
+  assert.equal(await page.evaluate(() => (window as any).canceled), 'AbortError');
+  const late = page.webmcp.waitForTool('late_tool', {timeout: 5000});
+  await page.evaluate(() => setTimeout(() => ((document as any).modelContext ?? (navigator as any).modelContext)
+    .registerTool({name: 'late_tool', description: 'Registers late', execute: async () => ({late: true})}), 200));
+  assert.equal((await late).name, 'late_tool');
+  assert.deepEqual(await page.webmcp.callTool('late_tool'), {late: true});
+  await assert.rejects(() => page.webmcp.waitForTool('never_registered', {timeout: 300}), /Timeout|timeout/);
   await page.evaluate(() => {
     const child = document.createElement('iframe');
     child.name = 'tools-child';
@@ -84,6 +99,11 @@ export async function verifyWebMcp(page: any, assert: Assertions) {
   assert.deepEqual((await remote.webmcp.tools()).map((tool: any) => tool.name), ['remote_only']);
   assert.deepEqual(await remote.webmcp.callTool('remote_only'), {frame: 'remote'});
   assert.equal((await page.webmcp.tools()).some((tool: any) => tool.name === 'remote_only'), false);
+  const everyFrame = await page.webmcp.tools({allFrames: true});
+  assert.deepEqual(everyFrame.filter((tool: any) => tool.name.endsWith('_only')).map((tool: any) => [tool.name, tool.frame.name]),
+    [['child_only', 'tools-child'], ['remote_only', 'remote-tools']]);
+  assert.equal(everyFrame.find((tool: any) => tool.name === 'remote_only').origin, 'http://localhost:47839');
+  assert.deepEqual(await page.webmcp.callTool('remote_only', undefined, {allFrames: true}), {frame: 'remote'});
   const remoteHandle = await remote.evaluateHandle(() => ({value: 42}));
   try {
     assert.equal(await remoteHandle.evaluate((value: any) => value.value), 42);
@@ -130,6 +150,8 @@ export async function verifyWebMcp(page: any, assert: Assertions) {
       });
       document.body.appendChild(form);
     }, {name, autosubmit});
+    // Chromium registers a form tool on a later task than the insertion.
+    await page.webmcp.waitForTool(name);
     const pending = page.webmcp.callTool(name, {email: 'sashoush@example.com'});
     if (!autosubmit) {
       await page.waitForFunction((name: string) =>
@@ -150,12 +172,14 @@ export async function verifyWebMcp(page: any, assert: Assertions) {
     document.body.appendChild(form);
   });
   await registerForm();
-  const formTool = (await page.webmcp.tools()).find((tool: any) => tool.name === 'subscribe');
+  const formTool = await page.webmcp.waitForTool('subscribe');
+  assert.equal(formTool.declarative, true);
   assert.equal(formTool?.description, 'Subscribes to the newsletter');
   assert.equal(formTool.inputSchema.properties.email.type, 'string');
   await assert.rejects(() => page.webmcp.callTool('subscribe', {email: 'sashoush@example.com'}, {timeout: 100}), /Timeout|timeout/);
   await page.goto('http://127.0.0.1:47839/form-document');
   await registerForm();
+  await page.webmcp.waitForTool('subscribe');
   const formCall = page.webmcp.callTool('subscribe', {email: 'sashoush@example.com'}, {timeout: 0});
   const formClosed = assert.rejects(() => formCall, /closed|detached|destroyed/i);
   await page.waitForFunction(() => document.querySelector<HTMLInputElement>('input[name="email"]')?.value === 'sashoush@example.com');

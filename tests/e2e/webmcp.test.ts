@@ -112,6 +112,7 @@ test('native Firefox WebMCP preserves top-level tool results, failures and lifec
       name: 'set_message', description: 'Updates the message',
       inputSchema: {type: 'object', properties: {message: {type: 'string'}}, required: ['message']},
       annotations: {readOnly: true},
+      frame: {name: '', url: 'http://127.0.0.1:47839/'},
     });
     expect(await page.webmcp.callTool('set_message', {message: 'sashoush'})).toEqual({message: 'sashoush'});
     expect(await page.locator('#result').textContent()).toBe('sashoush');
@@ -188,6 +189,11 @@ test('native Firefox exposes its current WebMCP registration limits', async () =
     const tools = await page.webmcp.tools();
     expect(tools.some((tool: any) => tool.name === 'signal_tool')).toBe(true);
     expect(tools.some((tool: any) => tool.name === 'form_tool')).toBe(false);
+    // Firefox hands a tool no AbortSignal, so a call that times out cannot
+    // be canceled in the page.
+    await page.evaluate(() => (navigator as any).modelContext.registerTool({name: 'options_tool',
+      description: 'Reports its options', execute: async (_input: unknown, options: any) => ({signal: typeof options?.signal})}));
+    expect(await page.webmcp.callTool('options_tool')).toEqual({signal: 'undefined'});
   } finally {
     await browser.close();
   }
