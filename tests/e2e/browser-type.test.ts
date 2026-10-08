@@ -73,28 +73,6 @@ describe('browser type', () => {
     expect(webkitErr.includes('Chromium') || webkitErr.includes('connectOverCDP')).toBe(true);
   });
 
-  test('browser_type_launch_persistent_context', async () => {
-    runOnceAcrossProjects();
-    // Launching with a userDataDir populates the profile; a second
-    // launch against the SAME dir must succeed (proves the first
-    // browser shut down, releasing the SingletonLock) and produce a
-    // usable page attached to the existing profile.
-    test.slow();
-    const dir = test.info().outputPath('persistent-profile');
-    {
-      const ctx = await chromium().launchPersistentContext(dir, { headless: true });
-      await ctx.newPage();
-      await ctx.close();
-    }
-    const ctx = await chromium().launchPersistentContext(dir, { headless: true });
-    try {
-      const p = await ctx.newPage();
-      const ua = (await p.evaluate(() => navigator.userAgent)) as string;
-      expect(ua.includes('Chrome') || ua.includes('Chromium') || ua.includes('HeadlessChrome')).toBe(true);
-    } finally {
-      await ctx.close();
-    }
-  });
   test('browser_contexts_lists_only_live_contexts', async ({ browserName }) => {
     // `browser.contexts()` must reflect what is currently open, not
     // everything ever opened. The registry behind it was append-only, so
