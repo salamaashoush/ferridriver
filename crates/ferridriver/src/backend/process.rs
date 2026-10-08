@@ -921,10 +921,11 @@ pub fn describe_process(pid: u32) -> Option<String> {
     let state = stat.rsplit_once(')')?.1.split_whitespace().next()?.to_string();
     let command = process_command(pid).unwrap_or_default();
     let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
-    let mut text = format!("{pid} `{command}` state {state}");
+    let mut text = format!("{pid} state {state}");
     if !wchan.is_empty() && wchan != "0" {
       let _ = write!(text, " in {wchan}");
     }
+    let _ = write!(text, " `{command}`");
     if depth < 2 {
       let children = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default();
       let children: Vec<String> = children

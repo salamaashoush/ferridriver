@@ -63,12 +63,19 @@ try {
 }
 export default 'passed';
 `});
-      const result = await run(['run', '--no-inherit', '--json', 'main.ts'], {cwd});
-      if (result.code !== 0 && existsSync(driverLog)) {
+      const driverNotes = () => {
+        if (!existsSync(driverLog)) return '';
         const lines = readFileSync(driverLog, 'utf8').split('\n');
         const notable = lines.filter(line => /Launching|DevToolsActivePort|ERROR|SEVERE|exited|binary/i.test(line));
-        result.text += `\n--- chromedriver log ---\n${[...notable, '...', ...lines.slice(-20)].join('\n')}`;
-      }
+        return `\n--- chromedriver log ---\n${[...notable, '...', ...lines.slice(-20)].join('\n')}`;
+      };
+      // A script that outlives the probe's limit throws rather than exiting
+      // non-zero; its ChromeDriver log is the evidence either way.
+      const result = await run(['run', '--no-inherit', '--json', 'main.ts'], {cwd}).catch(error => {
+        error.message += driverNotes();
+        throw error;
+      });
+      if (result.code !== 0) result.text += driverNotes();
       passed(result);
       assert.equal(JSON.parse(result.stdout).value, 'passed');
       const trace = await run(['trace', 'show', 'webmcp.trace.zip', '--no-inherit', '--json'], {cwd});
