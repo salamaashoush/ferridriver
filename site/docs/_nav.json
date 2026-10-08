@@ -48,6 +48,7 @@
       { "text": "Extensions", "link": "/scripting/extensions" },
       { "text": "BDD JS / TS API", "link": "/scripting/bdd-js-api" },
       { "text": "run_script", "link": "/scripting/run-script" },
+      { "text": "WebMCP", "link": "/scripting/webmcp" },
       { "text": "Sandbox", "link": "/scripting/sandbox" },
       { "text": "Capabilities", "link": "/scripting/capabilities" },
       { "text": "Sidecars", "link": "/scripting/sidecars" },

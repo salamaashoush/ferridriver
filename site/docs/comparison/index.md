@@ -22,7 +22,7 @@ packages rather than from their documentation.
 | **Network mocking** | `route` / `unroute` / HAR replay (all backends) | `route` / HAR | `setRequestInterception` | proxy / extension | `cy.intercept` |
 | **Trace viewer** | Playwright-compatible ZIP, viewer embedded in the binary | yes | no | no (Selenium 4 has BiDi traces) | yes |
 | **BDD** | bundled (`ferridriver-bdd`, 146 steps) | community plugins | community plugins | yes (per language) | community plugins |
-| **MCP server** | bundled (11 tools) | first-party `@playwright/mcp` (69 tools) | Google's `chrome-devtools-mcp` (58 tools), on `puppeteer-core` | no | no |
+| **MCP server** | bundled (13 tools) | first-party `@playwright/mcp` (69 tools) | Google's `chrome-devtools-mcp` (58 tools), on `puppeteer-core` | no | no |
 | **Agent CLI + skills** | no | `@playwright/cli` (9 skill references) | no | no | no |
 | **Parallel workers** | per-process MPMC dispatch | per-process | per-script | grid | per-spec (single browser) |
 | **Test framework included** | yes (`ferridriver-test`) | yes (`@playwright/test`) | no (use Jest etc.) | yes (per language) | yes |
@@ -99,7 +99,7 @@ something aimed at agents, and they have picked different shapes.
 
 | | ferridriver | `@playwright/mcp` | `chrome-devtools-mcp` |
 |---|---|---|---|
-| Tools | 11 | 69 | 58 (3 in `--slim`) |
+| Tools | 13 | 69 | 58 (3 in `--slim`) |
 | Shape | one binary, no runtime | Node, delegates to `playwright` | Node, on `puppeteer-core` |
 | Arbitrary code in the page | `run_script`, `evaluate` | `browser_evaluate`, `browser_run_code_unsafe` | `evaluate_script` |
 | Performance analysis | `diagnostics` (`trace_start` / `trace_stop`): the same 19 DevTools insights, checked against the engine | no | `performance_start_trace`, `performance_analyze_insight` |
@@ -107,7 +107,8 @@ something aimed at agents, and they have picked different shapes.
 | SEO and best-practices audits | `page.checkPageQuality()` from `run_script`: ten of Lighthouse's own, checked against Lighthouse | no | inside `lighthouse_audit` |
 | Heap snapshots | `page.takeHeapSnapshot()` from `run_script`: capture, analyse and diff, checked against DevTools' own heap engine | no | 13 tools |
 | Tools a page exposes about itself | `page.developerTools()` / `page.executeDeveloperTool()` from `run_script`, on every backend | no | `list_3p_developer_tools`, `execute_3p_developer_tool` |
-| Chrome extensions / PWA / WebMCP | no | no | yes |
+| WebMCP: tools a page registers for agents | `webmcp_tools`, `webmcp_call`, and `page.webmcp` from `run_script`; Chromium and Firefox | no | `list_webmcp_tools`, `execute_webmcp_tool` |
+| Chrome extensions / PWA | no | no | yes |
 | Extending the SERVER itself | `ferridriver_extensions`: add your own tools, reloadable without a restart | no | no |
 | Test generation | `run_bdd`, `codegen` | via `@playwright/cli` skills | no |
 
@@ -117,13 +118,13 @@ Two things worth taking from that table rather than the counts.
 is in the model's context on every turn. Microsoft's own README now
 points coding agents at `@playwright/cli` with SKILLs *instead* of the
 MCP server, for exactly this reason, and Google ships a `--slim` mode
-that drops `chrome-devtools-mcp` from 58 tools to 3. ferridriver's 11
+that drops `chrome-devtools-mcp` from 58 tools to 3. ferridriver's 13
 are deliberate: `run_script` takes a whole program with `page`,
 `context` and `request` bound, so a loop or a conditional needs one
 tool call rather than a tool per verb.
 
 **Where the depth is differs.** `chrome-devtools-mcp` is the only one
-of the three with PWA and extension installation and WebMCP; if that is
+of the three with PWA and extension installation; if that is
 the job, use it. Its thirteen heap-snapshot tools are one capability
 here rather than thirteen: `page.takeHeapSnapshot()` hands back a handle
 carrying the same queries, and the analysis behind them is [checked

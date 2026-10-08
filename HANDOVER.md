@@ -752,14 +752,15 @@ page shape that is not rare.
 `element_handle_remote()` in `backend/mod.rs` already hands you the
 per-backend object id if you do take it on. Do not do half of it.
 
-## 3. Extensions, PWA and WebMCP — 10 tools, and why none of them landed
+## 3. Extensions and PWA — 9 tools, and why none of them landed
 
 `install_extension`, `list_extensions`, `reload_extension`,
 `trigger_extension_action`, `uninstall_extension` (5);
-`install_pwa`, `launch_pwa`, `uninstall_pwa`, `get_os_app_state` (4);
-`list_webmcp_tools`, `execute_webmcp_tool` (2).
+`install_pwa`, `launch_pwa`, `uninstall_pwa`, `get_os_app_state` (4).
 
-The fourth category, `list_3p_developer_tools` and
+WebMCP has landed as `webmcp_tools` and `webmcp_call`, over the same
+`page.webmcp` the scripts and Node use; `site/docs/scripting/webmcp.md`
+is its reference. The fourth category, `list_3p_developer_tools` and
 `execute_3p_developer_tool`, HAS landed: `page.developerTools()` and
 `page.executeDeveloperTool()`, on every backend, because it is a DOM
 event rather than a protocol.
@@ -793,16 +794,14 @@ neither matters: headful answers with or without them, headless answers
 with neither. The flag is what Puppeteer sends and what upstream's own
 docs name, and on this build it changes nothing.
 
-**`WebMCP` has the domain and not the API.** `WebMCP.enable` succeeds,
-but nothing on the page can register a tool for it to report:
-`navigator.modelContext` is undefined, and with
-`--enable-features=WebMCP` (the flag `chrome-devtools-mcp`'s own
-`--categoryExperimentalWebmcp` documents) the page gains only
-`window.WebMCPEvent`, whose whole prototype is `toolName`. So a port
-could send `WebMCP.invokeTool` and never be able to show it working,
-which rule 9 says is not done. Re-probe on a newer Chrome before
-starting: `Object.getOwnPropertyNames(Object.getPrototypeOf(navigator))`
-is the one-line check.
+**`WebMCP` now has both.** Chrome 153 with `--enable-features=WebMCP`
+exposes `document.modelContext` and the `WebMCP` domain together; an
+earlier build here had only the domain. Calls on Chromium go through
+`WebMCP.invokeTool`, whose `toolResponded` carries the tool's own error
+and whose `cancelInvocation` aborts the tool's signal. Chromium sends
+neither `toolResponded` nor `toolsRemoved` when the tool's document goes
+away, which is why a call races the page's own navigation and close
+events.
 
 ### Two of them are addressed by TAB target, not page target
 

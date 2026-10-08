@@ -3,6 +3,7 @@
   "extensions",
   "bdd-js-api",
   "run-script",
+  "webmcp",
   "named-sessions",
   "sandbox",
   "capabilities",

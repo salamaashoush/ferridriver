@@ -1,6 +1,6 @@
 # Tools
 
-The MCP surface is scripting-focused: **ten tools**. `run_script` is the
+The MCP surface is scripting-focused: **thirteen tools**. `run_script` is the
 primary action path — a sandboxed QuickJS runtime with live `page`,
 `context`, `request`, and `browser` bindings over the ferridriver core.
 The rest are cheap observation and session-bootstrap primitives.
@@ -26,7 +26,8 @@ session: "staging:qa"     context "qa" on Chrome instance "staging"
 - **`connect`** — attach to a running Chrome (debugger URL or
   `auto_discover`). Parameters: `url?`, `auto_discover?`, `channel?`
   (default `"stable"`), `user_data_dir?`.
-- **`navigate`** — go to a URL; returns a fresh accessibility snapshot.
+- **`navigate`** — go to a URL; returns a fresh accessibility snapshot,
+  and the page's [WebMCP tools](#webmcp-2) when it registers any.
   Parameters: `url` (required), `wait_until?`
   (`commit` / `load` / `domcontentloaded` / `networkidle` / `none`;
   default `commit`).
@@ -136,6 +137,31 @@ Always a structured JSON payload:
 Scripts that throw surface as `status: "error"` in the payload — not as
 MCP-level errors — so callers can inspect the failure without catching
 protocol exceptions.
+
+## BDD (1)
+
+- **`run_bdd`** — run Gherkin features, inline or from files, through
+  the same engine as `ferridriver bdd`, JS and TS step files included.
+
+## WebMCP (2)
+
+Tools a page registers for agents through
+[WebMCP](/scripting/webmcp). Chromium needs
+`chromeArgs = ["--enable-features=WebMCP"]` under `[mcp.browser]`.
+
+- **`webmcp_tools`** — list the tools of every frame: name, title,
+  description, input schema, hints (read-only, consequential, untrusted
+  content) and the frame that registers each. Parameters: `timeout?`.
+- **`webmcp_call`** — call a tool and return its result as JSON. The
+  page runs the tool itself, so it may navigate or wait for the user. A
+  call that outlives `timeout` is canceled in the page. Parameters:
+  `name`, `input?` (an object matching the tool's schema), `frame?`
+  (frame name or URL, when several frames register the same name),
+  `timeout?`.
+
+`navigate`, `page new` and the `page` actions that move or switch the
+page append a `### WebMCP tools` section when the main frame registers
+tools, so an agent learns a page offers them without asking.
 
 ## Introspection (1)
 
