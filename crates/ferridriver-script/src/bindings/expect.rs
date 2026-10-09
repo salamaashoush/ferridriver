@@ -683,12 +683,6 @@ impl ExpectJs {
       }
     })
   }
-
-  /// Copy with negation toggled — backs boolean-state matcher options
-  /// (`toBeChecked({ checked: false })`, `toBeAttached({ attached: false })`).
-  fn negated(&self) -> Self {
-    self.clone_with(|e| e.is_not = !e.is_not)
-  }
 }
 
 fn unsupported_snapshot_subject(ctx: &Ctx<'_>, matcher: &'static str) -> rquickjs::Error {
@@ -823,20 +817,6 @@ fn u64_array_field(obj: Option<&Object<'_>>, key: &str) -> Option<Vec<u64>> {
   (!out.is_empty()).then_some(out)
 }
 
-/// Throw when a Playwright option we cannot honor yet is present —
-/// silently accepting and dropping it would be a false completion.
-fn reject_unsupported_option(obj: Option<&Object<'_>>, matcher: &'static str, key: &str) -> rquickjs::Result<()> {
-  if let Some(o) = obj
-    && o.contains_key(key).unwrap_or(false)
-  {
-    return Err(type_error(
-      o.ctx(),
-      format!("expect.{matcher}: the \"{key}\" option is not supported yet"),
-    ));
-  }
-  Ok(())
-}
-
 /// True when the value is a string or a RegExp instance — the shapes
 /// Playwright treats as an expected text value rather than an options
 /// bag in overloads like `toHaveAttribute(name, value?, options?)`.
@@ -869,11 +849,10 @@ fn parse_string_or_regex<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::R
     if let (Ok(s), Ok(f)) = (source, flags)
       && let (Some(s), Some(f)) = (s.as_string(), f.as_string())
     {
-      let pat = s.to_string()?;
-      let flg = f.to_string()?;
-      let re = ferridriver_expect::asymmetric::compile_js_regex(&pat, &flg)
-        .map_err(|e| type_error(ctx, format!("expect: invalid RegExp: {e}")))?;
-      return Ok(StringOrRegex::Regex(re));
+      return Ok(StringOrRegex::Regex(ferridriver_expect::JsRegex::new(
+        s.to_string()?,
+        f.to_string()?,
+      )));
     }
   }
   Err(type_error(ctx, "expected a string or RegExp"))
@@ -1213,12 +1192,10 @@ impl ExpectJs {
         let o = opts_obj(&options);
         let me = self.for_call(o.as_ref());
         let want_visible = bool_field(o.as_ref(), "visible").unwrap_or(true);
-        if want_visible {
-          me.build_locator_expect(&ctx, "toBeVisible")?.to_be_visible().await
-        } else {
-          me.build_locator_expect(&ctx, "toBeVisible")?.to_be_hidden().await
-        }
-        .or_else(|e| report(&ctx, e))
+        me.build_locator_expect(&ctx, "toBeVisible")?
+          .to_be_visible_with(want_visible)
+          .await
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1257,12 +1234,10 @@ impl ExpectJs {
         let o = opts_obj(&options);
         let me = self.for_call(o.as_ref());
         let want_enabled = bool_field(o.as_ref(), "enabled").unwrap_or(true);
-        if want_enabled {
-          me.build_locator_expect(&ctx, "toBeEnabled")?.to_be_enabled().await
-        } else {
-          me.build_locator_expect(&ctx, "toBeEnabled")?.to_be_disabled().await
-        }
-        .or_else(|e| report(&ctx, e))
+        me.build_locator_expect(&ctx, "toBeEnabled")?
+          .to_be_enabled_with(want_enabled)
+          .await
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1299,12 +1274,14 @@ impl ExpectJs {
     call_site
       .scope(async move {
         let o = opts_obj(&options);
-        reject_unsupported_option(o.as_ref(), "toBeChecked", "indeterminate")?;
-        let me = self.for_call(o.as_ref());
-        let want_checked = bool_field(o.as_ref(), "checked").unwrap_or(true);
-        let me = if want_checked { me } else { me.negated() };
-        me.build_locator_expect(&ctx, "toBeChecked")?
-          .to_be_checked()
+        let options = ferridriver_expect::CheckedOptions {
+          checked: bool_field(o.as_ref(), "checked"),
+          indeterminate: bool_field(o.as_ref(), "indeterminate"),
+        };
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect(&ctx, "toBeChecked")?
+          .to_be_checked_with(options)
           .await
           .or_else(|e| report(&ctx, e))
       })
@@ -1326,12 +1303,10 @@ impl ExpectJs {
         let o = opts_obj(&options);
         let me = self.for_call(o.as_ref());
         let want_editable = bool_field(o.as_ref(), "editable").unwrap_or(true);
-        if want_editable {
-          me.build_locator_expect(&ctx, "toBeEditable")?.to_be_editable().await
-        } else {
-          me.build_locator_expect(&ctx, "toBeEditable")?.to_be_readonly().await
-        }
-        .or_else(|e| report(&ctx, e))
+        me.build_locator_expect(&ctx, "toBeEditable")?
+          .to_be_editable_with(want_editable)
+          .await
+          .or_else(|e| report(&ctx, e))
       })
       .await
   }
@@ -1349,9 +1324,8 @@ impl ExpectJs {
         let o = opts_obj(&options);
         let me = self.for_call(o.as_ref());
         let want_attached = bool_field(o.as_ref(), "attached").unwrap_or(true);
-        let me = if want_attached { me } else { me.negated() };
         me.build_locator_expect(&ctx, "toBeAttached")?
-          .to_be_attached()
+          .to_be_attached_with(want_attached)
           .await
           .or_else(|e| report(&ctx, e))
       })
@@ -1513,8 +1487,7 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveValues(values: Array<string | RegExp>,
-  /// options?: { timeout? })`. RegExp entries are not supported yet —
-  /// they throw rather than silently mismatching.
+  /// options?: { timeout? })`.
   #[qjs(rename = "toHaveValues")]
   pub async fn to_have_values<'js>(
     &self,
@@ -1525,16 +1498,10 @@ impl ExpectJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        let mut values = Vec::with_capacity(expected.len());
-        for v in &expected {
-          let Some(s) = v.as_string() else {
-            return Err(type_error(
-              &ctx,
-              "expect.toHaveValues: RegExp entries are not supported yet — pass strings",
-            ));
-          };
-          values.push(s.to_string()?);
-        }
+        let values = expected
+          .iter()
+          .map(|v| parse_string_or_regex(&ctx, v))
+          .collect::<rquickjs::Result<Vec<_>>>()?;
         let o = opts_obj(&options);
         self
           .for_call(o.as_ref())
@@ -1610,9 +1577,9 @@ impl ExpectJs {
       .await
   }
 
-  /// Playwright: `toHaveClass(expected: string | RegExp, options?: { timeout? })`.
-  /// The array form is not supported yet — it throws rather than
-  /// silently comparing wrong.
+  /// Playwright: `toHaveClass(expected: string | RegExp | (string | RegExp)[],
+  /// options?: { timeout? })`. The array form asserts one class list per
+  /// element.
   #[qjs(rename = "toHaveClass")]
   pub async fn to_have_class<'js>(
     &self,
@@ -1623,40 +1590,54 @@ impl ExpectJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        if expected.as_array().is_some() {
-          return Err(type_error(
-            &ctx,
-            "expect.toHaveClass: the array form is not supported yet — pass a string or RegExp",
-          ));
-        }
-        let exp = parse_string_or_regex(&ctx, &expected)?;
         let o = opts_obj(&options);
-        self
-          .for_call(o.as_ref())
-          .build_locator_expect(&ctx, "toHaveClass")?
-          .to_have_class(exp)
-          .await
-          .or_else(|e| report(&ctx, e))
+        let me = self.for_call(o.as_ref());
+        let e = me.build_locator_expect(&ctx, "toHaveClass")?;
+        match parse_string_or_regex_array(&ctx, &expected)? {
+          Some(list) => e.to_have_class_array(&list).await,
+          None => e.to_have_class(parse_string_or_regex(&ctx, &expected)?).await,
+        }
+        .or_else(|e| report(&ctx, e))
       })
       .await
   }
 
-  /// Playwright: `toContainClass(expected: string, options?: { timeout? })`.
+  /// Playwright: `toContainClass(expected: string | string[], options?: { timeout? })`.
   #[qjs(rename = "toContainClass")]
   pub async fn to_contain_class<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
-    expected: String,
+    expected: Value<'js>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
         let o = opts_obj(&options);
-        self
-          .for_call(o.as_ref())
-          .build_locator_expect(&ctx, "toContainClass")?
-          .to_contain_class(&expected)
+        let me = self.for_call(o.as_ref());
+        let e = me.build_locator_expect(&ctx, "toContainClass")?;
+        if let Some(list) = expected.as_array() {
+          let mut classes = Vec::with_capacity(list.len());
+          for item in list.iter::<Value<'js>>() {
+            match item?.as_string() {
+              Some(s) => classes.push(s.to_string()?),
+              None => {
+                return Err(type_error(
+                  &ctx,
+                  "\"expected\" argument in toContainClass cannot contain RegExp values",
+                ));
+              },
+            }
+          }
+          return e.to_contain_class_array(&classes).await.or_else(|e| report(&ctx, e));
+        }
+        let Some(class) = expected.as_string() else {
+          return Err(type_error(
+            &ctx,
+            "\"expected\" argument in toContainClass cannot be a RegExp value",
+          ));
+        };
+        e.to_contain_class(&class.to_string()?)
           .await
           .or_else(|e| report(&ctx, e))
       })
@@ -1771,8 +1752,7 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveAccessibleName(name: string | RegExp,
-  /// options?: { ignoreCase?, timeout? })`. `ignoreCase` is not
-  /// supported yet — it throws rather than being silently dropped.
+  /// options?: { ignoreCase?, timeout? })`.
   #[qjs(rename = "toHaveAccessibleName")]
   pub async fn to_have_accessible_name<'js>(
     &self,
@@ -1785,11 +1765,11 @@ impl ExpectJs {
       .scope(async move {
         let exp = parse_string_or_regex(&ctx, &expected)?;
         let o = opts_obj(&options);
-        reject_unsupported_option(o.as_ref(), "toHaveAccessibleName", "ignoreCase")?;
+        let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
         self
           .for_call(o.as_ref())
           .build_locator_expect(&ctx, "toHaveAccessibleName")?
-          .to_have_accessible_name(exp)
+          .to_have_accessible_name_with(exp, ignore_case)
           .await
           .or_else(|e| report(&ctx, e))
       })
@@ -1797,8 +1777,7 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveAccessibleDescription(description: string | RegExp,
-  /// options?: { ignoreCase?, timeout? })`. `ignoreCase` is not
-  /// supported yet — it throws rather than being silently dropped.
+  /// options?: { ignoreCase?, timeout? })`.
   #[qjs(rename = "toHaveAccessibleDescription")]
   pub async fn to_have_accessible_description<'js>(
     &self,
@@ -1811,11 +1790,36 @@ impl ExpectJs {
       .scope(async move {
         let exp = parse_string_or_regex(&ctx, &expected)?;
         let o = opts_obj(&options);
-        reject_unsupported_option(o.as_ref(), "toHaveAccessibleDescription", "ignoreCase")?;
+        let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
         self
           .for_call(o.as_ref())
           .build_locator_expect(&ctx, "toHaveAccessibleDescription")?
-          .to_have_accessible_description(exp)
+          .to_have_accessible_description_with(exp, ignore_case)
+          .await
+          .or_else(|e| report(&ctx, e))
+      })
+      .await
+  }
+
+  /// Playwright: `toHaveAccessibleErrorMessage(errorMessage: string | RegExp,
+  /// options?: { ignoreCase?, timeout? })`.
+  #[qjs(rename = "toHaveAccessibleErrorMessage")]
+  pub async fn to_have_accessible_error_message<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let exp = parse_string_or_regex(&ctx, &expected)?;
+        let o = opts_obj(&options);
+        let ignore_case = bool_field(o.as_ref(), "ignoreCase").unwrap_or(false);
+        self
+          .for_call(o.as_ref())
+          .build_locator_expect(&ctx, "toHaveAccessibleErrorMessage")?
+          .to_have_accessible_error_message_with(exp, ignore_case)
           .await
           .or_else(|e| report(&ctx, e))
       })

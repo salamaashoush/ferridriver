@@ -645,6 +645,35 @@ if (!window.__fd) {
     selAll(parts: SelectorPart[]) { return executeSelector(parts, document); },
 
     /**
+     * One judgement of a web-first assertion: the page half of
+     * Playwright's `frames.ts::_expectInternal`. Single-element
+     * expressions are strict when `strict` is set; array expressions see
+     * every match. The answer is a JSON string so a strict breach, an
+     * engine error and an arbitrary received value all cross every
+     * backend as data rather than as a thrown, backend-mangled message.
+     */
+    async expect(parts: SelectorPart[], params: any, strict: boolean) {
+      try {
+        const isArray = params.expression === 'to.have.count' || params.expression.endsWith('.array');
+        const elements = executeSelector(parts, document);
+        if (strict && !isArray && elements.length > 1)
+          return JSON.stringify({ strict: elements.length });
+        if (!elements.length)
+          return JSON.stringify({ missing: true });
+        const log = isArray
+          ? `  locator resolved to ${elements.length} element${elements.length === 1 ? '' : 's'}`
+          : `  locator resolved to ${injected.previewNode(elements[0])}`;
+        const result = await injected.expect(elements[0], params, elements, frameVisible(elements[0]));
+        return JSON.stringify({ ...result, log });
+      } catch (e: any) {
+        return JSON.stringify({ error: e.message });
+      }
+    },
+    ariaSnapshotForExpectFailure() {
+      return document.body ? injected.ariaSnapshotForExpectFailure(document.body, { mode: 'default' }) : null;
+    },
+
+    /**
      * Paint `color` over every element a screenshot `mask` selector
      * resolves to, tagging each overlay with `tag` so the teardown can
      * remove exactly what it added. Mirrors Playwright's

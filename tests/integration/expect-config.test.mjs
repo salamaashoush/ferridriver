@@ -38,7 +38,7 @@ for (const [config, timeout] of [
   test(`expect configuration reaches the matcher with ${timeout}ms`, async () => {
     const result = await suite(config, invisible);
     assert.equal(result.code, 1, result.text);
-    assert.ok(result.text.includes(`Timeout:  ${timeout}ms`), result.text);
+    assert.ok(result.text.includes(`Timeout: ${timeout}ms`), result.text);
     assert.ok(result.elapsed < 15000, `matcher exceeded its configured timeout: ${result.elapsed}ms`);
   });
 }
@@ -53,7 +53,7 @@ test('each project uses its own expect timeout or the root fallback', async () =
     [[test.projects]]
     name = "slow"`, invisible);
   assert.equal(result.code, 1, result.text);
-  for (const timeout of [600, 2500]) assert.ok(result.text.includes(`Timeout:  ${timeout}ms`), result.text);
+  for (const timeout of [600, 2500]) assert.ok(result.text.includes(`Timeout: ${timeout}ms`), result.text);
 });
 
 const screenshot = `import { test, expect } from '@ferridriver/test';

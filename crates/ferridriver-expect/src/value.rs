@@ -18,7 +18,73 @@ use crate::{AssertionFailure, CallerLocation};
 #[derive(Debug, Clone)]
 pub enum StringOrRegex {
   String(String),
-  Regex(Regex),
+  Regex(JsRegex),
+}
+
+/// A JavaScript `RegExp` as the user wrote it. Web-first matchers hand
+/// `source` and `flags` to the page, so lookaround and backreferences
+/// work there; the compiled form serves the synchronous matchers, which
+/// run in Rust and refuse what the `regex` crate cannot express.
+#[derive(Debug, Clone)]
+pub struct JsRegex {
+  source: String,
+  flags: String,
+  compiled: Result<Regex, String>,
+}
+
+impl JsRegex {
+  #[must_use]
+  pub fn new(source: impl Into<String>, flags: impl Into<String>) -> Self {
+    let (source, flags) = (source.into(), flags.into());
+    let compiled = crate::asymmetric::compile_js_regex(&source, &flags).map_err(|e| e.to_string());
+    Self {
+      source,
+      flags,
+      compiled,
+    }
+  }
+
+  #[must_use]
+  pub fn source(&self) -> &str {
+    &self.source
+  }
+
+  #[must_use]
+  pub fn flags(&self) -> &str {
+    &self.flags
+  }
+
+  /// The pattern compiled for Rust-side matching.
+  ///
+  /// # Errors
+  ///
+  /// The `regex` crate's reason when the pattern uses a JavaScript-only
+  /// feature.
+  pub fn compiled(&self) -> Result<&Regex, &str> {
+    self.compiled.as_ref().map_err(String::as_str)
+  }
+
+  /// Rust-side match; a pattern Rust cannot compile matches nothing.
+  #[must_use]
+  pub fn is_match(&self, text: &str) -> bool {
+    self.compiled().is_ok_and(|re| re.is_match(text))
+  }
+}
+
+impl std::fmt::Display for JsRegex {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "/{}/{}", self.source, self.flags)
+  }
+}
+
+impl From<Regex> for JsRegex {
+  fn from(re: Regex) -> Self {
+    Self {
+      source: re.as_str().to_owned(),
+      flags: String::new(),
+      compiled: Ok(re),
+    }
+  }
 }
 
 /// Playwright's `normalizeWhiteSpace` (`isomorphic/stringUtils.ts`):
@@ -60,7 +126,7 @@ impl StringOrRegex {
   pub fn description(&self) -> String {
     match self {
       Self::String(s) => format!("\"{s}\""),
-      Self::Regex(re) => format!("/{}/", re.as_str()),
+      Self::Regex(re) => re.to_string(),
     }
   }
 
@@ -74,7 +140,12 @@ impl StringOrRegex {
     match self {
       Self::String(expected) => actual.to_lowercase() == expected.to_lowercase(),
       Self::Regex(re) => {
-        Regex::new(&format!("(?i){}", re.as_str())).map_or_else(|_| re.is_match(actual), |r| r.is_match(actual))
+        let flags = if re.flags().contains('i') {
+          re.flags().to_owned()
+        } else {
+          format!("{}i", re.flags())
+        };
+        JsRegex::new(re.source(), flags).is_match(actual)
       },
     }
   }
@@ -94,6 +165,12 @@ impl From<String> for StringOrRegex {
 
 impl From<Regex> for StringOrRegex {
   fn from(re: Regex) -> Self {
+    Self::Regex(re.into())
+  }
+}
+
+impl From<JsRegex> for StringOrRegex {
+  fn from(re: JsRegex) -> Self {
     Self::Regex(re)
   }
 }
@@ -639,7 +716,18 @@ impl ExpectValue {
     };
     let pass = match pattern {
       StringOrRegex::String(needle) => actual.contains(needle.as_str()),
-      StringOrRegex::Regex(re) => re.is_match(actual),
+      StringOrRegex::Regex(re) => match re.compiled() {
+        Ok(compiled) => compiled.is_match(actual),
+        Err(reason) => {
+          return Err(self.fail(
+            "toMatch",
+            format!("matching {}", pattern.description()),
+            format!("a pattern this engine cannot run: {reason}"),
+            None,
+            Some(Location::caller()),
+          ));
+        },
+      },
     };
     self.check(pass, "toMatch", pattern.description(), format!("{actual:?}"))
   }
@@ -867,7 +955,7 @@ mod tests {
   #[test]
   fn to_match_string_substring() {
     ok(expect_value(json!("hello")).to_match(&StringOrRegex::String("ello".into())));
-    ok(expect_value(json!("hello")).to_match(&StringOrRegex::Regex(Regex::new("^h.+o$").unwrap())));
+    ok(expect_value(json!("hello")).to_match(&StringOrRegex::Regex(Regex::new("^h.+o$").unwrap().into())));
     err(expect_value(json!("hello")).to_match(&StringOrRegex::String("bye".into())));
   }
 

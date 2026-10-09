@@ -486,7 +486,7 @@ export interface WebFirstMatchers {
   toBeHidden(options?: ExpectMatcherOptions): Promise<void>;
   toBeEnabled(options?: ExpectMatcherOptions & { enabled?: boolean }): Promise<void>;
   toBeDisabled(options?: ExpectMatcherOptions): Promise<void>;
-  toBeChecked(options?: ExpectMatcherOptions & { checked?: boolean }): Promise<void>;
+  toBeChecked(options?: ExpectMatcherOptions & { checked?: boolean; indeterminate?: boolean }): Promise<void>;
   toBeEditable(options?: ExpectMatcherOptions & { editable?: boolean }): Promise<void>;
   toBeAttached(options?: ExpectMatcherOptions & { attached?: boolean }): Promise<void>;
   toBeEmpty(options?: ExpectMatcherOptions): Promise<void>;
@@ -501,13 +501,13 @@ export interface WebFirstMatchers {
   toHaveAttribute(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
   toHaveAttribute(name: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveClass(expected: string | RegExp | Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
-  toContainClass(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+  toContainClass(expected: string | ReadonlyArray<string>, options?: ExpectMatcherOptions): Promise<void>;
   toHaveCSS(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { pseudo?: 'before' | 'after' }): Promise<void>;
   toHaveId(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
   toHaveRole(role: string, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveAccessibleName(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveAccessibleDescription(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveAccessibleErrorMessage(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
+  toHaveAccessibleName(expected: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
+  toHaveAccessibleDescription(expected: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
+  toHaveAccessibleErrorMessage(expected: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
   toHaveJSProperty(name: string, value: unknown, options?: ExpectMatcherOptions): Promise<void>;
   toHaveCount(count: number, options?: ExpectMatcherOptions): Promise<void>;
   // ferridriver extension: a locator's text content as the snapshot.

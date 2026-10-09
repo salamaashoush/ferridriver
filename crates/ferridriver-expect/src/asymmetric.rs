@@ -128,8 +128,9 @@ impl Asymmetric {
         } else {
           let pat = obj.get("regex")?.as_str()?;
           let flags = obj.get("flags").and_then(Value::as_str).unwrap_or("");
-          let re = compile_js_regex(pat, flags).ok()?;
-          Some(Self::StringMatching(StringOrRegex::Regex(re)))
+          Some(Self::StringMatching(StringOrRegex::Regex(crate::JsRegex::new(
+            pat, flags,
+          ))))
         }
       },
       "closeTo" => {

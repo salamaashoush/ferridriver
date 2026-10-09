@@ -17,6 +17,15 @@ pub struct InViewportOptions {
   pub ratio: Option<f64>,
 }
 
+/// Options for `expect(locator).toBeChecked()`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckedOptions {
+  /// `false` asserts unchecked.
+  pub checked: Option<bool>,
+  /// Asserts the mixed state; cannot be combined with `checked`.
+  pub indeterminate: Option<bool>,
+}
+
 /// Options for `expect(locator).toHaveCSS()`.
 #[derive(Debug, Clone, Default)]
 pub struct HaveCssOptions {

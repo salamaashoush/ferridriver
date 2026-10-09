@@ -195,6 +195,7 @@ pub const BUILTIN_MATCHER_NAMES: &[&str] = &[
   "toContainText",
   "toEqual",
   "toHaveAccessibleDescription",
+  "toHaveAccessibleErrorMessage",
   "toHaveAccessibleName",
   "toHaveAttribute",
   "toHaveCSS",

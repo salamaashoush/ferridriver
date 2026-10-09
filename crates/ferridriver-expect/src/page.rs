@@ -5,145 +5,78 @@
 use std::borrow::Borrow;
 
 use ferridriver::Page;
-
-use std::future::Future;
-use std::time::Duration;
+use ferridriver::expect::ExpectParams;
 
 use crate::AssertionFailure;
 use crate::builder::Expect;
-use crate::poll::{ExpectContext, MatchError, poll_traced};
 use crate::value::StringOrRegex;
-
-fn page_ctx(method: &'static str, is_not: bool, is_soft: bool) -> ExpectContext {
-  ExpectContext {
-    method,
-    subject: "page".into(),
-    is_not,
-    is_soft,
-  }
-}
-
-/// [`poll_traced`] on the page's context — the shared funnel for every
-/// page matcher below.
-async fn poll_page<F, Fut>(
-  page: &Page,
-  timeout: Duration,
-  method: &'static str,
-  is_not: bool,
-  is_soft: bool,
-  check: F,
-) -> Result<(), AssertionFailure>
-where
-  F: FnMut() -> Fut,
-  Fut: Future<Output = Result<(), MatchError>>,
-{
-  let params = serde_json::json!({
-    "isNot": is_not,
-    "timeout": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-  });
-  poll_traced(Some(page), params, timeout, page_ctx(method, is_not, is_soft), check).await
-}
+use crate::web::{Printed, Receiver, WebAssert, expected_text};
 
 impl<P: Borrow<Page>> Expect<'_, P> {
-  pub async fn to_have_title(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
-    let expected = expected.into();
-    let page: &Page = self.subject.borrow();
-    let is_not = self.is_not;
-    poll_page(page, self.timeout, "toHaveTitle", is_not, self.is_soft, || {
-      let expected = expected.clone();
-      async move {
-        let actual = page
-          .title()
-          .await
-          .map_err(|e| MatchError::new("(title)", e.to_string()))?;
-        let matches = expected.matches(&actual);
-        if matches == is_not {
-          Err(MatchError::new(
-            format!("{}{}", if is_not { "not " } else { "" }, expected.description()),
-            format!("\"{actual}\""),
-          ))
-        } else {
-          Ok(())
-        }
-      }
-    })
+  async fn page_text(
+    &self,
+    method: &'static str,
+    expression: &str,
+    expected: StringOrRegex,
+    substring: bool,
+    normalize: bool,
+    ignore_case: Option<bool>,
+  ) -> Result<(), AssertionFailure> {
+    let mut params = ExpectParams::new(expression, self.is_not);
+    params.expected_text = Some(vec![expected_text(&expected, substring, normalize, ignore_case)]);
+    WebAssert {
+      method,
+      receiver: Receiver::Page(self.subject.borrow()),
+      params,
+      printed: Printed::Text { expected, substring },
+      timeout: self.timeout,
+      is_soft: self.is_soft,
+    }
+    .run()
     .await
   }
 
+  /// Playwright: `toHaveTitle(titleOrRegExp, options?)`. The title is
+  /// compared with its whitespace normalized.
+  pub async fn to_have_title(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
+    self
+      .page_text("toHaveTitle", "to.have.title", expected.into(), false, true, None)
+      .await
+  }
+
+  /// ferridriver-only: the title contains `expected`.
   pub async fn to_contain_title(&self, expected: &str) -> Result<(), AssertionFailure> {
-    let expected = expected.to_string();
-    let page: &Page = self.subject.borrow();
-    let is_not = self.is_not;
-    poll_page(page, self.timeout, "toContainTitle", is_not, self.is_soft, || {
-      let expected = expected.clone();
-      async move {
-        let actual = page
-          .title()
-          .await
-          .map_err(|e| MatchError::new("(title)", e.to_string()))?;
-        let contains = actual.contains(&expected);
-        if contains == is_not {
-          Err(MatchError::new(
-            format!("{}containing \"{expected}\"", if is_not { "not " } else { "" }),
-            format!("\"{actual}\""),
-          ))
-        } else {
-          Ok(())
-        }
-      }
-    })
-    .await
+    self
+      .page_text("toContainTitle", "to.have.title", expected.into(), true, true, None)
+      .await
   }
 
   pub async fn to_have_url(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_url_with(expected, false).await
   }
 
+  /// Playwright: `toHaveURL(urlOrRegExp, options?: { ignoreCase?, timeout? })`.
   pub async fn to_have_url_with(
     &self,
     expected: impl Into<StringOrRegex>,
     ignore_case: bool,
   ) -> Result<(), AssertionFailure> {
-    let expected = expected.into();
-    let page: &Page = self.subject.borrow();
-    let is_not = self.is_not;
-    poll_page(page, self.timeout, "toHaveURL", is_not, self.is_soft, || {
-      let expected = expected.clone();
-      async move {
-        let actual = page.url();
-        let matches = expected.matches_with(&actual, ignore_case);
-        if matches == is_not {
-          Err(MatchError::new(
-            format!("{}{}", if is_not { "not " } else { "" }, expected.description()),
-            format!("\"{actual}\""),
-          ))
-        } else {
-          Ok(())
-        }
-      }
-    })
-    .await
+    self
+      .page_text(
+        "toHaveURL",
+        "to.have.url",
+        expected.into(),
+        false,
+        false,
+        ignore_case.then_some(true),
+      )
+      .await
   }
 
+  /// ferridriver-only: the URL contains `expected`.
   pub async fn to_contain_url(&self, expected: &str) -> Result<(), AssertionFailure> {
-    let expected = expected.to_string();
-    let page: &Page = self.subject.borrow();
-    let is_not = self.is_not;
-    poll_page(page, self.timeout, "toContainURL", is_not, self.is_soft, || {
-      let expected = expected.clone();
-      async move {
-        let actual = page.url();
-        let contains = actual.contains(&expected);
-        if contains == is_not {
-          Err(MatchError::new(
-            format!("{}containing \"{expected}\"", if is_not { "not " } else { "" }),
-            format!("\"{actual}\""),
-          ))
-        } else {
-          Ok(())
-        }
-      }
-    })
-    .await
+    self
+      .page_text("toContainURL", "to.have.url", expected.into(), true, false, None)
+      .await
   }
 }

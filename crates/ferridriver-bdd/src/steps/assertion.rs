@@ -179,10 +179,9 @@ async fn should_not_have_value(world: &mut BrowserWorld, selector: String, expec
 #[then("{string} should not have attribute {string}")]
 async fn should_not_have_attribute(world: &mut BrowserWorld, selector: String, attr: String) {
   let locator = crate::steps::selector_locator(world.page()?, &selector);
-  let any = StringOrRegex::Regex(regex::Regex::new(".*").expect("valid regex"));
   expect(&locator)
     .not()
-    .to_have_attribute(&attr, any)
+    .to_have_attribute_exists(&attr)
     .await
     .map_err(to_step_err)?;
 }

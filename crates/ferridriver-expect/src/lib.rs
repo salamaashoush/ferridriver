@@ -48,14 +48,15 @@ pub mod soft;
 pub mod subject;
 pub mod throw;
 pub mod value;
+mod web;
 
 pub use asymmetric::{
   ASYM_TAG_KEY, Asymmetric, CustomAsymmetric, Evaluator, TypeTag, deep_equal, deep_equal_with, match_object,
   match_object_with,
 };
 pub use builder::{
-  CssPseudo, Expect, ExpectPoll, HaveCssOptions, InViewportOptions, ToPassOptions, expect, expect_configured,
-  expect_poll, to_pass, to_pass_with_options,
+  CheckedOptions, CssPseudo, Expect, ExpectPoll, HaveCssOptions, InViewportOptions, ToPassOptions, expect,
+  expect_configured, expect_poll, to_pass, to_pass_with_options,
 };
 pub use diff::{json_diff, pretty_json, unified_diff};
 pub use equality::{Mode as EqualityMode, equals};
@@ -75,7 +76,7 @@ pub use subject::{
   expect_live, promise_failure,
 };
 pub use throw::{ExpectFn, ThrowMatcher, ThrownError, expect_fn};
-pub use value::{ExpectValue, StringOrRegex, expect_value};
+pub use value::{ExpectValue, JsRegex, StringOrRegex, expect_value};
 
 /// Failure produced by a synchronous value matcher.
 ///
@@ -93,6 +94,9 @@ pub struct AssertionFailure {
   /// Raised by a `.soft()` assertion: the current test records it and
   /// carries on instead of stopping here. See [`crate::soft`].
   pub soft: bool,
+  /// The page's accessibility tree where a web-first assertion failed:
+  /// Playwright's `errorContext`.
+  pub error_context: Option<String>,
 }
 
 /// Source location captured at the matcher call site. `'static` strings
@@ -129,6 +133,7 @@ impl AssertionFailure {
       diff,
       location: None,
       soft: false,
+      error_context: None,
     }
   }
 
