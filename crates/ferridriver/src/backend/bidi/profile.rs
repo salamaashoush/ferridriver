@@ -56,7 +56,6 @@ impl ProfileGuard {
     // Closing any descriptor for this inode releases this process's POSIX locks.
     // Exclude same-process contenders before they can open Firefox's lock file.
     let local = local.try_lock_owned().map_err(|_| busy(profile))?;
-    // Darwin's flock and record locks conflict even on the same descriptor.
     let claim = claim_profile(profile)?;
     let file = lock_profile(profile)?;
     Ok(Self {
@@ -98,11 +97,32 @@ fn claim_profile(profile: &Path) -> Result<File> {
     .read(true)
     .write(true)
     .open(path)?;
+  claim_lock(&file, profile)?;
+  Ok(file)
+}
+
+// A record lock, not `flock`: an `flock` belongs to the open file
+// description, so a child another thread forks holds the claim until it
+// execs, and a launch racing that window was told the profile was in use.
+// Same-process contenders are kept out by the in-process mutex before
+// they can open this file and release the lock by closing it.
+#[cfg(unix)]
+fn claim_lock(file: &File, profile: &Path) -> Result<()> {
+  rustix::fs::fcntl_lock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+    if error == rustix::io::Errno::AGAIN || error == rustix::io::Errno::ACCESS {
+      busy(profile)
+    } else {
+      FerriError::backend(format!("Firefox profile claim failed: {error}"))
+    }
+  })
+}
+
+#[cfg(not(unix))]
+fn claim_lock(file: &File, profile: &Path) -> Result<()> {
   file.try_lock().map_err(|error| match error {
     std::fs::TryLockError::WouldBlock => busy(profile),
     std::fs::TryLockError::Error(error) => error.into(),
-  })?;
-  Ok(file)
+  })
 }
 
 #[cfg(unix)]
@@ -439,7 +459,8 @@ mod tests {
     assert!(ProfileGuard::acquire(profile.path()).is_err());
     drop(firefox.stdin.take());
     assert!(firefox.wait().unwrap().success());
-    assert!(ProfileGuard::acquire(profile.path()).is_ok());
+    let reacquired = ProfileGuard::acquire(profile.path());
+    assert!(reacquired.is_ok(), "{:?}", reacquired.err());
   }
 
   #[cfg(unix)]
