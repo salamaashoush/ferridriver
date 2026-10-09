@@ -23,6 +23,9 @@ pub(crate) struct LaunchedProfile {
   pub path: std::path::PathBuf,
   /// `Some` only for the throwaway profile, whose `Drop` removes it.
   pub owned: Option<tempfile::TempDir>,
+  /// Firefox's per-user data root for this launch (`MOZ_APP_DATA`),
+  /// unless the caller chose one.
+  pub app_data: Option<tempfile::TempDir>,
 }
 
 /// A `BiDi` session -- holds the transport and session metadata.
@@ -275,6 +278,7 @@ impl BidiSession {
       LaunchedProfile {
         path: dir.to_path_buf(),
         owned: None,
+        app_data: None,
       }
     } else {
       let owned = tempfile::Builder::new()
@@ -284,8 +288,23 @@ impl BidiSession {
       LaunchedProfile {
         path: owned.path().to_path_buf(),
         owned: Some(owned),
+        app_data: None,
       }
     };
+    let mut profile_dir = profile_dir;
+    // Before it reads `--profile`, Firefox creates its per-user data root
+    // and writes `profiles.ini`, crash reports and pending pings there. A
+    // launch keeps all of that out of the user's own Firefox data, and
+    // starts where that directory is protected (it fails with "Could not
+    // find profile folder." otherwise).
+    if !env.contains_key("MOZ_APP_DATA") && std::env::var_os("MOZ_APP_DATA").is_none() {
+      profile_dir.app_data = Some(
+        tempfile::Builder::new()
+          .prefix("ferridriver-firefox-data-")
+          .tempdir()
+          .map_err(|e| format!("tempdir: {e}"))?,
+      );
+    }
 
     let mut profile_guard = super::profile::ProfileGuard::acquire(&profile_dir.path)?;
 
@@ -340,6 +359,9 @@ impl BidiSession {
     }
 
     command.env("MOZ_CRASHREPORTER_DISABLE", "1");
+    if let Some(app_data) = &profile_dir.app_data {
+      command.env("MOZ_APP_DATA", app_data.path());
+    }
     command
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
@@ -432,6 +454,21 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
 
   let mut line = String::new();
+  // What Firefox printed before the URL, so a startup failure carries
+  // Firefox's own reason ("Could not find profile folder.") instead of
+  // only an exit status.
+  let mut output: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+  let exited = |status: std::process::ExitStatus, output: &std::collections::VecDeque<String>| {
+    let said: Vec<&str> = output.iter().map(String::as_str).collect();
+    FerriError::Backend(if said.is_empty() {
+      format!("Firefox exited during startup with status: {status}")
+    } else {
+      format!(
+        "Firefox exited during startup with status: {status}\n{}",
+        said.join("\n")
+      )
+    })
+  };
   loop {
     if tokio::time::Instant::now() >= deadline {
       return Err(FerriError::timeout(
@@ -447,9 +484,7 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
       Ok(Ok(0)) => {
         // EOF
         if let Ok(Some(status)) = child.try_wait() {
-          return Err(FerriError::Backend(format!(
-            "Firefox exited during startup with status: {status}"
-          )));
+          return Err(exited(status, &output));
         }
         // stderr closed but the process is still alive — read_line
         // returns 0 immediately from here on, so pace the exit checks
@@ -472,14 +507,19 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
           }
           return Ok(ws_url);
         }
+        let said = line.trim();
+        if !said.is_empty() {
+          if output.len() == 20 {
+            output.pop_front();
+          }
+          output.push_back(said.to_string());
+        }
       },
       Ok(Err(e)) => return Err(FerriError::Backend(format!("Firefox stderr read error: {e}"))),
       Err(_) => {
         // Timeout on this read, check if process died
         if let Ok(Some(status)) = child.try_wait() {
-          return Err(FerriError::Backend(format!(
-            "Firefox exited during startup with status: {status}"
-          )));
+          return Err(exited(status, &output));
         }
       },
     }
