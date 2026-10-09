@@ -18,7 +18,7 @@ test('concurrent MCP callers each receive their own correlated response', async 
 for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
   test(`${backend}: MCP close cancels an active browser wait and admits a fresh session afterward`, async () => {
     const source = `
-from http.server import BaseHTTPRequestHandler,HTTPServer
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
@@ -27,9 +27,10 @@ class Handler(BaseHTTPRequestHandler):
   self.send_response(200)
   self.send_header('Content-Type','text/html')
   self.send_header('Content-Length',len(data))
+  self.send_header('Connection','close')
   self.end_headers()
   self.wfile.write(data)
-server=HTTPServer(('127.0.0.1',0),Handler)
+server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
 print(server.server_port,flush=True)
 server.serve_forever()
 `;
