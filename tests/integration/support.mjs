@@ -17,13 +17,22 @@ export async function fixtureServer(body) {
 }
 
 export async function workspace(files) {
-  const root = await mkdtemp(join(tmpdir(), 'ferridriver-integration-'));
+  const root = await physicalPath(await mkdtemp(join(tmpdir(), 'ferridriver-integration-')));
   for (const [name, body] of Object.entries(files)) {
     const path = join(root, name);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, body);
   }
   return root;
+}
+
+// A process started in a directory reports its cwd resolved, and macOS's
+// temporary directory sits behind the /var -> /private/var link, so paths
+// the binary prints are compared against the resolved one.
+async function physicalPath(path) {
+  const result = await commands.exec('probe', { command: `cd ${quote(path)} && pwd -P` });
+  assert.equal(result.exitCode, 0, result.stderr);
+  return result.stdout.trim();
 }
 
 export function quote(value) {

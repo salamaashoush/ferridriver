@@ -109,7 +109,7 @@ test('interrupting the gate lets its running check clean up before exiting', asy
       read signal <&3
     `,
     'interrupt.sh': `#!/bin/sh
-      /bin/mkfifo "$PROBE_ROOT/ready" "$PROBE_ROOT/hold"
+      /usr/bin/mkfifo "$PROBE_ROOT/ready" "$PROBE_ROOT/hold"
       "$1" test --only types > "$PROBE_ROOT/gate.log" 2>&1 &
       gate_pid=$!
       trap 'kill -TERM "$gate_pid" 2>/dev/null || true' EXIT
@@ -212,7 +212,7 @@ test('ready runs tests while documentation is still in progress', async () => {
   });
   await chmod(join(cwd, 'cargo'), 0o700);
   await chmod(join(cwd, 'bun'), 0o700);
-  passed(await run([join(cwd, 'docs-started'), join(cwd, 'test-finished')], { executable: '/bin/mkfifo' }));
+  passed(await run([join(cwd, 'docs-started'), join(cwd, 'test-finished')], { executable: '/usr/bin/mkfifo' }));
   const result = await run(['ready', '--only', 'napi/browser.test.ts', '--only', 'docs', '--jobs', '2'], {
     executable, env: { PATH: cwd, PROBE_ROOT: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache') },
   });
