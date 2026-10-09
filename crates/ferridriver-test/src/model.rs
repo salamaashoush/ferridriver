@@ -470,6 +470,9 @@ pub struct TestInfo {
   pub steps: Arc<Mutex<Vec<TestStep>>>,
   /// Soft assertion errors (collected, not thrown).
   pub soft_errors: Arc<std::sync::Mutex<Vec<TestFailure>>>,
+  /// Set when the attempt failed in a way a retry cannot fix
+  /// (Playwright's `_hasNonRetriableError`).
+  pub non_retriable: Arc<std::sync::atomic::AtomicBool>,
   /// Hard errors collected during test execution. The worker pushes
   /// the primary failure here after the test body returns; afterEach
   /// hooks observe the full list. Mirrors Playwright's
@@ -566,6 +569,10 @@ impl ferridriver_expect::SoftSink for TestInfo {
       screenshot: None,
     });
   }
+
+  fn forbid_retry(&self) {
+    TestInfo::forbid_retry(self);
+  }
 }
 
 impl TestInfo {
@@ -601,6 +608,7 @@ impl TestInfo {
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
+      non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: Arc::new(Mutex::new(Vec::new())),
       snapshot_suffix: Arc::new(Mutex::new(String::new())),
       column: None,
@@ -641,6 +649,35 @@ impl TestInfo {
         },
       )));
     }
+  }
+
+  /// Record an annotation the test body pushed, keeping a modifier
+  /// (`skip`, `fixme`, `fail`, `slow`) typed and a missing description
+  /// absent, as Playwright's `testInfo.annotations` does.
+  pub async fn annotate_runtime(&self, type_name: String, description: Option<String>) {
+    let annotation = match type_name.as_str() {
+      "skip" => TestAnnotation::Skip {
+        reason: description,
+        condition: None,
+      },
+      "fixme" => TestAnnotation::Fixme {
+        reason: description,
+        condition: None,
+      },
+      "fail" => TestAnnotation::Fail {
+        reason: description,
+        condition: None,
+      },
+      "slow" => TestAnnotation::Slow {
+        reason: description,
+        condition: None,
+      },
+      _ => TestAnnotation::Info {
+        type_name,
+        description: description.unwrap_or_default(),
+      },
+    };
+    self.annotations.lock().await.push(annotation);
   }
 
   /// Add a structured annotation at runtime.
@@ -686,6 +723,11 @@ impl TestInfo {
   /// matcher, and the value matchers have no `await` to spend.
   pub fn add_soft_error(&self, error: TestFailure) {
     self.soft_errors.lock().unwrap_or_else(|e| e.into_inner()).push(error);
+  }
+
+  /// Keep this test from being retried after this attempt.
+  pub fn forbid_retry(&self) {
+    self.non_retriable.store(true, std::sync::atomic::Ordering::Relaxed);
   }
 
   /// Check if any soft errors have been collected.
@@ -1152,13 +1194,32 @@ impl TestInfo {
     name: &crate::snapshot_path::SnapshotName,
     update_index: bool,
   ) -> crate::snapshot_path::ResolvedSnapshotPaths {
+    self.resolve_snapshot_paths_with_extension(kind, name, update_index, None)
+  }
+
+  /// [`Self::resolve_snapshot_paths`] with the extension an unnamed
+  /// snapshot takes from its value.
+  pub fn resolve_snapshot_paths_with_extension(
+    &self,
+    kind: crate::snapshot_path::SnapshotKind,
+    name: &crate::snapshot_path::SnapshotName,
+    update_index: bool,
+    anonymous_extension: Option<&str>,
+  ) -> crate::snapshot_path::ResolvedSnapshotPaths {
     let counters = if kind == crate::snapshot_path::SnapshotKind::Aria {
       &self.aria_snapshot_names
     } else {
       &self.snapshot_names
     };
     let mut guard = counters.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::snapshot_path::resolve_snapshot_paths(&self.snapshot_context(), kind, name, &mut guard, update_index, None)
+    crate::snapshot_path::resolve_snapshot_paths(
+      &self.snapshot_context(),
+      kind,
+      name,
+      &mut guard,
+      update_index,
+      anonymous_extension,
+    )
   }
 
   /// Close every step still open, so a body that failed mid-step leaves

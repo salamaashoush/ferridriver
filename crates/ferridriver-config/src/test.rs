@@ -445,6 +445,84 @@ impl StringOrList {
   }
 }
 
+// ── Workers ─────────────────────────────────────────────────────────────────
+
+/// Playwright's `resolveWorkers` (`common/config.ts`): a worker count
+/// written as a number, a numeric string, or a percentage of logical
+/// cores, resolved to a count of at least one.
+///
+/// # Errors
+/// When the value is neither a number nor a percentage, or is below 1.
+pub fn parse_workers(text: &str) -> Result<u32, String> {
+  let trimmed = text.trim();
+  if let Some(percent) = trimmed.strip_suffix('%') {
+    let percent = leading_int(percent).ok_or_else(|| format!("Workers {text} must be a number or percentage."))?;
+    if percent < 1 {
+      return Err(format!("Workers must be a positive number, received {percent}."));
+    }
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let cpus = i64::try_from(cpus).unwrap_or(i64::MAX);
+    return Ok(u32::try_from((cpus.saturating_mul(percent) / 100).max(1)).unwrap_or(u32::MAX));
+  }
+  let count = leading_int(trimmed).ok_or_else(|| format!("Workers {text} must be a number or percentage."))?;
+  positive_workers(count)
+}
+
+/// Playwright's default, `'50%'`: half the logical cores, at least one.
+#[must_use]
+pub fn default_workers() -> u32 {
+  let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+  u32::try_from((cpus / 2).max(1)).unwrap_or(u32::MAX)
+}
+
+fn positive_workers(count: i64) -> Result<u32, String> {
+  if count < 1 {
+    return Err(format!("Workers must be a positive number, received {count}."));
+  }
+  Ok(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// `parseInt`'s reading of a decimal prefix: optional sign, then digits,
+/// anything after ignored. `None` when there are no digits (`NaN`).
+fn leading_int(text: &str) -> Option<i64> {
+  let text = text.trim_start();
+  let (sign, rest) = match text.as_bytes().first() {
+    Some(b'-') => (-1, &text[1..]),
+    Some(b'+') => (1, &text[1..]),
+    _ => (1, text),
+  };
+  let digits: &str = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+  if digits.is_empty() {
+    return None;
+  }
+  Some(sign * digits.parse::<i64>().unwrap_or(i64::MAX))
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkersValue {
+  Count(i64),
+  Fraction(f64),
+  Text(String),
+}
+
+impl WorkersValue {
+  fn resolve(self) -> Result<u32, String> {
+    match self {
+      Self::Count(n) => positive_workers(n),
+      Self::Fraction(n) => Err(format!("Workers must be a whole number, received {n}.")),
+      Self::Text(text) => parse_workers(&text),
+    }
+  }
+}
+
+fn deserialize_optional_workers<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+  Option::<WorkersValue>::deserialize(deserializer)?
+    .map(WorkersValue::resolve)
+    .transpose()
+    .map_err(serde::de::Error::custom)
+}
+
 // ── Test config ─────────────────────────────────────────────────────────────
 
 /// Test runner configuration.
@@ -470,7 +548,10 @@ pub struct TestConfig {
   /// the document itself.
   #[serde(skip)]
   pub config_dir: Option<PathBuf>,
-  pub workers: u32,
+  /// Worker count; absent means half the logical cores
+  /// ([`Self::worker_count`]).
+  #[serde(deserialize_with = "deserialize_optional_workers")]
+  pub workers: Option<u32>,
   pub retries: u32,
   pub reporter: Vec<ReporterConfig>,
   pub output_dir: PathBuf,
@@ -1059,9 +1140,31 @@ impl<'de> Deserialize<'de> for ReporterConfig {
 pub enum UpdateSnapshotsMode {
   All,
   Changed,
-  #[default]
   Missing,
   None,
+  /// Missing baselines are written, but the tests that write them fail,
+  /// so a run never silently passes on a baseline it just created.
+  #[default]
+  Default,
+}
+
+impl UpdateSnapshotsMode {
+  /// The mode a CLI or protocol value names.
+  ///
+  /// # Errors
+  /// When the value is not one of Playwright's five modes.
+  pub fn parse(value: &str) -> Result<Self, String> {
+    match value {
+      "all" => Ok(Self::All),
+      "changed" => Ok(Self::Changed),
+      "missing" => Ok(Self::Missing),
+      "none" => Ok(Self::None),
+      "default" => Ok(Self::Default),
+      other => Err(format!(
+        "updateSnapshots: expected one of 'all', 'changed', 'missing', 'none', 'default', got '{other}'"
+      )),
+    }
+  }
 }
 
 /// Configuration for slow test reporting. Playwright: `reportSlowTests`.
@@ -1111,6 +1214,13 @@ pub struct ProjectConfig {
   pub grep_invert: Option<String>,
   pub dependencies: Vec<String>,
   pub teardown: Option<String>,
+  /// Playwright's `default`: whether the project runs when no
+  /// `--project` is given. Absent means `true`.
+  pub default: Option<bool>,
+  /// Most workers this project's tests may use at once, within the
+  /// run's own `workers` budget.
+  #[serde(deserialize_with = "deserialize_optional_workers")]
+  pub workers: Option<u32>,
   #[serde(default)]
   pub metadata: serde_json::Value,
   pub tag: Option<Vec<String>>,
@@ -1158,6 +1268,8 @@ impl Default for ProjectConfig {
       grep_invert: None,
       dependencies: Vec::new(),
       teardown: None,
+      default: None,
+      workers: None,
       metadata: serde_json::Value::Null,
       tag: None,
       expect: None,
@@ -1305,6 +1417,9 @@ pub struct CliOverrides {
   pub name: Option<String>,
   pub fully_parallel: Option<bool>,
   pub project_filter: Vec<String>,
+  /// Select `default: false` projects too when no filter is given, as
+  /// Playwright's UI and test server do.
+  pub include_non_default_projects: bool,
   pub no_deps: bool,
   pub teardown: Option<String>,
   pub only_changed: Option<String>,
@@ -1358,7 +1473,7 @@ impl Default for TestConfig {
       expect_timeout: DEFAULT_EXPECT_TIMEOUT_MS,
       expect: ExpectConfig::default(),
       config_dir: None,
-      workers: 0,
+      workers: None,
       retries: 0,
       reporter: vec![ReporterConfig {
         name: "terminal".into(),
@@ -1505,6 +1620,12 @@ impl TestConfig {
     self.screenshot_on_failure = self.screenshot.mode != ScreenshotMode::Off;
   }
 
+  /// The run's worker budget: the configured count, else the default.
+  #[must_use]
+  pub fn worker_count(&self) -> u32 {
+    self.workers.unwrap_or_else(default_workers)
+  }
+
   /// Create a new config with project overrides merged on top.
   ///
   /// Follows Playwright's merge semantics: project fields override base config
@@ -1540,6 +1661,9 @@ impl TestConfig {
     }
     if let Some(ref dir) = project.test_dir {
       merged.test_dir = Some(dir.clone());
+    }
+    if let Some(workers) = project.workers {
+      merged.workers = Some(merged.worker_count().min(workers));
     }
 
     if let Some(retries) = project.retries {
@@ -1801,6 +1925,40 @@ mod expect_config_tests {
 
   fn config(toml_src: &str) -> TestConfig {
     toml::from_str::<TestConfig>(toml_src).expect("parse")
+  }
+
+  fn config_error(toml_src: &str) -> String {
+    toml::from_str::<TestConfig>(toml_src)
+      .expect_err("rejected")
+      .to_string()
+  }
+
+  #[test]
+  fn workers_take_a_count_a_numeric_string_or_a_percentage() {
+    let cpus =
+      u32::try_from(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)).expect("cpus");
+    assert_eq!(config("workers = 3\n").workers, Some(3));
+    assert_eq!(config("workers = \"2\"\n").workers, Some(2));
+    assert_eq!(config("workers = \"100%\"\n").workers, Some(cpus));
+    assert_eq!(config("workers = \"1%\"\n").workers, Some((cpus / 100).max(1)));
+    assert_eq!(super::parse_workers("4x"), Ok(4), "parseInt reads the leading digits");
+  }
+
+  #[test]
+  fn workers_below_one_or_unreadable_are_refused_with_playwrights_message() {
+    assert!(config_error("workers = 0\n").contains("Workers must be a positive number, received 0."));
+    assert!(config_error("workers = \"-2\"\n").contains("Workers must be a positive number, received -2."));
+    assert!(config_error("workers = \"0%\"\n").contains("Workers must be a positive number, received 0."));
+    assert!(config_error("workers = \"many\"\n").contains("Workers many must be a number or percentage."));
+    assert!(config_error("workers = 1.5\n").contains("Workers must be a whole number, received 1.5."));
+  }
+
+  #[test]
+  fn a_project_caps_its_workers_inside_the_runs_budget() {
+    let cfg = config("workers = 4\n[[projects]]\nname = \"a\"\nworkers = 2\n[[projects]]\nname = \"b\"\nworkers = 8\n");
+    assert_eq!(cfg.merge_project(&cfg.projects[0]).workers, Some(2));
+    assert_eq!(cfg.merge_project(&cfg.projects[1]).workers, Some(4));
+    assert!(config_error("[[projects]]\nname = \"a\"\nworkers = 0\n").contains("Workers must be a positive number"));
   }
 
   #[test]

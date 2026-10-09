@@ -72,10 +72,7 @@ impl InfoBridge {
   pub async fn flush(&self) {
     let drained: Vec<(String, Option<String>)> = Self::lock(&self.annotations).drain(..).collect();
     for (type_name, description) in drained {
-      self
-        .test_info
-        .annotate(type_name, description.unwrap_or_default())
-        .await;
+      self.test_info.annotate_runtime(type_name, description).await;
     }
     // Close any step left open by a mid-step failure so reporters and
     // the trace never see a dangling span.
@@ -228,53 +225,43 @@ impl TestHostBridge for InfoBridge {
     Some(self.test_info.call_owner())
   }
 
-  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
-    let info = Arc::clone(&self.test_info);
-    // An unnamed snapshot is NOT given a name here: the resolver owns
-    // the anonymous form (title path + running index), so a matcher and
-    // `testInfo.snapshotPath()` cannot disagree about it.
-    let name = name.map_or(crate::snapshot_path::SnapshotName::Anonymous, |n| {
-      crate::snapshot_path::SnapshotName::One(n)
-    });
-    Box::pin(async move {
-      let actual = match target {
-        SnapshotTarget::Value(s) => s,
-        SnapshotTarget::Locator(locator) => locator
-          .text_content()
-          .await
-          .map_err(|e| format!("toMatchSnapshot: reading text content: {e}"))?
-          .unwrap_or_default(),
-        SnapshotTarget::Page(_) => {
-          return Err(
-            "toMatchSnapshot applies to a string value or a locator — use toHaveScreenshot for pages".to_string(),
-          );
-        },
-      };
-      crate::snapshot::assert_snapshot(&info, &actual, &name, false).map_err(|f| f.message)
-    })
+  fn match_value_snapshot(
+    &self,
+    received: crate::snapshot::SnapshotValue,
+    name: crate::snapshot_path::SnapshotName,
+    options: serde_json::Value,
+    is_not: bool,
+  ) -> Result<(), String> {
+    let info = &self.test_info;
+    let defaults = &info.expect.to_match_snapshot;
+    let parsed = screenshot_options_from_json(&options, false)?;
+    let comparator = crate::comparator::ImageComparatorOptions {
+      threshold: parsed.threshold.or(defaults.threshold),
+      max_diff_pixels: parsed.max_diff_pixels.or(defaults.max_diff_pixels.map(u64::from)),
+      max_diff_pixel_ratio: parsed.max_diff_pixel_ratio.or(defaults.max_diff_pixel_ratio),
+      comparator: parsed.comparator,
+    };
+    let soft =
+      crate::snapshot::match_value_snapshot(info, &received, &name, &comparator, is_not).map_err(|f| f.message)?;
+    record_missing_baseline(info, soft);
+    Ok(())
   }
 
   fn match_screenshot(
     &self,
     target: SnapshotTarget,
-    name: Option<String>,
+    name: crate::snapshot_path::SnapshotName,
     options: serde_json::Value,
+    is_not: bool,
   ) -> BridgeFuture<Result<(), String>> {
     let info = Arc::clone(&self.test_info);
-    let name = name.map_or(crate::snapshot_path::SnapshotName::Anonymous, |n| {
-      crate::snapshot_path::SnapshotName::One(n)
-    });
     Box::pin(async move {
       // Playwright layers the call's bag over `expect.toHaveScreenshot`
       // (`matchers/toMatchSnapshot.ts:121-127`), so a suite that sets a
       // threshold once in config gets it on every call that did not
       // name its own.
-      let opts = screenshot_options_from_json(&options, info.ignore_snapshots)
+      let opts = screenshot_options_from_json(&options, info.ignore_snapshots)?
         .with_config_defaults(&info.expect.to_have_screenshot);
-      let update = matches!(
-        info.update_snapshots,
-        crate::config::UpdateSnapshotsMode::All | crate::config::UpdateSnapshotsMode::Changed
-      );
       // `timeout` on the call, else `expect.toHaveScreenshot.timeout`,
       // else the expect default — the window the capture retries in.
       let timeout = opts
@@ -285,7 +272,7 @@ impl TestHostBridge for InfoBridge {
         resolved.absolute_snapshot_path,
         &info.output_dir.join(&resolved.relative_output_path),
       );
-      crate::snapshot::screenshot_until_match(&paths, &opts, update, timeout, || {
+      let soft = crate::snapshot::to_have_screenshot(&paths, &opts, info.update_snapshots, is_not, timeout, || {
         let target = target.clone();
         let opts = &opts;
         async move {
@@ -302,43 +289,59 @@ impl TestHostBridge for InfoBridge {
         }
       })
       .await
-      .map_err(|f| f.message)
+      .map_err(|f| f.message)?;
+      record_missing_baseline(&info, soft);
+      Ok(())
     })
   }
 
   fn match_aria_snapshot(
     &self,
     target: SnapshotTarget,
-    expected_yaml: String,
+    expected: super::AriaExpectation,
     is_not: bool,
     timeout_ms: Option<u64>,
   ) -> BridgeFuture<Result<(), String>> {
     let timeout = Duration::from_millis(timeout_ms.unwrap_or_else(|| self.test_info.expect.timeout_ms()));
-    let expected_yaml = crate::expect::aria_template_with_children(
-      &expected_yaml,
-      self.test_info.expect.to_match_aria_snapshot.children.as_deref(),
-    );
+    let info = Arc::clone(&self.test_info);
     Box::pin(async move {
-      match target {
-        SnapshotTarget::Locator(locator) => {
-          let mut e = ferridriver_expect::expect(&locator).with_timeout(timeout);
-          if is_not {
-            e = e.not();
-          }
-          crate::expect::LocatorSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
-            .await
-            .map_err(|f| f.message)
+      let locator = match &target {
+        SnapshotTarget::Locator(locator) => locator.clone(),
+        // Page-scoped `to.match.aria` matches against `document.body`.
+        SnapshotTarget::Page(page) => page.locator("body"),
+        SnapshotTarget::Value(_) => return Err("toMatchAriaSnapshot applies to a locator or a page".to_string()),
+      };
+      let expected_yaml = match expected {
+        super::AriaExpectation::File(name) => {
+          let soft = crate::snapshot::match_aria_file(&info, &name, is_not, timeout, |template| {
+            let locator = locator.clone();
+            async move { locator.match_aria_snapshot(&template).await }
+          })
+          .await
+          .map_err(|f| f.message)?;
+          record_missing_baseline(&info, soft);
+          return Ok(());
         },
-        SnapshotTarget::Page(page) => {
-          let mut e = ferridriver_expect::expect(&page).with_timeout(timeout);
-          if is_not {
-            e = e.not();
-          }
-          crate::expect::PageSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
-            .await
-            .map_err(|f| f.message)
+        super::AriaExpectation::Template(yaml) => {
+          crate::expect::aria_template_with_children(&yaml, info.expect.to_match_aria_snapshot.children.as_deref())
         },
-        SnapshotTarget::Value(_) => Err("toMatchAriaSnapshot applies to a locator or a page".to_string()),
+      };
+      if let SnapshotTarget::Page(page) = target {
+        let mut e = ferridriver_expect::expect(&page).with_timeout(timeout);
+        if is_not {
+          e = e.not();
+        }
+        crate::expect::PageSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
+          .await
+          .map_err(|f| f.message)
+      } else {
+        let mut e = ferridriver_expect::expect(&locator).with_timeout(timeout);
+        if is_not {
+          e = e.not();
+        }
+        crate::expect::LocatorSnapshotMatchers::to_match_aria_snapshot(&e, &expected_yaml)
+          .await
+          .map_err(|f| f.message)
       }
     })
   }
@@ -349,13 +352,25 @@ impl TestHostBridge for InfoBridge {
 fn screenshot_options_from_json(
   v: &serde_json::Value,
   ignore_snapshots: bool,
-) -> crate::expect::ScreenshotMatcherOptions {
+) -> Result<crate::expect::ScreenshotMatcherOptions, String> {
   let f = |k: &str| v.get(k).and_then(serde_json::Value::as_f64);
   let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_string);
-  crate::expect::ScreenshotMatcherOptions {
+  // `SnapshotHelper`'s checks (`matchers/toMatchSnapshot.ts`).
+  if f("maxDiffPixels").is_some_and(|n| n < 0.0) {
+    return Err("`maxDiffPixels` option value must be non-negative integer".to_string());
+  }
+  if f("maxDiffPixelRatio").is_some_and(|r| !(0.0..=1.0).contains(&r)) {
+    return Err("`maxDiffPixelRatio` option value must be between 0 and 1".to_string());
+  }
+  let comparator = s("_comparator")
+    .map(|name| name.parse())
+    .transpose()?
+    .unwrap_or_default();
+  Ok(crate::expect::ScreenshotMatcherOptions {
     threshold: f("threshold"),
     max_diff_pixels: v.get("maxDiffPixels").and_then(serde_json::Value::as_u64),
     max_diff_pixel_ratio: f("maxDiffPixelRatio"),
+    comparator,
     mask_color: s("maskColor"),
     animations: s("animations"),
     caret: s("caret"),
@@ -399,7 +414,7 @@ fn screenshot_options_from_json(
     full_page: v.get("fullPage").and_then(serde_json::Value::as_bool),
     omit_background: v.get("omitBackground").and_then(serde_json::Value::as_bool),
     ignore: ignore_snapshots,
-  }
+  })
 }
 
 /// Overlay one `use` bag onto another, key by key — Playwright's rule
@@ -504,6 +519,20 @@ pub fn world_data(meta: WorldMeta<'_>) -> TestWorldData {
         .as_ref()
         .map_or(serde_json::Value::Null, |cfg| crate::reporter::api::full_config(cfg)),
     },
+  }
+}
+
+/// A baseline written under `updateSnapshots: 'default'` fails the test
+/// once it ends, and no retry can fix that.
+fn record_missing_baseline(info: &TestInfo, soft: Option<String>) {
+  if let Some(message) = soft {
+    info.add_soft_error(crate::model::TestFailure {
+      message,
+      stack: None,
+      diff: None,
+      screenshot: None,
+    });
+    info.forbid_retry();
   }
 }
 

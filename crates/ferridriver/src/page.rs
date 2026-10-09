@@ -36,6 +36,9 @@ pub struct Page {
   /// back to `default_timeout`"; `0` means "infinite" (Playwright parity).
   default_navigation_timeout: AtomicU64,
   snapshot_tracker: Arc<AsyncMutex<snapshot::SnapshotTracker>>,
+  /// Screenshots of one page run one at a time, as Playwright's
+  /// `Screenshotter` queues them: each prepares and restores the page.
+  pub(crate) screenshot_queue: AsyncMutex<()>,
   mouse_position: Mutex<(f64, f64)>,
   /// Emulated viewport, tracked client-side like Playwright's
   /// `Page._viewportSize` so [`Self::viewport_size`] is a sync accessor
@@ -117,6 +120,7 @@ impl Page {
       default_timeout: AtomicU64::new(UNSET_TIMEOUT),
       default_navigation_timeout: AtomicU64::new(UNSET_TIMEOUT),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
+      screenshot_queue: AsyncMutex::new(()),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
       strict_selectors: std::sync::atomic::AtomicBool::new(false),
@@ -147,6 +151,7 @@ impl Page {
       default_timeout: AtomicU64::new(UNSET_TIMEOUT),
       default_navigation_timeout: AtomicU64::new(UNSET_TIMEOUT),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
+      screenshot_queue: AsyncMutex::new(()),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
       strict_selectors: std::sync::atomic::AtomicBool::new(false),
@@ -2207,11 +2212,8 @@ impl Page {
   /// `page.screenshot(options?: PageScreenshotOptions)` per
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
   ///
-  /// Lowers the Playwright-shaped [`ScreenshotOptions`] bag into the
-  /// backend-level [`crate::backend::ScreenshotOpts`] wire struct. Handles Rust-side
-  /// concerns (writing `path` to disk, applying `timeout` via a
-  /// `tokio::time::timeout` race) that don't belong in the per-backend
-  /// dispatch path.
+  /// [`crate::screenshotter`] does the capture; this writes `path` and
+  /// bounds the whole of it by `timeout`.
   ///
   /// # Errors
   ///
@@ -2247,13 +2249,11 @@ impl Page {
 
   /// Implementation of [`Self::screenshot`].
   pub(crate) async fn screenshot_impl(&self, opts: ScreenshotOptions) -> Result<Vec<u8>> {
-    let wire = opts.to_backend_opts();
-    // A mask resolves through the injected selector engine, so it has to
-    // be present before the backend runs the install expression.
-    if !wire.mask.is_empty() {
+    // Masks resolve through the injected selector engine.
+    if !opts.mask.is_empty() {
       self.inner.ensure_engine_injected().await?;
     }
-    let capture = async { self.inner.screenshot(wire).await };
+    let capture = crate::screenshotter::screenshot_page(self, &opts);
     let bytes = match opts.timeout {
       Some(ms) if ms > 0 => {
         let fut = tokio::time::timeout(std::time::Duration::from_millis(ms), capture);

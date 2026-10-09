@@ -16,6 +16,8 @@ examples/*/dist/
 examples/*/node_modules/
 examples/*/bun.lock
 __snapshots__/
+# Baselines the e2e specs write beside themselves as they run.
+tests/**/*-snapshots/
 *.ferridriver-ct/
 __ferri_ct_*
 

@@ -1,4 +1,4 @@
-import {mkdir, readFile, writeFile} from 'node:fs/promises';
+import {mkdir, readdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {test, expect} from '@ferridriver/test';
 import { runOnceAcrossProjects } from './helpers/projects';
@@ -35,6 +35,26 @@ test('Firefox launch applies string, number and boolean preferences without leak
   } finally {
     await fresh.close();
   }
+});
+
+test('a Firefox launch keeps its per-user data out of the home directory', async () => {
+  runOnceAcrossProjects();
+  test.slow();
+  // Firefox writes profiles.ini, crash reports and pending pings under its
+  // per-user data root (~/Library/Application Support/Firefox, ~/.mozilla)
+  // before it reads --profile. A launch gets its own root, so the user's
+  // Firefox data is untouched and a protected one does not stop startup.
+  const home = test.info().outputPath('home');
+  await mkdir(home, {recursive: true});
+  const browser = await firefox().launch({headless: true, env: {HOME: home}});
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<h1>launched</h1>');
+    expect(await page.locator('h1').textContent()).toBe('launched');
+  } finally {
+    await browser.close();
+  }
+  expect(await readdir(home, {recursive: true})).toEqual([]);
 });
 
 test('Firefox persistent preferences preserve caller content and reject a second live profile owner', async () => {

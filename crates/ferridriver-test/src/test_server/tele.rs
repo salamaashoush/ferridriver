@@ -59,7 +59,7 @@ pub fn configure(config: &TestConfig, root_dir: &Path, projects: &[ProjectInfo<'
         "metadata": json!({}),
         "rootDir": root_dir.display().to_string(),
         "version": env!("CARGO_PKG_VERSION"),
-        "workers": config.workers,
+        "workers": config.worker_count(),
         "projects": summaries,
       },
     },

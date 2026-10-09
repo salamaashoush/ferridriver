@@ -42,6 +42,7 @@ thiserror = { workspace = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 sha1 = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+webp = { version = "0.3", default-features = false }
 tokio-stream = "0.1"
 dirs = "7"
 tempfile = "3"

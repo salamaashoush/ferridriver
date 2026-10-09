@@ -19,6 +19,10 @@ use crate::AssertionFailure;
 /// a matcher, on whatever task the test body is using.
 pub trait SoftSink: Send + Sync {
   fn record(&self, failure: &AssertionFailure);
+
+  /// The recorded failure cannot be fixed by running the test again
+  /// (Playwright's `shouldNotRetryTest`), so the test is not retried.
+  fn forbid_retry(&self) {}
 }
 
 tokio::task_local! {
@@ -40,6 +44,18 @@ pub fn record(failure: &AssertionFailure) -> bool {
   CURRENT_SINK
     .try_with(|sink| {
       sink.record(failure);
+    })
+    .is_ok()
+}
+
+/// Record a failure that must fail the test without stopping it, and
+/// that a retry cannot fix. `false` when there is no test to record into.
+#[must_use]
+pub fn record_non_retriable(failure: &AssertionFailure) -> bool {
+  CURRENT_SINK
+    .try_with(|sink| {
+      sink.record(failure);
+      sink.forbid_retry();
     })
     .is_ok()
 }

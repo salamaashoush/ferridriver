@@ -21,8 +21,8 @@ mod startup_tests;
 use base64::Engine as _;
 
 use super::{
-  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMessage, CookieData, ImageFormat, MetricData,
-  NetworkRequest, RwLock, ScreenshotOpts,
+  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, BackgroundColor, ConsoleMessage, CookieData, ImageFormat,
+  MetricData, NetworkRequest, RwLock, ScreenshotCapture, ScreenshotScale,
 };
 use crate::error::{FerriError, Result};
 use crate::network::{
@@ -3551,198 +3551,101 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Screenshots ----
 
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
-    // Pre-capture: set up per-field state and collect teardown tokens.
-    let (style_installed, mask_installed) = self.screenshot_install_dom(&opts).await?;
-    let bg_installed = self.screenshot_install_transparent_bg(&opts).await?;
-    let result = async {
-      let params = self.screenshot_build_params(&opts).await?;
-      screenshot::capture(&*self.transport, self.session_id.as_deref(), params).await
-    }
-    .await;
-
-    // Teardown — always runs so user interaction after a failure sees
-    // a pristine page state.
-    if style_installed {
-      let _ = self.evaluate(crate::backend::screenshot_js::uninstall_style_js()).await;
-    }
-    if mask_installed {
-      let _ = self.evaluate(crate::backend::screenshot_js::uninstall_mask_js()).await;
-    }
-    if bg_installed {
-      let _ = self
-        .cmd(
-          "Emulation.setDefaultBackgroundColorOverride",
-          serde_json::Value::Object(serde_json::Map::default()),
-        )
-        .await;
-    }
-
-    result
+  /// `crPage.ts::setBackgroundColor`.
+  pub async fn set_background_color(&self, color: Option<BackgroundColor>) -> Result<()> {
+    let params = match color {
+      Some(c) => serde_json::json!({ "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a } }),
+      None => serde_json::json!({}),
+    };
+    self.cmd("Emulation.setDefaultBackgroundColorOverride", params).await?;
+    Ok(())
   }
 
-  /// Install the DOM-side screenshot overrides (caret hide, user style,
-  /// animation pause, mask overlays) via `Runtime.evaluate`. Returns
-  /// `(style_installed, mask_installed)` so the caller knows which
-  /// teardown calls to make.
-  async fn screenshot_install_dom(&self, opts: &ScreenshotOpts) -> Result<(bool, bool)> {
-    let css = crate::backend::screenshot_js::build_css(opts);
-    let style_installed = if css.is_empty() {
-      false
+  /// `crPage.ts::takeScreenshot`.
+  pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
+    let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
+    let metric = |object: &str, key: &str| {
+      metrics
+        .get(object)
+        .and_then(|v| v.get(key))
+        .and_then(serde_json::Value::as_f64)
+    };
+    let page_scale = metric("visualViewport", "scale").unwrap_or(1.0);
+    let document_rect = match (capture.document_rect, capture.viewport_rect) {
+      (Some(rect), _) => rect,
+      (None, Some(viewport)) => crate::options::ClipRect {
+        x: metric("visualViewport", "pageX").unwrap_or(0.0) + viewport.x,
+        y: metric("visualViewport", "pageY").unwrap_or(0.0) + viewport.y,
+        width: (viewport.width / page_scale + 1e-3).floor(),
+        height: (viewport.height / page_scale + 1e-3).floor(),
+      },
+      (None, None) => return Err(FerriError::backend("screenshot: no rect to capture")),
+    };
+    // A document rect is laid out content, so the current page scale
+    // does not apply to it.
+    let mut clip_scale = if capture.viewport_rect.is_some() {
+      page_scale
     } else {
+      1.0
+    };
+    if capture.scale == ScreenshotScale::Css {
+      // The deviceScaleFactor override does not reach the layout
+      // metrics, so an emulated one wins over the computed ratio.
+      let overridden = self
+        .last_metrics_params
+        .lock()
+        .ok()
+        .and_then(|p| {
+          p.as_ref()
+            .and_then(|p| p.get("deviceScaleFactor"))
+            .and_then(serde_json::Value::as_f64)
+        })
+        .filter(|dsf| *dsf > 0.0);
+      let computed = match (metric("contentSize", "width"), metric("cssContentSize", "width")) {
+        (Some(device), Some(css)) if css > 0.0 => Some(device / css),
+        _ => None,
+      };
+      clip_scale /= overridden.or(computed).filter(|dsf| *dsf > 0.0).unwrap_or(1.0);
+    }
+    let format = match capture.format {
+      ImageFormat::Png => "png",
+      ImageFormat::Jpeg => "jpeg",
+      ImageFormat::Webp => "webp",
+    };
+    let mut params = serde_json::json!({
+      "format": format,
+      "clip": {
+        "x": document_rect.x,
+        "y": document_rect.y,
+        "width": document_rect.width,
+        "height": document_rect.height,
+        "scale": clip_scale,
+      },
+      "captureBeyondViewport": !capture.fits_viewport,
+    });
+    if let Some(quality) = capture.quality {
+      params["quality"] = serde_json::json!(quality);
+    }
+    // Capturing beyond the viewport resets touch emulation in Chromium
+    // (crbug.com/558509412), so a page that had it gets it back.
+    let had_touch = !capture.fits_viewport
+      && self
+        .evaluate("navigator.maxTouchPoints > 0")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bytes = screenshot::capture(&*self.transport, self.session_id.as_deref(), params).await?;
+    if had_touch {
       self
-        .evaluate(&crate::backend::screenshot_js::install_style_js(&css))
+        .cmd(
+          "Emulation.setTouchEmulationEnabled",
+          serde_json::json!({ "enabled": true, "maxTouchPoints": 5 }),
+        )
         .await?;
-      true
-    };
-    let mask_installed = if let Some(js) = crate::backend::screenshot_js::install_mask_js(opts) {
-      self.evaluate(&js).await?;
-      true
-    } else {
-      false
-    };
-    Ok((style_installed, mask_installed))
-  }
-
-  /// Enable transparent-background capture via CDP
-  /// `Emulation.setDefaultBackgroundColorOverride` when
-  /// `opts.omit_background` is set. Returns `true` if the override
-  /// was installed (caller must reverse it).
-  async fn screenshot_install_transparent_bg(&self, opts: &ScreenshotOpts) -> Result<bool> {
-    if !opts.omit_background {
-      return Ok(false);
     }
-    self
-      .cmd(
-        "Emulation.setDefaultBackgroundColorOverride",
-        serde_json::json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}}),
-      )
-      .await?;
-    Ok(true)
-  }
-
-  /// Build the `Page.captureScreenshot` parameter object from
-  /// `opts.format`, `opts.quality`, `opts.clip`, `opts.full_page`,
-  /// and `opts.scale`. Caller-supplied clips win over full-page
-  /// computation; CSS scale translates to `clip.scale = 1 / devicePixelRatio`.
-  async fn screenshot_build_params(&self, opts: &ScreenshotOpts) -> Result<serde_json::Value> {
-    use crate::backend::ScreenshotScale;
-    let format_str = match opts.format {
-      ImageFormat::Png => "png",
-      ImageFormat::Jpeg => "jpeg",
-      ImageFormat::Webp => "webp",
-    };
-    let mut params = serde_json::json!({"format": format_str});
-    if let Some(q) = opts.quality {
-      params["quality"] = serde_json::json!(q);
-    }
-    let css_scale = matches!(opts.scale, Some(ScreenshotScale::Css));
-    if let Some(rect) = opts.clip {
-      let scale = if css_scale {
-        1.0 / self.device_pixel_ratio().await.unwrap_or(1.0)
-      } else {
-        1.0
-      };
-      params["clip"] = serde_json::json!({
-          "x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height, "scale": scale
-      });
-      params["captureBeyondViewport"] = serde_json::json!(true);
-    } else if opts.full_page {
-      let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
-      let content_size = metrics.get("contentSize");
-      let w = content_size
-        .and_then(|c| c.get("width"))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(800.0);
-      let h = content_size
-        .and_then(|c| c.get("height"))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(600.0);
-      let mut scale = metrics
-        .get("visualViewport")
-        .and_then(|v| v.get("scale"))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(1.0);
-      if css_scale {
-        scale /= self.device_pixel_ratio().await.unwrap_or(1.0);
-      }
-      params["clip"] = serde_json::json!({
-          "x": 0, "y": 0, "width": w, "height": h, "scale": scale
-      });
-      params["captureBeyondViewport"] = serde_json::json!(true);
-    } else if css_scale {
-      // A plain viewport capture sends no clip, and CDP's scale lives ON
-      // the clip — so `scale: "css"` was accepted and dropped, and every
-      // capture came back at device pixels. Playwright always sends a
-      // clip for exactly this reason, deriving it from the viewport when
-      // the shot is not full-page (`chromium/crPage.ts::takeScreenshot`).
-      let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
-      let viewport = metrics
-        .get("cssVisualViewport")
-        .or_else(|| metrics.get("visualViewport"));
-      let num = |key: &str, fallback: f64| {
-        viewport
-          .and_then(|v| v.get(key))
-          .and_then(serde_json::Value::as_f64)
-          .unwrap_or(fallback)
-      };
-      let page_scale = num("scale", 1.0);
-      params["clip"] = serde_json::json!({
-          "x": num("pageX", 0.0),
-          "y": num("pageY", 0.0),
-          "width": num("clientWidth", 800.0),
-          "height": num("clientHeight", 600.0),
-          "scale": page_scale / self.device_pixel_ratio().await.unwrap_or(1.0),
-      });
-    }
-    Ok(params)
-  }
-
-  /// Fetch the target's current `window.devicePixelRatio`. Used to
-  /// translate the `scale: "css"` option into CDP's per-clip scale
-  /// multiplier — `clip.scale = 1/DPR` means "one image pixel per
-  /// CSS pixel" even on Retina.
-  async fn device_pixel_ratio(&self) -> Result<f64> {
-    let v = self.evaluate("window.devicePixelRatio || 1").await?;
-    Ok(v.and_then(|v| v.as_f64()).unwrap_or(1.0))
-  }
-
-  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
-    let js = format!(
-      r"(function(){{
-                const el = document.querySelector('{}');
-                if (!el) return null;
-                const r = el.getBoundingClientRect();
-                return JSON.stringify({{x:r.x,y:r.y,width:r.width,height:r.height}});
-            }})()",
-      selector.replace('\'', "\\'")
-    );
-    let result = self.evaluate(&js).await?;
-    let rect_str = result
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .ok_or_else(|| FerriError::invalid_selector(selector, "not found"))?;
-    let rect: serde_json::Value =
-      serde_json::from_str(&rect_str).map_err(|e| FerriError::Backend(format!("Parse rect: {e}")))?;
-
-    let format_str = match format {
-      ImageFormat::Png => "png",
-      ImageFormat::Jpeg => "jpeg",
-      ImageFormat::Webp => "webp",
-    };
-
-    screenshot::capture(
-      &*self.transport,
-      self.session_id.as_deref(),
-      serde_json::json!({
-          "format": format_str,
-          "clip": {
-              "x": rect["x"], "y": rect["y"],
-              "width": rect["width"], "height": rect["height"],
-              "scale": 1
-          }
-      }),
-    )
-    .await
+    Ok(bytes)
   }
 
   // ---- Screencast (video recording) ----
@@ -7519,48 +7422,6 @@ impl<T: CdpTransport> CdpElement<T> {
       )
       .await?;
     Ok(())
-  }
-
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
-    // Prefer `objectId` over `nodeId` for the same reason as
-    // [`Self::scroll_into_view`]: the DOM-agent nodeId map relies on
-    // a prior `DOM.getDocument`, which the lazy bootstrap skips
-    // (PERF_AUDIT §M.4). `DOM.getBoxModel` accepts `objectId`
-    // directly.
-    let object_id = self.object_id().await?;
-    let result = self
-      .cmd("DOM.getBoxModel", serde_json::json!({"objectId": &*object_id}))
-      .await?;
-    let content = result
-      .get("model")
-      .and_then(|m| m.get("content"))
-      .and_then(|c| c.as_array())
-      .ok_or_else(|| FerriError::protocol("DOM.getBoxModel", "No box model"))?;
-
-    if content.len() < 8 {
-      return Err(FerriError::protocol("DOM.getBoxModel", "Invalid box model"));
-    }
-
-    let x = content[0].as_f64().unwrap_or(0.0);
-    let y = content[1].as_f64().unwrap_or(0.0);
-    let w = content[4].as_f64().unwrap_or(0.0) - x;
-    let h = content[5].as_f64().unwrap_or(0.0) - y;
-
-    let fmt = match format {
-      ImageFormat::Png => "png",
-      ImageFormat::Jpeg => "jpeg",
-      ImageFormat::Webp => "webp",
-    };
-
-    screenshot::capture(
-      &*self.transport,
-      self.session_id.as_deref(),
-      serde_json::json!({
-          "format": fmt,
-          "clip": {"x": x, "y": y, "width": w, "height": h, "scale": 1}
-      }),
-    )
-    .await
   }
 }
 

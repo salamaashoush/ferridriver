@@ -650,16 +650,15 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     let prop = property.to_string();
-    let pseudo = options.pseudo.clone();
+    let pseudo_arg = options
+      .pseudo
+      .map(|p| format!(", '::{}'", p.as_str()))
+      .unwrap_or_default();
     poll_locator(locator, self.timeout, "toHaveCSS", is_not, self.is_soft, || {
       let expected = expected.clone();
       let prop = prop.clone();
-      let pseudo = pseudo.clone();
+      let pseudo_arg = pseudo_arg.clone();
       async move {
-        let pseudo_arg = pseudo
-          .as_deref()
-          .map(|p| format!(", '{}'", p.replace('\'', "\\'")))
-          .unwrap_or_default();
         let js = format!(
           "el => window.getComputedStyle(el{pseudo_arg}).getPropertyValue('{}')",
           prop.replace('\'', "\\'")

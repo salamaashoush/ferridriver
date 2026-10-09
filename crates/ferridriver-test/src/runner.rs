@@ -331,11 +331,22 @@ impl TestRunner {
     if self.reporters.is_empty() {
       return Ok(edits);
     }
-    let runs: Vec<ProjectRun> = self
-      .project_runs()
-      .into_iter()
-      .filter(|run| self.overrides.project_filter.is_empty() || self.overrides.project_filter.contains(&run.name))
-      .collect();
+    let runs: Vec<ProjectRun> = if self.config.projects.is_empty() {
+      self.project_runs()
+    } else {
+      let selected = select_projects(
+        &self.config.projects,
+        &self.overrides.project_filter,
+        self.overrides.include_non_default_projects,
+      )?;
+      self
+        .project_runs()
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| selected.contains(idx))
+        .map(|(_, run)| run)
+        .collect()
+    };
     let narrowed: Vec<TestPlan> = runs
       .iter()
       .map(|run| {
@@ -672,45 +683,36 @@ impl TestRunner {
       },
     };
 
-    // Resolve `--project NAME` filter into the index set the runner
-    // will execute. When non-empty, also pull in transitive deps
-    // (unless `--no-deps`) and any teardown projects referenced by
-    // the kept set.
-    let allowed_indices: rustc_hash::FxHashSet<usize> = if self.overrides.project_filter.is_empty() {
-      (0..projects.len()).collect()
-    } else {
-      let mut wanted: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
-      for name in &self.overrides.project_filter {
-        if let Some(idx) = projects.iter().position(|p| &p.name == name) {
-          wanted.insert(idx);
-        } else {
-          tracing::warn!(target: "ferridriver::runner", "--project {name}: no matching project");
-        }
-      }
-      // Walk dependencies until fixpoint (unless --no-deps).
-      if !self.overrides.no_deps {
-        let mut frontier: Vec<usize> = wanted.iter().copied().collect();
-        while let Some(idx) = frontier.pop() {
-          for dep_name in &projects[idx].dependencies {
-            if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name)
-              && wanted.insert(dep_idx)
-            {
-              frontier.push(dep_idx);
-            }
+    // Select the top-level projects, then pull in their transitive
+    // dependencies (unless `--no-deps`) and the teardowns of everything
+    // kept — Playwright's `buildProjectsClosure`.
+    let mut allowed_indices: rustc_hash::FxHashSet<usize> = match select_projects(
+      &projects,
+      &self.overrides.project_filter,
+      self.overrides.include_non_default_projects,
+    ) {
+      Ok(selected) => selected.into_iter().collect(),
+      Err(e) => {
+        tracing::error!(target: "ferridriver::runner", "{e}");
+        return ExecuteSummary {
+          exit_code: 1,
+          ..Default::default()
+        };
+      },
+    };
+    if !self.overrides.no_deps {
+      let mut frontier: Vec<usize> = allowed_indices.iter().copied().collect();
+      while let Some(idx) = frontier.pop() {
+        let deps = projects[idx].dependencies.iter().chain(projects[idx].teardown.iter());
+        for dep_name in deps {
+          if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name)
+            && allowed_indices.insert(dep_idx)
+          {
+            frontier.push(dep_idx);
           }
         }
       }
-      // Always pull in declared teardowns of kept projects.
-      let kept: Vec<usize> = wanted.iter().copied().collect();
-      for idx in kept {
-        if let Some(t) = &projects[idx].teardown
-          && let Some(t_idx) = projects.iter().position(|p| &p.name == t)
-        {
-          wanted.insert(t_idx);
-        }
-      }
-      wanted
-    };
+    }
     let sorted: Vec<usize> = sorted.into_iter().filter(|idx| allowed_indices.contains(idx)).collect();
 
     // `--teardown NAME` overrides any project-declared teardown by
@@ -873,7 +875,7 @@ impl TestRunner {
 
     // `workers` is the global concurrency budget; never launch more workers
     // than tests across all projects in flight.
-    let num_workers = (self.config.workers as usize).min(total_tests.max(1)).max(1) as u32;
+    let num_workers = (self.config.worker_count() as usize).min(total_tests.max(1)).max(1) as u32;
     if reporting_enabled {
       let project_plans: Vec<crate::reporter::api::ProjectPlan<'_>> = scheduled
         .iter()
@@ -993,8 +995,8 @@ impl TestRunner {
           .available_permits()
           .div_ceil(ready_projects.min(cap - in_flight))
           .min(project_plan.total_tests)
-          .min(project_config.workers.max(1) as usize) as u32;
-        project_config.workers = allocation;
+          .min(project_config.worker_count().max(1) as usize) as u32;
+        project_config.workers = Some(allocation);
         // The lease covers browser teardown too; releasing it at the last test
         // would overlap the next project's launches with live old browsers.
         let Ok(worker_lease) = Arc::clone(&worker_slots).try_acquire_many_owned(allocation) else {
@@ -1161,7 +1163,7 @@ impl TestRunner {
   /// Core execution engine, returning the full per-run tally. `execute()` is
   /// the thin `i32` wrapper; the multi-project orchestrator uses the summary
   /// to aggregate counts across concurrently-run projects.
-  #[tracing::instrument(skip_all, fields(workers = self.config.workers, tests = plan.total_tests))]
+  #[tracing::instrument(skip_all, fields(workers = self.config.worker_count(), tests = plan.total_tests))]
   pub async fn execute_with_summary(&self, mut plan: TestPlan, event_bus: EventBus) -> ExecuteSummary {
     self.apply_run_filters(&mut plan);
     plan.expand_repetitions(self.config.repeat_each);
@@ -1226,7 +1228,7 @@ impl TestRunner {
     }
 
     // Never launch more workers than tests — extra workers launch browsers for nothing.
-    let num_workers = (self.config.workers as usize).min(total_tests).max(1) as u32;
+    let num_workers = (self.config.worker_count() as usize).min(total_tests).max(1) as u32;
 
     // Custom `#[fixture]` definitions, collected once and seeded into every
     // worker's fixture pool so tests can resolve them via `ctx.get`.
@@ -2471,6 +2473,96 @@ fn retain_tests_in_files(plan: &mut TestPlan, changed_paths: &[std::path::PathBu
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
+/// Playwright's `filterProjects` (`runner/projectUtils.ts`): the
+/// top-level projects a run selects, as indices into `projects`.
+///
+/// With no names, every project whose `default` is not `false` (or every
+/// project, when `include_non_default`). Names match case-insensitively
+/// and `*` is a wildcard; a literal name that matches nothing is an
+/// error, as is a filter that selects nothing.
+pub(crate) fn select_projects(
+  projects: &[ProjectConfig],
+  names: &[String],
+  include_non_default: bool,
+) -> Result<Vec<usize>, String> {
+  if names.is_empty() {
+    return Ok(
+      projects
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| include_non_default || p.default.unwrap_or(true))
+        .map(|(i, _)| i)
+        .collect(),
+    );
+  }
+  let available = || {
+    projects
+      .iter()
+      .map(|p| format!("\"{}\"", p.name))
+      .collect::<Vec<_>>()
+      .join(", ")
+  };
+  let lowered: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+  let mut unmatched: Vec<&String> = names
+    .iter()
+    .zip(&lowered)
+    .filter(|(_, l)| !l.contains('*'))
+    .map(|(n, _)| n)
+    .collect();
+  let selected: Vec<usize> = projects
+    .iter()
+    .enumerate()
+    .filter(|(_, p)| {
+      let name = p.name.to_lowercase();
+      let mut hit = false;
+      for (original, pattern) in names.iter().zip(&lowered) {
+        if pattern.contains('*') {
+          hit |= wildcard_matches(pattern, &name);
+        } else if *pattern == name {
+          unmatched.retain(|n| *n != original);
+          hit = true;
+        }
+      }
+      hit
+    })
+    .map(|(i, _)| i)
+    .collect();
+  if !unmatched.is_empty() {
+    let unknown = unmatched
+      .iter()
+      .map(|n| format!("\"{n}\""))
+      .collect::<Vec<_>>()
+      .join(", ");
+    return Err(format!(
+      "Project(s) {unknown} not found. Available projects: {}",
+      available()
+    ));
+  }
+  if selected.is_empty() {
+    return Err(format!("No projects matched. Available projects: {}", available()));
+  }
+  Ok(selected)
+}
+
+/// Whole-string match where `*` stands for any run of characters.
+fn wildcard_matches(pattern: &str, text: &str) -> bool {
+  let parts: Vec<&str> = pattern.split('*').collect();
+  let (first, rest) = parts.split_first().map_or(("", &[][..]), |(f, r)| (*f, r));
+  let Some(mut remaining) = text.strip_prefix(first) else {
+    return false;
+  };
+  let Some((last, middle)) = rest.split_last() else {
+    return remaining.is_empty();
+  };
+  for part in middle {
+    match remaining.find(part) {
+      Some(at) => remaining = &remaining[at + part.len()..],
+      None => return false,
+    }
+  }
+  remaining.len() >= last.len() && remaining.ends_with(last)
+}
+
 /// Topologically sort projects by `dependencies`. Returns indices in execution order.
 ///
 /// Uses Kahn's algorithm. Returns `Err` if there's a cycle or a missing dependency.
@@ -2976,7 +3068,44 @@ mod project_plan_tests {
 
 #[cfg(test)]
 mod project_filter_tests {
-  use super::absolute_path;
+  use super::{absolute_path, select_projects, wildcard_matches};
+  use crate::config::ProjectConfig;
+
+  fn project(name: &str, default: Option<bool>) -> ProjectConfig {
+    ProjectConfig {
+      name: name.to_string(),
+      default,
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn wildcards_match_the_whole_name() {
+    assert!(wildcard_matches("slow*", "slow"));
+    assert!(wildcard_matches("slow*", "slow-nightly"));
+    assert!(wildcard_matches("*-nightly", "slow-nightly"));
+    assert!(wildcard_matches("s*w*y", "slow-nightly"));
+    assert!(!wildcard_matches("slow*", "very-slow"));
+    assert!(!wildcard_matches("ab*b", "ab"));
+    assert!(!wildcard_matches("*a*a", "a"));
+  }
+
+  #[test]
+  fn no_filter_selects_default_projects_unless_asked_for_all() {
+    let projects = [project("a", None), project("b", Some(false)), project("c", Some(true))];
+    assert_eq!(select_projects(&projects, &[], false), Ok(vec![0, 2]));
+    assert_eq!(select_projects(&projects, &[], true), Ok(vec![0, 1, 2]));
+  }
+
+  #[test]
+  fn an_unknown_literal_name_is_an_error_even_beside_a_match() {
+    let projects = [project("a", None), project("b", Some(false))];
+    let names = ["B".to_string(), "zz".to_string()];
+    assert_eq!(
+      select_projects(&projects, &names, false),
+      Err(r#"Project(s) "zz" not found. Available projects: "a", "b""#.to_string())
+    );
+  }
 
   /// A spec discovered outside the working directory reaches
   /// `filter_plan_for_project` as a `../..`-prefixed relative path.

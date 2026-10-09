@@ -203,7 +203,7 @@ async fn run_one(workers: u32) -> Duration {
   };
 
   let config = TestConfig {
-    workers,
+    workers: Some(workers),
     timeout: 10_000,
     reporter: vec![ReporterConfig {
       name: "none".into(),

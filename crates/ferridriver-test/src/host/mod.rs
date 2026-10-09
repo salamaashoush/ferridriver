@@ -70,25 +70,41 @@ pub trait TestHostBridge: crate::step::StepDriver {
   fn call_owner(&self) -> Option<String> {
     None
   }
-  /// `toMatchSnapshot(name?)` — text snapshot against the run's
-  /// snapshot directory/update mode. `Err(message)` = assertion failed.
-  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>>;
+  /// `expect(value).toMatchSnapshot(name?, options?)` — synchronous, as
+  /// upstream: a `string` or a `Buffer` against its baseline, under the
+  /// run's update mode. `Err(message)` = assertion failed.
+  fn match_value_snapshot(
+    &self,
+    received: crate::snapshot::SnapshotValue,
+    name: crate::snapshot_path::SnapshotName,
+    options: serde_json::Value,
+    is_not: bool,
+  ) -> Result<(), String>;
   /// `toHaveScreenshot(name?, options?)` — PNG baseline compare.
   /// `options` is the raw Playwright option bag as JSON.
   fn match_screenshot(
     &self,
     target: SnapshotTarget,
-    name: Option<String>,
+    name: crate::snapshot_path::SnapshotName,
     options: serde_json::Value,
+    is_not: bool,
   ) -> BridgeFuture<Result<(), String>>;
   /// `toMatchAriaSnapshot(yaml, { timeout? })`.
   fn match_aria_snapshot(
     &self,
     target: SnapshotTarget,
-    expected_yaml: String,
+    expected: AriaExpectation,
     is_not: bool,
     timeout_ms: Option<u64>,
   ) -> BridgeFuture<Result<(), String>>;
+}
+
+/// What `toMatchAriaSnapshot` compares against: a template written in
+/// the test, or one kept in a snapshot file (`{ name? }`).
+#[derive(Debug, Clone)]
+pub enum AriaExpectation {
+  Template(String),
+  File(crate::snapshot_path::SnapshotName),
 }
 
 /// A host's map from the code it actually executes back to the file the

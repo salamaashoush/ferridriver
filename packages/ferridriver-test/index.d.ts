@@ -191,24 +191,28 @@ export interface TestType<TFixtures = TestFixtures> {
   skip(title: string, body: TestBody<TFixtures>): void;
   skip(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   skip(): void;
+  skip(description: string): void;
   skip(condition: boolean, description?: string): void;
   skip(callback: ConditionBody<TFixtures>, description?: string): void;
 
   fixme(title: string, body: TestBody<TFixtures>): void;
   fixme(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   fixme(): void;
+  fixme(description: string): void;
   fixme(condition: boolean, description?: string): void;
   fixme(callback: ConditionBody<TFixtures>, description?: string): void;
 
   fail(title: string, body: TestBody<TFixtures>): void;
   fail(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   fail(): void;
+  fail(description: string): void;
   fail(condition: boolean, description?: string): void;
   fail(callback: ConditionBody<TFixtures>, description?: string): void;
 
   slow(title: string, body: TestBody<TFixtures>): void;
   slow(title: string, details: TestDetails, body: TestBody<TFixtures>): void;
   slow(): void;
+  slow(description: string): void;
   slow(condition: boolean, description?: string): void;
   slow(callback: ConditionBody<TFixtures>, description?: string): void;
 
@@ -443,6 +447,13 @@ export interface ScreenshotAssertionOptions {
   timeout?: number;
 }
 
+/** How `toMatchSnapshot` compares a `Buffer` holding an image. */
+export interface SnapshotComparisonOptions {
+  maxDiffPixelRatio?: number;
+  maxDiffPixels?: number;
+  threshold?: number;
+}
+
 export interface GenericMatchers {
   toBe(expected: unknown): void;
   toEqual(expected: unknown): void;
@@ -466,7 +477,8 @@ export interface GenericMatchers {
   toMatchObject(subset: object): void;
   toBeInstanceOf(ctor: Function): void;
   toThrow(matcher?: string | RegExp | Function | { message?: string | RegExp; name?: string }): void | Promise<void>;
-  toMatchSnapshot(name?: string): Promise<void>;
+  toMatchSnapshot(name: string | ReadonlyArray<string>, options?: SnapshotComparisonOptions): void;
+  toMatchSnapshot(options?: SnapshotComparisonOptions & { name?: string | ReadonlyArray<string> }): void;
 }
 
 export interface WebFirstMatchers {
@@ -490,7 +502,7 @@ export interface WebFirstMatchers {
   toHaveAttribute(name: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveClass(expected: string | RegExp | Array<string | RegExp>, options?: ExpectMatcherOptions): Promise<void>;
   toContainClass(expected: string, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveCSS(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { pseudo?: string }): Promise<void>;
+  toHaveCSS(name: string, value: string | RegExp, options?: ExpectMatcherOptions & { pseudo?: 'before' | 'after' }): Promise<void>;
   toHaveId(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
   toHaveRole(role: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveAccessibleName(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
@@ -498,10 +510,12 @@ export interface WebFirstMatchers {
   toHaveAccessibleErrorMessage(expected: string | RegExp, options?: ExpectMatcherOptions): Promise<void>;
   toHaveJSProperty(name: string, value: unknown, options?: ExpectMatcherOptions): Promise<void>;
   toHaveCount(count: number, options?: ExpectMatcherOptions): Promise<void>;
-  toMatchSnapshot(name?: string): Promise<void>;
-  toHaveScreenshot(name?: string, options?: ScreenshotAssertionOptions): Promise<void>;
-  toHaveScreenshot(options?: ScreenshotAssertionOptions): Promise<void>;
+  // ferridriver extension: a locator's text content as the snapshot.
+  toMatchSnapshot(name?: string | ReadonlyArray<string>, options?: SnapshotComparisonOptions): Promise<void>;
+  toHaveScreenshot(name: string | ReadonlyArray<string>, options?: ScreenshotAssertionOptions): Promise<void>;
+  toHaveScreenshot(options?: ScreenshotAssertionOptions & { name?: string | ReadonlyArray<string> }): Promise<void>;
   toMatchAriaSnapshot(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+  toMatchAriaSnapshot(options?: ExpectMatcherOptions & { name?: string }): Promise<void>;
 }
 
 export interface PageMatchers {
@@ -509,9 +523,10 @@ export interface PageMatchers {
   toContainTitle(expected: string, options?: ExpectMatcherOptions): Promise<void>;
   toHaveURL(expected: string | RegExp, options?: ExpectMatcherOptions & { ignoreCase?: boolean }): Promise<void>;
   toContainURL(expected: string, options?: ExpectMatcherOptions): Promise<void>;
-  toHaveScreenshot(name?: string, options?: ScreenshotAssertionOptions): Promise<void>;
-  toHaveScreenshot(options?: ScreenshotAssertionOptions): Promise<void>;
+  toHaveScreenshot(name: string | ReadonlyArray<string>, options?: ScreenshotAssertionOptions): Promise<void>;
+  toHaveScreenshot(options?: ScreenshotAssertionOptions & { name?: string | ReadonlyArray<string> }): Promise<void>;
   toMatchAriaSnapshot(expected: string, options?: ExpectMatcherOptions): Promise<void>;
+  toMatchAriaSnapshot(options?: ExpectMatcherOptions & { name?: string }): Promise<void>;
 }
 
 export interface APIResponseMatchers {
@@ -716,16 +731,22 @@ export interface WaitForSelectorOptions extends TimeoutOption {
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
 }
 
-export interface ScreenshotOptions extends TimeoutOption {
-  type?: 'png' | 'jpeg';
-  quality?: number;
-  fullPage?: boolean;
-  clip?: { x: number; y: number; width: number; height: number };
-  omitBackground?: boolean;
-  path?: string;
-  scale?: 'css' | 'device';
+export interface LocatorScreenshotOptions extends TimeoutOption {
+  animations?: 'disabled' | 'allow';
+  caret?: 'hide' | 'initial';
   mask?: Locator[];
   maskColor?: string;
+  omitBackground?: boolean;
+  path?: string;
+  quality?: number;
+  scale?: 'css' | 'device';
+  style?: string;
+  type?: 'png' | 'jpeg' | 'webp';
+}
+
+export interface ScreenshotOptions extends LocatorScreenshotOptions {
+  clip?: { x: number; y: number; width: number; height: number };
+  fullPage?: boolean;
 }
 
 /** Options for `page.checkAccessibility`. */
@@ -1279,7 +1300,7 @@ export interface ElementHandle extends JSHandle {
   isChecked(): Promise<boolean>;
   isEditable(): Promise<boolean>;
   boundingBox(): Promise<{ x: number; y: number; width: number; height: number } | null>;
-  screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
+  screenshot(options?: LocatorScreenshotOptions): Promise<Uint8Array>;
   $(selector: string): Promise<ElementHandle | null>;
   $$(selector: string): Promise<ElementHandle[]>;
   $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
@@ -1343,7 +1364,7 @@ export interface Locator {
   count(): Promise<number>;
   all(): Promise<Locator[]>;
   boundingBox(options?: TimeoutOption): Promise<{ x: number; y: number; width: number; height: number } | null>;
-  screenshot(options?: ScreenshotOptions): Promise<Uint8Array>;
+  screenshot(options?: LocatorScreenshotOptions): Promise<Uint8Array>;
   ariaSnapshot(
     options?: TimeoutOption & { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
   ): Promise<string>;
@@ -1936,6 +1957,7 @@ export interface LaunchOptions {
   /** Chromium unpacked extension directories loaded at startup. */
   extensions?: string[];
   channel?: string;
+  env?: { [key: string]: string | undefined };
   slowMo?: number;
   timeout?: number;
   downloadsPath?: string;

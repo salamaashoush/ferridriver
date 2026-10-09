@@ -54,8 +54,8 @@ pub use asymmetric::{
   match_object_with,
 };
 pub use builder::{
-  Expect, ExpectPoll, HaveCssOptions, InViewportOptions, ToPassOptions, expect, expect_configured, expect_poll,
-  to_pass, to_pass_with_options,
+  CssPseudo, Expect, ExpectPoll, HaveCssOptions, InViewportOptions, ToPassOptions, expect, expect_configured,
+  expect_poll, to_pass, to_pass_with_options,
 };
 pub use diff::{json_diff, pretty_json, unified_diff};
 pub use equality::{Mode as EqualityMode, equals};

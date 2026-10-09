@@ -115,7 +115,7 @@ pub async fn run(request: Request) -> Result<Value> {
     .map(RunStatus::as_str);
   Ok(
     json!({ "text": text, "delegated": *collected.lock().await, "events": events,
-    "defaultWorkers": TestConfig::default().workers, "printsToStdio": prints_to_stdio, "status": status,
+    "defaultWorkers": TestConfig::default().worker_count(), "printsToStdio": prints_to_stdio, "status": status,
     "edits": { "excluded": edits.excluded, "annotations": edits.annotations, "skipSharding": edits.skip_sharding } }),
   )
 }

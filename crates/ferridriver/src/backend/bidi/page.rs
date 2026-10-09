@@ -16,7 +16,8 @@ use super::input;
 use super::session::BidiSession;
 use super::types::EvaluateResult;
 use crate::backend::{
-  AnyElement, AxNodeData, AxProperty, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, ScreenshotOpts,
+  AnyElement, AxNodeData, AxProperty, BackgroundColor, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle,
+  ScreenshotCapture,
 };
 use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::error::{FerriError, Result};
@@ -1133,181 +1134,78 @@ impl BidiPage {
 
   // ── Screenshots ─────────────────────────────────────────────────────────
 
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
-    // BiDi-specific refusals for knobs Firefox has no protocol for.
-    if opts.omit_background {
+  /// `bidiPage.ts::setBackgroundColor`: no `BiDi` command overrides the
+  /// default background, so only the reset is accepted.
+  pub fn set_background_color(color: Option<BackgroundColor>) -> Result<()> {
+    if color.is_some() {
       return Err(FerriError::unsupported(
         "BiDi/Firefox does not support `omitBackground` screenshots — no BiDi command exposes the transparent-background override.",
       ));
     }
-    // `scale` is a no-op on BiDi: `browsingContext.captureScreenshot` clips in
-    // CSS pixels and captures at the device pixel ratio, matching Playwright's
-    // own BiDi backend (which accepts `scale` and ignores it). At the default
-    // DPR=1 css and device are identical; we do not refuse it.
-
-    // A full-page capture measures the document's scrolling box, and
-    // Firefox reports that box before the reflow that adds a vertical
-    // scrollbar has run: the same page comes back 400px or 385px wide
-    // depending on which side of the flush the capture lands. Wait for
-    // a paint first, as the WebKit backend does for wheel events.
-    if opts.full_page {
-      self.wait_for_layout_flush().await?;
-    }
-
-    // Pre-capture DOM setup (caret, style, mask, CSS-animation pause) —
-    // shared helpers, BiDi-specific execution via `script.callFunction`.
-    let style_installed = self.screenshot_install_style(&opts).await?;
-    let mask_installed = self.screenshot_install_mask(&opts).await?;
-    let params = self.screenshot_build_params(&opts);
-
-    let result = self.cmd("browsingContext.captureScreenshot", params).await;
-
-    if style_installed {
-      let _ = self
-        .eval_bidi_function(&format!(
-          "() => {{ {}; }}",
-          crate::backend::screenshot_js::uninstall_style_js()
-        ))
-        .await;
-    }
-    if mask_installed {
-      let _ = self
-        .eval_bidi_function(&format!(
-          "() => {{ {}; }}",
-          crate::backend::screenshot_js::uninstall_mask_js()
-        ))
-        .await;
-    }
-
-    let data_str = result?
-      .get("data")
-      .and_then(|v| v.as_str().map(String::from))
-      .ok_or_else(|| FerriError::backend("Screenshot: missing data"))?;
-    base64::engine::general_purpose::STANDARD
-      .decode(data_str)
-      .map_err(|e| FerriError::Backend(format!("Screenshot base64 decode: {e}")))
-  }
-
-  /// Run a JS function-declaration expression via
-  /// `script.callFunction` in this page's browsing context. Used by
-  /// `screenshot()` to install and tear down DOM overrides.
-  /// Settle layout: two animation frames, awaited, so a reflow the last
-  /// DOM write scheduled has run and been painted before anything
-  /// measures the page.
-  async fn wait_for_layout_flush(&self) -> Result<()> {
-    self
-      .cmd(
-        "script.callFunction",
-        json!({
-          "functionDeclaration":
-            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
-          "target": {"context": &*self.context_id},
-          "awaitPromise": true,
-          "resultOwnership": "none",
-        }),
-      )
-      .await?;
     Ok(())
   }
 
-  async fn eval_bidi_function(&self, function_declaration: &str) -> Result<()> {
-    self
-      .cmd(
-        "script.callFunction",
-        json!({
-          "functionDeclaration": function_declaration,
-          "target": {"context": &*self.context_id},
-          "awaitPromise": false,
-          "resultOwnership": "none",
-        }),
-      )
-      .await
-      .map(|_| ())
-  }
-
-  async fn screenshot_install_style(&self, opts: &ScreenshotOpts) -> Result<bool> {
-    let css = crate::backend::screenshot_js::build_css(opts);
-    if css.is_empty() {
-      return Ok(false);
-    }
-    let install = format!("() => {{ {}; }}", crate::backend::screenshot_js::install_style_js(&css));
-    self.eval_bidi_function(&install).await.map(|()| true)
-  }
-
-  async fn screenshot_install_mask(&self, opts: &ScreenshotOpts) -> Result<bool> {
-    if let Some(js) = crate::backend::screenshot_js::install_mask_js(opts) {
-      let wrapped = format!("() => {{ {js}; }}");
-      self.eval_bidi_function(&wrapped).await.map(|()| true)
-    } else {
-      Ok(false)
-    }
-  }
-
-  fn screenshot_build_params(&self, opts: &ScreenshotOpts) -> serde_json::Value {
-    let format_type = match opts.format {
-      ImageFormat::Png => "image/png",
-      ImageFormat::Jpeg => "image/jpeg",
-      ImageFormat::Webp => "image/webp",
-    };
-    let quality = opts
-      .quality
-      .map(|q| f64::from(i32::try_from(q.clamp(0, 100)).unwrap_or(100)) / 100.0);
-    let origin = if opts.full_page { "document" } else { "viewport" };
-    let mut params = json!({
-      "context": &*self.context_id,
-      "origin": origin,
-      "format": { "type": format_type }
-    });
-    if let Some(q) = quality {
-      params["format"]["quality"] = json!(q);
-    }
-    if let Some(rect) = opts.clip {
-      params["clip"] = json!({
-        "type": "box",
-        "x": rect.x,
-        "y": rect.y,
-        "width": rect.width,
-        "height": rect.height,
-      });
-    }
-    params
-  }
-
-  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
-    // Find the element first
-    let elem = self.find_element(selector).await?;
-    let shared_id = match &elem {
-      AnyElement::Bidi(e) => &e.shared_id,
-      _ => {
-        return Err(FerriError::backend(
-          "screenshot_element: non-BiDi element on BiDi backend",
-        ));
+  /// `bidiPage.ts::takeScreenshot`. `browsingContext.captureScreenshot`
+  /// always captures at the device pixel ratio, so `scale` has no effect,
+  /// as upstream.
+  pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
+    let (rect, origin) = match (capture.document_rect, capture.viewport_rect) {
+      // Firefox clips a document-origin capture to the root element's
+      // scroll size, which is 0 tall when the page's content is all
+      // absolutely positioned, so a rect the viewport can hold is taken
+      // in viewport coordinates instead.
+      (Some(rect), _) if capture.fits_viewport => {
+        let scroll = self
+          .eval_internal(
+            "JSON.stringify({ x: window.scrollX, y: window.scrollY })",
+            &self.context_id,
+          )
+          .await?
+          .and_then(|v| {
+            v.as_str()
+              .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+          })
+          .unwrap_or_default();
+        let offset = |key: &str| scroll.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        (
+          crate::options::ClipRect {
+            x: rect.x - offset("x"),
+            y: rect.y - offset("y"),
+            ..rect
+          },
+          "viewport",
+        )
       },
+      (Some(rect), _) => (rect, "document"),
+      (None, Some(rect)) => (rect, "viewport"),
+      (None, None) => return Err(FerriError::backend("screenshot: no rect to capture")),
     };
-
-    let format_type = match format {
+    let format_type = match capture.format {
       ImageFormat::Png => "image/png",
-      ImageFormat::Jpeg => "image/jpeg",
       ImageFormat::Webp => "image/webp",
+      ImageFormat::Jpeg => "image/jpeg",
     };
-
+    let mut format = json!({ "type": format_type });
+    if let Some(quality) = capture.quality {
+      format["quality"] = json!(f64::from(quality) / 100.0);
+    }
     let result = self
       .cmd(
         "browsingContext.captureScreenshot",
         json!({
           "context": &*self.context_id,
-          "format": {"type": format_type},
-          "clip": {"type": "element", "element": {"sharedId": shared_id}}
+          "format": format,
+          "origin": origin,
+          "clip": { "type": "box", "x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height },
         }),
       )
       .await?;
-
-    let data_str = result
+    let data = result
       .get("data")
       .and_then(|v| v.as_str())
       .ok_or_else(|| FerriError::backend("Screenshot: missing data"))?;
     base64::engine::general_purpose::STANDARD
-      .decode(data_str)
+      .decode(data)
       .map_err(|e| FerriError::Backend(format!("Screenshot base64 decode: {e}")))
   }
 

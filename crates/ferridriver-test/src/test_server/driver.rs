@@ -284,12 +284,23 @@ impl Driver {
   async fn listing_for(&self, request: &Request, runner: &TestRunner) -> Listing {
     let build = (self.plan_factory)(None).await;
     let filter = RequestFilter::new(request, &self.root_dir);
-    let wanted = request.string_list("projects");
+    let mut errors = build.errors;
+    // Non-default projects are listed so they can be selected by name.
+    let selected = if runner.config().projects.is_empty() {
+      Ok(vec![0])
+    } else {
+      crate::runner::select_projects(&runner.config().projects, &request.string_list("projects"), true)
+    };
+    let selected = selected.unwrap_or_else(|e| {
+      errors.push(e);
+      Vec::new()
+    });
     let projects = runner
       .project_runs()
       .into_iter()
-      .filter(|project| wanted.is_empty() || wanted.iter().any(|name| name == &project.name))
-      .map(|project| {
+      .enumerate()
+      .filter(|(idx, _)| selected.contains(idx))
+      .map(|(_, project)| {
         let mut plan = project.narrow(&build.plan);
         filter.apply(&project.name, &mut plan);
         ProjectPlan { project, plan }
@@ -298,7 +309,7 @@ impl Driver {
     Listing {
       plan: build.plan,
       projects,
-      errors: build.errors,
+      errors,
     }
   }
 
@@ -505,7 +516,7 @@ fn apply_run_options(config: &mut TestConfig, overrides: &mut CliOverrides, requ
     config.browser.headless = !headed;
   }
   if let Some(workers) = workers_from(request)? {
-    config.workers = workers;
+    config.workers = Some(workers);
   }
   if let Some(max_failures) = request.number("maxFailures") {
     config.max_failures = u32::try_from(max_failures).unwrap_or(u32::MAX);
@@ -514,13 +525,7 @@ fn apply_run_options(config: &mut TestConfig, overrides: &mut CliOverrides, requ
     config.timeout = timeout;
   }
   if let Some(mode) = request.string("updateSnapshots") {
-    config.update_snapshots = match mode.as_str() {
-      "all" => UpdateSnapshotsMode::All,
-      "changed" => UpdateSnapshotsMode::Changed,
-      "missing" => UpdateSnapshotsMode::Missing,
-      "none" => UpdateSnapshotsMode::None,
-      other => return Err(format!("updateSnapshots {other} is not a mode")),
-    };
+    config.update_snapshots = UpdateSnapshotsMode::parse(&mode)?;
   }
   if let Some(trace) = request.string("trace") {
     config.trace = match trace.as_str() {
@@ -543,24 +548,11 @@ fn apply_run_options(config: &mut TestConfig, overrides: &mut CliOverrides, requ
 /// `workers` arrives as a number or a string, and the string may be a
 /// share of the machine's cores (Playwright's `"50%"`).
 fn workers_from(request: &Request) -> Result<Option<u32>, String> {
-  let Some(value) = request.params.get("workers") else {
-    return Ok(None);
-  };
-  let workers = match value {
-    Value::Null => return Ok(None),
-    Value::Number(number) => number.as_u64().and_then(|n| u32::try_from(n).ok()),
-    Value::String(text) => match text.strip_suffix('%') {
-      Some(percent) => percent.trim().parse::<u32>().ok().map(|percent| {
-        let cores = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
-        (cores * percent / 100).max(1)
-      }),
-      None => text.trim().parse::<u32>().ok(),
-    },
-    other => return Err(format!("workers {other} is neither a count nor a percentage")),
-  };
-  match workers {
-    Some(0) | None => Err(format!("workers {value} is not a usable worker count")),
-    Some(workers) => Ok(Some(workers)),
+  match request.params.get("workers") {
+    None | Some(Value::Null) => Ok(None),
+    Some(Value::String(text)) => ferridriver_config::test::parse_workers(text).map(Some),
+    Some(number @ Value::Number(_)) => ferridriver_config::test::parse_workers(&number.to_string()).map(Some),
+    Some(other) => Err(format!("Workers {other} must be a number or percentage.")),
   }
 }
 
@@ -896,7 +888,7 @@ mod tests {
     apply_run_options(&mut config, &mut overrides, &request).expect("options are all supported");
 
     assert!(!config.browser.headless, "headed:true launches a headed browser");
-    assert_eq!(config.workers, 1, "the UI's Single worker toggle");
+    assert_eq!(config.workers, Some(1), "the UI's Single worker toggle");
     assert_eq!(config.max_failures, 1, "the UI's Stop on first failure toggle");
     assert_eq!(config.timeout, 12_000);
     assert_eq!(config.update_snapshots, UpdateSnapshotsMode::All);
@@ -909,7 +901,7 @@ mod tests {
   fn an_absent_option_leaves_the_config_alone() {
     let mut config = TestConfig::default();
     config.browser.headless = true;
-    config.workers = 4;
+    config.workers = Some(4);
     config.trace = TraceMode::On;
     let before = (config.browser.headless, config.workers, config.trace);
 

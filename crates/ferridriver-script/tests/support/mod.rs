@@ -166,27 +166,40 @@ impl TestHostBridge for MockBridge {
     self.state(|s| s.soft_errors.clone())
   }
 
-  fn match_text_snapshot(&self, target: SnapshotTarget, name: Option<String>) -> BridgeFuture<Result<(), String>> {
-    let kind = snapshot_target_kind(&target);
-    self.state(|s| {
-      s.snapshot_calls
-        .push(format!("text {kind} name={}", name.as_deref().unwrap_or("<auto>")));
-    });
-    Box::pin(async { Ok(()) })
+  fn match_value_snapshot(
+    &self,
+    received: ferridriver_test::snapshot::SnapshotValue,
+    name: ferridriver_test::snapshot_path::SnapshotName,
+    _options: serde_json::Value,
+    _is_not: bool,
+  ) -> Result<(), String> {
+    let kind = match received {
+      ferridriver_test::snapshot::SnapshotValue::Text(_) => "value",
+      ferridriver_test::snapshot::SnapshotValue::Bytes(_) => "bytes",
+    };
+    let name = match name {
+      ferridriver_test::snapshot_path::SnapshotName::One(n) => n,
+      _ => "<auto>".to_string(),
+    };
+    self.state(|s| s.snapshot_calls.push(format!("text {kind} name={name}")));
+    Ok(())
   }
 
   fn match_screenshot(
     &self,
     target: SnapshotTarget,
-    name: Option<String>,
+    name: ferridriver_test::snapshot_path::SnapshotName,
     options: serde_json::Value,
+    _is_not: bool,
   ) -> BridgeFuture<Result<(), String>> {
     let kind = snapshot_target_kind(&target);
     self.state(|s| {
-      s.snapshot_calls.push(format!(
-        "screenshot {kind} name={} opts={options}",
-        name.as_deref().unwrap_or("<auto>")
-      ));
+      let name = match name {
+        ferridriver_test::snapshot_path::SnapshotName::One(n) => n,
+        _ => "<auto>".to_string(),
+      };
+      s.snapshot_calls
+        .push(format!("screenshot {kind} name={name} opts={options}"));
     });
     Box::pin(async { Ok(()) })
   }
@@ -194,11 +207,15 @@ impl TestHostBridge for MockBridge {
   fn match_aria_snapshot(
     &self,
     target: SnapshotTarget,
-    expected_yaml: String,
+    expected: ferridriver_test::host::AriaExpectation,
     is_not: bool,
     _timeout_ms: Option<u64>,
   ) -> BridgeFuture<Result<(), String>> {
     let kind = snapshot_target_kind(&target);
+    let expected_yaml = match expected {
+      ferridriver_test::host::AriaExpectation::Template(yaml) => yaml,
+      ferridriver_test::host::AriaExpectation::File(_) => "<file>".to_string(),
+    };
     self.state(|s| {
       s.snapshot_calls
         .push(format!("aria {kind} not={is_not} yaml={expected_yaml}"));

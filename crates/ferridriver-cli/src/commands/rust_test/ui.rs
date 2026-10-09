@@ -460,7 +460,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
   // loop exit.
   let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-  let workers = test_config.workers;
+  let workers = test_config.worker_count();
   let mut sidebar = Sidebar::default();
   let mut failed: BTreeSet<String> = BTreeSet::new();
   let mut queued: VecDeque<UiCommand> = VecDeque::new();

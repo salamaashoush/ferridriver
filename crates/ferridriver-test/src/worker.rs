@@ -914,6 +914,19 @@ fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
   std::path::absolute(&p).unwrap_or(p)
 }
 
+/// Playwright's `snapshotDir`: the configured one, else `testDir`, else
+/// the directory of the config file.
+fn snapshot_dir(config: &crate::config::TestConfig) -> std::path::PathBuf {
+  let dir = config
+    .snapshot_dir
+    .as_ref()
+    .or(config.test_dir.as_ref())
+    .map(std::path::PathBuf::from)
+    .or_else(|| config.config_dir.clone())
+    .unwrap_or_else(|| std::path::PathBuf::from("."));
+  absolutize(dir)
+}
+
 impl Worker {
   pub fn new(id: u32, slot: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>, live_traces: bool) -> Self {
     let pool = crate::context_pool::ContextPool::new(config.context_prewarm as usize);
@@ -973,20 +986,14 @@ impl Worker {
         suite_key,
         self.config.name.as_deref().unwrap_or_default(),
       ))),
-      snapshot_dir: absolutize(
-        self
-          .config
-          .snapshot_dir
-          .as_ref()
-          .map(std::path::PathBuf::from)
-          .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
-      ),
+      snapshot_dir: snapshot_dir(&self.config),
       snapshot_path_template: self.config.snapshot_path_template.clone(),
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
+      non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: Arc::new(Mutex::new(Vec::new())),
       snapshot_suffix: Arc::new(Mutex::new(String::new())),
       column: None,
@@ -1497,20 +1504,14 @@ impl Worker {
         &test_id,
         self.config.name.as_deref().unwrap_or_default(),
       ))),
-      snapshot_dir: absolutize(
-        self
-          .config
-          .snapshot_dir
-          .as_ref()
-          .map(std::path::PathBuf::from)
-          .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
-      ),
+      snapshot_dir: snapshot_dir(&self.config),
       snapshot_path_template: self.config.snapshot_path_template.clone(),
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
+      non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: Arc::new(Mutex::new(Vec::new())),
       snapshot_suffix: Arc::new(Mutex::new(String::new())),
       column: None,
@@ -2095,13 +2096,15 @@ impl Worker {
         if failure.message.contains("__FERRIDRIVER_SKIP__:") {
           let reason = failure.message.split("__FERRIDRIVER_SKIP__:").nth(1).unwrap_or("");
           tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
+          let mut annotations = test.annotations.clone();
+          annotations.extend(test_info.get_annotations().await);
           let outcome = Arc::new(TestOutcome {
             test_id: test_id.clone(),
             status: TestStatus::Skipped,
             duration: start.elapsed(),
             attempt,
             max_attempts,
-            annotations: test.annotations.clone(),
+            annotations,
             ..self.outcome_base(test, started_at)
           });
           if let Some(event_bus) = &self.event_bus {
@@ -2150,10 +2153,6 @@ impl Worker {
     {
       if modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
         expected_status = ExpectedStatus::Fail;
-      }
-      // Runtime slow: annotate via test_info for reporters.
-      if modifiers.slow.load(std::sync::atomic::Ordering::Relaxed) {
-        test_info.annotate("slow", "test.slow() called at runtime").await;
       }
       // timeout_override: already elapsed for this attempt, but log for debugging.
       if let Ok(guard) = modifiers.timeout_override.lock()
@@ -2284,7 +2283,8 @@ impl Worker {
 
     let should_retry = crate::model::outcome_kind(&[outcome.status], outcome.expected_status)
       == crate::model::TestOutcomeKind::Unexpected
-      && attempt < max_attempts;
+      && attempt < max_attempts
+      && !test_info.non_retriable.load(std::sync::atomic::Ordering::Relaxed);
 
     WorkerTestResult {
       outcome,

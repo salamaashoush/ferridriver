@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::page::WebDriverPage;
-use crate::backend::{AxNodeData, AxProperty, ImageFormat, ScreenshotOpts, ScreenshotScale};
+use crate::backend::{AxNodeData, AxProperty, BackgroundColor, ImageFormat, ScreenshotCapture, ScreenshotScale};
 use crate::error::{FerriError, Result};
 
 impl WebDriverPage {
@@ -60,71 +60,64 @@ impl WebDriverPage {
       .map_err(|error| FerriError::protocol("print", error.to_string()))
   }
 
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
-    if opts.full_page || opts.omit_background {
+  /// Classic `WebDriver` has no background override.
+  pub fn set_background_color(color: Option<BackgroundColor>) -> Result<()> {
+    if color.is_some() {
       return Err(FerriError::unsupported(
-        "Classic WebDriver screenshots capture the visible viewport and do not expose full-page or transparent-background capture",
+        "Classic WebDriver screenshots do not expose transparent-background capture",
       ));
     }
+    Ok(())
+  }
+
+  /// Classic `WebDriver` captures the visible viewport only, so the rect is
+  /// cropped out of that capture and anything beyond it is refused.
+  pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     let geometry = self
-      .execute_script("return {width:innerWidth,height:innerHeight};", vec![])
-      .await?;
-    let result = async {
-      let css = crate::backend::screenshot_js::build_css(&opts);
-      if !css.is_empty() {
-        self
-          .execute_script(&crate::backend::screenshot_js::install_style_js(&css), vec![])
-          .await?;
-      }
-      if let Some(mask) = crate::backend::screenshot_js::install_mask_js(&opts) {
-        self.execute_script(&mask, vec![]).await?;
-      }
-      self.screenshot_png().await
-    }
-    .await;
-    let cleanup = self
       .execute_script(
-        &format!(
-          "{};{}",
-          crate::backend::screenshot_js::uninstall_mask_js(),
-          crate::backend::screenshot_js::uninstall_style_js()
-        ),
+        "return {width:innerWidth,height:innerHeight,scrollX:scrollX,scrollY:scrollY};",
         vec![],
       )
-      .await;
-    let bytes = match (result, cleanup) {
-      (Ok(bytes), Ok(_)) => bytes,
-      (Err(error), Ok(_)) | (Ok(_), Err(error)) => return Err(error),
-      (Err(error), Err(cleanup)) => {
-        return Err(FerriError::backend(format!(
-          "{error}; screenshot cleanup failed: {cleanup}"
-        )));
+      .await?;
+    let number = |key: &str| geometry[key].as_f64().unwrap_or(0.0);
+    let rect = match (capture.document_rect, capture.viewport_rect) {
+      (_, Some(rect)) => rect,
+      (Some(rect), None) => crate::options::ClipRect {
+        x: rect.x - number("scrollX"),
+        y: rect.y - number("scrollY"),
+        width: rect.width,
+        height: rect.height,
       },
+      (None, None) => return Err(FerriError::backend("screenshot: no rect to capture")),
     };
+    let beyond = !capture.fits_viewport
+      || rect.x < 0.0
+      || rect.y < 0.0
+      || rect.x + rect.width > number("width")
+      || rect.y + rect.height > number("height");
+    if beyond {
+      return Err(FerriError::unsupported(
+        "Classic WebDriver screenshots capture the visible viewport and cannot capture beyond it",
+      ));
+    }
+    let bytes = self.screenshot_png().await?;
     let mut image = image::load_from_memory(&bytes).map_err(|error| FerriError::backend(error.to_string()))?;
-    let viewport_width = geometry["width"]
-      .as_f64()
+    let viewport_width = Some(number("width"))
       .filter(|width| *width > 0.0)
       .ok_or_else(|| FerriError::protocol("screenshot", "invalid viewport width"))?;
     let ratio = f64::from(image.width()) / viewport_width;
-    if let Some(clip) = opts.clip {
-      let x = pixels((clip.x * ratio).floor())?;
-      let y = pixels((clip.y * ratio).floor())?;
-      let width = pixels((clip.width * ratio).ceil())?;
-      let height = pixels((clip.height * ratio).ceil())?;
-      if width == 0
-        || height == 0
-        || x.saturating_add(width) > image.width()
-        || y.saturating_add(height) > image.height()
-      {
-        return Err(FerriError::invalid_argument(
-          "clip",
-          "screenshot clip must fit within the visible viewport",
-        ));
-      }
-      image = image.crop_imm(x, y, width, height);
+    let x = pixels((rect.x * ratio).floor())?;
+    let y = pixels((rect.y * ratio).floor())?;
+    let width = pixels((rect.width * ratio).ceil())?.min(image.width().saturating_sub(x));
+    let height = pixels((rect.height * ratio).ceil())?.min(image.height().saturating_sub(y));
+    if width == 0 || height == 0 {
+      return Err(FerriError::invalid_argument(
+        "clip",
+        "Clipped area is either empty or outside the resulting image",
+      ));
     }
-    if opts.scale == Some(ScreenshotScale::Css) && (ratio - 1.0).abs() > f64::EPSILON {
+    image = image.crop_imm(x, y, width, height);
+    if capture.scale == ScreenshotScale::Css && (ratio - 1.0).abs() > f64::EPSILON {
       image = image.resize_exact(
         pixels((f64::from(image.width()) / ratio).round())?,
         pixels((f64::from(image.height()) / ratio).round())?,
@@ -132,31 +125,22 @@ impl WebDriverPage {
       );
     }
     let mut output = std::io::Cursor::new(Vec::new());
-    if matches!(opts.format, ImageFormat::Jpeg) {
-      let quality = u8::try_from(opts.quality.unwrap_or(80))
-        .ok()
-        .filter(|quality| *quality <= 100)
-        .ok_or_else(|| FerriError::invalid_argument("quality", "expected an integer from 0 to 100"))?;
-      image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality)
-        .encode_image(&image.to_rgb8())
-        .map_err(|error| FerriError::backend(error.to_string()))?;
-    } else {
-      image
-        .write_to(
-          &mut output,
-          if matches!(opts.format, ImageFormat::Webp) {
-            image::ImageFormat::WebP
-          } else {
-            image::ImageFormat::Png
-          },
-        )
-        .map_err(|error| FerriError::backend(error.to_string()))?;
+    match capture.format {
+      ImageFormat::Jpeg => {
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, capture.quality.unwrap_or(80))
+          .encode_image(&image.to_rgb8())
+          .map_err(|error| FerriError::backend(error.to_string()))?;
+      },
+      ImageFormat::Png | ImageFormat::Webp => {
+        image
+          .write_to(&mut output, image::ImageFormat::Png)
+          .map_err(|error| FerriError::backend(error.to_string()))?;
+      },
+    }
+    if capture.format == ImageFormat::Webp {
+      return crate::backend::encode_webp_from_png(output.get_ref(), capture.quality);
     }
     Ok(output.into_inner())
-  }
-
-  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
-    self.find_element(selector).await?.screenshot(format).await
   }
 
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {

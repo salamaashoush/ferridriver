@@ -564,48 +564,7 @@ pub struct ScreenshotOptions {
   pub timeout: Option<u64>,
 }
 
-impl ScreenshotOptions {
-  /// Lower to the backend's wire options.
-  ///
-  /// One lowering, used by `Page::screenshot` and by the screenshot
-  /// MATCHER, which installs the page-side half of a capture itself when
-  /// its subject is an element. Two lowerings meant two answers to the
-  /// same option: the matcher's own hand-rolled CSS masked with a
-  /// `background` rule that a masked element's children painted through,
-  /// and dropped `scale` entirely.
-  #[must_use]
-  pub fn to_backend_opts(&self) -> crate::backend::ScreenshotOpts {
-    crate::backend::ScreenshotOpts {
-      format: match self.format.unwrap_or_default() {
-        ScreenshotFormat::Jpeg => crate::backend::ImageFormat::Jpeg,
-        ScreenshotFormat::Webp => crate::backend::ImageFormat::Webp,
-        ScreenshotFormat::Png => crate::backend::ImageFormat::Png,
-      },
-      quality: self.quality,
-      full_page: self.full_page.unwrap_or(false),
-      clip: self.clip,
-      omit_background: self.omit_background.unwrap_or(false),
-      scale: self.scale.map(|s| match s {
-        ScreenshotScale::Css => crate::backend::ScreenshotScale::Css,
-        ScreenshotScale::Device => crate::backend::ScreenshotScale::Device,
-      }),
-      animations: self.animations.map(|a| match a {
-        AnimationsMode::Disabled => crate::backend::ScreenshotAnimations::Disabled,
-        AnimationsMode::Allow => crate::backend::ScreenshotAnimations::Allow,
-      }),
-      caret: self.caret.map(|c| match c {
-        CaretMode::Hide => crate::backend::ScreenshotCaret::Hide,
-        CaretMode::Initial => crate::backend::ScreenshotCaret::Initial,
-      }),
-      mask: self.mask.iter().map(|l| l.selector().to_string()).collect(),
-      mask_color: self.mask_color.clone(),
-      style: self.style.clone(),
-    }
-  }
-}
-
-/// Screenshot image format — Playwright's `type?: 'png' | 'jpeg'`, plus
-/// Chromium's `webp` (rejected as Unsupported on WebKit/Firefox).
+/// Screenshot image format — Playwright's `type?: 'png' | 'jpeg' | 'webp'`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ScreenshotFormat {
   #[default]
@@ -717,18 +676,24 @@ impl From<&str> for ScreenshotScale {
   }
 }
 
-/// Options for element screenshots (`locator.screenshot()` /
-/// `element_handle.screenshot()`). Element captures support the format
-/// family and file output; page-level concerns (`fullPage`, `clip`,
-/// `mask`) stay on [`ScreenshotOptions`].
+/// Options for element screenshots: Playwright's
+/// `LocatorScreenshotOptions` / `ElementHandleScreenshotOptions`, which
+/// are [`ScreenshotOptions`] without `clip` and `fullPage`.
 #[derive(Debug, Clone, Default)]
 pub struct ElementScreenshotOptions {
+  pub animations: Option<AnimationsMode>,
+  pub caret: Option<CaretMode>,
   pub format: Option<ScreenshotFormat>,
-  pub path: Option<std::path::PathBuf>,
-  pub timeout: Option<u64>,
+  pub mask: Vec<crate::locator::Locator>,
+  pub mask_color: Option<String>,
   /// Drop the default white backdrop so the capture keeps its
   /// transparency. Playwright's `omitBackground`; ignored for jpeg.
   pub omit_background: Option<bool>,
+  pub path: Option<std::path::PathBuf>,
+  pub quality: Option<i64>,
+  pub scale: Option<ScreenshotScale>,
+  pub style: Option<String>,
+  pub timeout: Option<u64>,
 }
 
 /// Pixel-rectangle clip for [`ScreenshotOptions::clip`]. All values are in

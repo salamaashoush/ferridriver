@@ -35,7 +35,9 @@ pub fn apply_shared(
   browser: &cli::BrowserArgs,
 ) -> anyhow::Result<()> {
   overrides.project_filter.clone_from(&runner.project);
-  overrides.workers = runner.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+  overrides.workers = runner.workers;
+  overrides.update_snapshots = runner.update_snapshots;
+  overrides.ignore_snapshots = runner.ignore_snapshots;
   overrides.reporter.clone_from(&runner.reporter);
   overrides.watch = runner.watch;
   overrides.ui = runner.ui;

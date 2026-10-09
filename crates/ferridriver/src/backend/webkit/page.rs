@@ -18,7 +18,8 @@ use super::connection::Session;
 use super::element::WebKitElement;
 use super::protocol::{self, Envelope, NavigateParams, NavigateResult};
 use crate::backend::{
-  AnyElement, AxNodeData, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, ScreenshotOpts,
+  AnyElement, AxNodeData, BackgroundColor, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle,
+  ScreenshotCapture, ScreenshotScale,
 };
 use crate::console_message::ConsoleMessage;
 use crate::error::{FerriError, Result};
@@ -1348,122 +1349,92 @@ impl WebKitPage {
 
   // ── Screenshots ───────────────────────────────────────────────────────
 
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
-    // Install the DOM-side overrides (caret hide, user style, animation
-    // pause, mask overlays) before the capture, exactly like the CDP
-    // backend (`CdpPage::screenshot_install_dom`). WebKit has no
-    // protocol-level masking, so the shared `screenshot_js` overlay
-    // divs are the only way to honour `mask` / `maskColor`.
-    let css = crate::backend::screenshot_js::build_css(&opts);
-    let style_installed = if css.is_empty() {
-      false
-    } else {
-      self
-        .eval_value(&crate::backend::screenshot_js::install_style_js(&css))
-        .await?;
-      true
+  /// `wkPage.ts::setBackgroundColor`.
+  pub async fn set_background_color(&self, color: Option<BackgroundColor>) -> Result<()> {
+    let params = match color {
+      Some(c) => json!({ "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a } }),
+      None => json!({}),
     };
-    let mask_installed = if let Some(js) = crate::backend::screenshot_js::install_mask_js(&opts) {
-      self.eval_value(&js).await?;
-      true
-    } else {
-      false
-    };
-    let result = self.capture_rect(&opts).await;
-    // Teardown always runs so post-screenshot interaction sees pristine
-    // DOM, even when the capture itself failed.
-    if style_installed {
-      let _ = self
-        .eval_value(crate::backend::screenshot_js::uninstall_style_js())
-        .await;
-    }
-    if mask_installed {
-      let _ = self
-        .eval_value(crate::backend::screenshot_js::uninstall_mask_js())
-        .await;
-    }
-    result
+    self
+      .target_session()
+      .send("Page.setDefaultBackgroundColorOverride", params)
+      .await
+      .map_err(conn_err)?;
+    Ok(())
   }
 
-  /// Capture the visible / full-page / clipped rect via `Page.snapshotRect`
-  /// and decode the returned data URL. Split out of [`Self::screenshot`]
-  /// so the mask/style install + teardown wrap a single capture call.
-  async fn capture_rect(&self, opts: &ScreenshotOpts) -> Result<Vec<u8>> {
-    let (document_rect, coord_system) = if opts.full_page {
-      let dims = self
-        .eval_value(
-          "JSON.stringify({\
-            w: Math.max(document.documentElement.scrollWidth, document.documentElement.clientWidth),\
-            h: Math.max(document.documentElement.scrollHeight, document.documentElement.clientHeight)\
-          })",
-        )
-        .await?;
-      let parsed: Value = dims
-        .as_str()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-      let w = parsed.get("w").and_then(Value::as_f64).unwrap_or(0.0);
-      let h = parsed.get("h").and_then(Value::as_f64).unwrap_or(0.0);
-      (json!({ "x": 0, "y": 0, "width": w, "height": h }), "Page")
-    } else if let Some(rect) = opts.clip {
-      (
-        json!({ "x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height }),
-        "Viewport",
-      )
-    } else {
-      let dims = self
-        .eval_value("JSON.stringify({w:window.innerWidth,h:window.innerHeight})")
-        .await?;
-      let parsed: Value = dims
-        .as_str()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-      let w = parsed.get("w").and_then(Value::as_f64).unwrap_or(800.0);
-      let h = parsed.get("h").and_then(Value::as_f64).unwrap_or(600.0);
-      (json!({ "x": 0, "y": 0, "width": w, "height": h }), "Viewport")
+  /// `wkPage.ts::takeScreenshot`.
+  pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
+    let (rect, coordinate_system) = match (capture.document_rect, capture.viewport_rect) {
+      (Some(rect), _) => (rect, "Page"),
+      (None, Some(rect)) => (rect, "Viewport"),
+      (None, None) => return Err(FerriError::backend("screenshot: no rect to capture")),
     };
-    let mut params = document_rect;
-    params["coordinateSystem"] = json!(coord_system);
-    params["omitDeviceScaleFactor"] = json!(!matches!(opts.scale, Some(crate::backend::ScreenshotScale::Device)));
+    let omit_device_scale_factor = capture.scale == ScreenshotScale::Css;
+    self
+      .validate_screenshot_dimensions(rect, omit_device_scale_factor)
+      .await?;
+    // WebKit on macOS has no WebP encoder: capture a PNG and re-encode it.
+    let recode_png_to_webp = capture.format == ImageFormat::Webp && cfg!(target_os = "macos");
+    let format = match capture.format {
+      ImageFormat::Png => "png",
+      ImageFormat::Jpeg => "jpeg",
+      ImageFormat::Webp if recode_png_to_webp => "png",
+      ImageFormat::Webp => "webp",
+    };
+    let mut params = json!({
+      "x": rect.x,
+      "y": rect.y,
+      "width": rect.width,
+      "height": rect.height,
+      "coordinateSystem": coordinate_system,
+      "omitDeviceScaleFactor": omit_device_scale_factor,
+      "format": format,
+    });
+    if let (Some(quality), false) = (capture.quality, recode_png_to_webp) {
+      params["quality"] = json!(quality);
+    }
     let resp = self
       .target_session()
       .send("Page.snapshotRect", params)
       .await
       .map_err(conn_err)?;
     let data_url = resp.get("dataURL").and_then(Value::as_str).unwrap_or_default();
-    let b64 = data_url.split_once(',').map_or(data_url, |(_, d)| d);
-    let png = base64::engine::general_purpose::STANDARD
-      .decode(b64)
+    let encoded = data_url.split_once(',').map_or(data_url, |(_, d)| d);
+    let bytes = base64::engine::general_purpose::STANDARD
+      .decode(encoded)
       .map_err(|e| FerriError::backend(format!("screenshot base64: {e}")))?;
-    match opts.format {
-      ImageFormat::Png => Ok(png),
-      // `Page.snapshotRect` only produces PNG; Playwright transcodes to
-      // JPEG client-side (`wkPage.takeScreenshot` via jpeg-js, quality
-      // default 80 from `screenshotter.ts`). Do the same here.
-      ImageFormat::Jpeg => {
-        let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-          .map_err(|e| FerriError::backend(format!("screenshot png decode: {e}")))?;
-        let mut out = std::io::Cursor::new(Vec::new());
-        let quality = u8::try_from(opts.quality.unwrap_or(80).clamp(0, 100)).unwrap_or(80);
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
-        img
-          .to_rgb8()
-          .write_with_encoder(encoder)
-          .map_err(|e| FerriError::backend(format!("screenshot jpeg encode: {e}")))?;
-        Ok(out.into_inner())
-      },
-      ImageFormat::Webp => Err(FerriError::unsupported(
-        "screenshot type 'webp' is not supported on the WebKit backend (Page.snapshotRect produces PNG; Playwright supports webp on Chromium only)",
-      )),
+    if recode_png_to_webp {
+      return crate::backend::encode_webp_from_png(&bytes, capture.quality);
     }
+    Ok(bytes)
   }
 
-  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
-    let elem = self.find_element(selector).await?;
-    match elem {
-      AnyElement::WebKit(e) => e.screenshot(format).await,
-      _ => Err(FerriError::backend("screenshot_element: non-webkit element")),
+  /// Cairo-based ports (Linux, Windows) cannot produce an image wider or
+  /// taller than 32767 pixels.
+  async fn validate_screenshot_dimensions(
+    &self,
+    rect: crate::options::ClipRect,
+    omit_device_scale_factor: bool,
+  ) -> Result<()> {
+    if cfg!(target_os = "macos") {
+      return Ok(());
     }
+    let ratio = if omit_device_scale_factor {
+      1.0
+    } else {
+      self
+        .eval_value("window.devicePixelRatio || 1")
+        .await?
+        .as_f64()
+        .unwrap_or(1.0)
+    };
+    if (rect.width * ratio).ceil() > 32767.0 || (rect.height * ratio).ceil() > 32767.0 {
+      return Err(FerriError::backend(
+        "Cannot take screenshot larger than 32767 pixels on any dimension",
+      ));
+    }
+    Ok(())
   }
 
   // ── Accessibility ─────────────────────────────────────────────────────

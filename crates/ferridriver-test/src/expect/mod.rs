@@ -68,6 +68,8 @@ pub struct ScreenshotMatcherOptions {
   pub threshold: Option<f64>,
   pub max_diff_pixels: Option<u64>,
   pub max_diff_pixel_ratio: Option<f64>,
+  /// Playwright's private `_comparator`: `pixelmatch` unless set.
+  pub comparator: crate::comparator::Comparator,
   pub mask_color: Option<String>,
   pub animations: Option<String>,
   pub caret: Option<String>,

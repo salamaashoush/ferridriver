@@ -634,9 +634,16 @@ impl Locator {
 
   // ── Screenshot ──────────────────────────────────────────────────────────
 
+  /// Playwright: `locator.screenshot(options?: LocatorScreenshotOptions): Promise<Buffer>`.
   #[napi]
-  pub async fn screenshot(&self) -> Result<Buffer> {
-    let bytes = self.inner.screenshot().await.map_err(crate::error::to_napi)?;
+  pub async fn screenshot(&self, options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
+    let opts = options.unwrap_or_default().into_core(self.inner.page());
+    let bytes = self
+      .inner
+      .screenshot()
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)?;
     Ok(bytes.into())
   }
 

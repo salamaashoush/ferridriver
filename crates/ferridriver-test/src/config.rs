@@ -63,7 +63,9 @@ pub fn parse_common_cli_args() -> CliOverrides {
       "--headed" => overrides.headless_override = Some(false),
       "--workers" | "-j" => {
         i += 1;
-        overrides.workers = args.get(i).and_then(|v| v.parse().ok());
+        overrides.workers = args
+          .get(i)
+          .and_then(|v| ferridriver_config::test::parse_workers(v).ok());
       },
       "--retries" => {
         i += 1;
@@ -94,24 +96,13 @@ pub fn parse_common_cli_args() -> CliOverrides {
         }
       },
       "--update-snapshots" | "-u" => {
-        let mode = match args.get(i + 1).map(String::as_str) {
-          Some("all") => {
+        // A bare flag means `changed`, Playwright's preset.
+        let mode = match args.get(i + 1).map(|v| UpdateSnapshotsMode::parse(v)) {
+          Some(Ok(mode)) => {
             i += 1;
-            UpdateSnapshotsMode::All
+            mode
           },
-          Some("changed") => {
-            i += 1;
-            UpdateSnapshotsMode::Changed
-          },
-          Some("missing") => {
-            i += 1;
-            UpdateSnapshotsMode::Missing
-          },
-          Some("none") => {
-            i += 1;
-            UpdateSnapshotsMode::None
-          },
-          _ => UpdateSnapshotsMode::All,
+          _ => UpdateSnapshotsMode::Changed,
         };
         overrides.update_snapshots = Some(mode);
       },
@@ -221,7 +212,7 @@ fn apply_env_overrides(overrides: &mut CliOverrides) {
     overrides.backend = Some(v);
   }
   if let Some(v) = env("FERRITEST_WORKERS") {
-    overrides.workers = v.parse().ok();
+    overrides.workers = ferridriver_config::test::parse_workers(&v).ok();
   }
   if let Some(v) = env("FERRITEST_GREP") {
     overrides.grep = Some(v);
@@ -302,9 +293,9 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
 
   // Environment variable overrides.
   if let Ok(w) = std::env::var("FERRIDRIVER_WORKERS")
-    && let Ok(v) = w.parse()
+    && let Ok(v) = ferridriver_config::test::parse_workers(&w)
   {
-    config.workers = v;
+    config.workers = Some(v);
   }
   if let Ok(r) = std::env::var("FERRIDRIVER_RETRIES")
     && let Ok(v) = r.parse()
@@ -322,7 +313,7 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
 
   // CLI overrides (highest priority).
   if let Some(w) = overrides.workers {
-    config.workers = w;
+    config.workers = Some(w);
   }
   if let Some(t) = overrides.timeout {
     config.timeout = t;
@@ -471,13 +462,7 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
     config.trace = TraceMode::parse_label(&t);
   }
 
-  // Auto-detect worker count.
-  if config.workers == 0 {
-    let cpus = std::thread::available_parallelism()
-      .map(|n| n.get() as u32)
-      .unwrap_or(4);
-    config.workers = (cpus / 2).max(1);
-  }
+  config.workers = Some(config.worker_count());
 
   // Normalize browser↔backend consistency after all overrides are applied.
   config.browser.apply_use_engine();

@@ -1,12 +1,10 @@
 //! Playwright `WebKit` element handle — DOM-node operations addressed
 //! by a `Runtime.RemoteObject.objectId` on the page's target session.
 
-use base64::Engine as _;
 use serde_json::{Value, json};
 
 use super::connection::{ConnectionError, Session};
 use super::protocol;
-use crate::backend::ImageFormat;
 use crate::error::{FerriError, Result};
 
 /// Element handle for the PW `WebKit` backend.
@@ -141,55 +139,6 @@ impl WebKitElement {
       )
       .await?;
     Ok(())
-  }
-
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
-    let rect = self
-      .call_fn_value(
-        "function(){this.scrollIntoView({block:'center'});\
-         const r=this.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};}",
-      )
-      .await?
-      .ok_or_else(|| FerriError::backend("webkit: element rect null"))?;
-    let resp = self
-      .target
-      .send(
-        "Page.snapshotRect",
-        json!({
-          "x": rect.get("x").and_then(Value::as_f64).unwrap_or(0.0),
-          "y": rect.get("y").and_then(Value::as_f64).unwrap_or(0.0),
-          "width": rect.get("width").and_then(Value::as_f64).unwrap_or(0.0),
-          "height": rect.get("height").and_then(Value::as_f64).unwrap_or(0.0),
-          "coordinateSystem": "Viewport",
-        }),
-      )
-      .await
-      .map_err(map_err)?;
-    let data_url = resp.get("dataURL").and_then(Value::as_str).unwrap_or_default();
-    let b64 = data_url.split_once(',').map_or(data_url, |(_, d)| d);
-    let png = base64::engine::general_purpose::STANDARD
-      .decode(b64)
-      .map_err(|e| FerriError::backend(format!("element screenshot base64: {e}")))?;
-    match format {
-      ImageFormat::Png => Ok(png),
-      // `Page.snapshotRect` only produces PNG — transcode like the
-      // page-screenshot path (Playwright transcodes client-side too,
-      // jpeg-js quality default 80).
-      ImageFormat::Jpeg => {
-        let img = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
-          .map_err(|e| FerriError::backend(format!("element screenshot png decode: {e}")))?;
-        let mut out = std::io::Cursor::new(Vec::new());
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80);
-        img
-          .to_rgb8()
-          .write_with_encoder(encoder)
-          .map_err(|e| FerriError::backend(format!("element screenshot jpeg encode: {e}")))?;
-        Ok(out.into_inner())
-      },
-      ImageFormat::Webp => Err(FerriError::unsupported(
-        "screenshot type 'webp' is not supported on the WebKit backend (Page.snapshotRect produces PNG; Playwright supports webp on Chromium only)",
-      )),
-    }
   }
 
   /// Set the file list on this `<input type=file>` element via the

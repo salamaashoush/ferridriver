@@ -1,9 +1,7 @@
-use base64::Engine;
 use serde_json::{Value, json};
 
 use super::page::WebDriverPage;
 use super::session::Command;
-use crate::backend::ImageFormat;
 use crate::error::{FerriError, Result};
 
 pub struct WebDriverElement {
@@ -97,34 +95,5 @@ impl WebDriverElement {
       .as_f64()
       .ok_or_else(|| FerriError::protocol("WebDriver element rectangle", "missing y"))?;
     Ok((x, y))
-  }
-
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
-    let value = self
-      .page
-      .command(Command::get(&["element", &self.id, "screenshot"]))
-      .await?;
-    let encoded = value
-      .as_str()
-      .ok_or_else(|| FerriError::protocol("WebDriver element screenshot", "expected base64 PNG"))?;
-    let png = base64::engine::general_purpose::STANDARD
-      .decode(encoded)
-      .map_err(|error| FerriError::protocol("WebDriver element screenshot", error.to_string()))?;
-    if matches!(format, ImageFormat::Png) {
-      return Ok(png);
-    }
-    let image = image::load_from_memory(&png).map_err(|error| FerriError::backend(error.to_string()))?;
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    image
-      .write_to(
-        &mut bytes,
-        match format {
-          ImageFormat::Png => image::ImageFormat::Png,
-          ImageFormat::Jpeg => image::ImageFormat::Jpeg,
-          ImageFormat::Webp => image::ImageFormat::WebP,
-        },
-      )
-      .map_err(|error| FerriError::backend(error.to_string()))?;
-    Ok(bytes.into_inner())
   }
 }

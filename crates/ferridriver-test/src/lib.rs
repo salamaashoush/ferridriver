@@ -92,6 +92,7 @@ pub type Result<T> = std::result::Result<T, model::TestFailure>;
 
 // -- Core modules --
 pub mod artifacts;
+pub mod comparator;
 pub mod config;
 pub mod context;
 pub(crate) mod context_pool;

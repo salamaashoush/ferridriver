@@ -152,7 +152,7 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
   };
 
   let config = TestConfig {
-    workers: num_workers,
+    workers: Some(num_workers),
     timeout: 10_000,
     reporter: vec![ReporterConfig {
       name: "none".into(),

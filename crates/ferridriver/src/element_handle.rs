@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::backend::{AnyElement, ImageFormat};
+use crate::backend::AnyElement;
 use crate::error::{FerriError, Result};
 use crate::js_handle::{HandleRemote, JSHandle, disposed_error};
 use crate::page::Page;
@@ -440,11 +440,7 @@ impl ElementHandle {
     let result = self
       .js_handle
       .evaluate(
-        "el => {\
-          const r = el.getBoundingClientRect();\
-          if (r.width === 0 && r.height === 0 && r.x === 0 && r.y === 0) return null;\
-          return {x: r.x, y: r.y, width: r.width, height: r.height};\
-        }",
+        &format!("el => ({}).call(el)", crate::screenshotter::MAIN_FRAME_BOX_FN),
         empty_arg(),
         Some(true),
       )
@@ -674,18 +670,28 @@ impl ElementHandle {
 
   pub(crate) async fn screenshot_impl(&self, opts: crate::options::ElementScreenshotOptions) -> Result<Vec<u8>> {
     self.ensure_live()?;
-    let format = match opts.format.unwrap_or_default() {
-      crate::options::ScreenshotFormat::Png => ImageFormat::Png,
-      crate::options::ScreenshotFormat::Jpeg => ImageFormat::Jpeg,
-      crate::options::ScreenshotFormat::Webp => ImageFormat::Webp,
-    };
-    let capture = async { self.any_element().screenshot(format).await };
-    let bytes = match opts.timeout {
-      Some(ms) if ms > 0 => match tokio::time::timeout(std::time::Duration::from_millis(ms), capture).await {
-        Ok(res) => res?,
-        Err(_) => return Err(crate::error::FerriError::timeout("screenshot", ms)),
-      },
-      _ => capture.await?,
+    let request = crate::screenshotter::Request::from(&opts);
+    let format = request.validate(None)?;
+    let page = Arc::clone(self.page());
+    page.inner.ensure_engine_injected().await?;
+    let timeout_ms = opts.timeout.unwrap_or_else(|| page.default_timeout());
+    let deadline = (timeout_ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms));
+    let _queue = page.screenshot_queue.lock().await;
+    let mut attempt = 0usize;
+    let bytes = loop {
+      let backoff =
+        crate::locator::Locator::RETRY_BACKOFFS_MS[attempt.min(crate::locator::Locator::RETRY_BACKOFFS_MS.len() - 1)];
+      attempt += 1;
+      if backoff > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+      }
+      if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+        return Err(FerriError::timeout("screenshot", timeout_ms));
+      }
+      match crate::screenshotter::screenshot_resolved_element(&page, self.any_element(), format, &request).await {
+        Err(e) if e.to_string().contains("error:notvisible") => {},
+        other => break other?,
+      }
     };
     if let Some(ref path) = opts.path {
       if let Some(parent) = path.parent()
@@ -1428,24 +1434,6 @@ impl ElementHandle {
     let result = locator.set_input_files_impl(files, opts).await;
     self.temp_untag().await;
     result
-  }
-
-  /// Playwright: `elementHandle.screenshot(options?)` with the full
-  /// option bag (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:187`).
-  /// Captures the element's bounding rect; `opts.format` drives the
-  /// PNG/JPEG selection, with the remaining options carried on the
-  /// backend path when supported.
-  ///
-  /// # Errors
-  ///
-  /// Forwards the backend's screenshot error.
-  pub async fn screenshot_with_opts(&self, opts: crate::backend::ScreenshotOpts) -> Result<Vec<u8>> {
-    self.ensure_live()?;
-    // Backend path today: element-level screenshot takes only a format
-    // argument; the other fields of `ScreenshotOpts` are accepted at
-    // this layer for API parity with Playwright and are honoured
-    // transparently when the backend grows support.
-    self.any_element().screenshot(opts.format).await
   }
 }
 

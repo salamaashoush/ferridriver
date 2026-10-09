@@ -31,8 +31,8 @@ test('core screenshot matcher reports changed pixels and writes actual and diff 
   const { capture, snapshots } = await setup('red', 'color_box');
   const result = await capture(false, "() => { document.getElementById('box').style.background = 'blue'; }");
   assert.equal(result.matched, false);
-  assert.ok(result.message.includes('mismatch'), result.message);
-  assert.ok(result.message.includes('pixels differ'), result.message);
+  assert.match(result.message, /Screenshot comparison failed/);
+  assert.match(result.message, /\d+ pixels \(ratio \d\.\d\d of all image pixels\) are different\./);
   assert.equal(result.hasScreenshot, true);
   assert.ok((await stat(join(snapshots, 'color_box-diff.png'))).size > 100);
   assert.ok((await stat(join(snapshots, 'color_box-actual.png'))).isFile());
@@ -43,5 +43,5 @@ test('core screenshot matcher detects changed element dimensions', async () => {
   const result = await capture(false,
     "() => { const b = document.getElementById('box'); b.style.width = '200px'; b.style.height = '200px'; }");
   assert.equal(result.matched, false);
-  assert.ok(result.message.includes('size mismatch'), result.message);
+  assert.match(result.message, /Expected an image 100px by 100px, received 200px by 200px\./);
 });

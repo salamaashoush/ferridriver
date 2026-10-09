@@ -182,7 +182,9 @@ fn lower_launch_options(opts: LaunchOptions) -> core_opts::LaunchOptions {
       .map(std::path::PathBuf::from)
       .collect(),
     channel: opts.channel,
-    env: None,
+    env: opts
+      .env
+      .map(|env| env.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()),
     slow_mo: opts.slow_mo.map(u64::from),
     timeout: opts.timeout.map(u64::from),
     downloads_path: opts.downloads_path.map(std::path::PathBuf::from),

@@ -309,8 +309,16 @@ action_options!(crate::options::PdfOptions {
 });
 
 action_options!(crate::options::ElementScreenshotOptions {
+  opt animations: crate::options::AnimationsMode,
+  opt caret: crate::options::CaretMode,
   opt format: crate::options::ScreenshotFormat,
+  vec mask: crate::locator::Locator,
+  opt mask_color: String,
+  opt omit_background: bool,
   opt path: std::path::PathBuf,
+  opt quality: i64,
+  opt scale: crate::options::ScreenshotScale,
+  opt style: String,
   ms timeout: u64,
 });
 

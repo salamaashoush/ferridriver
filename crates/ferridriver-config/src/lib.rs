@@ -1016,7 +1016,7 @@ backend = "cdp-pipe"
 
     assert_eq!(root.mcp.server_name(), "unified-test");
     assert!(root.mcp.headless());
-    assert_eq!(root.test.workers, 7);
+    assert_eq!(root.test.workers, Some(7));
     assert_eq!(root.test.test_match, vec!["tests/**/*.spec.ts"]);
   }
 
@@ -1044,7 +1044,7 @@ test:
 
     assert_eq!(root.mcp.server_name(), "yaml-unified");
     assert!(root.mcp.headless());
-    assert_eq!(root.test.workers, 5);
+    assert_eq!(root.test.workers, Some(5));
   }
 
   #[test]
@@ -1065,7 +1065,7 @@ test:
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(root.mcp.server_name(), "json-unified");
-    assert_eq!(root.test.workers, 9);
+    assert_eq!(root.test.workers, Some(9));
   }
 
   #[test]
@@ -1084,7 +1084,7 @@ test:
     root.mcp.browser.backend = Some(mcp::BackendChoice::CdpWs);
     root.mcp.browser.headless = Some(true);
     root.mcp.browser.chrome_args = vec!["--no-sandbox".into()];
-    root.test.workers = 4;
+    root.test.workers = Some(4);
     root.test.timeout = 60_000;
     root.test.test_match = vec!["custom/**/*.spec.ts".into()];
     root.test.browser.headless = true;
@@ -1099,7 +1099,7 @@ test:
     assert_eq!(parsed.mcp.server.name.as_deref(), Some("custom"));
     assert_eq!(parsed.mcp.browser.backend, Some(mcp::BackendChoice::CdpWs));
     assert_eq!(parsed.mcp.browser.headless, Some(true));
-    assert_eq!(parsed.test.workers, 4);
+    assert_eq!(parsed.test.workers, Some(4));
     assert!(parsed.test.browser.headless);
     assert!(parsed.test.browser.use_options.is_mobile);
   }

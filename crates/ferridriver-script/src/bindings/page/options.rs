@@ -343,6 +343,29 @@ pub(crate) fn parse_screenshot_options<'js>(
   }
 }
 
+/// `LocatorScreenshotOptions` / `ElementHandleScreenshotOptions`: the
+/// page bag without `clip` and `fullPage`, which an element capture
+/// ignores just as upstream's `screenshotElement` does.
+pub(crate) fn parse_element_screenshot_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::ElementScreenshotOptions> {
+  let page = parse_screenshot_options(ctx, value)?;
+  Ok(ferridriver::options::ElementScreenshotOptions {
+    animations: page.animations,
+    caret: page.caret,
+    format: page.format,
+    mask: page.mask,
+    mask_color: page.mask_color,
+    omit_background: page.omit_background,
+    path: page.path,
+    quality: page.quality,
+    scale: page.scale,
+    style: page.style,
+    timeout: page.timeout,
+  })
+}
+
 /// Subset of Playwright's `PDFOptions` exposed to scripts. Path fields and
 /// advanced page-range/margin controls are not wired yet; users who need
 /// those can use `page.evaluate` with `window.print` or extend here.

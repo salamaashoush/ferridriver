@@ -5,13 +5,11 @@
 
 use std::sync::Arc;
 
-use base64::Engine;
 use serde_json::json;
 
 use super::input;
 use super::session::BidiSession;
 use super::types::EvaluateResult;
-use crate::backend::ImageFormat;
 use crate::error::{FerriError, Result};
 
 /// Element handle for the `BiDi` backend.
@@ -171,33 +169,5 @@ impl BidiElement {
       .call_fn("(el) => el.scrollIntoView({block: 'center', inline: 'center'})")
       .await;
     Ok(())
-  }
-
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
-    let format_type = match format {
-      ImageFormat::Png => "image/png",
-      ImageFormat::Jpeg => "image/jpeg",
-      ImageFormat::Webp => "image/webp",
-    };
-
-    let result = self
-      .session
-      .send_command(
-        "browsingContext.captureScreenshot",
-        json!({
-          "context": &*self.context_id,
-          "format": {"type": format_type},
-          "clip": {"type": "element", "element": {"sharedId": self.shared_id}}
-        }),
-      )
-      .await?;
-
-    let data_str = result
-      .get("data")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::backend("Element screenshot: missing data"))?;
-    base64::engine::general_purpose::STANDARD
-      .decode(data_str)
-      .map_err(|e| FerriError::Backend(format!("Element screenshot base64 decode: {e}")))
   }
 }

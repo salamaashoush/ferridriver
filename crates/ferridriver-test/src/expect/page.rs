@@ -49,18 +49,26 @@ pub trait PageSnapshotMatchers {
 impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
     let page = self.subject;
-    let actual_png = page.screenshot().await.map_err(|e| TestFailure {
-      message: format!("page screenshot failed: {e}"),
-      stack: None,
-      diff: None,
-      screenshot: None,
-    })?;
-
     // The comparison budget comes from `expect.toHaveScreenshot` when
     // the call named nothing of its own.
     let options = crate::expect::ScreenshotMatcherOptions::default()
       .with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
-    crate::snapshot::compare_screenshot_png_with(&actual_png, name, &options)
+    let timeout = options.timeout.unwrap_or(self.timeout);
+    let snap_dir = std::env::var("SNAPSHOT_DIR")
+      .map(std::path::PathBuf::from)
+      .unwrap_or_else(|_| std::path::PathBuf::from("__snapshots__"));
+    let paths = crate::snapshot::ScreenshotFiles::beside(&snap_dir, name);
+    crate::snapshot::settle_outside_host(
+      crate::snapshot::to_have_screenshot(
+        &paths,
+        &options,
+        crate::snapshot::env_update_mode(),
+        self.is_not,
+        timeout,
+        || crate::expect::locator::capture_page_with_options(page, &options),
+      )
+      .await,
+    )
   }
 
   async fn to_match_aria_snapshot(&self, expected: &str) -> Result<(), TestFailure> {

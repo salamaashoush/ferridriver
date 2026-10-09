@@ -20,9 +20,27 @@ pub struct RunnerArgs {
   #[arg(long, help_heading = "Run")]
   pub project: Vec<String>,
 
-  /// Number of parallel workers.
+  /// Number of parallel workers, or a percentage of logical CPU cores
+  /// (`50%`).
+  #[arg(long, short = 'j', value_parser = ferridriver_config::test::parse_workers, help_heading = "Run")]
+  pub workers: Option<u32>,
+
+  /// Update snapshots with the actual results: `all`, `changed`,
+  /// `missing`, `none` or `default`. A bare `-u` means `changed`.
+  #[arg(
+    long,
+    short = 'u',
+    value_name = "MODE",
+    num_args = 0..=1,
+    default_missing_value = "changed",
+    value_parser = ferridriver_config::test::UpdateSnapshotsMode::parse,
+    help_heading = "Run"
+  )]
+  pub update_snapshots: Option<ferridriver_config::test::UpdateSnapshotsMode>,
+
+  /// Ignore screenshot and snapshot expectations.
   #[arg(long, help_heading = "Run")]
-  pub workers: Option<usize>,
+  pub ignore_snapshots: bool,
 
   /// Shard across CI machines, `X/N` (e.g. `2/4` runs the second of four
   /// shards).

@@ -513,6 +513,58 @@ pub struct ScreenshotOptions {
   pub timeout: Option<f64>,
 }
 
+/// Playwright-parity `LocatorScreenshotOptions` /
+/// `ElementHandleScreenshotOptions`: [`ScreenshotOptions`] without
+/// `clip` and `fullPage`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ElementScreenshotOptions {
+  #[napi(ts_type = "'disabled' | 'allow'")]
+  pub animations: Option<String>,
+  #[napi(ts_type = "'hide' | 'initial'")]
+  pub caret: Option<String>,
+  #[napi(ts_type = "'png' | 'jpeg' | 'webp'", js_name = "type")]
+  pub format: Option<String>,
+  #[napi(ts_type = "Array<Locator>")]
+  pub mask: Option<Vec<LocatorRef>>,
+  pub mask_color: Option<String>,
+  pub omit_background: Option<bool>,
+  pub path: Option<String>,
+  pub quality: Option<i32>,
+  #[napi(ts_type = "'css' | 'device'")]
+  pub scale: Option<String>,
+  pub style: Option<String>,
+  pub timeout: Option<f64>,
+}
+
+impl ElementScreenshotOptions {
+  /// Lower to core options, materialising `mask` against `page`.
+  #[must_use]
+  pub fn into_core(self, page: &std::sync::Arc<ferridriver::Page>) -> ferridriver::options::ElementScreenshotOptions {
+    ferridriver::options::ElementScreenshotOptions {
+      animations: self
+        .animations
+        .as_deref()
+        .map(ferridriver::options::AnimationsMode::from),
+      caret: self.caret.as_deref().map(ferridriver::options::CaretMode::from),
+      format: self.format.as_deref().map(ferridriver::options::ScreenshotFormat::from),
+      mask: self
+        .mask
+        .unwrap_or_default()
+        .iter()
+        .map(|l| page.locator(&l.selector))
+        .collect(),
+      mask_color: self.mask_color,
+      omit_background: self.omit_background,
+      path: self.path.map(std::path::PathBuf::from),
+      quality: self.quality.map(i64::from),
+      scale: self.scale.as_deref().map(ferridriver::options::ScreenshotScale::from),
+      style: self.style,
+      timeout: self.timeout.map(f64_to_u64),
+    }
+  }
+}
+
 /// Viewport configuration.
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -1515,6 +1567,9 @@ pub struct LaunchOptions {
   pub extensions: Option<Vec<String>>,
   /// Browser distribution channel ("chrome", "chrome-beta", "msedge", ...).
   pub channel: Option<String>,
+  /// Environment variables visible to the browser.
+  #[napi(ts_type = "{ [key: string]: string | undefined }")]
+  pub env: Option<std::collections::HashMap<String, Option<String>>>,
   /// Slow down operations by this many ms (debugging).
   pub slow_mo: Option<u32>,
   /// Maximum time to wait for the browser to start (ms). `0` disables.

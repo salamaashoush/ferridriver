@@ -333,7 +333,7 @@ pub fn full_config(config: &TestConfig) -> serde_json::Value {
     "shard": serde_json::Value::Null,
     "updateSnapshots": config.update_snapshots,
     "version": env!("CARGO_PKG_VERSION"),
-    "workers": config.workers,
+    "workers": config.worker_count(),
     "webServer": config.web_server,
   })
 }

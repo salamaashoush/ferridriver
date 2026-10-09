@@ -229,22 +229,10 @@ impl ElementHandle {
     self.inner.scroll_into_view_if_needed().await.into_napi()
   }
 
-  /// Playwright: `elementHandle.screenshot(opts?): Promise<Buffer>`.
-  /// Accepts a subset of the full option bag today (`format`); the
-  /// remaining fields are carried at the core layer until the shared
-  /// locator-level screenshot gets the full surface.
+  /// Playwright: `elementHandle.screenshot(options?: ElementHandleScreenshotOptions): Promise<Buffer>`.
   #[napi]
-  pub async fn screenshot(&self, format: Option<String>) -> Result<Buffer> {
-    let fmt = match format.as_deref().unwrap_or("png") {
-      "png" => ferridriver::options::ScreenshotFormat::Png,
-      "jpeg" | "jpg" => ferridriver::options::ScreenshotFormat::Jpeg,
-      "webp" => ferridriver::options::ScreenshotFormat::Webp,
-      other => return Err(napi::Error::from_reason(format!("invalid screenshot format: {other}"))),
-    };
-    let opts = ferridriver::options::ElementScreenshotOptions {
-      format: Some(fmt),
-      ..Default::default()
-    };
+  pub async fn screenshot(&self, options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
+    let opts = options.unwrap_or_default().into_core(self.inner.page());
     let bytes = self.inner.screenshot().options(opts).await.into_napi()?;
     Ok(bytes.into())
   }

@@ -20,8 +20,37 @@ pub struct InViewportOptions {
 /// Options for `expect(locator).toHaveCSS()`.
 #[derive(Debug, Clone, Default)]
 pub struct HaveCssOptions {
-  /// Pseudo-element selector (e.g. `"::before"`, `"::after"`).
-  pub pseudo: Option<String>,
+  /// Pseudo-element to read computed styles from.
+  pub pseudo: Option<CssPseudo>,
+}
+
+/// Playwright's `pseudo?: 'before' | 'after'`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CssPseudo {
+  Before,
+  After,
+}
+
+impl CssPseudo {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Before => "before",
+      Self::After => "after",
+    }
+  }
+}
+
+impl std::str::FromStr for CssPseudo {
+  type Err = String;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s {
+      "before" => Ok(Self::Before),
+      "after" => Ok(Self::After),
+      other => Err(format!("pseudo: expected \"before\" or \"after\", got \"{other}\"")),
+    }
+  }
 }
 
 /// Wrap a subject for auto-retrying assertions.

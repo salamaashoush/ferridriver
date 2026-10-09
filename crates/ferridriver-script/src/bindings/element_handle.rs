@@ -5,12 +5,10 @@
 //! Phase E bolts the ~25 Playwright DOM methods on top of this same class.
 
 use ferridriver::ElementHandle;
-use ferridriver::backend::ImageFormat;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use crate::bindings::convert::FerriResultCtxExt;
-use crate::bindings::convert::type_error;
 use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
 
 /// Parse Playwright's `options?: { timeout?: number }` bag into a
@@ -29,35 +27,6 @@ fn parse_timeout_options<'js>(
     _ => JsTimeoutOpts::default(),
   };
   Ok(parsed.timeout.map(crate::bindings::convert::ms_f64_to_u64))
-}
-
-/// Extract `{ type?: 'png' | 'jpeg' | 'webp' }` from a user-supplied
-/// screenshot options bag. Defaults to PNG when the caller omits the
-/// bag or the `type` field. Matches Playwright's
-/// `elementHandle.screenshot(options?)` surface.
-fn parse_screenshot_format<'js>(
-  ctx: &rquickjs::Ctx<'js>,
-  options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-) -> rquickjs::Result<ImageFormat> {
-  let Some(opts_val) = options.0 else {
-    return Ok(ImageFormat::Png);
-  };
-  if opts_val.is_undefined() || opts_val.is_null() {
-    return Ok(ImageFormat::Png);
-  }
-  let Some(obj) = opts_val.as_object() else {
-    return Ok(ImageFormat::Png);
-  };
-  let type_field: Option<String> = obj.get("type").ok();
-  match type_field.as_deref() {
-    None | Some("" | "png") => Ok(ImageFormat::Png),
-    Some("jpeg" | "jpg") => Ok(ImageFormat::Jpeg),
-    Some("webp") => Ok(ImageFormat::Webp),
-    Some(other) => Err(type_error(
-      ctx,
-      format!("screenshot: unsupported screenshot type {other:?}; expected 'png' | 'jpeg' | 'webp'"),
-    )),
-  }
 }
 
 /// QuickJS-visible wrapper around a core [`ElementHandle`].
@@ -390,11 +359,7 @@ impl ElementHandleJs {
       .await
   }
 
-  /// Playwright: `elementHandle.screenshot(opts?)`. Today accepts
-  /// `{ type?: 'png'|'jpeg'|'webp' }` via the `opts.type` field;
-  /// additional `ScreenshotOpts` fields are carried at the core layer
-  /// and take effect once the locator-level screenshot gets the full
-  /// bag.
+  /// Playwright: `elementHandle.screenshot(options?: ElementHandleScreenshotOptions): Promise<Buffer>`.
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(
     &self,
@@ -404,16 +369,7 @@ impl ElementHandleJs {
   ) -> rquickjs::Result<Vec<u8>> {
     call_site
       .scope(async move {
-        let format = parse_screenshot_format(&ctx, options)?;
-        let format = match format {
-          ImageFormat::Png => ferridriver::options::ScreenshotFormat::Png,
-          ImageFormat::Jpeg => ferridriver::options::ScreenshotFormat::Jpeg,
-          ImageFormat::Webp => ferridriver::options::ScreenshotFormat::Webp,
-        };
-        let opts = ferridriver::options::ElementScreenshotOptions {
-          format: Some(format),
-          ..Default::default()
-        };
+        let opts = crate::bindings::page::options::parse_element_screenshot_options(&ctx, options)?;
         self.inner.screenshot().options(opts).await.into_js_with(&ctx)
       })
       .await

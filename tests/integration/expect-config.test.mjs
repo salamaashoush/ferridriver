@@ -12,6 +12,7 @@ async function suite(config, source) {
       timeout = 20000
       outputDir = "out"
       snapshotDir = "snaps"
+      updateSnapshots = "missing"
       reporter = [{ name = "list" }]
       ${config}
       [test.browser]
@@ -76,7 +77,7 @@ for (const [ratio, failures] of [[0.5, 1], [0.01, 2]]) {
   test(`screenshot comparison uses the ${ratio} config budget and the stricter call override`, async () => {
     const result = await suite(`[test.expect]\ntimeout = 1000\n[test.expect.toHaveScreenshot]\nmaxDiffPixelRatio = ${ratio}`, screenshot);
     assert.equal(result.code, 1, result.text);
-    assert.equal(result.text.split('pixels differ').length - 1, failures, result.text);
+    assert.equal(result.text.split('of all image pixels) are different.').length - 1, failures, result.text);
   });
 }
 
@@ -92,8 +93,8 @@ for (const ownBudget of [false, true]) {
       timeout = 800
       ${ownBudget ? '[test.projects.expect.toHaveScreenshot]\nmaxDiffPixelRatio = 0.9' : ''}`, screenshot);
     assert.equal(result.code, 1, result.text);
-    assert.ok(result.text.includes('pixels differ'), result.text);
-    if (ownBudget) assert.equal(result.text.split('pixels differ').length - 1, 1, result.text);
+    assert.ok(result.text.includes('of all image pixels) are different.'), result.text);
+    if (ownBudget) assert.equal(result.text.split('of all image pixels) are different.').length - 1, 1, result.text);
   });
 }
 

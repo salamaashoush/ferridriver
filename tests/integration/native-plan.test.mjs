@@ -15,6 +15,7 @@ testMatch = ["**/*.test.ts"]
 workers = 1
 outputDir = "test-results"
 snapshotDir = "__snapshots__"
+updateSnapshots = "missing"
 reporter = [{ name = "list" }]
 [test.browser]
 headless = true

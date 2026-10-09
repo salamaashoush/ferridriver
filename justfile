@@ -146,6 +146,38 @@ perf-diff:
   [ "$stale" -eq 0 ]
   cd "$root" && cargo test -p ferridriver-perf --test differential
 
+# Check the screenshot comparators against Playwright's own.
+#
+# `ferridriver_test::comparator` ports pixelmatch and ssim-cie94. This
+# runs the originals, unmodified, from the Playwright checkout beside
+# this repository (`PLAYWRIGHT_REPO` overrides it) over the image pairs
+# in crates/ferridriver-test/tests/fixtures/comparator, fails if their
+# verdicts differ from the recording checked in there, and then runs the
+# offline comparison `just test` runs too. Needs bun.
+comparator-diff:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  root="{{justfile_directory()}}"
+  fixtures="$root/crates/ferridriver-test/tests/fixtures/comparator"
+  fresh="$(mktemp)"
+  trap 'rm -f "$fresh"' EXIT
+  bun "$root/scripts/comparator-diff/engine.mjs" "$fixtures" > "$fresh"
+  python3 -c 'import json,sys; a,b=(json.load(open(p))["cases"] for p in sys.argv[1:]); sys.exit(a!=b)' \
+    "$fixtures/upstream.json" "$fresh" \
+    || { echo "the recording is out of date with upstream -- run: just comparator-diff-update" >&2; exit 1; }
+  cd "$root" && cargo test -p ferridriver-test --test comparator_differential
+
+# Re-capture the comparator fixtures and re-record upstream's verdicts.
+# Read the resulting diff before committing it.
+comparator-diff-update:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  root="{{justfile_directory()}}"
+  fixtures="$root/crates/ferridriver-test/tests/fixtures/comparator"
+  cargo build --locked --bin ferridriver
+  "$root/target/debug/ferridriver" run --no-inherit "$root/scripts/comparator-diff/capture.ts" -- "$fixtures"
+  bun "$root/scripts/comparator-diff/engine.mjs" "$fixtures" > "$fixtures/upstream.json"
+
 # Re-record what the real engine says about each fixture trace.
 #
 # Run after deliberately changing what we compare, or after bumping the

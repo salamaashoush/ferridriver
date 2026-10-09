@@ -755,7 +755,7 @@ if (!window.__fd) {
     // out of the injected script.
     matchAriaTemplate: (node: Element, template: any) => {
       const result = matchesExpectAriaTemplate(node, template);
-      return { matches: result.matches.length > 0, received: result.received.raw };
+      return { matches: result.matches.length > 0, received: result.received.raw, regex: result.received.regex };
     },
     ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
       injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),

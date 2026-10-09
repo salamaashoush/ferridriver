@@ -261,6 +261,9 @@ pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
 pub struct AriaSnapshotMatch {
   pub matches: bool,
   pub received: String,
+  /// The live tree rendered with its text as patterns: what a newly
+  /// generated baseline file holds.
+  pub regex: String,
 }
 
 /// A lazy element locator bound to a [`crate::Frame`]. Every Locator
@@ -1558,6 +1561,11 @@ impl Locator {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string(),
+      regex: parsed
+        .get("regex")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string(),
     })
   }
 
@@ -1654,20 +1662,19 @@ impl Locator {
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
     let val = retry_resolve!(self, None, "boundingBox", |el, _page| async move {
-      el.call_js_fn_value(
-        "function() { var r = this.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}; }",
-      )
-      .await
+      el.call_js_fn_value(crate::screenshotter::MAIN_FRAME_BOX_FN).await
     })?;
-    match val {
-      Some(v) => Ok(Some(BoundingBox {
-        x: v["x"].as_f64().unwrap_or(0.0),
-        y: v["y"].as_f64().unwrap_or(0.0),
-        width: v["width"].as_f64().unwrap_or(0.0),
-        height: v["height"].as_f64().unwrap_or(0.0),
-      })),
-      None => Ok(None),
-    }
+    Ok(
+      val
+        .as_ref()
+        .and_then(crate::screenshotter::parse_rect)
+        .map(|r| BoundingBox {
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+        }),
+    )
   }
 
   // ── Waiting ───────────────────────────────────────────────────────────────
@@ -1787,13 +1794,13 @@ impl Locator {
   }
 
   pub(crate) async fn screenshot_impl(&self, opts: crate::options::ElementScreenshotOptions) -> Result<Vec<u8>> {
-    let format = match opts.format.unwrap_or_default() {
-      crate::options::ScreenshotFormat::Png => crate::backend::ImageFormat::Png,
-      crate::options::ScreenshotFormat::Jpeg => crate::backend::ImageFormat::Jpeg,
-      crate::options::ScreenshotFormat::Webp => crate::backend::ImageFormat::Webp,
-    };
+    let request = crate::screenshotter::Request::from(&opts);
+    let format = request.validate(None)?;
+    let page = Arc::clone(self.frame.page_arc());
+    let _queue = page.screenshot_queue.lock().await;
+    let (page_ref, request_ref) = (&page, &request);
     let bytes = retry_resolve!(self, opts.timeout, "screenshot", |el, _page| async move {
-      el.screenshot(format).await
+      crate::screenshotter::screenshot_resolved_element(page_ref, &el, format, request_ref).await
     })?;
     if let Some(ref path) = opts.path {
       if let Some(parent) = path.parent()
@@ -2491,7 +2498,7 @@ impl Locator {
   // methods. Retry backoff: [0, 20, 50, 100, 100, 500]ms (same as Playwright).
 
   /// Backoff schedule matching Playwright's retryWithProgressAndTimeouts.
-  const RETRY_BACKOFFS_MS: &'static [u64] = &[0, 0, 20, 50, 100, 100, 500];
+  pub(crate) const RETRY_BACKOFFS_MS: &'static [u64] = &[0, 0, 20, 50, 100, 100, 500];
 
   /// Resolve element + run JS callback in ONE CDP call, with retry.
   /// Used by: innerText, textContent, innerHTML, getAttribute, inputValue, isVisible, etc.

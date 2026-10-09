@@ -562,10 +562,7 @@ fn modifier_call<'js>(
     return runtime_modifier(ctx, kind, args);
   }
 
-  let reason = args
-    .iter()
-    .skip(1)
-    .find_map(|v| v.as_string().and_then(|s| s.to_string().ok()));
+  let reason = modifier_description(args);
 
   if let Some(func) = callback {
     let (line, col) = capture_location(ctx);
@@ -598,6 +595,17 @@ fn modifier_call<'js>(
     None => r.file_annotations.push(FileAnnotationReg { annotation, line, col }),
   })
   .map_err(|e| throw_script_error(ctx, &e))
+}
+
+/// A modifier's description: the lone string in
+/// `test.{skip,fixme,fail,slow}(description)`, otherwise the argument
+/// after the condition or callback (`common/testType.ts::_modifier`).
+fn modifier_description(args: &[Value<'_>]) -> Option<String> {
+  let at = usize::from(!(args.len() == 1 && args[0].as_string().is_some()));
+  args
+    .get(at)
+    .and_then(|v| v.as_string())
+    .and_then(|s| s.to_string().ok())
 }
 
 /// JS truthiness for a modifier condition. `test.skip(0)` and
@@ -647,10 +655,11 @@ fn runtime_modifier(ctx: &Ctx<'_>, kind: &str, args: &[Value<'_>]) -> rquickjs::
   // No argument at all is unconditional; otherwise JS falsiness decides,
   // so `test.skip(0)` is a no-op rather than an unconditional skip.
   let condition = args.first().is_none_or(truthy);
-  let reason = args.iter().find_map(|v| v.as_string().and_then(|s| s.to_string().ok()));
+  let reason = modifier_description(args);
   if !condition {
     return Ok(());
   }
+  bridge.annotate(kind.to_string(), reason.clone());
   match kind {
     "skip" | "fixme" => {
       bridge.set_skip(reason.clone());
@@ -2684,6 +2693,7 @@ async fn apply_suite_modifier<'js>(
   }
   let bridge = with_test_registry(ctx, |r| r.current.as_ref().map(|c| Arc::clone(&c.bridge)))?
     .ok_or_else(|| ScriptError::internal("no current test for a suite modifier".to_string()))?;
+  bridge.annotate(kind.clone(), description.clone());
   match kind.as_str() {
     "skip" | "fixme" => {
       bridge.set_skip(description.clone());

@@ -248,7 +248,7 @@ async fn deep_profile() {
     shard: None,
   };
   let config = TestConfig {
-    workers: 1,
+    workers: Some(1),
     timeout: 5000,
     reporter: vec![ReporterConfig {
       name: "none".into(),

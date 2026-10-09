@@ -88,6 +88,7 @@ pub use video::Video;
 // ── Public lower-level modules (needed by MCP server and consumers) ──
 pub mod backend;
 pub mod route;
+mod screenshotter;
 pub mod snapshot;
 pub mod state;
 pub mod trace;

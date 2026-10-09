@@ -990,16 +990,19 @@ impl LocatorJs {
       .await
   }
 
-  /// Playwright: `locator.screenshot(options?): Promise<Buffer>`.
-  /// Thin delegator to core `Locator::screenshot` (PNG bytes).
+  /// Playwright: `locator.screenshot(options?: LocatorScreenshotOptions): Promise<Buffer>`.
   #[qjs(rename = "screenshot")]
-  pub async fn screenshot(
+  pub async fn screenshot<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<u8>> {
     call_site
-      .scope(async move { self.inner.screenshot().await.into_js_with(&ctx) })
+      .scope(async move {
+        let opts = crate::bindings::page::options::parse_element_screenshot_options(&ctx, options)?;
+        self.inner.screenshot().options(opts).await.into_js_with(&ctx)
+      })
       .await
   }
 

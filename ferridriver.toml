@@ -9,6 +9,9 @@ steps = ["tests/steps/**/*.ts"]
 baseUrl = "http://127.0.0.1:47831"
 # Projects share the worker budget, including browser teardown.
 maxParallelProjects = 0
+# The snapshot specs create their baselines as they run; `__snapshots__`
+# is not committed.
+updateSnapshots = "missing"
 
 [test.browser]
 headless = true

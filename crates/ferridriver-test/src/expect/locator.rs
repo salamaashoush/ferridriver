@@ -70,7 +70,6 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
     let locator = self.subject;
     let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
     let snap_dir = std::path::PathBuf::from("__snapshots__");
-    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
     let info = crate::model::TestInfo {
       test_id: crate::model::TestId {
         repeat_each_index: 0,
@@ -88,11 +87,12 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       output_dir: std::path::PathBuf::from("test-results"),
       snapshot_dir: snap_dir,
       snapshot_path_template: None,
-      update_snapshots: crate::config::UpdateSnapshotsMode::default(),
+      update_snapshots: crate::snapshot::env_update_mode(),
       ignore_snapshots: false,
       attachments: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       soft_errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+      non_retriable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       snapshot_suffix: std::sync::Arc::new(tokio::sync::Mutex::new(String::new())),
       column: None,
@@ -113,12 +113,13 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       open_steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     };
-    crate::snapshot::assert_snapshot(
+    crate::snapshot::settle_outside_host(crate::snapshot::match_value_snapshot(
       &info,
-      &actual,
+      &crate::snapshot::SnapshotValue::Text(actual),
       &crate::snapshot_path::SnapshotName::One(name.to_string()),
-      update,
-    )
+      &crate::comparator::ImageComparatorOptions::default(),
+      false,
+    ))
   }
 
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
@@ -135,12 +136,18 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
     let snap_dir = std::env::var("SNAPSHOT_DIR")
       .map(std::path::PathBuf::from)
       .unwrap_or_else(|_| std::path::PathBuf::from("__snapshots__"));
-    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
     let paths = crate::snapshot::ScreenshotFiles::beside(&snap_dir, name);
-    crate::snapshot::screenshot_until_match(&paths, &options, update, timeout, || {
-      capture_with_options(locator, &options)
-    })
-    .await
+    crate::snapshot::settle_outside_host(
+      crate::snapshot::to_have_screenshot(
+        &paths,
+        &options,
+        crate::snapshot::env_update_mode(),
+        self.is_not,
+        timeout,
+        || capture_with_options(locator, &options),
+      )
+      .await,
+    )
   }
 
   async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
@@ -245,7 +252,7 @@ async fn capture_target(
     _ => None,
   };
   // Playwright's default is `hide`; only an explicit `initial` keeps the
-  // caret, which is exactly what core's `build_css` encodes.
+  // caret.
   let caret = match options.caret.as_deref() {
     Some("initial") => Some(CaretMode::Initial),
     Some("hide") => Some(CaretMode::Hide),
@@ -257,119 +264,51 @@ async fn capture_target(
     _ => None,
   };
 
-  let raw_png = if let Some(locator) = locator {
-    {
-      // The element form has no `mask`/`style` of its own on the wire,
-      // so the page carries them and the element supplies the bounds.
-      let page_opts = ferridriver::options::ScreenshotOptions {
-        animations,
-        caret,
-        mask: options.mask.iter().map(|sel| page.locator(sel)).collect(),
-        mask_color: options.mask_color.clone(),
-        scale,
-        style: (!style.is_empty()).then(|| style.clone()),
-        ..Default::default()
-      };
-      let restore = install_page_capture_state(page, &page_opts).await?;
-      let opts = ferridriver::options::ElementScreenshotOptions {
-        omit_background: options.omit_background,
-        ..Default::default()
-      };
-      let shot = locator.screenshot().options(opts).await;
-      restore.undo(page).await;
-      shot
-    }
+  let mask: Vec<Locator> = options.mask.iter().map(|sel| page.locator(sel)).collect();
+  let style = (!style.is_empty()).then_some(style);
+  let shot = if let Some(locator) = locator {
+    let opts = ferridriver::options::ElementScreenshotOptions {
+      animations,
+      caret,
+      mask,
+      mask_color: options.mask_color.clone(),
+      omit_background: options.omit_background,
+      scale,
+      style,
+      ..Default::default()
+    };
+    locator.screenshot().options(opts).await
   } else {
-    {
-      let opts = ferridriver::options::ScreenshotOptions {
-        animations,
-        caret,
-        full_page: options.full_page,
-        mask: options.mask.iter().map(|sel| page.locator(sel)).collect(),
-        mask_color: options.mask_color.clone(),
-        omit_background: options.omit_background,
-        scale,
-        style: (!style.is_empty()).then_some(style),
-        ..Default::default()
-      };
-      page.screenshot().options(opts).await
-    }
-  }
-  .map_err(|e| TestFailure {
+    let opts = ferridriver::options::ScreenshotOptions {
+      animations,
+      caret,
+      clip: options.clip.map(|c| ferridriver::options::ClipRect {
+        x: c.x,
+        y: c.y,
+        width: c.width,
+        height: c.height,
+      }),
+      full_page: options.full_page,
+      mask,
+      mask_color: options.mask_color.clone(),
+      omit_background: options.omit_background,
+      scale,
+      style,
+      ..Default::default()
+    };
+    page.screenshot().options(opts).await
+  };
+  let png = shot.map_err(|e| TestFailure {
     message: format!("screenshot failed: {e}"),
     stack: None,
     diff: None,
     screenshot: None,
-  });
+  })?;
 
-  let png = raw_png?;
-
-  if let Some(clip) = options.clip {
-    Ok(crop_png_to_clip(&png, &clip)?)
-  } else {
-    Ok(png)
+  match (locator, options.clip) {
+    (Some(_), Some(clip)) => crop_png_to_clip(&png, &clip),
+    _ => Ok(png),
   }
-}
-
-/// The page-level DOM state an ELEMENT capture still needs.
-///
-/// `locator.screenshot()` takes only the element's own options on every
-/// backend, so the style rules and mask overlays that belong to the page
-/// are installed around it and torn down after — the same pair core runs
-/// inside `page.screenshot()`, driven from here so both subjects reach
-/// one implementation.
-struct PageCaptureState {
-  style: bool,
-  mask: bool,
-}
-
-impl PageCaptureState {
-  async fn undo(self, page: &Arc<ferridriver::Page>) {
-    if self.mask {
-      let _ = eval_void(page, ferridriver::backend::screenshot_js::uninstall_mask_js()).await;
-    }
-    if self.style {
-      let _ = eval_void(page, ferridriver::backend::screenshot_js::uninstall_style_js()).await;
-    }
-  }
-}
-
-async fn eval_void(page: &Arc<ferridriver::Page>, js: &str) -> Result<(), ferridriver::error::FerriError> {
-  page
-    .evaluate(js, ferridriver::protocol::SerializedArgument::default(), None)
-    .await
-    .map(|_| ())
-}
-
-async fn install_page_capture_state(
-  page: &Arc<ferridriver::Page>,
-  opts: &ferridriver::options::ScreenshotOptions,
-) -> Result<PageCaptureState, TestFailure> {
-  let wire = opts.to_backend_opts();
-  let fail = |what: &str, e: ferridriver::error::FerriError| TestFailure {
-    message: format!("screenshot capture-options {what} failed: {e}"),
-    stack: None,
-    diff: None,
-    screenshot: None,
-  };
-
-  let css = ferridriver::backend::screenshot_js::build_css(&wire);
-  let mut state = PageCaptureState {
-    style: false,
-    mask: false,
-  };
-  if !css.is_empty() {
-    eval_void(page, &ferridriver::backend::screenshot_js::install_style_js(&css))
-      .await
-      .map_err(|e| fail("style", e))?;
-    state.style = true;
-  }
-  if let Some(install) = ferridriver::backend::screenshot_js::install_mask_js(&wire) {
-    page.ensure_engine_injected().await.map_err(|e| fail("mask", e))?;
-    eval_void(page, &install).await.map_err(|e| fail("mask", e))?;
-    state.mask = true;
-  }
-  Ok(state)
 }
 
 fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>, TestFailure> {

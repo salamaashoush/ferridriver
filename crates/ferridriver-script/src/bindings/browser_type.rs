@@ -163,6 +163,7 @@ struct JsLaunchOptions {
   args: Option<Vec<String>>,
   extensions: Option<Vec<String>>,
   channel: Option<String>,
+  env: Option<rustc_hash::FxHashMap<String, String>>,
   slow_mo: Option<u64>,
   timeout: Option<u64>,
   downloads_path: Option<String>,
@@ -233,7 +234,7 @@ fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Res
       .map(std::path::PathBuf::from)
       .collect(),
     channel: parsed.channel,
-    env: None,
+    env: parsed.env,
     slow_mo: parsed.slow_mo,
     timeout: parsed.timeout,
     downloads_path: parsed.downloads_path.map(std::path::PathBuf::from),

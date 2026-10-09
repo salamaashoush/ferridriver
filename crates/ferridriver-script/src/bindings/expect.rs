@@ -701,6 +701,50 @@ fn unsupported_snapshot_subject(ctx: &Ctx<'_>, matcher: &'static str) -> rquickj
 /// A snapshot-matcher failure (message produced runner-side, already
 /// fully formatted), resolved by the same soft rule as every other
 /// assertion.
+/// Playwright's `nameOrOptions, optOptions` pair: a name (`string` or
+/// path segments) with the options after it, or one bag carrying `name`.
+fn snapshot_name_and_options<'js>(
+  ctx: &Ctx<'js>,
+  name_or_options: Option<Value<'js>>,
+  options: Option<Value<'js>>,
+) -> rquickjs::Result<(ferridriver_test::snapshot_path::SnapshotName, JsonValue)> {
+  use ferridriver_test::snapshot_path::SnapshotName;
+  let as_name = |value: &Value<'js>| -> rquickjs::Result<Option<SnapshotName>> {
+    if let Some(s) = value.as_string() {
+      return Ok(Some(SnapshotName::One(s.to_string()?)));
+    }
+    if let Some(array) = value.as_array() {
+      let parts = array.iter::<String>().collect::<rquickjs::Result<Vec<_>>>()?;
+      return Ok(Some(SnapshotName::Segments(parts)));
+    }
+    Ok(None)
+  };
+  let to_json = |value: Option<Value<'js>>| -> rquickjs::Result<JsonValue> {
+    match value {
+      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(ctx, v),
+      _ => Ok(JsonValue::Object(serde_json::Map::new())),
+    }
+  };
+  match name_or_options {
+    Some(value) if value.as_string().is_some() || value.as_array().is_some() => {
+      let name = as_name(&value)?.unwrap_or(SnapshotName::Anonymous);
+      Ok((name, to_json(options)?))
+    },
+    Some(value) if value.as_object().is_some() => {
+      let name = match value.as_object().map(|o| o.get::<_, Value<'js>>("name")).transpose()? {
+        Some(n) if !n.is_undefined() => as_name(&n)?.unwrap_or(SnapshotName::Anonymous),
+        _ => SnapshotName::Anonymous,
+      };
+      let mut bag = to_json(Some(value))?;
+      if let Some(map) = bag.as_object_mut() {
+        map.remove("name");
+      }
+      Ok((name, bag))
+    },
+    _ => Ok((SnapshotName::Anonymous, to_json(options)?)),
+  }
+}
+
 fn snapshot_failure(ctx: &Ctx<'_>, is_soft: bool, message: String) -> rquickjs::Result<()> {
   report(ctx, AssertionFailure::new(message, None).with_soft(is_soft))
 }
@@ -1620,7 +1664,7 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveCSS(name: string, value: string | RegExp,
-  /// options?: { timeout? })`.
+  /// options?: { pseudo?: 'before' | 'after', timeout? })`.
   #[qjs(rename = "toHaveCSS")]
   pub async fn to_have_css<'js>(
     &self,
@@ -1634,10 +1678,22 @@ impl ExpectJs {
       .scope(async move {
         let exp = parse_string_or_regex(&ctx, &expected)?;
         let o = opts_obj(&options);
+        let pseudo = match o
+          .as_ref()
+          .map(|o| o.get::<_, Option<String>>("pseudo"))
+          .transpose()?
+          .flatten()
+        {
+          Some(p) => Some(
+            p.parse::<ferridriver_expect::CssPseudo>()
+              .map_err(|e| type_error(&ctx, e))?,
+          ),
+          None => None,
+        };
         self
           .for_call(o.as_ref())
           .build_locator_expect(&ctx, "toHaveCSS")?
-          .to_have_css_with(&name, exp, ferridriver_expect::HaveCssOptions::default())
+          .to_have_css_with(&name, exp, ferridriver_expect::HaveCssOptions { pseudo })
           .await
           .or_else(|e| report(&ctx, e))
       })
@@ -1903,35 +1959,74 @@ impl ExpectJs {
   // `ferridriver run`, BDD steps) they throw a typed error, the same
   // stance Playwright takes for snapshot assertions without a runner.
 
-  /// Playwright: `toMatchSnapshot(name?: string)` on a string value or
-  /// a locator (compares the locator's text content).
+  /// Playwright: `toMatchSnapshot(name?: string | string[], options?)` /
+  /// `toMatchSnapshot(options?)` on a `string` or a `Buffer` —
+  /// synchronous, as upstream; a `Buffer` holding an image is compared as
+  /// one. A locator compares its text content (a ferridriver extension,
+  /// so that form alone returns a promise).
   #[qjs(rename = "toMatchSnapshot")]
-  pub async fn to_match_snapshot(
+  pub fn to_match_snapshot<'js>(
     &self,
-    call_site: crate::bindings::CallSite,
-    ctx: Ctx<'_>,
-    name: Opt<String>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchSnapshot()")?;
-        if self.is_not {
+    ctx: Ctx<'js>,
+    name_or_options: Opt<Value<'js>>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchSnapshot()")?;
+    let (name, options) = snapshot_name_and_options(&ctx, name_or_options.0, options.0)?;
+    let (is_not, is_soft) = (self.is_not, self.is_soft);
+    match &self.subject.kind {
+      SubjectKind::Locator(locator) => {
+        let locator = locator.clone();
+        let (promise, resolve, reject) = rquickjs::Promise::new(&ctx)?;
+        let task_ctx = ctx.clone();
+        ctx.spawn(async move {
+          let settled = match locator.text_content().await {
+            Ok(text) => bridge
+              .match_value_snapshot(
+                ferridriver_test::snapshot::SnapshotValue::Text(text.unwrap_or_default()),
+                name,
+                options,
+                is_not,
+              )
+              .or_else(|m| snapshot_failure(&task_ctx, is_soft, m)),
+            Err(e) => Err(type_error(
+              &task_ctx,
+              format!("toMatchSnapshot: reading text content: {e}"),
+            )),
+          };
+          let _ = match settled {
+            Ok(()) => resolve.call::<_, ()>(()),
+            Err(_) => reject.call::<_, ()>((task_ctx.catch(),)),
+          };
+        });
+        Ok(promise.into_value())
+      },
+      SubjectKind::Page(_) | SubjectKind::ApiResponse(_) => Err(unsupported_snapshot_subject(&ctx, "toMatchSnapshot")),
+      SubjectKind::Value => {
+        let received = self.subject.live.clone().restore(&ctx)?;
+        if received.as_promise().is_some() {
           return Err(type_error(
             &ctx,
-            "expect.toMatchSnapshot: not.toMatchSnapshot is not supported",
+            "An unresolved Promise was passed to toMatchSnapshot(), make sure to resolve it by adding await to it.",
           ));
         }
-        let target = self.snapshot_target(&ctx, "toMatchSnapshot")?;
+        let received = match received.as_string() {
+          Some(text) => ferridriver_test::snapshot::SnapshotValue::Text(text.to_string()?),
+          None => ferridriver_test::snapshot::SnapshotValue::Bytes(
+            ferrijs::std::node::bytes::value_to_bytes(&ctx, &received, None)
+              .map_err(|_| unsupported_snapshot_subject(&ctx, "toMatchSnapshot"))?,
+          ),
+        };
         bridge
-          .match_text_snapshot(target, name.0)
-          .await
-          .or_else(|m| snapshot_failure(&ctx, self.is_soft, m))
-      })
-      .await
+          .match_value_snapshot(received, name, options, is_not)
+          .or_else(|m| snapshot_failure(&ctx, is_soft, m))?;
+        Ok(Value::new_undefined(ctx))
+      },
+    }
   }
 
-  /// Playwright: `toHaveScreenshot(name?: string, options?)` /
-  /// `toHaveScreenshot(options?)` on a locator or page.
+  /// Playwright: `toHaveScreenshot(name?: string | string[], options?)` /
+  /// `toHaveScreenshot(options?)` on a locator or page, `.not` included.
   #[qjs(rename = "toHaveScreenshot")]
   pub async fn to_have_screenshot<'js>(
     &self,
@@ -1943,21 +2038,13 @@ impl ExpectJs {
     call_site
       .scope(async move {
         let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toHaveScreenshot()")?;
-        if self.is_not {
-          return Err(type_error(
-            &ctx,
-            "expect.toHaveScreenshot: not.toHaveScreenshot is not supported",
-          ));
-        }
-        let (name, opts_val) = match name_or_options.0 {
-          Some(v) if v.as_string().is_some() => (v.as_string().and_then(|s| s.to_string().ok()), options.0),
-          Some(v) if v.as_object().is_some() => (None, Some(v)),
-          _ => (None, options.0),
+        let is_name = |v: &Value<'js>| v.as_string().is_some() || v.as_array().is_some();
+        let opts_val = match &name_or_options.0 {
+          Some(v) if is_name(v) => options.0.clone(),
+          Some(v) if v.as_object().is_some() => Some(v.clone()),
+          _ => options.0.clone(),
         };
-        let mut opts_json: serde_json::Value = match &opts_val {
-          Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v.clone())?,
-          _ => serde_json::json!({}),
-        };
+        let (name, mut opts_json) = snapshot_name_and_options(&ctx, name_or_options.0, options.0)?;
         // `mask` is `Locator[]`, and a Locator is a native class: a plain
         // serde walk of the bag turns each entry into an empty object and
         // the mask silently disappears. Read the instances off the object
@@ -1971,7 +2058,7 @@ impl ExpectJs {
         }
         let target = self.snapshot_target(&ctx, "toHaveScreenshot")?;
         bridge
-          .match_screenshot(target, name, opts_json)
+          .match_screenshot(target, name, opts_json, self.is_not)
           .await
           .or_else(|m| snapshot_failure(&ctx, self.is_soft, m))
       })
@@ -1985,14 +2072,45 @@ impl ExpectJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
-    expected: String,
+    expected: Opt<Value<'js>>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
         let bridge = crate::bindings::test::current_bridge(&ctx, "expect(...).toMatchAriaSnapshot()")?;
         let o = opts_obj(&options);
-        let timeout_ms = u64_field(o.as_ref(), "timeout");
+        let mut timeout_ms = u64_field(o.as_ref(), "timeout");
+        // `toMatchAriaSnapshot(template, options?)` or, reading the
+        // template from a snapshot file, `toMatchAriaSnapshot({ name?, timeout? })`.
+        let expected = match expected.0 {
+          Some(v) if v.as_string().is_some() => ferridriver_test::host::AriaExpectation::Template(
+            v.as_string()
+              .map(rquickjs::String::to_string)
+              .transpose()?
+              .unwrap_or_default(),
+          ),
+          Some(v) if v.as_object().is_some() => {
+            let bag = v.as_object();
+            timeout_ms = u64_field(bag, "timeout").or(timeout_ms);
+            let name = match bag.map(|b| b.get::<_, Value<'js>>("name")).transpose()? {
+              Some(n) if n.as_string().is_some() => ferridriver_test::snapshot_path::SnapshotName::One(
+                n.as_string()
+                  .map(rquickjs::String::to_string)
+                  .transpose()?
+                  .unwrap_or_default(),
+              ),
+              Some(n) if n.as_array().is_some() => ferridriver_test::snapshot_path::SnapshotName::Segments(
+                n.as_array()
+                  .map(|a| a.iter::<String>().collect::<rquickjs::Result<Vec<_>>>())
+                  .transpose()?
+                  .unwrap_or_default(),
+              ),
+              _ => ferridriver_test::snapshot_path::SnapshotName::Anonymous,
+            };
+            ferridriver_test::host::AriaExpectation::File(name)
+          },
+          _ => ferridriver_test::host::AriaExpectation::File(ferridriver_test::snapshot_path::SnapshotName::Anonymous),
+        };
         let target = self.snapshot_target(&ctx, "toMatchAriaSnapshot")?;
         bridge
           .match_aria_snapshot(target, expected, self.is_not, timeout_ms)

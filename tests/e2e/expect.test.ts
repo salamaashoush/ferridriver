@@ -223,6 +223,27 @@ describe('expect', () => {
     await expect(page.locator('#sel')).toHaveValues(['a', 'b']);
   });
 
+  test('to_have_css_reads_the_pseudo_element', async ({ page }) => {
+    await page.goto(
+      dataUrl(
+        '<style>#p { color: rgb(0, 0, 255) } #p::before { content: "a"; color: rgb(255, 0, 0) }' +
+          ' #p::after { content: "b"; color: rgb(0, 128, 0) }</style><div id="p">x</div>',
+      ),
+    );
+    const p = page.locator('#p');
+    await expect(p).toHaveCSS('color', 'rgb(0, 0, 255)');
+    await expect(p).toHaveCSS('color', 'rgb(255, 0, 0)', { pseudo: 'before' });
+    await expect(p).toHaveCSS('color', 'rgb(0, 128, 0)', { pseudo: 'after' });
+    await expect(p).not.toHaveCSS('color', 'rgb(0, 0, 255)', { pseudo: 'before', timeout: 200 });
+    let message = '';
+    try {
+      await expect(p).toHaveCSS('color', 'rgb(255, 0, 0)', { pseudo: '::before' as 'before' });
+    } catch (e) {
+      message = String(e);
+    }
+    expect(message).toContain('pseudo: expected "before" or "after", got "::before"');
+  });
+
   test('to_have_url_ignore_case', async ({ page }) => {
     await page.goto(dataUrl('<h1>x</h1>'));
     await expect(page).toHaveURL(/^DATA:/i);
