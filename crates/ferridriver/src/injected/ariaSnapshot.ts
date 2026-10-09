@@ -100,6 +100,10 @@ export function generateAriaTree(rootElement: Element, publicOptions: AriaTreeOp
     if (node.nodeType === Node.TEXT_NODE && node.nodeValue) {
       if (!parentElementVisible)
         return;
+      // Text nodes that are not rendered are neither visible nor exposed to aria,
+      // so they are skipped regardless of the visibility option.
+      if (roleUtils.isTextNodeNotRendered(node as Text))
+        return;
 
       const text = node.nodeValue;
       // <textarea>AAA</textarea> should not report AAA as a child of the textarea.
@@ -120,8 +124,9 @@ export function generateAriaTree(rootElement: Element, publicOptions: AriaTreeOp
       visible = isElementVisibleForAria && isElementVisible(element);
 
     // Optimization: if we only consider aria visibility, we can skip child elements because
-    // they will not be visible for aria as well.
-    if (options.visibility === 'aria' && !visible)
+    // they will not be visible for aria as well. The only exception is the topmost modal dialog
+    // that escapes inertness of its ancestors.
+    if (options.visibility === 'aria' && !visible && !roleUtils.containsTopmostModalDialog(element))
       return;
 
     const ariaChildren: Element[] = [];
@@ -135,6 +140,8 @@ export function generateAriaTree(rootElement: Element, publicOptions: AriaTreeOp
     }
 
     const childAriaNode = visible ? toAriaNode(element, options, nameSourceElements) : null;
+    if (childAriaNode && element.getAttribute('aria-hidden')?.toLowerCase() === 'true')
+      childAriaNode.props['aria-hidden'] = 'true';
     let elementInfo: { element: Element, nameFromContentRefs: string[] } | undefined;
     if (childAriaNode) {
       if (childAriaNode.ref) {
@@ -502,6 +509,8 @@ export function renderAriaTreeAsJSON(ariaSnapshot: AriaSnapshot, publicOptions: 
       node.url = ariaNode.props.url;
     if (ariaNode.props.placeholder !== undefined)
       node.placeholder = ariaNode.props.placeholder;
+    if (ariaNode.props['aria-hidden'] !== undefined)
+      node.ariaHidden = true;
 
     const singleTextChild = ariaNode.children.length === 1 && typeof ariaNode.children[0] === 'string' ? ariaNode.children[0] : undefined;
     const isAtDepthLimit = !!publicOptions.depth && depth === publicOptions.depth;

@@ -11,10 +11,10 @@ file does not carry belongs in `mod.rs`.
 | | |
 |---|---|
 | upstream | `microsoft/playwright` |
-| version | 1.63.0-next |
-| commit | `51023b4` |
-| synced | 2026-08-19 |
-| sha256 | `f4c07bb3f3abf58439a7db5d1eac5f205b3934bc3f1a9838498842905ee54c02` |
+| version | 1.65.0-next |
+| commit | `d9f2fd3` |
+| synced | 2026-10-09 |
+| sha256 | `a0074710293e56f2e08487fa69a5beed6fdf1e9665773d97853f350b8e7afc77` |
 | devices | 207 |
 
 ## Attribution

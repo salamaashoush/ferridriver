@@ -198,8 +198,33 @@ function executeSelector(parts: SelectorPart[], root: Node): Element[] {
 
 type ElementState = 'visible' | 'hidden' | 'enabled' | 'disabled' | 'editable' | 'stable' | 'checked' | 'unchecked' | 'indeterminate';
 
+/**
+ * Whether every `<iframe>` between `node` and the top document is visible
+ * — the `frameVisible` Playwright threads through its selector resolution,
+ * so an element inside a hidden iframe is not visible either. Same-origin
+ * frames only: a cross-origin `frameElement` cannot be read, and is taken
+ * as visible.
+ */
+function frameVisible(node: Node): boolean {
+  let win: Window | null = node.ownerDocument?.defaultView ?? null;
+  try {
+    while (win && win !== win.parent && win.frameElement) {
+      if (!isElementVisible(win.frameElement))
+        return false;
+      win = win.parent;
+    }
+  } catch {
+    // A cross-origin ancestor.
+  }
+  return true;
+}
+
+function isVisible(el: Element): boolean {
+  return frameVisible(el) && isElementVisible(el);
+}
+
 function elementState(el: Element, state: ElementState): boolean | 'error:notconnected' {
-  const result = injected.elementState(el, state);
+  const result = injected.elementState(el, state as any, frameVisible(el));
   if (typeof result === 'object' && result !== null && 'matches' in result) {
     return (result as any).matches;
   }
@@ -217,7 +242,7 @@ function checkElementStates(el: Element, states: ElementState[]): string {
 
 function isActionable(el: Element): { actionable: boolean; reason?: string } {
   if (!el.isConnected) return { actionable: false, reason: 'notconnected' };
-  if (!isElementVisible(el)) return { actionable: false, reason: 'notvisible' };
+  if (!isVisible(el)) return { actionable: false, reason: 'notvisible' };
   if (getAriaDisabled(el)) return { actionable: false, reason: 'disabled' };
   return { actionable: true };
 }
@@ -346,13 +371,13 @@ async function awaitStates(el: Element, states: ElementState[]): Promise<string 
   // Non-stable states (visible / enabled / editable) are synchronous — no
   // rAF — so check them directly.
   const nonStable = states.filter((s) => s !== 'stable');
-  const result = await injected.checkElementStates(el, nonStable as any);
+  const result = await injected.checkElementStates(el, nonStable as any, frameVisible(el));
   if (result === 'error:notconnected') return 'connected';
   if (result !== undefined) return (result as any).missingState;
 
   if (states.includes('stable')) {
     const stable = await Promise.race([
-      injected.checkElementStates(el, ['stable'] as any).then((r: any) => r === undefined),
+      injected.checkElementStates(el, ['stable'] as any, frameVisible(el)).then((r: any) => r === undefined),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 1000)),
     ]);
     if (!stable) return 'stable';
@@ -686,18 +711,17 @@ if (!window.__fd) {
     querySelector: (selector: any, root: Node, strict: boolean) => injected.querySelector(selector, root, strict),
     querySelectorAll: (selector: any, root: Node) => injected.querySelectorAll(selector, root),
 
-    // Element highlight overlay (Playwright `injected.addHighlight` /
-    // `removeHighlight` / `hideHighlight`). Mirrors
-    // packages/injected/src/injectedScript.ts addHighlight/removeHighlight.
-    // `parts` is ferridriver's {engine, body} array — converted to a
-    // Playwright ParsedSelector so the highlight RAF loop can re-resolve
-    // it as the DOM/layout changes. `cssStyle` is the resolved CSS string
-    // (Locator.highlight composes the optional style record host-side).
-    addHighlight(parts: SelectorPart[], cssStyle?: string) {
-      injected.addHighlight(injected.parseSelector(partsToSelectorString(parts)), cssStyle);
-    },
-    removeHighlight(parts: SelectorPart[]) {
-      injected.removeHighlight(injected.parseSelector(partsToSelectorString(parts)));
+    // The element highlights this frame shows: the whole set, every time
+    // (`injected.setHighlights`, driven by the host's highlight controller
+    // as Playwright's `HighlightController` drives it). `parts` is
+    // ferridriver's {engine, body} array, converted to a ParsedSelector so
+    // the overlay re-resolves it as the DOM changes; `cssStyle` is already
+    // a CSS string.
+    setHighlights(entries: { parts: SelectorPart[]; cssStyle?: string }[]) {
+      injected.setHighlights(entries.map(e => ({
+        selector: injected.parseSelector(partsToSelectorString(e.parts)),
+        cssStyle: e.cssStyle,
+      })));
     },
     hideHighlight() {
       injected.hideHighlight();
@@ -707,7 +731,7 @@ if (!window.__fd) {
     elementState,
     checkElementStates,
     isActionable,
-    isVisible: isElementVisible,
+    isVisible,
     expectHitTarget,
     installHitInterceptor,
     finalizeHitInterceptor,

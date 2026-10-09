@@ -16,7 +16,7 @@
 
 import * as css from '@isomorphic/cssTokenizer';
 
-import { beginDOMCaches, closestCrossShadow, elementSafeTagName, enclosingShadowRootOrDocument, endDOMCaches, getElementComputedStyle, isElementStyleVisibilityVisible, isVisibleTextNode, parentElementOrShadowHost } from './domUtils';
+import { beginDOMCaches, closestCrossShadow, elementSafeTagName, enclosingShadowRootOrDocument, endDOMCaches, getElementComputedStyle, getGlobalOptions, isElementStyleVisibilityVisible, isListBoxSelect, isVisibleTextNode, parentElementOrShadowHost } from './domUtils';
 
 import type { AriaRole } from '@isomorphic/ariaSnapshot';
 
@@ -155,7 +155,7 @@ const kImplicitRoleByTagName: { [tagName: string]: (e: Element) => AriaRole | nu
   'PROGRESS': () => 'progressbar',
   'SEARCH': () => 'search',
   'SECTION': (e: Element) => hasExplicitAccessibleName(e) ? 'region' : null,
-  'SELECT': (e: Element) => e.hasAttribute('multiple') || (e as HTMLSelectElement).size > 1 ? 'listbox' : 'combobox',
+  'SELECT': (e: Element) => isListBoxSelect(e as HTMLSelectElement) ? 'listbox' : 'combobox',
   'STRONG': () => 'strong',
   'SUB': () => 'subscript',
   'SUP': () => 'superscript',
@@ -331,7 +331,68 @@ export function isElementHiddenForAria(element: Element): boolean {
   const isOptionInsideSelect = element.nodeName === 'OPTION' && !!element.closest('select');
   if (!isOptionInsideSelect && !isSlot && !isElementStyleVisibilityVisible(element, style))
     return true;
-  return belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element);
+  return belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element) || isElementInert(element);
+}
+
+// https://html.spec.whatwg.org/multipage/interaction.html#inert-subtrees
+// Inert elements cannot be focused, clicked or otherwise interacted with,
+// and are excluded from the accessibility tree.
+export function isElementInert(element: Element): boolean {
+  if (getGlobalOptions().skipInertCheck)
+    return false;
+  let inert = cacheIsInert?.get(element);
+  if (inert === undefined) {
+    if (element.hasAttribute('inert')) {
+      inert = true;
+    } else if (element === topmostModalDialog(element.ownerDocument)?.dialog) {
+      // The topmost modal dialog escapes inertness of its ancestors.
+      inert = false;
+    } else {
+      // Inert applies to all flat tree descendants, so we look up the hierarchy.
+      const parent = parentElementOrShadowHost(element);
+      if (parent) {
+        inert = isElementInert(parent);
+      } else {
+        // While a modal dialog is open, everything in the document, except for the dialog
+        // itself and its descendants, is inert.
+        inert = element.isConnected && !!topmostModalDialog(element.ownerDocument);
+      }
+    }
+    cacheIsInert?.set(element, inert);
+  }
+  return inert;
+}
+
+// Returns true for ancestors of the topmost modal dialog. Such ancestors are inert,
+// but still contain the non-inert dialog in their subtree.
+export function containsTopmostModalDialog(element: Element): boolean {
+  return !!topmostModalDialog(element.ownerDocument)?.ancestors.has(element);
+}
+
+function topmostModalDialog(document: Document): ModalDialogInfo | undefined {
+  if (getGlobalOptions().skipInertCheck || getGlobalOptions().skipDialogCheck)
+    return;
+  let info = cacheModalDialog?.get(document);
+  if (info === undefined) {
+    info = null;
+    try {
+      // There is no way to determine the top layer order, so we assume that the last modal
+      // dialog in the document order is the topmost one. Note that this does not pierce
+      // shadow roots.
+      const dialogs = document.querySelectorAll('dialog:modal');
+      if (dialogs.length) {
+        const dialog = dialogs[dialogs.length - 1];
+        const ancestors = new Set<Element>();
+        for (let e = parentElementOrShadowHost(dialog); e; e = parentElementOrShadowHost(e))
+          ancestors.add(e);
+        info = { dialog, ancestors };
+      }
+    } catch {
+      // Older browsers might not support the :modal pseudo-class.
+    }
+    cacheModalDialog?.set(document, info);
+  }
+  return info || undefined;
 }
 
 function belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element: Element): boolean {
@@ -341,7 +402,7 @@ function belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element: Element): boolean
 
     // When parent has a shadow root, all light dom children must be assigned to a slot,
     // otherwise they are not rendered and considered hidden for aria.
-    // Note: we can remove this logic once WebKit supports `Element.checkVisibility`.
+    // Note: needed for <option> and <slot>, which skip checkVisibility above.
     if (element.parentElement && element.parentElement.shadowRoot && !element.assignedSlot)
       hidden = true;
 
@@ -360,6 +421,23 @@ function belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element: Element): boolean
     cacheIsHidden?.set(element, hidden);
   }
   return hidden;
+}
+
+// Text nodes are usually hidden together with their parent element, with the exception of
+// a few cases where the parent is rendered, but the text node itself is not.
+// Such text nodes are neither visible nor exposed to aria.
+export function isTextNodeNotRendered(text: Text): boolean {
+  const parent = text.parentElement;
+  if (!parent)
+    return false;
+  if (parent.shadowRoot && !text.assignedSlot)
+    return true;
+  // Closed <details> only renders the <summary> element.
+  // It is actually the same shadowRoot scenario as above, but user-agent shadow roots
+  // are not acessible to JavaScript, so we manually check only the most common scenario.
+  if (elementSafeTagName(parent) === 'DETAILS' && !(parent as HTMLDetailsElement).open)
+    return true;
+  return false;
 }
 
 function getIdRefs(element: Element, ref: string | null): Element[] {
@@ -697,13 +775,8 @@ function getTextAlternativeInternal(element: Element, options: AccessibleNameOpt
   // Not part of an aria-labelledby or aria-describedby traversal, where the node directly referenced by that relation was hidden.
   // Nor part of a native host language text alternative element (e.g. label in HTML) or attribute traversal, where the root of that traversal was hidden.
   if (!options.includeHidden) {
-    const isEmbeddedInHiddenReferenceTraversal =
-      !!options.embeddedInLabelledBy?.hidden ||
-      !!options.embeddedInDescribedBy?.hidden ||
-      !!options.embeddedInNativeTextAlternative?.hidden ||
-      !!options.embeddedInLabel?.hidden;
     if (isElementIgnoredForAria(element) ||
-      (!isEmbeddedInHiddenReferenceTraversal && isElementHiddenForAria(element))) {
+      (!isEmbeddedInHiddenReferenceTraversal(options) && isElementHiddenForAria(element))) {
       options.visitedElements.add(element);
       return emptyCompositeString();
     }
@@ -746,7 +819,8 @@ function getTextAlternativeInternal(element: Element, options: AccessibleNameOpt
     const isOwnLabel = [...(element as (HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement)).labels || []].includes(element as any);
     const isOwnLabelledBy = (labelledBy || []).includes(element);
     if (!isOwnLabel && !isOwnLabelledBy) {
-      if (role === 'textbox') {
+      // Searchbox is a subclass of textbox, so it is handled the same way.
+      if (role === 'textbox' || role === 'searchbox') {
         options.visitedElements.add(element);
         if (tagName === 'INPUT' || tagName === 'TEXTAREA')
           return compositeString((element as HTMLInputElement | HTMLTextAreaElement).value, element, options.collectElements);
@@ -1014,8 +1088,17 @@ function getTextAlternativeInternal(element: Element, options: AccessibleNameOpt
   return emptyCompositeString();
 }
 
+function isEmbeddedInHiddenReferenceTraversal(options: AccessibleNameOptions): boolean {
+  return !!options.embeddedInLabelledBy?.hidden ||
+    !!options.embeddedInDescribedBy?.hidden ||
+    !!options.embeddedInNativeTextAlternative?.hidden ||
+    !!options.embeddedInLabel?.hidden;
+}
+
 function innerAccumulatedElementText(element: Element, options: AccessibleNameOptions): CompositeString {
   const tokens: string[] = [];
+  // Similarly to step 2a, text nodes that are not rendered are skipped unless explicitly referenced.
+  const skipNotRenderedText = !options.includeHidden && !isEmbeddedInHiddenReferenceTraversal(options);
   const elements = options.collectElements ? new Set<Element>() : undefined;
   const visit = (node: Node, skipSlotted: boolean) => {
     if (skipSlotted && (node as Element | Text).assignedSlot)
@@ -1034,6 +1117,8 @@ function innerAccumulatedElementText(element: Element, options: AccessibleNameOp
         token = ' ' + token + ' ';
       tokens.push(token);
     } else if (node.nodeType === 3 /* Node.TEXT_NODE */) {
+      if (skipNotRenderedText && isTextNodeNotRendered(node as Text))
+        return;
       // step 2g.
       tokens.push(node.textContent || '');
     }
@@ -1233,6 +1318,8 @@ function getAccessibleNameFromAssociatedLabels(labels: Iterable<HTMLLabelElement
 }
 
 export function receivesPointerEvents(element: Element): boolean {
+  if (isElementInert(element))
+    return false;
   const cache = cachePointerEvents!;
   let e: Element | undefined = element;
   let result: boolean | undefined;
@@ -1274,6 +1361,9 @@ let cacheAccessibleDescription: Map<Element, AccessibleDescription> | undefined;
 let cacheAccessibleDescriptionHidden: Map<Element, AccessibleDescription> | undefined;
 let cacheAccessibleErrorMessage: Map<Element, string> | undefined;
 let cacheIsHidden: Map<Element, boolean> | undefined;
+let cacheIsInert: Map<Element, boolean> | undefined;
+type ModalDialogInfo = { dialog: Element, ancestors: Set<Element> };
+let cacheModalDialog: Map<Document, ModalDialogInfo | null> | undefined;
 let cachePseudoContent: Map<Element, string | undefined> | undefined;
 let cachePseudoContentBefore: Map<Element, string | undefined> | undefined;
 let cachePseudoContentAfter: Map<Element, string | undefined> | undefined;
@@ -1295,6 +1385,8 @@ export function beginAriaCaches() {
   cacheAccessibleDescriptionHidden ??= new Map();
   cacheAccessibleErrorMessage ??= new Map();
   cacheIsHidden ??= new Map();
+  cacheIsInert ??= new Map();
+  cacheModalDialog ??= new Map();
   cachePseudoContent ??= new Map();
   cachePseudoContentBefore ??= new Map();
   cachePseudoContentAfter ??= new Map();
@@ -1311,6 +1403,8 @@ export function endAriaCaches() {
     cacheAccessibleDescriptionHidden = undefined;
     cacheAccessibleErrorMessage = undefined;
     cacheIsHidden = undefined;
+    cacheIsInert = undefined;
+    cacheModalDialog = undefined;
     cachePseudoContent = undefined;
     cachePseudoContentBefore = undefined;
     cachePseudoContentAfter = undefined;

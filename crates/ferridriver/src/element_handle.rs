@@ -327,22 +327,7 @@ impl ElementHandle {
   ///
   /// See [`Self::inner_html`].
   pub async fn is_visible(&self) -> Result<bool> {
-    // Playwright's `isVisible` matches the CSS/layout check:
-    //  - `display: none` → hidden
-    //  - `visibility: hidden/collapse` → hidden
-    //  - zero bounding rect → hidden
-    self
-      .eval_bool(
-        "el => {\
-          if (!el || !el.isConnected) return false;\
-          const style = getComputedStyle(el);\
-          if (style.visibility !== 'visible') return false;\
-          const rect = el.getBoundingClientRect();\
-          return rect.width > 0 && rect.height > 0;\
-        }",
-        "isVisible",
-      )
-      .await
+    self.element_state("visible").await
   }
 
   /// Playwright: `elementHandle.isHidden(): Promise<boolean>`.
@@ -351,31 +336,18 @@ impl ElementHandle {
   ///
   /// See [`Self::inner_html`].
   pub async fn is_hidden(&self) -> Result<bool> {
-    Ok(!self.is_visible().await?)
+    self.element_state("hidden").await
   }
 
-  /// Playwright: `elementHandle.isDisabled(): Promise<boolean>`. True
-  /// for form controls that carry the HTML `disabled` attribute OR
-  /// inherit disabled from a `<fieldset disabled>` ancestor.
+  /// Playwright: `elementHandle.isDisabled(): Promise<boolean>`: native
+  /// `disabled`, a disabled `<fieldset>`, or `aria-disabled` on a role
+  /// that takes it.
   ///
   /// # Errors
   ///
   /// See [`Self::inner_html`].
   pub async fn is_disabled(&self) -> Result<bool> {
-    self
-      .eval_bool(
-        "el => {\
-          const disabledTags = ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OPTGROUP', 'FIELDSET'];\
-          let cur = el;\
-          while (cur) {\
-            if (disabledTags.includes(cur.nodeName) && cur.disabled) return true;\
-            cur = cur.parentElement;\
-          }\
-          return false;\
-        }",
-        "isDisabled",
-      )
-      .await
+    self.element_state("disabled").await
   }
 
   /// Playwright: `elementHandle.isEnabled(): Promise<boolean>`.
@@ -384,7 +356,7 @@ impl ElementHandle {
   ///
   /// See [`Self::inner_html`].
   pub async fn is_enabled(&self) -> Result<bool> {
-    Ok(!self.is_disabled().await?)
+    self.element_state("enabled").await
   }
 
   /// Playwright: `elementHandle.isChecked(): Promise<boolean>`. Honors
@@ -404,24 +376,28 @@ impl ElementHandle {
       .await
   }
 
-  /// Playwright: `elementHandle.isEditable(): Promise<boolean>`. Returns
-  /// `true` for enabled `<input>` / `<textarea>` / `<select>` and for
-  /// `contenteditable` elements.
+  /// Playwright: `elementHandle.isEditable(): Promise<boolean>`: enabled
+  /// and not read-only, `aria-readonly` included. An element that cannot
+  /// be edited at all is an error, as upstream.
   ///
   /// # Errors
   ///
   /// See [`Self::inner_html`].
   pub async fn is_editable(&self) -> Result<bool> {
+    self.element_state("editable").await
+  }
+
+  /// `injected.elementState(el, state)`, through the same engine the
+  /// locator form uses.
+  async fn element_state(&self, state: &str) -> Result<bool> {
+    self.page().inner().ensure_engine_injected().await?;
     self
       .eval_bool(
-        "el => {\
-          if (el.isContentEditable) return true;\
-          if (!(el.nodeName === 'INPUT' || el.nodeName === 'TEXTAREA' || el.nodeName === 'SELECT')) return false;\
-          if (el.disabled) return false;\
-          if (el.readOnly) return false;\
-          return true;\
-        }",
-        "isEditable",
+        &format!(
+          "el => window.__fd.elementState(el, {}) === true",
+          serde_json::json!(state)
+        ),
+        state,
       )
       .await
   }

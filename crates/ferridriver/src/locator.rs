@@ -781,15 +781,14 @@ impl Locator {
   ///
   /// Playwright: `hideHighlight(): Promise<void>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
-  /// Tears down the whole overlay for this locator's frame.
+  /// Removes this locator's highlight; others stay.
   ///
   /// # Errors
   ///
-  /// Returns an error if frame resolution or the injected `hideHighlight`
-  /// call fails.
+  /// Returns an error if frame resolution or JS evaluation fails.
   pub async fn hide_highlight(&self) -> Result<()> {
-    let (frame, _selector) = self.resolved().await?;
-    frame.hide_highlight().await
+    let (frame, selector) = self.resolved().await?;
+    frame.hide_highlight(&selector).await
   }
 
   /// Type text into the element character by character using keyboard events.
@@ -1446,12 +1445,11 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn is_visible(&self) -> Result<bool> {
-    // Single evaluate: find element + check visibility. Returns false if not found.
+    // Playwright's `elementState(el, 'visible')`: a non-empty box with
+    // visible style, inside iframes that are visible themselves. Not
+    // found is `false`, without waiting.
     let val = self
-      .eval_on_element(
-        "var s = getComputedStyle(el); \
-       return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';",
-      )
+      .eval_on_element("return window.__fd.elementState(el, 'visible') === true;")
       .await?;
     // eval_on_element returns null if element not found -> false (Playwright behavior)
     Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
@@ -1472,7 +1470,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_enabled(&self) -> Result<bool> {
-    self.eval_bool("function() { return !this.disabled; }").await
+    self
+      .eval_bool("function() { return window.__fd.elementState(this, 'enabled') === true; }")
+      .await
   }
 
   /// Check whether the element is disabled.
@@ -1481,7 +1481,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_disabled(&self) -> Result<bool> {
-    self.eval_bool("function() { return !!this.disabled; }").await
+    self
+      .eval_bool("function() { return window.__fd.elementState(this, 'disabled') === true; }")
+      .await
   }
 
   /// Check whether a checkbox or radio button is checked.
@@ -1824,7 +1826,7 @@ impl Locator {
   /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_editable(&self) -> Result<bool> {
     self
-      .eval_bool("function() { return !this.disabled && !this.readOnly; }")
+      .eval_bool("function() { return window.__fd.elementState(this, 'editable') === true; }")
       .await
   }
 

@@ -27,6 +27,14 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// High-level page API, mirrors Playwright's Page interface.
 /// Always constructed behind `Arc<Page>` — locators, frames, and consumers
 /// hold Arc refs. No cloning of the Page struct itself.
+/// One `locator.highlight()` in force.
+#[derive(Debug, Clone)]
+struct HighlightEntry {
+  frame_id: Arc<str>,
+  selector: String,
+  style: Option<String>,
+}
+
 pub struct Page {
   pub(crate) inner: AnyPage,
   default_timeout: AtomicU64,
@@ -39,6 +47,11 @@ pub struct Page {
   /// Screenshots of one page run one at a time, as Playwright's
   /// `Screenshotter` queues them: each prepares and restores the page.
   pub(crate) screenshot_queue: AsyncMutex<()>,
+  /// Playwright's `HighlightController`: the highlights `locator.highlight()`
+  /// asked for, by frame. Re-applied every second while any remain, so a
+  /// highlight survives the frame re-rendering or navigating.
+  highlights: Mutex<Vec<HighlightEntry>>,
+  highlight_timer: std::sync::atomic::AtomicBool,
   mouse_position: Mutex<(f64, f64)>,
   /// Emulated viewport, tracked client-side like Playwright's
   /// `Page._viewportSize` so [`Self::viewport_size`] is a sync accessor
@@ -121,6 +134,8 @@ impl Page {
       default_navigation_timeout: AtomicU64::new(UNSET_TIMEOUT),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       screenshot_queue: AsyncMutex::new(()),
+      highlights: Mutex::new(Vec::new()),
+      highlight_timer: std::sync::atomic::AtomicBool::new(false),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
       strict_selectors: std::sync::atomic::AtomicBool::new(false),
@@ -152,6 +167,8 @@ impl Page {
       default_navigation_timeout: AtomicU64::new(UNSET_TIMEOUT),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       screenshot_queue: AsyncMutex::new(()),
+      highlights: Mutex::new(Vec::new()),
+      highlight_timer: std::sync::atomic::AtomicBool::new(false),
       mouse_position: Mutex::new((0.0, 0.0)),
       viewport: Mutex::new(None),
       strict_selectors: std::sync::atomic::AtomicBool::new(false),
@@ -3942,6 +3959,15 @@ impl Page {
   ///
   /// Returns an error if the page-side teardown evaluation fails.
   pub async fn hide_highlight(&self) -> Result<()> {
+    self.lock_highlights().clear();
+    let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
+    let main = self.with_frame_cache(FrameCache::main_frame_id);
+    for id in ids.iter().filter(|id| main.as_deref() != Some(&***id)) {
+      let _ = self
+        .inner
+        .evaluate_in_frame("window.__fd && window.__fd._injected.hideHighlight()", id)
+        .await;
+    }
     self
       .inner
       .evaluate(
@@ -3951,6 +3977,85 @@ impl Page {
       )
       .await?;
     Ok(())
+  }
+
+  fn lock_highlights(&self) -> std::sync::MutexGuard<'_, Vec<HighlightEntry>> {
+    self
+      .highlights
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// `HighlightController.addHighlight`.
+  pub(crate) async fn add_highlight(
+    self: &Arc<Self>,
+    frame_id: Arc<str>,
+    selector: &str,
+    style: Option<String>,
+  ) -> Result<()> {
+    crate::selectors::parse(selector)?;
+    {
+      let mut entries = self.lock_highlights();
+      entries.retain(|e| !(e.frame_id == frame_id && e.selector == selector));
+      entries.push(HighlightEntry {
+        frame_id,
+        selector: selector.to_string(),
+        style,
+      });
+    }
+    self.apply_highlights().await?;
+    self.keep_highlights_applied();
+    Ok(())
+  }
+
+  /// `HighlightController.removeHighlight`.
+  pub(crate) async fn remove_highlight(&self, frame_id: &str, selector: &str) -> Result<()> {
+    self
+      .lock_highlights()
+      .retain(|e| !(&*e.frame_id == frame_id && e.selector == selector));
+    self.apply_highlights().await
+  }
+
+  /// Give every live frame exactly its own highlights.
+  async fn apply_highlights(&self) -> Result<()> {
+    let entries = self.lock_highlights().clone();
+    let main = self.with_frame_cache(FrameCache::main_frame_id);
+    let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
+    let mut first_error = None;
+    for id in ids {
+      let mine: Vec<(String, Option<String>)> = entries
+        .iter()
+        .filter(|e| e.frame_id == id)
+        .map(|e| (e.selector.clone(), e.style.clone()))
+        .collect();
+      let frame_id = (main.as_deref() != Some(&*id)).then_some(&*id);
+      if let Err(e) = crate::selectors::set_highlights(&self.inner, &mine, frame_id).await
+        && !mine.is_empty()
+      {
+        first_error.get_or_insert(e);
+      }
+    }
+    first_error.map_or(Ok(()), Err)
+  }
+
+  /// The one-second re-apply loop, started by the first highlight and
+  /// ended once none are left or the page closes.
+  fn keep_highlights_applied(self: &Arc<Self>) {
+    if self.highlight_timer.swap(true, std::sync::atomic::Ordering::AcqRel) {
+      return;
+    }
+    let page = Arc::downgrade(self);
+    tokio::spawn(async move {
+      loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let Some(page) = page.upgrade() else { return };
+        if page.is_closed() || page.lock_highlights().is_empty() {
+          page.highlight_timer.store(false, std::sync::atomic::Ordering::Release);
+          return;
+        }
+        let _ = page.apply_highlights().await;
+      }
+    });
   }
 
   // ── Exposed Functions ───────────────────────────────────────────────────

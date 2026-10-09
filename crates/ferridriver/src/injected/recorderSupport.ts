@@ -15,14 +15,11 @@ import { Highlight } from './highlight';
       highlight = undefined;
     }
   };
-  injected.addHighlight = (selector: any, style?: string) => {
+  injected.setHighlights = (highlights: { selector: any, cssStyle?: string }[]) => {
+    if (!highlights.length && !highlight)
+      return;
     highlight ??= new Highlight(injected);
     highlight.install();
-    highlight.addElementHighlight(selector, style);
-  };
-  injected.removeHighlight = (selector: any) => {
-    highlight ??= new Highlight(injected);
-    highlight.install();
-    highlight.removeElementHighlight(selector);
+    highlight.setElementHighlights(highlights);
   };
 })();

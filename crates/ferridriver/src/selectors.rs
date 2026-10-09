@@ -965,26 +965,30 @@ pub fn parse_strict_violation_count<E: std::fmt::Display + ?Sized>(err: &E) -> O
   count_str.parse().ok()
 }
 
-/// Show the element highlight overlay for `selector` in `frame_id`'s
-/// execution context. `style` is an optional resolved CSS string applied
-/// to the highlight box (the caller composes the `style` record into a
-/// string, mirroring Playwright's `cssObjectToString`). Mirrors
-/// Playwright's `frame._highlight(selector, style)` ->
-/// `injected.addHighlight(parsed, style)` flow
-/// (`/tmp/playwright/packages/playwright-core/src/server/frames.ts:1333`).
+/// Set the element highlights `frame_id` shows to exactly `entries`
+/// (selector, optional CSS), through `injected.setHighlights`. An empty
+/// list clears them.
 ///
 /// # Errors
 ///
-/// Returns an error if selector parsing or JS evaluation fails.
-pub async fn highlight(page: &AnyPage, selector: &str, style: Option<&str>, frame_id: Option<&str>) -> Result<()> {
-  let parsed = parse(selector)?;
-  page.ensure_engine_injected().await?;
-  let parts_json = build_parts_json(&parsed);
-  let style_arg = match style {
-    Some(s) => serde_json::to_string(s).unwrap_or_else(|_| "undefined".to_string()),
-    None => "undefined".to_string(),
-  };
-  let js = format!("window.__fd.addHighlight({parts_json},{style_arg})");
+/// Returns an error if a selector does not parse or JS evaluation fails.
+pub async fn set_highlights(
+  page: &AnyPage,
+  entries: &[(String, Option<String>)],
+  frame_id: Option<&str>,
+) -> Result<()> {
+  let mut list = Vec::with_capacity(entries.len());
+  for (selector, style) in entries {
+    let parts: serde_json::Value = serde_json::from_str(&build_parts_json(&parse(selector)?))?;
+    list.push(serde_json::json!({ "parts": parts, "cssStyle": style }));
+  }
+  if !list.is_empty() {
+    page.ensure_engine_injected().await?;
+  }
+  let js = format!(
+    "window.__fd && window.__fd.setHighlights({})",
+    serde_json::Value::Array(list)
+  );
   run_void(page, &js, frame_id).await
 }
 

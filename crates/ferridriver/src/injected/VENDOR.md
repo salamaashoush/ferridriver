@@ -15,9 +15,9 @@ belongs upstream, send it there.
 | | |
 |---|---|
 | upstream | `microsoft/playwright` |
-| version | 1.63.0-next |
-| commit | `07730b7` |
-| synced | 2026-08-17 |
+| version | 1.65.0-next |
+| commit | `d9f2fd3` |
+| synced | 2026-10-09 |
 
 ## Re-sync recipe
 
@@ -86,8 +86,20 @@ takes `ExpectedTextValue`, `Point` and `Rect` from it).
 
 ## Deltas carried inside vendored files
 
-None. Three API changes landed in ferridriver's own files instead when
+None. These API changes landed in ferridriver's own files instead when
 upstream made them:
+
+- 1.65 threads a `frameVisible` argument through `elementState` and
+  `checkElementStates`: an element inside a hidden iframe is hidden.
+  Playwright computes it host-side while resolving frame hops;
+  `index.ts::frameVisible` walks the element's `frameElement` chain,
+  which covers same-origin frames and takes a cross-origin ancestor as
+  visible.
+- 1.65 replaced `addHighlight`/`removeHighlight` with a declarative
+  `setHighlights([...])`. `index.ts` exposes it as `__fd.setHighlights`,
+  and `Page`'s highlight controller re-applies each frame's set the way
+  `server/highlightController.ts` does. `recorderSupport.ts` shims the
+  same method onto its own `Highlight`.
 
 - `getElementAccessibleName` returns a composite `AccessibleName` since
   1.63; callers that want the string use `getElementAccessibleNameText`,

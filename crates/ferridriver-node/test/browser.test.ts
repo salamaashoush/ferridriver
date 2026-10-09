@@ -1067,7 +1067,8 @@ for (const backend of BACKENDS) {
           });
         </script>
       `);
-      await page.waitForSelector("#target");
+      // An empty <div> has no box, so it is attached but never visible.
+      await page.waitForSelector("#target", { state: "attached" });
       await page.locator("#target").dispatchEvent("custom");
       const text = await page.locator("#target").innerText();
       expect(text).toBe("event fired");

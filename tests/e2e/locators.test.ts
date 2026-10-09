@@ -261,21 +261,31 @@ describe('locators', () => {
   });
 
   test('script_locator_highlight', async ({ page }) => {
-    // highlight() installs the Playwright glass-pane overlay
-    // (<x-pw-glass>); dispose()/hideHighlight() tear it down. The
-    // overlay's presence is the real effect of the call.
-    await page.goto(dataUrl("<button id='b'>Target</button>"));
+    // highlight() draws a box over the element in the glass pane;
+    // dispose()/hideHighlight() take that locator's box away and leave any
+    // other locator's. The pane's shadow root is closed outside
+    // Playwright's own test mode, so the boxes are counted through the
+    // overlay the engine rendered.
+    await page.goto(dataUrl("<button id='b'>Target</button><a id='a' href='#'>Other</a>"));
     const loc = page.locator('#b');
-    const glassCount = () => page.evaluate("document.querySelectorAll('x-pw-glass').length");
-    expect(await glassCount()).toBe(0);
+    const boxes = {
+      toHaveCount: (n: number) =>
+        expect
+          .poll(() => page.evaluate('window.__fd._injected._highlight?._renderedEntries?.length ?? 0'))
+          .toBe(n),
+    };
+    await boxes.toHaveCount(0);
     const disp = await loc.highlight({ style: { outlineColor: 'red', zIndex: 7 } });
-    expect(await glassCount()).toBe(1);
+    await boxes.toHaveCount(1);
     await disp.dispose();
-    expect(await glassCount()).toBe(0);
+    await boxes.toHaveCount(0);
     await loc.highlight();
-    expect(await glassCount()).toBe(1);
+    await page.locator('#a').highlight();
+    await boxes.toHaveCount(2);
     await loc.hideHighlight();
-    expect(await glassCount()).toBe(0);
+    await boxes.toHaveCount(1);
+    await page.hideHighlight();
+    await boxes.toHaveCount(0);
   });
 
   test('script_locator_napi_parity', async ({ page }) => {
