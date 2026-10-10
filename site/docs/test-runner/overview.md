@@ -30,8 +30,10 @@ Rust or JavaScript / TypeScript step bodies).
   PNG snapshots.
 - **Traces.** Playwright-compatible ZIP traces (viewable with
   `npx playwright show-trace`).
-- **Filters.** `--grep`, `--grep-invert`, `--tag`, `--shard`,
+- **Filters.** `--grep`, `--grep-invert` (`-G`), `--tag`, `--shard`,
   `--last-failed`, `--forbid-only`, `--project`.
+- **Order.** `--shuffle` runs files, and tests in parallel mode, in a
+  random order and prints the seed; `--shuffle <seed>` repeats it.
 
 ## Entry points
 

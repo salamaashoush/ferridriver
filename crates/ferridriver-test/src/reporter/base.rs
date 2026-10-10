@@ -909,17 +909,26 @@ pub fn summary_message(screen: Screen, collector: &ResultCollector) -> String {
   tokens.join("\n")
 }
 
-/// `Running N tests using M workers`, printed when a run begins.
+/// `Running N tests using M workers`, printed when a run begins, with the
+/// seed of a shuffled run so it can be repeated.
 #[must_use]
-pub fn starting_message(screen: Screen, total: usize, workers: u32) -> String {
+pub fn starting_message(screen: Screen, total: usize, workers: u32, metadata: &serde_json::Value) -> String {
   if total == 0 {
     return String::new();
   }
+  let shuffle = metadata
+    .get("shuffleSeed")
+    .and_then(serde_json::Value::as_str)
+    .map(|seed| format!(", shuffle seed {seed}"))
+    .unwrap_or_default();
   format!(
     "\n{}{total}{}{workers}{}",
     screen.dim("Running "),
     screen.dim(if total == 1 { " test using " } else { " tests using " }),
-    screen.dim(if workers == 1 { " worker" } else { " workers" }),
+    screen.dim(&format!(
+      "{}{shuffle}",
+      if workers == 1 { " worker" } else { " workers" }
+    )),
   )
 }
 

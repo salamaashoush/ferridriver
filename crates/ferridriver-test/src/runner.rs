@@ -891,7 +891,7 @@ impl TestRunner {
       bus.emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
-        metadata: self.config.metadata.clone(),
+        metadata: with_shuffle_seed(self.config.metadata.clone(), self.overrides.shuffle.as_deref()),
         start_time: std::time::SystemTime::now(),
         preamble: Arc::new(crate::reporter::api::RunPreamble::build(&self.config, &project_plans)),
       });
@@ -1301,7 +1301,7 @@ impl TestRunner {
 
     // Compose `metadata` with optional git info per `captureGitInfo`.
     // Cloned once here so each downstream emit sees the same JSON.
-    let mut run_metadata = self.config.metadata.clone();
+    let mut run_metadata = with_shuffle_seed(self.config.metadata.clone(), self.overrides.shuffle.as_deref());
     if self.config.capture_git_info {
       let info = crate::git_info::GitInfo::capture();
       let git_value = serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
@@ -1379,6 +1379,7 @@ impl TestRunner {
 
     // ── Dispatcher — enqueue suites with hooks + mode context ──
     let dispatcher = Arc::new(Dispatcher::new());
+    let mut units: Vec<crate::dispatcher::WorkItem> = Vec::new();
     for suite in &plan.suites {
       let repeat_each_index = suite.tests.first().map_or(0, |test| test.id.repeat_each_index);
       let suite_key = format!("{}::{}::repeat:{repeat_each_index}", suite.file, suite.name);
@@ -1409,7 +1410,7 @@ impl TestRunner {
               hooks: Arc::clone(&hooks),
               suite_mode: crate::model::SuiteMode::Parallel,
             };
-            dispatcher.enqueue_single(assignment);
+            units.push(crate::dispatcher::WorkItem::Single(assignment));
           }
         },
         crate::model::SuiteMode::Serial => {
@@ -1434,12 +1435,21 @@ impl TestRunner {
               suite_mode: crate::model::SuiteMode::Serial,
             })
             .collect();
-          dispatcher.enqueue_serial(crate::dispatcher::SerialBatch {
+          units.push(crate::dispatcher::WorkItem::Serial(crate::dispatcher::SerialBatch {
             suite_key: suite_key.clone(),
             assignments,
             hooks: Arc::clone(&hooks),
-          });
+          }));
         },
+      }
+    }
+    if let Some(seed) = &self.overrides.shuffle {
+      shuffle_work(&mut units, seed);
+    }
+    for unit in units {
+      match unit {
+        crate::dispatcher::WorkItem::Single(assignment) => dispatcher.enqueue_single(assignment),
+        crate::dispatcher::WorkItem::Serial(batch) => dispatcher.enqueue_serial(batch),
       }
     }
 
@@ -2619,6 +2629,40 @@ fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, ferridri
 
 /// Filter a test plan for a specific project's scope.
 ///
+/// Playwright's `shuffleTestGroups`: the order is the units sorted by a
+/// hash of the seed and each unit's first test, so one seed always gives
+/// one order.
+fn shuffle_work(units: &mut [crate::dispatcher::WorkItem], seed: &str) {
+  use sha2::Digest as _;
+  units.sort_by_cached_key(|unit| {
+    let first = match unit {
+      crate::dispatcher::WorkItem::Single(assignment) => Some(&assignment.test.id),
+      crate::dispatcher::WorkItem::Serial(batch) => batch.assignments.first().map(|a| &a.test.id),
+    };
+    let key = first.map(crate::model::TestId::execution_key).unwrap_or_default();
+    sha2::Sha256::digest(format!(
+      "{seed}\x1e{}\x1e{key}",
+      first.map_or("", |id| id.file.as_str())
+    ))
+    .to_vec()
+  });
+}
+
+/// The run's `metadata` with Playwright's `shuffleSeed`, which the run
+/// header reports.
+fn with_shuffle_seed(mut metadata: serde_json::Value, seed: Option<&str>) -> serde_json::Value {
+  let Some(seed) = seed else {
+    return metadata;
+  };
+  match &mut metadata {
+    serde_json::Value::Object(map) => {
+      map.insert("shuffleSeed".into(), seed.into());
+    },
+    other => *other = serde_json::json!({ "shuffleSeed": seed }),
+  }
+  metadata
+}
+
 /// Applies project-level test_match, test_dir, grep, grep_invert, and tag filters.
 fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &ProjectConfig) {
   // Filter by test_dir: only keep suites whose file lives under it.

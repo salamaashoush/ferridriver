@@ -123,12 +123,13 @@ impl Reporter for LineReporter {
       ReporterEvent::RunStarted {
         total_tests,
         num_workers,
+        metadata,
         ..
       } => {
         self.total = *total_tests;
         self.out.write(&format!(
           "{}\n",
-          base::starting_message(screen, *total_tests, *num_workers)
+          base::starting_message(screen, *total_tests, *num_workers, metadata)
         ));
       },
 

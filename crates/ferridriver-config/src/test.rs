@@ -1381,6 +1381,8 @@ pub struct CliOverrides {
   pub grep: Option<String>,
   pub grep_invert: Option<String>,
   pub tag: Option<String>,
+  /// `--shuffle [seed]`: schedule in an order this seed decides.
+  pub shuffle: Option<String>,
   /// Explicit `--headless` / `--headed` choice. `None` leaves the
   /// config's value alone; a bool overrides it in EITHER direction, so
   /// `--headed` can win over a config that pins `headless = true`.

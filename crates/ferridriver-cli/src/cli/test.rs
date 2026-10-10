@@ -19,7 +19,7 @@ pub struct TestRunArgs {
   pub grep: Option<String>,
 
   /// Skip tests whose full title matches this substring/regex.
-  #[arg(long, help_heading = "Selection")]
+  #[arg(long, short = 'G', help_heading = "Selection")]
   pub grep_invert: Option<String>,
 
   /// Only run tests carrying this tag (from `test(title, { tag })`).
@@ -53,6 +53,11 @@ pub struct TestRunArgs {
   /// Run each test N times.
   #[arg(long, help_heading = "Run")]
   pub repeat_each: Option<u32>,
+
+  /// Schedule test files, and tests in parallel mode, in a random order;
+  /// pass a seed to reproduce a previous order.
+  #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "SEED", help_heading = "Run")]
+  pub shuffle: Option<String>,
 
   /// Fail the run when `test.only` is present (CI guard).
   #[arg(long, help_heading = "Run")]

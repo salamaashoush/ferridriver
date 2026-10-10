@@ -15,6 +15,18 @@ pub async fn run(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::R
     grep: args.grep,
     grep_invert: args.grep_invert,
     tag: args.tag,
+    // A bare `--shuffle` picks a seed, which the run header then reports.
+    shuffle: args.shuffle.map(|seed| {
+      if seed.is_empty() {
+        (std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map_or(0, |d| d.subsec_nanos())
+          % 1_000_000_000)
+          .to_string()
+      } else {
+        seed
+      }
+    }),
     retries: args.retries,
     timeout: args.timeout,
     last_failed: args.last_failed,
