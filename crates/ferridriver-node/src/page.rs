@@ -1195,7 +1195,7 @@ impl Page {
   /// `PageCheckOptions` bag.
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .check(&selector)
@@ -1208,7 +1208,7 @@ impl Page {
   /// `PageUncheckOptions` bag.
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .uncheck(&selector)
@@ -1226,7 +1226,7 @@ impl Page {
     checked: bool,
     options: Option<crate::types::CheckOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .set_checked(&selector, checked)
@@ -1661,7 +1661,7 @@ impl Page {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486`.
   #[napi]
   pub async fn drag_and_drop(&self, source: String, target: String, options: Option<DragAndDropOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .drag_and_drop(&source, &target)

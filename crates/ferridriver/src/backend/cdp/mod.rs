@@ -2331,10 +2331,7 @@ impl<T: CdpWrap> CdpPage<T> {
     .await
     {
       Ok(result) => result,
-      Err(_) => Err(FerriError::Timeout {
-        timeout_ms,
-        operation: Some(format!("navigating to {url}")),
-      }),
+      Err(_) => Err(FerriError::timeout(format!("navigating to {url}"), timeout_ms)),
     }
   }
 

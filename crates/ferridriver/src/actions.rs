@@ -788,7 +788,11 @@ pub async fn extract_markdown(page: &AnyPage) -> Result<String> {
 /// # Errors
 ///
 /// Returns an error if the JS evaluation fails or the element has no box.
-pub async fn resolve_click_point(element: &AnyElement, position: Option<crate::options::Point>) -> Result<(f64, f64)> {
+pub async fn resolve_click_point(
+  element: &AnyElement,
+  position: Option<crate::options::Point>,
+  scroll: bool,
+) -> Result<(f64, f64)> {
   let position_js = match position {
     Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
     None => "null".to_string(),
@@ -801,7 +805,8 @@ pub async fn resolve_click_point(element: &AnyElement, position: Option<crate::o
   // best-available primitive, not a workaround.
   let js = format!(
     "function() {{ \
-      if (typeof this.scrollIntoViewIfNeeded === 'function') {{ \
+      if (!{scroll}) {{ \
+      }} else if (typeof this.scrollIntoViewIfNeeded === 'function') {{ \
         this.scrollIntoViewIfNeeded(); \
       }} else {{ \
         this.scrollIntoView({{ block: 'center', inline: 'center' }}); \
@@ -810,6 +815,14 @@ pub async fn resolve_click_point(element: &AnyElement, position: Option<crate::o
       var pos = {position_js}; \
       var x = pos ? (r.x + pos.x) : (r.x + r.width / 2); \
       var y = pos ? (r.y + pos.y) : (r.y + r.height / 2); \
+      if (!pos && r.width * r.height > 0) {{ \
+        var vw = window.innerWidth, vh = window.innerHeight; \
+        var left = Math.max(r.left, 0), right = Math.min(r.right, vw); \
+        var top = Math.max(r.top, 0), bottom = Math.min(r.bottom, vh); \
+        if ((right - left) * (bottom - top) <= 0.99 || right <= left || bottom <= top) return 'error:notinviewport'; \
+        x = (left + right) / 2; \
+        y = (top + bottom) / 2; \
+      }} \
       var win = this.ownerDocument.defaultView; \
       while (win && win !== win.parent && win.frameElement) {{ \
         var fr = win.frameElement.getBoundingClientRect(); \
@@ -821,6 +834,9 @@ pub async fn resolve_click_point(element: &AnyElement, position: Option<crate::o
     }}"
   );
   let val = element.call_js_fn_value(&js).await?;
+  if let Some(reason @ serde_json::Value::String(_)) = &val {
+    return Err(FerriError::Backend(reason.as_str().unwrap_or_default().to_string()));
+  }
   val
     .and_then(|v| {
       let x = v.get("x").and_then(serde_json::Value::as_f64)?;
@@ -883,6 +899,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     // (`undefined` => precise `scrollIntoViewIfNeeded`, then end/center/start)
     // to reveal targets under `position:sticky` overlays.
     let scroll_align = match attempt % 4 {
+      _ if !opts.scrolls() => Some("false"),
       0 => None,
       1 => Some("{block:'end',inline:'end'}"),
       2 => Some("{block:'center',inline:'center'}"),
@@ -893,7 +910,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     // enabled / stable) + `scrollIntoView` + viewport-intersected
     // `clickPoint` in ONE callFunctionOn.
     let (x, y) = if opts.is_force() {
-      resolve_click_point(element, opts.position).await?
+      resolve_click_point(element, opts.position, opts.scrolls()).await?
     } else {
       match click_prep(element, page, opts.position, scroll_align).await? {
         ClickPrep::Ready { x, y } => (x, y),
@@ -1098,7 +1115,12 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     // Playwright hover: visible + stable (no enabled gate).
     wait_for_states(element, page, &["visible", "stable"]).await.ok();
   }
-  let (x, y) = resolve_click_point(element, opts.position).await?;
+  let (x, y) = resolve_click_point(
+    element,
+    opts.position,
+    opts.scroll != Some(crate::options::ActionScroll::None),
+  )
+  .await?;
 
   // Hit-target check (Playwright's `'hover'` interceptor set:
   // `mousemove`): trial runs only the preliminary `expectHitTarget`;
@@ -1177,7 +1199,12 @@ pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::o
       .await
       .ok();
   }
-  let (x, y) = resolve_click_point(element, opts.position).await?;
+  let (x, y) = resolve_click_point(
+    element,
+    opts.position,
+    opts.scroll != Some(crate::options::ActionScroll::None),
+  )
+  .await?;
 
   // Hit-target check (Playwright's `'tap'` interceptor set:
   // pointerdown/up + touchstart/end/cancel) — same lifecycle as hover.

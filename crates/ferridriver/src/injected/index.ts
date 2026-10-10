@@ -389,7 +389,7 @@ async function clickPrep(
   el: Element,
   position: { x: number; y: number } | null,
   states: ElementState[],
-  scrollAlign?: ScrollIntoViewOptions | null,
+  scrollAlign?: ScrollIntoViewOptions | null | false,
 ): Promise<{
   guard: string;
   actionable: boolean;
@@ -406,8 +406,10 @@ async function clickPrep(
   // Scroll into view. On a retry the host passes an explicit alignment
   // (Playwright `_retryPointerAction` cycles undefined/end/center/start to
   // escape position:sticky overlays); otherwise use the precise non-standard
-  // `scrollIntoViewIfNeeded`.
-  if (scrollAlign) {
+  // `scrollIntoViewIfNeeded`. `false` is the action's `scroll: 'none'`.
+  if (scrollAlign === false) {
+    // Leave the page where it is.
+  } else if (scrollAlign) {
     el.scrollIntoView(scrollAlign);
   } else if (typeof (el as any).scrollIntoViewIfNeeded === 'function') {
     (el as any).scrollIntoViewIfNeeded();

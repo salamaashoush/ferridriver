@@ -431,13 +431,13 @@ impl Frame {
 
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self.inner.check(&selector).maybe_options(opts).await.into_napi()
   }
 
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self.inner.uncheck(&selector).maybe_options(opts).await.into_napi()
   }
 
@@ -448,7 +448,7 @@ impl Frame {
     checked: bool,
     options: Option<crate::types::CheckOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .set_checked(&selector, checked)
@@ -500,7 +500,9 @@ impl Frame {
     target: String,
     options: Option<crate::types::DragAndDropOptions>,
   ) -> Result<()> {
-    let opts = options.map(ferridriver::options::DragAndDropOptions::from);
+    let opts = options
+      .map(ferridriver::options::DragAndDropOptions::try_from)
+      .transpose()?;
     self
       .inner
       .drag_and_drop(&source, &target)

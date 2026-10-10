@@ -20,12 +20,15 @@ use thiserror::Error;
 pub enum FerriError {
   /// Operation did not complete within its deadline. Mirrors Playwright's
   /// `TimeoutError` — message format `"Timeout {timeout_ms}ms exceeded"` with
-  /// an optional `"while {operation}"` suffix.
-  #[error("Timeout {timeout_ms}ms exceeded{}", .operation.as_ref().map(|op| format!(" while {op}")).unwrap_or_default())]
+  /// an optional `"while {operation}"` suffix, then the `Call log:` an
+  /// action records while it retries.
+  #[error("Timeout {timeout_ms}ms exceeded{}{}", .operation.as_ref().map(|op| format!(" while {op}")).unwrap_or_default(), format_call_log(.call_log))]
   Timeout {
     /// Short phrase describing what was being waited on, e.g. `"navigating to https://..."`.
     operation: Option<String>,
     timeout_ms: u64,
+    /// Playwright's `Call log:` lines, in the order the operation logged them.
+    call_log: Vec<String>,
   },
 
   /// Target page, context, browser, or session has been closed. Mirrors
@@ -159,6 +162,7 @@ impl FerriError {
     Self::Timeout {
       operation: Some(operation.into()),
       timeout_ms,
+      call_log: Vec::new(),
     }
   }
 
@@ -168,7 +172,17 @@ impl FerriError {
     Self::Timeout {
       operation: None,
       timeout_ms,
+      call_log: Vec::new(),
     }
+  }
+
+  /// Attaches an operation's call log to a timeout; other errors pass through.
+  #[must_use]
+  pub fn with_call_log(mut self, log: Vec<String>) -> Self {
+    if let Self::Timeout { call_log, .. } = &mut self {
+      *call_log = log;
+    }
+    self
   }
 
   /// Builder for [`FerriError::StrictModeViolation`].
@@ -259,6 +273,18 @@ impl FerriError {
   }
 }
 
+fn format_call_log(lines: &[String]) -> String {
+  if lines.is_empty() {
+    return String::new();
+  }
+  let mut out = String::from("\nCall log:");
+  for line in lines {
+    out.push_str("\n  - ");
+    out.push_str(line);
+  }
+  out
+}
+
 impl From<std::io::Error> for FerriError {
   fn from(e: std::io::Error) -> Self {
     Self::Io(e.to_string())
@@ -321,6 +347,22 @@ mod tests {
     assert_eq!(err.name(), "TimeoutError");
     assert!(err.is_timeout_error());
     assert!(!err.is_target_closed_error());
+  }
+
+  #[test]
+  fn timeout_message_carries_the_call_log() {
+    let err = FerriError::timeout("click", 2000).with_call_log(vec![
+      "waiting for locator('button')".into(),
+      "  element is outside of the viewport".into(),
+    ]);
+    assert_eq!(
+      err.to_string(),
+      "Timeout 2000ms exceeded while click\nCall log:\n  - waiting for locator('button')\n  -   element is outside of the viewport"
+    );
+    assert_eq!(
+      FerriError::backend("x").with_call_log(vec!["y".into()]).to_string(),
+      "backend error: x"
+    );
   }
 
   #[test]

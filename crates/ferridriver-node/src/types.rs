@@ -649,6 +649,8 @@ pub struct ClickOptions {
   pub steps: Option<u32>,
   pub timeout: Option<f64>,
   pub trial: Option<bool>,
+  #[napi(ts_type = "'auto' | 'none'")]
+  pub scroll: Option<String>,
 }
 
 impl TryFrom<ClickOptions> for ferridriver::options::ClickOptions {
@@ -681,6 +683,7 @@ impl TryFrom<ClickOptions> for ferridriver::options::ClickOptions {
       steps: o.steps,
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
+      scroll: parse_scroll(o.scroll.as_deref())?,
     })
   }
 }
@@ -704,6 +707,8 @@ pub struct DblClickOptions {
   pub steps: Option<u32>,
   pub timeout: Option<f64>,
   pub trial: Option<bool>,
+  #[napi(ts_type = "'auto' | 'none'")]
+  pub scroll: Option<String>,
 }
 
 impl TryFrom<DblClickOptions> for ferridriver::options::DblClickOptions {
@@ -735,6 +740,7 @@ impl TryFrom<DblClickOptions> for ferridriver::options::DblClickOptions {
       steps: o.steps,
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
+      scroll: parse_scroll(o.scroll.as_deref())?,
     })
   }
 }
@@ -1222,17 +1228,22 @@ pub struct CheckOptions {
   pub position: Option<Point>,
   pub timeout: Option<f64>,
   pub trial: Option<bool>,
+  #[napi(ts_type = "'auto' | 'none'")]
+  pub scroll: Option<String>,
 }
 
-impl From<CheckOptions> for ferridriver::options::CheckOptions {
-  fn from(o: CheckOptions) -> Self {
-    Self {
+impl TryFrom<CheckOptions> for ferridriver::options::CheckOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: CheckOptions) -> std::result::Result<Self, Self::Error> {
+    Ok(Self {
       force: o.force,
       no_wait_after: o.no_wait_after,
       position: o.position.map(Into::into),
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
-    }
+      scroll: parse_scroll(o.scroll.as_deref())?,
+    })
   }
 }
 
@@ -1267,6 +1278,8 @@ pub struct HoverOptions {
   pub position: Option<Point>,
   pub timeout: Option<f64>,
   pub trial: Option<bool>,
+  #[napi(ts_type = "'auto' | 'none'")]
+  pub scroll: Option<String>,
 }
 
 impl TryFrom<HoverOptions> for ferridriver::options::HoverOptions {
@@ -1288,6 +1301,7 @@ impl TryFrom<HoverOptions> for ferridriver::options::HoverOptions {
       position: o.position.map(Into::into),
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
+      scroll: parse_scroll(o.scroll.as_deref())?,
     })
   }
 }
@@ -1307,6 +1321,8 @@ pub struct TapOptions {
   pub position: Option<Point>,
   pub timeout: Option<f64>,
   pub trial: Option<bool>,
+  #[napi(ts_type = "'auto' | 'none'")]
+  pub scroll: Option<String>,
 }
 
 impl TryFrom<TapOptions> for ferridriver::options::TapOptions {
@@ -1328,6 +1344,7 @@ impl TryFrom<TapOptions> for ferridriver::options::TapOptions {
       position: o.position.map(Into::into),
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
+      scroll: parse_scroll(o.scroll.as_deref())?,
     })
   }
 }
@@ -1357,11 +1374,15 @@ pub struct DragAndDropOptions {
   pub timeout: Option<f64>,
   /// Perform actionability checks only; skip the actual mouse action.
   pub trial: Option<bool>,
+  #[napi(ts_type = "'auto' | 'none'")]
+  pub scroll: Option<String>,
 }
 
-impl From<DragAndDropOptions> for ferridriver::options::DragAndDropOptions {
-  fn from(o: DragAndDropOptions) -> Self {
-    Self {
+impl TryFrom<DragAndDropOptions> for ferridriver::options::DragAndDropOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: DragAndDropOptions) -> std::result::Result<Self, Self::Error> {
+    Ok(Self {
       force: o.force,
       no_wait_after: o.no_wait_after,
       source_position: o.source_position.map(Into::into),
@@ -1370,8 +1391,19 @@ impl From<DragAndDropOptions> for ferridriver::options::DragAndDropOptions {
       strict: o.strict,
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
-    }
+      scroll: parse_scroll(o.scroll.as_deref())?,
+    })
   }
+}
+
+/// Playwright's `scroll?: 'auto' | 'none'` action option.
+fn parse_scroll(value: Option<&str>) -> napi::Result<Option<ferridriver::options::ActionScroll>> {
+  value
+    .map(|v| {
+      ferridriver::options::ActionScroll::parse(v)
+        .ok_or_else(|| napi::Error::from_reason(format!("scroll: expected 'auto' or 'none', got {v:?}")))
+    })
+    .transpose()
 }
 
 /// Navigation options (waitUntil, timeout, referer).

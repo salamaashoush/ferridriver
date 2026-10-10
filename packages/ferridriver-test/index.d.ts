@@ -715,6 +715,7 @@ export interface ClickOptions {
   noWaitAfter?: boolean;
   trial?: boolean;
   timeout?: number;
+  scroll?: 'auto' | 'none';
 }
 
 export interface FillOptions {
@@ -1366,7 +1367,7 @@ export interface Locator {
   // steps is a ferridriver extension (default 5): intermediate
   // mousemoves so mousemove-tracked drag libraries cross their drag
   // threshold; Playwright emits a single move.
-  dragTo(target: Locator, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; steps?: number; trial?: boolean }): Promise<void>;
+  dragTo(target: Locator, options?: TimeoutOption & { force?: boolean; sourcePosition?: { x: number; y: number }; targetPosition?: { x: number; y: number }; steps?: number; trial?: boolean; scroll?: 'auto' | 'none' }): Promise<void>;
   // ferridriver extension: drop a DataTransfer payload (in-memory files
   // and/or string data by MIME type) onto this element.
   drop(

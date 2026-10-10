@@ -952,6 +952,27 @@ pub fn modifiers_bitmask(mods: &[Modifier]) -> u32 {
 /// Full click option bag shared by Page/Locator/Frame click methods.
 /// All three expose the same 10-field surface.
 ///
+/// Whether a pointer action scrolls its target into view first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionScroll {
+  #[default]
+  Auto,
+  None,
+}
+
+impl ActionScroll {
+  /// Playwright's `'auto' | 'none'`.
+  #[must_use]
+  pub fn parse(value: &str) -> Option<Self> {
+    match value {
+      "auto" => Some(Self::Auto),
+      "none" => Some(Self::None),
+      _ => None,
+    }
+  }
+}
+
 /// Every option is `Option<T>`: callers omit fields and the backend
 /// applies the documented defaults (`button: Left`, `click_count: 1`,
 /// `delay: 0`, `steps: 1`, etc.).
@@ -985,9 +1006,18 @@ pub struct ClickOptions {
   /// Run actionability checks only; skip the mouse events. Modifiers
   /// are still pressed/released around the no-op.
   pub trial: Option<bool>,
+  /// Playwright `scroll?: 'auto' | 'none'`: `none` leaves the page where
+  /// it is instead of scrolling the target into view first.
+  pub scroll: Option<ActionScroll>,
 }
 
 impl ClickOptions {
+  /// `false` when the caller opted out of scrolling into view.
+  #[must_use]
+  pub fn scrolls(&self) -> bool {
+    self.scroll != Some(ActionScroll::None)
+  }
+
   /// [`Self::button`] with the `Left` default applied.
   #[must_use]
   pub fn resolved_button(&self) -> MouseButton {
@@ -1092,6 +1122,9 @@ pub struct CheckOptions {
   pub position: Option<Point>,
   pub timeout: Option<u64>,
   pub trial: Option<bool>,
+  /// Playwright `scroll?: 'auto' | 'none'`: `none` leaves the page where
+  /// it is instead of scrolling the target into view first.
+  pub scroll: Option<ActionScroll>,
 }
 
 impl CheckOptions {
@@ -1121,6 +1154,7 @@ impl CheckOptions {
       steps: None,
       timeout: self.timeout,
       trial: self.trial,
+      scroll: self.scroll,
     }
   }
 }
@@ -1315,6 +1349,9 @@ pub struct HoverOptions {
   pub position: Option<Point>,
   pub timeout: Option<u64>,
   pub trial: Option<bool>,
+  /// Playwright `scroll?: 'auto' | 'none'`: `none` leaves the page where
+  /// it is instead of scrolling the target into view first.
+  pub scroll: Option<ActionScroll>,
 }
 
 impl HoverOptions {
@@ -1343,6 +1380,9 @@ pub struct TapOptions {
   pub position: Option<Point>,
   pub timeout: Option<u64>,
   pub trial: Option<bool>,
+  /// Playwright `scroll?: 'auto' | 'none'`: `none` leaves the page where
+  /// it is instead of scrolling the target into view first.
+  pub scroll: Option<ActionScroll>,
 }
 
 impl TapOptions {
@@ -1373,6 +1413,9 @@ pub struct DblClickOptions {
   pub steps: Option<u32>,
   pub timeout: Option<u64>,
   pub trial: Option<bool>,
+  /// Playwright `scroll?: 'auto' | 'none'`: `none` leaves the page where
+  /// it is instead of scrolling the target into view first.
+  pub scroll: Option<ActionScroll>,
 }
 
 impl DblClickOptions {
@@ -1392,6 +1435,7 @@ impl DblClickOptions {
       steps: self.steps,
       timeout: self.timeout,
       trial: self.trial,
+      scroll: self.scroll,
     }
   }
 }
@@ -1430,6 +1474,9 @@ pub struct DragAndDropOptions {
   pub timeout: Option<u64>,
   /// Perform actionability checks only; skip the actual mouse press/move/release.
   pub trial: Option<bool>,
+  /// Playwright `scroll?: 'auto' | 'none'`: `none` leaves the page where
+  /// it is instead of scrolling the target into view first.
+  pub scroll: Option<ActionScroll>,
 }
 
 /// Polling cadence for `waitForFunction`. Playwright's `polling` union:
@@ -2918,6 +2965,7 @@ mod drag_option_tests {
       source_position: Some(Point { x: 10.0, y: 20.0 }),
       target_position: Some(Point { x: 30.0, y: 40.0 }),
       steps: Some(5),
+      scroll: None,
       strict: Some(true),
       timeout: Some(2_000),
       trial: Some(true),

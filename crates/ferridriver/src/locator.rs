@@ -70,8 +70,11 @@ macro_rules! retry_resolve {
       )
     };
     let __trace_span = $crate::trace::open_action(__trace_page.snapshot_before(__trace_span).await).await;
+    // Playwright's `Call log:`, attached to the error if the action times out.
+    let mut __call_log: ::std::vec::Vec<::std::string::String> =
+      ::std::vec![format!("waiting for {}", $crate::locator_generator::as_locator(&$self.selector))];
     if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
-      __s.log(format!("waiting for {}", $crate::locator_generator::as_locator(&$self.selector)));
+      __s.log(__call_log[0].clone());
     }
     // Input-time capture (target mark + input@ snapshot + point) fires
     // once, on the first successful resolution.
@@ -95,10 +98,10 @@ macro_rules! retry_resolve {
         // time has already run out.
         if let ::std::option::Option::Some(__d) = __deadline {
           if ::std::time::Instant::now() >= __d {
-            break 'retry ::std::result::Result::Err($crate::error::FerriError::timeout(
-              __op_name.to_string(),
-              __resolved_timeout,
-            ));
+            break 'retry ::std::result::Result::Err(
+              $crate::error::FerriError::timeout(__op_name.to_string(), __resolved_timeout)
+                .with_call_log(::std::mem::take(&mut __call_log)),
+            );
           }
         }
 
@@ -165,6 +168,9 @@ macro_rules! retry_resolve {
         // implementation paid on every retry attempt (~2 RTTs).
         match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
           ::std::result::Result::Ok($el) => {
+            if __call_log.len() == 1 {
+              __call_log.push(format!("attempting {} action", __op_name));
+            }
             if __trace_input_pending {
               __trace_input_pending = false;
               if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
@@ -180,11 +186,14 @@ macro_rules! retry_resolve {
                   // (`error:notvisible` / `error:notenabled` / ...) plus
                   // stale-handle backend errors (the node detached
                   // mid-action). Keep re-resolving until the deadline.
-                  if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
-                    if __msg != __trace_last_log {
-                      __s.log(__msg.clone());
-                      __trace_last_log = __msg;
+                  let __line = $crate::locator::action_log_line(&__msg);
+                  if __line != __trace_last_log {
+                    __call_log.push(format!("  {__line}"));
+                    __call_log.push(format!("retrying {} action", __op_name));
+                    if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
+                      __s.log(__line.clone());
                     }
+                    __trace_last_log = __line;
                   }
                 } else {
                   break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
@@ -214,6 +223,24 @@ macro_rules! retry_resolve {
     }
     __result
   }};
+}
+
+/// The call-log line for a retried attempt, in Playwright's wording:
+/// `error:notinviewport` is "element is outside of the viewport",
+/// `error:not<state>` is "element is not <state>".
+pub(crate) fn action_log_line(msg: &str) -> String {
+  let Some(at) = msg.find("error:not") else {
+    return msg.strip_prefix("backend error: ").unwrap_or(msg).to_string();
+  };
+  let state: String = msg[at + "error:not".len()..]
+    .chars()
+    .take_while(char::is_ascii_alphanumeric)
+    .collect();
+  match state.as_str() {
+    "inviewport" => "element is outside of the viewport".to_string(),
+    "connected" => "element is not attached to the DOM".to_string(),
+    _ => format!("element is not {state}"),
+  }
 }
 
 /// Should a failed action attempt be retried (re-resolve + try again
@@ -1927,11 +1954,20 @@ impl Locator {
     target: &Locator,
     options: Option<crate::options::DragAndDropOptions>,
   ) -> Result<()> {
-    // `RECT_JS` scrolls the element into view and returns its full
-    // padding-box rect so `sourcePosition` / `targetPosition` offset from
-    // the origin as Playwright does.
-    const RECT_JS: &str = "function() { try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); } var r = this.getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; }";
+    // The rect script scrolls the element into view (unless the caller
+    // asked for `scroll: 'none'`) and returns its full padding-box rect so
+    // `sourcePosition` / `targetPosition` offset from the origin as
+    // Playwright does.
     let opts = options.unwrap_or_default();
+    let scroll = if opts.scroll == Some(crate::options::ActionScroll::None) {
+      ""
+    } else {
+      "try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); }"
+    };
+    let rect_js = format!(
+      "function() {{ {scroll} var r = this.getBoundingClientRect(); return {{x: r.x, y: r.y, width: r.width, height: r.height}}; }}"
+    );
+    let rect_js = rect_js.as_str();
 
     // Resolve source then target geometry under the action retry funnel
     // (Playwright resolves each with its own `_retryPointerAction`, source
@@ -1942,11 +1978,11 @@ impl Locator {
       opts.timeout,
       "dragTo",
       ::serde_json::json!({ "target": target.selector }),
-      |el, _page| async move { el.call_js_fn_value(RECT_JS).await }
+      |el, _page| async move { el.call_js_fn_value(rect_js).await }
     )?
     .ok_or_else(|| crate::error::FerriError::Backend("no source bounding box".into()))?;
     let tgt = retry_resolve!(target, opts.timeout, "dragTo", |el, _page| async move {
-      el.call_js_fn_value(RECT_JS).await
+      el.call_js_fn_value(rect_js).await
     })?
     .ok_or_else(|| crate::error::FerriError::Backend("no target bounding box".into()))?;
 

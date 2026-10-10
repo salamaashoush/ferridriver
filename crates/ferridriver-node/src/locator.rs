@@ -403,7 +403,7 @@ impl Locator {
   /// `LocatorCheckOptions` bag.
   #[napi]
   pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .check()
@@ -415,7 +415,7 @@ impl Locator {
   /// Uncheck a checkbox. Accepts Playwright's full `LocatorUncheckOptions` bag.
   #[napi]
   pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .uncheck()
@@ -633,7 +633,7 @@ impl Locator {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
   #[napi(js_name = "dragTo")]
   pub async fn drag_to(&self, target: &Locator, options: Option<crate::types::DragAndDropOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self.inner.drag_to(&target.inner).maybe_options(opts).await.into_napi()
   }
 
@@ -723,7 +723,7 @@ impl Locator {
 
   #[napi]
   pub async fn set_checked(&self, checked: bool, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .set_checked(checked)

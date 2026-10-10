@@ -355,21 +355,21 @@ impl ElementHandle {
   /// Playwright: `elementHandle.check(options?)`.
   #[napi]
   pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self.inner.check().maybe_options(opts).await.into_napi()
   }
 
   /// Playwright: `elementHandle.uncheck(options?)`.
   #[napi]
   pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self.inner.uncheck().maybe_options(opts).await.into_napi()
   }
 
   /// Playwright: `elementHandle.setChecked(checked, options?)`.
   #[napi]
   pub async fn set_checked(&self, checked: bool, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
+    let opts = options.map(TryInto::try_into).transpose()?;
     self.inner.set_checked(checked).maybe_options(opts).await.into_napi()
   }
 
