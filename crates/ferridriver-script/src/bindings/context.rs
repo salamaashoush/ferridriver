@@ -1116,44 +1116,34 @@ impl BrowserContextJs {
       let vm = vm.clone();
       let name = name.clone();
       Box::pin(async move {
-        let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> = crate::vm_with!(vm => |ctx| {
-          let saved = crate::bindings::page::get_exposed_callback(&ctx, &name)?
-            .ok_or_else(|| {
-              throw_named(&ctx, "Error", "BrowserContext.exposeBinding: exposed callback gone")
-            })?;
-          let f = saved.restore(&ctx)?;
-          // Playwright spreads the page-side call args into the
-          // callback. For exposeBinding the BindingSource object is the
-          // first argument; for exposeFunction it is omitted.
-          let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
-          if with_source {
-            let src = rquickjs::Object::new(ctx.clone())?;
-            src.set("context", source.context.clone())?;
-            src.set("page", source.page.clone())?;
-            src.set("frame", source.frame.clone())?;
-            call_args.push_arg(src)?;
-          }
-          for v in &args {
-            // `json_to_js` (NOT serde): a transitive dep force-enables
-            // `serde_json/arbitrary_precision`, under which the serde
-            // path turns numbers into wrapper objects.
-            call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
-          }
-          let res = async {
-              let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
-              mp.into_future::<rquickjs::Value<'_>>().await
+        let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
+          crate::vm_with!(vm => |ctx| {
+            let saved = crate::bindings::page::get_exposed_callback(&ctx, &name)?
+              .ok_or_else(|| {
+                throw_named(&ctx, "Error", "BrowserContext.exposeBinding: exposed callback gone")
+              })?;
+            let f = saved.restore(&ctx)?;
+            // Playwright spreads the page-side call args into the
+            // callback. For exposeBinding the BindingSource object is the
+            // first argument; for exposeFunction it is omitted.
+            let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
+            if with_source {
+              let src = rquickjs::Object::new(ctx.clone())?;
+              src.set("context", source.context.clone())?;
+              src.set("page", source.page.clone())?;
+              src.set("frame", source.frame.clone())?;
+              call_args.push_arg(src)?;
             }
-          .await?;
-          let json = match ctx.json_stringify(res)? {
-            Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
-            None => serde_json::Value::Null,
-          };
-          Ok(json)
-        })
-        .await;
-        out.map_or(serde_json::Value::Null, |inner| {
-          inner.unwrap_or(serde_json::Value::Null)
-        })
+            for v in &args {
+              // `json_to_js` (NOT serde): a transitive dep force-enables
+              // `serde_json/arbitrary_precision`, under which the serde
+              // path turns numbers into wrapper objects.
+              call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
+            }
+            crate::bindings::page::settle_exposed_call(&ctx, &f, call_args).await
+          })
+          .await;
+        crate::bindings::page::exposed_outcome(out)
       })
     });
     Ok(binding)

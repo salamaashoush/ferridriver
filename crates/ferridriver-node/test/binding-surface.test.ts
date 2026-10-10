@@ -163,21 +163,33 @@ for (const backend of BACKENDS) {
       expect(typeof fl.locator).toBe("function");
     });
 
-    it("page.exposeFunction wires JS callback", async () => {
-      // NAPI surface is fire-and-forget with a single args array
-      // (documented convention); the QuickJS/script surface carries the
-      // full Playwright parity (spread args + return-value delivery).
+    it("page.exposeFunction spreads the call and returns the result", async () => {
       const seen: unknown[][] = [];
-      await page.exposeFunction("__expose_record", (args: unknown[]) => {
+      await page.exposeFunction("__expose_record", (...args: unknown[]) => {
         seen.push(args);
+        return { got: args, n: args.length };
       });
       await page.setContent("<button>x</button>");
-      await page.evaluate(`window.__expose_record(1, 'two', { three: 3 })`);
-      for (let i = 0; i < 50 && seen.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      expect(seen.length).toBe(1);
-      expect(seen[0]).toEqual([1, "two", { three: 3 }]);
+      expect(await page.evaluate(`window.__expose_record(1, 'two', { three: 3 })`)).toEqual({
+        got: [1, "two", { three: 3 }],
+        n: 3,
+      });
+      expect(seen).toEqual([[1, "two", { three: 3 }]]);
+    });
+
+    it("page.exposeFunction awaits an async callback and rejects with its error", async () => {
+      await page.exposeFunction("__expose_async", async (n: number) => {
+        await new Promise((r) => setTimeout(r, 10));
+        return n * 2;
+      });
+      await page.exposeFunction("__expose_throw", () => {
+        throw new Error("WOOF WOOF");
+      });
+      await page.setContent("<button>x</button>");
+      expect(await page.evaluate(`window.__expose_async(21)`)).toBe(42);
+      expect(
+        await page.evaluate(`window.__expose_throw().then(() => 'no error', (e) => e.message)`),
+      ).toBe("WOOF WOOF");
     });
 
     it("page.$eval runs the function on the first match", async () => {
@@ -213,17 +225,15 @@ for (const backend of BACKENDS) {
       const seenArgs: unknown[][] = [];
       await page.exposeBinding(
         "__page_bind",
-        (source: { context: string; page: string; frame: string }, args: unknown[]) => {
+        (source: { context: string; page: string; frame: string }, ...args: number[]) => {
           seenSource.push(source);
           seenArgs.push(args);
+          return args[0] + args[1];
         },
       );
       await page.setContent("<button>x</button>");
       expect(await page.evaluate(`typeof window.__page_bind`)).toBe("function");
-      await page.evaluate(`window.__page_bind(2, 3)`);
-      for (let i = 0; i < 50 && seenArgs.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      expect(await page.evaluate(`window.__page_bind(2, 3)`)).toBe(5);
       expect(seenArgs.length).toBe(1);
       expect(seenArgs[0]).toEqual([2, 3]);
       expect(Object.keys(seenSource[0]).sort()).toEqual(["context", "frame", "page"]);
@@ -265,7 +275,7 @@ for (const backend of BACKENDS) {
     it("context.exposeBinding applies to a page opened after registration", async () => {
       // Register BEFORE opening the page, then open a fresh page and
       // observe window[name] is present and the BindingSource reached
-      // the callback. NAPI is fire-and-forget: (source, args).
+      // the callback.
       const ctx = browser.newContext();
       const seenSource: Record<string, unknown>[] = [];
       const seenArgs: unknown[][] = [];
@@ -273,20 +283,18 @@ for (const backend of BACKENDS) {
         "__ctx_bind",
         (
           source: { context: string; page: string; frame: string },
-          args: unknown[],
+          ...args: number[]
         ) => {
           seenSource.push(source);
           seenArgs.push(args);
+          return args[0] * args[1];
         },
       );
       const p = await ctx.newPage();
       await p.goto("data:text/html,<title>x</title>");
       const installed = await p.evaluate(`typeof window.__ctx_bind`);
       expect(installed).toBe("function");
-      await p.evaluate(`window.__ctx_bind(2, 3)`);
-      for (let i = 0; i < 50 && seenArgs.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      expect(await p.evaluate(`window.__ctx_bind(2, 3)`)).toBe(6);
       expect(seenArgs.length).toBe(1);
       expect(seenArgs[0]).toEqual([2, 3]);
       expect(Object.keys(seenSource[0]).sort()).toEqual([
@@ -305,17 +313,14 @@ for (const backend of BACKENDS) {
     it("context.exposeFunction delivers only the page-side args (no source)", async () => {
       const ctx = browser.newContext();
       const seen: unknown[][] = [];
-      await ctx.exposeFunction("__ctx_fn", (args: unknown[]) => {
+      await ctx.exposeFunction("__ctx_fn", (...args: unknown[]) => {
         seen.push(args);
+        return args.length;
       });
       const p = await ctx.newPage();
       await p.goto("data:text/html,<title>x</title>");
-      await p.evaluate(`window.__ctx_fn(1, 'two')`);
-      for (let i = 0; i < 50 && seen.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      expect(seen.length).toBe(1);
-      expect(seen[0]).toEqual([1, "two"]);
+      expect(await p.evaluate(`window.__ctx_fn(1, 'two')`)).toBe(2);
+      expect(seen).toEqual([[1, "two"]]);
       await ctx.close();
     });
 

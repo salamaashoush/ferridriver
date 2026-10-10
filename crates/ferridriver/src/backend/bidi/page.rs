@@ -2419,29 +2419,33 @@ impl BidiPage {
               frame: call_ctx.clone(),
             };
             let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
-            if let Some(callback) = maybe_fn {
-              let exposed_session = exposed_session.clone();
-              let _ = binding_tx.send(Box::pin(async move {
-                let result = callback(source, args).await;
-                let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
-                let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
-                let resolve_js = format!(
-                  "(() => {{ const f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
-                );
-                let _ = exposed_session
-                  .transport
-                  .send_command(
-                    "script.callFunction",
-                    json!({
-                      "functionDeclaration": format!("() => {{ {resolve_js} }}"),
-                      "target": {"context": call_ctx},
-                      "awaitPromise": false,
-                      "resultOwnership": "none"
-                    }),
-                  )
-                  .await;
-              }));
-            }
+            let exposed_session = exposed_session.clone();
+            let _ = binding_tx.send(Box::pin(async move {
+              let (settled, value) = match maybe_fn {
+                Some(callback) => match callback(source, args).await {
+                  Ok(value) => (true, value),
+                  Err(message) => (false, serde_json::Value::String(message)),
+                },
+                None => (false, serde_json::Value::String(format!("Function not found: {fn_name}"))),
+              };
+              let _ = exposed_session
+                .transport
+                .send_command(
+                  "script.callFunction",
+                  json!({
+                    "functionDeclaration": "(id, ok, value) => { const c = window.__ferri_exposed && window.__ferri_exposed[id]; if (c) { delete window.__ferri_exposed[id]; ok ? c.resolve(JSON.parse(value)) : c.reject(new Error(value)); } }",
+                    "arguments": [
+                      {"type": "string", "value": id},
+                      {"type": "boolean", "value": settled},
+                      {"type": "string", "value": if settled { value.to_string() } else { value.as_str().unwrap_or_default().to_string() }},
+                    ],
+                    "target": {"context": call_ctx},
+                    "awaitPromise": false,
+                    "resultOwnership": "none"
+                  }),
+                )
+                .await;
+            }));
           },
           "log.entryAdded" => {
             // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`.
@@ -3630,10 +3634,10 @@ impl BidiPage {
     let js = format!(
       r"(channel) => {{
         window['{name}'] = (...args) => {{
-          return new Promise((resolve) => {{
+          return new Promise((resolve, reject) => {{
             const id = Math.random().toString(36);
             window.__ferri_exposed = window.__ferri_exposed || {{}};
-            window.__ferri_exposed[id] = resolve;
+            window.__ferri_exposed[id] = {{ resolve, reject }};
             channel(JSON.stringify({{name: '{name}', id, args}}));
           }});
         }};

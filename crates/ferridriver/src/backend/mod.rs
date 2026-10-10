@@ -2090,3 +2090,19 @@ pub(crate) fn ensure_user_data_dir(dir: Option<&str>) -> crate::error::Result<()
   }
   Ok(())
 }
+
+/// The page-side statement settling call `seq` on the `__fd_bc` binding
+/// controller with an exposed callback's outcome: its value, or a rejection
+/// carrying the message the callback threw.
+pub(crate) fn binding_settle_js(seq: u64, outcome: &std::result::Result<serde_json::Value, String>) -> String {
+  match outcome {
+    Ok(value) => format!(
+      "globalThis.__fd_bc.resolve({seq}, {})",
+      serde_json::to_string(value).unwrap_or_else(|_| "null".into())
+    ),
+    Err(message) => format!(
+      "globalThis.__fd_bc.reject({seq}, {})",
+      serde_json::to_string(message).unwrap_or_else(|_| "''".into())
+    ),
+  }
+}

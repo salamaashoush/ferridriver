@@ -518,16 +518,11 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
   let maybe_fn = ctx.exposed_fns.read().await.get(&fn_name).cloned();
   let target_swap = ctx.target_swap.clone();
   let _ = ctx.binding_tx.send(Box::pin(async move {
-    let deliver_js = if let Some(callback) = maybe_fn {
-      let result = callback(source, args).await;
-      format!(
-        "globalThis.__fd_bc.resolve({}, {})",
-        seq,
-        serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
-      )
-    } else {
-      format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
+    let outcome = match maybe_fn {
+      Some(callback) => callback(source, args).await,
+      None => Err(format!("Function not found: {fn_name}")),
     };
+    let deliver_js = crate::backend::binding_settle_js(seq, &outcome);
     // Resolve in the calling context — each frame has its own `__fd_bc`
     // controller, so a default-context evaluate would strand an iframe
     // caller's promise.

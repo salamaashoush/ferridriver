@@ -116,6 +116,23 @@ describe('binding surface', () => {
     });
   });
 
+  test('page_expose_function_errors', async ({ page }) => {
+    // Ported from page-expose-function.spec.ts "should throw exception in
+    // page context": the page-side call rejects with the callback's error,
+    // whether it throws or returns a rejected promise.
+    await setup(page);
+    await page.exposeFunction('woof', () => {
+      throw new Error('WOOF WOOF');
+    });
+    await page.exposeFunction('woofAsync', async () => {
+      throw new Error('async WOOF');
+    });
+    const caught = (name: string) =>
+      page.evaluate(`window.${name}().then(() => 'no error', (e) => e.message)`);
+    expect(await caught('woof')).toBe('WOOF WOOF');
+    expect(await caught('woofAsync')).toBe('async WOOF');
+  });
+
   test('page_expose_binding', async ({ page }) => {
     // page.exposeBinding = page.exposeFunction plus a leading
     // BindingSource ({ context, page, frame }). Prove the source object

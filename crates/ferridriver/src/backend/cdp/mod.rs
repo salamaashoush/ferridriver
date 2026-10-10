@@ -6491,18 +6491,14 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
     };
     let Some(callback) = fns.read().await.get(&fn_name).cloned() else {
-      deliver(format!(
-        "globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')"
+      deliver(crate::backend::binding_settle_js(
+        seq,
+        &Err(format!("Function not found: {fn_name}")),
       ));
       return;
     };
-    let resolve_js = move |result: &serde_json::Value| {
-      format!(
-        "globalThis.__fd_bc.resolve({}, {})",
-        seq,
-        serde_json::to_string(result).unwrap_or_else(|_| "null".into())
-      )
-    };
+    let resolve_js =
+      move |result: &std::result::Result<serde_json::Value, String>| crate::backend::binding_settle_js(seq, result);
     let mut fut = Box::pin(callback(source, args));
     match futures::poll!(fut.as_mut()) {
       std::task::Poll::Ready(result) => deliver(resolve_js(&result)),

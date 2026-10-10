@@ -166,8 +166,9 @@ impl PageEvent {
 }
 
 /// Future returned by an [`ExposedFn`] — resolves to the page-visible
-/// result of the bound callback.
-pub type ExposedFnFuture = Pin<Box<dyn Future<Output = serde_json::Value> + Send>>;
+/// result of the bound callback, or to the message of the error it threw,
+/// which the page-side call rejects with.
+pub type ExposedFnFuture = Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>;
 
 /// Callback type for exposed functions (`page.exposeFunction`).
 ///

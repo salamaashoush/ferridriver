@@ -1918,56 +1918,35 @@ impl Page {
       .map_err(crate::error::to_napi)
   }
 
-  /// Playwright: `page.exposeFunction(name, callback)`. Registers a
-  /// JS function on `window` that proxies into the supplied
-  /// `callback`. The callback receives the args from the page-side
-  /// call as a single array.
-  ///
-  /// NAPI convention: the callback receives the page-side call
-  /// arguments as a single array (`(args: unknown[]) => void`) and is
-  /// fire-and-forget — the page-side call resolves to `null` while the
-  /// JS callback runs asynchronously. Return-value delivery + arg
-  /// spreading (full Playwright parity) lives on the QuickJS/script
-  /// surface, which is the one that runs LLM-generated Playwright code;
-  /// this Rust-native binding keeps its established contract.
-  #[napi(
-    ts_args_type = "name: string, callback: (args: unknown[]) => void",
-    ts_return_type = "Promise<void>"
-  )]
+  /// Playwright: `page.exposeFunction(name, callback)`. Binds
+  /// `window[name]` to a page-side proxy that calls `callback` with the
+  /// spread call arguments and resolves to what it returns, or rejects
+  /// with what it threw.
+  #[napi(ts_args_type = "name: string, callback: Function", ts_return_type = "Promise<void>")]
   #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
   pub fn expose_function(
     &self,
     env: &napi::Env,
     name: String,
-    callback: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>,
+    callback: napi::bindgen_prelude::Unknown<'_>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
-    let tsfn = callback
-      .build_threadsafe_function()
-      .callee_handled::<false>()
-      .weak::<true>()
-      .max_queue_size::<0>()
-      .build()?;
-    let cb: ferridriver::events::ExposedFn = std::sync::Arc::new(move |args: Vec<serde_json::Value>| {
-      let arg = serde_json::Value::Array(args);
-      tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
-      // ExposedFn is async now (the QuickJS surface awaits the real
-      // value); NAPI stays fire-and-forget — resolve immediately.
-      Box::pin(async move { serde_json::Value::Null })
-    });
+    let binding = crate::exposed::binding(*env, callback, false)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      inner.expose_function(&name, cb).await.map_err(crate::error::to_napi)
+      inner
+        .expose_binding(&name, binding)
+        .await
+        .map_err(crate::error::to_napi)
     })
     .build(env)
   }
 
   /// Playwright: `page.exposeBinding(name, callback)`
   /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:371`).
-  /// Like [`Self::expose_function`], but the callback additionally
-  /// receives a `BindingSource` (`{ context, page, frame }` identifiers).
-  /// NAPI is fire-and-forget — the page-side promise resolves to `null`.
+  /// Like [`Self::expose_function`], but the callback first receives a
+  /// `BindingSource` (`{ context, page, frame }` identifiers).
   #[napi(
-    ts_args_type = "name: string, callback: (source: { context: string, page: string, frame: string }, args: unknown[]) => void",
+    ts_args_type = "name: string, callback: (source: { context: string, page: string, frame: string }, ...args: any[]) => any",
     ts_return_type = "Promise<void>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
@@ -1975,31 +1954,9 @@ impl Page {
     &self,
     env: &napi::Env,
     name: String,
-    callback: napi::bindgen_prelude::Function<
-      '_,
-      napi::bindgen_prelude::FnArgs<(crate::context::BindingSourceJs, serde_json::Value)>,
-      (),
-    >,
+    callback: napi::bindgen_prelude::Unknown<'_>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
-    let tsfn = callback
-      .build_threadsafe_function()
-      .callee_handled::<false>()
-      .weak::<true>()
-      .max_queue_size::<0>()
-      .build()?;
-    let binding: ferridriver::ExposedBinding = std::sync::Arc::new(move |source, args| {
-      let arg: napi::bindgen_prelude::FnArgs<(crate::context::BindingSourceJs, serde_json::Value)> = (
-        crate::context::BindingSourceJs {
-          context: source.context,
-          page: source.page,
-          frame: source.frame,
-        },
-        serde_json::Value::Array(args),
-      )
-        .into();
-      tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
-      Box::pin(async move { serde_json::Value::Null })
-    });
+    let binding = crate::exposed::binding(*env, callback, true)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       inner

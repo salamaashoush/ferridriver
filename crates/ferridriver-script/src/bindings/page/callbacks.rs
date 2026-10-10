@@ -534,6 +534,53 @@ pub(crate) fn get_exposed_callback(ctx: &rquickjs::Ctx<'_>, name: &str) -> rquic
   with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
 }
 
+/// Call an exposed callback and settle it the way the page-side caller
+/// sees it: the awaited return value as JSON, or the message it threw.
+pub(crate) async fn settle_exposed_call<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  callback: &rquickjs::Function<'js>,
+  args: rquickjs::function::Args<'js>,
+) -> rquickjs::Result<Result<serde_json::Value, String>> {
+  let returned = async {
+    let value: rquickjs::promise::MaybePromise<'js> = args.apply(callback)?;
+    value.into_future::<rquickjs::Value<'js>>().await
+  }
+  .await;
+  match returned {
+    // `JSON.stringify` + serde_json's own parser: AP-safe both ways (a
+    // non-serde_json deserializer mis-handles numbers under
+    // `arbitrary_precision`). `undefined` and functions become null.
+    Ok(value) => Ok(Ok(match ctx.json_stringify(value)? {
+      Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
+      None => serde_json::Value::Null,
+    })),
+    Err(rquickjs::Error::Exception) => {
+      let thrown = ctx.catch();
+      let message = match thrown.as_exception() {
+        Some(exception) => exception.message().unwrap_or_default(),
+        None => match thrown.as_string() {
+          Some(s) => s.to_string()?,
+          None => format!("{thrown:?}"),
+        },
+      };
+      Ok(Err(message))
+    },
+    Err(other) => Err(other),
+  }
+}
+
+/// Flatten a VM round-trip of [`settle_exposed_call`] into the outcome an
+/// exposed binding hands back to the page.
+pub(crate) fn exposed_outcome<E: std::fmt::Display, F: std::fmt::Display>(
+  out: Result<Result<Result<serde_json::Value, String>, F>, E>,
+) -> Result<serde_json::Value, String> {
+  match out {
+    Ok(Ok(outcome)) => outcome,
+    Ok(Err(e)) => Err(e.to_string()),
+    Err(e) => Err(e.to_string()),
+  }
+}
+
 /// Drop a stashed exposed-binding callback (binding disposed).
 pub(crate) fn remove_exposed_callback(ctx: &rquickjs::Ctx<'_>, name: &str) {
   let _ = with_page_callbacks(ctx, |r| r.exposed.remove(name));

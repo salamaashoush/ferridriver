@@ -3197,7 +3197,7 @@ impl PageJs {
         // (the previous fire-and-forget behaviour was a Playwright
         // incompatibility).
         Box::pin(async move {
-          let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> =
+          let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
             crate::vm_with!(vm => |ctx| {
               let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
                 .ok_or_else(|| {
@@ -3217,25 +3217,10 @@ impl PageJs {
                 // walker keeps numbers as JS numbers.
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
               }
-              let res = async {
-                  let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
-                  mp.into_future::<rquickjs::Value<'_>>().await
-                }
-              .await?;
-              // Round-trip through QuickJS `JSON.stringify` + serde_json's
-              // own parser — AP-safe both ways (a non-serde_json
-              // deserializer mis-handles numbers under
-              // `arbitrary_precision`). `undefined`/function -> null.
-              let json = match ctx.json_stringify(res)? {
-                Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
-                None => serde_json::Value::Null,
-              };
-              Ok(json)
+              settle_exposed_call(&ctx, &f, call_args).await
             })
             .await;
-          out.map_or(serde_json::Value::Null, |inner| {
-            inner.unwrap_or(serde_json::Value::Null)
-          })
+          exposed_outcome(out)
         })
       }
     });
@@ -3277,7 +3262,7 @@ impl PageJs {
         let vm = vm.clone();
         let name = name.clone();
         Box::pin(async move {
-          let out: Result<rquickjs::Result<serde_json::Value>, crate::error::ScriptError> =
+          let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
             crate::vm_with!(vm => |ctx| {
               let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?.ok_or_else(|| {
                 throw_named(&ctx, "Error", "page.exposeBinding: exposed callback gone")
@@ -3295,21 +3280,10 @@ impl PageJs {
               for v in args {
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
               }
-              let res = async {
-                  let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
-                  mp.into_future::<rquickjs::Value<'_>>().await
-                }
-              .await?;
-              let json = match ctx.json_stringify(res)? {
-                Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
-                None => serde_json::Value::Null,
-              };
-              Ok(json)
+              settle_exposed_call(&ctx, &f, call_args).await
             })
             .await;
-          out.map_or(serde_json::Value::Null, |inner| {
-            inner.unwrap_or(serde_json::Value::Null)
-          })
+          exposed_outcome(out)
         })
       }
     });
