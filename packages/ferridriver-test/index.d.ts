@@ -2244,6 +2244,11 @@ export interface ReporterFullConfig {
   version: string;
   workers: number;
   projects: ReporterFullProject[];
+  /** The projects selected to run once `--project` has been applied. */
+  filteredProjects: ReporterFullProject[];
+  /** The runner process's command line. */
+  argv: string[];
+  failOnFlakyTests: boolean;
   forbidOnly: boolean;
   fullyParallel: boolean;
   globalSetup: string[];

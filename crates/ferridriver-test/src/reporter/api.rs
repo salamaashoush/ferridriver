@@ -281,8 +281,18 @@ impl RunPreamble {
   /// narrowed to it.
   #[must_use]
   pub fn build(config: &TestConfig, projects: &[ProjectPlan<'_>]) -> Self {
+    let mut full = full_config(config);
+    // Playwright's `filteredProjects`: the projects selected to run once
+    // `--project` has been applied, which is what a run schedules.
+    if let Some(map) = full.as_object_mut() {
+      let selected: Vec<serde_json::Value> = projects
+        .iter()
+        .map(|plan| full_project(plan.config, plan.project))
+        .collect();
+      map.insert("filteredProjects".into(), selected.into());
+    }
     Self {
-      config: full_config(config),
+      config: full,
       suite: root_suite(config, projects),
     }
   }
@@ -312,6 +322,9 @@ pub fn full_config(config: &TestConfig) -> serde_json::Value {
 
   serde_json::json!({
     "rootDir": root_dir,
+    "argv": std::env::args().collect::<Vec<_>>(),
+    "failOnFlakyTests": config.fail_on_flaky_tests,
+    "filteredProjects": projects,
     "forbidOnly": config.forbid_only,
     "fullyParallel": config.fully_parallel,
     "globalSetup": config.global_setup,
