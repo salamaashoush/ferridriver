@@ -1395,6 +1395,8 @@ export interface Locator {
   // normalize(), the selector/isStrict introspection getters,
   // setStrict(), and rightClick() (= click({ button: 'right' })).
   description(): string | null;
+  /** The code that builds this locator, or the text `describe()` gave it. */
+  toString(): string;
   normalize(): Promise<Locator>;
   /**
    * The locator expression to paste into a test, such as

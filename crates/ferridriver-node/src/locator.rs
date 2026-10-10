@@ -216,6 +216,12 @@ impl Locator {
     self.inner.description()
   }
 
+  /// Playwright: `locator.toString(): string`.
+  #[napi(js_name = "toString")]
+  pub fn to_js_string(&self) -> String {
+    self.inner.to_string()
+  }
+
   #[napi]
   pub fn first(&self) -> Locator {
     Self::wrap(self.inner.first())

@@ -71,7 +71,7 @@ macro_rules! retry_resolve {
     };
     let __trace_span = $crate::trace::open_action(__trace_page.snapshot_before(__trace_span).await).await;
     if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
-      __s.log(format!("waiting for locator('{}')", $self.selector));
+      __s.log(format!("waiting for {}", $crate::locator_generator::as_locator(&$self.selector)));
     }
     // Input-time capture (target mark + input@ snapshot + point) fires
     // once, on the first successful resolution.
@@ -488,9 +488,7 @@ impl Locator {
   /// `locatorCustomDescription` in `packages/isomorphic/locatorGenerators.ts`.
   #[must_use]
   pub fn description(&self) -> Option<String> {
-    let last = self.selector.rsplit(" >> ").next().unwrap_or(&self.selector).trim();
-    let body = last.strip_prefix("internal:describe=")?;
-    serde_json::from_str::<String>(body).ok()
+    crate::locator_generator::locator_custom_description(&self.selector)
   }
 
   /// First element. Opts out of strict mode because the selector explicitly
@@ -2618,6 +2616,14 @@ impl Locator {
       inner.evaluate_in_frame(&js, rframe.id()).await
     }?;
     selectors::decode_read_result(raw, &rsel)
+  }
+}
+
+/// Playwright's `locator.toString()`: the code that would build this
+/// locator, or the description a trailing `describe()` gave it.
+impl std::fmt::Display for Locator {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&crate::locator_generator::as_locator_description(&self.selector))
   }
 }
 

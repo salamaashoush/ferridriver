@@ -531,6 +531,12 @@ impl LocatorJs {
     crate::bindings::convert::Null(self.inner.description())
   }
 
+  /// Playwright: `locator.toString(): string`.
+  #[qjs(rename = "toString")]
+  pub fn to_js_string(&self) -> String {
+    self.inner.to_string()
+  }
+
   #[qjs(rename = "first")]
   pub fn first(&self) -> LocatorJs {
     LocatorJs::new(self.inner.first())

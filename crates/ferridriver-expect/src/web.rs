@@ -28,9 +28,19 @@ impl Receiver<'_> {
     }
   }
 
+  /// `locator.toString()`, which the message and the call's title use.
   fn description(&self) -> Option<String> {
     match self {
-      Self::Locator(locator) => Some(format!("locator('{}')", locator.selector())),
+      Self::Locator(locator) => Some(locator.to_string()),
+      Self::Page(_) => None,
+    }
+  }
+
+  /// What the server's `waiting for` line names: the locator, ignoring a
+  /// custom description.
+  fn waiting_for(&self) -> Option<String> {
+    match self {
+      Self::Locator(locator) => Some(ferridriver::locator_generator::as_locator(locator.selector())),
       Self::Page(_) => None,
     }
   }
@@ -430,15 +440,18 @@ struct CallLog {
 impl CallLog {
   fn new(assertion: &WebAssert<'_>) -> Self {
     let not = if assertion.params.is_not { "not " } else { "" };
-    let subject = assertion.receiver.description();
-    let target = subject.as_ref().map(|s| format!(" {s}")).unwrap_or_default();
+    let target = assertion
+      .receiver
+      .description()
+      .map(|s| format!(" {s}"))
+      .unwrap_or_default();
     let mut header = vec![format!(
       "Expect \"{not}{}\"{target} with timeout {}ms",
       assertion.method,
       assertion.timeout.as_millis()
     )];
-    if let Some(subject) = subject {
-      header.push(format!("waiting for {subject}"));
+    if let Some(target) = assertion.receiver.waiting_for() {
+      header.push(format!("waiting for {target}"));
     }
     Self {
       header,

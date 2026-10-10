@@ -17,7 +17,7 @@ use crate::model::TestFailure;
 fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool, is_soft: bool) -> ExpectContext {
   ExpectContext {
     method,
-    subject: format!("locator('{}')", locator.selector()),
+    subject: locator.to_string(),
     is_not,
     is_soft,
   }
