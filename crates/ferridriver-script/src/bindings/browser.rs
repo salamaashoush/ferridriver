@@ -310,8 +310,7 @@ impl BrowserJs {
   #[qjs(rename = "newPage")]
   pub async fn new_page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let page = self.inner.new_page().await.into_js_with(&ctx)?;
-    let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
-    let instance = Class::instance(ctx.clone(), wrapper)?;
+    let instance = crate::bindings::identity::page_object(&ctx, page)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
@@ -328,8 +327,7 @@ impl BrowserJs {
   #[qjs(rename = "page")]
   pub async fn page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let page = self.inner.page().await.into_js_with(&ctx)?;
-    let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
-    let instance = Class::instance(ctx.clone(), wrapper)?;
+    let instance = crate::bindings::identity::page_object(&ctx, page)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 

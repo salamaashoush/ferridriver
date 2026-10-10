@@ -69,6 +69,7 @@ mod frame;
 mod frame_locator;
 mod heap;
 mod http_client;
+mod identity;
 #[allow(dead_code)]
 mod install;
 mod js_handle;

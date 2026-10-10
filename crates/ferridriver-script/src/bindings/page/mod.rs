@@ -1647,8 +1647,7 @@ impl PageJs {
       let Some(opener) = opener else {
         return Ok(rquickjs::Value::new_null(ctx.clone()));
       };
-      let wrapper = pagejs_for_ctx(&ctx, opener);
-      let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
+      let instance = crate::bindings::identity::page_object(&ctx, opener)?;
       rquickjs::IntoJs::into_js(instance, &ctx)
     })
   }
@@ -2960,28 +2959,40 @@ impl PageJs {
   /// Always returns a Frame — the cache is seeded inside `Page::new` /
   /// `Page::with_context` before the Page is handed out.
   #[qjs(rename = "mainFrame")]
-  pub fn main_frame(&self) -> crate::bindings::frame::FrameJs {
-    crate::bindings::frame::FrameJs::new(self.inner.main_frame())
+  pub fn main_frame<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::frame::FrameJs>> {
+    crate::bindings::identity::frame_object(&ctx, self.inner.main_frame())
   }
 
   /// All non-detached frames on the page. Playwright:
   /// `page.frames(): Frame[]`.
   #[qjs(rename = "frames")]
-  pub fn frames(&self) -> Vec<crate::bindings::frame::FrameJs> {
+  pub fn frames<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Vec<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     self
       .inner
       .frames()
       .into_iter()
-      .map(crate::bindings::frame::FrameJs::new)
+      .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
       .collect()
   }
 
-  /// Playwright: `page.frameLocator(selector): FrameLocator`. Targets
-  /// an `<iframe>` matching the selector at the page's main-frame
-  /// scope.
+  /// Playwright: `page.frameLocator(selector?: string): FrameLocator`.
+  /// Without a selector, the locator matches in whichever frame it is
+  /// found.
   #[qjs(rename = "frameLocator")]
-  pub fn frame_locator(&self, selector: String) -> crate::bindings::frame_locator::FrameLocatorJs {
-    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
+  pub fn frame_locator(&self, selector: Opt<String>) -> crate::bindings::frame_locator::FrameLocatorJs {
+    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(selector.0.as_deref()))
+  }
+
+  /// Playwright: `page.getByRef(ref: string): Locator`.
+  #[qjs(rename = "getByRef")]
+  pub fn get_by_ref(&self, aria_ref: String) -> crate::bindings::locator::LocatorJs {
+    crate::bindings::locator::LocatorJs::new(self.inner.get_by_ref(&aria_ref))
   }
 
   /// Locate a frame by name or URL. Accepts Playwright's union:
@@ -2996,7 +3007,7 @@ impl PageJs {
     &self,
     ctx: rquickjs::Ctx<'js>,
     selector: rquickjs::Value<'js>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::frame::FrameJs>> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     let core_sel = if let Some(s) = selector.as_string() {
       ferridriver::options::FrameSelector::by_name(s.to_string()?)
     } else if let Some(obj) = selector.as_object() {
@@ -3023,8 +3034,11 @@ impl PageJs {
     if core_sel.is_empty() {
       return Ok(crate::bindings::convert::Null(None));
     }
+    let frame = self.inner.frame(core_sel);
     Ok(crate::bindings::convert::Null(
-      self.inner.frame(core_sel).map(crate::bindings::frame::FrameJs::new),
+      frame
+        .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+        .transpose()?,
     ))
   }
 

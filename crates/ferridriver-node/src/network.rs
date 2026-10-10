@@ -309,13 +309,13 @@ impl Request {
   /// CDP main-target preload) or when the wrapper was created without a
   /// page reference.
   #[napi(ts_return_type = "Frame | null")]
-  pub fn frame(&self) -> Option<crate::frame::Frame> {
+  pub fn frame(&self) -> Option<crate::identity::FrameObject> {
     let page = self.page.as_ref()?;
     let frame_id = self.inner.frame_id()?;
     let frames = page.frames();
     for f in frames {
       if f.frame_id() == frame_id {
-        return Some(crate::frame::Frame::wrap(f));
+        return Some(crate::identity::FrameObject(f));
       }
     }
     None
@@ -501,7 +501,7 @@ impl Response {
   /// Mirrors Playwright `response.frame(): Frame`. Convenience for
   /// `response.request().frame()`.
   #[napi(ts_return_type = "Frame | null")]
-  pub fn frame(&self) -> Option<crate::frame::Frame> {
+  pub fn frame(&self) -> Option<crate::identity::FrameObject> {
     self.request().frame()
   }
 }

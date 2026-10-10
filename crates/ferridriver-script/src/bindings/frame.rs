@@ -69,14 +69,27 @@ impl FrameJs {
 
   /// Parent frame (null for the main frame). Sync.
   #[qjs(rename = "parentFrame")]
-  pub fn parent_frame(&self) -> crate::bindings::convert::Null<FrameJs> {
-    crate::bindings::convert::Null(self.inner.parent_frame().map(FrameJs::new))
+  pub fn parent_frame<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, FrameJs>>> {
+    let parent = self.inner.parent_frame();
+    Ok(crate::bindings::convert::Null(
+      parent
+        .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+        .transpose()?,
+    ))
   }
 
   /// Child frames of this frame. Sync.
   #[qjs(rename = "childFrames")]
-  pub fn child_frames(&self) -> Vec<FrameJs> {
-    self.inner.child_frames().into_iter().map(FrameJs::new).collect()
+  pub fn child_frames<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<Vec<rquickjs::Class<'js, FrameJs>>> {
+    self
+      .inner
+      .child_frames()
+      .into_iter()
+      .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+      .collect()
   }
 
   /// Whether this frame has been detached from the page. Sync.
@@ -326,18 +339,24 @@ impl FrameJs {
     Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
   }
 
-  /// Playwright: `frame.frameLocator(selector): FrameLocator`.
+  /// Playwright: `frame.frameLocator(selector?: string): FrameLocator`.
   #[qjs(rename = "frameLocator")]
-  pub fn frame_locator(&self, selector: String) -> crate::bindings::frame_locator::FrameLocatorJs {
-    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
+  pub fn frame_locator(
+    &self,
+    selector: rquickjs::function::Opt<String>,
+  ) -> crate::bindings::frame_locator::FrameLocatorJs {
+    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(selector.0.as_deref()))
   }
 
   /// Playwright: `frame.page(): Page`. Returns the owning page; it
   /// carries the session's `AsyncContext` (via userdata) so
   /// `page.route` / `page.exposeFunction` work on the returned handle.
   #[qjs(rename = "page")]
-  pub fn page(&self, ctx: rquickjs::Ctx<'_>) -> crate::bindings::page::PageJs {
-    crate::bindings::page::pagejs_for_ctx(&ctx, self.inner.page_arc().clone())
+  pub fn page<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::page::PageJs>> {
+    crate::bindings::identity::page_object(&ctx, self.inner.page_arc().clone())
   }
 
   // ── Action methods (Playwright parity — task 3.9) ──────────────────

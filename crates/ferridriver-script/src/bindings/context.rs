@@ -735,10 +735,8 @@ impl BrowserContextJs {
   ) -> rquickjs::Result<Value<'js>> {
     call_site
       .scope(async move {
-        use rquickjs::class::Class;
         let page = self.inner.new_page().await.into_js_with(&ctx)?;
-        let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
-        let instance = Class::instance(ctx.clone(), wrapper)?;
+        let instance = crate::bindings::identity::page_object(&ctx, page)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       })
       .await
@@ -751,12 +749,10 @@ impl BrowserContextJs {
   #[qjs(rename = "pages")]
   pub async fn pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     use rquickjs::IntoJs;
-    use rquickjs::class::Class;
     let pages = self.inner.pages().await.into_js_with(&ctx)?;
     let arr = rquickjs::Array::new(ctx.clone())?;
     for (i, page) in pages.into_iter().enumerate() {
-      let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
-      let instance = Class::instance(ctx.clone(), wrapper)?;
+      let instance = crate::bindings::identity::page_object(&ctx, page)?;
       arr.set(i, instance)?;
     }
     arr.into_js(&ctx)
@@ -1080,13 +1076,11 @@ impl BrowserContextJs {
       },
       ContextEvent::FrameAttached { page, frame_id }
       | ContextEvent::FrameDetached { page, frame_id }
-      | ContextEvent::FrameNavigated { page, frame_id } => Class::instance(
-        ctx.clone(),
-        crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
-      )?
-      .into_js(&ctx),
+      | ContextEvent::FrameNavigated { page, frame_id } => {
+        crate::bindings::identity::frame_object(&ctx, page.frame_for_id(&frame_id))?.into_js(&ctx)
+      },
       ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
-        Class::instance(ctx.clone(), crate::bindings::page::pagejs_for_ctx(&ctx, page))?.into_js(&ctx)
+        crate::bindings::identity::page_object(&ctx, page)?.into_js(&ctx)
       },
     }
   }
@@ -1307,13 +1301,11 @@ fn context_event_to_js<'js>(ctx: &Ctx<'js>, event: ferridriver::events::ContextE
     },
     ContextEvent::FrameAttached { page, frame_id }
     | ContextEvent::FrameDetached { page, frame_id }
-    | ContextEvent::FrameNavigated { page, frame_id } => Class::instance(
-      ctx.clone(),
-      crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
-    )?
-    .into_js(ctx),
+    | ContextEvent::FrameNavigated { page, frame_id } => {
+      crate::bindings::identity::frame_object(ctx, page.frame_for_id(&frame_id))?.into_js(ctx)
+    },
     ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
-      Class::instance(ctx.clone(), crate::bindings::page::pagejs_for_ctx(ctx, page))?.into_js(ctx)
+      crate::bindings::identity::page_object(ctx, page)?.into_js(ctx)
     },
   }
 }

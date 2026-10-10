@@ -71,8 +71,8 @@ impl ConsoleMessage {
   /// Playwright: `consoleMessage.page(): Page | null`. Returns `null`
   /// if the owning page has been dropped.
   #[napi(ts_return_type = "Page | null")]
-  pub fn page(&self) -> Option<crate::page::Page> {
-    self.inner.page().map(crate::page::Page::wrap)
+  pub fn page(&self) -> Option<crate::identity::PageObject> {
+    self.inner.page().map(crate::identity::PageObject)
   }
 
   /// Playwright: `consoleMessage.timestamp(): number`. Milliseconds

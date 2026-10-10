@@ -46,16 +46,21 @@ impl Frame {
 
   /// Parent frame. Returns null for the main frame.
   /// Playwright: `frame.parentFrame(): Frame | null` (sync).
-  #[napi]
-  pub fn parent_frame(&self) -> Option<Frame> {
-    self.inner.parent_frame().map(Frame::wrap)
+  #[napi(ts_return_type = "Frame | null")]
+  pub fn parent_frame(&self) -> Option<crate::identity::FrameObject> {
+    self.inner.parent_frame().map(crate::identity::FrameObject)
   }
 
   /// Child frames of this frame.
   /// Playwright: `frame.childFrames(): Frame[]` (sync).
-  #[napi]
-  pub fn child_frames(&self) -> Vec<Frame> {
-    self.inner.child_frames().into_iter().map(Frame::wrap).collect()
+  #[napi(ts_return_type = "Frame[]")]
+  pub fn child_frames(&self) -> Vec<crate::identity::FrameObject> {
+    self
+      .inner
+      .child_frames()
+      .into_iter()
+      .map(crate::identity::FrameObject)
+      .collect()
   }
 
   // ── Evaluation ────────────────────────────────────────────────────────
@@ -335,17 +340,16 @@ impl Frame {
     )
   }
 
-  /// Playwright: `frame.frameLocator(selector): FrameLocator`. Targets
-  /// an `<iframe>` matching the selector within this frame.
-  #[napi]
-  pub fn frame_locator(&self, selector: String) -> crate::frame_locator::FrameLocator {
-    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(&selector))
+  /// Playwright: `frame.frameLocator(selector?: string): FrameLocator`.
+  #[napi(ts_args_type = "selector?: string")]
+  pub fn frame_locator(&self, selector: Option<String>) -> crate::frame_locator::FrameLocator {
+    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(selector.as_deref()))
   }
 
   /// Playwright: `frame.page(): Page` — the page this frame belongs to.
-  #[napi]
-  pub fn page(&self) -> crate::page::Page {
-    crate::page::Page::wrap(self.inner.page_arc().clone())
+  #[napi(ts_return_type = "Page")]
+  pub fn page(&self) -> crate::identity::PageObject {
+    crate::identity::PageObject(self.inner.page_arc().clone())
   }
 
   // ── Action methods (Playwright parity — task 3.9) ────────────────────

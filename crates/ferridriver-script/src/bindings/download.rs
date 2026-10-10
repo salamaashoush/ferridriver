@@ -44,8 +44,16 @@ impl DownloadJs {
   /// owning page has already been closed (the Rust weak-backref model
   /// surfaces that case; Playwright's TS type is non-nullable).
   #[qjs(rename = "page")]
-  pub fn page(&self) -> crate::bindings::convert::Null<crate::bindings::page::PageJs> {
-    crate::bindings::convert::Null(self.inner.page().map(crate::bindings::page::PageJs::new))
+  pub fn page<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::page::PageJs>>> {
+    let page = self.inner.page();
+    Ok(crate::bindings::convert::Null(
+      page
+        .map(|page| crate::bindings::identity::page_object(&ctx, page))
+        .transpose()?,
+    ))
   }
 
   /// Playwright: `download.path(): Promise<string>`.

@@ -1,7 +1,6 @@
 //! `BrowserContext` class -- NAPI binding for `ferridriver::ContextRef`.
 
 use crate::error::IntoNapi;
-use crate::page::Page;
 use crate::page::{JsUrl, MatcherSpec, PredReturn, PredRoute, resolve_pred};
 use crate::types::CookieData;
 use napi::Result;
@@ -135,17 +134,17 @@ impl BrowserContext {
   }
 
   /// Create a new page in this context.
-  #[napi]
-  pub async fn new_page(&self) -> Result<Page> {
+  #[napi(ts_return_type = "Promise<Page>")]
+  pub async fn new_page(&self) -> Result<crate::identity::PageObject> {
     let page = Box::pin(self.inner.new_page()).await.into_napi()?;
-    Ok(Page::wrap(page))
+    Ok(crate::identity::PageObject(page))
   }
 
   /// Get all pages in this context.
-  #[napi]
-  pub async fn pages(&self) -> Result<Vec<Page>> {
+  #[napi(ts_return_type = "Promise<Page[]>")]
+  pub async fn pages(&self) -> Result<Vec<crate::identity::PageObject>> {
     let pages = self.inner.pages().await.into_napi()?;
-    Ok(pages.into_iter().map(Page::wrap).collect())
+    Ok(pages.into_iter().map(crate::identity::PageObject).collect())
   }
 
   // ── Cookies ──
@@ -1309,13 +1308,11 @@ impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
         let wrapper = crate::download::Download::from_core(d);
         unsafe { crate::download::Download::to_napi_value(env, wrapper) }
       },
-      ContextEventArg::Frame { page, frame_id } => {
-        let wrapper = crate::frame::Frame::wrap(page.frame_for_id(&frame_id));
-        unsafe { crate::frame::Frame::to_napi_value(env, wrapper) }
+      ContextEventArg::Frame { page, frame_id } => unsafe {
+        crate::identity::FrameObject::to_napi_value(env, crate::identity::FrameObject(page.frame_for_id(&frame_id)))
       },
-      ContextEventArg::Page(page) => {
-        let wrapper = crate::page::Page::wrap(page);
-        unsafe { crate::page::Page::to_napi_value(env, wrapper) }
+      ContextEventArg::Page(page) => unsafe {
+        crate::identity::PageObject::to_napi_value(env, crate::identity::PageObject(page))
       },
     }
   }

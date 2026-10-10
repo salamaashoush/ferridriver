@@ -304,17 +304,17 @@ impl ElementHandle {
   // ── Frame accessors ──────────────────────────────────────────────────
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
-  #[napi]
-  pub async fn owner_frame(&self) -> Result<Option<crate::frame::Frame>> {
+  #[napi(ts_return_type = "Promise<Frame | null>")]
+  pub async fn owner_frame(&self) -> Result<Option<crate::identity::FrameObject>> {
     let maybe = self.inner.owner_frame().await.into_napi()?;
-    Ok(maybe.map(crate::frame::Frame::wrap))
+    Ok(maybe.map(crate::identity::FrameObject))
   }
 
   /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
-  #[napi]
-  pub async fn content_frame(&self) -> Result<Option<crate::frame::Frame>> {
+  #[napi(ts_return_type = "Promise<Frame | null>")]
+  pub async fn content_frame(&self) -> Result<Option<crate::identity::FrameObject>> {
     let maybe = self.inner.content_frame().await.into_napi()?;
-    Ok(maybe.map(crate::frame::Frame::wrap))
+    Ok(maybe.map(crate::identity::FrameObject))
   }
 
   // ── wait_for_* helpers ───────────────────────────────────────────────

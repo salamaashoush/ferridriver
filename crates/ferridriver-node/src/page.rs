@@ -41,8 +41,8 @@ pub type PageWaitForEventResult = napi::bindgen_prelude::Either10<
   crate::download::Download,
   crate::console_message::ConsoleMessage,
   crate::web_error::JsErrorValue,
-  crate::frame::Frame,
-  Page,
+  crate::identity::FrameObject,
+  crate::identity::PageObject,
 >;
 
 /// Lift a core [`PageEvent`] into the live-object union listeners
@@ -66,10 +66,12 @@ fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEv
     PageEvent::FrameAttached(info)
     | PageEvent::FrameNavigated(info)
     | PageEvent::FrameNavigatedWithinDocument(info) => {
-      Either10::I(crate::frame::Frame::wrap(page.frame_for_id(&info.frame_id)))
+      Either10::I(crate::identity::FrameObject(page.frame_for_id(&info.frame_id)))
     },
-    PageEvent::FrameDetached { frame_id } => Either10::I(crate::frame::Frame::wrap(page.frame_for_id(&frame_id))),
-    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => Either10::J(Page::wrap(page.clone())),
+    PageEvent::FrameDetached { frame_id } => Either10::I(crate::identity::FrameObject(page.frame_for_id(&frame_id))),
+    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
+      Either10::J(crate::identity::PageObject(page.clone()))
+    },
   }
 }
 
@@ -268,9 +270,9 @@ impl Page {
   /// synchronous weak upgrade; the yield keeps the promise-returning
   /// Playwright signature without an unused-async lint.
   #[napi(ts_return_type = "Promise<Page | null>")]
-  pub async fn opener(&self) -> Option<Page> {
+  pub async fn opener(&self) -> Option<crate::identity::PageObject> {
     tokio::task::yield_now().await;
-    self.inner.opener().map(Page::wrap)
+    self.inner.opener().map(crate::identity::PageObject)
   }
 
   #[napi(js_name = "context")]
@@ -322,12 +324,18 @@ impl Page {
     }
   }
 
-  /// Playwright: `page.frameLocator(selector): FrameLocator`. Targets
-  /// an `<iframe>` matching the selector at the page's main-frame
-  /// scope. Equivalent to `page.mainFrame().frameLocator(selector)`.
-  #[napi]
-  pub fn frame_locator(&self, selector: String) -> crate::frame_locator::FrameLocator {
-    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(&selector))
+  /// Playwright: `page.frameLocator(selector?: string): FrameLocator`.
+  /// Without a selector, the locator matches in whichever frame it is
+  /// found.
+  #[napi(ts_args_type = "selector?: string")]
+  pub fn frame_locator(&self, selector: Option<String>) -> crate::frame_locator::FrameLocator {
+    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(selector.as_deref()))
+  }
+
+  /// Playwright: `page.getByRef(ref: string): Locator`.
+  #[napi(js_name = "getByRef", ts_args_type = "ref: string")]
+  pub fn get_by_ref(&self, aria_ref: String) -> crate::locator::Locator {
+    crate::locator::Locator::wrap(self.inner.get_by_ref(&aria_ref))
   }
 
   /// Set the default timeout for all operations (milliseconds).
@@ -624,24 +632,32 @@ impl Page {
   /// Main frame of this page. Playwright: `page.mainFrame(): Frame`
   /// (non-null). The frame cache is seeded inside `Page::new` /
   /// `Page::with_context` before the Page is handed out.
-  #[napi]
-  pub fn main_frame(&self) -> crate::frame::Frame {
-    crate::frame::Frame::wrap(self.inner.main_frame())
+  #[napi(ts_return_type = "Frame")]
+  pub fn main_frame(&self) -> crate::identity::FrameObject {
+    crate::identity::FrameObject(self.inner.main_frame())
   }
 
   /// All frames in the page (main frame + all iframes).
   /// Playwright: `page.frames(): Frame[]` (sync).
-  #[napi]
-  pub fn frames(&self) -> Vec<crate::frame::Frame> {
-    self.inner.frames().into_iter().map(crate::frame::Frame::wrap).collect()
+  #[napi(ts_return_type = "Frame[]")]
+  pub fn frames(&self) -> Vec<crate::identity::FrameObject> {
+    self
+      .inner
+      .frames()
+      .into_iter()
+      .map(crate::identity::FrameObject)
+      .collect()
   }
 
   /// Find a frame by name or URL. Mirrors Playwright's
   /// `page.frame(string | { name?, url? }): Frame | null` (sync).
   /// The URL field is an exact-match string for now; task 3.12 extends
   /// it to the full `string | RegExp` union.
-  #[napi(ts_args_type = "selector: string | { name?: string | null | undefined; url?: string | null | undefined }")]
-  pub fn frame(&self, selector: crate::types::FrameSelectorArg) -> Option<crate::frame::Frame> {
+  #[napi(
+    ts_args_type = "selector: string | { name?: string | null | undefined; url?: string | null | undefined }",
+    ts_return_type = "Frame | null"
+  )]
+  pub fn frame(&self, selector: crate::types::FrameSelectorArg) -> Option<crate::identity::FrameObject> {
     let core_sel: ferridriver::options::FrameSelector = match selector {
       napi::Either::A(name) => ferridriver::options::FrameSelector::by_name(name),
       napi::Either::B(bag) => bag.into(),
@@ -649,7 +665,7 @@ impl Page {
     if core_sel.is_empty() {
       return None;
     }
-    self.inner.frame(core_sel).map(crate::frame::Frame::wrap)
+    self.inner.frame(core_sel).map(crate::identity::FrameObject)
   }
 
   // ── Events (Playwright-compatible on/once/waitForEvent) ─────────────

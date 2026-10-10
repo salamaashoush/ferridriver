@@ -43,8 +43,11 @@ impl FileChooserJs {
   /// Playwright: `fileChooser.page(): Page`. Derived from the captured
   /// element's owning page.
   #[qjs(rename = "page")]
-  pub fn page(&self) -> crate::bindings::page::PageJs {
-    crate::bindings::page::PageJs::new(self.inner.page().clone())
+  pub fn page<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::page::PageJs>> {
+    crate::bindings::identity::page_object(&ctx, self.inner.page().clone())
   }
 
   /// Playwright: `fileChooser.setFiles(files, options?): Promise<void>`.

@@ -43,13 +43,13 @@ impl Download {
   /// Playwright: `download.page(): Page`. Throws if the owning page
   /// has already been closed — TS consumers don't see a dead-page case
   /// in Playwright, but Rust's weak-backref model surfaces it honestly.
-  #[napi]
-  pub fn page(&self) -> Result<crate::page::Page> {
+  #[napi(ts_return_type = "Page")]
+  pub fn page(&self) -> Result<crate::identity::PageObject> {
     let page = self
       .inner
       .page()
       .ok_or_else(|| napi::Error::from_reason("download's owning page has been closed"))?;
-    Ok(crate::page::Page::wrap(page))
+    Ok(crate::identity::PageObject(page))
   }
 
   /// Playwright: `download.path(): Promise<string>`.

@@ -51,8 +51,8 @@ impl Dialog {
   /// opened before its page was available (early page initialization)
   /// or the owning page has been closed.
   #[napi(ts_return_type = "Page | null")]
-  pub fn page(&self) -> Option<crate::page::Page> {
-    self.inner.page().map(crate::page::Page::wrap)
+  pub fn page(&self) -> Option<crate::identity::PageObject> {
+    self.inner.page().map(crate::identity::PageObject)
   }
 
   /// Playwright: `dialog.accept(promptText?): Promise<void>`.

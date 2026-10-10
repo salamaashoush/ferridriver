@@ -150,24 +150,32 @@ impl FrameLocator {
   /// Nested-frame chain: `frameLocator.frameLocator(selector)`.
   #[napi]
   pub fn frame_locator(&self, selector: String) -> FrameLocator {
-    FrameLocator::wrap(self.inner.frame_locator(&selector))
+    FrameLocator::wrap(self.inner.frame_locator(selector.as_str()))
   }
 
   /// Playwright: `frameLocator.first(): FrameLocator`.
   #[napi]
-  pub fn first(&self) -> FrameLocator {
-    FrameLocator::wrap(self.inner.first())
+  pub fn first(&self) -> napi::Result<FrameLocator> {
+    self
+      .inner
+      .first()
+      .map(FrameLocator::wrap)
+      .map_err(crate::error::to_napi)
   }
 
   /// Playwright: `frameLocator.last(): FrameLocator`.
   #[napi]
-  pub fn last(&self) -> FrameLocator {
-    FrameLocator::wrap(self.inner.last())
+  pub fn last(&self) -> napi::Result<FrameLocator> {
+    self.inner.last().map(FrameLocator::wrap).map_err(crate::error::to_napi)
   }
 
   /// Playwright: `frameLocator.nth(index): FrameLocator`.
   #[napi]
-  pub fn nth(&self, index: i32) -> FrameLocator {
-    FrameLocator::wrap(self.inner.nth(index))
+  pub fn nth(&self, index: i32) -> napi::Result<FrameLocator> {
+    self
+      .inner
+      .nth(index)
+      .map(FrameLocator::wrap)
+      .map_err(crate::error::to_napi)
   }
 }

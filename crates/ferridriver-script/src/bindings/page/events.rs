@@ -5,9 +5,6 @@ use std::sync::Arc;
 
 use ferridriver::Page;
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
-
 pub(crate) fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
   ferridriver::events::event_name_matches(name, ev)
 }
@@ -66,18 +63,14 @@ pub(crate) fn page_event_to_js<'js>(
     PageEvent::PageError(err) => crate::bindings::web_error::build_native_error(ctx, err.error()),
     PageEvent::FrameAttached(info)
     | PageEvent::FrameNavigated(info)
-    | PageEvent::FrameNavigatedWithinDocument(info) => Class::instance(
-      ctx.clone(),
-      crate::bindings::frame::FrameJs::new(page.frame_for_id(&info.frame_id)),
-    )?
-    .into_js(ctx),
-    PageEvent::FrameDetached { frame_id } => Class::instance(
-      ctx.clone(),
-      crate::bindings::frame::FrameJs::new(page.frame_for_id(&frame_id)),
-    )?
-    .into_js(ctx),
+    | PageEvent::FrameNavigatedWithinDocument(info) => {
+      crate::bindings::identity::frame_object(ctx, page.frame_for_id(&info.frame_id))?.into_js(ctx)
+    },
+    PageEvent::FrameDetached { frame_id } => {
+      crate::bindings::identity::frame_object(ctx, page.frame_for_id(&frame_id))?.into_js(ctx)
+    },
     PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
-      Class::instance(ctx.clone(), pagejs_for_ctx(ctx, page.clone()))?.into_js(ctx)
+      crate::bindings::identity::page_object(ctx, page.clone())?.into_js(ctx)
     },
   }
 }

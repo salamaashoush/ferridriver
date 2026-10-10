@@ -1425,6 +1425,8 @@ export interface Locator {
   getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector: string): FrameLocator;
+  visible(): Locator;
+  within(locator: Locator): Locator;
   contentFrame(): FrameLocator;
   page(): Page;
 }
@@ -1536,7 +1538,7 @@ export interface Frame {
   getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTestId(testId: string | RegExp): Locator;
-  frameLocator(selector: string): FrameLocator;
+  frameLocator(selector?: string): FrameLocator;
   page(): Page;
   evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   parentFrame(): Frame | null;
@@ -1665,7 +1667,8 @@ export interface Page {
   getByAltText(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTitle(text: string | RegExp, options?: GetByTextOptions): Locator;
   getByTestId(testId: string | RegExp): Locator;
-  frameLocator(selector: string): FrameLocator;
+  frameLocator(selector?: string): FrameLocator;
+  getByRef(ref: string): Locator;
   frames(): Frame[];
   mainFrame(): Frame;
   frame(nameOrOptions: string | { name?: string; url?: string | RegExp }): Frame | null;

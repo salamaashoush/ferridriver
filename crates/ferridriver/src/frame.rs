@@ -538,11 +538,13 @@ impl Frame {
     })
   }
 
-  /// Create a `FrameLocator` for an `<iframe>` matching `selector`
-  /// inside this frame's document. Mirrors Playwright's
-  /// `frame.frameLocator(selector)`.
+  /// Playwright: `frame.frameLocator(selector?: string): FrameLocator`.
+  /// With a selector, the `<iframe>` it matches in this frame's document;
+  /// without one, whichever frame in this frame's subtree (this one
+  /// included) the eventual locator matches in.
   #[must_use]
-  pub fn frame_locator(&self, selector: &str) -> crate::locator::FrameLocator {
+  pub fn frame_locator<'a>(&self, selector: impl Into<Option<&'a str>>) -> crate::locator::FrameLocator {
+    let selector = selector.into().unwrap_or(crate::locator::ANY_FRAME);
     crate::locator::FrameLocator::for_iframe_in(self.clone(), selector.to_string())
   }
 

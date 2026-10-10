@@ -192,19 +192,22 @@ impl RequestJs {
   /// initiating frame_id via the owning page's frame cache. Returns
   /// `null` when no frame context is attached.
   #[qjs(rename = "frame")]
-  pub fn frame(&self) -> Null<crate::bindings::frame::FrameJs> {
-    Null(self.frame_of())
+  pub fn frame<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
+    self
+      .frame_of()
+      .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+      .transpose()
+      .map(Null)
   }
 
-  fn frame_of(&self) -> Option<crate::bindings::frame::FrameJs> {
+  #[qjs(skip)]
+  fn frame_of(&self) -> Option<ferridriver::Frame> {
     let page = self.page.as_ref()?;
     let frame_id = self.inner.frame_id()?;
-    for f in page.frames() {
-      if f.frame_id() == frame_id {
-        return Some(crate::bindings::frame::FrameJs::new(f));
-      }
-    }
-    None
+    page.frames().into_iter().find(|f| f.frame_id() == frame_id)
   }
 
   /// Mirrors Playwright `request.serviceWorker(): Worker | null`.
@@ -375,8 +378,11 @@ impl ResponseJs {
   /// Mirrors Playwright `response.frame(): Frame`. Convenience for
   /// `response.request().frame()`.
   #[qjs(rename = "frame")]
-  pub fn frame(&self) -> Null<crate::bindings::frame::FrameJs> {
-    Null(self.request().frame_of())
+  pub fn frame<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
+    self.request().frame(ctx)
   }
 }
 

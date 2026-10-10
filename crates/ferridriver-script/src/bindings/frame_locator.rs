@@ -9,7 +9,9 @@
 
 use ferridriver::locator::FrameLocator;
 use rquickjs::function::Opt;
-use rquickjs::{JsLifetime, class::Trace};
+use rquickjs::{Ctx, JsLifetime, class::Trace};
+
+use crate::bindings::convert::FerriResultCtxExt;
 
 use super::locator::LocatorJs;
 use super::page::{parse_role_options, parse_text_options, string_or_regex_from_js};
@@ -30,9 +32,20 @@ impl FrameLocatorJs {
 
 #[rquickjs::methods]
 impl FrameLocatorJs {
+  /// Playwright: `frameLocator.locator(selectorOrLocator: string | Locator,
+  /// options?: LocatorOptions): Locator`.
   #[qjs(rename = "locator")]
-  pub fn locator(&self, selector: String) -> LocatorJs {
-    LocatorJs::new(self.inner.locator(&selector))
+  pub fn locator<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    selector_or_locator: rquickjs::Value<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let (like, filter) = crate::bindings::locator::lower_locator_args(&ctx, &selector_or_locator, options, true)?;
+    Ok(LocatorJs::new(match filter {
+      Some(f) => self.inner.locator_with(like, &f),
+      None => self.inner.locator(like),
+    }))
   }
 
   #[qjs(rename = "getByRole")]
@@ -115,21 +128,21 @@ impl FrameLocatorJs {
 
   #[qjs(rename = "frameLocator")]
   pub fn frame_locator(&self, selector: String) -> FrameLocatorJs {
-    FrameLocatorJs::new(self.inner.frame_locator(&selector))
+    FrameLocatorJs::new(self.inner.frame_locator(selector.as_str()))
   }
 
   #[qjs(rename = "first")]
-  pub fn first(&self) -> FrameLocatorJs {
-    FrameLocatorJs::new(self.inner.first())
+  pub fn first(&self, ctx: Ctx<'_>) -> rquickjs::Result<FrameLocatorJs> {
+    self.inner.first().map(FrameLocatorJs::new).into_js_with(&ctx)
   }
 
   #[qjs(rename = "last")]
-  pub fn last(&self) -> FrameLocatorJs {
-    FrameLocatorJs::new(self.inner.last())
+  pub fn last(&self, ctx: Ctx<'_>) -> rquickjs::Result<FrameLocatorJs> {
+    self.inner.last().map(FrameLocatorJs::new).into_js_with(&ctx)
   }
 
   #[qjs(rename = "nth")]
-  pub fn nth(&self, index: i32) -> FrameLocatorJs {
-    FrameLocatorJs::new(self.inner.nth(index))
+  pub fn nth(&self, ctx: Ctx<'_>, index: i32) -> rquickjs::Result<FrameLocatorJs> {
+    self.inner.nth(index).map(FrameLocatorJs::new).into_js_with(&ctx)
   }
 }

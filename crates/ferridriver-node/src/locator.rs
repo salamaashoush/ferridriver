@@ -198,9 +198,9 @@ impl Locator {
   }
 
   /// Playwright: `locator.page(): Page`.
-  #[napi]
-  pub fn page(&self) -> crate::page::Page {
-    crate::page::Page::wrap(self.inner.page().clone())
+  #[napi(ts_return_type = "Page")]
+  pub fn page(&self) -> crate::identity::PageObject {
+    crate::identity::PageObject(self.inner.page().clone())
   }
 
   /// Playwright: `locator.describe(description: string): Locator`.
@@ -220,6 +220,18 @@ impl Locator {
   #[napi(js_name = "toString")]
   pub fn to_js_string(&self) -> String {
     self.inner.to_string()
+  }
+
+  /// Playwright: `locator.visible(): Locator`.
+  #[napi]
+  pub fn visible(&self) -> Locator {
+    Self::wrap(self.inner.visible())
+  }
+
+  /// Playwright: `locator.within(locator: Locator): Locator`.
+  #[napi]
+  pub fn within(&self, locator: &Locator) -> Locator {
+    Self::wrap(self.inner.within(&locator.inner))
   }
 
   #[napi]

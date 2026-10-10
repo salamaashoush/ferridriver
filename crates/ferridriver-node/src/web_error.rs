@@ -37,8 +37,8 @@ impl WebError {
   /// Playwright: `webError.page(): null | Page`. Returns the page the
   /// error originated on, or `null` if the page has been dropped.
   #[napi(ts_return_type = "Page | null")]
-  pub fn page(&self) -> Option<crate::page::Page> {
-    self.inner.page().map(crate::page::Page::wrap)
+  pub fn page(&self) -> Option<crate::identity::PageObject> {
+    self.inner.page().map(crate::identity::PageObject)
   }
 
   /// Playwright: `webError.error(): Error`. Returns a **native JS

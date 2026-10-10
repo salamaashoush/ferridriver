@@ -468,15 +468,17 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
   #[qjs(rename = "ownerFrame")]
-  pub async fn owner_frame(
+  pub async fn owner_frame<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::frame::FrameJs>> {
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     call_site
       .scope(async move {
         let maybe = self.inner.owner_frame().await.into_js_with(&ctx)?;
-        Ok(maybe.map(crate::bindings::frame::FrameJs::new))
+        maybe
+          .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+          .transpose()
       })
       .await
       .map(crate::bindings::convert::Null)
@@ -484,15 +486,17 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
   #[qjs(rename = "contentFrame")]
-  pub async fn content_frame(
+  pub async fn content_frame<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::frame::FrameJs>> {
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     call_site
       .scope(async move {
         let maybe = self.inner.content_frame().await.into_js_with(&ctx)?;
-        Ok(maybe.map(crate::bindings::frame::FrameJs::new))
+        maybe
+          .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+          .transpose()
       })
       .await
       .map(crate::bindings::convert::Null)

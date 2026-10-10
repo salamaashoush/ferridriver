@@ -141,6 +141,40 @@ fn get_bool<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<Opt
     .ok_or_else(|| type_error(obj.ctx(), format!("filter options: {key}: expected boolean")))
 }
 
+/// `selectorOrLocator, options?` as `Locator.locator` and
+/// `FrameLocator.locator` take them: a real `Locator` (so the core can
+/// check it belongs to the same page), or a selector string or
+/// `{ selector }`, plus the filter bag when it filters anything.
+pub(crate) fn lower_locator_args<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  selector_or_locator: &rquickjs::Value<'js>,
+  options: Opt<rquickjs::Value<'js>>,
+  allow_visible: bool,
+) -> rquickjs::Result<(
+  ferridriver::options::LocatorLike,
+  Option<ferridriver::options::FilterOptions>,
+)> {
+  let expected = || type_error(ctx, "locator: expected a selector string or Locator instance");
+  let like = if let Some(s) = selector_or_locator.as_string() {
+    ferridriver::options::LocatorLike::Selector(s.to_string()?)
+  } else if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(selector_or_locator) {
+    ferridriver::options::LocatorLike::Locator(class.borrow().inner.clone())
+  } else if let Some(obj) = selector_or_locator.as_object() {
+    ferridriver::options::LocatorLike::Selector(get_string(obj, "selector")?.ok_or_else(expected)?)
+  } else {
+    return Err(expected());
+  };
+  let opts = parse_locator_options_public(ctx, options, allow_visible)?;
+  let filter = ferridriver::options::FilterOptions {
+    has_text: opts.has_text,
+    has_not_text: opts.has_not_text,
+    has: opts.has,
+    has_not: opts.has_not,
+    visible: opts.visible,
+  };
+  Ok((like, (!is_empty_filter(&filter)).then_some(filter)))
+}
+
 pub(crate) fn parse_locator_options_public<'js>(
   ctx: &rquickjs::Ctx<'js>,
   value: Opt<rquickjs::Value<'js>>,
@@ -296,47 +330,7 @@ impl LocatorJs {
     selector_or_locator: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<LocatorJs> {
-    // Lower the JS argument to a `LocatorLike`: real `LocatorJs` class →
-    // `LocatorLike::Locator` (enables same-page check); string or plain
-    // `{ selector }` object → `LocatorLike::Selector`.
-    let like: ferridriver::options::LocatorLike = if let Some(s) = selector_or_locator.as_string() {
-      ferridriver::options::LocatorLike::Selector(s.to_string()?)
-    } else if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(&selector_or_locator) {
-      ferridriver::options::LocatorLike::Locator(class.borrow().inner.clone())
-    } else if let Some(obj) = selector_or_locator.as_object() {
-      match get_string(obj, "selector")? {
-        Some(sel) => ferridriver::options::LocatorLike::Selector(sel),
-        None => {
-          return Err(type_error(
-            &ctx,
-            "Locator.locator: expected a selector string or Locator instance",
-          ));
-        },
-      }
-    } else {
-      return Err(type_error(
-        &ctx,
-        "Locator.locator: expected a selector string or Locator instance",
-      ));
-    };
-
-    // Rust core `Locator::locator(selOrLoc, options?)` handles the
-    // `internal:chain` encoding, cross-frame sentinel, and option
-    // application in one infallible call — script binding is a thin
-    // delegator.
-    let opts = parse_locator_options_public(&ctx, options, false)?;
-    let filter_opts = ferridriver::options::FilterOptions {
-      has_text: opts.has_text,
-      has_not_text: opts.has_not_text,
-      has: opts.has,
-      has_not: opts.has_not,
-      visible: opts.visible,
-    };
-    let filter = if is_empty_filter(&filter_opts) {
-      None
-    } else {
-      Some(filter_opts)
-    };
+    let (like, filter) = lower_locator_args(&ctx, &selector_or_locator, options, false)?;
     let locator = match filter {
       Some(f) => self.inner.locator_with(like, &f),
       None => self.inner.locator(like),
@@ -515,8 +509,11 @@ impl LocatorJs {
   /// `AsyncContext` (via userdata) so `page.route` /
   /// `page.exposeFunction` work on the returned handle.
   #[qjs(rename = "page")]
-  pub fn page(&self, ctx: rquickjs::Ctx<'_>) -> crate::bindings::page::PageJs {
-    crate::bindings::page::pagejs_for_ctx(&ctx, self.inner.page().clone())
+  pub fn page<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::page::PageJs>> {
+    crate::bindings::identity::page_object(&ctx, self.inner.page().clone())
   }
 
   /// Playwright: `locator.describe(description: string): Locator`.
@@ -535,6 +532,20 @@ impl LocatorJs {
   #[qjs(rename = "toString")]
   pub fn to_js_string(&self) -> String {
     self.inner.to_string()
+  }
+
+  /// Playwright: `locator.visible(): Locator`.
+  #[qjs(rename = "visible")]
+  pub fn visible(&self) -> LocatorJs {
+    LocatorJs::new(self.inner.visible())
+  }
+
+  /// Playwright: `locator.within(locator: Locator): Locator`.
+  #[qjs(rename = "within")]
+  pub fn within<'js>(&self, ctx: rquickjs::Ctx<'js>, scope: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
+    let class = rquickjs::Class::<LocatorJs>::from_value(&scope)
+      .map_err(|_| type_error(&ctx, "Locator.within: expected a Locator instance"))?;
+    Ok(LocatorJs::new(self.inner.within(&class.borrow().inner)))
   }
 
   #[qjs(rename = "first")]

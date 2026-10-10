@@ -40,6 +40,7 @@ pub mod frame;
 pub mod frame_locator;
 pub mod heap;
 pub mod http_client;
+pub(crate) mod identity;
 pub mod js_handle;
 pub mod keyboard;
 pub mod locator;
@@ -175,7 +176,8 @@ pub fn install_page_on<'js>(
   page: Arc<ferridriver::Page>,
   vm: ferrijs::VmHandle,
 ) -> rquickjs::Result<()> {
-  let js_page = Class::instance(ctx.clone(), PageJs::new_with_vm(page, vm))?;
+  let js_page = Class::instance(ctx.clone(), PageJs::new_with_vm(Arc::clone(&page), vm))?;
+  identity::adopt_page(ctx, &js_page, page);
   target.set("page", js_page)?;
   // Native page-callbacks registry (context userdata): route handlers,
   // exposeFunction callbacks, screencast — all cross-task dispatched.

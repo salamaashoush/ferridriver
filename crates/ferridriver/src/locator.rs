@@ -133,8 +133,12 @@ macro_rules! retry_resolve {
         // selector silently matches the WRONG page).
         // A failure here means the iframe itself is not there yet — same
         // retry semantics as a missing element.
-        let ::std::result::Result::Ok((__rframe, __rsel)) = $self.resolved().await else {
-          continue;
+        let (__rframe, __rsel) = match $self.resolved().await {
+          ::std::result::Result::Ok(resolved) => resolved,
+          ::std::result::Result::Err(e @ $crate::error::FerriError::InvalidSelector { .. }) => {
+            break 'retry ::std::result::Result::Err(e);
+          },
+          ::std::result::Result::Err(_) => continue,
         };
         let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
         if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
@@ -307,30 +311,16 @@ impl Locator {
   /// frame chunking: query the `<iframe>` in the current frame, hop to
   /// its content frame, continue with the next chunk. Re-resolved on
   /// every action attempt so a re-attached iframe is picked up.
+  ///
+  /// A selector that starts with `frameLocator()`'s any-frame token is
+  /// tried from every frame in this one's subtree (Playwright's
+  /// `resolveFramesForSelector`): the one frame where it matches wins, and
+  /// matches in more than one frame are an error retrying cannot fix.
   pub(crate) async fn resolved(&self) -> Result<(crate::frame::Frame, String)> {
-    const MARK: &str = ">> internal:control=enter-frame >>";
-    if !self.selector.contains("internal:control=enter-frame") {
-      return Ok((self.frame.clone(), self.selector.clone()));
+    match any_frame_rest(&self.selector)? {
+      Some(rest) => Box::pin(resolve_in_any_frame(&self.frame, rest)).await,
+      None => Box::pin(resolve_frame_hops(self.frame.clone(), &self.selector)).await,
     }
-    let mut parts = self.selector.split(MARK).map(str::trim);
-    let mut cur = self.frame.clone();
-    let mut pending = parts.next().unwrap_or("").to_string();
-    for next in parts {
-      let page_arc = std::sync::Arc::clone(cur.page_arc());
-      let fid: Option<String> = if cur.is_main_frame() {
-        None
-      } else {
-        Some(cur.id().to_string())
-      };
-      let el = crate::selectors::query_one(page_arc.inner(), &pending, false, fid.as_deref()).await?;
-      let handle = crate::element_handle::ElementHandle::from_any_element(std::sync::Arc::clone(&page_arc), el).await?;
-      cur = handle
-        .content_frame()
-        .await?
-        .ok_or_else(|| crate::error::FerriError::protocol("frameLocator", "<iframe> has no content frame"))?;
-      pending = next.to_string();
-    }
-    Ok((cur, pending))
   }
 
   /// Returns a copy of this locator with strict-mode toggled.
@@ -489,6 +479,22 @@ impl Locator {
   #[must_use]
   pub fn description(&self) -> Option<String> {
     crate::locator_generator::locator_custom_description(&self.selector)
+  }
+
+  /// Playwright: `locator.visible(): Locator` — only the visible matches.
+  #[must_use]
+  pub fn visible(&self) -> Locator {
+    self.filter(&crate::options::FilterOptions {
+      visible: Some(true),
+      ..Default::default()
+    })
+  }
+
+  /// Playwright: `locator.within(locator: Locator): Locator` — this
+  /// locator, searched for inside `scope`.
+  #[must_use]
+  pub fn within(&self, scope: &Locator) -> Locator {
+    scope.locator(self.clone())
   }
 
   /// First element. Opts out of strict mode because the selector explicitly
@@ -1587,19 +1593,7 @@ impl Locator {
     // Resolve frameLocator enter-frame hops, then count the trailing
     // selector inside the resolved frame (no-op for plain selectors).
     let (rf, rsel) = self.resolved().await?;
-    let parsed = selectors::parse(&rsel)?;
-    let parts_json = selectors::build_parts_json(&parsed);
-    let inner = rf.page_arc().inner();
-    let fd = inner.injected_script().await?;
-    let js = format!("{fd}.selCount({parts_json})");
-    let val = if rf.is_main_frame() {
-      inner.evaluate(&js).await
-    } else {
-      inner.evaluate_in_frame(&js, rf.id()).await
-    }?
-    .and_then(|v| v.as_u64())
-    .unwrap_or(0);
-    Ok(usize::try_from(val).unwrap_or(usize::MAX))
+    count_in(&rf, &rsel).await
   }
 
   /// Resolve this locator to a canonical selector and return a new
@@ -2362,12 +2356,11 @@ impl Locator {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
-    let parsed = selectors::parse(&self.selector)?;
-    let parts_json = selectors::build_parts_json(&parsed);
-    self.frame.page_arc().inner().ensure_engine_injected().await?;
+    let (frame, selector) = self.resolved().await?;
+    let parts_json = selectors::build_parts_json(&selectors::parse(&selector)?);
+    frame.page_arc().inner().ensure_engine_injected().await?;
     let probe = format!("() => window.__fd.selAll({parts_json})");
-    let array_handle = self
-      .frame
+    let array_handle = frame
       .evaluate_handle(&probe, crate::protocol::SerializedArgument::default(), Some(true))
       .await?;
     let result = array_handle.evaluate(fn_source, arg, is_function).await;
@@ -2637,6 +2630,108 @@ impl std::fmt::Debug for Locator {
   }
 }
 
+// ── Frame resolution ──────────────────────────────────────────────────────────
+
+/// `frameLocator()` without a selector: the rest of the selector may
+/// match in any frame below the one it starts from.
+pub(crate) const ANY_FRAME: &str = "internal:control=any-frame";
+
+/// What an any-frame locator runs when no frame matches yet: a selector
+/// that cannot match, so actions keep waiting and counts read zero.
+const MATCHES_NOTHING: &str = ":not(*)";
+
+/// The selector after `frameLocator()`'s token, or `None` when the
+/// selector does not start in any frame.
+fn any_frame_rest(selector: &str) -> Result<Option<&str>> {
+  let Some(rest) = selector.trim().strip_prefix(ANY_FRAME) else {
+    return Ok(None);
+  };
+  match rest.trim_start().strip_prefix(">>").map(str::trim) {
+    Some(rest) if !rest.is_empty() => Ok(Some(rest)),
+    _ => Err(crate::error::FerriError::InvalidSelector {
+      selector: selector.to_string(),
+      reason: "Selector cannot be empty after frameLocator()".into(),
+    }),
+  }
+}
+
+/// Resolve `frameLocator` enter-frame hops from `start` into the deepest
+/// frame plus the selector to run inside it.
+async fn resolve_frame_hops(start: crate::frame::Frame, selector: &str) -> Result<(crate::frame::Frame, String)> {
+  const MARK: &str = ">> internal:control=enter-frame >>";
+  if !selector.contains("internal:control=enter-frame") {
+    return Ok((start, selector.to_string()));
+  }
+  let mut parts = selector.split(MARK).map(str::trim);
+  let mut cur = start;
+  let mut pending = parts.next().unwrap_or("").to_string();
+  for next in parts {
+    let page_arc = Arc::clone(cur.page_arc());
+    let fid = (!cur.is_main_frame()).then(|| cur.id().to_string());
+    let el = crate::selectors::query_one(page_arc.inner(), &pending, false, fid.as_deref()).await?;
+    let handle = crate::element_handle::ElementHandle::from_any_element(Arc::clone(&page_arc), el).await?;
+    cur = handle
+      .content_frame()
+      .await?
+      .ok_or_else(|| crate::error::FerriError::protocol("frameLocator", "<iframe> has no content frame"))?;
+    pending = next.to_string();
+  }
+  Ok((cur, pending))
+}
+
+/// Try `selector` from `root` and every frame below it, keeping the
+/// frames it matches in. A start frame whose hops lead nowhere, or whose
+/// document is between loads, is skipped as Playwright's no-stall pass
+/// skips it.
+async fn resolve_in_any_frame(root: &crate::frame::Frame, selector: &str) -> Result<(crate::frame::Frame, String)> {
+  let mut starts = vec![root.clone()];
+  let mut next = 0;
+  while next < starts.len() {
+    let children = starts[next].child_frames();
+    starts.extend(children);
+    next += 1;
+  }
+  let mut matched: Vec<(crate::frame::Frame, String)> = Vec::new();
+  for start in starts {
+    let Ok((frame, rest)) = resolve_frame_hops(start, selector).await else {
+      continue;
+    };
+    if matched.iter().any(|(seen, _)| seen.id() == frame.id()) {
+      continue;
+    }
+    if count_in(&frame, &rest).await.is_ok_and(|n| n > 0) {
+      matched.push((frame, rest));
+    }
+  }
+  if matched.len() > 1 {
+    return Err(crate::error::FerriError::InvalidSelector {
+      selector: format!("{ANY_FRAME} >> {selector}"),
+      reason: "frameLocator() matched elements in multiple frames.".into(),
+    });
+  }
+  Ok(
+    matched
+      .pop()
+      .unwrap_or_else(|| (root.clone(), MATCHES_NOTHING.to_string())),
+  )
+}
+
+/// How many elements `selector` matches in `frame`, without strictness.
+async fn count_in(frame: &crate::frame::Frame, selector: &str) -> Result<usize> {
+  let parts_json = selectors::build_parts_json(&selectors::parse(selector)?);
+  let inner = frame.page_arc().inner();
+  let fd = inner.injected_script().await?;
+  let js = format!("{fd}.selCount({parts_json})");
+  let val = if frame.is_main_frame() {
+    inner.evaluate(&js).await
+  } else {
+    inner.evaluate_in_frame(&js, frame.id()).await
+  }?
+  .and_then(|v| v.as_u64())
+  .unwrap_or(0);
+  Ok(usize::try_from(val).unwrap_or(usize::MAX))
+}
+
 // ── FrameLocator ──────────────────────────────────────────────────────────────
 
 /// A selector-builder that produces parent-frame [`Locator`]s targeting
@@ -2680,22 +2775,53 @@ impl FrameLocator {
   }
 
   fn enter(&self, selector: &str) -> String {
+    if self.frame_selector == ANY_FRAME {
+      return format!("{ANY_FRAME} >> {selector}");
+    }
     format!("{} >> internal:control=enter-frame >> {selector}", self.frame_selector)
   }
 
-  /// Locator inside this iframe. Mirrors Playwright's
-  /// `frameLocator.locator(selector, options?)` — sync, returns a
-  /// `Locator` bound to the parent frame with an `enter-frame`
-  /// selector chain. The options-bag form is [`Self::locator_with`].
+  /// Playwright's `_nthSelector`: picking one of the frames needs the
+  /// frames to be named by a selector.
+  fn nth_selector(&self, nth: &str) -> Result<String> {
+    if self.frame_selector == ANY_FRAME {
+      return Err(crate::error::FerriError::InvalidArgument {
+        name: "frameLocator".into(),
+        reason: "Selecting the nth frame is not allowed on frameLocator().".into(),
+      });
+    }
+    Ok(format!("{} >> nth={nth}", self.frame_selector))
+  }
+
+  /// Playwright: `frameLocator.locator(selectorOrLocator: string | Locator,
+  /// options?: LocatorOptions): Locator` — sync, bound to the parent
+  /// frame with an `enter-frame` selector chain. A locator is entered by
+  /// its own selector; one from another page cannot match, which the
+  /// selector engine reports when the locator is used. The options-bag
+  /// form is [`Self::locator_with`].
   #[must_use]
-  pub fn locator(&self, selector: &str) -> Locator {
-    Locator::new(self.frame.clone(), self.enter(selector))
+  pub fn locator(&self, selector_or_locator: impl Into<crate::options::LocatorLike>) -> Locator {
+    match selector_or_locator.into() {
+      crate::options::LocatorLike::Selector(selector) => self.child(&selector),
+      crate::options::LocatorLike::Locator(inner) if Arc::ptr_eq(self.frame.page_arc(), inner.frame.page_arc()) => {
+        self.child(&inner.selector)
+      },
+      crate::options::LocatorLike::Locator(_) => self.child("internal:cross-frame-error=true"),
+    }
   }
 
   /// [`Self::locator`] with Playwright's `LocatorOptions` filter bag.
   #[must_use]
-  pub fn locator_with(&self, selector: &str, options: &crate::options::FilterOptions) -> Locator {
-    self.locator(selector).filter(options)
+  pub fn locator_with(
+    &self,
+    selector_or_locator: impl Into<crate::options::LocatorLike>,
+    options: &crate::options::FilterOptions,
+  ) -> Locator {
+    self.locator(selector_or_locator).filter(options)
+  }
+
+  fn child(&self, selector: &str) -> Locator {
+    Locator::new(self.frame.clone(), self.enter(selector))
   }
 
   /// `getByRole` inside this iframe.
@@ -2706,7 +2832,7 @@ impl FrameLocator {
   ) -> crate::locator_builder::LocatorBuilder<RoleOptions> {
     let fl = self.clone();
     let role = role.into();
-    crate::locator_builder::LocatorBuilder::new(move |opts| fl.locator(&build_role_selector(role.as_str(), opts)))
+    crate::locator_builder::LocatorBuilder::new(move |opts| fl.child(&build_role_selector(role.as_str(), opts)))
   }
 
   /// `getByText` inside this iframe.
@@ -2718,7 +2844,7 @@ impl FrameLocator {
   /// `getByTestId` inside this iframe.
   #[must_use]
   pub fn get_by_test_id(&self, test_id: impl Into<StringOrRegex>) -> Locator {
-    self.locator(&build_testid_selector(&self.frame.test_id_attribute(), &test_id.into()))
+    self.child(&build_testid_selector(&self.frame.test_id_attribute(), &test_id.into()))
   }
 
   /// `getByLabel` inside this iframe.
@@ -2754,7 +2880,7 @@ impl FrameLocator {
     text: StringOrRegex,
   ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
     let fl = self.clone();
-    crate::locator_builder::LocatorBuilder::new(move |opts| fl.locator(&build_text_like_selector(kind, &text, opts)))
+    crate::locator_builder::LocatorBuilder::new(move |opts| fl.child(&build_text_like_selector(kind, &text, opts)))
   }
 
   fn attr_builder(
@@ -2763,7 +2889,7 @@ impl FrameLocator {
     text: StringOrRegex,
   ) -> crate::locator_builder::LocatorBuilder<TextOptions> {
     let fl = self.clone();
-    crate::locator_builder::LocatorBuilder::new(move |opts| fl.locator(&build_attr_selector(attr, &text, opts)))
+    crate::locator_builder::LocatorBuilder::new(move |opts| fl.child(&build_attr_selector(attr, &text, opts)))
   }
 
   /// The locator pointing at the `<iframe>` element itself, in the
@@ -2785,30 +2911,38 @@ impl FrameLocator {
   }
 
   /// First matching iframe (`nth=0`).
-  #[must_use]
-  pub fn first(&self) -> FrameLocator {
-    FrameLocator {
-      frame: self.frame.clone(),
-      frame_selector: format!("{} >> nth=0", self.frame_selector),
-    }
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::InvalidArgument`] on `frameLocator()`,
+  /// which names no iframe to pick from.
+  pub fn first(&self) -> Result<FrameLocator> {
+    self.nth_frame("0")
   }
 
   /// Last matching iframe (`nth=-1`).
-  #[must_use]
-  pub fn last(&self) -> FrameLocator {
-    FrameLocator {
-      frame: self.frame.clone(),
-      frame_selector: format!("{} >> nth=-1", self.frame_selector),
-    }
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::first`].
+  pub fn last(&self) -> Result<FrameLocator> {
+    self.nth_frame("-1")
   }
 
   /// Nth matching iframe.
-  #[must_use]
-  pub fn nth(&self, index: i32) -> FrameLocator {
-    FrameLocator {
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::first`].
+  pub fn nth(&self, index: i32) -> Result<FrameLocator> {
+    self.nth_frame(&index.to_string())
+  }
+
+  fn nth_frame(&self, nth: &str) -> Result<FrameLocator> {
+    Ok(FrameLocator {
       frame: self.frame.clone(),
-      frame_selector: format!("{} >> nth={index}", self.frame_selector),
-    }
+      frame_selector: self.nth_selector(nth)?,
+    })
   }
 }
 

@@ -8,7 +8,6 @@
 //! `webkit.launch()` entry points.
 
 use crate::error::IntoNapi;
-use crate::page::Page;
 use napi::Result;
 use napi_derive::napi;
 
@@ -103,10 +102,10 @@ fn build_browser_event_callback(
 #[napi]
 impl Browser {
   /// Create a new page (tab).
-  #[napi]
-  pub async fn new_page(&self) -> Result<Page> {
+  #[napi(ts_return_type = "Promise<Page>")]
+  pub async fn new_page(&self) -> Result<crate::identity::PageObject> {
     let page = Box::pin(self.inner.new_page()).await.into_napi()?;
-    Ok(Page::wrap(page))
+    Ok(crate::identity::PageObject(page))
   }
 
   /// Playwright: `browser.newBrowserCDPSession()`. Attaches a raw CDP
@@ -118,17 +117,17 @@ impl Browser {
   }
 
   /// Create a new page and navigate to URL.
-  #[napi]
-  pub async fn new_page_with_url(&self, url: String) -> Result<Page> {
+  #[napi(ts_return_type = "Promise<Page>")]
+  pub async fn new_page_with_url(&self, url: String) -> Result<crate::identity::PageObject> {
     let page = Box::pin(self.inner.new_page_with_url(&url)).await.into_napi()?;
-    Ok(Page::wrap(page))
+    Ok(crate::identity::PageObject(page))
   }
 
   /// Get the active page for the default context.
-  #[napi]
-  pub async fn page(&self) -> Result<Page> {
+  #[napi(ts_return_type = "Promise<Page>")]
+  pub async fn page(&self) -> Result<crate::identity::PageObject> {
     let page = Box::pin(self.inner.page()).await.into_napi()?;
-    Ok(Page::wrap(page))
+    Ok(crate::identity::PageObject(page))
   }
 
   /// Create a new isolated browser context.

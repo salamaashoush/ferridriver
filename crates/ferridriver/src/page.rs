@@ -1061,12 +1061,18 @@ impl Page {
     self.main_frame().get_by_test_id(test_id)
   }
 
-  /// Create a `FrameLocator` for an `<iframe>` matching the selector.
-  ///
-  /// Equivalent to Playwright's `page.frameLocator(selector)`.
+  /// Playwright: `page.frameLocator(selector?: string): FrameLocator`,
+  /// [`crate::frame::Frame::frame_locator`] on the main frame.
   #[must_use]
-  pub fn frame_locator(self: &Arc<Self>, selector: &str) -> crate::locator::FrameLocator {
+  pub fn frame_locator<'a>(self: &Arc<Self>, selector: impl Into<Option<&'a str>>) -> crate::locator::FrameLocator {
     self.main_frame().frame_locator(selector)
+  }
+
+  /// Playwright: `page.getByRef(ref: string): Locator` — the element an
+  /// AI-mode aria snapshot labelled `[ref=<ref>]`.
+  #[must_use]
+  pub fn get_by_ref(self: &Arc<Self>, aria_ref: &str) -> Locator {
+    self.locator(&format!("aria-ref={aria_ref}"))
   }
 
   // ── Handle materialisation (Playwright `page.$` / `page.$$`) ─────
