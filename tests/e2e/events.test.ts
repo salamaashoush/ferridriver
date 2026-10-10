@@ -255,15 +255,14 @@ describe('events', () => {
 
   test('context_noopener_popup_tracked', async ({ browser, baseURL }) => {
     // noopener windows carry no JS opener, and on CDP they land in a
-    // fresh browsing instance whose session answers nothing while
-    // paused (the claim watchdog resumes early). They must still
+    // fresh browsing instance whose session answers nothing until
+    // resumed (its setup is written first and answered after). They must still
     // register, fire 'page', and be drivable. The protocol-level
     // opener id survives noopener on every engine (CDP targetInfo,
     // BiDi originalOpener, WebKit pageProxyCreated), so opener()
     // resolves — same as Playwright's backends, which read the same
-    // fields. URL is asserted via evaluate, not page.url(): on the
-    // watchdog path the frame cache can lag the popup's first
-    // navigation.
+    // fields. URL is asserted via evaluate, not page.url(): the frame
+    // cache can lag the popup's first navigation.
     const ctx = await browser.newContext({});
     try {
       const opener = await ctx.newPage();

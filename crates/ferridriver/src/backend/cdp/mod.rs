@@ -9,6 +9,7 @@
 //! waiter before sending Page.navigate, then await the waiter which resolves
 //! when the reader task sees Page.loadEventFired for that session.
 
+mod paused;
 pub mod pipe;
 mod renderer;
 mod screenshot;
@@ -717,31 +718,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
     headful: bool,
   ) -> Result<CdpPage<T>> {
     let inject_src = crate::selectors::build_lazy_inject_js();
-    // Same-process popups answer session commands while parked on
-    // waitForDebuggerOnStart — the pause window lets the pump configure
-    // the page before its first document runs. A popup in a NEW
-    // browsing instance (noopener, cross-origin COOP) answers NOTHING
-    // until resumed: Chrome does not spin the renderer up. Watchdog:
-    // when the enables get no answer, resume early and finish the
-    // setup against the running target (config degrades to
-    // applied-asap, still ordered before any awaited caller sees the
-    // page). Playwright avoids the stall by queueing its whole init +
-    // resume as one wire-ordered batch (crPage.ts:548).
-    let enable_fut = Self::enable_domains(transport, Some(session_id), None, false, Some(&inject_src));
-    tokio::pin!(enable_fut);
-    let timed = tokio::time::timeout(Duration::from_secs(1), &mut enable_fut).await;
-    let frame_tree_seed = if let Ok(r) = timed {
-      r?
-    } else {
-      let _ = transport
-        .send_command(
-          Some(session_id),
-          "Runtime.runIfWaitingForDebugger",
-          &super::EMPTY_PARAMS,
-        )
-        .await;
-      enable_fut.await?
-    };
     let injected_script = Arc::new(InjectedScriptManager::new());
     injected_script
       .injected
@@ -749,6 +725,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let page = CdpPage {
       transport: Arc::clone(transport),
       session_id: Some(Arc::from(session_id)),
+      setup: Arc::new(paused::PausedSetup::paused()),
       target_id: Arc::from(target_id),
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
@@ -766,7 +743,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       headful,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
-      seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
+      seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
       lifecycle: Arc::new(std::sync::Mutex::new(LifecycleState::new())),
       lifecycle_notify: Arc::new(tokio::sync::Notify::new()),
@@ -793,6 +770,19 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page.frame_observer(),
     );
     let _ = page.main_frame_id.set(page.target_id.to_string());
+    let enable = {
+      let transport = Arc::clone(transport);
+      let session = session_id.to_string();
+      let seed = Arc::clone(&page.seeded_frame_tree);
+      async move {
+        let frames = Self::enable_domains(&transport, Some(&session), None, false, Some(&inject_src)).await?;
+        if frames.is_some() {
+          *seed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = frames;
+        }
+        Ok(())
+      }
+    };
+    page.setup.write(Box::pin(enable)).await?;
     Ok(page)
   }
 
@@ -877,6 +867,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     CdpPage {
       transport: self.transport.clone(),
       session_id: sid.map(Arc::from),
+      setup: Arc::default(),
       target_id: Arc::from(target_id),
       browser_context_id: None,
       events: crate::events::EventEmitter::new(),
@@ -1064,6 +1055,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let page = CdpPage {
       transport: self.transport.clone(),
       session_id: sid.map(Arc::from),
+      setup: Arc::default(),
       target_id: Arc::from(target_id),
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
@@ -1808,6 +1800,8 @@ pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, coun
 pub struct CdpPage<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<Arc<str>>,
+  /// The setup of a popup that attached paused; idle on every other page.
+  setup: Arc<paused::PausedSetup>,
   pub(crate) target_id: Arc<str>,
   /// Browser context ID for isolated contexts (used for `Target.disposeBrowserContext` on close).
   browser_context_id: Option<Arc<str>>,
@@ -2179,6 +2173,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
     Self {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
+      setup: self.setup.clone(),
       target_id: self.target_id.clone(),
       browser_context_id: self.browser_context_id.clone(),
       events: self.events.clone(),
@@ -2261,9 +2256,55 @@ impl<T: CdpWrap> CdpPage<T> {
 
   /// Send a CDP command to this page's session.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    if self.setup.is_paused() {
+      return Box::pin(self.cmd_while_paused(method, params)).await;
+    }
     self
       .transport
       .send_command(self.session_id.as_deref(), method, &params)
+      .await
+  }
+
+  /// A command whose answer the caller needs, on a popup still paused.
+  /// No answer inside the grace means the popup answers nothing until
+  /// resumed, so it is resumed here rather than left to stall its setup:
+  /// what was written already still reaches its first document, what
+  /// follows may not.
+  async fn cmd_while_paused(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let answer = self.transport.send_command(self.session_id.as_deref(), method, &params);
+    tokio::pin!(answer);
+    if let Ok(result) = tokio::time::timeout(paused::ANSWER_GRACE, &mut answer).await {
+      return result;
+    }
+    tracing::debug!("paused popup did not answer {method}; resuming it early");
+    self.resume_popup().await?;
+    answer.await
+  }
+
+  /// Send a setup command nothing reads the answer of. A popup still
+  /// paused gets it written and is not waited on.
+  async fn configure(&self, method: &'static str, params: serde_json::Value) -> Result<()> {
+    if !self.setup.is_paused() {
+      return self.cmd(method, params).await.map(|_| ());
+    }
+    self.write_paused(method, params, |_| Ok(())).await
+  }
+
+  /// Write a command to a paused popup, `then` taking its answer once
+  /// the popup is resumed.
+  async fn write_paused(
+    &self,
+    method: &'static str,
+    params: serde_json::Value,
+    then: impl FnOnce(serde_json::Value) -> Result<()> + Send + 'static,
+  ) -> Result<()> {
+    let transport = Arc::clone(&self.transport);
+    let session = self.session_id.clone();
+    self
+      .setup
+      .write(Box::pin(async move {
+        then(transport.send_command(session.as_deref(), method, &params).await?)
+      }))
       .await
   }
 
@@ -2271,12 +2312,21 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `waitForDebuggerOnStart`. Called by the popup pump once context
   /// configuration (init scripts, bindings, routes) has been applied,
   /// so the popup's first document already sees them — the same
-  /// pause-configure-resume window Playwright's `CRPage` uses.
+  /// pause-configure-resume window Playwright's `CRPage` uses. The
+  /// answers the setup left owed are collected here, behind the resume
+  /// on the wire.
   pub(crate) async fn resume_popup(&self) -> Result<()> {
-    self
-      .cmd("Runtime.runIfWaitingForDebugger", serde_json::json!({}))
-      .await?;
-    Ok(())
+    let owed = self.setup.resume();
+    let resume = self.transport.send_command(
+      self.session_id.as_deref(),
+      "Runtime.runIfWaitingForDebugger",
+      &super::EMPTY_PARAMS,
+    );
+    let (answers, resumed) = tokio::join!(futures::future::join_all(owed), resume);
+    for error in answers.into_iter().filter_map(Result::err) {
+      tracing::debug!("popup setup: {error}");
+    }
+    resumed.map(|_| ())
   }
 
   // ---- Navigation ----
@@ -4958,9 +5008,8 @@ impl<T: CdpWrap> CdpPage<T> {
       .as_deref()
       .map(|ua| async move {
         self
-          .cmd("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
+          .configure("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
           .await
-          .map(|_| ())
       })
       .into();
     let locale_fut: OptionFuture<_> = opts
@@ -4968,15 +5017,14 @@ impl<T: CdpWrap> CdpPage<T> {
       .as_deref()
       .map(|l| async move {
         let _ = self
-          .cmd("Emulation.setLocaleOverride", serde_json::json!({"locale": l}))
+          .configure("Emulation.setLocaleOverride", serde_json::json!({"locale": l}))
           .await;
         self
-          .cmd(
+          .configure(
             "Network.setUserAgentOverride",
             serde_json::json!({"userAgent": "", "acceptLanguage": l}),
           )
           .await
-          .map(|_| ())
       })
       .into();
     let tz_fut: OptionFuture<_> = opts
@@ -4984,36 +5032,32 @@ impl<T: CdpWrap> CdpPage<T> {
       .as_deref()
       .map(|tz| async move {
         self
-          .cmd("Emulation.setTimezoneOverride", serde_json::json!({"timezoneId": tz}))
+          .configure("Emulation.setTimezoneOverride", serde_json::json!({"timezoneId": tz}))
           .await
-          .map(|_| ())
       })
       .into();
     let js_fut: OptionFuture<_> = opts
       .java_script_enabled
       .map(|v| async move {
         self
-          .cmd("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))
+          .configure("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))
           .await
-          .map(|_| ())
       })
       .into();
     let csp_fut: OptionFuture<_> = opts
       .bypass_csp
       .map(|v| async move {
         self
-          .cmd("Page.setBypassCSP", serde_json::json!({"enabled": v}))
+          .configure("Page.setBypassCSP", serde_json::json!({"enabled": v}))
           .await
-          .map(|_| ())
       })
       .into();
     let tls_fut: OptionFuture<_> = opts
       .ignore_https_errors
       .map(|v| async move {
         self
-          .cmd("Security.setIgnoreCertificateErrors", serde_json::json!({"ignore": v}))
+          .configure("Security.setIgnoreCertificateErrors", serde_json::json!({"ignore": v}))
           .await
-          .map(|_| ())
       })
       .into();
     let creds_fut: OptionFuture<_> = opts
@@ -5029,14 +5073,13 @@ impl<T: CdpWrap> CdpPage<T> {
       .map(|p| async move {
         if matches!(p, crate::options::ServiceWorkerPolicy::Block) {
           self
-            .cmd(
+            .configure(
               "Page.addScriptToEvaluateOnNewDocument",
               serde_json::json!({
                 "source": "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}"
               }),
             )
             .await
-            .map(|_| ())
         } else {
           Ok(())
         }
@@ -5071,21 +5114,19 @@ impl<T: CdpWrap> CdpPage<T> {
           .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
           .collect();
         self
-          .cmd("Network.setExtraHTTPHeaders", serde_json::json!({"headers": pairs}))
+          .configure("Network.setExtraHTTPHeaders", serde_json::json!({"headers": pairs}))
           .await
-          .map(|_| ())
       })
       .into();
     let geo_fut: OptionFuture<_> = opts
       .geolocation
       .map(|g| async move {
         self
-          .cmd(
+          .configure(
             "Emulation.setGeolocationOverride",
             serde_json::json!({"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}),
           )
           .await
-          .map(|_| ())
       })
       .into();
     let perms_fut: OptionFuture<_> = opts
@@ -5111,14 +5152,13 @@ impl<T: CdpWrap> CdpPage<T> {
       .offline
       .map(|o| async move {
         self
-          .cmd(
+          .configure(
             "Network.emulateNetworkConditions",
             serde_json::json!({
               "offline": o, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1,
             }),
           )
           .await
-          .map(|_| ())
       })
       .into();
 
@@ -5254,7 +5294,9 @@ impl<T: CdpWrap> CdpPage<T> {
       // the emulated size if it lands after it. Both hang off the same
       // unchanged-metrics guard, so a re-applied viewport costs nothing.
       self.resize_window_for(config).await;
-      self.cmd("Emulation.setDeviceMetricsOverride", params.clone()).await?;
+      self
+        .configure("Emulation.setDeviceMetricsOverride", params.clone())
+        .await?;
       let mut last = match self.last_metrics_params.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
@@ -5268,7 +5310,7 @@ impl<T: CdpWrap> CdpPage<T> {
       // param is omitted on some channels). Mirrors Playwright's
       // `crEmulationManager._updateTouch` which uses 5.
       let _ = self
-        .cmd(
+        .configure(
           "Emulation.setTouchEmulationEnabled",
           serde_json::json!({"enabled": true, "maxTouchPoints": 5}),
         )
@@ -5307,7 +5349,7 @@ impl<T: CdpWrap> CdpPage<T> {
       MediaOverride::Disabled | MediaOverride::Unchanged => "",
     };
     let params = serde_json::json!({"features": features, "media": media});
-    self.cmd("Emulation.setEmulatedMedia", params).await?;
+    self.configure("Emulation.setEmulatedMedia", params).await?;
     Ok(())
   }
 
@@ -6541,7 +6583,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       let mut initialized = self.binding_initialized.lock().await;
       if !*initialized {
         self
-          .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
+          .configure("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
           .await?;
         self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
         // The first document runs the controller init script, so
@@ -6582,7 +6624,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       let mut initialized = self.binding_initialized.lock().await;
       if !*initialized {
         self
-          .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
+          .configure("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
           .await?;
         self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
         *initialized = true;

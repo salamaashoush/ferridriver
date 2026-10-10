@@ -191,10 +191,29 @@ impl<T: CdpWrap> CdpPage<T> {
 
   pub(super) async fn install_init_script(&self, source: &str) -> Result<String> {
     let mut scripts = self.renderers.scripts.lock().await;
-    let result = self
-      .cmd("Page.addScriptToEvaluateOnNewDocument", json!({"source":source}))
-      .await?;
-    let identifier = script_identifier(&result)?;
+    let identifier = if self.setup.is_paused() {
+      // The protocol's identifier comes with an answer a paused popup
+      // may not give until resumed; hand out one of ours until then.
+      let identifier = self.setup.script_identifier();
+      let setup = Arc::clone(&self.setup);
+      let ours = identifier.clone();
+      self
+        .write_paused(
+          "Page.addScriptToEvaluateOnNewDocument",
+          json!({"source":source}),
+          move |result| {
+            setup.script_answered(ours, script_identifier(&result)?);
+            Ok(())
+          },
+        )
+        .await?;
+      identifier
+    } else {
+      let result = self
+        .cmd("Page.addScriptToEvaluateOnNewDocument", json!({"source":source}))
+        .await?;
+      script_identifier(&result)?
+    };
     scripts.push((identifier.clone(), source.to_owned()));
     for renderer in self.current_renderers() {
       self.install_renderer_script(&renderer, &identifier, source).await?;
@@ -231,7 +250,7 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .cmd(
         "Page.removeScriptToEvaluateOnNewDocument",
-        json!({"identifier":identifier}),
+        json!({"identifier":self.setup.protocol_script(identifier)}),
       )
       .await?;
     scripts.retain(|(id, _)| id != identifier);
