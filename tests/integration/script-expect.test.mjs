@@ -477,7 +477,8 @@ test("poll to satisfy with predicate", async () => {
 test("poll timeout throws with last value", async () => {
   {
     const error = await failure("await expect.poll(() => 'never matches', { timeout: 300 }).toEqual('something'); return 'unreached'");
-    assert.ok(error.includes("toEqual") && error.includes("timed out"), error);
+    assert.ok(error.includes("toEqual") && error.includes("Timeout 300ms exceeded while waiting on the predicate"), error);
+    assert.ok(error.includes("never matches"), error);
   }
 });
 
