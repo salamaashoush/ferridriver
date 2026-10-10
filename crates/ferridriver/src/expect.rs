@@ -225,13 +225,16 @@ async fn evaluate_engine(
   method: &str,
 ) -> Result<Option<Value>> {
   let inner = page.inner();
+  // An engine from another realm counts as missing (see
+  // `selectors::build_lazy_inject_js_with`).
+  let expression = format!("window.__fd instanceof Object ? {call} : {ENGINE_MISSING:?}");
   inner.ensure_engine_injected().await?;
-  let expression = format!("window.__fd ? {call} : {ENGINE_MISSING:?}");
   let value = match frame_id {
     None => inner.evaluate(&expression).await,
     Some(id) => inner.evaluate_in_frame(&expression, id).await,
   }?;
   if value.as_ref().and_then(Value::as_str) == Some(ENGINE_MISSING) {
+    inner.forget_engine(frame_id);
     return Err(FerriError::protocol(
       method,
       "the page is navigating and has no script engine yet",

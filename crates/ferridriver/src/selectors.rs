@@ -305,10 +305,16 @@ pub fn build_lazy_inject_js_with(test_id_attribute: &str) -> String {
   });
   // The engine JS directly creates window.__fd at the end of its IIFE,
   // reading `window.__fdOptions` as it goes.
+  //
+  // An injection that races a navigation can run in the outgoing
+  // document and still set `window.__fd` on the new one, through the
+  // shared WindowProxy. That engine's functions belong to a dead realm, so
+  // its promises never settle; `instanceof` against this realm's `Object`
+  // tells it apart, and it is injected over rather than waited on.
   format!(
     r"(async () => {{
-      if (window.__fd) return window.__fd;
-      if (window.__fd_promise) return await window.__fd_promise;
+      if (window.__fd instanceof Object) return window.__fd;
+      if (window.__fd === undefined && window.__fd_promise instanceof Promise) return await window.__fd_promise;
       window.__fd_promise = (async () => {{
         try {{
           window.__fdOptions = {options};

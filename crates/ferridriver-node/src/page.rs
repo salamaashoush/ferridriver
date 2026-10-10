@@ -2060,15 +2060,34 @@ impl Page {
   /// Playwright: `page.ariaSnapshot(options?): Promise<string>`.
   #[napi(
     js_name = "ariaSnapshot",
-    ts_args_type = "options?: { depth?: number, track?: string }",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
     ts_return_type = "Promise<string>"
   )]
-  pub async fn aria_snapshot(&self, options: Option<SnapshotForAiOptions>) -> Result<String> {
-    let opts = options.map(Into::into);
+  pub async fn aria_snapshot(&self, options: Option<crate::types::AriaSnapshotOptions>) -> Result<String> {
+    let opts = options.map(Into::into).unwrap_or_default();
     self
       .inner
       .aria_snapshot()
-      .maybe_options(opts)
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
+  /// Playwright: `page.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
+  #[napi(
+    js_name = "ariaSnapshotJSON",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
+    ts_return_type = "Promise<import('./types').AriaSnapshotJSON>"
+  )]
+  pub async fn aria_snapshot_json(
+    &self,
+    options: Option<crate::types::AriaSnapshotOptions>,
+  ) -> Result<Vec<serde_json::Value>> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self
+      .inner
+      .aria_snapshot_json()
+      .options(opts)
       .await
       .map_err(crate::error::to_napi)
   }

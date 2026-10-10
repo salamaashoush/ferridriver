@@ -1217,6 +1217,30 @@ export interface GetByTextOptions {
   exact?: boolean;
 }
 
+/** One node of `ariaSnapshotJSON()`: Playwright's `AriaNodeJSON`. */
+export interface AriaNodeJSON {
+  role: string;
+  name?: string;
+  checked?: true | 'mixed';
+  disabled?: true;
+  expanded?: true;
+  active?: true;
+  invalid?: true | 'grammar' | 'spelling';
+  level?: number;
+  pressed?: true | 'mixed';
+  selected?: true;
+  ariaHidden?: true;
+  ref?: string;
+  cursor?: 'pointer';
+  box?: { x: number; y: number; width: number; height: number };
+  url?: string;
+  placeholder?: string;
+  text?: string;
+  children?: (AriaNodeJSON | string)[];
+}
+
+export type AriaSnapshotJSON = AriaNodeJSON[];
+
 export interface LocatorFilterOptions {
   has?: Locator;
   hasNot?: Locator;
@@ -1368,6 +1392,9 @@ export interface Locator {
   ariaSnapshot(
     options?: TimeoutOption & { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
   ): Promise<string>;
+  ariaSnapshotJSON(
+    options?: TimeoutOption & { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
+  ): Promise<AriaSnapshotJSON>;
 
   isVisible(options?: TimeoutOption): Promise<boolean>;
   isHidden(options?: TimeoutOption): Promise<boolean>;
@@ -1670,6 +1697,12 @@ export interface Page {
   getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector?: string): FrameLocator;
   getByRef(ref: string): Locator;
+  ariaSnapshot(
+    options?: TimeoutOption & { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
+  ): Promise<string>;
+  ariaSnapshotJSON(
+    options?: TimeoutOption & { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
+  ): Promise<AriaSnapshotJSON>;
   frames(): Frame[];
   mainFrame(): Frame;
   frame(nameOrOptions: string | { name?: string; url?: string | RegExp }): Frame | null;

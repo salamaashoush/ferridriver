@@ -108,20 +108,23 @@ describe('toHaveScreenshot baselines', () => {
 
 describe('toMatchAriaSnapshot files', () => {
   test('a missing file is generated from the live tree, then matched', async ({ page }, testInfo) => {
-    const file = testInfo.snapshotPath('nav.aria.yml', { kind: 'aria' });
+    // The aria path template has no project in it, so every project would
+    // share (and delete) one file.
+    const name = `nav-${testInfo.project.name}.aria.yml`;
+    const file = testInfo.snapshotPath(name, { kind: 'aria' });
     rmSync(file, { force: true });
     await page.setContent('<nav><a href="/a">Home</a><button>Save</button></nav>');
-    await expect(page.locator('nav')).toMatchAriaSnapshot({ name: 'nav.aria.yml', timeout: 500 });
+    await expect(page.locator('nav')).toMatchAriaSnapshot({ name, timeout: 500 });
     const written = readFileSync(file, 'utf8');
     expect(written).toContain('- link "Home"');
     expect(written).toContain('- button "Save"');
-    await expect(page.locator('nav')).toMatchAriaSnapshot({ name: 'nav.aria.yml' });
+    await expect(page.locator('nav')).toMatchAriaSnapshot({ name });
     await page.setContent('<nav><a href="/a">Home</a><button>Discard</button></nav>');
     const message = await expect(page.locator('nav'))
-      .toMatchAriaSnapshot({ name: 'nav.aria.yml', timeout: 500 })
+      .toMatchAriaSnapshot({ name, timeout: 500 })
       .then(() => '', e => String(e));
     expect(message).toContain('Discard');
-    await expect(page.locator('nav')).not.toMatchAriaSnapshot({ name: 'nav.aria.yml', timeout: 500 });
+    await expect(page.locator('nav')).not.toMatchAriaSnapshot({ name, timeout: 500 });
   });
 
   test('.not cannot generate a baseline', async ({ page }) => {

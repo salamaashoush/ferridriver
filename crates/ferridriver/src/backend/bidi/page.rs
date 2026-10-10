@@ -954,6 +954,11 @@ impl BidiPage {
     self.injected_script.ensure(self).await
   }
 
+  /// See [`crate::backend::AnyPage::forget_engine`].
+  pub fn forget_engine(&self, frame_id: Option<&str>) {
+    self.injected_script.reset_context(frame_id.unwrap_or(&self.context_id));
+  }
+
   /// Ensure the engine is injected into a specific browsing context.
   /// Used before frame-scoped queries so freshly-attached / `srcdoc` /
   /// `data:` child contexts have `window.__fd` (Residual 2).
@@ -968,6 +973,10 @@ impl BidiPage {
   /// `browsingContext.domContentLoaded` / `load` event for that context
   /// (no fixed delay), bounded so a wedged child can't hang a query.
   async fn wait_context_ready(&self, ctx: &str) -> Result<()> {
+    // Subscribe before looking: a child that finishes parsing between the
+    // readiness check and the subscription would otherwise fire its
+    // event unseen and leave this waiting out the whole bound.
+    let mut rx = self.session.transport.tap_events();
     // Fast path: query readiness directly. A successful evaluate also
     // proves the context is reachable.
     if let Ok(Some(v)) = self.eval_internal("document.readyState", ctx).await
@@ -979,7 +988,6 @@ impl BidiPage {
     // Slow path: the child is still parsing — wait for its own
     // domContentLoaded/load event (BiDi reports child events with
     // `context` == the child id).
-    let mut rx = self.session.transport.tap_events();
     let target = ctx.to_string();
     let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
       while let Some(event) = rx.recv().await {

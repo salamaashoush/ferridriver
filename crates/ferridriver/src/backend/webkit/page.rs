@@ -1101,6 +1101,11 @@ impl WebKitPage {
     Ok("window.__fd".to_string())
   }
 
+  /// See [`crate::backend::AnyPage::forget_engine`].
+  pub fn forget_engine(&self) {
+    self.engine_injected.store(false, Ordering::Relaxed);
+  }
+
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     if self.engine_injected.load(Ordering::Relaxed) {
       return Ok(());

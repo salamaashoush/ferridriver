@@ -141,6 +141,34 @@ fn get_bool<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<Opt
     .ok_or_else(|| type_error(obj.ctx(), format!("filter options: {key}: expected boolean")))
 }
 
+/// `ariaSnapshot`'s `TimeoutOptions & { mode?, depth?, boxes? }`, shared
+/// by the locator and page forms.
+pub(crate) fn aria_snapshot_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::AriaSnapshotOptions> {
+  #[derive(serde::Deserialize, Default)]
+  #[serde(rename_all = "camelCase", default)]
+  struct JsAria {
+    mode: Option<String>,
+    depth: Option<i32>,
+    boxes: Option<bool>,
+    timeout: Option<u64>,
+  }
+  match options.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let p: JsAria = crate::bindings::convert::serde_from_js(ctx, v)?;
+      Ok(ferridriver::options::AriaSnapshotOptions {
+        mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(p.mode.as_deref())),
+        depth: p.depth,
+        boxes: p.boxes,
+        timeout: p.timeout,
+      })
+    },
+    _ => Ok(ferridriver::options::AriaSnapshotOptions::default()),
+  }
+}
+
 /// `selectorOrLocator, options?` as `Locator.locator` and
 /// `FrameLocator.locator` take them: a real `Locator` (so the core can
 /// check it belongs to the same page), or a selector string or
@@ -1079,27 +1107,30 @@ impl LocatorJs {
   ) -> rquickjs::Result<String> {
     call_site
       .scope(async move {
-        let core_opts = match options.0 {
-          Some(v) if !v.is_undefined() && !v.is_null() => {
-            #[derive(serde::Deserialize, Default)]
-            #[serde(rename_all = "camelCase", default)]
-            struct JsAria {
-              mode: Option<String>,
-              depth: Option<i32>,
-              boxes: Option<bool>,
-              timeout: Option<u64>,
-            }
-            let p: JsAria = crate::bindings::convert::serde_from_js(&ctx, v)?;
-            ferridriver::options::AriaSnapshotOptions {
-              mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(p.mode.as_deref())),
-              depth: p.depth,
-              boxes: p.boxes,
-              timeout: p.timeout,
-            }
-          },
-          _ => ferridriver::options::AriaSnapshotOptions::default(),
-        };
+        let core_opts = aria_snapshot_options(&ctx, options)?;
         self.inner.aria_snapshot().options(core_opts).await.into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// Playwright: `locator.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
+  #[qjs(rename = "ariaSnapshotJSON")]
+  pub async fn aria_snapshot_json<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let core_opts = aria_snapshot_options(&ctx, options)?;
+        let json = self
+          .inner
+          .aria_snapshot_json()
+          .options(core_opts)
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::json_to_js(&ctx, &serde_json::Value::Array(json))
       })
       .await
   }

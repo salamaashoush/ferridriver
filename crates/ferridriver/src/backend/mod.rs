@@ -1257,6 +1257,18 @@ impl AnyPage {
     page_dispatch!(self, ensure_engine_injected())
   }
 
+  /// The engine a frame was given is gone or belongs to another realm, so
+  /// the next [`Self::ensure_engine_injected`] has to inject it again.
+  /// CDP installs it with a per-document init script and `WebDriver` runs
+  /// the lazy injection on every call, so neither keeps state to forget.
+  pub fn forget_engine(&self, frame_id: Option<&str>) {
+    match self {
+      Self::Bidi(page) => page.forget_engine(frame_id),
+      Self::WebKit(page) => page.forget_engine(),
+      Self::CdpPipe(_) | Self::CdpWs(_) | Self::WebDriver(_) => {},
+    }
+  }
+
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     page_dispatch!(self, evaluate(expression))
   }

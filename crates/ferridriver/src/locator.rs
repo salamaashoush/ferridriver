@@ -1381,6 +1381,30 @@ impl Locator {
   }
 
   pub(crate) async fn aria_snapshot_impl(&self, options: crate::options::AriaSnapshotOptions) -> Result<String> {
+    let (root_frame, _) = self.resolved().await?;
+    let json = self.aria_snapshot_json_impl(options).await?;
+    render_aria_snapshot(&root_frame, &json).await
+  }
+
+  /// Playwright: `locator.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`
+  /// — the tree [`Self::aria_snapshot`] renders, with the trees of the
+  /// iframes it gave refs to merged under their `iframe` nodes.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::aria_snapshot`].
+  #[track_caller]
+  pub fn aria_snapshot_json(
+    &self,
+  ) -> crate::action::Action<'static, crate::options::AriaSnapshotOptions, Vec<serde_json::Value>> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { locator.aria_snapshot_json_impl(opts).await }))
+  }
+
+  pub(crate) async fn aria_snapshot_json_impl(
+    &self,
+    options: crate::options::AriaSnapshotOptions,
+  ) -> Result<Vec<serde_json::Value>> {
     // The frame the element resolves in (frameLocator enter-frame hops
     // resolved here) — root for the recursive child-iframe descent.
     let (root_frame, _sel) = self.resolved().await?;
@@ -1396,8 +1420,16 @@ impl Locator {
         .unwrap_or_default();
       let raw = parse_aria_raw(&raw_s)?;
       let seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-      let lines = aria_stitch_frame(root_frame.clone(), raw, mode.to_string(), depth, options.boxes, "", seq).await?;
-      Ok::<String, crate::error::FerriError>(lines.join("\n"))
+      aria_merge_frame(
+        root_frame.clone(),
+        raw,
+        mode.to_string(),
+        depth,
+        options.boxes,
+        String::new(),
+        seq,
+      )
+      .await
     })
   }
 
@@ -3222,19 +3254,18 @@ fn json_quote(s: &str) -> String {
 
 // ── ariaSnapshot cross-iframe stitching ─────────────────────────────────────
 //
-// Mirrors Playwright's server `ariaSnapshotForFrame` /
-// `ariaSnapshotFrameRef`
-// (`/tmp/playwright/packages/playwright-core/src/server/page.ts:1103`).
-// The injected `ariaSnapshotFrame` renders one frame and reports
-// the `<iframe>` nodes it gave refs to (`iframeRefs` / `iframeDepths`);
-// the host resolves each into its child browsing context and splices
-// the child render beneath the parent's `- iframe [ref=...]` line.
+// Mirrors Playwright's server `ariaSnapshotJSONForFrame`
+// (`packages/playwright-core/src/server/page.ts`). The injected
+// `ariaSnapshotFrame` builds one frame's tree and reports the `<iframe>`
+// nodes it gave refs to (`iframeRefs` / `iframeDepths`); the host resolves
+// each into its child browsing context and sets the child's tree as the
+// `iframe` node's children.
 
 /// Decoded result of `window.__fd.ariaSnapshotFrame`.
 #[derive(serde::Deserialize, Default)]
 struct AriaRaw {
   #[serde(default)]
-  full: String,
+  json: Vec<serde_json::Value>,
   /// May contain `null` entries — `mode: 'default'` assigns no refs, so
   /// the renderer pushes `undefined` for un-reffed iframes (filtered out
   /// exactly like Playwright's `ref in iframeDepths` check).
@@ -3248,7 +3279,7 @@ struct AriaRaw {
 /// prefix is NOT one of them: the vendored injected derives it from the
 /// per-frame `frameSeq` it was constructed with, and ferridriver injects
 /// one script per page, so the host prefixes a child frame's refs while
-/// stitching instead ([`aria_stitch_frame`]).
+/// merging instead ([`aria_merge_frame`]).
 fn aria_opts_json(mode: &str, depth: Option<i32>, boxes: Option<bool>) -> String {
   let mut m = serde_json::Map::new();
   m.insert("mode".into(), serde_json::Value::String(mode.to_string()));
@@ -3268,29 +3299,21 @@ fn parse_aria_raw(s: &str) -> Result<AriaRaw> {
   serde_json::from_str(s).map_err(|e| crate::error::FerriError::evaluation(format!("ariaSnapshot parse: {e}")))
 }
 
-/// Compiled-once matcher for the `- iframe [ref=...]` lines
-/// `aria_stitch_frame` splices child snapshots under. `None` is
-/// unreachable for the literal pattern but preserves the error path
-/// without an unwrap.
-static IFRAME_REF_RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
-
-/// Render `frame` (already snapshotted into `raw`), then recurse into
-/// every rendered child iframe and splice the child lines under the
-/// matching `- iframe [ref=...]` line. Boxed so the
-/// frame -> child-frame recursion has a finite future size.
-fn aria_stitch_frame(
+/// `frame`'s tree (already built into `raw`) with every rendered child
+/// iframe's tree merged under its `iframe` node, and this frame's refs
+/// given `ref_prefix`. Boxed so the frame -> child-frame recursion has a
+/// finite future size.
+fn aria_merge_frame(
   frame: crate::frame::Frame,
   raw: AriaRaw,
   mode: String,
   depth: Option<i32>,
   boxes: Option<bool>,
-  ref_prefix: &str,
+  ref_prefix: String,
   seq: Arc<std::sync::atomic::AtomicU32>,
-) -> futures::future::BoxFuture<'static, Result<Vec<String>>> {
-  let ref_prefix = ref_prefix.to_string();
+) -> futures::future::BoxFuture<'static, Result<Vec<serde_json::Value>>> {
   Box::pin(async move {
-    // Playwright: `iframeRefs.filter(ref => ref in iframeDepths)` —
-    // preserves order so `indexOf(ref)` aligns with `childSnapshots`.
+    // Playwright: `iframeRefs.filter(ref => ref in iframeDepths)`.
     let rendered: Vec<String> = raw
       .iframe_refs
       .iter()
@@ -3298,58 +3321,72 @@ fn aria_stitch_frame(
       .filter(|r| raw.iframe_depths.contains_key(*r))
       .cloned()
       .collect();
-
-    let mut child_snaps: Vec<Vec<String>> = Vec::with_capacity(rendered.len());
+    let mut children = std::collections::HashMap::with_capacity(rendered.len());
     for refv in &rendered {
-      child_snaps.push(aria_child_snapshot(&frame, refv, &mode, depth, boxes, &raw.iframe_depths, &seq).await?);
+      let child = aria_child_snapshot(&frame, refv, &mode, depth, boxes, &raw.iframe_depths, &seq).await?;
+      children.insert(refv.clone(), child);
     }
-
-    let re = IFRAME_REF_RE
-      .get_or_init(|| regex::Regex::new(r"^(\s*)- iframe (?:\[active\] )?\[ref=([^\]]*)\]").ok())
-      .as_ref()
-      .ok_or_else(|| crate::error::FerriError::evaluation("ariaSnapshot iframe regex failed to compile".to_string()))?;
-
-    let mut out: Vec<String> = Vec::new();
-    for line in raw.full.split('\n') {
-      let Some(caps) = re.captures(line) else {
-        out.push(prefix_aria_refs(line, &ref_prefix));
-        continue;
-      };
-      let leading = caps.get(1).map_or("", |m| m.as_str());
-      let refv = caps.get(2).map_or("", |m| m.as_str());
-      let child = rendered.iter().position(|x| x == refv).map(|i| &child_snaps[i]);
-      let has = child.is_some_and(|c| !c.is_empty());
-      // Splicing matches on the frame's OWN ref; the displayed ref is
-      // the prefixed one. Child lines arrive already prefixed.
-      let line = prefix_aria_refs(line, &ref_prefix);
-      out.push(if has { format!("{line}:") } else { line });
-      if let Some(child_lines) = child {
-        for l in child_lines {
-          out.push(format!("{leading}  {l}"));
-        }
-      }
+    let mut json = raw.json;
+    for node in &mut json {
+      merge_iframe_children(node, &mut children, &ref_prefix);
     }
-    Ok(out)
+    Ok(json)
   })
 }
 
-/// Namespace one frame's rendered refs. Playwright mints `f<seq>e<n>`
-/// inside the renderer because its injected script is built per frame;
-/// ferridriver's is built per page, so the prefix is applied to the
-/// rendered line here. A `- text:` line is left alone — only a node key
-/// carries `[ref=...]`.
-fn prefix_aria_refs(line: &str, prefix: &str) -> String {
-  if prefix.is_empty() || line.trim_start().starts_with("- text:") {
-    return line.to_string();
+/// Playwright's `mergeIframeChildren`, which also namespaces this frame's
+/// refs: ferridriver's injected script is built per page rather than per
+/// frame, so the `f<n>` prefix Playwright mints inside the renderer is
+/// applied here. A child tree arrives with its own prefix already.
+fn merge_iframe_children(
+  node: &mut serde_json::Value,
+  children: &mut std::collections::HashMap<String, Vec<serde_json::Value>>,
+  ref_prefix: &str,
+) {
+  let Some(object) = node.as_object_mut() else {
+    return;
+  };
+  let own_ref = object.get("ref").and_then(serde_json::Value::as_str).map(str::to_owned);
+  if let Some(own_ref) = &own_ref
+    && !ref_prefix.is_empty()
+  {
+    object.insert(
+      "ref".into(),
+      serde_json::Value::String(format!("{ref_prefix}{own_ref}")),
+    );
   }
-  line.replace("[ref=", &format!("[ref={prefix}"))
+  if object.get("role").and_then(serde_json::Value::as_str) == Some("iframe")
+    && let Some(own_ref) = own_ref
+  {
+    if let Some(child) = children.remove(&own_ref).filter(|c| !c.is_empty()) {
+      object.insert("children".into(), serde_json::Value::Array(child));
+    }
+    return;
+  }
+  if let Some(serde_json::Value::Array(kids)) = object.get_mut("children") {
+    for kid in kids {
+      merge_iframe_children(kid, children, ref_prefix);
+    }
+  }
+}
+
+/// Render a merged tree as YAML, in `frame`, with the renderer the
+/// injected script ships (`renderAriaSnapshotAsYaml`).
+async fn render_aria_snapshot(frame: &crate::frame::Frame, json: &[serde_json::Value]) -> Result<String> {
+  let literal =
+    serde_json::to_string(&serde_json::to_string(json).map_err(|e| crate::error::FerriError::Json(e.to_string()))?)
+      .map_err(|e| crate::error::FerriError::Json(e.to_string()))?;
+  let js = format!("() => window.__fd.renderAriaSnapshot(JSON.parse({literal}))");
+  let rendered = frame
+    .evaluate(&js, crate::protocol::SerializedArgument::default(), Some(true))
+    .await?;
+  Ok(rendered.as_str().map(str::to_owned).unwrap_or_default())
 }
 
 /// Resolve one child iframe (`refv`) into its content frame, snapshot
-/// its `<body>`, and recurse. Mirrors `ariaSnapshotFrameRef`. A missing
-/// element / unresolvable content frame yields an empty render (the
-/// parent then keeps the bare `- iframe [ref=...]` line — Playwright
-/// parity).
+/// its `<body>`, and recurse. A missing element or unresolvable content
+/// frame yields an empty tree, and the parent keeps its bare `iframe`
+/// node, as Playwright's does.
 async fn aria_child_snapshot(
   frame: &crate::frame::Frame,
   refv: &str,
@@ -3358,7 +3395,7 @@ async fn aria_child_snapshot(
   boxes: Option<bool>,
   depths: &std::collections::HashMap<String, i32>,
   seq: &Arc<std::sync::atomic::AtomicU32>,
-) -> Result<Vec<String>> {
+) -> Result<Vec<serde_json::Value>> {
   // Tag the iframe in JS, then re-resolve it through the normal
   // selector + content-frame path (the same one `frameLocator` uses).
   // Passing a utility-eval JSHandle straight into `content_frame()`
@@ -3423,13 +3460,13 @@ async fn aria_child_snapshot(
     return Ok(Vec::new());
   }
   let child_raw = parse_aria_raw(&raw_s)?;
-  aria_stitch_frame(
+  aria_merge_frame(
     child_frame,
     child_raw,
     mode.to_string(),
     child_depth,
     boxes,
-    &prefix,
+    prefix,
     Arc::clone(seq),
   )
   .await

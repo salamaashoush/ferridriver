@@ -508,6 +508,25 @@ impl Locator {
       .map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `locator.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
+  #[napi(
+    js_name = "ariaSnapshotJSON",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
+    ts_return_type = "Promise<import('./types').AriaSnapshotJSON>"
+  )]
+  pub async fn aria_snapshot_json(
+    &self,
+    options: Option<crate::types::AriaSnapshotOptions>,
+  ) -> Result<Vec<serde_json::Value>> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self
+      .inner
+      .aria_snapshot_json()
+      .options(opts)
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
   #[napi]
   pub async fn text_content(&self) -> Result<Option<String>> {
     self.inner.text_content().await.map_err(crate::error::to_napi)

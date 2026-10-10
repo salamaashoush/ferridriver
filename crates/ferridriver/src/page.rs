@@ -107,6 +107,10 @@ pub struct Page {
   opener: std::sync::OnceLock<std::sync::Weak<Page>>,
 }
 
+fn aria_snapshot_params(opts: &crate::options::AriaSnapshotOptions) -> serde_json::Value {
+  serde_json::json!({ "mode": opts.mode.map(crate::options::AriaSnapshotMode::as_str), "depth": opts.depth, "boxes": opts.boxes })
+}
+
 impl Page {
   #[must_use]
   pub fn webmcp(self: &Arc<Self>) -> crate::web_mcp::WebMcp {
@@ -2392,28 +2396,61 @@ impl Page {
     Box::pin(snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker)).await
   }
 
-  /// Playwright `page.ariaSnapshot(options?): Promise<string>` — the
-  /// full accessibility-tree text (the `full` field of the structured
-  /// snapshot).
+  /// Playwright: `page.ariaSnapshot(options?: TimeoutOptions & { mode?: 'ai' |
+  /// 'default', depth?: number, boxes?: boolean }): Promise<string>` — the
+  /// main frame's `body` (or `frameset`) as YAML, with the iframes an AI
+  /// snapshot gives refs to merged in.
   ///
   /// # Errors
   ///
-  /// Returns an error if the accessibility snapshot cannot be built.
+  /// Returns an error if the document has no body within the timeout or
+  /// the snapshot cannot be built.
   #[track_caller]
-  pub fn aria_snapshot(&self) -> crate::action::Action<'_, snapshot::SnapshotOptions, String> {
+  pub fn aria_snapshot(self: &Arc<Self>) -> crate::action::Action<'_, crate::options::AriaSnapshotOptions, String> {
     let page = self;
-    crate::action::Action::new(move |opts| {
+    crate::action::Action::new(move |opts: crate::options::AriaSnapshotOptions| {
       Box::pin(async move {
+        let params = aria_snapshot_params(&opts);
         page
-          .traced("ariaSnapshot", serde_json::json!({}), page.aria_snapshot_impl(opts))
+          .traced(
+            "ariaSnapshot",
+            params,
+            page.aria_snapshot_root().aria_snapshot_impl(opts),
+          )
           .await
       })
     })
   }
 
-  /// Implementation of [`Self::aria_snapshot`].
-  pub(crate) async fn aria_snapshot_impl(&self, opts: snapshot::SnapshotOptions) -> Result<String> {
-    Ok(Box::pin(self.snapshot_for_ai_impl(opts)).await?.full)
+  /// Playwright: `page.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`,
+  /// the tree [`Self::aria_snapshot`] renders.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::aria_snapshot`].
+  #[track_caller]
+  pub fn aria_snapshot_json(
+    self: &Arc<Self>,
+  ) -> crate::action::Action<'_, crate::options::AriaSnapshotOptions, Vec<serde_json::Value>> {
+    let page = self;
+    crate::action::Action::new(move |opts: crate::options::AriaSnapshotOptions| {
+      Box::pin(async move {
+        let params = aria_snapshot_params(&opts);
+        page
+          .traced(
+            "ariaSnapshotJSON",
+            params,
+            page.aria_snapshot_root().aria_snapshot_json_impl(opts),
+          )
+          .await
+      })
+    })
+  }
+
+  /// Playwright's `body,frameset`, non-strict: a frameset document has
+  /// several.
+  fn aria_snapshot_root(self: &Arc<Self>) -> Locator {
+    self.locator("body,frameset").first()
   }
 
   // ── Viewport ────────────────────────────────────────────────────────────

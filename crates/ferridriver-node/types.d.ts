@@ -29,3 +29,28 @@ export interface DeviceDescriptor {
  * `browser.newContext({ ...devices['iPhone 15'] })`.
  */
 export declare const devices: Record<string, DeviceDescriptor>;
+
+/** One node of `ariaSnapshotJSON()`: Playwright's `AriaNodeJSON`. */
+export interface AriaNodeJSON {
+  role: string;
+  name?: string;
+  checked?: true | 'mixed';
+  disabled?: true;
+  expanded?: true;
+  active?: true;
+  invalid?: true | 'grammar' | 'spelling';
+  level?: number;
+  pressed?: true | 'mixed';
+  selected?: true;
+  ariaHidden?: true;
+  ref?: string;
+  cursor?: 'pointer';
+  box?: { x: number; y: number; width: number; height: number };
+  url?: string;
+  placeholder?: string;
+  text?: string;
+  children?: (AriaNodeJSON | string)[];
+}
+
+/** `page.ariaSnapshotJSON()` / `locator.ariaSnapshotJSON()`. */
+export type AriaSnapshotJSON = AriaNodeJSON[];

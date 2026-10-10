@@ -3116,23 +3116,30 @@ impl PageJs {
   ) -> rquickjs::Result<String> {
     call_site
       .scope(async move {
-        let core_opts = match options.0 {
-          Some(v) if !v.is_undefined() && !v.is_null() => {
-            #[derive(serde::Deserialize, Default)]
-            #[serde(rename_all = "camelCase", default)]
-            struct JsSnap {
-              depth: Option<i32>,
-              track: Option<String>,
-            }
-            let p: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
-            ferridriver::snapshot::SnapshotOptions {
-              depth: p.depth,
-              track: p.track,
-            }
-          },
-          _ => ferridriver::snapshot::SnapshotOptions::default(),
-        };
+        let core_opts = crate::bindings::locator::aria_snapshot_options(&ctx, options)?;
         self.inner.aria_snapshot().options(core_opts).await.into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// Playwright: `page.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
+  #[qjs(rename = "ariaSnapshotJSON")]
+  pub async fn aria_snapshot_json<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    call_site
+      .scope(async move {
+        let core_opts = crate::bindings::locator::aria_snapshot_options(&ctx, options)?;
+        let json = self
+          .inner
+          .aria_snapshot_json()
+          .options(core_opts)
+          .await
+          .into_js_with(&ctx)?;
+        crate::bindings::convert::json_to_js(&ctx, &serde_json::Value::Array(json))
       })
       .await
   }

@@ -606,7 +606,9 @@ declare global {
   interface Window { __fd: any; }
 }
 
-if (!window.__fd) {
+// A `window.__fd` from another realm (an injection that ran in the
+// outgoing document) is replaced: its promises can never settle.
+if (!(window.__fd instanceof Object)) {
   window.__fd = {
     // Playwright InjectedScript instance (for advanced/direct use)
     _injected: injected,
@@ -812,12 +814,10 @@ if (!window.__fd) {
     },
     ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
       injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
-    // One frame's render plus the `iframeRefs` / `iframeDepths` the Rust
-    // core needs to stitch child-iframe subtrees underneath it (mirrors
-    // server `ariaSnapshotForFrame`). Playwright merges the child JSON
-    // into the parent tree and renders once at the end; ferridriver
-    // renders per frame and splices the text, so the YAML comes back
-    // here rather than the JSON.
+    // One frame's tree plus the `iframeRefs` / `iframeDepths` the Rust
+    // core needs to merge child-iframe trees into it (server
+    // `ariaSnapshotJSONForFrame`). The merged tree renders once, through
+    // `renderAriaSnapshot`, as Playwright renders it.
     ariaSnapshotFrame: (
       node: Node,
       options?: { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
@@ -827,8 +827,9 @@ if (!window.__fd) {
         depth: options?.depth,
         boxes: options?.boxes,
       });
-      return { full: renderAriaSnapshotAsYaml(json), iframeRefs, iframeDepths };
+      return { json, iframeRefs, iframeDepths };
     },
+    renderAriaSnapshot: (json: any) => renderAriaSnapshotAsYaml(json),
     // Tag the iframe/frame element that the renderer assigned `ref` to
     // with `attr=ref`, so the host can re-resolve it through the normal
     // selector + content-frame path (BiDi-safe — passing a utility-eval

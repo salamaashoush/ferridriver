@@ -908,13 +908,7 @@ async fn take_page_snapshot(context: Option<Arc<ferridriver::ContextRef>>) -> Op
     timeout: Some(5000),
     ..Default::default()
   };
-  match page
-    .locator("body,frameset")
-    .first()
-    .aria_snapshot()
-    .options(options)
-    .await
-  {
+  match page.aria_snapshot().options(options).await {
     Ok(snapshot) => Some(snapshot),
     Err(e) => {
       tracing::debug!(target: "ferridriver::worker", "failed to capture aria snapshot: {e}");
