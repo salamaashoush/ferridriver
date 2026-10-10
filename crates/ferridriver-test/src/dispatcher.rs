@@ -26,6 +26,18 @@ pub struct SerialBatch {
   pub hooks: Arc<Hooks>,
 }
 
+/// One more attempt of a test that failed.
+pub struct Retry<'a> {
+  pub test_fn: &'a TestFn,
+  pub id: &'a TestId,
+  pub fixture_requests: Vec<String>,
+  pub attempt: u32,
+  pub suite_key: String,
+  pub hooks: Arc<Hooks>,
+  pub metadata: Option<serde_json::Value>,
+  pub locks: Vec<crate::model::TestAnnotation>,
+}
+
 /// Work item pulled by a worker.
 pub enum WorkItem {
   /// Single parallel test.
@@ -35,6 +47,20 @@ pub enum WorkItem {
 }
 
 impl WorkItem {
+  /// Every lock the item's tests declared: the whole item holds them, as
+  /// a serial suite runs on one worker from first test to last.
+  pub(crate) fn lock_names(&self) -> Vec<String> {
+    let assignments = match self {
+      Self::Single(assignment) => std::slice::from_ref(assignment),
+      Self::Serial(batch) => batch.assignments.as_slice(),
+    };
+    assignments
+      .iter()
+      .flat_map(|assignment| crate::locks::names(&assignment.test.annotations))
+      .map(str::to_string)
+      .collect()
+  }
+
   pub(crate) fn repeat_each_index(&self) -> u32 {
     match self {
       Self::Single(assignment) => assignment.test.id.repeat_each_index,
@@ -79,31 +105,24 @@ impl Dispatcher {
   }
 
   /// Re-enqueue a test for retry (always as single item).
-  pub fn retry_shared(
-    &self,
-    test_fn: &TestFn,
-    id: &TestId,
-    fixture_requests: Vec<String>,
-    attempt: u32,
-    suite_key: String,
-    hooks: Arc<Hooks>,
-    metadata: Option<serde_json::Value>,
-  ) {
+  pub fn retry_shared(&self, retry: Retry<'_>) {
     let assignment = TestAssignment {
       test: TestCase {
-        metadata,
-        id: id.clone(),
-        test_fn: Arc::clone(test_fn),
-        fixture_requests,
-        annotations: Vec::new(),
+        metadata: retry.metadata,
+        id: retry.id.clone(),
+        test_fn: Arc::clone(retry.test_fn),
+        fixture_requests: retry.fixture_requests,
+        // A retry still holds the test's locks; nothing else on the list
+        // schedules it.
+        annotations: retry.locks,
         timeout: None,
         retries: None,
         expected_status: crate::model::ExpectedStatus::Pass,
         use_options: None,
       },
-      attempt,
-      suite_key,
-      hooks,
+      attempt: retry.attempt,
+      suite_key: retry.suite_key,
+      hooks: retry.hooks,
       suite_mode: SuiteMode::Parallel,
     };
     let _ = self.tx.try_send(WorkItem::Single(assignment));

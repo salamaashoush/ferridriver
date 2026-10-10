@@ -203,7 +203,7 @@ fn annotation_values(annotations: &[TestAnnotation]) -> Vec<Value> {
       TestAnnotation::Fail { reason, .. } => Some(json!({ "type": "fail", "description": reason })),
       TestAnnotation::Slow { reason, .. } => Some(json!({ "type": "slow", "description": reason })),
       TestAnnotation::Info { type_name, description } => Some(json!({ "type": type_name, "description": description })),
-      TestAnnotation::Tag(_) | TestAnnotation::Only => None,
+      TestAnnotation::Tag(_) | TestAnnotation::Only | TestAnnotation::Lock(_) => None,
     })
     .collect()
 }

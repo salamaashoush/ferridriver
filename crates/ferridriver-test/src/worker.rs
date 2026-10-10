@@ -1142,6 +1142,8 @@ impl Worker {
         break;
       }
       repetition = Some(index);
+      let locks = item.lock_names();
+      let _held = crate::locks::acquire(locks.iter().map(String::as_str)).await;
       match item {
         WorkItem::Single(assignment) => {
           let result = ferridriver_expect::with_expect_config(

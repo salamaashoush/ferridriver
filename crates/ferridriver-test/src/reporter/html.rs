@@ -365,7 +365,7 @@ fn annotations_of(annotations: &[TestAnnotation]) -> Vec<HtmlAnnotation> {
             description: Some(description.clone()),
           });
         },
-        TestAnnotation::Tag(_) | TestAnnotation::Only => return None,
+        TestAnnotation::Tag(_) | TestAnnotation::Only | TestAnnotation::Lock(_) => return None,
       };
       Some(HtmlAnnotation {
         kind: kind.to_string(),

@@ -344,35 +344,39 @@ fn stdio(text: &str) -> Vec<JsonStdio> {
 fn annotations(annotations: &[TestAnnotation]) -> Vec<JsonAnnotation> {
   annotations
     .iter()
-    .map(|a| match a {
-      TestAnnotation::Skip { reason, .. } => JsonAnnotation {
-        kind: "skip".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Slow { reason, .. } => JsonAnnotation {
-        kind: "slow".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Fixme { reason, .. } => JsonAnnotation {
-        kind: "fixme".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Fail { reason, .. } => JsonAnnotation {
-        kind: "fail".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Only => JsonAnnotation {
-        kind: "only".into(),
-        description: None,
-      },
-      TestAnnotation::Tag(tag) => JsonAnnotation {
-        kind: "tag".into(),
-        description: Some(tag.clone()),
-      },
-      TestAnnotation::Info { type_name, description } => JsonAnnotation {
-        kind: type_name.clone(),
-        description: Some(description.clone()),
-      },
+    // A lock schedules the test; Playwright does not report it.
+    .filter_map(|a| {
+      Some(match a {
+        TestAnnotation::Lock(_) => return None,
+        TestAnnotation::Skip { reason, .. } => JsonAnnotation {
+          kind: "skip".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Slow { reason, .. } => JsonAnnotation {
+          kind: "slow".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Fixme { reason, .. } => JsonAnnotation {
+          kind: "fixme".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Fail { reason, .. } => JsonAnnotation {
+          kind: "fail".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Only => JsonAnnotation {
+          kind: "only".into(),
+          description: None,
+        },
+        TestAnnotation::Tag(tag) => JsonAnnotation {
+          kind: "tag".into(),
+          description: Some(tag.clone()),
+        },
+        TestAnnotation::Info { type_name, description } => JsonAnnotation {
+          kind: type_name.clone(),
+          description: Some(description.clone()),
+        },
+      })
     })
     .collect()
 }

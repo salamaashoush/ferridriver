@@ -71,6 +71,7 @@ fn lower_annotation(a: &CollectedAnnotation) -> Option<TestAnnotation> {
     }),
     "only" => Some(TestAnnotation::Only),
     "tag" => a.value.clone().map(TestAnnotation::Tag),
+    "lock" => a.value.clone().map(TestAnnotation::Lock),
     "info" => Some(TestAnnotation::Info {
       type_name: a.value.clone().unwrap_or_default(),
       description: a.description.clone().unwrap_or_default(),

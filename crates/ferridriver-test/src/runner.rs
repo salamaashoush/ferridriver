@@ -1380,6 +1380,20 @@ impl TestRunner {
     // ── Dispatcher — enqueue suites with hooks + mode context ──
     let dispatcher = Arc::new(Dispatcher::new());
     let mut units: Vec<crate::dispatcher::WorkItem> = Vec::new();
+    let mut locks_by_test: FxHashMap<crate::model::TestId, Vec<crate::model::TestAnnotation>> = FxHashMap::default();
+    for suite in &plan.suites {
+      for test in &suite.tests {
+        let locks: Vec<_> = test
+          .annotations
+          .iter()
+          .filter(|a| matches!(a, crate::model::TestAnnotation::Lock(_)))
+          .cloned()
+          .collect();
+        if !locks.is_empty() {
+          locks_by_test.insert(test.id.clone(), locks);
+        }
+      }
+    }
     for suite in &plan.suites {
       let repeat_each_index = suite.tests.first().map_or(0, |test| test.id.repeat_each_index);
       let suite_key = format!("{}::{}::repeat:{repeat_each_index}", suite.file, suite.name);
@@ -1571,15 +1585,16 @@ impl TestRunner {
     let isolated = self.config.retry_strategy == crate::config::RetryStrategy::Isolated;
     let mut waiting_retries: std::collections::VecDeque<WorkerTestResult> = std::collections::VecDeque::new();
     let retry = |result: &WorkerTestResult| {
-      dispatcher.retry_shared(
-        &result.test_fn,
-        &result.test_id,
-        result.fixture_requests.clone(),
-        result.outcome.attempt + 1,
-        result.suite_key.clone(),
-        Arc::clone(&result.hooks),
-        result.outcome.case_metadata.clone(),
-      );
+      dispatcher.retry_shared(crate::dispatcher::Retry {
+        test_fn: &result.test_fn,
+        id: &result.test_id,
+        fixture_requests: result.fixture_requests.clone(),
+        attempt: result.outcome.attempt + 1,
+        suite_key: result.suite_key.clone(),
+        hooks: Arc::clone(&result.hooks),
+        metadata: result.outcome.case_metadata.clone(),
+        locks: locks_by_test.get(&result.test_id).cloned().unwrap_or_default(),
+      });
     };
 
     let mut stop_requested = false;

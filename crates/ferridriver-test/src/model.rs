@@ -1452,6 +1452,9 @@ pub enum TestAnnotation {
   },
   Only,
   Tag(String),
+  /// A named lock: tests sharing one never run at the same time.
+  /// Playwright's `test(title, { lock }, body)`.
+  Lock(String),
   /// Structured metadata: type + description (e.g., issue/JIRA-1234, severity/critical).
   Info {
     type_name: String,

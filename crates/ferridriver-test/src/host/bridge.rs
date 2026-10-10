@@ -560,7 +560,7 @@ pub fn static_annotation_pairs(annotations: &[TestAnnotation]) -> Vec<(String, O
       TestAnnotation::Info { type_name, description } => {
         Some((type_name.clone(), Some(description.clone()).filter(|d| !d.is_empty())))
       },
-      TestAnnotation::Tag(_) | TestAnnotation::Only => None,
+      TestAnnotation::Tag(_) | TestAnnotation::Only | TestAnnotation::Lock(_) => None,
       TestAnnotation::Skip { reason, .. } => Some(("skip".to_string(), reason.clone())),
       TestAnnotation::Fixme { reason, .. } => Some(("fixme".to_string(), reason.clone())),
       TestAnnotation::Fail { reason, .. } => Some(("fail".to_string(), reason.clone())),

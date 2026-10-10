@@ -410,6 +410,7 @@ fn parse_details<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Result<ParsedDetails, r
       });
     }
   }
+  out.annotations.extend(lock_annotations(ctx, o)?);
   if let Ok(t) = o.get::<_, f64>("timeout") {
     out.timeout_ms = Some(t.max(0.0) as u64);
   }
@@ -417,6 +418,33 @@ fn parse_details<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Result<ParsedDetails, r
     out.retries = Some(r.max(0.0) as u32);
   }
   Ok(out)
+}
+
+/// The `lock: string | string[]` of a details or `describe.configure`
+/// bag, one annotation per name.
+fn lock_annotations<'js>(ctx: &Ctx<'js>, bag: &Object<'js>) -> Result<Vec<CollectedAnnotation>, rquickjs::Error> {
+  let Ok(lock) = bag.get::<_, Value<'_>>("lock") else {
+    return Ok(Vec::new());
+  };
+  if lock.is_undefined() || lock.is_null() {
+    return Ok(Vec::new());
+  }
+  let names: Vec<String> = if let Some(name) = lock.as_string() {
+    vec![name.to_string()?]
+  } else {
+    serde_from_js(ctx, lock)
+      .map_err(|e| throw_script_error(ctx, &ScriptError::internal(format!("test details `lock`: {e}"))))?
+  };
+  Ok(
+    names
+      .into_iter()
+      .map(|name| CollectedAnnotation {
+        kind: "lock".to_string(),
+        value: Some(name),
+        description: None,
+      })
+      .collect(),
+  )
 }
 
 struct Registration<'js> {
@@ -1260,6 +1288,15 @@ fn describe_call<'js>(
       &ScriptError::internal(format!("describe `{name}` has no function body")),
     )
   })?;
+  // Playwright: `describe(title, details, callback)`; the group's tags,
+  // annotations and locks reach every test in it.
+  let mut annotations = annotations;
+  if let Some(details) = args
+    .get(1)
+    .filter(|v| v.as_function().is_none() && v.as_object().is_some())
+  {
+    annotations.extend(parse_details(ctx, details)?.annotations);
+  }
   register_suite(ctx, &name, mode, annotations)?;
   let result = body.call::<_, ()>(());
   pop_suite(ctx);
@@ -1359,10 +1396,12 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
       };
       let retries = opts.get::<_, f64>("retries").ok().map(|r| r.max(0.0) as u32);
       let timeout_ms = opts.get::<_, f64>("timeout").ok().map(|t| t.max(0.0) as u64);
+      let locks = lock_annotations(&ctx, &opts)?;
       let (line, col) = capture_location(&ctx);
-      with_test_registry(&ctx, |r| match r.describe_stack.last().copied() {
-        Some(idx) => {
+      with_test_registry(&ctx, |r| {
+        if let Some(idx) = r.describe_stack.last().copied() {
           let s = &mut r.suites[idx];
+          s.annotations.extend(locks);
           if mode.is_some() {
             s.mode = mode;
           }
@@ -1372,14 +1411,20 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
           if timeout_ms.is_some() {
             s.timeout_ms = timeout_ms;
           }
-        },
-        None => r.file_configure.push(FileConfigureReg {
-          mode,
-          retries,
-          timeout_ms,
-          line,
-          col,
-        }),
+        } else {
+          r.file_configure.push(FileConfigureReg {
+            mode,
+            retries,
+            timeout_ms,
+            line,
+            col,
+          });
+          r.file_annotations.extend(
+            locks
+              .into_iter()
+              .map(|annotation| FileAnnotationReg { annotation, line, col }),
+          );
+        }
       })
       .map_err(|e| throw_script_error(&ctx, &e))
     },

@@ -640,35 +640,39 @@ fn stdio(text: &str) -> Vec<String> {
 pub fn annotations(annotations: &[TestAnnotation]) -> Vec<Annotation> {
   annotations
     .iter()
-    .map(|a| match a {
-      TestAnnotation::Skip { reason, .. } => Annotation {
-        kind: "skip".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Slow { reason, .. } => Annotation {
-        kind: "slow".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Fixme { reason, .. } => Annotation {
-        kind: "fixme".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Fail { reason, .. } => Annotation {
-        kind: "fail".into(),
-        description: reason.clone(),
-      },
-      TestAnnotation::Only => Annotation {
-        kind: "only".into(),
-        description: None,
-      },
-      TestAnnotation::Tag(tag) => Annotation {
-        kind: "tag".into(),
-        description: Some(tag.clone()),
-      },
-      TestAnnotation::Info { type_name, description } => Annotation {
-        kind: type_name.clone(),
-        description: Some(description.clone()),
-      },
+    // A lock schedules the test; Playwright does not report it.
+    .filter_map(|a| {
+      Some(match a {
+        TestAnnotation::Lock(_) => return None,
+        TestAnnotation::Skip { reason, .. } => Annotation {
+          kind: "skip".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Slow { reason, .. } => Annotation {
+          kind: "slow".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Fixme { reason, .. } => Annotation {
+          kind: "fixme".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Fail { reason, .. } => Annotation {
+          kind: "fail".into(),
+          description: reason.clone(),
+        },
+        TestAnnotation::Only => Annotation {
+          kind: "only".into(),
+          description: None,
+        },
+        TestAnnotation::Tag(tag) => Annotation {
+          kind: "tag".into(),
+          description: Some(tag.clone()),
+        },
+        TestAnnotation::Info { type_name, description } => Annotation {
+          kind: type_name.clone(),
+          description: Some(description.clone()),
+        },
+      })
     })
     .collect()
 }

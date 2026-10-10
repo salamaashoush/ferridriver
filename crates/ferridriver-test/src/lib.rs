@@ -107,6 +107,7 @@ pub mod fixture_graph;
 pub mod git_info;
 pub mod host;
 pub mod interactive;
+pub mod locks;
 pub mod logging;
 pub mod model;
 pub mod reporter;

@@ -21,6 +21,8 @@ export interface TestDetails {
   annotation?: TestDetailsAnnotation | TestDetailsAnnotation[];
   timeout?: number;
   retries?: number;
+  /** Named locks: tests sharing one never run at the same time. */
+  lock?: string | string[];
 }
 
 export interface TestProject {
@@ -138,13 +140,19 @@ export type TestBody<TFixtures> = (fixtures: TFixtures, testInfoOrRow?: any) => 
 
 export interface DescribeFunction {
   (title: string, body: () => void): void;
+  (title: string, details: TestDetails, body: () => void): void;
   serial(title: string, body: () => void): void;
+  serial(title: string, details: TestDetails, body: () => void): void;
   parallel(title: string, body: () => void): void;
+  parallel(title: string, details: TestDetails, body: () => void): void;
   skip(title: string, body: () => void): void;
+  skip(title: string, details: TestDetails, body: () => void): void;
   fixme(title: string, body: () => void): void;
+  fixme(title: string, details: TestDetails, body: () => void): void;
   only(title: string, body: () => void): void;
+  only(title: string, details: TestDetails, body: () => void): void;
   each<Row>(rows: Row[]): (titleTemplate: string, body: (row: Row) => void) => void;
-  configure(options: { mode?: 'serial' | 'parallel' | 'default'; retries?: number; timeout?: number }): void;
+  configure(options: { mode?: 'serial' | 'parallel' | 'default'; retries?: number; timeout?: number; lock?: string | string[] }): void;
 }
 
 export type FixtureScope = 'test' | 'worker';

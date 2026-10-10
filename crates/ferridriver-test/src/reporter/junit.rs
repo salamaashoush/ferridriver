@@ -237,7 +237,9 @@ impl JUnitReporter {
   fn render_properties(&self, outcome: &TestOutcome) -> String {
     let mut rows = String::new();
     for annotation in &outcome.annotations {
-      let (kind, description) = annotation_pair(annotation);
+      let Some((kind, description)) = annotation_pair(annotation) else {
+        continue;
+      };
       if self.omit_tags && kind == "tag" {
         continue;
       }
@@ -444,9 +446,12 @@ fn matcher_name(message: &str) -> Option<String> {
   Some(format!("expect.{negated}{name}"))
 }
 
-fn annotation_pair(annotation: &crate::model::TestAnnotation) -> (String, String) {
+/// The property a test annotation becomes; a lock schedules the test and
+/// is not reported.
+fn annotation_pair(annotation: &crate::model::TestAnnotation) -> Option<(String, String)> {
   use crate::model::TestAnnotation as A;
-  match annotation {
+  Some(match annotation {
+    A::Lock(_) => return None,
     A::Skip { reason, .. } => ("skip".into(), reason.clone().unwrap_or_default()),
     A::Slow { reason, .. } => ("slow".into(), reason.clone().unwrap_or_default()),
     A::Fixme { reason, .. } => ("fixme".into(), reason.clone().unwrap_or_default()),
@@ -454,7 +459,7 @@ fn annotation_pair(annotation: &crate::model::TestAnnotation) -> (String, String
     A::Only => ("only".into(), String::new()),
     A::Tag(tag) => ("tag".into(), tag.clone()),
     A::Info { type_name, description } => (type_name.clone(), description.clone()),
-  }
+  })
 }
 
 /// Characters XML 1.0 discourages; some parsers reject the document
