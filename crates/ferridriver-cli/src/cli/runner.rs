@@ -64,6 +64,11 @@ pub struct RunnerArgs {
   #[arg(long, help_heading = "Reporting")]
   pub reporter: Vec<String>,
 
+  /// Reporter to add to the configured ones, repeatable; `--reporter`
+  /// replaces them instead.
+  #[arg(long, help_heading = "Reporting")]
+  pub add_reporter: Vec<String>,
+
   /// Watch mode: re-run on file changes, with an interactive terminal TUI
   /// where there is a TTY and plain re-runs where there is not.
   #[arg(long, help_heading = "Run")]

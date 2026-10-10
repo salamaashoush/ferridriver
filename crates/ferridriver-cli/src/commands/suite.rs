@@ -39,6 +39,7 @@ pub fn apply_shared(
   overrides.update_snapshots = runner.update_snapshots;
   overrides.ignore_snapshots = runner.ignore_snapshots;
   overrides.reporter.clone_from(&runner.reporter);
+  overrides.add_reporter.clone_from(&runner.add_reporter);
   overrides.watch = runner.watch;
   overrides.ui = runner.ui;
   overrides.ui_port = runner.ui_port;

@@ -1392,6 +1392,8 @@ pub struct CliOverrides {
   pub retries: Option<u32>,
   pub timeout: Option<u64>,
   pub reporter: Vec<String>,
+  /// `--add-reporter`: reporters on top of the configured ones.
+  pub add_reporter: Vec<String>,
   pub grep: Option<String>,
   pub grep_invert: Option<String>,
   pub tag: Option<String>,

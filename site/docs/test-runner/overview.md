@@ -34,6 +34,8 @@ Rust or JavaScript / TypeScript step bodies).
   `--last-failed`, `--forbid-only`, `--project`.
 - **Order.** `--shuffle` runs files, and tests in parallel mode, in a
   random order and prints the seed; `--shuffle <seed>` repeats it.
+- **Reporters.** `--reporter` replaces the configured reporters;
+  `--add-reporter` adds one on top of them.
 
 ## Entry points
 

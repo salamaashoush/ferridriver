@@ -331,6 +331,16 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
       })
       .collect();
   }
+  // Playwright's `--add-reporter`: appended to whatever the config or
+  // `--reporter` chose, once each.
+  for name in &overrides.add_reporter {
+    if !config.reporter.iter().any(|r| &r.name == name) {
+      config.reporter.push(ReporterConfig {
+        name: name.clone(),
+        options: std::collections::BTreeMap::new(),
+      });
+    }
+  }
   if let Some(headless) = overrides.headless_override {
     config.browser.headless = headless;
   }
