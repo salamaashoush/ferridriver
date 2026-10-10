@@ -479,6 +479,7 @@ declare global {
     reportSlowTests?: unknown;
     reporter?: unknown;
     retries?: unknown;
+    retryStrategy?: unknown;
     screenshot?: unknown;
     screenshotOnFailure?: unknown;
     snapshotDir?: unknown;

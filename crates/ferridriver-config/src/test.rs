@@ -553,6 +553,8 @@ pub struct TestConfig {
   #[serde(deserialize_with = "deserialize_optional_workers")]
   pub workers: Option<u32>,
   pub retries: u32,
+  #[serde(default)]
+  pub retry_strategy: RetryStrategy,
   pub reporter: Vec<ReporterConfig>,
   pub output_dir: PathBuf,
   pub browser: BrowserConfig,
@@ -1134,6 +1136,18 @@ impl<'de> Deserialize<'de> for ReporterConfig {
   }
 }
 
+/// When a failed test is retried. Playwright: `retryStrategy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RetryStrategy {
+  /// As soon as a worker is free.
+  #[default]
+  Immediate,
+  /// After everything else has run, one at a time, so a retry shares the
+  /// machine with nothing.
+  Isolated,
+}
+
 /// Snapshot update mode. Playwright: `updateSnapshots`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1477,6 +1491,7 @@ impl Default for TestConfig {
       config_dir: None,
       workers: None,
       retries: 0,
+      retry_strategy: RetryStrategy::default(),
       reporter: vec![ReporterConfig {
         name: "terminal".into(),
         options: BTreeMap::new(),

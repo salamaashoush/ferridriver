@@ -9,7 +9,7 @@
 pub use ferridriver_config::test::{
   BrowserConfig, CliOverrides, ContextConfig, DEFAULT_EXPECT_TIMEOUT_MS, ExpectConfig, GeolocationConfig,
   GracefulShutdown, HttpCredentialsConfig, ProjectConfig, ProxyConfig, ReportSlowTestsConfig, ReporterConfig,
-  ScreenshotMode, ScreenshotOption, ShardArg, StringOrList, TestConfig, ToHaveScreenshotConfig,
+  RetryStrategy, ScreenshotMode, ScreenshotOption, ShardArg, StringOrList, TestConfig, ToHaveScreenshotConfig,
   ToMatchAriaSnapshotConfig, ToMatchSnapshotConfig, ToPassConfig, TraceMode, TraceOption, UpdateSnapshotsMode,
   VideoConfig, VideoMode, VideoOption, ViewportConfig, ViewportOverride, WebServerConfig, expand_device_keys,
 };

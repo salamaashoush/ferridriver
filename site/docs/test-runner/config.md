@@ -12,6 +12,7 @@ workers       = 4
 timeout       = 30000
 expectTimeout = 5000
 retries       = 1
+retryStrategy = "immediate"   # or "isolated": retries run last, one at a time
 fullyParallel = true
 outputDir     = "test-results"
 

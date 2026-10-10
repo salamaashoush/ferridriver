@@ -1566,6 +1566,22 @@ impl TestRunner {
       self.config.max_failures as usize // 0 = unlimited
     };
 
+    // `retryStrategy: 'isolated'`: a retry waits here until every test has
+    // either finished or joined it, then they run one at a time.
+    let isolated = self.config.retry_strategy == crate::config::RetryStrategy::Isolated;
+    let mut waiting_retries: std::collections::VecDeque<WorkerTestResult> = std::collections::VecDeque::new();
+    let retry = |result: &WorkerTestResult| {
+      dispatcher.retry_shared(
+        &result.test_fn,
+        &result.test_id,
+        result.fixture_requests.clone(),
+        result.outcome.attempt + 1,
+        result.suite_key.clone(),
+        Arc::clone(&result.hooks),
+        result.outcome.case_metadata.clone(),
+      );
+    };
+
     let mut stop_requested = false;
     loop {
       let result = tokio::select! {
@@ -1595,15 +1611,11 @@ impl TestRunner {
           attempt = result.outcome.attempt,
           "retrying failed test",
         );
-        dispatcher.retry_shared(
-          &result.test_fn,
-          &result.test_id,
-          result.fixture_requests.clone(),
-          result.outcome.attempt + 1,
-          result.suite_key.clone(),
-          Arc::clone(&result.hooks),
-          result.outcome.case_metadata.clone(),
-        );
+        if isolated {
+          waiting_retries.push_back(result);
+        } else {
+          retry(&result);
+        }
       } else {
         final_count += 1;
         // Track failures for max_failures / fail_fast.
@@ -1629,6 +1641,10 @@ impl TestRunner {
 
       if final_count >= total_tests {
         dispatcher.close();
+      } else if final_count + waiting_retries.len() >= total_tests
+        && let Some(next) = waiting_retries.pop_front()
+      {
+        retry(&next);
       }
     }
 
