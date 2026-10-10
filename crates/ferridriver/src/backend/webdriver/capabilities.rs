@@ -73,6 +73,10 @@ impl WebDriverPage {
     "Classic WebDriver does not expose browser-to-host script channels"
   );
   unavailable!(
+    expose_callback(_name: &str, _binding: crate::events::ExposedBinding) -> (),
+    "Classic WebDriver does not expose browser-to-host script channels"
+  );
+  unavailable!(
     add_init_script(_source: &str) -> String,
     "Classic WebDriver cannot register scripts before document execution"
   );

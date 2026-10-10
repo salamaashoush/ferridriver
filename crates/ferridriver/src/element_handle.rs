@@ -80,6 +80,7 @@ fn empty_arg() -> SerializedArgument {
   SerializedArgument {
     value: SerializedValue::Special(SpecialValue::Undefined),
     handles: Vec::new(),
+    functions: Vec::new(),
   }
 }
 

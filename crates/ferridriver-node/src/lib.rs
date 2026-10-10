@@ -64,6 +64,7 @@ mod disposable;
 mod download;
 mod element_handle;
 mod error;
+mod evaluate_arg;
 mod exposed;
 mod file_chooser;
 mod frame;

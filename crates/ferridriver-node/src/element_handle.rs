@@ -86,15 +86,17 @@ impl ElementHandle {
   /// Playwright: `elementHandle.evaluate(pageFunction, arg?): Promise<R>`.
   /// Delegates through the companion `JSHandle`.
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions",
     ts_return_type = "Promise<unknown>"
   )]
   pub async fn evaluate(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized =
+      crate::page::build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let result = self
       .inner
       .as_js_handle()
@@ -105,13 +107,15 @@ impl ElementHandle {
   }
 
   /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
-  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions")]
   pub async fn evaluate_handle(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::js_handle::JSHandle> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized =
+      crate::page::build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let handle = self
       .inner
       .as_js_handle()
@@ -252,7 +256,7 @@ impl ElementHandle {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized = crate::page::build_serialized_argument(arg)?;
     let result = self
       .inner
       .eval_on_selector(&selector, &page_function.source, serialized)
@@ -274,7 +278,7 @@ impl ElementHandle {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized = crate::page::build_serialized_argument(arg)?;
     let result = self
       .inner
       .eval_on_selector_all(&selector, &page_function.source, serialized)

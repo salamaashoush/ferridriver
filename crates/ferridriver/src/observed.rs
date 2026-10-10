@@ -84,11 +84,15 @@ impl<T: Clone> Buffer<T> {
   }
 }
 
-/// Console + page-error history for one backend page.
+/// Console + page-error history for one backend page, plus the
+/// bindings behind functions passed to `evaluate`, which a main-frame
+/// navigation retires along with the documents that could call them.
 #[derive(Default)]
 pub(crate) struct ObservedBuffers {
   console: Buffer<ConsoleMessage>,
   errors: Buffer<WebError>,
+  evaluate_callbacks: Vec<String>,
+  retired_callbacks: Vec<String>,
 }
 
 impl ObservedBuffers {
@@ -103,6 +107,15 @@ impl ObservedBuffers {
   pub(crate) fn mark_navigation(&mut self) {
     self.console.mark_navigation();
     self.errors.mark_navigation();
+    let live = std::mem::take(&mut self.evaluate_callbacks);
+    self.retired_callbacks.extend(live);
+  }
+
+  /// Record the bindings of an `evaluate` call and hand back those a
+  /// navigation retired since the last call, for the caller to remove.
+  pub(crate) fn track_evaluate_callbacks(&mut self, names: impl IntoIterator<Item = String>) -> Vec<String> {
+    self.evaluate_callbacks.extend(names);
+    std::mem::take(&mut self.retired_callbacks)
   }
 
   /// Buffer lengths at a point in time — captured by the API navigation

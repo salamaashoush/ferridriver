@@ -569,6 +569,48 @@ pub(crate) async fn settle_exposed_call<'js>(
   }
 }
 
+/// The binding behind a function passed in an argument with
+/// `exposeFunctions`: each page-side call runs it with the spread call
+/// arguments. Released with the other callbacks of `page_key` when that
+/// page closes; a context's live as long as the session.
+pub(crate) fn argument_function<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  callback: rquickjs::Function<'js>,
+  page_key: Option<usize>,
+) -> rquickjs::Result<ferridriver::protocol::ArgFunction> {
+  let vm = ferrijs::vm_handle(ctx)
+    .ok_or_else(|| throw_named(ctx, "Error", "exposeFunctions requires the script engine's VM handle"))?;
+  let name = ferridriver::protocol::ArgFunction::fresh_name();
+  let saved = SavedCallback::save(ctx, callback);
+  with_page_callbacks(ctx, |r| {
+    r.exposed.insert(name.clone(), saved);
+    if let Some(page_key) = page_key {
+      r.track_exposed_owner(page_key, name.clone());
+    }
+  })?;
+  let key = name.clone();
+  let binding: ferridriver::ExposedBinding = Arc::new(move |_source, args| {
+    let vm = vm.clone();
+    let name = key.clone();
+    Box::pin(async move {
+      let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
+        crate::vm_with!(vm => |ctx| {
+          let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
+            .ok_or_else(|| throw_named(&ctx, "Error", "exposed callback gone"))?;
+          let f = saved.restore(&ctx)?;
+          let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
+          for v in &args {
+            call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
+          }
+          settle_exposed_call(&ctx, &f, call_args).await
+        })
+        .await;
+      exposed_outcome(out)
+    })
+  });
+  Ok(ferridriver::protocol::ArgFunction { name, binding })
+}
+
 /// Flatten a VM round-trip of [`settle_exposed_call`] into the outcome an
 /// exposed binding hands back to the page.
 pub(crate) fn exposed_outcome<E: std::fmt::Display, F: std::fmt::Display>(

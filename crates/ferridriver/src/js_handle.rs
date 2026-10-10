@@ -174,10 +174,12 @@ impl JSHandleBacking {
       Self::Remote(remote) => crate::protocol::SerializedArgument {
         value: crate::protocol::SerializedValue::Handle(0),
         handles: vec![remote.to_handle_id()],
+        functions: Vec::new(),
       },
       Self::Value(v) => crate::protocol::SerializedArgument {
         value: v.clone(),
         handles: Vec::new(),
+        functions: Vec::new(),
       },
     }
   }
@@ -335,6 +337,7 @@ impl JSHandle {
     if self.is_disposed() {
       return Err(disposed_error());
     }
+    self.page.expose_arg_functions(&user_arg.functions).await?;
     let (args, handles) = build_handle_evaluate_args(&self.backing, user_arg);
     let result = self
       .any_page()
@@ -365,6 +368,7 @@ impl JSHandle {
     if self.is_disposed() {
       return Err(disposed_error());
     }
+    self.page.expose_arg_functions(&user_arg.functions).await?;
     let (args, handles) = build_handle_evaluate_args(&self.backing, user_arg);
     let result = self
       .any_page()
@@ -505,6 +509,7 @@ fn build_handle_evaluate_args(
   let crate::protocol::SerializedArgument {
     value: user_value,
     handles: user_handles,
+    ..
   } = user_arg;
 
   if let JSHandleBacking::Value(inline) = receiver {

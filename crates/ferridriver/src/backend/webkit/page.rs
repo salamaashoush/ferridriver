@@ -135,6 +135,9 @@ pub struct WebKitPage {
   pub(crate) exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
   /// Idempotent latch for the `Runtime.addBinding` + listener setup.
   binding_initialized: Arc<AtomicBool>,
+  /// Held while the channel installs, so a concurrent caller waits for
+  /// the controller instead of finding the flag set and racing ahead.
+  binding_install: Arc<tokio::sync::Mutex<()>>,
   /// Ordered list of `(identifier, source)` bootstrap-script fragments.
   /// PW `WebKit`'s `Page.setBootstrapScript` holds a SINGLE source that
   /// each call overwrites, so every `add_init_script` must re-send the
@@ -471,6 +474,7 @@ impl WebKitPage {
         global_object_id: Arc::new(std::sync::Mutex::new(None)),
         exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         binding_initialized: Arc::new(AtomicBool::new(false)),
+        binding_install: Arc::new(tokio::sync::Mutex::new(())),
         init_scripts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
@@ -2273,6 +2277,7 @@ impl WebKitPage {
   /// a navigation into a fresh process. `replay_binding_channel` re-arms
   /// the protocol side (`addBinding` + controller) on the swapped target.
   async fn ensure_binding_channel(&self) -> Result<()> {
+    let _installing = self.binding_install.lock().await;
     if self.binding_initialized.swap(true, Ordering::SeqCst) {
       return Ok(());
     }
@@ -2290,7 +2295,53 @@ impl WebKitPage {
         true,
       )
       .await?;
+    // Child frames already running keep their documents, so the init
+    // script never reaches them: install the controller there directly.
+    let contexts: Vec<i64> = self.frame_contexts.read().await.values().copied().collect();
+    for context_id in contexts {
+      let _ = self
+        .target_session()
+        .send(
+          protocol::RUNTIME_EVALUATE,
+          json!({
+            "expression": crate::backend::cdp::CdpPage::<crate::backend::cdp::pipe::PipeTransport>::BINDING_CONTROLLER_JS,
+            "contextId": context_id,
+          }),
+        )
+        .await;
+    }
     Ok(())
+  }
+
+  /// Register a binding the page reaches only through
+  /// `__playwright__binding__controller__.callBinding`, never as a global.
+  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.ensure_binding_channel().await?;
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  /// [`Self::expose_callback`] for a popup still held paused: the
+  /// controller arrives with its first document's init scripts.
+  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    if !self.binding_initialized.swap(true, Ordering::SeqCst) {
+      self
+        .target_session()
+        .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
+        .await
+        .map_err(conn_err)?;
+      self
+        .add_init_script(
+          crate::backend::cdp::CdpPage::<crate::backend::cdp::pipe::PipeTransport>::BINDING_CONTROLLER_JS,
+        )
+        .await?;
+    }
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  pub async fn remove_callback(&self, name: &str) {
+    self.exposed_fns.write().await.remove(name);
   }
 
   /// Whether the exposed-function binding channel has been initialised.

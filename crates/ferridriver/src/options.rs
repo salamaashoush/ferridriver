@@ -310,6 +310,29 @@ pub fn evaluation_script(
   }
 }
 
+/// The init-script source for `addInitScript(script, arg, { exposeFunctions:
+/// true })`: the argument travels as JavaScript that rebuilds it, each
+/// function in it calling back through the bindings controller.
+///
+/// # Errors
+///
+/// Returns an error unless `script` is a function, or if `arg` holds a
+/// handle.
+pub fn evaluation_script_exposing(
+  script: InitScriptSource,
+  arg: &crate::protocol::SerializedValue,
+) -> Result<String, crate::error::FerriError> {
+  match script {
+    InitScriptSource::Function { body } => Ok(format!("({body})({})", arg.to_js_source()?)),
+    InitScriptSource::Source(_) | InitScriptSource::Content(_) | InitScriptSource::Path(_) => {
+      Err(crate::error::FerriError::invalid_argument(
+        "script",
+        "Passing functions requires the init script to be a function",
+      ))
+    },
+  }
+}
+
 /// Options for filtering locators — used by both
 /// `Locator::filter(options)` and the `Locator` constructor. Every field
 /// maps directly to a corresponding injected-selector clause:

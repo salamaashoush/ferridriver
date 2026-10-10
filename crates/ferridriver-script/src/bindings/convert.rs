@@ -262,10 +262,45 @@ pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs
 /// handle table. Detection is recursive, so handles nested inside
 /// object / array user args keep their page-side identity.
 pub fn quickjs_arg_to_serialized<'js>(
-  _ctx: &Ctx<'js>,
+  ctx: &Ctx<'js>,
   value: Option<Value<'js>>,
 ) -> rquickjs::Result<ferridriver::protocol::SerializedArgument> {
-  use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
+  quickjs_arg_with_functions(ctx, value, ArgFunctions::Reject)
+}
+
+/// What a function inside an argument becomes.
+#[derive(Clone, Copy)]
+pub enum ArgFunctions {
+  /// Playwright without `exposeFunctions`: an error naming where it sat.
+  Reject,
+  /// With `exposeFunctions`: a binding the page calls back through,
+  /// released when the page with this key closes, if one owns it.
+  Expose { page_key: Option<usize> },
+}
+
+impl ArgFunctions {
+  /// The mode an `{ exposeFunctions?: boolean }` option bag selects.
+  pub fn from_options(options: Option<&Value<'_>>, page_key: Option<usize>) -> rquickjs::Result<Self> {
+    let expose = match options.and_then(Value::as_object) {
+      Some(bag) => bag.get::<_, Option<bool>>("exposeFunctions")?.unwrap_or(false),
+      None => false,
+    };
+    Ok(if expose {
+      Self::Expose { page_key }
+    } else {
+      Self::Reject
+    })
+  }
+}
+
+/// [`quickjs_arg_to_serialized`] with the functions in the argument
+/// handled as `functions` says.
+pub fn quickjs_arg_with_functions<'js>(
+  ctx: &Ctx<'js>,
+  value: Option<Value<'js>>,
+  functions: ArgFunctions,
+) -> rquickjs::Result<ferridriver::protocol::SerializedArgument> {
+  use ferridriver::protocol::{SerializedArgument, SerializedValue, SpecialValue};
 
   let v = match value {
     Some(v) if !v.is_undefined() => v,
@@ -273,6 +308,7 @@ pub fn quickjs_arg_to_serialized<'js>(
       return Ok(SerializedArgument {
         value: SerializedValue::Special(SpecialValue::Undefined),
         handles: Vec::new(),
+        functions: Vec::new(),
       });
     },
   };
@@ -281,6 +317,7 @@ pub fn quickjs_arg_to_serialized<'js>(
     return Ok(SerializedArgument {
       value: SerializedValue::Special(SpecialValue::Null),
       handles: Vec::new(),
+      functions: Vec::new(),
     });
   }
 
@@ -288,11 +325,20 @@ pub fn quickjs_arg_to_serialized<'js>(
   // JS -> serde_json::Value -> SerializedValue, allocating the whole
   // argument tree twice on every `page.evaluate(fn, arg)` /
   // `locator.evaluate`. Walk once, retaining numeric wire sentinels.
-  let mut alloc = SerializationContext::default();
-  let mut handles = Vec::new();
+  let mut walk = ArgWalk {
+    ctx,
+    alloc: ferridriver::protocol::SerializationContext::default(),
+    handles: Vec::new(),
+    mode: functions,
+    functions: Vec::new(),
+    path: Vec::new(),
+    visited: Vec::new(),
+  };
+  let value = walk.serialize(&v, 0)?;
   Ok(SerializedArgument {
-    value: js_value_to_serialized(&v, &mut alloc, &mut handles, 0)?,
-    handles,
+    value,
+    handles: walk.handles,
+    functions: walk.functions,
   })
 }
 
@@ -301,87 +347,183 @@ pub fn quickjs_arg_to_serialized<'js>(
 /// that behaviour with an explicit bound instead of overflowing.
 const MAX_ARG_DEPTH: u32 = 512;
 
-/// Walk a JS value into a wire [`SerializedValue`].
-fn js_value_to_serialized(
-  v: &Value<'_>,
-  alloc: &mut ferridriver::protocol::SerializationContext,
-  handles: &mut Vec<ferridriver::protocol::HandleId>,
-  depth: u32,
-) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
-  use ferridriver::protocol::{SerializedValue, SpecialValue};
+struct ArgWalk<'a, 'js> {
+  ctx: &'a Ctx<'js>,
+  alloc: ferridriver::protocol::SerializationContext,
+  handles: Vec<ferridriver::protocol::HandleId>,
+  mode: ArgFunctions,
+  functions: Vec<ferridriver::protocol::ArgFunction>,
+  path: Vec<ferridriver::protocol::ArgPathStep>,
+  /// Arrays and objects already written, by id: a second visit is a
+  /// `{ref}`, which is what keeps a cycle from recursing forever.
+  visited: Vec<(Value<'js>, u32)>,
+}
 
-  if depth > MAX_ARG_DEPTH {
-    return Err(type_error(v.ctx(), "argument too deeply nested or cyclic"));
-  }
+impl<'js> ArgWalk<'_, 'js> {
+  /// Walk a JS value into a wire [`ferridriver::protocol::SerializedValue`].
+  fn serialize(&mut self, v: &Value<'js>, depth: u32) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
+    use ferridriver::protocol::{ArgPathStep, SerializedValue, SpecialValue};
 
-  if v.is_undefined() {
-    return Ok(SerializedValue::Special(SpecialValue::Undefined));
-  }
-  if v.is_null() {
-    return Ok(SerializedValue::Special(SpecialValue::Null));
-  }
-  if let Some(b) = v.as_bool() {
-    return Ok(SerializedValue::Bool(b));
-  }
-  if let Some(i) = v.as_int() {
-    return Ok(SerializedValue::from_f64(f64::from(i)));
-  }
-  if let Some(f) = v.as_float() {
-    return Ok(SerializedValue::from_f64(f));
-  }
-  if let Some(s) = v.as_string() {
-    return Ok(SerializedValue::Str(s.to_string()?));
-  }
-  if let Some(bi) = v.as_big_int() {
-    // Wire BigInt is a decimal string. `to_i64` covers the common
-    // range; a value outside it errors (the old serde_json path could
-    // not represent BigInt at all, so erroring is not a regression).
-    return match bi.clone().to_i64() {
-      Ok(n) => Ok(SerializedValue::BigInt(n.to_string())),
-      Err(_) => Err(type_error(v.ctx(), "BigInt argument out of i64 range")),
-    };
-  }
-  if let Some(arr) = v.as_array() {
-    let id = alloc.alloc_id();
-    let mut items = Vec::with_capacity(arr.len());
-    for idx in 0..arr.len() {
-      let el: Value<'_> = arr.get(idx)?;
-      // Array holes / undefined / functions serialise as null.
-      items.push(if el.is_undefined() || el.is_function() {
-        SerializedValue::Special(SpecialValue::Null)
-      } else {
-        js_value_to_serialized(&el, alloc, handles, depth + 1)?
-      });
+    if depth > MAX_ARG_DEPTH {
+      return Err(type_error(v.ctx(), "argument too deeply nested or cyclic"));
     }
-    return Ok(SerializedValue::Array { id, items });
-  }
-  if let Some(obj) = v.as_object() {
-    // Plain object: own enumerable string keys, dropping
-    // undefined/function/symbol-valued props (JSON.stringify rules).
-    let id = alloc.alloc_id();
-    let mut entries = Vec::new();
-    for key in obj.keys::<String>() {
-      let key = key?;
-      let val: Value<'_> = obj.get(&key)?;
-      if val.is_undefined() || val.is_function() || val.type_of() == rquickjs::Type::Symbol {
-        continue;
+
+    if v.is_undefined() {
+      return Ok(SerializedValue::Special(SpecialValue::Undefined));
+    }
+    if v.is_null() {
+      return Ok(SerializedValue::Special(SpecialValue::Null));
+    }
+    if let Some(b) = v.as_bool() {
+      return Ok(SerializedValue::Bool(b));
+    }
+    if let Some(i) = v.as_int() {
+      return Ok(SerializedValue::from_f64(f64::from(i)));
+    }
+    if let Some(f) = v.as_float() {
+      return Ok(SerializedValue::from_f64(f));
+    }
+    if let Some(s) = v.as_string() {
+      return Ok(SerializedValue::Str(s.to_string()?));
+    }
+    if let Some(bi) = v.as_big_int() {
+      // Wire BigInt is a decimal string. `to_i64` covers the common
+      // range; a value outside it errors (the old serde_json path could
+      // not represent BigInt at all, so erroring is not a regression).
+      return match bi.clone().to_i64() {
+        Ok(n) => Ok(SerializedValue::BigInt(n.to_string())),
+        Err(_) => Err(type_error(v.ctx(), "BigInt argument out of i64 range")),
+      };
+    }
+    if let Some(f) = v.as_function() {
+      return self.function(v, f.clone());
+    }
+    if let Some(rich) = self.rich_object(v)? {
+      return Ok(rich);
+    }
+    if let Some((_, id)) = self.visited.iter().find(|(seen, _)| seen == v) {
+      return Ok(SerializedValue::Reference(*id));
+    }
+    if let Some(arr) = v.as_array() {
+      let id = self.alloc.alloc_id();
+      self.visited.push((v.clone(), id));
+      let mut items = Vec::with_capacity(arr.len());
+      for idx in 0..arr.len() {
+        let el: Value<'_> = arr.get(idx)?;
+        self.path.push(ArgPathStep::Index(idx));
+        // Array holes / undefined serialise as null.
+        items.push(if el.is_undefined() {
+          SerializedValue::Special(SpecialValue::Null)
+        } else {
+          self.serialize(&el, depth + 1)?
+        });
+        self.path.pop();
       }
-      entries.push(ferridriver::protocol::PropertyEntry {
-        k: key,
-        v: js_value_to_serialized(&val, alloc, handles, depth + 1)?,
-      });
+      return Ok(SerializedValue::Array { id, items });
     }
-    if entries.is_empty()
-      && let Some(handle) = handle_value_to_serialized(v, handles)?
-    {
-      return Ok(handle);
+    if let Some(obj) = v.as_object() {
+      // Plain object: own enumerable string keys, dropping undefined and
+      // symbol-valued props (JSON.stringify rules).
+      let id = self.alloc.alloc_id();
+      self.visited.push((v.clone(), id));
+      let mut entries = Vec::new();
+      for key in obj.keys::<String>() {
+        let key = key?;
+        let val: Value<'_> = obj.get(&key)?;
+        if val.is_undefined() || val.type_of() == rquickjs::Type::Symbol {
+          continue;
+        }
+        self.path.push(ArgPathStep::Key(key.clone()));
+        let v = self.serialize(&val, depth + 1)?;
+        self.path.pop();
+        entries.push(ferridriver::protocol::PropertyEntry { k: key, v });
+      }
+      if entries.is_empty()
+        && let Some(handle) = handle_value_to_serialized(v, &mut self.handles)?
+      {
+        return Ok(handle);
+      }
+      return Ok(SerializedValue::Object { id, entries });
     }
-    return Ok(SerializedValue::Object { id, entries });
+
+    // Symbol / other non-JSON value at this position:
+    // JSON.stringify treats it as undefined.
+    Ok(SerializedValue::Special(SpecialValue::Undefined))
   }
 
-  // Symbol / function / other non-JSON value at this position:
-  // JSON.stringify treats it as undefined.
-  Ok(SerializedValue::Special(SpecialValue::Undefined))
+  /// Upstream's `serializeValue` rich types: an `Error`, `Date`, `URL` or
+  /// `RegExp` crosses as itself rather than as its (empty) own keys.
+  fn rich_object(&self, v: &Value<'js>) -> rquickjs::Result<Option<ferridriver::protocol::SerializedValue>> {
+    use ferridriver::protocol::{ErrorValue, RegExpValue, SerializedValue};
+
+    let Some(obj) = v.as_object() else {
+      return Ok(None);
+    };
+    let text = |key: &str| -> rquickjs::Result<String> {
+      Ok(
+        obj
+          .get::<_, Option<rquickjs::convert::Coerced<String>>>(key)?
+          .map(|s| s.0)
+          .unwrap_or_default(),
+      )
+    };
+    if v.is_error() {
+      return Ok(Some(SerializedValue::Error(ErrorValue {
+        m: text("message")?,
+        n: text("name")?,
+        s: text("stack")?,
+      })));
+    }
+    let globals = self.ctx.globals();
+    let is = |class: &str| -> rquickjs::Result<bool> {
+      Ok(match globals.get::<_, Option<rquickjs::Object<'js>>>(class)? {
+        Some(constructor) => obj.is_instance_of(&constructor),
+        None => false,
+      })
+    };
+    let to_json = || -> rquickjs::Result<String> {
+      let method: rquickjs::Function<'js> = obj.get("toJSON")?;
+      let json: Option<rquickjs::convert::Coerced<String>> = method.call((rquickjs::function::This(obj.clone()),))?;
+      Ok(json.map(|s| s.0).unwrap_or_default())
+    };
+    if is("Date")? {
+      return Ok(Some(SerializedValue::Date(to_json()?)));
+    }
+    if is("URL")? {
+      return Ok(Some(SerializedValue::Url(to_json()?)));
+    }
+    if is("RegExp")? {
+      return Ok(Some(SerializedValue::RegExp(RegExpValue {
+        p: text("source")?,
+        f: text("flags")?,
+      })));
+    }
+    Ok(None)
+  }
+
+  fn function(
+    &mut self,
+    v: &Value<'js>,
+    f: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
+    match self.mode {
+      ArgFunctions::Reject => {
+        let display = v
+          .clone()
+          .get::<rquickjs::convert::Coerced<String>>()
+          .map(|s| s.0)
+          .unwrap_or_default();
+        let message = ferridriver::protocol::unexpected_value_error(&self.path, &display).to_string();
+        Err(throw_named(self.ctx, "Error", message))
+      },
+      ArgFunctions::Expose { page_key } => {
+        let function = crate::bindings::page::argument_function(self.ctx, f, page_key)?;
+        let value = ferridriver::protocol::SerializedValue::Function(function.name.clone());
+        self.functions.push(function);
+        Ok(value)
+      },
+    }
+  }
 }
 
 fn handle_value_to_serialized(
@@ -519,6 +661,10 @@ fn rehydrate<'js>(
     SerializedValue::Handle(_) => Err(type_error(
       ctx,
       "cannot convert the value: bare Handle in return value — use evaluateHandle()",
+    )),
+    SerializedValue::Function(name) => Err(type_error(
+      ctx,
+      format!("cannot convert the value: function binding {name} in a return value"),
     )),
   }
 }
@@ -857,7 +1003,15 @@ pub fn init_script_from_js<'js>(
     Some(v) if v.is_null() => Some(serde_json::Value::Null),
     Some(v) => Some(serde_from_js::<serde_json::Value>(ctx, v)?),
   };
+  Ok((init_script_source_from_js(ctx, script)?, arg_json))
+}
 
+/// The `script` of `addInitScript(script, ...)`: a function, source text,
+/// or `{ path?, content? }`.
+pub fn init_script_source_from_js<'js>(
+  ctx: &Ctx<'js>,
+  script: Value<'js>,
+) -> rquickjs::Result<ferridriver::options::InitScriptSource> {
   let init = if script.is_function() {
     // `String(fn)` invokes `Function.prototype.toString` — the same
     // primitive Playwright's client uses via `fun.toString()`.
@@ -887,6 +1041,5 @@ pub fn init_script_from_js<'js>(
       "addInitScript: script must be Function | string | { path?, content? }",
     ));
   };
-
-  Ok((init, arg_json))
+  Ok(init)
 }

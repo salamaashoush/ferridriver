@@ -28,7 +28,8 @@ step!(ScreenshotOf {
     example: "Then I take a screenshot of \"#chart\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let bytes = page.locator(&sel).screenshot_impl(crate::options::ElementScreenshotOptions::default()).await?;
+        let locator = page.locator(&sel);
+        let bytes = Box::pin(locator.screenshot_impl(crate::options::ElementScreenshotOptions::default())).await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Some(serde_json::json!({"screenshot": b64, "selector": sel, "format": "png"})))
     }

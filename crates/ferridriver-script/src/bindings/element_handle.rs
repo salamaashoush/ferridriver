@@ -82,11 +82,19 @@ impl ElementHandleJs {
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     call_site
       .scope(async move {
         let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let serialized = crate::bindings::convert::quickjs_arg_with_functions(
+          &ctx,
+          arg.0,
+          crate::bindings::convert::ArgFunctions::from_options(
+            options.0.as_ref(),
+            Some(self.inner.page().backend_page_id()),
+          )?,
+        )?;
         let result = self
           .inner
           .as_js_handle()
@@ -106,11 +114,19 @@ impl ElementHandleJs {
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
     call_site
       .scope(async move {
         let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let serialized = crate::bindings::convert::quickjs_arg_with_functions(
+          &ctx,
+          arg.0,
+          crate::bindings::convert::ArgFunctions::from_options(
+            options.0.as_ref(),
+            Some(self.inner.page().backend_page_id()),
+          )?,
+        )?;
         let handle = self
           .inner
           .as_js_handle()

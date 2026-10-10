@@ -45,6 +45,7 @@
 //! | `Array`            | `{a: [...], id: <n>}`             |
 //! | `Object` (plain)   | `{o: [{k,v}, ...], id: <n>}`      |
 //! | `JSHandle` ref     | `{h: <index>}`                    |
+//! | exposed function   | `{fn: <binding name>}`            |
 //! | shared-subgraph    | `{ref: <id>}`                     |
 //!
 //! `Map` / `Set` are NOT distinct variants — Playwright walks them as plain
@@ -303,6 +304,10 @@ pub enum SerializedValue {
   Handle(u32),
   /// Back-reference to a previously-emitted `a` / `o` by its `id`.
   Reference(u32),
+  /// A caller-side function passed with `exposeFunctions` — wire shape
+  /// `{fn: <binding name>}`. The page receives a function that calls back
+  /// through that binding.
+  Function(String),
 }
 
 impl SerializedValue {
@@ -424,6 +429,102 @@ impl SerializedValue {
     Self::Handle(handle_index)
   }
 
+  /// JavaScript source that evaluates to this value. An init script runs
+  /// before any utility script exists, so its argument travels inline:
+  /// Playwright parses it page-side with `parseInitScriptArg`, and this is
+  /// that parse done ahead of time. Handles cannot reach a document that
+  /// does not exist yet.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the value holds a [`Self::Handle`].
+  pub fn to_js_source(&self) -> crate::error::Result<String> {
+    let mut out = String::from("(r => ");
+    self.write_js_source(&mut out).map_err(|e| match e {
+      JsSourceError::Handle => {
+        crate::error::FerriError::invalid_argument("arg", "a JSHandle cannot be passed to an init script")
+      },
+      JsSourceError::Format => crate::error::FerriError::invalid_argument("arg", "could not render the argument"),
+    })?;
+    out.push_str(")({})");
+    Ok(out)
+  }
+
+  fn write_js_source(&self, out: &mut String) -> Result<(), JsSourceError> {
+    use std::fmt::Write as _;
+    let quote = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+    match self {
+      Self::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+      Self::Number(n) => write!(out, "({n:?})")?,
+      Self::Str(s) => out.push_str(&quote(s)),
+      Self::Special(special) => out.push_str(match special {
+        SpecialValue::Null => "null",
+        SpecialValue::Undefined => "undefined",
+        SpecialValue::NaN => "NaN",
+        SpecialValue::Infinity => "Infinity",
+        SpecialValue::NegInfinity => "(-Infinity)",
+        SpecialValue::NegZero => "(-0)",
+      }),
+      Self::Date(iso) => write!(out, "new Date({})", quote(iso))?,
+      Self::Url(url) => write!(out, "new URL({})", quote(url))?,
+      Self::BigInt(digits) => write!(out, "BigInt({})", quote(digits))?,
+      Self::Error(e) => write!(
+        out,
+        "Object.assign(new Error({}), {{ name: {}, stack: {} }})",
+        quote(&e.m),
+        quote(&e.n),
+        quote(&e.s)
+      )?,
+      Self::RegExp(r) => write!(out, "new RegExp({}, {})", quote(&r.p), quote(&r.f))?,
+      Self::TypedArray(t) => {
+        let constructor = match t.k {
+          TypedArrayKind::I8 => "Int8Array",
+          TypedArrayKind::U8 => "Uint8Array",
+          TypedArrayKind::U8Clamped => "Uint8ClampedArray",
+          TypedArrayKind::I16 => "Int16Array",
+          TypedArrayKind::U16 => "Uint16Array",
+          TypedArrayKind::I32 => "Int32Array",
+          TypedArrayKind::U32 => "Uint32Array",
+          TypedArrayKind::F32 => "Float32Array",
+          TypedArrayKind::F64 => "Float64Array",
+          TypedArrayKind::BI64 => "BigInt64Array",
+          TypedArrayKind::BUI64 => "BigUint64Array",
+        };
+        write!(out, "new {constructor}(new Uint8Array({:?}).buffer)", t.b)?;
+      },
+      Self::ArrayBuffer(a) => write!(out, "new Uint8Array({:?}).buffer", a.b)?,
+      // Each collection lands in `r` before its members are built, so a
+      // member referring back to it (a cycle) finds it there.
+      Self::Array { id, items } => {
+        write!(out, "(r[{id}] = [], r[{id}].push(")?;
+        for (i, item) in items.iter().enumerate() {
+          if i > 0 {
+            out.push_str(", ");
+          }
+          item.write_js_source(out)?;
+        }
+        write!(out, "), r[{id}])")?;
+      },
+      Self::Object { id, entries } => {
+        write!(out, "(r[{id}] = {{}}")?;
+        for entry in entries {
+          write!(out, ", r[{id}][{}] = ", quote(&entry.k))?;
+          entry.v.write_js_source(out)?;
+        }
+        write!(out, ", r[{id}])")?;
+      },
+      Self::Reference(id) => write!(out, "r[{id}]")?,
+      Self::Function(name) => write!(
+        out,
+        "((...args) => globalThis[{}].callBinding({}, ...args))",
+        quote(BINDINGS_CONTROLLER),
+        quote(name)
+      )?,
+      Self::Handle(_) => return Err(JsSourceError::Handle),
+    }
+    Ok(())
+  }
+
   // ── Conversion helpers ────────────────────────────────────────────────────
 
   /// Convert a [`serde_json::Value`] into a `SerializedValue`, covering
@@ -512,7 +613,8 @@ impl SerializedValue {
       | Self::TypedArray(_)
       | Self::ArrayBuffer(_)
       | Self::Handle(_)
-      | Self::Reference(_) => None,
+      | Self::Reference(_)
+      | Self::Function(_) => None,
     }
   }
 
@@ -644,6 +746,11 @@ impl Serialize for SerializedValue {
       Self::Reference(id) => {
         let mut m = s.serialize_map(Some(1))?;
         m.serialize_entry("ref", id)?;
+        m.end()
+      },
+      Self::Function(name) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("fn", name)?;
         m.end()
       },
     }
@@ -840,6 +947,10 @@ fn decode_tagged_object(mut bag: serde_json::Map<String, serde_json::Value>) -> 
     let idx = v.as_u64().ok_or_else(|| DecodeError::tag("h", "must be u64"))?;
     return Ok(SerializedValue::Handle(u32::try_from(idx)?));
   }
+  if let Some(v) = bag.remove("fn") {
+    let name = v.as_str().ok_or_else(|| DecodeError::tag("fn", "must be a string"))?;
+    return Ok(SerializedValue::Function(name.to_string()));
+  }
   if let Some(v) = bag.remove("ta") {
     let ta: TypedArrayValue = serde_json::from_value(v)?;
     return Ok(SerializedValue::TypedArray(ta));
@@ -884,6 +995,7 @@ pub fn argument_from_serde<A: serde::Serialize + ?Sized>(arg: &A) -> crate::erro
   Ok(SerializedArgument {
     value: SerializedValue::from_json(&json, &mut ctx),
     handles: Vec::new(),
+    functions: Vec::new(),
   })
 }
 
@@ -910,7 +1022,24 @@ pub fn result_to_serde<T: serde::de::DeserializeOwned>(value: &SerializedValue) 
   serde_json::from_value(json).map_err(|e| crate::error::FerriError::Json(format!("eval result: {e}")))
 }
 
+/// Why [`SerializedValue::to_js_source`] could not render a value.
+enum JsSourceError {
+  Handle,
+  Format,
+}
+
+impl From<std::fmt::Error> for JsSourceError {
+  fn from(_: std::fmt::Error) -> Self {
+    Self::Format
+  }
+}
+
 // ── SerializedArgument ──────────────────────────────────────────────────────
+
+/// The page global through which a function passed as an argument calls
+/// back: Playwright's `kBindingsControllerProperty`, which the vendored
+/// `parseEvaluationResultValue` reads.
+pub const BINDINGS_CONTROLLER: &str = "__playwright__binding__controller__";
 
 /// The full `{ value, handles }` envelope ferridriver passes to the
 /// injected utility script when a user calls `page.evaluate(fn, arg)`.
@@ -926,6 +1055,75 @@ pub struct SerializedArgument {
   pub value: SerializedValue,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub handles: Vec<HandleId>,
+  /// The callbacks behind each [`SerializedValue::Function`] in `value`,
+  /// registered on the page before the argument reaches it.
+  #[serde(skip)]
+  pub functions: Vec<ArgFunction>,
+}
+
+/// A caller-side function inside an argument, reachable from the page
+/// through the binding `name` (Playwright's `exposeFunctions`).
+#[derive(Clone)]
+pub struct ArgFunction {
+  pub name: String,
+  pub binding: crate::events::ExposedBinding,
+}
+
+impl ArgFunction {
+  /// A binding name no other function has had. The `__pw_fn_` prefix is
+  /// Playwright's `kFunctionBindingPrefix`.
+  #[must_use]
+  pub fn fresh_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("__pw_fn_{}_{id}", std::process::id())
+  }
+}
+
+impl std::fmt::Debug for ArgFunction {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ArgFunction")
+      .field("name", &self.name)
+      .finish_non_exhaustive()
+  }
+}
+
+/// One step of the path to a value inside an argument.
+#[derive(Debug, Clone)]
+pub enum ArgPathStep {
+  Key(String),
+  Index(usize),
+}
+
+/// Playwright's error for a value an argument cannot carry, a function
+/// passed without `exposeFunctions`: `Attempting to serialize unexpected
+/// value at position "a.b[0]": <value>`.
+#[must_use]
+pub fn unexpected_value_error(path: &[ArgPathStep], display: &str) -> crate::error::FerriError {
+  let mut chain = String::new();
+  for (i, step) in path.iter().enumerate() {
+    match step {
+      ArgPathStep::Key(key) if i == 0 => chain.push_str(key),
+      ArgPathStep::Key(key) => {
+        chain.push('.');
+        chain.push_str(key);
+      },
+      ArgPathStep::Index(index) => {
+        chain.push('[');
+        chain.push_str(&index.to_string());
+        chain.push(']');
+      },
+    }
+  }
+  let position = if chain.is_empty() {
+    String::new()
+  } else {
+    format!(" at position \"{chain}\"")
+  };
+  crate::error::FerriError::invalid_argument(
+    "arg",
+    format!("Attempting to serialize unexpected value{position}: {display}"),
+  )
 }
 
 impl Default for SerializedValue {
@@ -1411,10 +1609,53 @@ mod tests {
   // ── SerializedArgument ──────────────────────────────────────────────────
 
   #[test]
+  fn function_crosses_as_its_binding_name() {
+    let value = SerializedValue::Function("__pw_fn_1".into());
+    assert_eq!(serde_json::to_value(&value).unwrap(), json!({"fn": "__pw_fn_1"}));
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"fn": "__pw_fn_1"})).unwrap(),
+      value
+    );
+  }
+
+  #[test]
+  fn js_source_rebuilds_rich_and_cyclic_values() {
+    let value = SerializedValue::Object {
+      id: 1,
+      entries: vec![
+        PropertyEntry {
+          k: "self".into(),
+          v: SerializedValue::Reference(1),
+        },
+        PropertyEntry {
+          k: "when".into(),
+          v: SerializedValue::Date("1970-01-01T00:00:00.000Z".into()),
+        },
+        PropertyEntry {
+          k: "cb".into(),
+          v: SerializedValue::Function("__pw_fn_2".into()),
+        },
+        PropertyEntry {
+          k: "nz".into(),
+          v: SerializedValue::Special(SpecialValue::NegZero),
+        },
+      ],
+    };
+    assert_eq!(
+      value.to_js_source().unwrap(),
+      "(r => (r[1] = {}, r[1][\"self\"] = r[1], r[1][\"when\"] = new Date(\"1970-01-01T00:00:00.000Z\"), \
+       r[1][\"cb\"] = ((...args) => globalThis[\"__playwright__binding__controller__\"].callBinding(\"__pw_fn_2\", ...args)), \
+       r[1][\"nz\"] = (-0), r[1]))({})"
+    );
+    assert!(SerializedValue::Handle(0).to_js_source().is_err());
+  }
+
+  #[test]
   fn serialized_argument_omits_empty_handles() {
     let arg = SerializedArgument {
       value: SerializedValue::Number(1.0),
       handles: vec![],
+      functions: vec![],
     };
     let s = serde_json::to_string(&arg).unwrap();
     assert_eq!(s, r#"{"value":1.0}"#);
@@ -1434,6 +1675,7 @@ mod tests {
           handle: None,
         },
       ],
+      functions: vec![],
     };
     let wire = serde_json::to_value(&arg).unwrap();
     assert_eq!(

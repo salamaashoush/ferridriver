@@ -437,11 +437,12 @@ impl TryFrom<WaitForFunctionOptions> for ferridriver::options::WaitForFunctionOp
   }
 }
 
-/// Playwright `LocatorEvaluateOptions` — matches `{ timeout?: number }`.
+/// Playwright `locator.evaluate`'s `TimeoutOptions & EvaluateOptions`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct EvaluateOptions {
   pub timeout: Option<f64>,
+  pub expose_functions: Option<bool>,
 }
 
 impl From<EvaluateOptions> for ferridriver::options::EvaluateOptions {
@@ -1075,66 +1076,14 @@ impl napi::bindgen_prelude::FromNapiValue for NapiPageFunction {
   }
 }
 
-#[derive(Debug, Clone)]
-pub struct NapiEvaluateArg(pub ferridriver::protocol::SerializedArgument);
+pub use crate::evaluate_arg::NapiEvaluateArg;
 
-impl napi::bindgen_prelude::TypeName for NapiEvaluateArg {
-  fn type_name() -> &'static str {
-    "unknown"
-  }
-  fn value_type() -> napi::ValueType {
-    napi::ValueType::Unknown
-  }
-}
-
-impl napi::bindgen_prelude::ValidateNapiValue for NapiEvaluateArg {}
-
-impl napi::bindgen_prelude::FromNapiValue for NapiEvaluateArg {
-  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
-    use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
-
-    // Try top-level class-instance detection. `napi_unwrap` returns an
-    // error when the value isn't a wrapped class of the target `T`;
-    // attempts fall through to the JSON path. When the value IS a
-    // `JSHandle` / `ElementHandle`, the binding extracts the backend
-    // remote and hands it to `HandleRemote::to_serialized_argument`
-    // — the canonical packaging lives on core so the NAPI and
-    // QuickJS surfaces produce identical wire shapes (Rule 1: Rust
-    // is source of truth; bindings are thin mirrors).
-    if let Ok(jh) = unsafe {
-      <napi::bindgen_prelude::ClassInstance<'_, crate::js_handle::JSHandle> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)
-    } {
-      return Ok(Self(jh.inner_ref().backing().to_serialized_argument()));
-    }
-    if let Ok(eh) = unsafe {
-      <napi::bindgen_prelude::ClassInstance<'_, crate::element_handle::ElementHandle> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)
-    } {
-      return Ok(Self(eh.inner_ref().as_js_handle().backing().to_serialized_argument()));
-    }
-
-    // Quick `undefined` check via the C API to avoid importing `JsValue`
-    // just for one call. A missing / undefined arg surfaces as the
-    // `undefined` sentinel so the utility script skips the arg slot.
-    let mut ty = napi::sys::ValueType::napi_undefined;
-    unsafe {
-      napi::check_status!(napi::sys::napi_typeof(env, napi_val, &raw mut ty))?;
-    }
-    if ty == napi::sys::ValueType::napi_undefined {
-      return Ok(Self(SerializedArgument {
-        value: SerializedValue::Special(SpecialValue::Undefined),
-        handles: Vec::new(),
-      }));
-    }
-    // JSON fallback (null / primitives / plain objects / arrays).
-    // `FromNapiValue` on `serde_json::Value` does the walk.
-    let json: serde_json::Value =
-      unsafe { <serde_json::Value as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)? };
-    let mut alloc = SerializationContext::default();
-    Ok(Self(SerializedArgument {
-      value: SerializedValue::from_json(&json, &mut alloc),
-      handles: Vec::new(),
-    }))
-  }
+/// Playwright's `ExposeFunctionsOptions`, `{ exposeFunctions?: boolean }`,
+/// on `evaluate`, `evaluateHandle` and `addInitScript`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ExposeFunctionsOptions {
+  pub expose_functions: Option<bool>,
 }
 
 /// Playwright-parity options for `selectOption`. Three fields per
@@ -2052,8 +2001,25 @@ impl napi::bindgen_prelude::FromNapiValue for NapiInitScript {
 /// `Option<serde_json::Value>` unmarshal collapses both JS `null` and
 /// `undefined` to `None`, which would silently change semantics for the
 /// `page.addInitScript(fn, null)` case.
-#[derive(Debug, Clone, Default)]
-pub struct NapiInitScriptArg(pub Option<serde_json::Value>);
+pub struct NapiInitScriptArg {
+  /// What a plain init script receives: `JSON.stringify(arg)`, as
+  /// Playwright's `evaluationScript` inlines it.
+  json: Option<serde_json::Value>,
+  /// The argument with its functions bound, for `exposeFunctions`.
+  exposed: crate::evaluate_arg::NapiEvaluateArg,
+}
+
+impl NapiInitScriptArg {
+  /// The argument a plain init script receives.
+  pub fn into_json(self) -> Option<serde_json::Value> {
+    self.json
+  }
+
+  /// The argument an init script with `exposeFunctions` receives.
+  pub fn into_exposed(self) -> napi::Result<ferridriver::protocol::SerializedArgument> {
+    self.exposed.into_argument(true)
+  }
+}
 
 impl napi::bindgen_prelude::TypeName for NapiInitScriptArg {
   fn type_name() -> &'static str {
@@ -2142,16 +2108,15 @@ impl napi::bindgen_prelude::ValidateNapiValue for NapiInitScriptArg {}
 
 impl napi::bindgen_prelude::FromNapiValue for NapiInitScriptArg {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    let exposed = unsafe { crate::evaluate_arg::NapiEvaluateArg::from_napi_value(env, napi_val)? };
     let mut t: napi::sys::napi_valuetype = 0;
     napi::check_status!(unsafe { napi::sys::napi_typeof(env, napi_val, &raw mut t) })?;
-    if t == napi::sys::ValueType::napi_undefined {
-      return Ok(Self(None));
-    }
-    if t == napi::sys::ValueType::napi_null {
-      return Ok(Self(Some(serde_json::Value::Null)));
-    }
-    let v: serde_json::Value = unsafe { napi::bindgen_prelude::FromNapiValue::from_napi_value(env, napi_val)? };
-    Ok(Self(Some(v)))
+    let json = if t == napi::sys::ValueType::napi_undefined {
+      None
+    } else {
+      Some(crate::evaluate_arg::json_stringify(env, napi_val)?)
+    };
+    Ok(Self { json, exposed })
   }
 }
 

@@ -275,11 +275,19 @@ pub type ContextWsRoutes = HashMap<String, Vec<(crate::url_matcher::UrlMatcher, 
 /// `times` budget), so one context-wide counter governs all pages.
 pub type ContextRoutes = HashMap<String, Vec<crate::route::RegisteredRoute>>;
 
-/// Per-context init-script registry map: composite session key →
-/// `(registry id, lowered script source)` in registration order.
-/// Applied to every page of the context — current pages at
-/// registration time, future pages by `ContextRef::new_page`.
-pub type ContextInitScripts = HashMap<String, Vec<(u64, String)>>;
+/// Per-context init-script registry map: composite session key → the
+/// scripts in registration order. Applied to every page of the context —
+/// current pages at registration time, future pages by
+/// `ContextRef::new_page`.
+pub type ContextInitScripts = HashMap<String, Vec<ContextInitScript>>;
+
+/// One context init script and every page it went onto, so disposing it
+/// reaches the pages opened after it as well as those open before.
+pub struct ContextInitScript {
+  pub id: u64,
+  pub source: String,
+  pub installed: Arc<std::sync::Mutex<Vec<(crate::backend::AnyPage, String)>>>,
+}
 
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
@@ -409,6 +417,10 @@ pub struct BrowserState {
   /// [`crate::events::ExposedBinding`] is invoked across `.await`
   /// points and read during async page-open.
   pub context_bindings: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>>,
+  /// Per-context callbacks behind functions passed to a context init
+  /// script with `exposeFunctions`: bindings every page in the context
+  /// reaches through the bindings controller, never as a global.
+  pub context_callbacks: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>>,
   /// Per-context WebSocket-route registry — `context.routeWebSocket`
   /// handlers keyed by composite session key, in registration order.
   /// Consumed by `ContextRef::new_page` so a context-level WS route
@@ -544,6 +556,7 @@ impl BrowserState {
       har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_har_updates: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
+      context_callbacks: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_ws_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_init_scripts: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
@@ -2122,6 +2135,7 @@ impl BrowserState {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .remove(composite);
     self.context_bindings.write().await.remove(composite);
+    self.context_callbacks.write().await.remove(composite);
     self.context_ws_routes.write().await.remove(composite);
     self.context_routes.write().await.remove(composite);
     self.context_init_scripts.write().await.remove(composite);

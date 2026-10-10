@@ -12,10 +12,14 @@ use crate::context::BindingSourceJs;
 /// binding source first for `exposeBinding` only, and awaits whatever the
 /// callback returns. A thread-safe function has a fixed arity and cannot
 /// await, so this adapter does all three on the JS side, and the promise it
-/// always returns carries a synchronous throw as a rejection.
-const ADAPTER: &str = "(f, withSource) => withSource
-  ? (source, args) => Promise.resolve().then(() => f(source, ...args))
-  : (source, args) => Promise.resolve().then(() => f(...args))";
+/// always returns carries a synchronous throw as a rejection. The result
+/// crosses as JSON, which has no `undefined`.
+const ADAPTER: &str = "(f, withSource) => {
+  const json = v => v === undefined ? null : v;
+  return withSource
+    ? (source, args) => Promise.resolve().then(() => f(source, ...args)).then(json)
+    : (source, args) => Promise.resolve().then(() => f(...args)).then(json);
+}";
 
 type Adapted<'a> = Function<'a, FnArgs<(BindingSourceJs, serde_json::Value)>, Promise<serde_json::Value>>;
 

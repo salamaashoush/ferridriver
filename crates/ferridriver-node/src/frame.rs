@@ -68,15 +68,17 @@ impl Frame {
   /// Playwright: `frame.evaluate(pageFunction, arg?): Promise<R>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:196`).
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions",
     ts_return_type = "Promise<unknown>"
   )]
   pub async fn evaluate(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized =
+      crate::page::build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let result = self
       .inner
       .evaluate(&page_function.source, serialized, page_function.is_function)
@@ -98,7 +100,7 @@ impl Frame {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized = crate::page::build_serialized_argument(arg)?;
     let result = self
       .inner
       .eval_on_selector(&selector, &page_function.source, serialized, page_function.is_function)
@@ -120,7 +122,7 @@ impl Frame {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized = crate::page::build_serialized_argument(arg)?;
     let result = self
       .inner
       .eval_on_selector_all(&selector, &page_function.source, serialized, page_function.is_function)
@@ -131,13 +133,15 @@ impl Frame {
 
   /// Playwright: `frame.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:190`).
-  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions")]
   pub async fn evaluate_handle(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::js_handle::JSHandle> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized =
+      crate::page::build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let handle = self
       .inner
       .evaluate_handle(&page_function.source, serialized, page_function.is_function)

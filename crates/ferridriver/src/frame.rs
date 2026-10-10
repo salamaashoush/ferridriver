@@ -137,6 +137,7 @@ impl Frame {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
+    self.page.expose_arg_functions(&arg.functions).await?;
     let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
     let empty = matches!(
       arg.value,
@@ -190,6 +191,7 @@ impl Frame {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::js_handle::JSHandle> {
+    self.page.expose_arg_functions(&arg.functions).await?;
     let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
     let empty = matches!(
       arg.value,

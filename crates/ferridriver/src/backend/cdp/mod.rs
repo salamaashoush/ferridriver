@@ -6360,16 +6360,19 @@ impl<T: CdpWrap> CdpPage<T> {
 if(globalThis.__fd_bc)return;
 var bc={seq:0,cbs:{},fns:{}};
 globalThis.__fd_bc=bc;
+bc.call=function(name,args){
+  var s=++bc.seq;
+  var p=new Promise(function(r,j){bc.cbs[s]={r:r,j:j}});
+  globalThis.__fd_binding__(JSON.stringify({name:name,seq:s,args:args}));
+  return p;
+};
 bc.add=function(name){
   bc.fns[name]=true;
-  globalThis[name]=function(){
-    var s=++bc.seq;
-    var args=[];for(var i=0;i<arguments.length;i++)args.push(arguments[i]);
-    var p=new Promise(function(r,j){bc.cbs[s]={r:r,j:j}});
-    globalThis.__fd_binding__(JSON.stringify({name:name,seq:s,args:args}));
-    return p;
-  };
+  globalThis[name]=function(){return bc.call(name,Array.prototype.slice.call(arguments))};
 };
+Object.defineProperty(globalThis,'__playwright__binding__controller__',{configurable:true,value:{
+  callBinding:function(name){return bc.call(name,Array.prototype.slice.call(arguments,1))}
+}});
 bc.del=function(name){delete bc.fns[name];delete globalThis[name]};
 bc.resolve=function(seq,val){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.r(val)}};
 bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new Error(err))}};
@@ -6556,6 +6559,36 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       let _ = this.evaluate(&controller_and_register).await;
     });
     Ok(())
+  }
+
+  /// Register a binding the page reaches only through
+  /// `__playwright__binding__controller__.callBinding`, never as a global:
+  /// the callback behind a function passed as an argument.
+  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.ensure_binding_channel().await?;
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  /// [`Self::expose_callback`] for a page whose first document has not run
+  /// yet: the controller arrives with that document's init scripts.
+  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    {
+      let mut initialized = self.binding_initialized.lock().await;
+      if !*initialized {
+        self
+          .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
+          .await?;
+        self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
+        *initialized = true;
+      }
+    }
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  pub async fn remove_callback(&self, name: &str) {
+    self.exposed_fns.write().await.remove(name);
   }
 
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {

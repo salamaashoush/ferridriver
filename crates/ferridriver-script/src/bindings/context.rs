@@ -634,11 +634,20 @@ impl BrowserContextJs {
     ctx: Ctx<'js>,
     script: Value<'js>,
     arg: Opt<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
     call_site
       .scope(async move {
-        let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
-        let disposable = self.inner.add_init_script(init, arg_json).await.into_js_with(&ctx)?;
+        let functions = crate::bindings::convert::ArgFunctions::from_options(options.0.as_ref(), None)?;
+        let disposable = if let crate::bindings::convert::ArgFunctions::Expose { .. } = functions {
+          let init = crate::bindings::convert::init_script_source_from_js(&ctx, script)?;
+          let arg = crate::bindings::convert::quickjs_arg_with_functions(&ctx, arg.0, functions)?;
+          self.inner.add_init_script_exposing_functions(init, arg).await
+        } else {
+          let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
+          self.inner.add_init_script(init, arg_json).await
+        }
+        .into_js_with(&ctx)?;
         let instance =
           rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
         rquickjs::IntoJs::into_js(instance, &ctx)

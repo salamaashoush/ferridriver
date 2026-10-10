@@ -728,6 +728,11 @@ export interface TimeoutOption {
   timeout?: number;
 }
 
+export interface EvaluateOptions {
+  /** Pass functions inside `arg` to the page, which calls back into them. */
+  exposeFunctions?: boolean;
+}
+
 export interface WaitForSelectorOptions extends TimeoutOption {
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
 }
@@ -1277,8 +1282,8 @@ export interface Mouse {
 
 export interface JSHandle {
   jsonValue(): Promise<unknown>;
-  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
   getProperty(propertyName: string): Promise<JSHandle>;
   // Plain object rather than Playwright's Map<string, JSHandle> — the
   // documented ferridriver shape shared with the NAPI binding's
@@ -1405,9 +1410,9 @@ export interface Locator {
   isEditable(options?: TimeoutOption): Promise<boolean>;
   isAttached(options?: TimeoutOption): Promise<boolean>;
 
-  evaluate(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption): Promise<unknown>;
+  evaluate(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & EvaluateOptions): Promise<unknown>;
   evaluateAll(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & EvaluateOptions): Promise<JSHandle>;
   elementHandle(options?: TimeoutOption): Promise<ElementHandle>;
   elementHandles(): Promise<ElementHandle[]>;
   waitFor(options?: WaitForSelectorOptions): Promise<void>;
@@ -1568,7 +1573,8 @@ export interface Frame {
   getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector?: string): FrameLocator;
   page(): Page;
-  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
   parentFrame(): Frame | null;
   childFrames(): Frame[];
 }
@@ -1754,8 +1760,8 @@ export interface Page {
   isChecked(selector: string, options?: TimeoutOption): Promise<boolean>;
   isEditable(selector: string, options?: TimeoutOption): Promise<boolean>;
 
-  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown): Promise<JSHandle>;
+  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
   pause(): Promise<void>;
   requestGC(): Promise<void>;
   snapshotForAI(options?: { depth?: number; track?: string }): Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>;
@@ -1771,7 +1777,7 @@ export interface Page {
   querySelectorAll(selector: string): Promise<ElementHandle[]>;
   $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<Disposable>;
+  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown, options?: EvaluateOptions): Promise<Disposable>;
   addScriptTag(options?: { url?: string; path?: string; content?: string; type?: string }): Promise<ElementHandle>;
   addStyleTag(options?: { url?: string; path?: string; content?: string }): Promise<ElementHandle>;
   exposeFunction(name: string, callback: Function): Promise<void>;
@@ -1929,7 +1935,7 @@ export interface BrowserContext {
   setOffline(offline: boolean): Promise<void>;
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
   storageState(options?: { path?: string }): Promise<StorageState>;
-  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown): Promise<void>;
+  addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown, options?: EvaluateOptions): Promise<Disposable>;
   // Context-level expose returns a Disposable that unregisters the
   // binding and removes the page-side window proxy (a ferridriver
   // extension over Playwright's void return).

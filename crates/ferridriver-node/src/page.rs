@@ -15,14 +15,22 @@ use napi::bindgen_prelude::{Buffer, JsObjectValue as _, JsValue as _};
 use napi_derive::napi;
 
 /// Lower an optional [`crate::types::NapiEvaluateArg`] into a
-/// [`SerializedArgument`]. `None` maps to the `undefined` sentinel so
-/// the utility script sees the user function called with zero
-/// positional args; `Some(NapiEvaluateArg(_))` returns the wrapped
-/// argument directly. The class-instance detection for `JSHandle` /
-/// `ElementHandle` happens inside [`crate::types::NapiEvaluateArg`]'s
-/// `FromNapiValue` impl — this helper just unwraps.
-pub(crate) fn build_serialized_argument(arg: Option<crate::types::NapiEvaluateArg>) -> SerializedArgument {
-  arg.map(|a| a.0).unwrap_or_default()
+/// [`SerializedArgument`] for a call without `exposeFunctions`. `None`
+/// maps to the `undefined` sentinel so the utility script sees the user
+/// function called with zero positional args.
+pub(crate) fn build_serialized_argument(arg: Option<crate::types::NapiEvaluateArg>) -> Result<SerializedArgument> {
+  build_evaluate_argument(arg, false)
+}
+
+/// [`build_serialized_argument`] for a call that takes `options`.
+pub(crate) fn build_evaluate_argument(
+  arg: Option<crate::types::NapiEvaluateArg>,
+  expose_functions: bool,
+) -> Result<SerializedArgument> {
+  arg.map_or_else(
+    || Ok(SerializedArgument::default()),
+    |a| a.into_argument(expose_functions),
+  )
 }
 
 /// The live object a page event carries to its listener / waiter —
@@ -505,7 +513,7 @@ impl Page {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = build_serialized_argument(arg);
+    let serialized = build_serialized_argument(arg)?;
     let result = self
       .inner
       .eval_on_selector(&selector, &page_function.source, serialized, page_function.is_function)
@@ -527,7 +535,7 @@ impl Page {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = build_serialized_argument(arg);
+    let serialized = build_serialized_argument(arg)?;
     let result = self
       .inner
       .eval_on_selector_all(&selector, &page_function.source, serialized, page_function.is_function)
@@ -1343,15 +1351,16 @@ impl Page {
   /// arrays / `NaN` / `±Infinity` / `undefined` / `-0`) round-trip as
   /// their native JS form — same as Playwright's `parseResult`.
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions",
     ts_return_type = "Promise<unknown>"
   )]
   pub async fn evaluate(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = build_serialized_argument(arg);
+    let serialized = build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let result = self
       .inner
       .evaluate(&page_function.source, serialized, page_function.is_function)
@@ -1362,13 +1371,14 @@ impl Page {
 
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:529`).
-  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions")]
   pub async fn evaluate_handle(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::js_handle::JSHandle> {
-    let serialized = build_serialized_argument(arg);
+    let serialized = build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let handle = self
       .inner
       .evaluate_handle(&page_function.source, serialized, page_function.is_function)
@@ -1441,7 +1451,7 @@ impl Page {
     arg: Option<crate::types::NapiEvaluateArg>,
     options: Option<WaitForFunctionOptions>,
   ) -> Result<crate::js_handle::JSHandle> {
-    let serialized = build_serialized_argument(arg);
+    let serialized = build_serialized_argument(arg)?;
     let opts = options
       .map(ferridriver::options::WaitForFunctionOptions::try_from)
       .transpose()?;
@@ -1893,19 +1903,24 @@ impl Page {
   /// [`ferridriver::options::evaluation_script`]; this method is a thin
   /// delegator.
   #[napi(
-    ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any",
+    ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any, options?: ExposeFunctionsOptions",
     ts_return_type = "Promise<Disposable>"
   )]
   pub async fn add_init_script(
     &self,
     script: crate::types::NapiInitScript,
     arg: crate::types::NapiInitScriptArg,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::disposable::Disposable> {
-    let disposable = self
-      .inner
-      .add_init_script(script.into(), arg.0)
-      .await
-      .map_err(crate::error::to_napi)?;
+    let disposable = if options.and_then(|o| o.expose_functions).unwrap_or(false) {
+      self
+        .inner
+        .add_init_script_exposing_functions(script.into(), arg.into_exposed()?)
+        .await
+    } else {
+      self.inner.add_init_script(script.into(), arg.into_json()).await
+    }
+    .map_err(crate::error::to_napi)?;
     Ok(crate::disposable::Disposable::wrap(disposable))
   }
 

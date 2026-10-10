@@ -236,6 +236,9 @@ pub struct BidiPage {
   closed: Arc<AtomicBool>,
   preload_scripts: Arc<RwLock<FxHashMap<String, String>>>,
   exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+  /// Whether `__playwright__binding__controller__` is installed, the way
+  /// functions passed as arguments call back.
+  binding_controller: Arc<tokio::sync::Mutex<bool>>,
   /// Manager for lazy engine injection.
   injected_script: Arc<InjectedScriptManager>,
   /// Most recent main-document `Request` observed by the `BiDi` network
@@ -447,6 +450,7 @@ impl BidiPage {
       closed: Arc::new(AtomicBool::new(false)),
       preload_scripts: Arc::new(RwLock::new(FxHashMap::default())),
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
+      binding_controller: Arc::new(tokio::sync::Mutex::new(false)),
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       event_barrier: Arc::new(std::sync::Mutex::new(None)),
@@ -3675,6 +3679,74 @@ impl BidiPage {
       .await;
 
     self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  /// Register a binding the page reaches only through
+  /// `__playwright__binding__controller__.callBinding`, never as a global.
+  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.ensure_binding_controller().await?;
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  pub async fn remove_callback(&self, name: &str) {
+    self.exposed_fns.write().await.remove(name);
+  }
+
+  /// Install the controller in every document of this page, present and
+  /// future. It speaks the same channel payload as an exposed binding, so
+  /// the `script.message` dispatcher settles its calls unchanged.
+  async fn ensure_binding_controller(&self) -> Result<()> {
+    let mut installed = self.binding_controller.lock().await;
+    if *installed {
+      return Ok(());
+    }
+    let js = format!(
+      r"(channel) => {{
+        if (globalThis['{controller}']) return;
+        Object.defineProperty(globalThis, '{controller}', {{ configurable: true, value: {{
+          callBinding(name, ...args) {{
+            return new Promise((resolve, reject) => {{
+              const id = Math.random().toString(36).slice(2);
+              window.__ferri_exposed = window.__ferri_exposed || {{}};
+              window.__ferri_exposed[id] = {{ resolve, reject }};
+              channel(JSON.stringify({{ name, id, args }}));
+            }});
+          }},
+        }} }});
+      }}",
+      controller = crate::protocol::BINDINGS_CONTROLLER,
+    );
+    let channel_arg = json!([{
+      "type": "channel",
+      "value": { "channel": BINDING_CHANNEL },
+    }]);
+    self
+      .cmd(
+        "script.addPreloadScript",
+        json!({
+          "functionDeclaration": js,
+          "arguments": channel_arg,
+          "contexts": [&*self.context_id]
+        }),
+      )
+      .await?;
+    for frame in self.get_frame_tree().await? {
+      let _ = self
+        .cmd(
+          "script.callFunction",
+          json!({
+            "functionDeclaration": js,
+            "arguments": channel_arg,
+            "target": {"context": frame.frame_id},
+            "awaitPromise": false,
+            "resultOwnership": "none"
+          }),
+        )
+        .await;
+    }
+    *installed = true;
     Ok(())
   }
 

@@ -10,7 +10,7 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use crate::bindings::convert::FerriResultCtxExt;
-use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
+use crate::bindings::convert::{extract_page_function, serialized_value_to_quickjs};
 
 /// QuickJS-visible wrapper around a core [`JSHandle`].
 ///
@@ -116,9 +116,17 @@ impl JSHandleJs {
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let serialized = crate::bindings::convert::quickjs_arg_with_functions(
+      &ctx,
+      arg.0,
+      crate::bindings::convert::ArgFunctions::from_options(
+        options.0.as_ref(),
+        Some(self.inner.page().backend_page_id()),
+      )?,
+    )?;
     let result = self
       .inner
       .evaluate(&source, serialized, is_fn)
@@ -134,9 +142,17 @@ impl JSHandleJs {
     ctx: rquickjs::Ctx<'js>,
     page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<JSHandleJs> {
     let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let serialized = crate::bindings::convert::quickjs_arg_with_functions(
+      &ctx,
+      arg.0,
+      crate::bindings::convert::ArgFunctions::from_options(
+        options.0.as_ref(),
+        Some(self.inner.page().backend_page_id()),
+      )?,
+    )?;
     let handle = self
       .inner
       .evaluate_handle(&source, serialized, is_fn)

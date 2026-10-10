@@ -96,15 +96,17 @@ impl JSHandle {
   /// Runs the function with this handle's remote object as the first
   /// positional argument. Rich types round-trip as native JS values.
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions",
     ts_return_type = "Promise<unknown>"
   )]
   pub async fn evaluate(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized =
+      crate::page::build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let result = self
       .inner
       .evaluate(&page_function.source, serialized, page_function.is_function)
@@ -114,13 +116,15 @@ impl JSHandle {
   }
 
   /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
-  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: ExposeFunctionsOptions")]
   pub async fn evaluate_handle(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::ExposeFunctionsOptions>,
   ) -> Result<JSHandle> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized =
+      crate::page::build_evaluate_argument(arg, options.and_then(|o| o.expose_functions).unwrap_or(false))?;
     let handle = self
       .inner
       .evaluate_handle(&page_function.source, serialized, page_function.is_function)

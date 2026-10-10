@@ -112,7 +112,7 @@ impl WebMcp {
       .inner
       .call_tool(
         &name,
-        crate::page::build_serialized_argument(input),
+        crate::page::build_serialized_argument(input)?,
         lower_options(options),
       )
       .await

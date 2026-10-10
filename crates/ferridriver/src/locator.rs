@@ -1843,7 +1843,7 @@ impl Locator {
   #[track_caller]
   pub fn screenshot(&self) -> crate::action::Action<'static, crate::options::ElementScreenshotOptions, Vec<u8>> {
     let locator = self.clone();
-    crate::action::Action::new(move |opts| Box::pin(async move { locator.screenshot_impl(opts).await }))
+    crate::action::Action::new(move |opts| Box::pin(async move { Box::pin(locator.screenshot_impl(opts)).await }))
   }
 
   pub(crate) async fn screenshot_impl(&self, opts: crate::options::ElementScreenshotOptions) -> Result<Vec<u8>> {

@@ -604,6 +604,33 @@ impl ContextRef {
       let binding_for_page = bind_source(binding, composite.clone());
       page.expose_binding(&name, binding_for_page).await?;
     }
+    for (name, binding) in self.context_callbacks().await {
+      page
+        .expose_callback(&name, bind_source(binding, composite.clone()))
+        .await?;
+    }
+    Ok(())
+  }
+
+  async fn context_callbacks(&self) -> Vec<(String, crate::events::ExposedBinding)> {
+    let callbacks = self.state.read().await.context_callbacks.clone();
+    let guard = callbacks.read().await;
+    guard
+      .get(&self.key.to_composite())
+      .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+      .unwrap_or_default()
+  }
+
+  /// The context's init-script callbacks on a popup still paused before
+  /// its first document. They go ahead of the init scripts, whose
+  /// functions call through the controller they install.
+  async fn apply_context_callbacks_pre_doc(&self, page: &AnyPage) -> Result<()> {
+    let composite = self.key.to_composite();
+    for (name, binding) in self.context_callbacks().await {
+      page
+        .expose_callback_pre_doc(&name, bind_source(binding, composite.clone()))
+        .await?;
+    }
     Ok(())
   }
 
@@ -1399,6 +1426,73 @@ impl ContextRef {
       .await
   }
 
+  /// Playwright: `browserContext.addInitScript(script, arg, {
+  /// exposeFunctions: true })`. Each function in `arg` stays callable
+  /// from every page of the context, popups included, until the returned
+  /// disposable removes the script.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error unless `script` is a function, if `arg` holds a
+  /// handle, or if injection fails on any page.
+  pub async fn add_init_script_exposing_functions(
+    &self,
+    script: crate::options::InitScriptSource,
+    arg: crate::protocol::SerializedArgument,
+  ) -> Result<crate::disposable::Disposable> {
+    let source = crate::options::evaluation_script_exposing(script, &arg.value)?;
+    let composite = self.key.to_composite();
+    {
+      let callbacks = self.state.read().await.context_callbacks.clone();
+      let mut guard = callbacks.write().await;
+      let entry = guard.entry(composite.clone()).or_default();
+      for function in &arg.functions {
+        entry.insert(function.name.clone(), function.binding.clone());
+      }
+    }
+    let pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    for page in &pages {
+      for function in &arg.functions {
+        page
+          .expose_callback(&function.name, bind_source(function.binding.clone(), composite.clone()))
+          .await?;
+      }
+    }
+    let script = self
+      .traced(
+        "addInitScript",
+        serde_json::json!({}),
+        self.add_init_script_source(source),
+      )
+      .await?;
+    let this = self.clone();
+    let names: Vec<String> = arg.functions.into_iter().map(|f| f.name).collect();
+    Ok(crate::disposable::Disposable::new(move || async move {
+      {
+        let callbacks = this.state.read().await.context_callbacks.clone();
+        let mut guard = callbacks.write().await;
+        if let Some(map) = guard.get_mut(&this.key.to_composite()) {
+          for name in &names {
+            map.remove(name);
+          }
+        }
+      }
+      let pages = {
+        let state = this.state.read().await;
+        state.context(&this.name).map(|c| c.pages.clone()).unwrap_or_default()
+      };
+      for page in &pages {
+        for name in &names {
+          page.remove_callback(name).await;
+        }
+      }
+      script.dispose().await
+    }))
+  }
+
   /// Register a lowered init-script source on this context: applied to
   /// every open page now, recorded in the per-context registry so
   /// [`Self::new_page`] applies it to future pages too (Playwright
@@ -1412,31 +1506,41 @@ impl ContextRef {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
       (state.context_init_scripts.clone(), id)
     };
+    let installed = Arc::new(std::sync::Mutex::new(Vec::new()));
     registry
       .write()
       .await
       .entry(composite.clone())
       .or_default()
-      .push((registry_id, source.clone()));
+      .push(crate::state::ContextInitScript {
+        id: registry_id,
+        source: source.clone(),
+        installed: Arc::clone(&installed),
+      });
 
     let inner_pages = {
       let state = self.state.read().await;
       state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
     };
-    let mut undo = Vec::with_capacity(inner_pages.len());
     for page in inner_pages {
       let id = page.add_init_script(&source).await?;
-      undo.push((page, id));
+      installed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((page, id));
     }
     Ok(crate::disposable::Disposable::new(move || async move {
       {
         let mut guard = registry.write().await;
         if let Some(entries) = guard.get_mut(&composite) {
-          entries.retain(|(id, _)| *id != registry_id);
+          entries.retain(|entry| entry.id != registry_id);
         }
       }
+      let undo = std::mem::take(&mut *installed.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
       for (page, id) in undo {
-        page.remove_init_script(&id).await?;
+        if !page.is_closed() {
+          page.remove_init_script(&id).await?;
+        }
       }
       Ok(())
     }))
@@ -1445,16 +1549,25 @@ impl ContextRef {
   /// Install every registered context-level init script onto a fresh
   /// page.
   async fn apply_context_init_scripts(&self, page: &Arc<Page>) -> Result<()> {
-    let sources: Vec<String> = {
+    let scripts: Vec<_> = {
       let registry = self.state.read().await.context_init_scripts.clone();
       let guard = registry.read().await;
       guard
         .get(&self.key.to_composite())
-        .map(|entries| entries.iter().map(|(_, s)| s.clone()).collect())
+        .map(|entries| {
+          entries
+            .iter()
+            .map(|e| (e.source.clone(), Arc::clone(&e.installed)))
+            .collect()
+        })
         .unwrap_or_default()
     };
-    for source in sources {
-      page.inner().add_init_script(&source).await?;
+    for (source, installed) in scripts {
+      let id = page.inner().add_init_script(&source).await?;
+      installed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((page.inner().clone(), id));
     }
     Ok(())
   }
@@ -2041,6 +2154,9 @@ async fn register_popup(
     && let Err(e) = apply_context_options(&page, opts).await
   {
     tracing::debug!("popup context options: {e}");
+  }
+  if let Err(e) = ctx_ref.apply_context_callbacks_pre_doc(page.inner()).await {
+    tracing::debug!("popup init-script callbacks: {e}");
   }
   if let Err(e) = ctx_ref.apply_context_init_scripts(&page).await {
     tracing::debug!("popup init scripts: {e}");

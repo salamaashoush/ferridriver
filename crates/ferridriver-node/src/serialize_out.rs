@@ -135,6 +135,10 @@ fn rehydrate(
       Status::InvalidArg,
       "rehydrate: bare Handle in return value — use evaluateHandle()".to_string(),
     )),
+    SerializedValue::Function(name) => Err(Error::new(
+      Status::InvalidArg,
+      format!("rehydrate: function binding {name} in a return value"),
+    )),
   }
 }
 

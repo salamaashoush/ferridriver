@@ -1796,6 +1796,34 @@ impl AnyPage {
     page_dispatch!(self, remove_exposed_function(name))
   }
 
+  /// Register the callback behind a function passed as an argument: the
+  /// page reaches it only through `__playwright__binding__controller__`.
+  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    page_dispatch!(self, expose_callback(name, binding))
+  }
+
+  /// [`Self::expose_callback`] for a popup whose first document has not run
+  /// yet; see [`Self::expose_binding_pre_doc`].
+  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    match self {
+      AnyPage::CdpPipe(p) => p.expose_callback_pre_doc(name, binding).await,
+      AnyPage::CdpWs(p) => p.expose_callback_pre_doc(name, binding).await,
+      AnyPage::WebKit(p) => p.expose_callback_pre_doc(name, binding).await,
+      AnyPage::Bidi(p) => p.expose_callback(name, binding).await,
+      AnyPage::WebDriver(p) => p.expose_callback(name, binding).await,
+    }
+  }
+
+  pub async fn remove_callback(&self, name: &str) {
+    match self {
+      AnyPage::CdpPipe(p) => p.remove_callback(name).await,
+      AnyPage::CdpWs(p) => p.remove_callback(name).await,
+      AnyPage::WebKit(p) => p.remove_callback(name).await,
+      AnyPage::Bidi(p) => p.remove_callback(name).await,
+      AnyPage::WebDriver(_) => {},
+    }
+  }
+
   // ── Init Scripts ──
 
   pub async fn add_init_script(&self, source: &str) -> Result<String> {

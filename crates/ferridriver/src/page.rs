@@ -1206,6 +1206,32 @@ impl Page {
       .await
   }
 
+  /// Register the callbacks behind the functions in an `evaluate`
+  /// argument. Playwright erases them when the main frame commits a new
+  /// document; here the next registration removes those a navigation
+  /// retired.
+  pub(crate) async fn expose_arg_functions(&self, functions: &[crate::protocol::ArgFunction]) -> Result<()> {
+    if functions.is_empty() {
+      return Ok(());
+    }
+    let retired = match self.inner.observed().lock() {
+      Ok(mut observed) => observed.track_evaluate_callbacks(functions.iter().map(|f| f.name.clone())),
+      Err(poisoned) => poisoned
+        .into_inner()
+        .track_evaluate_callbacks(functions.iter().map(|f| f.name.clone())),
+    };
+    for name in retired {
+      self.inner.remove_callback(&name).await;
+    }
+    for function in functions {
+      self
+        .inner
+        .expose_callback(&function.name, function.binding.clone())
+        .await?;
+    }
+    Ok(())
+  }
+
   // ── evaluate (Playwright parity) ─────────────────────────────────────
 
   /// Playwright: `page.evaluate(pageFunction, arg?): Promise<R>`
@@ -4513,6 +4539,37 @@ impl Page {
     let identifier = self.inner.add_init_script(&source).await?;
     let inner = self.inner.clone();
     Ok(crate::disposable::Disposable::new(move || async move {
+      inner.remove_init_script(&identifier).await
+    }))
+  }
+
+  /// Playwright: `page.addInitScript(script, arg, { exposeFunctions: true })`.
+  /// Each function in `arg` stays callable from every document the
+  /// script runs in, until the returned disposable removes the script.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error unless `script` is a function, if `arg` holds a
+  /// handle, or if the backend injection fails.
+  pub async fn add_init_script_exposing_functions(
+    &self,
+    script: crate::options::InitScriptSource,
+    arg: crate::protocol::SerializedArgument,
+  ) -> Result<crate::disposable::Disposable> {
+    let source = crate::options::evaluation_script_exposing(script, &arg.value)?;
+    for function in &arg.functions {
+      self
+        .inner
+        .expose_callback(&function.name, function.binding.clone())
+        .await?;
+    }
+    let identifier = self.inner.add_init_script(&source).await?;
+    let inner = self.inner.clone();
+    let names: Vec<String> = arg.functions.into_iter().map(|f| f.name).collect();
+    Ok(crate::disposable::Disposable::new(move || async move {
+      for name in &names {
+        inner.remove_callback(name).await;
+      }
       inner.remove_init_script(&identifier).await
     }))
   }

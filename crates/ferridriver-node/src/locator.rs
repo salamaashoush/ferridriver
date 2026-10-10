@@ -758,7 +758,7 @@ impl Locator {
   /// Playwright: `locator.evaluate(pageFunction, arg?, options?): Promise<R>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:129`).
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number }",
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, exposeFunctions?: boolean }",
     ts_return_type = "Promise<unknown>"
   )]
   pub async fn evaluate(
@@ -767,7 +767,8 @@ impl Locator {
     arg: Option<crate::types::NapiEvaluateArg>,
     options: Option<crate::types::EvaluateOptions>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let expose_functions = options.as_ref().and_then(|o| o.expose_functions).unwrap_or(false);
+    let serialized = crate::page::build_evaluate_argument(arg, expose_functions)?;
     let opts = options.map(Into::into);
     let result = self
       .inner
@@ -780,14 +781,17 @@ impl Locator {
 
   /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:138`).
-  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number }")]
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, exposeFunctions?: boolean }"
+  )]
   pub async fn evaluate_handle(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
     options: Option<crate::types::EvaluateOptions>,
   ) -> Result<crate::js_handle::JSHandle> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let expose_functions = options.as_ref().and_then(|o| o.expose_functions).unwrap_or(false);
+    let serialized = crate::page::build_evaluate_argument(arg, expose_functions)?;
     let opts = options.map(Into::into);
     let handle = self
       .inner
@@ -809,7 +813,7 @@ impl Locator {
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::serialize_out::Evaluated> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized = crate::page::build_serialized_argument(arg)?;
     let result = self
       .inner
       .evaluate_all(&page_function.source, serialized, page_function.is_function)
@@ -827,7 +831,7 @@ impl Locator {
     arg: Option<crate::types::NapiEvaluateArg>,
     options: Option<crate::types::EvaluateOptions>,
   ) -> Result<()> {
-    let serialized = crate::page::build_serialized_argument(arg);
+    let serialized = crate::page::build_serialized_argument(arg)?;
     let opts: Option<ferridriver::options::EvaluateOptions> = options.map(Into::into);
     let timeout = opts.and_then(|o| o.timeout);
     self

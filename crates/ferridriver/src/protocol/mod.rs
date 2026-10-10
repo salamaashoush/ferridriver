@@ -10,6 +10,7 @@
 pub mod serializers;
 
 pub use serializers::{
-  ArrayBufferValue, ErrorValue, HandleId, PropertyEntry, RegExpValue, SerializationContext, SerializedArgument,
-  SerializedValue, SpecialValue, TypedArrayKind, TypedArrayValue, argument_from_serde, result_to_serde,
+  ArgFunction, ArgPathStep, ArrayBufferValue, BINDINGS_CONTROLLER, ErrorValue, HandleId, PropertyEntry, RegExpValue,
+  SerializationContext, SerializedArgument, SerializedValue, SpecialValue, TypedArrayKind, TypedArrayValue,
+  argument_from_serde, result_to_serde, unexpected_value_error,
 };
