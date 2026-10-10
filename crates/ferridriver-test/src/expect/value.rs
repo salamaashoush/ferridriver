@@ -16,6 +16,7 @@ impl From<ferridriver_expect::AssertionFailure> for TestFailure {
       stack: a.location.map(|loc| format!("at {loc}")),
       diff: a.diff,
       screenshot: None,
+      error_context: a.error_context,
     }
   }
 }

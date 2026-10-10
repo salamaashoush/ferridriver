@@ -730,6 +730,13 @@ pub fn attempt_errors(outcome: &TestOutcome) -> Vec<&TestFailure> {
 fn attachment_lines(screen: Screen, attachments: &[Attachment]) -> Vec<String> {
   let mut lines = Vec::new();
   for (i, attachment) in attachments.iter().enumerate() {
+    if attachment.name == "error-context"
+      && let AttachmentBody::Path(path) = &attachment.body
+    {
+      lines.push(String::new());
+      lines.push(screen.dim(&format!("    Error Context: {}", path.display())));
+      continue;
+    }
     if attachment.name.starts_with('_') {
       continue;
     }

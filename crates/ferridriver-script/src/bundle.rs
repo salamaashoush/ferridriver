@@ -344,6 +344,29 @@ impl BundleSourceMap {
   pub fn new(bundle: Arc<CompiledBundle>, cwd: Arc<PathBuf>) -> Self {
     Self { bundle, cwd }
   }
+
+  /// `stack` with every frame in the bundle rewritten to the absolute
+  /// path, line and column of the source it came from, which is what a
+  /// reporter's location and a code frame are read from.
+  #[must_use]
+  pub fn resolve_stack(&self, stack: &str) -> String {
+    stack
+      .split('\n')
+      .map(|line| {
+        let Some((file, l, c)) = ferrijs::source_map::innermost_frame(line) else {
+          return line.to_string();
+        };
+        if file != self.bundle.module_name {
+          return line.to_string();
+        }
+        match ferridriver_test::host::SourceMap::remap(self, l, c) {
+          Some((src, sl, sc)) => line.replace(&format!("{file}:{l}:{c}"), &format!("{src}:{sl}:{sc}")),
+          None => line.to_string(),
+        }
+      })
+      .collect::<Vec<_>>()
+      .join("\n")
+  }
 }
 
 impl ferridriver_test::host::SourceMap for BundleSourceMap {

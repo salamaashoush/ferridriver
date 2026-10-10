@@ -2458,6 +2458,40 @@ pub(crate) async fn teardown_test_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptEr
   }
 }
 
+/// A failure caught from test code, with the `matcherResult.ariaSnapshot`
+/// an `expect` failure carries, which the host needs alongside the
+/// message to write `error-context.md`.
+struct Thrown {
+  error: ScriptError,
+  aria_snapshot: Option<String>,
+}
+
+impl Thrown {
+  fn caught(caught: rquickjs::CaughtError<'_>, source: &str) -> Self {
+    let thrown = match &caught {
+      rquickjs::CaughtError::Exception(e) => Some(e.as_object()),
+      rquickjs::CaughtError::Value(v) => v.as_object(),
+      rquickjs::CaughtError::Error(_) => None,
+    };
+    let aria_snapshot = thrown
+      .and_then(|e| e.get::<_, Object<'_>>("matcherResult").ok())
+      .and_then(|r| r.get::<_, Option<String>>("ariaSnapshot").ok().flatten());
+    Self {
+      error: caught_to_script_error(caught, source),
+      aria_snapshot,
+    }
+  }
+}
+
+impl From<ScriptError> for Thrown {
+  fn from(error: ScriptError) -> Self {
+    Self {
+      error,
+      aria_snapshot: None,
+    }
+  }
+}
+
 /// Resume every suspended worker-scoped fixture factory — the glue
 /// calls this once per worker session after the run completes.
 pub async fn teardown_worker_fixtures(vm: &ferrijs::VmHandle) -> Result<(), ScriptError> {
@@ -2580,10 +2614,10 @@ pub async fn run_test(
 }
 
 async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorldData) -> Result<(), ScriptError> {
-  let (world_obj, info_obj) = with_test_registry(ctx, |r| {
+  let (world_obj, info_obj, bridge) = with_test_registry(ctx, |r| {
     r.current
       .as_ref()
-      .map(|c| (c.world.clone(), c.test_info.clone()))
+      .map(|c| (c.world.clone(), c.test_info.clone(), Arc::clone(&c.bridge)))
       .ok_or_else(|| ScriptError::internal("no current test".to_string()))
   })??;
   let world_obj = world_obj.restore(ctx).map_err(se)?;
@@ -2606,7 +2640,7 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
   )
   .await?;
 
-  let mut first_err: Option<ScriptError> = None;
+  let mut first_err: Option<Thrown> = None;
 
   // Modifiers first, then hooks — Playwright's order
   // (`worker/workerMain.ts:556`). A `skip` here must stop the test
@@ -2616,7 +2650,7 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
     match apply_suite_modifier(ctx, m, &world_obj, &info_obj, &spec.source_label).await {
       Ok(()) => {},
       Err(e) => {
-        first_err = Some(e);
+        first_err = Some(e.into());
         break;
       },
     }
@@ -2639,10 +2673,10 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
     match called.catch(ctx) {
       Ok(mp) => {
         if let Err(e) = mp.into_future::<Value<'_>>().await.catch(ctx) {
-          first_err = Some(caught_to_script_error(e, &spec.source_label));
+          first_err = Some(Thrown::caught(e, &spec.source_label));
         }
       },
-      Err(e) => first_err = Some(caught_to_script_error(e, &spec.source_label)),
+      Err(e) => first_err = Some(Thrown::caught(e, &spec.source_label)),
     }
   }
 
@@ -2654,7 +2688,10 @@ async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorld
   }
 
   match first_err {
-    Some(e) => Err(e),
+    Some(thrown) => {
+      bridge.set_failure_context(thrown.aria_snapshot);
+      Err(thrown.error)
+    },
     None => Ok(()),
   }
 }
@@ -2720,7 +2757,7 @@ async fn invoke_hook_fn<'js>(
   world_obj: &Object<'js>,
   info_obj: &Object<'js>,
   source_label: &str,
-) -> Result<(), ScriptError> {
+) -> Result<(), Thrown> {
   let func = with_test_registry(ctx, |r| {
     r.hooks
       .get(hook_idx)
@@ -2729,12 +2766,12 @@ async fn invoke_hook_fn<'js>(
   })??;
   let func = func.restore(ctx).map_err(se)?;
   let called: rquickjs::Result<MaybePromise<'_>> = func.call((world_obj.clone(), info_obj.clone()));
-  let mp = called.catch(ctx).map_err(|e| caught_to_script_error(e, source_label))?;
+  let mp = called.catch(ctx).map_err(|e| Thrown::caught(e, source_label))?;
   mp.into_future::<Value<'_>>()
     .await
     .catch(ctx)
     .map(|_| ())
-    .map_err(|e| caught_to_script_error(e, source_label))
+    .map_err(|e| Thrown::caught(e, source_label))
 }
 
 /// Execute one `beforeAll`/`afterAll` hook with its own fixtures
@@ -2777,7 +2814,12 @@ pub async fn run_standalone_hook(
     )?;
     let result = async {
       resolve_custom_fixtures(&ctx, &world_obj, fixture_set, &requested, &world.use_options, &source_label).await?;
-      invoke_hook_fn(&ctx, hook_idx, &world_obj, &info_obj, &source_label).await
+      invoke_hook_fn(&ctx, hook_idx, &world_obj, &info_obj, &source_label)
+        .await
+        .map_err(|thrown| {
+          bridge.set_failure_context(thrown.aria_snapshot);
+          thrown.error
+        })
     }
     .await;
 

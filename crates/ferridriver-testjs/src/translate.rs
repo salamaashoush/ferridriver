@@ -486,14 +486,15 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let world = build_world_data(&pool, &test_info, &p).await?;
 
       let base_timeout = test_info.timeout;
+      let source_map = Arc::new(ferridriver_script::BundleSourceMap::new(
+        Arc::clone(&p.bundle),
+        Arc::clone(&p.cwd),
+      ));
       let bridge = Arc::new(InfoBridge::new(
         Arc::clone(&test_info),
         modifiers,
         Arc::new(session.session().deadline()),
-        Arc::new(ferridriver_script::BundleSourceMap::new(
-          Arc::clone(&p.bundle),
-          Arc::clone(&p.cwd),
-        )),
+        source_map.clone(),
         Arc::clone(&p.cwd),
         base_timeout,
         (*p.static_annotations).clone(),
@@ -517,15 +518,42 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
 
       match result {
         Ok(()) => Ok(()),
-        Err(e) => Err(TestFailure {
-          message: p.bundle.format_error(&e),
-          stack: e.stack.clone(),
-          diff: None,
-          screenshot: None,
-        }),
+        Err(e) => Err(script_failure(
+          &p.bundle,
+          &source_map,
+          &e,
+          bridge.take_failure_context(),
+        )),
       }
     })
   })
+}
+
+/// A thrown JS error as the runner's failure. With a stack, the stack
+/// names the source position, so the message stays the error's own text;
+/// without one, the message carries the location the bundle can map.
+fn script_failure(
+  bundle: &CompiledBundle,
+  source_map: &ferridriver_script::BundleSourceMap,
+  e: &ferridriver_script::ScriptError,
+  error_context: Option<String>,
+) -> TestFailure {
+  let stack = e
+    .stack
+    .as_deref()
+    .filter(|stack| !stack.trim().is_empty())
+    .map(|stack| source_map.resolve_stack(stack));
+  TestFailure {
+    message: if stack.is_some() {
+      e.message.clone()
+    } else {
+      bundle.format_error(e)
+    },
+    stack,
+    diff: None,
+    screenshot: None,
+    error_context,
+  }
 }
 
 /// Shared translation inputs.
@@ -872,26 +900,22 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
         })
         .info,
       };
+      let source_map = Arc::new(ferridriver_script::BundleSourceMap::new(
+        Arc::clone(&bundle),
+        cwd.clone(),
+      ));
       let bridge = Arc::new(InfoBridge::new(
         test_info,
         modifiers,
         Arc::new(session.session().deadline()),
-        Arc::new(ferridriver_script::BundleSourceMap::new(
-          Arc::clone(&bundle),
-          cwd.clone(),
-        )),
+        source_map.clone(),
         cwd.clone(),
         Duration::from_secs(30),
         Vec::new(),
       ));
-      ferridriver_script::run_standalone_hook(&session.vm_handle(), h_idx, world, bridge as _, label.clone())
+      ferridriver_script::run_standalone_hook(&session.vm_handle(), h_idx, world, bridge.clone() as _, label.clone())
         .await
-        .map_err(|e| TestFailure {
-          message: bundle.format_error(&e),
-          stack: e.stack.clone(),
-          diff: None,
-          screenshot: None,
-        })
+        .map_err(|e| script_failure(&bundle, &source_map, &e, bridge.take_failure_context()))
     })
   })
 }

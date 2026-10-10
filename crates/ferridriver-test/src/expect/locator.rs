@@ -241,6 +241,7 @@ async fn capture_target(
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         });
       },
     }
@@ -303,6 +304,7 @@ async fn capture_target(
     stack: None,
     diff: None,
     screenshot: None,
+    error_context: None,
   })?;
 
   match (locator, options.clip) {
@@ -319,6 +321,7 @@ fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>,
     stack: None,
     diff: None,
     screenshot: None,
+    error_context: None,
   })?;
   let (img_w, img_h) = img.dimensions();
   #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -337,6 +340,7 @@ fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>,
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     });
   }
   let cropped = img.crop_imm(x, y, w, h);
@@ -348,6 +352,7 @@ fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>,
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     })?;
   Ok(out)
 }

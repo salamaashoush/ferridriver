@@ -104,6 +104,7 @@ pub async fn mount(
     stack: None,
     diff: None,
     screenshot: None,
+    error_context: None,
   })?;
 
   // Return a locator pointing at the component root.
@@ -124,6 +125,7 @@ pub async fn unmount(page: &std::sync::Arc<ferridriver::Page>) -> Result<(), Tes
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     })?;
   Ok(())
 }

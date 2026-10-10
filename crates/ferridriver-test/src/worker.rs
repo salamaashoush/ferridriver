@@ -875,6 +875,90 @@ pub struct Worker {
   pool: Arc<crate::context_pool::ContextPool>,
 }
 
+/// Whether the attempt failed in a way `error-context.md` would carry
+/// none of the page for: some error was recorded and none of them
+/// brought the accessibility tree its assertion judged.
+fn wants_page_snapshot<E>(result: &Result<Result<(), TestFailure>, E>, test_info: &TestInfo) -> bool {
+  if std::env::var_os("PLAYWRIGHT_NO_COPY_PROMPT").is_some() {
+    return false;
+  }
+  let hard = match result {
+    Ok(Ok(())) => None,
+    Ok(Err(failure)) if failure.message.contains("__FERRIDRIVER_SKIP__:") => None,
+    Ok(Err(failure)) => Some(failure.error_context.is_some()),
+    Err(_) => Some(false),
+  };
+  let soft = test_info
+    .soft_errors
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .iter()
+    .map(|e| e.error_context.is_some())
+    .collect::<Vec<_>>();
+  let mut carried = hard.into_iter().chain(soft).peekable();
+  carried.peek().is_some() && carried.all(|has_context| !has_context)
+}
+
+/// The first page of the test's context, as an AI-mode aria snapshot,
+/// within the five seconds upstream gives it.
+async fn take_page_snapshot(context: Option<Arc<ferridriver::ContextRef>>) -> Option<String> {
+  let page = context?.pages().await.ok()?.into_iter().next()?;
+  let options = ferridriver::options::AriaSnapshotOptions {
+    mode: Some(ferridriver::options::AriaSnapshotMode::Ai),
+    timeout: Some(5000),
+    ..Default::default()
+  };
+  match page
+    .locator("body,frameset")
+    .first()
+    .aria_snapshot()
+    .options(options)
+    .await
+  {
+    Ok(snapshot) => Some(snapshot),
+    Err(e) => {
+      tracing::debug!(target: "ferridriver::worker", "failed to capture aria snapshot: {e}");
+      None
+    },
+  }
+}
+
+/// Write `error-context.md` for an attempt that recorded errors, and the
+/// attachment that points at it.
+fn write_error_context(
+  test_info: &TestInfo,
+  attempt: u32,
+  errors: &[&TestFailure],
+  page_snapshot: Option<&str>,
+) -> Option<Attachment> {
+  if errors.is_empty() || errors.iter().any(|e| e.message.contains("__FERRIDRIVER_SKIP__:")) {
+    return None;
+  }
+  let id = &test_info.test_id;
+  let cwd = std::env::current_dir().unwrap_or_default();
+  let content = crate::error_context::build(&crate::error_context::ErrorContextInput {
+    title_path: &test_info.title_path,
+    file: &id.file,
+    line: id.line.and_then(|l| u32::try_from(l).ok()).unwrap_or_default(),
+    column: id.column.and_then(|c| u32::try_from(c).ok()).unwrap_or_default(),
+    errors,
+    page_snapshot: page_snapshot.filter(|_| errors.iter().all(|e| e.error_context.is_none())),
+    cwd: &cwd,
+  })?;
+  let _ = std::fs::create_dir_all(&test_info.output_dir);
+  let path = test_info.output_dir.join(format!("error-context-attempt{attempt}.md"));
+  if let Err(e) = std::fs::write(&path, content) {
+    tracing::warn!(target: "ferridriver::worker", "error context write failed: {e}");
+    return None;
+  }
+  Some(Attachment {
+    name: "error-context".into(),
+    content_type: "text/markdown".into(),
+    body: AttachmentBody::Path(path),
+    step_id: None,
+  })
+}
+
 pub(crate) fn test_artifact_dir_name(id: &crate::model::TestId, project: &str) -> String {
   let name = artifact_dir_name(&id.full_name(), project);
   if id.repeat_each_index == 0 {
@@ -1211,6 +1295,7 @@ impl Worker {
             stack: None,
             diff: None,
             screenshot: None,
+            error_context: None,
           }),
           annotations: test.annotations.clone(),
           ..self.outcome_base(test, SystemTime::now())
@@ -1392,6 +1477,7 @@ impl Worker {
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         }),
         annotations: test.annotations.clone(),
         ..self.outcome_base(test, SystemTime::now())
@@ -2032,6 +2118,21 @@ impl Worker {
         _ => None,
       }
     };
+    // Playwright's `_takePageSnapshot`: an `expect` failure brings the
+    // tree it judged; any other failure gets the page as it was left.
+    let page_snapshot = if wants_page_snapshot(&timeout_result, &test_info) && teardown_stuck.is_none() {
+      Box::pin(after_hooks_step(
+        after_budget,
+        &after_limit_rx,
+        &mut teardown_stuck,
+        "capturing the page snapshot",
+        take_page_snapshot(resources.current_context().await),
+      ))
+      .await
+      .flatten()
+    } else {
+      None
+    };
     // Out of budget, the context is left to the browser's own shutdown:
     // closing it is the step most likely to wait on whatever wedged.
     Box::pin(after_hooks_step(
@@ -2051,6 +2152,7 @@ impl Worker {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     });
 
     let duration = start.elapsed();
@@ -2142,6 +2244,7 @@ impl Worker {
           stack: None,
           diff: None,
           screenshot,
+          error_context: None,
         }),
       ),
     };
@@ -2166,6 +2269,12 @@ impl Worker {
     // `test.fail()` is consulted: a test that only failed softly did
     // fail, and `test.fail()` must be able to expect that.
     let soft_errors = test_info.drain_soft_errors();
+    let error_context = write_error_context(
+      &test_info,
+      attempt,
+      raw_error.iter().chain(&soft_errors).collect::<Vec<_>>().as_slice(),
+      page_snapshot.as_deref(),
+    );
     let (raw_status, raw_error) = if !soft_errors.is_empty() && raw_status == TestStatus::Passed {
       let msg = soft_errors
         .iter()
@@ -2179,6 +2288,7 @@ impl Worker {
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         }),
       )
     } else {
@@ -2199,6 +2309,7 @@ impl Worker {
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         }),
       ),
       _ => (raw_status, raw_error),
@@ -2227,6 +2338,8 @@ impl Worker {
         let _ = std::fs::remove_file(path);
       }
     }
+
+    attachments.extend(error_context);
 
     // Merge compile-time annotations with runtime annotations.
     let mut annotations = test.annotations.clone();
@@ -2401,6 +2514,7 @@ where
         stack,
         diff: None,
         screenshot: None,
+        error_context: None,
       })
     },
   }

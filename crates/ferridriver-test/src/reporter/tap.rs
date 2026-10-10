@@ -198,6 +198,7 @@ mod tests {
           stack: Some("at spec.ts:7:1".into()),
           diff: None,
           screenshot: None,
+          error_context: None,
         }),
         ..Default::default()
       }),

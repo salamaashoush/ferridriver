@@ -100,6 +100,7 @@ pub mod ct;
 pub mod debug;
 pub mod discovery;
 pub mod dispatcher;
+pub mod error_context;
 pub mod expect;
 pub mod fixture;
 pub mod fixture_graph;

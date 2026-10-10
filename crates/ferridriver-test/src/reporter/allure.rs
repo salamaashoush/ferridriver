@@ -667,6 +667,7 @@ mod tests {
       stack: Some("at pay (tests/checkout.spec.ts:9:1)".into()),
       diff: None,
       screenshot: Some(vec![1, 2, 3]),
+      error_context: None,
     });
     failed.steps = vec![TestStep {
       step_id: "s1".into(),

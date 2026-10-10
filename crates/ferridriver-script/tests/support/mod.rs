@@ -131,9 +131,11 @@ impl TestHostBridge for MockBridge {
     self.state(|s| s.annotations.clone())
   }
 
-  fn record_soft_error(&self, message: String, _diff: Option<String>) {
+  fn record_soft_error(&self, message: String, _diff: Option<String>, _error_context: Option<String>) {
     self.state(|s| s.soft_errors.push(message));
   }
+
+  fn set_failure_context(&self, _error_context: Option<String>) {}
 
   fn set_skip(&self, reason: Option<String>) {
     self.state(|s| {

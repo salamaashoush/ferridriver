@@ -1354,6 +1354,7 @@ impl TestRunner {
                 stack: e.stack.clone(),
                 diff: None,
                 screenshot: None,
+                error_context: None,
               }),
             });
             event_bus.emit(ReporterEvent::RunFinished {

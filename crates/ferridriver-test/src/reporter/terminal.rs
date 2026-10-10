@@ -320,6 +320,7 @@ mod tests {
       stack: Some("    at check (tests/cart.spec.ts:19:5)".into()),
       diff: None,
       screenshot: None,
+      error_context: None,
     };
     Arc::new(TestOutcome {
       test_id: id(name),
@@ -471,6 +472,7 @@ mod tests {
         stack: None,
         diff: None,
         screenshot: None,
+        error_context: None,
       }),
     }])
     .await;

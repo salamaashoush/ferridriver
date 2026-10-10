@@ -495,6 +495,7 @@ fn runtime_failure(failure: WireFailure, resources: &FxHashMap<String, Vec<u8>>)
     stack: failure.stack,
     diff: failure.diff,
     screenshot: failure.screenshot.and_then(|name| resources.get(&name).cloned()),
+    error_context: None,
   }
 }
 
@@ -997,12 +998,14 @@ mod tests {
         stack: Some("at a.spec.ts:9:2".into()),
         diff: Some("- a\n+ b".into()),
         screenshot: Some(vec![1, 2, 3, 4]),
+        error_context: None,
       }),
       errors: vec![TestFailure {
         message: "boom".into(),
         stack: None,
         diff: None,
         screenshot: None,
+        error_context: None,
       }],
       attachments: vec![Attachment {
         name: "shot".into(),

@@ -212,6 +212,7 @@ pub fn match_value_snapshot(
     stack: None,
     diff: (difference.diff.is_none()).then_some(difference.message),
     screenshot: difference.diff,
+    error_context: None,
   })
 }
 
@@ -380,6 +381,7 @@ fn snapshot_failure(message: String) -> TestFailure {
     stack: None,
     diff: None,
     screenshot: None,
+    error_context: None,
   }
 }
 
@@ -778,6 +780,7 @@ fn screenshot_difference(
     stack: None,
     diff: None,
     screenshot: diff.map(<[u8]>::to_vec),
+    error_context: None,
   }
 }
 
@@ -865,5 +868,6 @@ fn compare_existing_png(
     stack: None,
     diff: None,
     screenshot: Some(mismatch.diff),
+    error_context: None,
   })
 }

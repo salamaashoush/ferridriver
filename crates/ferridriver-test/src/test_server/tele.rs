@@ -628,6 +628,7 @@ mod tests {
       stack: Some("at spec.ts:3".into()),
       diff: None,
       screenshot: None,
+      error_context: None,
     });
     let event = test_end("t1", &failed, Duration::from_secs(30));
     assert_eq!(event["params"]["result"]["status"], "failed");

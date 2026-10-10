@@ -51,6 +51,7 @@ fn fail<T: std::fmt::Display>(msg: T) -> TestFailure {
     stack: None,
     diff: None,
     screenshot: None,
+    error_context: None,
   }
 }
 

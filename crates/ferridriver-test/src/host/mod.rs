@@ -54,7 +54,12 @@ pub trait TestHostBridge: crate::step::StepDriver {
   /// Record a soft assertion failure. Synchronous: the value matchers
   /// have no `await` to spend, and the rule that a soft failure is
   /// recorded rather than thrown lives in `ferridriver_expect::soft`.
-  fn record_soft_error(&self, message: String, diff: Option<String>);
+  fn record_soft_error(&self, message: String, diff: Option<String>, error_context: Option<String>);
+  /// The `matcherResult.ariaSnapshot` the error that failed the test
+  /// carried, or `None` when it carried none. A thrown value reaches the
+  /// host as a message and a stack; this is the rest of what
+  /// `error-context.md` needs from it.
+  fn set_failure_context(&self, error_context: Option<String>);
   fn set_skip(&self, reason: Option<String>);
   fn set_expected_failure(&self);
   fn set_slow(&self);

@@ -567,6 +567,7 @@ impl ferridriver_expect::SoftSink for TestInfo {
       stack: failure.location.map(|l| l.to_string()),
       diff: failure.diff.clone(),
       screenshot: None,
+      error_context: failure.error_context.clone(),
     });
   }
 
@@ -1734,6 +1735,9 @@ pub struct TestFailure {
   pub diff: Option<String>,
   /// Screenshot on failure (auto-captured).
   pub screenshot: Option<Vec<u8>>,
+  /// The page's accessibility tree where an `expect` failed: Playwright's
+  /// `TestInfoError.errorContext`, written into `error-context.md`.
+  pub error_context: Option<String>,
 }
 
 impl fmt::Display for TestFailure {
@@ -1761,6 +1765,7 @@ impl TestFailure {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     }
   }
 }
@@ -1776,6 +1781,7 @@ impl From<String> for TestFailure {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     }
   }
 }
@@ -1799,6 +1805,7 @@ impl From<ferridriver::FerriError> for TestFailure {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     }
   }
 }

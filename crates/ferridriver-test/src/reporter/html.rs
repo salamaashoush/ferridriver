@@ -756,6 +756,7 @@ mod tests {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     });
     record(&mut reporter, first).await;
     record(&mut reporter, outcome("logs in", TestStatus::Passed, 2)).await;
@@ -790,6 +791,7 @@ mod tests {
       stack: None,
       diff: None,
       screenshot: Some(vec![1, 2, 3]),
+      error_context: None,
     });
     let attachments = attachments_of(&failed);
     assert_eq!(attachments.len(), 1);
@@ -820,6 +822,7 @@ mod tests {
           stack: Some("at setup.ts:3:1".into()),
           diff: None,
           screenshot: None,
+          error_context: None,
         }),
       })
       .await;

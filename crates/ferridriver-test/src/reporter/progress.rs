@@ -137,6 +137,7 @@ mod tests {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     });
     Arc::new(TestOutcome {
       test_id: TestId {

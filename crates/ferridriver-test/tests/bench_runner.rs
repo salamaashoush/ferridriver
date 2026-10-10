@@ -53,12 +53,14 @@ fn make_nav_test(i: usize) -> TestCase {
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         })?;
         let title = page.title().await.map_err(|e| TestFailure {
           message: e.to_string(),
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         })?;
         assert!(title.contains(&format!("Test {i}")));
         Ok(())
@@ -93,12 +95,14 @@ fn make_interaction_test(i: usize) -> TestCase {
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         })?;
         page.locator("#btn").click().await.map_err(|e| TestFailure {
           message: e.to_string(),
           stack: None,
           diff: None,
           screenshot: None,
+          error_context: None,
         })?;
         let text = page
           .locator("#btn")
@@ -109,6 +113,7 @@ fn make_interaction_test(i: usize) -> TestCase {
             stack: None,
             diff: None,
             screenshot: None,
+            error_context: None,
           })?
           .unwrap_or_default();
         assert!(text.contains(&format!("done {i}")));

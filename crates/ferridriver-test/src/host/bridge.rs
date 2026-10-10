@@ -37,6 +37,7 @@ pub struct InfoBridge {
   /// runtime ones.
   static_annotations: Vec<(String, Option<String>)>,
   attachment_count: AtomicUsize,
+  failure_context: Mutex<Option<String>>,
 }
 
 impl InfoBridge {
@@ -59,11 +60,18 @@ impl InfoBridge {
       annotations: Mutex::new(Vec::new()),
       static_annotations,
       attachment_count: AtomicUsize::new(0),
+      failure_context: Mutex::new(None),
     }
   }
 
   fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// What [`TestHostBridge::set_failure_context`] recorded, for the
+  /// [`crate::model::TestFailure`] the host builds from the thrown error.
+  pub fn take_failure_context(&self) -> Option<String> {
+    Self::lock(&self.failure_context).take()
   }
 
   /// Flush runtime annotations into the core `TestInfo` so reporters
@@ -154,7 +162,7 @@ impl TestHostBridge for InfoBridge {
     out
   }
 
-  fn record_soft_error(&self, message: String, diff: Option<String>) {
+  fn record_soft_error(&self, message: String, diff: Option<String>, error_context: Option<String>) {
     // One store: the test's own collector, which decides the outcome and
     // backs `testInfo.errors`. Recording is synchronous because a value
     // matcher has no `await` to spend.
@@ -163,7 +171,12 @@ impl TestHostBridge for InfoBridge {
       stack: None,
       diff,
       screenshot: None,
+      error_context,
     });
+  }
+
+  fn set_failure_context(&self, error_context: Option<String>) {
+    *Self::lock(&self.failure_context) = error_context;
   }
 
   fn set_skip(&self, reason: Option<String>) {
@@ -284,6 +297,7 @@ impl TestHostBridge for InfoBridge {
               stack: None,
               diff: None,
               screenshot: None,
+              error_context: None,
             }),
           }
         }
@@ -531,6 +545,7 @@ fn record_missing_baseline(info: &TestInfo, soft: Option<String>) {
       stack: None,
       diff: None,
       screenshot: None,
+      error_context: None,
     });
     info.forbid_retry();
   }

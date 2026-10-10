@@ -247,6 +247,7 @@ mod tests {
       stack: Some("    at check (tests/pay.spec.ts:88:13)".into()),
       diff: None,
       screenshot: None,
+      error_context: None,
     };
     Arc::new(TestOutcome {
       test_id: TestId {
