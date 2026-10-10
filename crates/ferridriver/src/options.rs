@@ -2506,6 +2506,10 @@ pub struct OriginState {
 pub struct StorageState {
   pub cookies: Vec<crate::backend::CookieData>,
   pub origins: Vec<OriginState>,
+  /// The context's `WebAuthn` passkeys, present only when asked for with
+  /// `storageState({ credentials: true })`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub credentials: Option<Vec<crate::credentials::VirtualCredential>>,
 }
 
 /// Options for `context.storageState(options?)`.
@@ -2518,6 +2522,8 @@ pub struct StorageStateOptions {
   /// Collect `IndexedDB` databases as well. Not yet implemented; accepted for
   /// signature parity. When `true`, the export is unaffected (empty set).
   pub indexed_db: Option<bool>,
+  /// Include the context's `WebAuthn` credentials.
+  pub credentials: Option<bool>,
 }
 
 /// Storage state bag — cookies + per-origin localStorage snapshot.
@@ -3295,6 +3301,7 @@ mod storage_state_tests {
           value: "t1".into(),
         }],
       }],
+      credentials: None,
     };
     let v = serde_json::to_value(&state).unwrap();
     assert_eq!(v["cookies"][0]["name"], "sid");

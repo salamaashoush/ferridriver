@@ -698,6 +698,19 @@ impl ContextRef {
     crate::tracing::Tracing::new(self.clone())
   }
 
+  /// `context.credentials` handle. Playwright: `browserContext.credentials`,
+  /// the context's virtual `WebAuthn` authenticator.
+  #[must_use]
+  pub fn credentials(&self) -> crate::credentials::Credentials {
+    crate::credentials::Credentials::new(self.clone())
+  }
+
+  pub(crate) async fn credential_store(&self) -> Arc<crate::credentials::CredentialStore> {
+    let stores = self.state.read().await.context_credentials.clone();
+    let mut stores = stores.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(stores.entry(self.key.to_composite()).or_default())
+  }
+
   /// `context.clock` handle. Playwright: `browserContext.clock`
   /// (`page.clock` is the same object).
   #[must_use]
@@ -817,7 +830,13 @@ impl ContextRef {
       localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value }))
     })";
 
-    let cookies = self.cookies().await?;
+    // A context opens lazily, with its first page: one that never had a
+    // page has no cookies to read yet, only what it was created with.
+    let cookies = if self.is_open().await {
+      self.cookies().await?
+    } else {
+      Vec::new()
+    };
 
     let pages = self.pages().await?;
     let mut origins: Vec<crate::options::OriginState> = Vec::new();
@@ -842,7 +861,20 @@ impl ContextRef {
       }
     }
 
-    let state = crate::options::StorageState { cookies, origins };
+    let credentials = match opts.as_ref().and_then(|o| o.credentials) {
+      Some(true) => Some(
+        self
+          .credentials()
+          .get(crate::credentials::CredentialFilter::default())
+          .await,
+      ),
+      _ => None,
+    };
+    let state = crate::options::StorageState {
+      cookies,
+      origins,
+      credentials,
+    };
 
     if let Some(opts) = opts
       && let Some(path) = opts.path
@@ -894,7 +926,8 @@ impl ContextRef {
       Some(p) => p,
       None => Box::pin(self.new_page()).await?,
     };
-    page.set_storage_state(state).await
+    page.set_storage_state(state).await?;
+    self.credentials().restore(state_credentials(state)?).await
   }
 
   /// Add cookies to this context.
@@ -1184,17 +1217,30 @@ impl ContextRef {
     if !should_hydrate {
       return Ok(());
     }
-    let state_value = match storage {
-      crate::options::StorageStateInput::Inline(v) => v.clone(),
-      crate::options::StorageStateInput::Path(path) => {
-        let text = std::fs::read_to_string(path)
-          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: read {}: {e}", path.display())))?;
-        serde_json::from_str(&text).map_err(|e| {
-          crate::error::FerriError::Backend(format!("storageState: parse JSON from {}: {e}", path.display()))
-        })?
-      },
+    page.set_storage_state(&storage_state_value(storage)?).await
+  }
+
+  /// Whether the context has opened in the browser, which it does with
+  /// its first page.
+  async fn is_open(&self) -> bool {
+    self.state.read().await.context(&self.name).is_ok()
+  }
+
+  /// Seed the `WebAuthn` credentials of the `storageState` the context was
+  /// created with: Playwright restores them with the context, before any
+  /// page, so `credentials.get()` sees them at once.
+  pub(crate) async fn restore_storage_state_credentials(
+    &self,
+    opts: &crate::options::BrowserContextOptions,
+  ) -> Result<()> {
+    let Some(storage) = opts.storage_state.as_ref() else {
+      return Ok(());
     };
-    page.set_storage_state(&state_value).await
+    let credentials = state_credentials(&storage_state_value(storage)?)?;
+    if credentials.is_empty() {
+      return Ok(());
+    }
+    self.credentials().restore(credentials).await
   }
 
   /// Register the context's `recordHar` recorder, once.
@@ -2025,6 +2071,30 @@ impl ContextRef {
       page.remove_exposed_function(name).await?;
     }
     Ok(())
+  }
+}
+
+/// The storage state a context was given, read from its file if a path.
+fn storage_state_value(storage: &crate::options::StorageStateInput) -> Result<serde_json::Value> {
+  match storage {
+    crate::options::StorageStateInput::Inline(v) => Ok(v.clone()),
+    crate::options::StorageStateInput::Path(path) => {
+      let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::error::FerriError::Backend(format!("storageState: read {}: {e}", path.display())))?;
+      serde_json::from_str(&text).map_err(|e| {
+        crate::error::FerriError::Backend(format!("storageState: parse JSON from {}: {e}", path.display()))
+      })
+    },
+  }
+}
+
+/// The `WebAuthn` credentials of a storage state, none when it has no
+/// `credentials` key.
+fn state_credentials(state: &serde_json::Value) -> Result<Vec<crate::credentials::VirtualCredential>> {
+  match state.get("credentials") {
+    None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+    Some(list) => serde_json::from_value(list.clone())
+      .map_err(|e| crate::error::FerriError::invalid_argument("storageState", format!("credentials: {e}"))),
   }
 }
 

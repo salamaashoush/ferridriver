@@ -383,6 +383,7 @@ action_options!(crate::har::RouteFromHarOptions {
 action_options!(crate::options::StorageStateOptions {
   opt path: std::path::PathBuf,
   opt indexed_db: bool,
+  opt credentials: bool,
 });
 
 action_options!(crate::options::BrowserContextOptions {

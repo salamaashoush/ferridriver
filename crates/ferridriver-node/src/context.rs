@@ -100,6 +100,13 @@ impl BrowserContext {
     crate::clock::Clock::wrap(self.inner.clone())
   }
 
+  /// Playwright: `browserContext.credentials` — the virtual WebAuthn
+  /// authenticator.
+  #[napi(getter)]
+  pub fn credentials(&self) -> crate::credentials::Credentials {
+    crate::credentials::Credentials::wrap(self.inner.credentials())
+  }
+
   /// Playwright: `browserContext.request` — the context-bound API
   /// request client sharing this context's cookies both ways
   /// (`page.request` returns the same context-bound client).
@@ -197,6 +204,7 @@ impl BrowserContext {
     let core_opts = options.map(|o| ferridriver::options::StorageStateOptions {
       path: o.path.map(std::path::PathBuf::from),
       indexed_db: o.indexed_db,
+      credentials: o.credentials,
     });
     let state = self.inner.storage_state().maybe_options(core_opts).await.into_napi()?;
     Ok(NapiStorageState::from(state))
@@ -1065,6 +1073,7 @@ pub struct NapiViewportSize {
 pub struct NapiStorageStateOptions {
   pub path: Option<String>,
   pub indexed_db: Option<bool>,
+  pub credentials: Option<bool>,
 }
 
 /// A single `localStorage` entry — Playwright `NameValue`.
@@ -1086,6 +1095,7 @@ pub struct NapiOriginState {
 pub struct NapiStorageState {
   pub cookies: Vec<CookieData>,
   pub origins: Vec<NapiOriginState>,
+  pub credentials: Option<Vec<crate::credentials::VirtualCredential>>,
 }
 
 impl From<ferridriver::options::StorageState> for NapiStorageState {
@@ -1107,6 +1117,7 @@ impl From<ferridriver::options::StorageState> for NapiStorageState {
             .collect(),
         })
         .collect(),
+      credentials: s.credentials.map(|list| list.into_iter().map(Into::into).collect()),
     }
   }
 }

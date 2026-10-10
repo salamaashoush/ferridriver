@@ -1917,6 +1917,25 @@ export interface StorageState {
     origin: string;
     localStorage: Array<{ name: string; value: string }>;
   }>;
+  credentials?: VirtualCredential[];
+}
+
+/** A WebAuthn passkey; every binary field is base64url. */
+export interface VirtualCredential {
+  id: string;
+  rpId: string;
+  userHandle: string;
+  privateKey: string;
+  publicKey: string;
+  signCount: number;
+}
+
+/** The context's virtual WebAuthn authenticator. */
+export interface Credentials {
+  create(rpId: string, options?: { id?: string; userHandle?: string; privateKey?: string; publicKey?: string; signCount?: number }): Promise<VirtualCredential>;
+  get(options?: { id?: string; rpId?: string }): Promise<VirtualCredential[]>;
+  delete(id: string): Promise<void>;
+  install(): Promise<void>;
 }
 
 export interface BrowserContext {
@@ -1938,7 +1957,7 @@ export interface BrowserContext {
   setGeolocation(geolocation: { latitude: number; longitude: number; accuracy?: number } | null): Promise<void>;
   setOffline(offline: boolean): Promise<void>;
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
-  storageState(options?: { path?: string }): Promise<StorageState>;
+  storageState(options?: { path?: string; indexedDB?: boolean; credentials?: boolean }): Promise<StorageState>;
   addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown, options?: EvaluateOptions): Promise<Disposable>;
   // Context-level expose returns a Disposable that unregisters the
   // binding and removes the page-side window proxy (a ferridriver
@@ -1969,6 +1988,7 @@ export interface BrowserContext {
   setDefaultNavigationTimeout(timeout: number): void;
   newCDPSession(page: Page): Promise<CDPSession>;
   browser(): Browser | null;
+  credentials: Credentials;
   clock: Clock;
   tracing: Tracing;
   // Context-bound API request client sharing this context's cookies in

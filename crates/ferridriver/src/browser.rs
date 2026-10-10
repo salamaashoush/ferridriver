@@ -269,14 +269,17 @@ impl Browser {
   #[track_caller]
   pub fn new_context(&self) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
     let this = self.clone();
-    crate::action::Action::new(move |opts| {
+    crate::action::Action::new(move |opts: crate::options::BrowserContextOptions| {
       Box::pin(async move {
         if !this.supports_isolated_contexts() {
           return Err(crate::FerriError::unsupported(
             "This browser does not support isolated contexts; use its default context",
           ));
         }
-        Ok(this.new_context_impl(Some(opts), true))
+        let restore = opts.clone();
+        let context = this.new_context_impl(Some(opts), true);
+        context.restore_storage_state_credentials(&restore).await?;
+        Ok(context)
       })
     })
   }
@@ -297,14 +300,17 @@ impl Browser {
     &self,
   ) -> crate::action::Action<'static, crate::options::BrowserContextOptions, ContextRef> {
     let this = self.clone();
-    crate::action::Action::new(move |opts| {
+    crate::action::Action::new(move |opts: crate::options::BrowserContextOptions| {
       Box::pin(async move {
         if !this.supports_isolated_contexts() {
           return Err(crate::FerriError::unsupported(
             "This browser does not support isolated contexts; use its default context",
           ));
         }
-        Ok(this.new_context_impl(Some(opts), false))
+        let restore = opts.clone();
+        let context = this.new_context_impl(Some(opts), false);
+        context.restore_storage_state_credentials(&restore).await?;
+        Ok(context)
       })
     })
   }

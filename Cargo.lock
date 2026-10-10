@@ -1682,6 +1682,7 @@ dependencies = [
  "pin-project-lite",
  "regex",
  "reqwest",
+ "ring",
  "rustc-hash",
  "rustix 1.1.4",
  "serde",

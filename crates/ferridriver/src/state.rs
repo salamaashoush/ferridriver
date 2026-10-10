@@ -421,6 +421,8 @@ pub struct BrowserState {
   /// script with `exposeFunctions`: bindings every page in the context
   /// reaches through the bindings controller, never as a global.
   pub context_callbacks: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>>,
+  /// Per-context `WebAuthn` authenticators (`browserContext.credentials`).
+  pub(crate) context_credentials: Arc<std::sync::Mutex<HashMap<String, Arc<crate::credentials::CredentialStore>>>>,
   /// Per-context WebSocket-route registry — `context.routeWebSocket`
   /// handlers keyed by composite session key, in registration order.
   /// Consumed by `ContextRef::new_page` so a context-level WS route
@@ -557,6 +559,7 @@ impl BrowserState {
       context_har_updates: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_callbacks: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
+      context_credentials: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_ws_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_routes: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       context_init_scripts: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
@@ -2155,6 +2158,11 @@ impl BrowserState {
       .remove(composite);
     self.context_bindings.write().await.remove(composite);
     self.context_callbacks.write().await.remove(composite);
+    self
+      .context_credentials
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(composite);
     self.context_ws_routes.write().await.remove(composite);
     self.context_routes.write().await.remove(composite);
     self.context_init_scripts.write().await.remove(composite);

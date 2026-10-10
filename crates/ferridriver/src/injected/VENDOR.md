@@ -30,7 +30,7 @@ cd crates/ferridriver/src/injected
 for f in domUtils highlight injectedScript layoutSelectorUtils roleSelectorEngine \
          roleUtils selectorEngine selectorEvaluator selectorGenerator selectorUtils \
          utilityScript webSocketMock xpathSelectorEngine ariaSnapshot \
-         ariaSnapshotDistiller clock consoleApi; do
+         ariaSnapshotDistiller clock consoleApi webAuthn; do
   cp /tmp/playwright/packages/injected/src/$f.ts $f.ts
 done
 for f in ariaSnapshot ariaSnapshotRenderer cssParser cssTokenizer locatorGenerators \
@@ -56,7 +56,7 @@ the Rust side `include_str!`s them.
 `highlight.ts`, `highlight.css`, `injectedScript.ts`,
 `layoutSelectorUtils.ts`, `roleSelectorEngine.ts`, `roleUtils.ts`,
 `selectorEngine.ts`, `selectorEvaluator.ts`, `selectorGenerator.ts`,
-`selectorUtils.ts`, `utilityScript.ts`, `webSocketMock.ts`,
+`selectorUtils.ts`, `utilityScript.ts`, `webAuthn.ts`, `webSocketMock.ts`,
 `xpathSelectorEngine.ts`.
 
 `packages/isomorphic/` → `isomorphic/`: `ariaSnapshot.ts`,
@@ -69,7 +69,7 @@ the Rust side `include_str!`s them.
 Entry points and support bundles, all built by `build.ts`: `index.ts`
 (the `window.__fd` surface the Rust side calls), `ariaSupport.ts`,
 `axSupport.ts`, `mcpSupport.ts`, `recorderSupport.ts`, `clockEntry.ts`,
-`webSocketMockEntry.ts`, `snapshotter_injected.js`, `isomorphic/yaml.ts`,
+`webAuthnEntry.ts`, `webSocketMockEntry.ts`, `snapshotter_injected.js`, `isomorphic/yaml.ts`,
 `stubs/`.
 
 `local/` holds code that exists only because a vendored file needs

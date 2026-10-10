@@ -52,6 +52,12 @@ impl BrowserContextJs {
     crate::bindings::clock::ClockJs::new(self.inner.clone())
   }
 
+  /// `context.credentials` — the virtual WebAuthn authenticator.
+  #[qjs(get, rename = "credentials")]
+  pub fn credentials(&self) -> crate::bindings::credentials::CredentialsJs {
+    crate::bindings::credentials::CredentialsJs::new(self.inner.credentials())
+  }
+
   /// `context.request` — the context-bound HTTP client sharing this
   /// context's cookies both ways (Playwright: `browserContext.request`;
   /// `page.request` returns the same context-bound client).
@@ -199,6 +205,7 @@ impl BrowserContextJs {
         struct JsStorageStateOptions {
           path: Option<String>,
           indexed_db: Option<bool>,
+          credentials: Option<bool>,
         }
         let core_opts = match options.0 {
           Some(v) if !v.is_undefined() && !v.is_null() => {
@@ -206,6 +213,7 @@ impl BrowserContextJs {
             Some(ferridriver::options::StorageStateOptions {
               path: parsed.path.map(std::path::PathBuf::from),
               indexed_db: parsed.indexed_db,
+              credentials: parsed.credentials,
             })
           },
           _ => None,
