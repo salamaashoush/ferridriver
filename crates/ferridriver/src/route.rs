@@ -193,7 +193,8 @@ pub struct Route {
 impl Route {
   /// Create a new Route with its response channel.
   #[must_use]
-  pub fn new(request: InterceptedRequest, action_tx: tokio::sync::oneshot::Sender<RouteAction>) -> Self {
+  pub fn new(mut request: InterceptedRequest, action_tx: tokio::sync::oneshot::Sender<RouteAction>) -> Self {
+    request.headers = crate::network::lowercase_names(&request.headers);
     Self {
       request,
       action_tx: Some(action_tx),

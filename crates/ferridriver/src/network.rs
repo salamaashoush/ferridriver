@@ -331,7 +331,7 @@ impl Request {
   /// For the post-extraInfo headers use `all_headers()`.
   #[must_use]
   pub fn headers(&self) -> Headers {
-    self.inner.provisional_headers.clone()
+    lowercase_names(&self.inner.provisional_headers)
   }
 
   /// Headers as `[{name, value}]` preserving order and duplicates.
@@ -556,7 +556,7 @@ impl Request {
       "mimeType": state
         .response
         .as_ref()
-        .and_then(|r| r.provisional_headers.get("content-type").cloned()),
+        .and_then(|r| lowercase_names(&r.provisional_headers).remove("content-type")),
       "headers": self.inner.provisional_headers,
       "postData": self.post_data(),
       "failure": self.failure(),
@@ -796,7 +796,7 @@ impl Response {
 
   #[must_use]
   pub fn headers(&self) -> Headers {
-    self.inner.provisional_headers.clone()
+    lowercase_names(&self.inner.provisional_headers)
   }
 
   /// All headers (raw if available, provisional otherwise).
@@ -1124,6 +1124,24 @@ pub fn known_raw_headers(headers: Vec<HeaderEntry>) -> RawHeadersFn {
     let headers = headers.clone();
     Box::pin(async move { Ok(headers) })
   })
+}
+
+/// Playwright's `headers()`: names lower-cased, a name the protocol
+/// reported under two casings joined like a repeated header.
+pub(crate) fn lowercase_names(map: &Headers) -> Headers {
+  let mut out: Headers = FxHashMap::default();
+  for (name, value) in map {
+    let name = name.to_ascii_lowercase();
+    let separator = if name == "set-cookie" { "\n" } else { ", " };
+    out
+      .entry(name)
+      .and_modify(|joined| {
+        joined.push_str(separator);
+        joined.push_str(value);
+      })
+      .or_insert_with(|| value.clone());
+  }
+  out
 }
 
 #[must_use]

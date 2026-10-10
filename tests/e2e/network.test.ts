@@ -267,6 +267,28 @@ describe('network', () => {
     }
   });
 
+  test('request_and_response_headers_have_lower_cased_names', async ({ page, baseURL }) => {
+    // Playwright's headers(): names lower-cased whatever casing the
+    // browser reported them in (Chromium and WebKit send `User-Agent`).
+    let routed: Record<string, string> = {};
+    await page.route('**/fx/landed', (route) => {
+      routed = route.request().headers();
+      return route.continue();
+    });
+    try {
+      const response = (await page.goto(`${baseURL}/fx/landed`))!;
+      const mixed = (headers: Record<string, string>) => Object.keys(headers).filter((name) => name !== name.toLowerCase());
+      expect(routed['user-agent']).toBeTruthy();
+      expect(mixed(routed)).toEqual([]);
+      expect(response.request().headers()['user-agent']).toBeTruthy();
+      expect(mixed(response.request().headers())).toEqual([]);
+      expect(response.headers()['content-type']).toBeTruthy();
+      expect(mixed(response.headers())).toEqual([]);
+    } finally {
+      await page.unrouteAll();
+    }
+  });
+
   test('route_fallback_chains_to_next_handler', async ({ page }) => {
     // route.fallback() passes the request to the NEXT matching handler
     // (newest-first), with fallback overrides visible to that handler —

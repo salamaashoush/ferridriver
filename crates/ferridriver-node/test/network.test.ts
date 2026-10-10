@@ -232,9 +232,8 @@ for (const backend of BACKENDS) {
       await page.evaluate("fetch('/ua-marker').then(r => r.text())");
       const uaReq = await uaWait;
       const headers = uaReq.headers();
-      const ua = Object.entries(headers).find(([k]) => k.toLowerCase() === "user-agent");
-      expect(ua).toBeDefined();
-      expect(ua![1]).not.toBe("");
+      expect(headers["user-agent"]).toBeTruthy();
+      expect(Object.keys(headers).filter((name) => name !== name.toLowerCase())).toEqual([]);
       const cookieHeaders = await cookieResp.headersArray();
       const setCookies = cookieHeaders.filter((h) => h.name.toLowerCase() === "set-cookie");
       expect(setCookies.length).toBe(2);
