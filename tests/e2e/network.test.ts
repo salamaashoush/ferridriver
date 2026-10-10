@@ -321,11 +321,13 @@ describe('network', () => {
 
   test('goto_network_failure', async ({ page }) => {
     // goto to an unreachable URL rejects with a typed error — not a
-    // Response-with-status-0.
+    // Response-with-status-0. Port 999 is privileged, so no test server
+    // can be listening there, and neither browser blocks it; a port in the
+    // ephemeral range was sometimes taken by a concurrent test's server.
     let threw = false;
     let msg = '';
     try {
-      await page.goto('http://127.0.0.1:65531/unreachable');
+      await page.goto('http://127.0.0.1:999/unreachable');
     } catch (e) {
       threw = true;
       msg = String((e as Error).message ?? e);
