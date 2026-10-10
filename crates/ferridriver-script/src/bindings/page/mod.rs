@@ -328,13 +328,19 @@ impl PageJs {
 
   /// Full HTML content of the page.
   #[qjs(rename = "content")]
-  pub async fn content(
+  pub async fn content<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
+    let include_shadow = match options.0.as_ref().and_then(rquickjs::Value::as_object) {
+      Some(bag) => bag.get::<_, Option<bool>>("includeShadow")?,
+      None => None,
+    };
+    let options = ferridriver::options::ContentOptions { include_shadow };
     call_site
-      .scope(async move { self.inner.content().await.into_js_with(&ctx) })
+      .scope(async move { self.inner.content().options(options).await.into_js_with(&ctx) })
       .await
   }
 
@@ -2915,8 +2921,7 @@ impl PageJs {
         // `addDialogHandler` + `dialogDidOpen` flow exactly).
         if event_lc == "dialog" {
           let dialog = self.inner.wait_for_dialog(timeout).await.into_js_with(&ctx)?;
-          let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
-          let instance = Class::instance(ctx.clone(), wrapper)?;
+          let instance = crate::bindings::identity::dialog_object(&ctx, dialog)?;
           return rquickjs::IntoJs::into_js(instance, &ctx);
         }
         // Same pattern for `filechooser` — one-shot handler on the

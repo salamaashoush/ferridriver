@@ -2122,3 +2122,9 @@ impl napi::bindgen_prelude::FromNapiValue for NapiInitScriptArg {
     Ok(Self(Some(v)))
   }
 }
+
+/// `page.content(options?)` / `frame.content(options?)`.
+#[napi(object)]
+pub struct ContentOptions {
+  pub include_shadow: Option<bool>,
+}

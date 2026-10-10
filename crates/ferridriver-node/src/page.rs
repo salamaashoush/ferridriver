@@ -36,7 +36,7 @@ pub type PageWaitForEventResult = napi::bindgen_prelude::Either10<
   crate::network::Request,
   crate::network::Response,
   crate::network::WebSocket,
-  crate::dialog::Dialog,
+  crate::identity::DialogObject,
   crate::file_chooser::FileChooser,
   crate::download::Download,
   crate::console_message::ConsoleMessage,
@@ -56,7 +56,7 @@ fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEv
     },
     PageEvent::Response(r) => Either10::B(crate::network::Response::from_core_with_page(r, page.clone())),
     PageEvent::WebSocket(ws) => Either10::C(crate::network::WebSocket::from_core(ws)),
-    PageEvent::Dialog(d) => Either10::D(crate::dialog::Dialog::from_core(d)),
+    PageEvent::Dialog(d) | PageEvent::DialogClosed(d) => Either10::D(crate::identity::DialogObject(d)),
     PageEvent::FileChooser(fc) => Either10::E(crate::file_chooser::FileChooser::from_core(fc)),
     PageEvent::Download(d) => Either10::F(crate::download::Download::from_core(d)),
     PageEvent::Console(msg) => Either10::G(crate::console_message::ConsoleMessage::from_core(msg)),
@@ -941,7 +941,7 @@ impl Page {
         match event_lc.as_str() {
           "dialog" => {
             let d = page.wait_for_dialog(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either10::D(crate::dialog::Dialog::from_core(d)))
+            Ok(napi::bindgen_prelude::Either10::D(crate::identity::DialogObject(d)))
           },
           "filechooser" => {
             let fc = page.wait_for_file_chooser(timeout).await.into_napi()?;
@@ -1250,9 +1250,18 @@ impl Page {
 
   // ── Content ─────────────────────────────────────────────────────────────
 
-  #[napi]
-  pub async fn content(&self) -> Result<String> {
-    self.inner.content().await.map_err(crate::error::to_napi)
+  /// Playwright: `page.content(options?: { includeShadow?: boolean }): Promise<string>`.
+  #[napi(ts_args_type = "options?: { includeShadow?: boolean }")]
+  pub async fn content(&self, options: Option<crate::types::ContentOptions>) -> Result<String> {
+    let options = ferridriver::options::ContentOptions {
+      include_shadow: options.and_then(|o| o.include_shadow),
+    };
+    self
+      .inner
+      .content()
+      .options(options)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]

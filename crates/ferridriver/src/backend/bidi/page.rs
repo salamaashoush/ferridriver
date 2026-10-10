@@ -2602,6 +2602,9 @@ impl BidiPage {
               crate::state::DIALOG_LOG_CAP,
             );
           },
+          // Playwright's `_onUserPromptClosed`: a prompt the browser
+          // closed without us still closes the dialog it opened.
+          "browsingContext.userPromptClosed" => dialog_manager.closed_in_browser(),
           "browsingContext.contextDestroyed" => {
             if event_ctx == &*ctx {
               // `swap` dedupes against `close_page`, which also emits

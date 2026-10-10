@@ -1937,6 +1937,7 @@ impl BrowserState {
         match event {
           PageEvent::PageError(err) => emit(ContextEvent::WebError(err)),
           PageEvent::Download(d) => emit(ContextEvent::Download(d)),
+          PageEvent::DialogClosed(d) => emit(ContextEvent::DialogClosed(d)),
           PageEvent::FrameAttached(info) => {
             if let Some(page) = upgrade() {
               emit(ContextEvent::FrameAttached {

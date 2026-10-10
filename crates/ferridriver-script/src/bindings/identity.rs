@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ferridriver::{Frame, Page};
 use rquickjs::{Class, Ctx, JsLifetime, Persistent};
 
+use crate::bindings::dialog::DialogJs;
 use crate::bindings::frame::FrameJs;
 use crate::bindings::page::PageJs;
 
@@ -16,6 +17,7 @@ use crate::bindings::page::PageJs;
 struct Wrappers {
   pages: Vec<(Arc<Page>, Persistent<Class<'static, PageJs>>)>,
   frames: Vec<(Frame, Persistent<Class<'static, FrameJs>>)>,
+  dialogs: Vec<(ferridriver::dialog::Dialog, Persistent<Class<'static, DialogJs>>)>,
 }
 
 impl Wrappers {
@@ -26,8 +28,18 @@ impl Wrappers {
     self
       .frames
       .retain(|(frame, _)| !frame.is_detached() && !frame.page_arc().is_closed());
+    // A closed dialog is kept a while: its `dialogclosed` event may still
+    // be on its way to script, and must hand over the same object.
+    while self.dialogs.len() > MAX_CLOSED_DIALOGS {
+      let Some(oldest_closed) = self.dialogs.iter().position(|(d, _)| d.is_closed()) else {
+        break;
+      };
+      self.dialogs.remove(oldest_closed);
+    }
   }
 }
+
+const MAX_CLOSED_DIALOGS: usize = 16;
 
 struct WrappersUserData(RefCell<Wrappers>);
 
@@ -96,6 +108,30 @@ pub(crate) fn frame_object<'js>(ctx: &Ctx<'js>, frame: Frame) -> rquickjs::Resul
   with_wrappers(ctx, |w| {
     w.prune();
     w.frames.push((frame, saved));
+  });
+  Ok(object)
+}
+
+/// The dialog's object, the same for its `dialog` and `dialogclosed`
+/// events.
+pub(crate) fn dialog_object<'js>(
+  ctx: &Ctx<'js>,
+  dialog: ferridriver::dialog::Dialog,
+) -> rquickjs::Result<Class<'js, DialogJs>> {
+  let known = with_wrappers(ctx, |w| {
+    w.dialogs
+      .iter()
+      .find(|(d, _)| d.is_same(&dialog))
+      .map(|(_, object)| object.clone())
+  });
+  if let Some(object) = known {
+    return object.restore(ctx);
+  }
+  let object = Class::instance(ctx.clone(), DialogJs::new(dialog.clone()))?;
+  let saved = Persistent::save(ctx, object.clone());
+  with_wrappers(ctx, |w| {
+    w.prune();
+    w.dialogs.push((dialog, saved));
   });
   Ok(object)
 }

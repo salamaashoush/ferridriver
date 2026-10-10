@@ -550,22 +550,37 @@ impl Frame {
 
   // ── Content (frame-scoped) ───────────────────────────────────────────
 
-  /// Get the frame's HTML content.
+  /// Playwright: `frame.content(options?: { includeShadow?: boolean }):
+  /// Promise<string>` — the doctype and the document element's markup.
   ///
   /// # Errors
   ///
   /// Returns an error if JS evaluation fails.
-  pub async fn content(&self) -> Result<String> {
-    self
-      .page
-      .traced_as("Frame", "content", serde_json::json!({}), async {
-        let r = self.backend_eval_expr("document.documentElement.outerHTML").await?;
-        Ok(
-          r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
-            .unwrap_or_default(),
-        )
+  #[track_caller]
+  pub fn content(&self) -> crate::action::Action<'_, crate::options::ContentOptions, String> {
+    let frame = self;
+    crate::action::Action::new(move |opts: crate::options::ContentOptions| {
+      Box::pin(async move {
+        let params = serde_json::json!({ "includeShadow": opts.include_shadow });
+        frame
+          .page
+          .traced_as("Frame", "content", params, frame.content_impl(opts))
+          .await
       })
-      .await
+    })
+  }
+
+  /// The injected engine's `documentContent`, which `page.content` shares.
+  pub(crate) async fn content_impl(&self, opts: crate::options::ContentOptions) -> Result<String> {
+    self.page.inner.ensure_engine_injected().await?;
+    let include_shadow = opts.include_shadow.unwrap_or(false);
+    let r = self
+      .backend_eval_expr(&format!("window.__fd._injected.documentContent({include_shadow})"))
+      .await?;
+    Ok(
+      r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
+        .unwrap_or_default(),
+    )
   }
 
   /// Get the frame's title.

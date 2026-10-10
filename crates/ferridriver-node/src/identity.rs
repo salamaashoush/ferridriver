@@ -14,12 +14,14 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{JavaScriptClassExt, Reference, ToNapiValue, TypeName, ValueType, WeakReference};
 use napi::{Env, sys};
 
+use crate::dialog::Dialog;
 use crate::frame::Frame;
 use crate::page::Page;
 
 thread_local! {
   static PAGES: RefCell<Vec<(Arc<ferridriver::Page>, WeakReference<Page>)>> = const { RefCell::new(Vec::new()) };
   static FRAMES: RefCell<Vec<(ferridriver::Frame, WeakReference<Frame>)>> = const { RefCell::new(Vec::new()) };
+  static DIALOGS: RefCell<Vec<(ferridriver::dialog::Dialog, WeakReference<Dialog>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A page on its way to JS, as the object that already stands for it.
@@ -27,6 +29,10 @@ pub struct PageObject(pub Arc<ferridriver::Page>);
 
 /// A frame on its way to JS, as the object that already stands for it.
 pub struct FrameObject(pub ferridriver::Frame);
+
+/// A dialog on its way to JS: the same object for its `dialog` and
+/// `dialogclosed` events.
+pub struct DialogObject(pub ferridriver::dialog::Dialog);
 
 fn known<K, T: 'static>(
   cache: &RefCell<Vec<(K, WeakReference<T>)>>,
@@ -87,6 +93,36 @@ impl ToNapiValue for FrameObject {
       },
     };
     unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+impl ToNapiValue for DialogObject {
+  unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
+    let js_env = Env::from_raw(env);
+    let found = DIALOGS.with(|dialogs| known(dialogs, js_env, |d| d.is_same(&val.0)))?;
+    let reference = match found {
+      Some(reference) => reference,
+      None => {
+        let reference = Dialog::from_core(val.0.clone()).into_reference(js_env)?;
+        DIALOGS.with(|dialogs| {
+          let mut dialogs = dialogs.borrow_mut();
+          dialogs.retain(|(_, weak)| weak.get().is_some());
+          dialogs.push((val.0, reference.downgrade()));
+        });
+        reference
+      },
+    };
+    unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+impl TypeName for DialogObject {
+  fn type_name() -> &'static str {
+    "Dialog"
+  }
+
+  fn value_type() -> ValueType {
+    ValueType::Object
   }
 }
 

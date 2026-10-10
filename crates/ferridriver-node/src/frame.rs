@@ -188,9 +188,13 @@ impl Frame {
 
   // ── Content ───────────────────────────────────────────────────────────
 
-  #[napi]
-  pub async fn content(&self) -> Result<String> {
-    self.inner.content().await.into_napi()
+  /// Playwright: `frame.content(options?: { includeShadow?: boolean }): Promise<string>`.
+  #[napi(ts_args_type = "options?: { includeShadow?: boolean }")]
+  pub async fn content(&self, options: Option<crate::types::ContentOptions>) -> Result<String> {
+    let options = ferridriver::options::ContentOptions {
+      include_shadow: options.and_then(|o| o.include_shadow),
+    };
+    self.inner.content().options(options).await.into_napi()
   }
 
   #[napi]

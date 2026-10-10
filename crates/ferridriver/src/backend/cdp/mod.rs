@@ -5902,13 +5902,22 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-      let mut rx = transport.tap_event_methods(&["Page.javascriptDialogOpening"], session_id.as_deref());
+      let mut rx = transport.tap_event_methods(
+        &["Page.javascriptDialogOpening", "Page.javascriptDialogClosed"],
+        session_id.as_deref(),
+      );
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
             continue;
           }
+        }
+        // Playwright's `crPage._onDialogClosed`: a dialog the browser
+        // closed without us still closes.
+        if event.get("method").and_then(|v| v.as_str()) == Some("Page.javascriptDialogClosed") {
+          dialog_manager.closed_in_browser();
+          continue;
         }
         let Some(params) = event.get("params") else {
           continue;

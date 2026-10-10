@@ -497,6 +497,14 @@ impl AriaSnapshotMode {
   }
 }
 
+/// Options for `page.content(options?)` / `frame.content(options?)`:
+/// Playwright's `{ includeShadow?: boolean }`, which serializes open
+/// shadow roots as declarative `<template shadowrootmode>` children.
+#[derive(Debug, Clone, Default)]
+pub struct ContentOptions {
+  pub include_shadow: Option<bool>,
+}
+
 /// Options for `locator.ariaSnapshot(options?)`. Mirrors Playwright's
 /// `TimeoutOptions & { mode?: 'ai' | 'default', depth?: number, boxes?: boolean }`
 /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`).

@@ -108,6 +108,9 @@ pub(crate) struct DialogState {
   /// `true` once `accept` or `dismiss` has run. Subsequent calls
   /// return an error to match Playwright's assertion semantics.
   handled: AtomicBool,
+  /// `dialogclosed` has been emitted; it fires once however the dialog
+  /// closed.
+  closed: AtomicBool,
   responder: DialogResponder,
   /// Back-reference to the [`DialogManager`] that emitted this
   /// dialog. Used to notify the manager via
@@ -165,6 +168,7 @@ impl Dialog {
         message,
         default_value,
         handled: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
         responder,
         manager,
         page,
@@ -199,6 +203,18 @@ impl Dialog {
     &self.inner.default_value
   }
 
+  /// Whether `other` is a handle on this same dialog.
+  #[must_use]
+  pub fn is_same(&self, other: &Dialog) -> bool {
+    Arc::ptr_eq(&self.inner, &other.inner)
+  }
+
+  /// Whether the dialog has closed, however it closed.
+  #[must_use]
+  pub fn is_closed(&self) -> bool {
+    self.inner.closed.load(Ordering::Acquire)
+  }
+
   /// Whether this dialog has already been accepted or dismissed.
   /// Second accept/dismiss calls error instead of firing a second
   /// protocol request.
@@ -218,11 +234,13 @@ impl Dialog {
   /// * Returns [`FerriError::Backend`] wrapping the backend error if the
   ///   underlying protocol call fails.
   pub async fn accept(&self, prompt_text: Option<String>) -> Result<()> {
-    self.mark_handled_or_error()?;
+    self.mark_handled_or_error("accept")?;
     if let Some(mgr) = &self.inner.manager {
       mgr.dialog_will_close(self);
     }
-    (self.inner.responder)(DialogResponse::Accept { prompt_text }).await
+    (self.inner.responder)(DialogResponse::Accept { prompt_text }).await?;
+    self.did_close();
+    Ok(())
   }
 
   /// Dismiss the dialog. Playwright: `dialog.dismiss(): Promise<void>`.
@@ -231,11 +249,13 @@ impl Dialog {
   ///
   /// See [`Self::accept`].
   pub async fn dismiss(&self) -> Result<()> {
-    self.mark_handled_or_error()?;
+    self.mark_handled_or_error("dismiss")?;
     if let Some(mgr) = &self.inner.manager {
       mgr.dialog_will_close(self);
     }
-    (self.inner.responder)(DialogResponse::Dismiss).await
+    (self.inner.responder)(DialogResponse::Dismiss).await?;
+    self.did_close();
+    Ok(())
   }
 
   /// Backend-internal: auto-close the dialog when no listener is
@@ -256,14 +276,27 @@ impl Dialog {
     } else {
       DialogResponse::Dismiss
     };
-    let _ = (self.inner.responder)(response).await;
+    if (self.inner.responder)(response).await.is_ok() {
+      self.did_close();
+    }
   }
 
-  fn mark_handled_or_error(&self) -> Result<()> {
+  /// Playwright's `Dialog._didClose`: emit `dialogclosed` on the page
+  /// (and through it the context), once, however the dialog closed.
+  pub(crate) fn did_close(&self) {
+    if self.inner.closed.swap(true, Ordering::AcqRel) {
+      return;
+    }
+    if let Some(page) = self.page() {
+      page.events().emit(crate::events::PageEvent::DialogClosed(self.clone()));
+    }
+  }
+
+  fn mark_handled_or_error(&self, verb: &str) -> Result<()> {
     if self.inner.handled.swap(true, Ordering::AcqRel) {
-      return Err(FerriError::Backend(
-        "Cannot accept dialog which is already handled!".into(),
-      ));
+      return Err(FerriError::Backend(format!(
+        "Cannot {verb} dialog which is already handled!"
+      )));
     }
     Ok(())
   }
@@ -415,6 +448,21 @@ impl DialogManager {
   pub fn dialog_will_close(&self, dialog: &Dialog) {
     if let Ok(mut open) = self.inner.open.lock() {
       open.retain(|d| !Arc::ptr_eq(&d.inner, &dialog.inner));
+    }
+  }
+
+  /// Playwright's `dialogWasClosedInBrowser`: the browser closed the
+  /// page's dialog without us (a user in a headed browser, a raw
+  /// protocol call), so the dialogs still waiting on a handler are
+  /// handled and closed now.
+  pub fn closed_in_browser(&self) {
+    let open: Vec<Dialog> = match self.inner.open.lock() {
+      Ok(mut g) => std::mem::take(&mut *g),
+      Err(_) => Vec::new(),
+    };
+    for dialog in open {
+      dialog.inner.handled.store(true, Ordering::Release);
+      dialog.did_close();
     }
   }
 

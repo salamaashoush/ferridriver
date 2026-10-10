@@ -1847,15 +1847,23 @@ impl Page {
 
   // ── Content ─────────────────────────────────────────────────────────────
 
-  /// Get the full HTML content of the page.
+  /// Playwright: `page.content(options?: { includeShadow?: boolean }):
+  /// Promise<string>`, the main frame's content.
   ///
   /// # Errors
   ///
   /// Returns an error if the content cannot be retrieved.
-  pub async fn content(&self) -> Result<String> {
-    self
-      .traced("content", serde_json::json!({}), self.inner.content())
-      .await
+  #[track_caller]
+  pub fn content(self: &Arc<Self>) -> crate::action::Action<'_, crate::options::ContentOptions, String> {
+    let page = self;
+    crate::action::Action::new(move |opts: crate::options::ContentOptions| {
+      Box::pin(async move {
+        let params = serde_json::json!({ "includeShadow": opts.include_shadow });
+        page
+          .traced("content", params, page.main_frame().content_impl(opts))
+          .await
+      })
+    })
   }
 
   /// Set the page's HTML content.

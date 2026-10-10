@@ -52,6 +52,9 @@ pub enum PageEvent {
   /// listener is registered when the dialog opens, the backend
   /// auto-closes it (accept for `beforeunload`, dismiss otherwise).
   Dialog(Dialog),
+  /// The dialog closed: accepted, dismissed, auto-closed or closed by
+  /// the browser. Playwright `page.on('dialogclosed')`.
+  DialogClosed(Dialog),
   /// File chooser opened on the page — intercepted via CDP
   /// `Page.fileChooserOpened` / `BiDi` `input.fileDialogOpened`.
   /// Carries a live [`FileChooser`] whose `setFiles(...)` uploads via
@@ -133,7 +136,7 @@ impl PageEvent {
         "postData": r.post_data(),
       }),
       PageEvent::WebSocket(ws) => serde_json::json!({ "url": ws.url(), "isClosed": ws.is_closed() }),
-      PageEvent::Dialog(d) => serde_json::json!({
+      PageEvent::Dialog(d) | PageEvent::DialogClosed(d) => serde_json::json!({
         "type": d.dialog_type().as_str(),
         "message": d.message(),
         "defaultValue": d.default_value(),
@@ -232,6 +235,7 @@ pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("requestfailed", PageEvent::RequestFailed(_))
       | ("websocket", PageEvent::WebSocket(_))
       | ("dialog", PageEvent::Dialog(_))
+      | ("dialogclosed", PageEvent::DialogClosed(_))
       | ("filechooser", PageEvent::FileChooser(_))
       | ("frameattached", PageEvent::FrameAttached(_))
       | ("framedetached", PageEvent::FrameDetached { .. })
@@ -763,9 +767,13 @@ impl<E: EmitterEvent> EventSubscription<E> {
   where
     F: Fn(&E) -> bool,
   {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    // Playwright's `timeout: 0` waits without a limit.
+    let deadline = (timeout_ms > 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms));
     loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      let remaining = match deadline {
+        Some(deadline) => deadline.saturating_duration_since(tokio::time::Instant::now()),
+        None => std::time::Duration::MAX,
+      };
       if remaining.is_zero() {
         return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms));
       }
@@ -857,6 +865,9 @@ pub enum ContextEvent {
   /// A page in this context fired `load`.
   /// `browserContext.on('pageload', (page: Page) => ...)`.
   PageLoad(Arc<crate::page::Page>),
+  /// A dialog on a page in this context closed.
+  /// `browserContext.on('dialogclosed', (dialog: Dialog) => ...)`.
+  DialogClosed(Dialog),
 }
 
 impl EmitterEvent for ContextEvent {
@@ -871,6 +882,7 @@ impl EmitterEvent for ContextEvent {
         | ("page", ContextEvent::Page(_))
         | ("pageclose", ContextEvent::PageClose(_))
         | ("pageload", ContextEvent::PageLoad(_))
+        | ("dialogclosed", ContextEvent::DialogClosed(_))
     )
   }
 }
@@ -911,6 +923,18 @@ pub type BrowserEventEmitter = Emitter<BrowserEvent>;
 mod tests {
   use super::*;
   use std::sync::atomic::AtomicUsize;
+
+  #[tokio::test]
+  async fn a_zero_timeout_waits_without_a_limit() {
+    let emitter = EventEmitter::new();
+    let waiting = emitter.wait_for_event("load", 0);
+    let late = emitter.clone();
+    tokio::spawn(async move {
+      tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+      late.emit(PageEvent::Load);
+    });
+    assert!(matches!(waiting.await, Ok(PageEvent::Load)));
+  }
 
   #[tokio::test]
   async fn late_listeners_and_subscribers_do_not_receive_queued_history() {

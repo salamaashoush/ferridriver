@@ -1296,6 +1296,7 @@ pub enum ContextEventArg {
     frame_id: String,
   },
   Page(std::sync::Arc<ferridriver::Page>),
+  Dialog(ferridriver::dialog::Dialog),
 }
 
 impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
@@ -1314,6 +1315,9 @@ impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
       ContextEventArg::Page(page) => unsafe {
         crate::identity::PageObject::to_napi_value(env, crate::identity::PageObject(page))
       },
+      ContextEventArg::Dialog(dialog) => unsafe {
+        crate::identity::DialogObject::to_napi_value(env, crate::identity::DialogObject(dialog))
+      },
     }
   }
 }
@@ -1329,6 +1333,7 @@ impl ContextEventArg {
       | ContextEvent::FrameDetached { page, frame_id }
       | ContextEvent::FrameNavigated { page, frame_id } => Self::Frame { page, frame_id },
       ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => Self::Page(page),
+      ContextEvent::DialogClosed(dialog) => Self::Dialog(dialog),
     }
   }
 }

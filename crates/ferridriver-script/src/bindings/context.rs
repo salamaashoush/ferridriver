@@ -1068,6 +1068,7 @@ impl BrowserContextJs {
       .unwrap_or_else(|| self.inner.default_timeout());
     let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
     match ev {
+      ContextEvent::DialogClosed(d) => crate::bindings::identity::dialog_object(&ctx, d)?.into_js(&ctx),
       ContextEvent::WebError(err) => {
         Class::instance(ctx.clone(), crate::bindings::web_error::WebErrorJs::new(err))?.into_js(&ctx)
       },
@@ -1293,6 +1294,7 @@ fn context_event_to_js<'js>(ctx: &Ctx<'js>, event: ferridriver::events::ContextE
   use rquickjs::IntoJs;
   use rquickjs::class::Class;
   match event {
+    ContextEvent::DialogClosed(d) => crate::bindings::identity::dialog_object(ctx, d)?.into_js(ctx),
     ContextEvent::WebError(err) => {
       Class::instance(ctx.clone(), crate::bindings::web_error::WebErrorJs::new(err))?.into_js(ctx)
     },

@@ -55,7 +55,7 @@ pub(crate) fn page_event_to_js<'js>(
     PageEvent::WebSocket(ws) => {
       Class::instance(ctx.clone(), crate::bindings::network::WebSocketJs::new(ws))?.into_js(ctx)
     },
-    PageEvent::Dialog(d) => Class::instance(ctx.clone(), crate::bindings::dialog::DialogJs::new(d))?.into_js(ctx),
+    PageEvent::Dialog(d) | PageEvent::DialogClosed(d) => crate::bindings::identity::dialog_object(ctx, d)?.into_js(ctx),
     PageEvent::FileChooser(fc) => {
       Class::instance(ctx.clone(), crate::bindings::file_chooser::FileChooserJs::new(fc))?.into_js(ctx)
     },

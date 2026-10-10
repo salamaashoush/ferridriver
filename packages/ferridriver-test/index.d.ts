@@ -1528,7 +1528,7 @@ export interface Frame {
   isDetached(): boolean;
   waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   goto(url: string, options?: GotoOptions): Promise<Response | null>;
-  content(): Promise<string>;
+  content(options?: { includeShadow?: boolean }): Promise<string>;
   title(): Promise<string>;
   locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
   getByRole(role: string, options?: GetByRoleOptions): Locator;
@@ -1629,6 +1629,7 @@ export type PageEvent =
   | 'console'
   | 'crash'
   | 'dialog'
+  | 'dialogclosed'
   | 'domcontentloaded'
   | 'download'
   | 'filechooser'
@@ -1653,7 +1654,7 @@ export interface Page {
   reload(options?: GotoOptions): Promise<Response | null>;
   url(): string;
   title(): Promise<string>;
-  content(): Promise<string>;
+  content(options?: { includeShadow?: boolean }): Promise<string>;
   setContent(html: string, options?: GotoOptions): Promise<void>;
   close(options?: { runBeforeUnload?: boolean }): Promise<void>;
   isClosed(): boolean;
