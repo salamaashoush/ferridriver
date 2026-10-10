@@ -138,6 +138,7 @@ async fn judge(
     page,
     frame_id,
     &format!("window.__fd.expect({parts}, {params_json}, {strict})"),
+    "expect",
   )
   .await?;
   let text = raw
@@ -200,21 +201,46 @@ async fn expect_nothing_matched(
     outcome.missing = true;
   }
   if outcome.matches == is_not && !params.is_array() {
-    outcome.aria_snapshot = evaluate_engine(page, frame_id, "window.__fd.ariaSnapshotForExpectFailure()")
-      .await?
-      .and_then(|v| v.as_str().map(str::to_owned));
+    outcome.aria_snapshot = evaluate_engine(
+      page,
+      frame_id,
+      "window.__fd.ariaSnapshotForExpectFailure()",
+      "ariaSnapshot",
+    )
+    .await?
+    .and_then(|v| v.as_str().map(str::to_owned));
   }
   Ok(outcome)
 }
 
-async fn evaluate_engine(page: &crate::page::Page, frame_id: Option<&str>, expression: &str) -> Result<Option<Value>> {
+/// Evaluate an engine call, or report that the engine is not in the
+/// document yet. Right after a navigation the new document can be live
+/// before the backend has seen it and re-injected, so the call finds no
+/// `window.__fd`; that is the page moving on, which the poll retries, not
+/// a script error that would settle the assertion.
+async fn evaluate_engine(
+  page: &crate::page::Page,
+  frame_id: Option<&str>,
+  call: &str,
+  method: &str,
+) -> Result<Option<Value>> {
   let inner = page.inner();
   inner.ensure_engine_injected().await?;
-  match frame_id {
-    None => inner.evaluate(expression).await,
-    Some(id) => inner.evaluate_in_frame(expression, id).await,
+  let expression = format!("window.__fd ? {call} : {ENGINE_MISSING:?}");
+  let value = match frame_id {
+    None => inner.evaluate(&expression).await,
+    Some(id) => inner.evaluate_in_frame(&expression, id).await,
+  }?;
+  if value.as_ref().and_then(Value::as_str) == Some(ENGINE_MISSING) {
+    return Err(FerriError::protocol(
+      method,
+      "the page is navigating and has no script engine yet",
+    ));
   }
+  Ok(value)
 }
+
+const ENGINE_MISSING: &str = "__fd_engine_missing__";
 
 impl crate::locator::Locator {
   /// [`Frame::expect_once`] on this locator, through any frame hops and

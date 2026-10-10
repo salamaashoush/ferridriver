@@ -337,3 +337,12 @@ describe('accessibility', () => {
     await expect(locator).not.toHaveAccessibleErrorMessage('This should not be considered.');
   });
 });
+
+test('a matcher right after a navigating click waits for the new document', async ({ page }) => {
+  for (let i = 0; i < 10; i++) {
+    await page.goto('http://127.0.0.1:47831/example-domain.html');
+    await page.click('a');
+    await expect(page).toHaveURL(/domain-info\.html/);
+    await expect(page.locator('body')).toBeVisible();
+  }
+});
