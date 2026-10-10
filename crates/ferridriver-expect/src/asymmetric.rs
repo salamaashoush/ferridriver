@@ -286,7 +286,10 @@ pub fn compile_js_regex(pattern: &str, flags: &str) -> Result<Regex, regex::Erro
       prefix = format!("(?{letters})");
     }
   }
-  Regex::new(&format!("{prefix}{pattern}"))
+  Regex::new(&format!(
+    "{prefix}{}",
+    ferridriver::url_matcher::js_regex_source(pattern)
+  ))
 }
 
 pub fn close_enough(a: f64, b: f64, digits: u8) -> bool {

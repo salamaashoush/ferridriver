@@ -80,6 +80,71 @@ impl UrlMatcher {
   }
 }
 
+/// A JS `RegExp` source in the `regex` crate's syntax. JS (Annex B) reads
+/// a brace that opens no `{n}`, `{n,}` or `{n,m}` quantifier as a literal,
+/// so `/{}/` matches the two characters; the `regex` crate rejects it.
+#[must_use]
+pub fn js_regex_source(source: &str) -> std::borrow::Cow<'_, str> {
+  if !source.contains(['{', '}']) {
+    return std::borrow::Cow::Borrowed(source);
+  }
+  let chars: Vec<char> = source.chars().collect();
+  let mut out = String::with_capacity(source.len() + 4);
+  let mut in_class = false;
+  let mut i = 0;
+  while i < chars.len() {
+    let c = chars[i];
+    match c {
+      '\\' => {
+        out.push(c);
+        if let Some(&next) = chars.get(i + 1) {
+          out.push(next);
+          i += 1;
+        }
+      },
+      '[' if !in_class => {
+        in_class = true;
+        out.push(c);
+      },
+      ']' if in_class => {
+        in_class = false;
+        out.push(c);
+      },
+      '{' if !in_class => match quantifier_len(&chars[i..]) {
+        Some(len) => {
+          out.extend(&chars[i..i + len]);
+          i += len - 1;
+        },
+        None => out.push_str("\\{"),
+      },
+      '}' if !in_class => out.push_str("\\}"),
+      _ => out.push(c),
+    }
+    i += 1;
+  }
+  std::borrow::Cow::Owned(out)
+}
+
+/// Length of the `{n}` / `{n,}` / `{n,m}` quantifier `chars` starts with.
+fn quantifier_len(chars: &[char]) -> Option<usize> {
+  let mut i = 1;
+  let digits = |i: &mut usize| {
+    let start = *i;
+    while chars.get(*i).is_some_and(char::is_ascii_digit) {
+      *i += 1;
+    }
+    *i > start
+  };
+  if !digits(&mut i) {
+    return None;
+  }
+  if chars.get(i) == Some(&',') {
+    i += 1;
+    digits(&mut i);
+  }
+  (chars.get(i) == Some(&'}')).then_some(i + 1)
+}
+
 /// Compile a JS `RegExp` source/flags pair into a [`regex::Regex`].
 ///
 /// JS flags are translated to `regex` crate inline flags at the front of
@@ -108,10 +173,11 @@ pub fn compile_js_regex(source: &str, flags: &str) -> Result<regex::Regex> {
       },
     }
   }
+  let translated = js_regex_source(source);
   let pattern = if inline_flags.is_empty() {
-    source.to_string()
+    translated.into_owned()
   } else {
-    format!("(?{inline_flags}){source}")
+    format!("(?{inline_flags}){translated}")
   };
   regex::Regex::new(&pattern)
     .map_err(|e| FerriError::invalid_argument("regex", format!("regex {source:?} failed to compile: {e}")))
@@ -355,6 +421,16 @@ pub fn glob_to_regex_pattern(glob: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn js_regex_braces_that_quantify_nothing_are_literal() {
+    let re = compile_js_regex(r"value: \(\) => {}", "").unwrap();
+    assert!(re.is_match("value: () => {}"));
+    assert!(compile_js_regex("a{2}b{1,}c{0,3}", "").unwrap().is_match("aabccc"));
+    assert!(compile_js_regex("x{,2}", "").unwrap().is_match("x{,2}"));
+    assert!(compile_js_regex("[{}]", "").unwrap().is_match("}"));
+    assert_eq!(js_regex_source(r"\{a}"), r"\{a\}");
+  }
 
   // ── glob_to_regex_pattern parity vectors ────────────────────────────────
   // Each vector is checked against what Playwright's JS function produces for
