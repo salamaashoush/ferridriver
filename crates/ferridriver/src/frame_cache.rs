@@ -58,6 +58,16 @@ impl FrameCache {
     }
   }
 
+  /// Record a new frame's place: the main frame leads `page.frames()` as
+  /// it does upstream, even when its children were reported first.
+  fn place(&mut self, id: &Arc<str>, is_main: bool) {
+    if is_main {
+      self.order.insert(0, Arc::clone(id));
+    } else {
+      self.order.push(Arc::clone(id));
+    }
+  }
+
   /// Apply a `Page.frameAttached`-equivalent event.
   ///
   /// A `FrameAttached` event carries `name` only when the backend can fill
@@ -87,7 +97,7 @@ impl FrameCache {
       info.url.clone()
     };
     if existing.is_none() {
-      self.order.push(Arc::clone(&id));
+      self.place(&id, info.parent_frame_id.is_none());
     }
     let merged = FrameInfo {
       frame_id: info.frame_id,
@@ -142,7 +152,7 @@ impl FrameCache {
       info.url.clone()
     };
     if existing.is_none() {
-      self.order.push(Arc::clone(&id));
+      self.place(&id, info.parent_frame_id.is_none());
     }
     let merged = FrameInfo {
       frame_id: info.frame_id,
@@ -289,6 +299,15 @@ mod tests {
     c.detach("a");
     let kids: Vec<_> = c.child_ids("root").into_iter().map(|id| id.to_string()).collect();
     assert_eq!(kids, vec!["b"]);
+  }
+
+  #[test]
+  fn main_frame_leads_when_attached_after_its_children() {
+    let mut c = FrameCache::default();
+    c.attach(mk("child", Some("root"), "", ""));
+    c.attach(mk("root", None, "", ""));
+    let ids: Vec<_> = c.live_ids().map(|id| id.to_string()).collect();
+    assert_eq!(ids, vec!["root", "child"]);
   }
 
   #[test]
