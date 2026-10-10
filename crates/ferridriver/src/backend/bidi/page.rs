@@ -2983,7 +2983,7 @@ impl BidiPage {
       return;
     }
     let mut rx = self.session.transport.tap_events();
-    let ctx = self.context_id.clone();
+    let intercept_ids = self.intercept_ids.clone();
     let session = self.session.clone();
     let routes = self.routes.clone();
 
@@ -2992,16 +2992,31 @@ impl BidiPage {
         if event.method != "network.beforeRequestSent" {
           continue;
         }
-        let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-        if event_ctx != &*ctx {
-          continue;
-        }
         let is_blocked = event
           .params
           .get("isBlocked")
           .and_then(serde_json::Value::as_bool)
           .unwrap_or(false);
         if !is_blocked {
+          continue;
+        }
+        // The intercept covers this page's iframes too, whose requests
+        // carry their own browsing context; what makes a blocked request
+        // this page's to resolve is that this page's intercept blocked it.
+        let blocked_by_us = {
+          let ours = intercept_ids.read().await;
+          event
+            .params
+            .get("intercepts")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|ids| {
+              ids
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|id| ours.iter().any(|o| o == id))
+            })
+        };
+        if !blocked_by_us {
           continue;
         }
 
