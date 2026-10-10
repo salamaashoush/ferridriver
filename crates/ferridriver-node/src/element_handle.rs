@@ -8,6 +8,7 @@
 //! JS via `page.query_selector` + `handle.dispose()`. Phase E bolts the
 //! Playwright DOM methods on top of this same class.
 
+use crate::abort::Bag;
 use crate::error::IntoNapi;
 use napi::Result;
 use napi::bindgen_prelude::Buffer;
@@ -201,26 +202,22 @@ impl ElementHandle {
 
   #[napi]
   pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.click().maybe_options(opts).await.into_napi()
+    self.inner.click().bag(options)?.await.into_napi()
   }
 
   #[napi]
   pub async fn dblclick(&self, options: Option<crate::types::DblClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.dblclick().maybe_options(opts).await.into_napi()
+    self.inner.dblclick().bag(options)?.await.into_napi()
   }
 
   #[napi]
   pub async fn hover(&self, options: Option<crate::types::HoverOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.hover().maybe_options(opts).await.into_napi()
+    self.inner.hover().bag(options)?.await.into_napi()
   }
 
   #[napi]
   pub async fn type_str(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
-    self.inner.type_str(&text).maybe_options(opts).await.into_napi()
+    self.inner.type_str(&text).bag(options)?.await.into_napi()
   }
 
   #[napi]
@@ -235,9 +232,16 @@ impl ElementHandle {
 
   /// Playwright: `elementHandle.screenshot(options?: ElementHandleScreenshotOptions): Promise<Buffer>`.
   #[napi]
-  pub async fn screenshot(&self, options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
+  pub async fn screenshot(&self, mut options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
+    let signal = crate::abort::take(&mut options);
     let opts = options.unwrap_or_default().into_core(self.inner.page());
-    let bytes = self.inner.screenshot().options(opts).await.into_napi()?;
+    let bytes = self
+      .inner
+      .screenshot()
+      .options(opts)
+      .maybe_signal(signal)
+      .await
+      .into_napi()?;
     Ok(bytes.into())
   }
 
@@ -328,11 +332,12 @@ impl ElementHandle {
   pub async fn wait_for_element_state(
     &self,
     state: String,
-    options: Option<crate::types::ElementHandleWaitOptions>,
+    mut options: Option<crate::types::ElementHandleWaitOptions>,
   ) -> Result<()> {
     let st = ferridriver::ElementState::parse(&state).into_napi()?;
+    let signal = crate::abort::take(&mut options);
     let timeout = options.and_then(|o| o.timeout).map(crate::types::f64_to_u64);
-    self.inner.wait_for_element_state(st, timeout).await.into_napi()
+    crate::abort::run(signal, self.inner.wait_for_element_state(st, timeout)).await
   }
 
   /// Playwright: `elementHandle.waitForSelector(selector, options?: { timeout? })`.
@@ -340,10 +345,11 @@ impl ElementHandle {
   pub async fn wait_for_selector(
     &self,
     selector: String,
-    options: Option<crate::types::ElementHandleWaitOptions>,
+    mut options: Option<crate::types::ElementHandleWaitOptions>,
   ) -> Result<Option<ElementHandle>> {
+    let signal = crate::abort::take(&mut options);
     let timeout = options.and_then(|o| o.timeout).map(crate::types::f64_to_u64);
-    let maybe = self.inner.wait_for_selector(&selector, timeout).await.into_napi()?;
+    let maybe = crate::abort::run(signal, self.inner.wait_for_selector(&selector, timeout)).await?;
     Ok(maybe.map(ElementHandle::wrap))
   }
 
@@ -352,43 +358,37 @@ impl ElementHandle {
   /// Playwright: `elementHandle.fill(value, options?)`.
   #[napi]
   pub async fn fill(&self, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
-    self.inner.fill(&value).maybe_options(opts).await.into_napi()
+    self.inner.fill(&value).bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.check(options?)`.
   #[napi]
   pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.check().maybe_options(opts).await.into_napi()
+    self.inner.check().bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.uncheck(options?)`.
   #[napi]
   pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.uncheck().maybe_options(opts).await.into_napi()
+    self.inner.uncheck().bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.setChecked(checked, options?)`.
   #[napi]
   pub async fn set_checked(&self, checked: bool, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.set_checked(checked).maybe_options(opts).await.into_napi()
+    self.inner.set_checked(checked).bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.tap(options?)`.
   #[napi]
   pub async fn tap(&self, options: Option<crate::types::TapOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap().maybe_options(opts).await.into_napi()
+    self.inner.tap().bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.press(key, options?)`.
   #[napi]
   pub async fn press(&self, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
-    self.inner.press(&key).maybe_options(opts).await.into_napi()
+    self.inner.press(&key).bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
@@ -402,7 +402,7 @@ impl ElementHandle {
     self
       .inner
       .dispatch_event(&event_type, event_init)
-      .maybe_options(options.map(Into::into))
+      .bag(options)?
       .await
       .into_napi()
   }
@@ -414,8 +414,7 @@ impl ElementHandle {
     values: crate::types::NapiSelectOptionInput,
     options: Option<crate::types::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    let opts = options.map(Into::into);
-    self.inner.select_option(values.0).maybe_options(opts).await.into_napi()
+    self.inner.select_option(values.0).bag(options)?.await.into_napi()
   }
 
   /// Playwright: `elementHandle.selectText(options?)`.
@@ -431,12 +430,6 @@ impl ElementHandle {
     files: crate::types::NapiInputFiles,
     options: Option<crate::types::SetInputFilesOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
-    self
-      .inner
-      .set_input_files(files.0)
-      .maybe_options(opts)
-      .await
-      .into_napi()
+    self.inner.set_input_files(files.0).bag(options)?.await.into_napi()
   }
 }

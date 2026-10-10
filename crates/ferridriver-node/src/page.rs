@@ -1,5 +1,6 @@
 //! Page class -- NAPI binding for `ferridriver::Page`.
 
+use crate::abort::Bag;
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
@@ -370,11 +371,10 @@ impl Page {
   /// issued). Mirrors Playwright's `Promise<Response | null>`.
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
-    let opts = options.map(ferridriver::options::GotoOptions::from);
     let resp = self
       .inner
       .goto(&url)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
@@ -384,11 +384,10 @@ impl Page {
   /// on the same basis as `goto` (or `null`).
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn go_back(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
-    let opts = options.map(ferridriver::options::GotoOptions::from);
     let resp = self
       .inner
       .go_back()
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
@@ -398,11 +397,10 @@ impl Page {
   /// `Response` on the same basis as `goto` (or `null`).
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn go_forward(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
-    let opts = options.map(ferridriver::options::GotoOptions::from);
     let resp = self
       .inner
       .go_forward()
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
@@ -412,13 +410,7 @@ impl Page {
   /// on the same basis as `goto` (or `null`).
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn reload(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
-    let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self
-      .inner
-      .reload()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)?;
+    let resp = self.inner.reload().bag(options)?.await.map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -890,7 +882,7 @@ impl Page {
   /// The predicate receives that live object and the wait resolves on
   /// the first event for which it returns truthy.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', optionsOrPredicate?: number | ((data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>) | { predicate?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>; timeout?: number }",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', optionsOrPredicate?: number | ((data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>) | { predicate?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }",
     ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Error | Frame | Page>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -909,6 +901,7 @@ impl Page {
     use napi::bindgen_prelude::Either3;
     let mut timeout_ms: Option<f64> = None;
     let mut predicate = None;
+    let mut signal = None;
     match options_or_predicate {
       None => {},
       Some(Either3::A(t)) => timeout_ms = Some(t),
@@ -923,6 +916,7 @@ impl Page {
       },
       Some(Either3::C(obj)) => {
         timeout_ms = obj.get::<f64>("timeout")?;
+        signal = crate::abort::take(&mut Some(obj.get::<crate::abort::Signal>("signal")?));
         if let Some(f) =
           obj.get::<napi::bindgen_prelude::Function<'_, PageWaitForEventResult, PredReturn>>("predicate")?
         {
@@ -946,7 +940,7 @@ impl Page {
     // like every other event (the emitter bridge claims the live
     // handles on behalf of broadcast listeners).
     if predicate.is_none() && matches!(event_lc.as_str(), "dialog" | "filechooser" | "download") {
-      return napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      return napi::bindgen_prelude::AsyncBlockBuilder::new(crate::abort::race(signal, async move {
         match event_lc.as_str() {
           "dialog" => {
             let d = page.wait_for_dialog(timeout).await.into_napi()?;
@@ -965,7 +959,7 @@ impl Page {
             ))
           },
         }
-      })
+      }))
       .build(env);
     }
 
@@ -973,7 +967,7 @@ impl Page {
     // caller's subsequent triggering line can't race past us. See
     // `wait_for_response` for the same pattern.
     let mut rx = self.inner.events().subscribe();
-    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+    napi::bindgen_prelude::AsyncBlockBuilder::new(crate::abort::race(signal, async move {
       let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
       loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -998,7 +992,7 @@ impl Page {
           return Ok(live_event_arg(&page, ev));
         }
       }
-    })
+    }))
     .build(env)
   }
 
@@ -1103,11 +1097,10 @@ impl Page {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
   #[napi]
   pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .click(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1116,11 +1109,10 @@ impl Page {
   /// Playwright's full `PageDblClickOptions` bag.
   #[napi]
   pub async fn dblclick(&self, selector: String, options: Option<crate::types::DblClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .dblclick(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1129,11 +1121,10 @@ impl Page {
   /// full `PageFillOptions` bag.
   #[napi]
   pub async fn fill(&self, selector: String, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .fill(&selector, &value)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1147,11 +1138,10 @@ impl Page {
     text: String,
     options: Option<crate::types::TypeOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .r#type(&selector, &text)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1160,11 +1150,10 @@ impl Page {
   /// Playwright's full `PagePressOptions` bag.
   #[napi]
   pub async fn press(&self, selector: String, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .press(&selector, &key)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1173,11 +1162,10 @@ impl Page {
   /// full `PageHoverOptions` bag.
   #[napi]
   pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .hover(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1191,11 +1179,10 @@ impl Page {
     values: crate::types::NapiSelectOptionInput,
     options: Option<crate::types::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    let opts = options.map(Into::into);
     self
       .inner
       .select_option(&selector, values.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1204,11 +1191,10 @@ impl Page {
   /// `PageCheckOptions` bag.
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .check(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1217,11 +1203,10 @@ impl Page {
   /// `PageUncheckOptions` bag.
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .uncheck(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1235,11 +1220,10 @@ impl Page {
     checked: bool,
     options: Option<crate::types::CheckOptions>,
   ) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .set_checked(&selector, checked)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1248,11 +1232,10 @@ impl Page {
   /// `page.tap(selector, options?)`. Accepts the full `PageTapOptions` bag.
   #[napi]
   pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .tap(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1392,11 +1375,10 @@ impl Page {
 
   #[napi]
   pub async fn wait_for_selector(&self, selector: String, options: Option<WaitOptions>) -> Result<()> {
-    let opts = options.map(ferridriver::options::WaitOptions::try_from).transpose()?;
     self
       .inner
       .wait_for_selector(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1405,7 +1387,7 @@ impl Page {
   /// Playwright API: `page.waitForURL(url, options?: { timeout?, waitUntil? })`.
   #[napi(
     js_name = "waitForURL",
-    ts_args_type = "url: string | RegExp, options?: { timeout?: number, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+    ts_args_type = "url: string | RegExp, options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
   )]
   pub async fn wait_for_url(
     &self,
@@ -1416,7 +1398,7 @@ impl Page {
     self
       .inner
       .wait_for_url(matcher)
-      .maybe_options(options.map(Into::into))
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1427,7 +1409,9 @@ impl Page {
   }
 
   /// Playwright API: `page.waitForLoadState(state?, options?: { timeout? })`.
-  #[napi(ts_args_type = "state?: 'load' | 'domcontentloaded' | 'networkidle', options?: { timeout?: number }")]
+  #[napi(
+    ts_args_type = "state?: 'load' | 'domcontentloaded' | 'networkidle', options?: { timeout?: number, signal?: AbortSignal }"
+  )]
   pub async fn wait_for_load_state(
     &self,
     state: Option<String>,
@@ -1436,7 +1420,7 @@ impl Page {
     self
       .inner
       .wait_for_load_state(state.as_deref())
-      .maybe_options(options.map(Into::into))
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1444,23 +1428,26 @@ impl Page {
   /// Playwright: `page.waitForFunction(pageFunction, arg?, options?): Promise<JSHandle>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:565`).
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { polling?: number | 'raf', timeout?: number }"
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { polling?: number | 'raf', timeout?: number, signal?: AbortSignal }"
   )]
   pub async fn wait_for_function(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-    options: Option<WaitForFunctionOptions>,
+    mut options: Option<WaitForFunctionOptions>,
   ) -> Result<crate::js_handle::JSHandle> {
     let serialized = build_serialized_argument(arg)?;
+    let signal = crate::abort::take(&mut options);
     let opts = options
       .map(ferridriver::options::WaitForFunctionOptions::try_from)
       .transpose()?;
-    let handle = self
-      .inner
-      .wait_for_function(&page_function.source, serialized, page_function.is_function, opts)
-      .await
-      .map_err(crate::error::to_napi)?;
+    let handle = crate::abort::run(
+      signal,
+      self
+        .inner
+        .wait_for_function(&page_function.source, serialized, page_function.is_function, opts),
+    )
+    .await?;
     Ok(crate::js_handle::JSHandle::wrap(handle))
   }
 
@@ -1557,7 +1544,8 @@ impl Page {
   // ── Screenshots ─────────────────────────────────────────────────────────
 
   #[napi]
-  pub async fn screenshot(&self, options: Option<ScreenshotOptions>) -> Result<Buffer> {
+  pub async fn screenshot(&self, mut options: Option<ScreenshotOptions>) -> Result<Buffer> {
+    let signal = crate::abort::take(&mut options);
     let mask_selectors: Vec<String> = options
       .as_ref()
       .and_then(|o| o.mask.as_ref())
@@ -1569,6 +1557,7 @@ impl Page {
       .inner
       .screenshot()
       .options(opts)
+      .maybe_signal(signal)
       .await
       .map_err(crate::error::to_napi)?;
     Ok(bytes.into())
@@ -1672,11 +1661,10 @@ impl Page {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486`.
   #[napi]
   pub async fn drag_and_drop(&self, source: String, target: String, options: Option<DragAndDropOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .drag_and_drop(&source, &target)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()
   }
@@ -1739,7 +1727,7 @@ impl Page {
     self
       .inner
       .dispatch_event(&selector, &event_type, event_init)
-      .maybe_options(options.map(Into::into))
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2033,15 +2021,14 @@ impl Page {
   /// Playwright: `page.ariaSnapshot(options?): Promise<string>`.
   #[napi(
     js_name = "ariaSnapshot",
-    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number, signal?: AbortSignal }",
     ts_return_type = "Promise<string>"
   )]
   pub async fn aria_snapshot(&self, options: Option<crate::types::AriaSnapshotOptions>) -> Result<String> {
-    let opts = options.map(Into::into).unwrap_or_default();
     self
       .inner
       .aria_snapshot()
-      .options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2049,18 +2036,17 @@ impl Page {
   /// Playwright: `page.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
   #[napi(
     js_name = "ariaSnapshotJSON",
-    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number, signal?: AbortSignal }",
     ts_return_type = "Promise<import('./types').AriaSnapshotJSON>"
   )]
   pub async fn aria_snapshot_json(
     &self,
     options: Option<crate::types::AriaSnapshotOptions>,
   ) -> Result<Vec<serde_json::Value>> {
-    let opts = options.map(Into::into).unwrap_or_default();
     self
       .inner
       .aria_snapshot_json()
-      .options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2209,11 +2195,10 @@ impl Page {
     files: crate::types::NapiInputFiles,
     options: Option<crate::types::SetInputFilesOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .set_input_files(&selector, files.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }

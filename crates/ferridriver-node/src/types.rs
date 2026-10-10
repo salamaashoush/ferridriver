@@ -383,20 +383,24 @@ pub struct FilterOptions {
 }
 
 /// Options for waiting operations.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct WaitOptions {
   /// "visible", "hidden", "attached", "stable"
   pub state: Option<String>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 /// Playwright's `{ timeout?: number }` bag for
 /// `elementHandle.waitForElementState` / `elementHandle.waitForSelector`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct ElementHandleWaitOptions {
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 /// Playwright's `geolocation` bag for `browserContext.setGeolocation`.
@@ -410,12 +414,14 @@ pub struct GeolocationOptions {
 
 /// Playwright `PageWaitForFunctionOptions` — matches
 /// `{ polling?: number | 'raf', timeout?: number }`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct WaitForFunctionOptions {
   #[napi(ts_type = "number | 'raf'")]
   pub polling: Option<napi::Either<f64, String>>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl TryFrom<WaitForFunctionOptions> for ferridriver::options::WaitForFunctionOptions {
@@ -438,10 +444,12 @@ impl TryFrom<WaitForFunctionOptions> for ferridriver::options::WaitForFunctionOp
 }
 
 /// Playwright `locator.evaluate`'s `TimeoutOptions & EvaluateOptions`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct EvaluateOptions {
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   pub expose_functions: Option<bool>,
 }
 
@@ -478,7 +486,7 @@ impl From<ClipRect> for ferridriver::options::ClipRect {
 
 /// Playwright-parity `PageScreenshotOptions`. Mirrors
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct ScreenshotOptions {
   #[napi(ts_type = "'disabled' | 'allow'")]
@@ -512,12 +520,14 @@ pub struct ScreenshotOptions {
   /// Raw CSS injected before capture and removed afterwards.
   pub style: Option<String>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 /// Playwright-parity `LocatorScreenshotOptions` /
 /// `ElementHandleScreenshotOptions`: [`ScreenshotOptions`] without
 /// `clip` and `fullPage`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct ElementScreenshotOptions {
   #[napi(ts_type = "'disabled' | 'allow'")]
@@ -536,6 +546,8 @@ pub struct ElementScreenshotOptions {
   pub scale: Option<String>,
   pub style: Option<String>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl ElementScreenshotOptions {
@@ -634,7 +646,7 @@ impl From<Point> for ferridriver::options::Point {
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
 /// All fields are the Playwright public surface; `noWaitAfter` is
 /// accepted for signature parity but has no effect in ferridriver.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct ClickOptions {
   #[napi(ts_type = "'left' | 'right' | 'middle'")]
@@ -649,6 +661,8 @@ pub struct ClickOptions {
   pub position: Option<Point>,
   pub steps: Option<u32>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   pub trial: Option<bool>,
   #[napi(ts_type = "'auto' | 'none'")]
   pub scroll: Option<String>,
@@ -694,7 +708,7 @@ impl TryFrom<ClickOptions> for ferridriver::options::ClickOptions {
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13116`.
 /// Identical shape to [`ClickOptions`] minus `clickCount` (forced to 2
 /// at dispatch).
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct DblClickOptions {
   #[napi(ts_type = "'left' | 'right' | 'middle'")]
@@ -707,6 +721,8 @@ pub struct DblClickOptions {
   pub position: Option<Point>,
   pub steps: Option<u32>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   pub trial: Option<bool>,
   #[napi(ts_type = "'auto' | 'none'")]
   pub scroll: Option<String>,
@@ -790,11 +806,13 @@ impl From<FilePayload> for ferridriver::options::FilePayload {
 }
 
 /// Playwright-parity options for `setInputFiles`. Two fields.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct SetInputFilesOptions {
   pub no_wait_after: Option<bool>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<SetInputFilesOptions> for ferridriver::options::SetInputFilesOptions {
@@ -891,13 +909,15 @@ impl napi::bindgen_prelude::FromNapiValue for NapiInputFiles {
 /// `localPaths`, `streams`, `data`, `force`, `trial` -- those are folded
 /// into the payload or unsupported), leaving `modifiers`, `position`, and
 /// `timeout`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct DropOptions {
   #[napi(ts_type = "Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>")]
   pub modifiers: Option<Vec<String>>,
   pub position: Option<Point>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl TryFrom<DropOptions> for ferridriver::options::DropOptions {
@@ -1088,12 +1108,14 @@ pub struct ExposeFunctionsOptions {
 
 /// Playwright-parity options for `selectOption`. Three fields per
 /// Playwright's `LocatorSelectOptionOptions`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct SelectOptionOptions {
   pub force: Option<bool>,
   pub no_wait_after: Option<bool>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<SelectOptionOptions> for ferridriver::options::SelectOptionOptions {
@@ -1108,12 +1130,14 @@ impl From<SelectOptionOptions> for ferridriver::options::SelectOptionOptions {
 
 /// Playwright-parity options for `page.fill` / `locator.fill` /
 /// `frame.fill`. Three fields per Playwright's `LocatorFillOptions`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct FillOptions {
   pub force: Option<bool>,
   pub no_wait_after: Option<bool>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<FillOptions> for ferridriver::options::FillOptions {
@@ -1128,12 +1152,14 @@ impl From<FillOptions> for ferridriver::options::FillOptions {
 
 /// Playwright-parity options for `page.press` / `locator.press` /
 /// `frame.press`. Three fields per Playwright's `LocatorPressOptions`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct PressOptions {
   pub delay: Option<f64>,
   pub no_wait_after: Option<bool>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<PressOptions> for ferridriver::options::PressOptions {
@@ -1149,12 +1175,14 @@ impl From<PressOptions> for ferridriver::options::PressOptions {
 /// Playwright-parity options for `page.type` / `locator.type` /
 /// `locator.pressSequentially`. Same shape as [`PressOptions`] per
 /// Playwright's `LocatorTypeOptions`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct TypeOptions {
   pub delay: Option<f64>,
   pub no_wait_after: Option<bool>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<TypeOptions> for ferridriver::options::TypeOptions {
@@ -1169,13 +1197,15 @@ impl From<TypeOptions> for ferridriver::options::TypeOptions {
 
 /// Playwright-parity options for `check` / `uncheck` / `setChecked`.
 /// Five fields per Playwright's `LocatorCheckOptions`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct CheckOptions {
   pub force: Option<bool>,
   pub no_wait_after: Option<bool>,
   pub position: Option<Point>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   pub trial: Option<bool>,
   #[napi(ts_type = "'auto' | 'none'")]
   pub scroll: Option<String>,
@@ -1198,10 +1228,12 @@ impl TryFrom<CheckOptions> for ferridriver::options::CheckOptions {
 
 /// Playwright-parity options for `page.dispatchEvent` /
 /// `locator.dispatchEvent` / `frame.dispatchEvent`. Single field.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct DispatchEventOptions {
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<DispatchEventOptions> for ferridriver::options::DispatchEventOptions {
@@ -1217,7 +1249,7 @@ impl From<DispatchEventOptions> for ferridriver::options::DispatchEventOptions {
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
 /// `hover(options?)`. No `steps` — hover always moves in a single step
 /// in Playwright (steps is a click/dblclick-only field).
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct HoverOptions {
   pub force: Option<bool>,
@@ -1226,6 +1258,8 @@ pub struct HoverOptions {
   pub no_wait_after: Option<bool>,
   pub position: Option<Point>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   pub trial: Option<bool>,
   #[napi(ts_type = "'auto' | 'none'")]
   pub scroll: Option<String>,
@@ -1260,7 +1294,7 @@ impl TryFrom<HoverOptions> for ferridriver::options::HoverOptions {
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
 /// `tap(options?)`. Explicit struct — distinct from `HoverOptions` so
 /// future tap-only divergence has a home.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct TapOptions {
   pub force: Option<bool>,
@@ -1269,6 +1303,8 @@ pub struct TapOptions {
   pub no_wait_after: Option<bool>,
   pub position: Option<Point>,
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   pub trial: Option<bool>,
   #[napi(ts_type = "'auto' | 'none'")]
   pub scroll: Option<String>,
@@ -1304,7 +1340,7 @@ impl TryFrom<TapOptions> for ferridriver::options::TapOptions {
 /// `page.dragAndDrop`) and `:13293` (for `locator.dragTo`). `strict` has
 /// no effect on `locator.dragTo` (the locator already carries strict);
 /// it is meaningful only on `page.dragAndDrop`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct DragAndDropOptions {
   /// Bypass actionability checks.
@@ -1321,6 +1357,8 @@ pub struct DragAndDropOptions {
   pub strict: Option<bool>,
   /// Maximum time in ms. `0` disables the timeout.
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   /// Perform actionability checks only; skip the actual mouse action.
   pub trial: Option<bool>,
   #[napi(ts_type = "'auto' | 'none'")]
@@ -1356,13 +1394,15 @@ fn parse_scroll(value: Option<&str>) -> napi::Result<Option<ferridriver::options
 }
 
 /// Navigation options (waitUntil, timeout, referer).
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct GotoOptions {
   /// When to consider navigation complete: "load", "domcontentloaded", "networkidle", "commit"
   pub wait_until: Option<String>,
   /// Maximum navigation timeout in milliseconds.
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   /// HTTP `Referer` header to send with the navigation request. Mirrors
   /// Playwright's `page.goto(url, { referer })`.
   pub referer: Option<String>,
@@ -1379,11 +1419,13 @@ impl From<GotoOptions> for ferridriver::options::GotoOptions {
 }
 
 /// Options for `page.waitForURL(url, { timeout?, waitUntil? })`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct WaitForUrlOptions {
   /// Maximum wait time in milliseconds.
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
   /// Lifecycle state to await once the URL matches: "load",
   /// "domcontentloaded", "networkidle", "commit".
   pub wait_until: Option<String>,
@@ -1399,11 +1441,13 @@ impl From<WaitForUrlOptions> for ferridriver::options::WaitForUrlOptions {
 }
 
 /// Options for `page.waitForLoadState(state?, { timeout? })`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct WaitForLoadStateOptions {
   /// Maximum wait time in milliseconds.
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<WaitForLoadStateOptions> for ferridriver::options::WaitForLoadStateOptions {
@@ -2053,7 +2097,7 @@ impl From<SnapshotForAiOptions> for ferridriver::snapshot::SnapshotOptions {
 
 /// Options for `locator.ariaSnapshot(options?)`. Mirrors Playwright's
 /// `TimeoutOptions & { mode?: 'ai' | 'default', depth?: number }`.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
 pub struct AriaSnapshotOptions {
   /// `'default'` (Playwright stable YAML) or `'ai'` (ref-annotated).
@@ -2065,6 +2109,8 @@ pub struct AriaSnapshotOptions {
   pub boxes: Option<bool>,
   /// Resolution/actionability timeout in ms. `None` = page default.
   pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
 }
 
 impl From<AriaSnapshotOptions> for ferridriver::options::AriaSnapshotOptions {
@@ -2125,3 +2171,29 @@ impl napi::bindgen_prelude::FromNapiValue for NapiInitScriptArg {
 pub struct ContentOptions {
   pub include_shadow: Option<bool>,
 }
+
+crate::abort::signalled!(
+  AriaSnapshotOptions,
+  CheckOptions,
+  ClickOptions,
+  DblClickOptions,
+  DispatchEventOptions,
+  DragAndDropOptions,
+  DropOptions,
+  ElementHandleWaitOptions,
+  EvaluateOptions,
+  ElementScreenshotOptions,
+  FillOptions,
+  GotoOptions,
+  HoverOptions,
+  PressOptions,
+  ScreenshotOptions,
+  SelectOptionOptions,
+  SetInputFilesOptions,
+  TapOptions,
+  TypeOptions,
+  WaitForFunctionOptions,
+  WaitForLoadStateOptions,
+  WaitForUrlOptions,
+  WaitOptions,
+);

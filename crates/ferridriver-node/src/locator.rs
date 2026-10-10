@@ -1,5 +1,6 @@
 //! Locator class -- NAPI binding for `ferridriver::Locator`.
 
+use crate::abort::Bag;
 use crate::error::IntoNapi;
 use crate::types::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
 use napi::Result;
@@ -275,37 +276,24 @@ impl Locator {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
   #[napi]
   pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .click()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.click().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   /// Double-click the element matched by this locator. Accepts
   /// Playwright's full `LocatorDblClickOptions` bag.
   #[napi]
   pub async fn dblclick(&self, options: Option<crate::types::DblClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .dblclick()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.dblclick().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   /// Fill an input with `value`. Accepts Playwright's full
   /// `LocatorFillOptions` bag.
   #[napi]
   pub async fn fill(&self, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .fill(&value)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -343,22 +331,20 @@ impl Locator {
   /// `pressSequentially`; both call paths are identical in ferridriver.
   #[napi]
   pub async fn type_text(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .r#type(&text)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "type")]
   pub async fn type_alias(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .r#type(&text)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -367,11 +353,10 @@ impl Locator {
   /// `LocatorPressOptions` bag.
   #[napi]
   pub async fn press(&self, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .press(&key)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -380,13 +365,7 @@ impl Locator {
   /// Playwright's full `LocatorHoverOptions` bag.
   #[napi]
   pub async fn hover(&self, options: Option<crate::types::HoverOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .hover()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.hover().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -403,25 +382,13 @@ impl Locator {
   /// `LocatorCheckOptions` bag.
   #[napi]
   pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .check()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.check().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   /// Uncheck a checkbox. Accepts Playwright's full `LocatorUncheckOptions` bag.
   #[napi]
   pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .uncheck()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.uncheck().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   /// Select options on a `<select>` element. Accepts Playwright's
@@ -433,11 +400,10 @@ impl Locator {
     values: crate::types::NapiSelectOptionInput,
     options: Option<crate::types::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    let opts = options.map(Into::into);
     self
       .inner
       .select_option(values.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -469,7 +435,7 @@ impl Locator {
     self
       .inner
       .dispatch_event(&event_type, event_init)
-      .maybe_options(options.map(Into::into))
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -478,11 +444,10 @@ impl Locator {
   /// `LocatorPressSequentiallyOptions` (same shape as `TypeOptions`).
   #[napi]
   pub async fn press_sequentially(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .press_sequentially(&text)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -495,15 +460,14 @@ impl Locator {
   /// Playwright `InjectedScript` — byte-for-byte Playwright YAML.
   #[napi(
     js_name = "ariaSnapshot",
-    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number, signal?: AbortSignal }",
     ts_return_type = "Promise<string>"
   )]
   pub async fn aria_snapshot(&self, options: Option<crate::types::AriaSnapshotOptions>) -> Result<String> {
-    let opts = options.map(Into::into).unwrap_or_default();
     self
       .inner
       .aria_snapshot()
-      .options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -511,18 +475,17 @@ impl Locator {
   /// Playwright: `locator.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
   #[napi(
     js_name = "ariaSnapshotJSON",
-    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number }",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, boxes?: boolean, timeout?: number, signal?: AbortSignal }",
     ts_return_type = "Promise<import('./types').AriaSnapshotJSON>"
   )]
   pub async fn aria_snapshot_json(
     &self,
     options: Option<crate::types::AriaSnapshotOptions>,
   ) -> Result<Vec<serde_json::Value>> {
-    let opts = options.map(Into::into).unwrap_or_default();
     self
       .inner
       .aria_snapshot_json()
-      .options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -633,8 +596,7 @@ impl Locator {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
   #[napi(js_name = "dragTo")]
   pub async fn drag_to(&self, target: &Locator, options: Option<crate::types::DragAndDropOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.drag_to(&target.inner).maybe_options(opts).await.into_napi()
+    self.inner.drag_to(&target.inner).bag(options)?.await.into_napi()
   }
 
   /// Drop a file/data payload onto this element. Mirrors Playwright's
@@ -647,11 +609,10 @@ impl Locator {
     payload: crate::types::NapiDropPayload,
     options: Option<crate::types::DropOptions>,
   ) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .drop(payload.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -660,25 +621,21 @@ impl Locator {
 
   #[napi]
   pub async fn wait_for(&self, options: Option<WaitOptions>) -> Result<()> {
-    let opts = options.map(ferridriver::options::WaitOptions::try_from).transpose()?;
-    self
-      .inner
-      .wait_for()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.wait_for().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   // ── Screenshot ──────────────────────────────────────────────────────────
 
   /// Playwright: `locator.screenshot(options?: LocatorScreenshotOptions): Promise<Buffer>`.
   #[napi]
-  pub async fn screenshot(&self, options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
+  pub async fn screenshot(&self, mut options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
+    let signal = crate::abort::take(&mut options);
     let opts = options.unwrap_or_default().into_core(self.inner.page());
     let bytes = self
       .inner
       .screenshot()
       .options(opts)
+      .maybe_signal(signal)
       .await
       .map_err(crate::error::to_napi)?;
     Ok(bytes.into())
@@ -707,13 +664,7 @@ impl Locator {
   /// Playwright's full `LocatorTapOptions` bag.
   #[napi]
   pub async fn tap(&self, options: Option<crate::types::TapOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .tap()
-      .maybe_options(opts)
-      .await
-      .map_err(crate::error::to_napi)
+    self.inner.tap().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -723,11 +674,10 @@ impl Locator {
 
   #[napi]
   pub async fn set_checked(&self, checked: bool, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .set_checked(checked)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -741,11 +691,10 @@ impl Locator {
     files: crate::types::NapiInputFiles,
     options: Option<crate::types::SetInputFilesOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .set_input_files(files.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .map_err(crate::error::to_napi)
   }
@@ -758,7 +707,7 @@ impl Locator {
   /// Playwright: `locator.evaluate(pageFunction, arg?, options?): Promise<R>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:129`).
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, exposeFunctions?: boolean }",
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, signal?: AbortSignal, exposeFunctions?: boolean }",
     ts_return_type = "Promise<unknown>"
   )]
   pub async fn evaluate(
@@ -769,11 +718,10 @@ impl Locator {
   ) -> Result<crate::serialize_out::Evaluated> {
     let expose_functions = options.as_ref().and_then(|o| o.expose_functions).unwrap_or(false);
     let serialized = crate::page::build_evaluate_argument(arg, expose_functions)?;
-    let opts = options.map(Into::into);
     let result = self
       .inner
       .evaluate(&page_function.source, serialized, page_function.is_function)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()?;
     Ok(crate::serialize_out::Evaluated(result))
@@ -782,7 +730,7 @@ impl Locator {
   /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:138`).
   #[napi(
-    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, exposeFunctions?: boolean }"
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, signal?: AbortSignal, exposeFunctions?: boolean }"
   )]
   pub async fn evaluate_handle(
     &self,
@@ -792,11 +740,10 @@ impl Locator {
   ) -> Result<crate::js_handle::JSHandle> {
     let expose_functions = options.as_ref().and_then(|o| o.expose_functions).unwrap_or(false);
     let serialized = crate::page::build_evaluate_argument(arg, expose_functions)?;
-    let opts = options.map(Into::into);
     let handle = self
       .inner
       .evaluate_handle(&page_function.source, serialized, page_function.is_function)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()?;
     Ok(crate::js_handle::JSHandle::wrap(handle))
@@ -824,21 +771,26 @@ impl Locator {
 
   /// Playwright: `locator.waitForFunction(pageFunction, arg?, options?): Promise<void>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:396`).
-  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number }")]
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number, signal?: AbortSignal }"
+  )]
   pub async fn wait_for_function(
     &self,
     page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-    options: Option<crate::types::EvaluateOptions>,
+    mut options: Option<crate::types::EvaluateOptions>,
   ) -> Result<()> {
     let serialized = crate::page::build_serialized_argument(arg)?;
+    let signal = crate::abort::take(&mut options);
     let opts: Option<ferridriver::options::EvaluateOptions> = options.map(Into::into);
     let timeout = opts.and_then(|o| o.timeout);
-    self
-      .inner
-      .wait_for_function(&page_function.source, serialized, page_function.is_function, timeout)
-      .await
-      .map_err(crate::error::to_napi)
+    crate::abort::run(
+      signal,
+      self
+        .inner
+        .wait_for_function(&page_function.source, serialized, page_function.is_function, timeout),
+    )
+    .await
   }
 
   #[napi]

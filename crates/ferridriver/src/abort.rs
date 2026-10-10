@@ -219,6 +219,20 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn an_action_stops_on_the_signal_it_was_given() {
+    let signal = AbortSignal::new();
+    let action = crate::action::Action::<(), ()>::new(|()| Box::pin(std::future::pending())).signal(signal.clone());
+    tokio::spawn(async move { signal.abort("stop") });
+    let error = action.await.unwrap_err();
+    assert_eq!(error.to_string(), "stop");
+    assert_eq!(error.name(), "AbortError");
+
+    let refused = crate::action::Action::<(), u8>::new(|()| Box::pin(async { Ok(1) }))
+      .maybe_signal(Some(AbortSignal::refused("too late")));
+    assert_eq!(refused.await.unwrap_err().to_string(), ABORTED);
+  }
+
+  #[tokio::test]
   async fn no_signal_runs_the_future_untouched() {
     assert_eq!(guard(async { Ok(7) }).await.unwrap(), 7);
     assert!(current().is_none());

@@ -9,8 +9,6 @@ use ferridriver::file_chooser::FileChooser as CoreFileChooser;
 use napi::Result;
 use napi_derive::napi;
 
-use crate::error::IntoNapi;
-
 /// Live file-chooser handle — observed via
 /// `page.waitForEvent('filechooser')` or `page.on('filechooser', cb)`.
 #[napi]
@@ -45,9 +43,10 @@ impl FileChooser {
   pub async fn set_files(
     &self,
     files: crate::types::NapiInputFiles,
-    options: Option<crate::types::SetInputFilesOptions>,
+    mut options: Option<crate::types::SetInputFilesOptions>,
   ) -> Result<()> {
+    let signal = crate::abort::take(&mut options);
     let opts = options.map(Into::into);
-    self.inner.set_files(files.0, opts).await.into_napi()
+    crate::abort::run(signal, self.inner.set_files(files.0, opts)).await
   }
 }

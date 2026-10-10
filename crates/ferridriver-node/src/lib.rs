@@ -51,6 +51,7 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod abort;
 mod browser;
 mod browser_type;
 mod cdp_session;

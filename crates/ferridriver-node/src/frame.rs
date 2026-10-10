@@ -1,5 +1,6 @@
 //! Frame class -- NAPI binding for `ferridriver::Frame`.
 
+use crate::abort::Bag;
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use napi::Result;
@@ -235,11 +236,10 @@ impl Frame {
     selector: String,
     options: Option<crate::types::WaitOptions>,
   ) -> Result<Option<crate::element_handle::ElementHandle>> {
-    let opts = options.map(ferridriver::options::WaitOptions::try_from).transpose()?;
     let handle = self
       .inner
       .wait_for_selector(&selector)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()?;
     Ok(handle.map(crate::element_handle::ElementHandle::wrap))
@@ -372,32 +372,28 @@ impl Frame {
   /// Playwright's full `FrameClickOptions` bag.
   #[napi]
   pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.click(&selector).maybe_options(opts).await.into_napi()
+    self.inner.click(&selector).bag(options)?.await.into_napi()
   }
 
   /// Double-click the first element matching `selector` in this frame.
   /// Accepts Playwright's full `FrameDblClickOptions` bag.
   #[napi]
   pub async fn dblclick(&self, selector: String, options: Option<crate::types::DblClickOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.dblclick(&selector).maybe_options(opts).await.into_napi()
+    self.inner.dblclick(&selector).bag(options)?.await.into_napi()
   }
 
   /// Hover the first element matching `selector` in this frame.
   /// Accepts Playwright's full `FrameHoverOptions` bag.
   #[napi]
   pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.hover(&selector).maybe_options(opts).await.into_napi()
+    self.inner.hover(&selector).bag(options)?.await.into_napi()
   }
 
   /// Tap the first element matching `selector` in this frame. Accepts
   /// Playwright's full `FrameTapOptions` bag.
   #[napi]
   pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap(&selector).maybe_options(opts).await.into_napi()
+    self.inner.tap(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
@@ -407,8 +403,7 @@ impl Frame {
 
   #[napi]
   pub async fn fill(&self, selector: String, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
-    self.inner.fill(&selector, &value).maybe_options(opts).await.into_napi()
+    self.inner.fill(&selector, &value).bag(options)?.await.into_napi()
   }
 
   #[napi(js_name = "type")]
@@ -418,31 +413,22 @@ impl Frame {
     text: String,
     options: Option<crate::types::TypeOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
-    self
-      .inner
-      .r#type(&selector, &text)
-      .maybe_options(opts)
-      .await
-      .into_napi()
+    self.inner.r#type(&selector, &text).bag(options)?.await.into_napi()
   }
 
   #[napi]
   pub async fn press(&self, selector: String, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
-    let opts = options.map(Into::into);
-    self.inner.press(&selector, &key).maybe_options(opts).await.into_napi()
+    self.inner.press(&selector, &key).bag(options)?.await.into_napi()
   }
 
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.check(&selector).maybe_options(opts).await.into_napi()
+    self.inner.check(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.uncheck(&selector).maybe_options(opts).await.into_napi()
+    self.inner.uncheck(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
@@ -452,11 +438,10 @@ impl Frame {
     checked: bool,
     options: Option<crate::types::CheckOptions>,
   ) -> Result<()> {
-    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
       .set_checked(&selector, checked)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()
   }
@@ -468,11 +453,10 @@ impl Frame {
     values: crate::types::NapiSelectOptionInput,
     options: Option<crate::types::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    let opts = options.map(Into::into);
     self
       .inner
       .select_option(&selector, values.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()
   }
@@ -486,11 +470,10 @@ impl Frame {
     files: crate::types::NapiInputFiles,
     options: Option<crate::types::SetInputFilesOptions>,
   ) -> Result<()> {
-    let opts = options.map(Into::into);
     self
       .inner
       .set_input_files(&selector, files.0)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()
   }
@@ -504,13 +487,10 @@ impl Frame {
     target: String,
     options: Option<crate::types::DragAndDropOptions>,
   ) -> Result<()> {
-    let opts = options
-      .map(ferridriver::options::DragAndDropOptions::try_from)
-      .transpose()?;
     self
       .inner
       .drag_and_drop(&source, &target)
-      .maybe_options(opts)
+      .bag(options)?
       .await
       .into_napi()
   }
@@ -526,7 +506,7 @@ impl Frame {
     self
       .inner
       .dispatch_event(&selector, &event_type, event_init)
-      .maybe_options(options.map(Into::into))
+      .bag(options)?
       .await
       .into_napi()
   }

@@ -28,6 +28,7 @@ pub struct Action<'a, O, T> {
   /// `test --debug`. Every builder is `#[track_caller]`, so the location
   /// captured below is the user's line and not the builder's body.
   origin: crate::trace::CallOrigin,
+  signal: Option<crate::abort::AbortSignal>,
 }
 
 impl<'a, O: Default, T> Action<'a, O, T> {
@@ -37,6 +38,7 @@ impl<'a, O: Default, T> Action<'a, O, T> {
       opts: O::default(),
       run: Box::new(run),
       origin: crate::trace::call_origin_here(),
+      signal: None,
     }
   }
 }
@@ -55,6 +57,19 @@ impl<O, T> Action<'_, O, T> {
       None => self,
     }
   }
+
+  /// Playwright's `signal` option: stop the operation with `AbortError`
+  /// when `signal` fires.
+  pub fn signal(mut self, signal: crate::abort::AbortSignal) -> Self {
+    self.signal = Some(signal);
+    self
+  }
+
+  /// [`Action::signal`] when `Some`.
+  pub fn maybe_signal(mut self, signal: Option<crate::abort::AbortSignal>) -> Self {
+    self.signal = signal.or(self.signal);
+    self
+  }
 }
 
 // `T: 'a` because scoping the call origin wraps the boxed future in a new
@@ -66,7 +81,9 @@ impl<'a, O, T: 'a> IntoFuture for Action<'a, O, T> {
   fn into_future(self) -> Self::IntoFuture {
     let origin = self.origin;
     let mut fut = (self.run)(self.opts);
-    if crate::abort::current().is_some() {
+    if let Some(signal) = self.signal {
+      fut = Box::pin(crate::abort::scope(Some(signal), crate::abort::guard(fut)));
+    } else if crate::abort::current().is_some() {
       fut = Box::pin(crate::abort::guard(fut));
     }
     // Nothing captured a site (nothing is tracing, observing or gating), so
