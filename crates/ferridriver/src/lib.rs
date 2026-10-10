@@ -23,6 +23,7 @@
 //! ```
 
 // ── Public API (Playwright-compatible) ──
+pub mod abort;
 pub mod accessibility;
 pub mod action;
 pub mod audits;

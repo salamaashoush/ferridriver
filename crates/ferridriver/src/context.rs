@@ -728,7 +728,7 @@ impl ContextRef {
       let composite = self.composite();
       let span = crate::trace::begin_action(Some(&composite), "BrowserContext", method, None, params);
       let span = crate::trace::open_action(span).await;
-      let result = crate::trace::within_action(op).await;
+      let result = crate::trace::within_action(crate::abort::guard(op)).await;
       if let Some(span) = span {
         span.finish(result.as_ref().err());
       }

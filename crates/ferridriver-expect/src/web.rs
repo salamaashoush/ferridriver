@@ -195,27 +195,42 @@ impl<'a> WebAssert<'a> {
       Err(_) => {},
     }
 
+    // Playwright fails an assertion whose `signal` fires the way it fails
+    // one that runs out of time: with the matcher's own message.
+    let signal = ferridriver::abort::current();
+    let aborted = || signal.as_ref().is_some_and(ferridriver::abort::AbortSignal::is_aborted);
     let steps = backoff(limit);
     for step in 0.. {
       let pause = Duration::from_millis(steps[step.min(steps.len() - 1)]);
       let remaining = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-      if remaining.is_some_and(|r| r.is_zero()) {
+      if remaining.is_some_and(|r| r.is_zero()) || aborted() {
         break;
       }
       if !pause.is_zero() {
-        tokio::time::sleep(remaining.map_or(pause, |r| pause.min(r))).await;
+        ferridriver::abort::sleep(remaining.map_or(pause, |r| pause.min(r))).await;
       }
       let remaining = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-      if remaining.is_some_and(|r| r.is_zero()) {
+      if remaining.is_some_and(|r| r.is_zero()) || aborted() {
         break;
       }
-      let attempt = self.receiver.judge(&self.params);
+      let attempt = async {
+        match signal.as_ref() {
+          Some(signal) => tokio::select! {
+            judged = self.receiver.judge(&self.params) => Some(judged),
+            () = signal.aborted() => None,
+          },
+          None => Some(self.receiver.judge(&self.params).await),
+        }
+      };
       let judged = match remaining {
         Some(r) => match tokio::time::timeout(r, attempt).await {
-          Ok(judged) => judged,
-          Err(_) => break,
+          Ok(Some(judged)) => judged,
+          Ok(None) | Err(_) => break,
         },
-        None => attempt.await,
+        None => match attempt.await {
+          Some(judged) => judged,
+          None => break,
+        },
       };
       match judged {
         Ok(outcome) if outcome.matches != is_not => return Ok(()),

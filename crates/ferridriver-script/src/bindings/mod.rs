@@ -18,6 +18,7 @@
 //! carries the error message and, where applicable, a `name` matching
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 
+pub mod abort;
 pub mod artifacts;
 pub mod bdd;
 pub mod browser;
@@ -146,7 +147,7 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // `EventTarget`, `AbortController` / `AbortSignal`, the Streams
   // surface, `Buffer`, `Blob` and `File` are the runtime's, installed
   // when the realm is built.
-  Ok(())
+  abort::install(ctx)
 }
 
 /// Install the `page` global when a page is available on the run context.

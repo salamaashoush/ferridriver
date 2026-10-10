@@ -419,6 +419,7 @@ export default frameworkModule;
 
 export interface ExpectMatcherOptions {
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 export interface TextMatcherOptions extends ExpectMatcherOptions {
@@ -445,6 +446,7 @@ export interface ScreenshotAssertionOptions {
   omitBackground?: boolean;
   /** Overall budget for the assertion, including its retries. */
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 /** How `toMatchSnapshot` compares a `Buffer` holding an image. */
@@ -701,6 +703,7 @@ export function mergeExpects<List extends unknown[]>(...expects: List): Expect<M
 
 export interface GotoOptions {
   timeout?: number;
+  signal?: AbortSignal;
   waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit';
   referer?: string;
 }
@@ -715,6 +718,7 @@ export interface ClickOptions {
   noWaitAfter?: boolean;
   trial?: boolean;
   timeout?: number;
+  signal?: AbortSignal;
   scroll?: 'auto' | 'none';
 }
 
@@ -722,10 +726,12 @@ export interface FillOptions {
   force?: boolean;
   noWaitAfter?: boolean;
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 export interface TimeoutOption {
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 export interface EvaluateOptions {
@@ -1586,7 +1592,7 @@ export interface WebSocket {
   // page.waitForEvent) or Playwright's { timeout } bag.
   waitForEvent(
     event: 'framesent' | 'framereceived' | 'socketerror' | 'close',
-    optionsOrTimeout?: number | { timeout?: number },
+    optionsOrTimeout?: number | { timeout?: number; signal?: AbortSignal },
   ): Promise<{ event: string; payload: string | null; error: string | null }>;
 }
 
@@ -1788,7 +1794,7 @@ export interface Page {
   waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', options?: TimeoutOption): Promise<void>;
   waitForURL(url: string | RegExp | ((url: URL) => boolean), options?: TimeoutOption & { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }): Promise<void>;
   waitForTimeout(timeout: number): Promise<void>;
-  waitForEvent(event: PageEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+  waitForEvent(event: PageEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
   waitForRequest(urlOrPredicate: string | RegExp | ((request: Request) => boolean), options?: TimeoutOption): Promise<Request>;
   waitForResponse(urlOrPredicate: string | RegExp | ((response: Response) => boolean), options?: TimeoutOption): Promise<Response>;
 
@@ -1945,7 +1951,7 @@ export interface BrowserContext {
   routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
-  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
   on(event: string, handler: (arg: unknown) => void): this;
   addListener(event: string, handler: (arg: unknown) => void): this;
   once(event: string, handler: (arg: unknown) => void): this;
@@ -2091,7 +2097,7 @@ export interface Browser {
   isConnected(): boolean;
   close(): Promise<void>;
   newBrowserCDPSession(): Promise<CDPSession>;
-  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number }): Promise<unknown>;
+  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
   on(event: string, handler: (arg: unknown) => void): this;
   addListener(event: string, handler: (arg: unknown) => void): this;
   once(event: string, handler: (arg: unknown) => void): this;

@@ -521,7 +521,7 @@ impl Page {
         params,
       );
       let span = crate::trace::open_action(self.snapshot_before(span).await).await;
-      let result = crate::trace::within_action(op).await;
+      let result = crate::trace::within_action(crate::abort::guard(op)).await;
       if let Some(span) = span {
         self.snapshot_after_and_finish(span, result.as_ref().err()).await;
       }

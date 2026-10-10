@@ -92,8 +92,21 @@ macro_rules! retry_resolve {
         )
       };
 
+      let __signal = $crate::abort::current();
+      if let ::std::option::Option::Some(__signal) = __signal.as_ref()
+        && __signal.was_refused()
+      {
+        break 'retry ::std::result::Result::Err(__signal.error());
+      }
       let mut __idx: usize = 0;
       loop {
+        if let ::std::option::Option::Some(__signal) = __signal.as_ref()
+          && __signal.is_aborted()
+        {
+          let __error = __signal.error();
+          __call_log.push(format!("operation was aborted: {}", __error));
+          break 'retry ::std::result::Result::Err(__error.with_call_log(::std::mem::take(&mut __call_log)));
+        }
         // Deadline check up-front so we never race into one more attempt after
         // time has already run out.
         if let ::std::option::Option::Some(__d) = __deadline {
@@ -123,7 +136,7 @@ macro_rules! retry_resolve {
             ::std::option::Option::None => __delay_ms,
           };
           if __sleep_ms > 0 {
-            ::tokio::time::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
+            $crate::abort::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
           }
         }
 
@@ -177,8 +190,14 @@ macro_rules! retry_resolve {
                 __trace_page.trace_capture_input(__s, &$el, $op).await;
               }
             }
-            match ($body).await {
+            // Boxed: the guarded attempt would otherwise sit inline in the
+            // state machine of every action this macro expands into.
+            match ::std::boxed::Box::pin($crate::abort::guard($body)).await {
               ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
+              ::std::result::Result::Err(e @ $crate::error::FerriError::Aborted { .. }) => {
+                __call_log.push(format!("operation was aborted: {e}"));
+                break 'retry ::std::result::Result::Err(e.with_call_log(::std::mem::take(&mut __call_log)));
+              },
               ::std::result::Result::Err(e) => {
                 let __msg = e.to_string();
                 if $crate::locator::is_retryable_action_error(&__msg) {
@@ -1767,10 +1786,11 @@ impl Locator {
     // calls named after waiting.
     let timeout = opts.timeout.unwrap_or_else(|| self.frame.page_arc().default_timeout());
     let state = opts.state.unwrap_or_default();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+    // Playwright's `timeout: 0` waits for as long as it takes.
+    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
 
     loop {
-      if tokio::time::Instant::now() >= deadline {
+      if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
         return Err(crate::error::FerriError::timeout(
           format!("waiting for '{}' to be {state}", self.selector),
           timeout,
@@ -1828,7 +1848,7 @@ impl Locator {
           }
         },
       }
-      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      crate::abort::sleep(std::time::Duration::from_millis(50)).await;
     }
   }
 

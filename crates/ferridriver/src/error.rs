@@ -67,6 +67,17 @@ pub enum FerriError {
   #[error("interrupted: {0}")]
   Interrupted(String),
 
+  /// The call's `signal` fired. Mirrors Playwright's `AbortError`:
+  /// `message` is the abort reason, or "The operation was aborted" for a
+  /// signal that had fired before the call.
+  #[error("{message}{}", format_call_log(.call_log))]
+  Aborted {
+    message: String,
+    /// The [`crate::abort::AbortSignal::id`] that fired.
+    signal: u64,
+    call_log: Vec<String>,
+  },
+
   /// Caller passed an argument that did not pass validation.
   #[error("invalid argument {name:?}: {reason}")]
   InvalidArgument { name: String, reason: String },
@@ -129,6 +140,7 @@ impl FerriError {
     match self {
       Self::Timeout { .. } => "TimeoutError",
       Self::TargetClosed { .. } => "TargetClosedError",
+      Self::Aborted { .. } => "AbortError",
       _ => "FerriError",
     }
   }
@@ -140,7 +152,10 @@ impl FerriError {
   /// the typed class from the prefix.
   #[must_use]
   pub fn has_named_prefix(&self) -> bool {
-    matches!(self, Self::Timeout { .. } | Self::TargetClosed { .. })
+    matches!(
+      self,
+      Self::Timeout { .. } | Self::TargetClosed { .. } | Self::Aborted { .. }
+    )
   }
 
   /// Render the error message with the Playwright-style class prefix
@@ -176,10 +191,11 @@ impl FerriError {
     }
   }
 
-  /// Attaches an operation's call log to a timeout; other errors pass through.
+  /// Attaches an operation's call log to a timeout or abort; other
+  /// errors pass through.
   #[must_use]
   pub fn with_call_log(mut self, log: Vec<String>) -> Self {
-    if let Self::Timeout { call_log, .. } = &mut self {
+    if let Self::Timeout { call_log, .. } | Self::Aborted { call_log, .. } = &mut self {
       *call_log = log;
     }
     self

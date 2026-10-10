@@ -65,7 +65,10 @@ impl<'a, O, T: 'a> IntoFuture for Action<'a, O, T> {
 
   fn into_future(self) -> Self::IntoFuture {
     let origin = self.origin;
-    let fut = (self.run)(self.opts);
+    let mut fut = (self.run)(self.opts);
+    if crate::abort::current().is_some() {
+      fut = Box::pin(crate::abort::guard(fut));
+    }
     // Nothing captured a site (nothing is tracing, observing or gating), so
     // there is nothing to scope and no reason to box a second time.
     if origin.location.is_none() {

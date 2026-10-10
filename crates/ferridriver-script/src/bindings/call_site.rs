@@ -38,7 +38,7 @@ use rquickjs::{Ctx, JsLifetime};
 /// because capturing costs a stack walk per call.
 ///
 /// [`call_origins_wanted`]: ferridriver::trace::call_origins_wanted
-pub struct CallSite(CallOrigin);
+pub struct CallSite(CallOrigin, Option<ferridriver::abort::AbortSignal>);
 
 impl CallSite {
   /// No call site — for a caller reaching a binding method from Rust
@@ -46,7 +46,7 @@ impl CallSite {
   /// report.
   #[must_use]
   pub fn none() -> Self {
-    Self(CallOrigin::default())
+    Self(CallOrigin::default(), None)
   }
 
   /// Run `fut` attributed to this call site.
@@ -60,6 +60,7 @@ impl CallSite {
   /// would otherwise hold `fut` in more than one state of the same state
   /// machine, and every browser action would carry two copies of itself.
   pub fn scope<F: std::future::Future>(self, fut: F) -> impl std::future::Future<Output = F::Output> {
+    let fut = ferridriver::abort::scope(self.1, fut);
     if self.0.location.is_none() && self.0.script.is_none() {
       futures::future::Either::Left(fut)
     } else {
@@ -82,7 +83,10 @@ impl<'js> FromParam<'js> for CallSite {
   }
 
   fn from_param<'a>(params: &mut ParamsAccessor<'a, 'js>) -> rquickjs::Result<Self> {
-    Ok(Self(capture(params.ctx())))
+    Ok(Self(
+      capture(params.ctx()),
+      crate::bindings::abort::take_pending(params.ctx()),
+    ))
   }
 }
 

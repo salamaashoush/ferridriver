@@ -112,6 +112,9 @@ where
   let mut call_log: Vec<String> = Vec::new();
   call_log.push(format!("expect.{} with timeout {}ms", ctx.method, timeout.as_millis()));
   call_log.push(format!("waiting for {}", ctx.subject));
+  // Playwright fails an assertion whose `signal` fires the way it fails
+  // one that runs out of time: with the matcher's own message.
+  let signal = ferridriver::abort::current();
 
   loop {
     match check().await {
@@ -131,11 +134,11 @@ where
         // up early (a 400ms timeout failed at ~170ms); Playwright polls
         // until the deadline expires.
         let now = tokio::time::Instant::now();
-        if now >= deadline {
+        if now >= deadline || signal.as_ref().is_some_and(ferridriver::abort::AbortSignal::is_aborted) {
           break;
         }
         let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
-        tokio::time::sleep(sleep_dur).await;
+        ferridriver::abort::sleep(sleep_dur).await;
       },
     }
   }
