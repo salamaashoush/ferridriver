@@ -500,6 +500,26 @@ impl DialogManager {
       }
     }))
   }
+
+  /// The context's half of Playwright's dialog dispatch: a `dialog`
+  /// listener on the page's context also takes the dialog, which then
+  /// stays open until someone handles it, and hears of it first.
+  #[must_use]
+  pub fn register_context_bridge(&self, events: crate::events::ContextEventEmitter) -> DialogHandlerId {
+    let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+    let handler: DialogHandlerFn = Arc::new(move |dialog: &Dialog| {
+      if events.has_listener("dialog") {
+        events.emit(crate::events::ContextEvent::Dialog(dialog.clone()));
+        true
+      } else {
+        false
+      }
+    });
+    if let Ok(mut handlers) = self.inner.handlers.lock() {
+      handlers.insert(0, DialogHandlerEntry { id, handler });
+    }
+    DialogHandlerId(id)
+  }
 }
 
 #[cfg(test)]

@@ -316,6 +316,22 @@ struct EmitterShared<E> {
   state_observer: std::sync::OnceLock<StateObserver<E>>,
   listeners: std::sync::Mutex<Vec<ListenerSlot<E>>>,
   subscribers: std::sync::Mutex<Vec<SubscriberSlot<E>>>,
+  /// Events a pending [`Emitter::wait_for_event`] is waiting on, by id.
+  waiters: std::sync::Mutex<Vec<(u64, String)>>,
+}
+
+/// Unregisters a [`Emitter::wait_for_event`] waiter however its wait ends.
+struct WaiterGuard<E> {
+  shared: std::sync::Weak<EmitterShared<E>>,
+  id: u64,
+}
+
+impl<E> Drop for WaiterGuard<E> {
+  fn drop(&mut self) {
+    if let Some(shared) = self.shared.upgrade() {
+      lock_or_recover(&shared.waiters).retain(|(id, _)| *id != self.id);
+    }
+  }
 }
 
 #[derive(Clone)]
@@ -461,6 +477,7 @@ impl<E: EmitterEvent> Emitter<E> {
         state_observer: std::sync::OnceLock::new(),
         listeners: std::sync::Mutex::new(Vec::new()),
         subscribers: std::sync::Mutex::new(Vec::new()),
+        waiters: std::sync::Mutex::new(Vec::new()),
       }),
       pending_rx: std::sync::Mutex::new(Some(queue_rx)),
       dispatcher_running: AtomicBool::new(false),
@@ -520,16 +537,19 @@ impl<E: EmitterEvent> Emitter<E> {
   }
 
   /// Whether any named listener registered via [`Self::on`] or
-  /// [`Self::once`] is filtering for `event_name`. Used by backend
-  /// dialog / filechooser / download listeners to decide auto-close
-  /// behaviour when nobody is attached. Raw [`Self::subscribe`]
-  /// subscribers (`waitForEvent`) don't count here — they are covered
-  /// by the grace-period `is_handled` check in the backend listener.
+  /// [`Self::once`], or a pending [`Self::wait_for_event`], is filtering
+  /// for `event_name`, as Node's `waitForEvent` adds a listener of its
+  /// own. Used by dialog / filechooser / download dispatch to decide
+  /// auto-close behaviour when nobody is attached. Raw
+  /// [`Self::subscribe`] subscribers don't count.
   #[must_use]
   pub fn has_listener(&self, event_name: &str) -> bool {
     lock_or_recover(&self.inner.shared.listeners)
       .iter()
       .any(|slot| slot.name == event_name)
+      || lock_or_recover(&self.inner.shared.waiters)
+        .iter()
+        .any(|(_, name)| name == event_name)
   }
 
   /// Number of attached consumers: named listeners plus live raw
@@ -588,8 +608,18 @@ impl<E: EmitterEvent> Emitter<E> {
     event_name: &str,
     timeout_ms: u64,
   ) -> impl Future<Output = crate::error::Result<E>> + Send {
+    let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+    lock_or_recover(&self.inner.shared.waiters).push((id, event_name.to_string()));
+    let guard = WaiterGuard {
+      shared: Arc::downgrade(&self.inner.shared),
+      id,
+    };
     let name = event_name.to_string();
-    self.wait_for(move |e| E::matches_name(&name, e), timeout_ms)
+    let wait = self.wait_for(move |e| E::matches_name(&name, e), timeout_ms);
+    async move {
+      let _registered = guard;
+      wait.await
+    }
   }
 
   /// Subscribe to events matching a name. The callback runs on the
@@ -870,6 +900,9 @@ pub enum ContextEvent {
   /// A page in this context fired `load`.
   /// `browserContext.on('pageload', (page: Page) => ...)`.
   PageLoad(Arc<crate::page::Page>),
+  /// A dialog opened on a page in this context.
+  /// `browserContext.on('dialog', (dialog: Dialog) => ...)`.
+  Dialog(Dialog),
   /// A dialog on a page in this context closed.
   /// `browserContext.on('dialogclosed', (dialog: Dialog) => ...)`.
   DialogClosed(Dialog),
@@ -887,6 +920,7 @@ impl EmitterEvent for ContextEvent {
         | ("page", ContextEvent::Page(_))
         | ("pageclose", ContextEvent::PageClose(_))
         | ("pageload", ContextEvent::PageLoad(_))
+        | ("dialog", ContextEvent::Dialog(_))
         | ("dialogclosed", ContextEvent::DialogClosed(_))
     )
   }

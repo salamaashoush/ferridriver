@@ -2190,12 +2190,6 @@ async fn register_popup(
     tracing::debug!("popup frames: {e}");
   }
 
-  // WebSocket-route install still evaluates into the live document, so
-  // it runs post-resume (first-document sockets on paused backends stay
-  // a documented residual).
-  if let Err(e) = ctx_ref.apply_context_ws_routes(&page).await {
-    tracing::debug!("popup ws routes: {e}");
-  }
   let record_opts = {
     let s = state.read().await;
     s.get_record_video(&composite)
@@ -2211,8 +2205,21 @@ async fn register_popup(
   }
   ctx_ref.emit_page_created(Arc::clone(&page));
   if let Some(opener) = opener {
-    opener.inner().events().emit(crate::events::PageEvent::Popup(page));
+    opener
+      .inner()
+      .events()
+      .emit(crate::events::PageEvent::Popup(Arc::clone(&page)));
   }
+
+  // WebSocket-route install evaluates into the live document, so it runs
+  // post-resume (first-document sockets on paused backends stay a
+  // documented residual), and off the pump: a document held by a dialog
+  // it opened would otherwise stall every popup after it.
+  tokio::spawn(async move {
+    if let Err(e) = ctx_ref.apply_context_ws_routes(&page).await {
+      tracing::debug!("popup ws routes: {e}");
+    }
+  });
   Ok(())
 }
 

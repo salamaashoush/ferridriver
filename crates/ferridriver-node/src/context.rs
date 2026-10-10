@@ -600,7 +600,7 @@ impl BrowserContext {
   /// live class instance (WebError / Download / Frame / Page), and the
   /// context is returned so registrations chain.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   pub fn on<'env>(
@@ -615,7 +615,7 @@ impl BrowserContext {
 
   /// Node's `addListener`, an alias of [`Self::on`].
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   pub fn add_listener<'env>(
@@ -629,7 +629,7 @@ impl BrowserContext {
 
   /// One-shot variant of [`Self::on`]. Auto-removed after first match.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   pub fn once<'env>(
@@ -645,7 +645,7 @@ impl BrowserContext {
   /// Node's `prependListener`: runs before the listeners already
   /// attached to the same event.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_listener<'env>(
@@ -660,7 +660,7 @@ impl BrowserContext {
 
   /// Node's `prependOnceListener`.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_once_listener<'env>(
@@ -677,7 +677,7 @@ impl BrowserContext {
   /// `off(event, listener)`. `off(event)` alone drops every listener
   /// for that event.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener?: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener?: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -717,7 +717,7 @@ impl BrowserContext {
 
   /// Node's `removeListener`, an alias of [`Self::off`].
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', listener?: (arg: WebError | Download | Frame | Page) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener?: (arg: WebError | Download | Frame | Page | Dialog) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -796,8 +796,8 @@ impl BrowserContext {
   /// page-lifecycle mirror events; resolves with the matching live
   /// class instance.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload', timeoutMs?: number",
-    ts_return_type = "Promise<WebError | Download | Frame | Page>"
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', timeoutMs?: number",
+    ts_return_type = "Promise<WebError | Download | Frame | Page | Dialog>"
   )]
   pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<ContextEventArg> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
@@ -1300,7 +1300,7 @@ impl ContextEventArg {
       | ContextEvent::FrameDetached { page, frame_id }
       | ContextEvent::FrameNavigated { page, frame_id } => Self::Frame { page, frame_id },
       ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => Self::Page(page),
-      ContextEvent::DialogClosed(dialog) => Self::Dialog(dialog),
+      ContextEvent::Dialog(dialog) | ContextEvent::DialogClosed(dialog) => Self::Dialog(dialog),
     }
   }
 }

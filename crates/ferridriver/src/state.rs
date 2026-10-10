@@ -1945,6 +1945,7 @@ impl BrowserState {
       ctx.cdp_context_id = Some(id);
     }
     page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+    let _ = page.dialog_manager().register_context_bridge(context_events.clone());
 
     // Spawn the page→context bridge exactly once per registered page.
     // Runs independently of any `ContextRef` or `Page` wrapper
