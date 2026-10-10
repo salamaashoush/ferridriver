@@ -582,12 +582,10 @@ export type ValueAssertions<T = unknown> = GenericMatchers & {
 /// Playwright: `expect(actual, messageOrOptions?: string | { message?: string })`.
 export type ExpectMessage = string | { message?: string };
 
-export interface PollAssertions {
-  toBe(expected: unknown): Promise<void>;
-  toEqual(expected: unknown): Promise<void>;
+export type PollAssertions = Promisified<GenericMatchers> & {
   toSatisfy(predicate: (value: unknown) => boolean): Promise<void>;
   not: PollAssertions;
-}
+};
 
 /// The `this` a custom matcher body reads.
 export interface MatcherState {

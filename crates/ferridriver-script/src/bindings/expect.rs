@@ -2265,6 +2265,18 @@ impl ExpectPollJs {
     }
   }
 
+  /// What the generic matchers on `expect.poll` read to poll the way the
+  /// native ones do.
+  #[qjs(rename = "_pollInfo")]
+  pub fn poll_info<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    let info = Object::new(ctx.clone())?;
+    info.set("generator", self.generator.clone().restore(&ctx)?)?;
+    info.set("timeout", u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX) as f64)?;
+    info.set("intervals", self.intervals.iter().map(|&ms| ms as f64).collect::<Vec<_>>())?;
+    info.set("isNot", self.is_not)?;
+    Ok(info)
+  }
+
   #[qjs(rename = "_notInner")]
   pub fn not_inner(&self) -> ExpectPollJs {
     ExpectPollJs {
@@ -2277,72 +2289,6 @@ impl ExpectPollJs {
     }
   }
 
-  /// `expect.poll(fn).toBe(x)` is the same `Object.is` the non-polling
-  /// matcher is, applied to each generated value while it is still live.
-  #[qjs(rename = "toBe")]
-  pub async fn to_be<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: Ctx<'js>,
-    expected: Value<'js>,
-  ) -> rquickjs::Result<()> {
-    let expected = Persistent::save(&ctx, expected);
-    call_site
-      .scope(async move {
-        let generator_fn = self.generator.clone();
-        let deadline = tokio::time::Instant::now() + self.timeout;
-        let mut interval_idx = 0;
-        let last: String = loop {
-          let actual = JsLive(call_generator_live(&ctx, &generator_fn).await?);
-          let want = JsLive(expected.clone().restore(&ctx)?);
-          let pass_raw = actual.same_value(&want)?;
-          if if self.is_not { !pass_raw } else { pass_raw } {
-            return Ok(());
-          }
-          let described = actual.describe();
-          let now = tokio::time::Instant::now();
-          if now >= deadline {
-            break described;
-          }
-          let interval_ms = self
-            .intervals
-            .get(interval_idx)
-            .copied()
-            .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
-          interval_idx += 1;
-          tokio::time::sleep(Duration::from_millis(interval_ms).min(deadline - now)).await;
-        };
-        let want = JsLive(expected.clone().restore(&ctx)?).describe();
-        let prefix = self.message.as_ref().map(|m| format!("{m}: ")).unwrap_or_default();
-        Err(assertion_to_rq(
-          &ctx,
-          AssertionFailure::new(
-            format!(
-              "{prefix}expect.poll().toBe() timed out after {}ms\n\nExpected: {want}\nReceived: {last}",
-              self.timeout.as_millis()
-            ),
-            None,
-          ),
-          self.stack.as_deref(),
-        ))
-      })
-      .await
-  }
-
-  #[qjs(rename = "toEqual")]
-  pub async fn to_equal<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: Ctx<'js>,
-    expected: Value<'js>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let exp: JsonValue = serde_from_js(&ctx, expected)?;
-        self.poll_value(&ctx, "toEqual", &exp).await
-      })
-      .await
-  }
 
   #[qjs(rename = "toSatisfy")]
   pub async fn to_satisfy<'js>(
@@ -2399,50 +2345,6 @@ impl ExpectPollJs {
         ))
       })
       .await
-  }
-}
-
-impl ExpectPollJs {
-  async fn poll_value(&self, ctx: &Ctx<'_>, method: &str, expected: &JsonValue) -> rquickjs::Result<()> {
-    let generator_fn = self.generator.clone();
-    let deadline = tokio::time::Instant::now() + self.timeout;
-    let mut interval_idx = 0;
-    let is_not = self.is_not;
-    let last: JsonValue = loop {
-      let actual: JsonValue = call_generator(ctx, &generator_fn).await?;
-      let pass_raw = deep_equal(&actual, expected);
-      let pass = if is_not { !pass_raw } else { pass_raw };
-      if pass {
-        return Ok(());
-      }
-      let interval_ms = self
-        .intervals
-        .get(interval_idx)
-        .copied()
-        .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
-      interval_idx += 1;
-      // Clamp the interval to the remaining budget so the final
-      // attempt lands AT the deadline instead of bailing early.
-      let now = tokio::time::Instant::now();
-      if now >= deadline {
-        break actual;
-      }
-      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
-      tokio::time::sleep(sleep_dur).await;
-    };
-    Err(assertion_to_rq(
-      ctx,
-      AssertionFailure::new(
-        format!(
-          "expect.poll().{method}() timed out after {}ms\n\nExpected: {}\nReceived: {}",
-          self.timeout.as_millis(),
-          ferridriver_expect::asymmetric::json_short(expected),
-          ferridriver_expect::asymmetric::json_short(&last)
-        ),
-        None,
-      ),
-      self.stack.as_deref(),
-    ))
   }
 }
 
@@ -2628,7 +2530,7 @@ fn create_expect<'js>(
         let val = class.into_value();
         install_poll_not_getter(&ctx, &val)?;
         install_poll_settled_refusal(&ctx, &val)?;
-        Ok(val)
+        with_generic_poll_matchers(&ctx, val)
       }
     },
   )?;
@@ -3572,6 +3474,53 @@ fn install_poll_settled_refusal<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> r
   Ok(())
 }
 
+/// Upstream's `expect.poll` takes every generic matcher: it polls the
+/// value and runs `expect(value)[matcher](...args)` on it until that
+/// passes, and on timeout throws the last failure with its call log. The
+/// matchers `ExpectPollJs` implements itself stay native; the proxy adds
+/// the rest.
+const GENERIC_POLL_MATCHERS: &str = r"(target, expect) => new Proxy(target, {
+  get(t, prop) {
+    if (typeof prop !== 'string' || prop in t) {
+      const value = Reflect.get(t, prop, t);
+      return typeof value === 'function' ? value.bind(t) : value;
+    }
+    if (!prop.startsWith('to')) return undefined;
+    return async (...args) => {
+      const { generator, timeout, intervals, isNot } = t._pollInfo();
+      const deadline = timeout ? Date.now() + timeout : Infinity;
+      let index = 0;
+      let last;
+      for (;;) {
+        const value = await generator();
+        try {
+          const subject = isNot ? expect(value).not : expect(value);
+          await subject[prop](...args);
+          return;
+        } catch (error) {
+          last = error;
+        }
+        const left = deadline - Date.now();
+        if (left <= 0) break;
+        const step = intervals[Math.min(index++, intervals.length - 1)];
+        await new Promise(resolve => setTimeout(resolve, Math.min(step, left)));
+      }
+      const note = `Timeout ${timeout}ms exceeded while waiting on the predicate`;
+      if (last !== null && typeof last === 'object' && 'message' in last) {
+        last.message = `${last.message}\n\nCall Log:\n- ${note}`;
+        throw last;
+      }
+      throw new Error(note);
+    };
+  },
+})";
+
+fn with_generic_poll_matchers<'js>(ctx: &Ctx<'js>, instance: Value<'js>) -> rquickjs::Result<Value<'js>> {
+  let wrap: Function<'js> = ctx.eval(GENERIC_POLL_MATCHERS)?;
+  let expect: Value<'js> = ctx.globals().get("expect")?;
+  wrap.call((instance, expect))
+}
+
 fn install_poll_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
   let object_global: Object<'js> = ctx.globals().get("Object")?;
   let define_property: Function<'js> = object_global.get("defineProperty")?;
@@ -3583,7 +3532,7 @@ fn install_poll_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquick
       let new_class = Class::instance(ctx.clone(), inverted)?;
       let new_val = new_class.into_value();
       install_poll_not_getter(&ctx, &new_val)?;
-      Ok(new_val)
+      with_generic_poll_matchers(&ctx, new_val)
     },
   )?;
   let descriptor = Object::new(ctx.clone())?;
