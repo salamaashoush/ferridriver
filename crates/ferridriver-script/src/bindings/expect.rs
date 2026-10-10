@@ -2271,8 +2271,14 @@ impl ExpectPollJs {
   pub fn poll_info<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     let info = Object::new(ctx.clone())?;
     info.set("generator", self.generator.clone().restore(&ctx)?)?;
-    info.set("timeout", u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX) as f64)?;
-    info.set("intervals", self.intervals.iter().map(|&ms| ms as f64).collect::<Vec<_>>())?;
+    info.set(
+      "timeout",
+      u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX) as f64,
+    )?;
+    info.set(
+      "intervals",
+      self.intervals.iter().map(|&ms| ms as f64).collect::<Vec<_>>(),
+    )?;
     info.set("isNot", self.is_not)?;
     Ok(info)
   }
@@ -2288,7 +2294,6 @@ impl ExpectPollJs {
       stack: self.stack.clone(),
     }
   }
-
 
   #[qjs(rename = "toSatisfy")]
   pub async fn to_satisfy<'js>(
