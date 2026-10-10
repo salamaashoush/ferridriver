@@ -2167,21 +2167,27 @@ async fn register_popup(
   if let Err(e) = ctx_ref.apply_context_bindings_pre_doc(page.inner()).await {
     tracing::debug!("popup bindings: {e}");
   }
-  if let Some(opener_id) = popup.opener_target_id.as_deref() {
+  let opener = if let Some(opener_id) = popup.opener_target_id.as_deref() {
     let opener = {
       let s = state.read().await;
       s.find_page_by_backend_id(instance, opener_id)
     };
-    if let Some(opener) = opener {
-      page.set_opener(&opener);
+    if let Some(opener) = opener.as_ref() {
+      page.set_opener(opener);
     }
-  }
+    opener
+  } else {
+    None
+  };
   popup.page.resume_popup().await?;
 
   // BiDi popups are never paused; their first navigation can commit before
   // the context pump installs the frame-cache listener.
-  if matches!(&popup.page, crate::backend::AnyPage::Bidi(_)) {
-    page.sync_frames().await?;
+  // A popup that closed at once still counts: Playwright reports it.
+  if matches!(&popup.page, crate::backend::AnyPage::Bidi(_))
+    && let Err(e) = page.sync_frames().await
+  {
+    tracing::debug!("popup frames: {e}");
   }
 
   // WebSocket-route install still evaluates into the live document, so
@@ -2203,7 +2209,10 @@ async fn register_popup(
       crate::trace::spawn_screencast_pump(&recorder, page.inner()).await;
     }
   }
-  ctx_ref.emit_page_created(page);
+  ctx_ref.emit_page_created(Arc::clone(&page));
+  if let Some(opener) = opener {
+    opener.inner().events().emit(crate::events::PageEvent::Popup(page));
+  }
   Ok(())
 }
 

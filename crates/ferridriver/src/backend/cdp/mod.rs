@@ -3067,6 +3067,7 @@ impl<T: CdpWrap> CdpPage<T> {
         "arguments": arguments,
         "returnByValue": return_by_value,
         "awaitPromise": true,
+        "userGesture": true,
         "executionContextId": ctx_id,
       });
       let response = self.cmd("Runtime.callFunctionOn", params).await?;
@@ -3090,12 +3091,15 @@ impl<T: CdpWrap> CdpPage<T> {
         "arguments": arguments,
         "returnByValue": return_by_value,
         "awaitPromise": true,
+        "userGesture": true,
         "objectId": anchor,
       });
       let response = self.cmd("Runtime.callFunctionOn", params).await?;
       return self.parse_eval_response(&response, return_by_value);
     }
 
+    // Every path passes `userGesture` as Playwright's `evaluateWithArguments`
+    // does: an evaluated `window.open` is a popup, not a blocked one.
     // No contextId, no handles — use Runtime.evaluate IIFE. Chrome
     // picks the default execution context. Wrap as
     // `(WRAPPER)(literal_args...)`. Args are JS-literal-safe via
@@ -3118,6 +3122,7 @@ impl<T: CdpWrap> CdpPage<T> {
           "expression": expression,
           "returnByValue": return_by_value,
           "awaitPromise": true,
+          "userGesture": true,
         }),
       )
       .await?;

@@ -72,6 +72,7 @@ pub(crate) fn page_event_to_js<'js>(
     PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
       crate::bindings::identity::page_object(ctx, page.clone())?.into_js(ctx)
     },
+    PageEvent::Popup(popup) => crate::bindings::identity::page_object(ctx, popup)?.into_js(ctx),
   }
 }
 

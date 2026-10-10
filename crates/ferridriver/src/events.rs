@@ -93,6 +93,10 @@ pub enum PageEvent {
   /// `cancel` / `delete` / `failure` methods; mirrors Playwright's
   /// `page.on('download', (download: Download) => ...)`.
   Download(Download),
+  /// This page opened another, as `window.open` or a `target=_blank`
+  /// link does. Playwright's `page.on('popup', (page: Page) => ...)`,
+  /// fired once the popup is set up, after the context's `page` event.
+  Popup(Arc<crate::page::Page>),
 }
 
 impl PageEvent {
@@ -150,6 +154,7 @@ impl PageEvent {
         "url": d.url(),
         "suggestedFilename": d.suggested_filename(),
       }),
+      PageEvent::Popup(page) => serde_json::json!({ "url": page.url() }),
       PageEvent::Load => serde_json::json!({ "type": "load" }),
       PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
       PageEvent::Close => serde_json::json!({ "type": "close" }),
@@ -249,6 +254,7 @@ pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("close", PageEvent::Close)
       | ("pageerror", PageEvent::PageError(_))
       | ("download", PageEvent::Download(_))
+      | ("popup", PageEvent::Popup(_))
   )
 }
 
@@ -855,10 +861,8 @@ pub enum ContextEvent {
   },
   /// A new page was created in this context. Mirrors Playwright's
   /// `browserContext.on('page', (page: Page) => ...)` — fired from
-  /// `ContextRef::new_page` once the public wrapper exists. Pages the
-  /// BROWSER creates (window.open popups) are not yet tracked — that
-  /// needs target-relationship bookkeeping (see the parity backlog's
-  /// `page.opener()` item).
+  /// `ContextRef::new_page` once the public wrapper exists, and by the
+  /// popup pump for the pages the browser opens.
   Page(Arc<crate::page::Page>),
   /// A page in this context was closed.
   /// `browserContext.on('pageclose', (page: Page) => ...)`.

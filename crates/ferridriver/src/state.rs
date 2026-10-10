@@ -615,7 +615,17 @@ impl BrowserState {
         .contexts
         .iter()
         .find(|(_, ctx)| ctx.cdp_context_id.as_deref() == Some(id))
-        .map(|(name, _)| name.clone()),
+        .map(|(name, _)| name.clone())
+        // The `default` context opens its pages in the browser's own
+        // context and never learns that context's id, but the browser
+        // still names it on the pages those pages open.
+        .or_else(|| {
+          inst
+            .contexts
+            .get("default")
+            .filter(|ctx| ctx.cdp_context_id.is_none())
+            .map(|_| "default".to_string())
+        }),
     }
   }
 
@@ -624,11 +634,19 @@ impl BrowserState {
   /// pageProxyId). Used to wire `page.opener()` for popups.
   pub(crate) fn find_page_by_backend_id(&self, instance: &str, backend_id: &str) -> Option<Arc<crate::page::Page>> {
     let inst = self.instances.get(instance)?;
-    inst
-      .contexts
-      .values()
-      .flat_map(|ctx| ctx.pages.iter())
+    let pages = || inst.contexts.values().flat_map(|ctx| ctx.pages.iter());
+    pages()
       .find(|page| page.backend_target_id() == backend_id)
+      // A popup a child frame opened names that frame (a `BiDi` browsing
+      // context of its own) as its opener; the page is the one holding it.
+      .or_else(|| {
+        pages().find(|page| {
+          page
+            .frame_cache()
+            .lock()
+            .is_ok_and(|cache| cache.record(backend_id).is_some())
+        })
+      })
       .and_then(|page| page.page_backref_handle().upgrade())
   }
 
