@@ -1811,9 +1811,24 @@ impl Locator {
           } else {
             Some(rframe.id())
           };
-          let found = selectors::query_one(inner, rsel, false, frame_id).await.is_ok();
+          let sel_js = selectors::build_selone_js(rsel, "window.__fd", self.strict)?;
+          // A document being replaced has no engine yet: not attached.
+          let found = match inner.ensure_engine_injected().await {
+            Ok(()) => selectors::query_one_prebuilt(inner, &sel_js, &self.selector, frame_id)
+              .await
+              .map(|_| ()),
+            Err(e) => Err(e),
+          };
           selectors::cleanup_tags(inner).await;
-          found
+          match found {
+            Ok(()) => true,
+            // Playwright's strict `waitForSelector` throws on a second
+            // match; waiting on would only end in a timeout that hides it.
+            Err(e) => match selectors::parse_strict_violation_count(&e) {
+              Some(count) => return Err(crate::error::FerriError::strict(self.selector.clone(), count)),
+              None => false,
+            },
+          }
         },
         Err(_) => false,
       };

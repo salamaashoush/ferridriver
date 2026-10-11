@@ -665,7 +665,10 @@ impl Frame {
     opts: WaitOptions,
   ) -> Result<Option<crate::element_handle::ElementHandle>> {
     let state = opts.state;
-    let locator = self.selector_locator(selector);
+    let locator = match opts.strict {
+      Some(strict) => self.locator(selector).strict(strict),
+      None => self.selector_locator(selector),
+    };
     locator.wait_for_impl(opts).await?;
     // Playwright returns a handle only when the element is present; the
     // `hidden` / `detached` states resolve precisely because it is not.

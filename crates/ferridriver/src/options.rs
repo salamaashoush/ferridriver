@@ -463,6 +463,10 @@ impl WaitState {
 pub struct WaitOptions {
   pub state: Option<WaitState>,
   pub timeout: Option<u64>,
+  /// Playwright's `waitForSelector({ strict })`: more than one match is
+  /// an error. Unset, a selector takes its first match unless the
+  /// context has `strictSelectors`, and a locator is strict.
+  pub strict: Option<bool>,
 }
 
 /// Playwright: `page.waitForURL(url, options?: { timeout?, waitUntil? })`.

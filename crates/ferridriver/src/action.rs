@@ -270,6 +270,7 @@ action_options!(crate::options::EvaluateOptions {
 
 action_options!(crate::options::WaitOptions {
   opt state: crate::options::WaitState,
+  opt strict: bool,
   ms timeout: u64,
 });
 

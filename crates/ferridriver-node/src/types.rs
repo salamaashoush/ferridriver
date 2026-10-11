@@ -388,6 +388,8 @@ pub struct FilterOptions {
 pub struct WaitOptions {
   /// "visible", "hidden", "attached", "stable"
   pub state: Option<String>,
+  /// More than one match is an error rather than the first being taken.
+  pub strict: Option<bool>,
   pub timeout: Option<f64>,
   #[napi(ts_type = "AbortSignal")]
   pub signal: Option<crate::abort::Signal>,
@@ -1702,6 +1704,7 @@ impl TryFrom<WaitOptions> for ferridriver::options::WaitOptions {
         })
         .transpose()?,
       timeout: o.timeout.map(f64_to_u64),
+      strict: o.strict,
     })
   }
 }

@@ -419,9 +419,10 @@ impl PageJs {
       .await
   }
 
-  /// Wait for an element matching `selector`. Optional `options` object
-  /// accepts `{ state?: 'visible'|'hidden'|'attached'|'stable', timeout?: ms }`.
-  /// Resolves when the condition is met; throws on timeout.
+  /// Playwright: `page.waitForSelector(selector, options?: { state?,
+  /// strict?, timeout? })`. Resolves to the matched element handle for
+  /// `state: 'attached'` / `'visible'` (default), or `null` for
+  /// `'hidden'` / `'detached'`; throws on timeout.
   #[qjs(rename = "waitForSelector")]
   pub async fn wait_for_selector<'js>(
     &self,
@@ -429,18 +430,20 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     selector: String,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
     call_site
       .scope(async move {
         let opts = parse_wait_options(&ctx, options)?;
-        self
+        let handle = self
           .inner
           .wait_for_selector(&selector)
           .options(opts)
           .await
-          .into_js_with(&ctx)
+          .into_js_with(&ctx)?;
+        Ok(handle.map(crate::bindings::element_handle::ElementHandleJs::new))
       })
       .await
+      .map(crate::bindings::convert::Null)
   }
 
   // ── Locators ──────────────────────────────────────────────────────────────

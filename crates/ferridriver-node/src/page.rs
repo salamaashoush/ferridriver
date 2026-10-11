@@ -1373,14 +1373,22 @@ impl Page {
 
   // ── Waiting ─────────────────────────────────────────────────────────────
 
+  /// Playwright: `page.waitForSelector(selector, options?)`. Returns the
+  /// matched handle for `state: 'attached' | 'visible'` (default), or
+  /// `null` for `state: 'hidden' | 'detached'`.
   #[napi]
-  pub async fn wait_for_selector(&self, selector: String, options: Option<WaitOptions>) -> Result<()> {
-    self
+  pub async fn wait_for_selector(
+    &self,
+    selector: String,
+    options: Option<WaitOptions>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    let handle = self
       .inner
       .wait_for_selector(&selector)
       .bag(options)?
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    Ok(handle.map(crate::element_handle::ElementHandle::wrap))
   }
 
   /// Wait for the page URL to match. Accepts a glob string or a native JS `RegExp`.

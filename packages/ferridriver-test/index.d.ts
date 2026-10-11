@@ -748,6 +748,8 @@ export interface EvaluateOptions {
 
 export interface WaitForSelectorOptions extends TimeoutOption {
   state?: 'attached' | 'detached' | 'visible' | 'hidden';
+  // More than one match throws; without it the first match is taken.
+  strict?: boolean;
 }
 
 export interface LocatorScreenshotOptions extends TimeoutOption {
@@ -1428,7 +1430,7 @@ export interface Locator {
   evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & EvaluateOptions): Promise<JSHandle>;
   elementHandle(options?: TimeoutOption): Promise<ElementHandle>;
   elementHandles(): Promise<ElementHandle[]>;
-  waitFor(options?: WaitForSelectorOptions): Promise<void>;
+  waitFor(options?: Omit<WaitForSelectorOptions, 'strict'>): Promise<void>;
   waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
   // highlight returns a Disposable that removes the overlay; hideHighlight
   // clears any overlay (ferridriver extensions over Playwright's void

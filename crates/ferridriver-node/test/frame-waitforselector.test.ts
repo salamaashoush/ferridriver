@@ -44,6 +44,28 @@ for (const backend of BACKENDS) {
       expect(await handle!.textContent()).toBe("payload-text");
     });
 
+    it("takes the first of several matches, on the page and on a frame", async () => {
+      await page.setContent('<p class="row">one</p><p class="row">two</p>');
+      const onPage = await page.waitForSelector(".row", { timeout: 2000 });
+      expect(await onPage!.textContent()).toBe("one");
+      const onFrame = await page.mainFrame()!.waitForSelector(".row", { timeout: 2000 });
+      expect(await onFrame!.textContent()).toBe("one");
+      expect(await page.waitForSelector(".absent", { state: "detached", timeout: 2000 })).toBeNull();
+    });
+
+    it("strict rejects a second match instead of timing out", async () => {
+      await page.setContent('<p class="row">one</p><p class="row">two</p>');
+      const started = Date.now();
+      const message = (work: Promise<unknown>) => work.then(() => "resolved", (e: Error) => e.message);
+      expect(await message(page.waitForSelector(".row", { strict: true, timeout: 10_000 }))).toMatch(
+        /strict mode violation.*2 elements/,
+      );
+      expect(await message(page.locator(".row").waitFor({ timeout: 10_000 }))).toMatch(
+        /strict mode violation.*2 elements/,
+      );
+      expect(Date.now() - started).toBeLessThan(5000);
+    });
+
     it("state: 'attached' returns the handle even when display:none", async () => {
       await page.setContent(
         '<div id="hid" style="display:none">hidden-payload</div>',

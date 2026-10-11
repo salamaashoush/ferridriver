@@ -2032,21 +2032,34 @@ impl Page {
 
   // ── Waiting ─────────────────────────────────────────────────────────────
 
-  /// Wait for an element matching the selector to satisfy the wait condition.
+  /// Wait for an element matching the selector to satisfy the wait
+  /// condition, in the main frame. Playwright:
+  /// `page.waitForSelector(selector, options?: { state?, strict?, timeout? })`,
+  /// resolving to the element for `attached` / `visible` and to `null`
+  /// for `hidden` / `detached`. Of several matches the first is taken,
+  /// unless `strict`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the wait times out.
+  /// Returns an error if the wait times out, or on more than one match
+  /// under `strict`.
   #[track_caller]
-  pub fn wait_for_selector(self: &Arc<Self>, selector: &str) -> crate::action::Action<'static, WaitOptions, ()> {
+  pub fn wait_for_selector(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, WaitOptions, Option<crate::element_handle::ElementHandle>> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
     crate::action::Action::new(move |opts| Box::pin(async move { page.wait_for_selector_impl(&selector, opts).await }))
   }
 
   /// Implementation of [`Self::wait_for_selector`].
-  pub(crate) async fn wait_for_selector_impl(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<()> {
-    self.locator(selector).wait_for_impl(opts).await
+  pub(crate) async fn wait_for_selector_impl(
+    self: &Arc<Self>,
+    selector: &str,
+    opts: WaitOptions,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    self.main_frame().wait_for_selector_impl(selector, opts).await
   }
 
   /// Wait for the page URL to match the given matcher.

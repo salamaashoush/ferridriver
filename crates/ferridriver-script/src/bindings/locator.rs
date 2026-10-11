@@ -948,6 +948,7 @@ impl LocatorJs {
               })
               .transpose()?,
             timeout: parsed.timeout,
+            strict: None,
           })
           .await
           .into_js_with(&ctx)
