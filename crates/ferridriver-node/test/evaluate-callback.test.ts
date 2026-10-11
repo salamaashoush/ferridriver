@@ -92,6 +92,24 @@ describe(`[${backend}] exposeFunctions`, () => {
     expect(result).toEqual([5, "gi", "/path", "bigint", [1, 2], "bad", "target", true]);
   });
 
+  it("keeps undefined properties and items in their place", async () => {
+    const result = await page.evaluate(
+      (arg: any) => ({
+        keys: Object.keys(arg).sort(),
+        gone: "gone" in arg && arg.gone === undefined,
+        symbol: "symbol" in arg && arg.symbol === undefined,
+        list: arg.list.map((item: unknown) => (item === undefined ? "undefined" : item === null ? "null" : item)),
+      }),
+      { gone: undefined, symbol: Symbol("s"), list: [1, undefined, null, , 5] },
+    );
+    expect(result).toEqual({
+      keys: ["gone", "list", "symbol"],
+      gone: true,
+      symbol: true,
+      list: [1, "undefined", "null", "undefined", 5],
+    });
+  });
+
   it("passes functions to an init script", async () => {
     const received: number[] = [];
     await page.addInitScript(

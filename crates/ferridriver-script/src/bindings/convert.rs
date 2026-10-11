@@ -424,28 +424,23 @@ impl<'js> ArgWalk<'_, 'js> {
       for idx in 0..arr.len() {
         let el: Value<'_> = arr.get(idx)?;
         self.path.push(ArgPathStep::Index(idx));
-        // Array holes / undefined serialise as null.
-        items.push(if el.is_undefined() {
-          SerializedValue::Special(SpecialValue::Null)
-        } else {
-          self.serialize(&el, depth + 1)?
-        });
+        // A hole reads as `undefined` and crosses as one, as Playwright's
+        // `serializeValue` has it.
+        items.push(self.serialize(&el, depth + 1)?);
         self.path.pop();
       }
       return Ok(SerializedValue::Array { id, items });
     }
     if let Some(obj) = v.as_object() {
-      // Plain object: own enumerable string keys, dropping undefined and
-      // symbol-valued props (JSON.stringify rules).
+      // Plain object: own enumerable string keys. An undefined or
+      // symbol-valued property stays, as `undefined` (Playwright's
+      // `serializeValue` walks `Object.keys`).
       let id = self.alloc.alloc_id();
       self.visited.push((v.clone(), id));
       let mut entries = Vec::new();
       for key in obj.keys::<String>() {
         let key = key?;
         let val: Value<'_> = obj.get(&key)?;
-        if val.is_undefined() || val.type_of() == rquickjs::Type::Symbol {
-          continue;
-        }
         self.path.push(ArgPathStep::Key(key.clone()));
         let v = self.serialize(&val, depth + 1)?;
         self.path.pop();

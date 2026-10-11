@@ -147,12 +147,9 @@ impl Walk {
         let mut item = ptr::null_mut();
         check_status!(unsafe { sys::napi_get_element(self.env, value, index, &raw mut item) })?;
         self.path.push(ArgPathStep::Index(index as usize));
-        // Array holes and undefined serialise as null, as JSON has them.
-        let serialized = if self.is_undefined(item)? {
-          SerializedValue::Special(SpecialValue::Null)
-        } else {
-          self.serialize(item, depth + 1)?
-        };
+        // A hole reads as `undefined` and crosses as one, as Playwright's
+        // `serializeValue` has it.
+        let serialized = self.serialize(item, depth + 1)?;
         self.path.pop();
         items.push(serialized);
       }
@@ -177,12 +174,6 @@ impl Walk {
       check_status!(unsafe { sys::napi_get_element(self.env, keys, index, &raw mut key) })?;
       let mut item = ptr::null_mut();
       check_status!(unsafe { sys::napi_get_property(self.env, value, key, &raw mut item) })?;
-      // Undefined and symbol properties drop out, as JSON has them.
-      let mut kind = 0;
-      check_status!(unsafe { sys::napi_typeof(self.env, item, &raw mut kind) })?;
-      if kind == sys::ValueType::napi_undefined || kind == sys::ValueType::napi_symbol {
-        continue;
-      }
       let key = unsafe { String::from_napi_value(self.env, key)? };
       self.path.push(ArgPathStep::Key(key.clone()));
       let serialized = self.serialize(item, depth + 1)?;
