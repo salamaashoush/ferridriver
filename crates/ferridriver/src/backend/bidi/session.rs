@@ -384,7 +384,8 @@ impl BidiSession {
     }
 
     debug!("Launching Firefox for BiDi: {firefox_path}");
-    let mut child = command.spawn().map_err(|e| format!("Firefox launch: {e}"))?;
+    let mut child =
+      crate::backend::process::spawn_exclusive(|| command.spawn()).map_err(|e| format!("Firefox launch: {e}"))?;
     // Track before the BiDi handshake below. Firefox does not exit when
     // its parent dies, and the handshake takes long enough that a kill
     // landing inside it used to strand a whole browser.

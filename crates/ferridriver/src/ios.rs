@@ -427,7 +427,7 @@ async fn spawn_owned(
     .stderr(std::process::Stdio::piped());
   #[cfg(unix)]
   command.process_group(0);
-  let mut child = command.spawn()?;
+  let mut child = crate::backend::process::spawn_exclusive(|| command.spawn())?;
   let stderr = crate::backend::process::drain_child_output(&mut child);
   let index = state.groups.len();
   state.groups.push(ChildGroup::new(child));

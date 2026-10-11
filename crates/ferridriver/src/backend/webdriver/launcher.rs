@@ -28,7 +28,7 @@ where
   #[cfg(unix)]
   command.process_group(0);
   drop(http_listener);
-  let mut child = command.spawn()?;
+  let mut child = crate::backend::process::spawn_exclusive(|| command.spawn())?;
   let stderr = crate::backend::process::drain_child_stderr(&mut child);
   let group = std::sync::Arc::new(tokio::sync::Mutex::new(Some(ChildGroup::new(child))));
   crate::state::allocation::retain_driver(&group);

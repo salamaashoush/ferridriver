@@ -62,7 +62,7 @@ async fn start_unix_server(
     .stderr(Stdio::piped());
   #[cfg(unix)]
   command.process_group(0);
-  let mut child = command.spawn()?;
+  let mut child = crate::backend::process::spawn_exclusive(|| command.spawn())?;
   let stdout = child
     .stdout
     .take()

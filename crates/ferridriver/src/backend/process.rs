@@ -20,6 +20,23 @@
 //! - `killpg` covers the *OS* side (all helpers in the same group die
 //!   too, even if Chrome itself crashed or spun off sandboxed children).
 
+/// Run `spawn`, which starts a child process, while no other child of
+/// this process is being started.
+///
+/// Where the platform has no `pipe2` (macOS), std opens the pipes a
+/// spawn needs and marks them close-on-exec in a second step. A child
+/// another thread forks in between inherits them. One of those pipes is
+/// how `Command::spawn` learns its own child reached `exec`: it reads
+/// until every writer is gone, so a browser that inherited the write end
+/// keeps a second browser's launch reading for as long as it lives. A
+/// pool of workers launching together hit that in a few runs out of a
+/// hundred, and nothing bounds the read.
+pub fn spawn_exclusive<T>(spawn: impl FnOnce() -> T) -> T {
+  static STARTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  let _starting = STARTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  spawn()
+}
+
 pub(crate) async fn output(
   mut command: tokio::process::Command,
   input: Option<&[u8]>,
@@ -35,9 +52,8 @@ pub(crate) async fn output(
   command.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
   #[cfg(unix)]
   command.process_group(0);
-  let mut child = command
-    .spawn()
-    .map_err(|error| FerriError::backend(format!("starting {program}: {error}")))?;
+  let mut child =
+    spawn_exclusive(|| command.spawn()).map_err(|error| FerriError::backend(format!("starting {program}: {error}")))?;
   let stdin = child.stdin.take();
   let stdout = child.stdout.take();
   let stderr = child.stderr.take();
@@ -1198,6 +1214,52 @@ mod tests {
       .expect("read child pid");
     let child: u32 = line.trim().parse().expect("child pid");
     (child, leader)
+  }
+
+  /// Each child outlives the round, so a spawn another child's inherited
+  /// pipe holds up stays held until the deadline.
+  #[cfg(unix)]
+  fn spawn_together(
+    children: usize,
+    spawn: fn(&mut std::process::Command) -> std::io::Result<std::process::Child>,
+  ) -> usize {
+    use std::os::unix::process::CommandExt;
+    let (started, starts) = std::sync::mpsc::channel();
+    let together = std::sync::Arc::new(std::sync::Barrier::new(children));
+    for _ in 0..children {
+      let (started, together) = (started.clone(), std::sync::Arc::clone(&together));
+      std::thread::spawn(move || {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        #[allow(unsafe_code)]
+        unsafe {
+          // SAFETY: `setsid` is async-signal-safe and the closure allocates
+          // nothing. It is what puts std on its fork path, as a browser
+          // launch is.
+          command.pre_exec(setsid_pre_exec());
+        }
+        together.wait();
+        let _ = started.send(spawn(&mut command));
+      });
+    }
+    let started: Vec<_> = (0..children)
+      .map(|_| starts.recv_timeout(std::time::Duration::from_secs(5)))
+      .collect();
+    let stalled = started.iter().filter(|child| child.is_err()).count();
+    for mut child in started.into_iter().flatten().flatten() {
+      let _ = child.kill();
+      let _ = child.wait();
+    }
+    stalled
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn children_started_together_do_not_hold_up_each_others_spawn() {
+    for round in 0..40 {
+      let stalled = spawn_together(12, |command| spawn_exclusive(|| command.spawn()));
+      assert_eq!(stalled, 0, "round {round}: spawns still waiting on their own child");
+    }
   }
 
   fn kill_group(leader: &mut std::process::Child) {

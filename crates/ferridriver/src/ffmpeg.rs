@@ -168,13 +168,15 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
   // Output file
   args.push(output_path.to_string_lossy().into_owned());
 
-  Command::new(ffmpeg)
-    .args(&args)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .spawn()
-    .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg: {e}")))
+  crate::backend::process::spawn_exclusive(|| {
+    Command::new(ffmpeg)
+      .args(&args)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::null())
+      .stderr(Stdio::piped())
+      .spawn()
+  })
+  .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg: {e}")))
 }
 
 /// Encode a 1-second white video at the requested `width x height` with no

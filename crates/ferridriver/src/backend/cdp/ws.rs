@@ -127,8 +127,7 @@ impl WsTransport {
     let port_file = user_data_dir.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
 
-    let mut child = command
-      .spawn()
+    let mut child = crate::backend::process::spawn_exclusive(|| command.spawn())
       .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
     // Track before the port-file wait + websocket connect below.
     crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(user_data_dir), owns_user_data_dir);

@@ -77,7 +77,7 @@ fn spawn_reaper() -> Option<Reaper> {
       Ok(())
     });
   }
-  let mut child = match command.spawn() {
+  let mut child = match super::process::spawn_exclusive(|| command.spawn()) {
     Ok(c) => c,
     Err(e) => {
       tracing::warn!(

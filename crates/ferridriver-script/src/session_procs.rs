@@ -351,7 +351,8 @@ impl SessionProcs {
         return Err("session processes are closing".into());
       }
       jobs.retain(|job| job.exit.borrow().is_none());
-      let mut child = build(rc).spawn().map_err(|e| format!("spawn command: {e}"))?;
+      let mut child = ferridriver::backend::process::spawn_exclusive(|| build(rc).spawn())
+        .map_err(|e| format!("spawn command: {e}"))?;
       let pid = child.id();
       let out = child.stdout.take();
       let err = child.stderr.take();
@@ -463,7 +464,8 @@ impl SessionProcs {
     if interactive {
       cmd.stdin(Stdio::piped());
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn command: {e}"))?;
+    let mut child =
+      ferridriver::backend::process::spawn_exclusive(|| cmd.spawn()).map_err(|e| format!("spawn command: {e}"))?;
     let pid = pid_of(child.id());
     let stdout = Arc::new(Mutex::new(Ring::default()));
     let stderr = Arc::new(Mutex::new(Ring::default()));

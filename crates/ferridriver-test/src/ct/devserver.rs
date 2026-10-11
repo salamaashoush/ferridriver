@@ -106,19 +106,21 @@ impl DevServer {
 /// within the timeout, or the process exits early.
 pub async fn start(config: &DevServerConfig) -> ferridriver::error::Result<DevServer> {
   use ferridriver::FerriError;
-  let mut child = tokio::process::Command::new(&config.cmd)
-    .args(&config.args)
-    .current_dir(&config.cwd)
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .map_err(|e| {
-      FerriError::backend(format!(
-        "failed to spawn `{}` — is it installed? ({e})\nInstall: {}",
-        config.cmd,
-        install_hint(&config.cmd),
-      ))
-    })?;
+  let mut child = ferridriver::backend::process::spawn_exclusive(|| {
+    tokio::process::Command::new(&config.cmd)
+      .args(&config.args)
+      .current_dir(&config.cwd)
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+  })
+  .map_err(|e| {
+    FerriError::backend(format!(
+      "failed to spawn `{}` — is it installed? ({e})\nInstall: {}",
+      config.cmd,
+      install_hint(&config.cmd),
+    ))
+  })?;
 
   let stdout = child.stdout.take();
   let stderr = child.stderr.take();

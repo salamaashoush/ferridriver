@@ -252,44 +252,50 @@ fn spawn_with_pipes(
 ) -> Result<(tokio::process::Child, BoxReader, BoxWriter)> {
   use std::os::unix::io::AsRawFd;
 
-  let (parent_sock, child_sock) =
-    std::os::unix::net::UnixStream::pair().map_err(|e| FerriError::Backend(format!("socketpair: {e}")))?;
-  // Borrow the raw fd for `pre_exec`; ownership stays with `child_sock`
-  // so the parent's copy is CLOSED (via Drop) right after `spawn()`.
-  // Holding it open meant the reader could never see EOF when Chrome
-  // died — a live in-process fd to the child end kept the socketpair
-  // open, `fail_all_pending` never fired, and every in-flight command
-  // ate the full 30s timeout instead of failing fast.
-  let child_fd = child_sock.as_raw_fd();
+  // The socket pair is made under the same exclusion as the spawn: another
+  // launch forking while it is not yet close-on-exec would hand its browser
+  // this one's pipe, and the reader would never see this Chrome die.
+  let (child, parent_sock) = crate::backend::process::spawn_exclusive(|| {
+    let (parent_sock, child_sock) =
+      std::os::unix::net::UnixStream::pair().map_err(|e| FerriError::Backend(format!("socketpair: {e}")))?;
+    // Borrow the raw fd for `pre_exec`; ownership stays with `child_sock`
+    // so the parent's copy is CLOSED (via Drop) right after `spawn()`.
+    // Holding it open meant the reader could never see EOF when Chrome
+    // died — a live in-process fd to the child end kept the socketpair
+    // open, `fail_all_pending` never fired, and every in-flight command
+    // ate the full 30s timeout instead of failing fast.
+    let child_fd = child_sock.as_raw_fd();
 
-  #[allow(unsafe_code)]
-  unsafe {
-    command.pre_exec(move || {
-      // Put the Chrome parent in its own session + process group so
-      // `kill_process_group` can take down every renderer/GPU/zygote
-      // helper together on teardown. See `backend::process`.
-      libc::setsid();
-      let flags = libc::fcntl(child_fd, libc::F_GETFD);
-      if flags != -1 {
-        libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-      }
-      if child_fd != 3 && libc::dup2(child_fd, 3) == -1 {
-        return Err(std::io::Error::last_os_error());
-      }
-      if child_fd != 4 && libc::dup2(child_fd, 4) == -1 {
-        return Err(std::io::Error::last_os_error());
-      }
-      if child_fd != 3 && child_fd != 4 {
-        libc::close(child_fd);
-      }
-      Ok(())
-    });
-  }
+    #[allow(unsafe_code)]
+    unsafe {
+      command.pre_exec(move || {
+        // Put the Chrome parent in its own session + process group so
+        // `kill_process_group` can take down every renderer/GPU/zygote
+        // helper together on teardown. See `backend::process`.
+        libc::setsid();
+        let flags = libc::fcntl(child_fd, libc::F_GETFD);
+        if flags != -1 {
+          libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+        }
+        if child_fd != 3 && libc::dup2(child_fd, 3) == -1 {
+          return Err(std::io::Error::last_os_error());
+        }
+        if child_fd != 4 && libc::dup2(child_fd, 4) == -1 {
+          return Err(std::io::Error::last_os_error());
+        }
+        if child_fd != 3 && child_fd != 4 {
+          libc::close(child_fd);
+        }
+        Ok(())
+      });
+    }
 
-  let child = command
-    .spawn()
-    .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome with --remote-debugging-pipe: {e}")))?;
-  drop(child_sock);
+    let child = command
+      .spawn()
+      .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome with --remote-debugging-pipe: {e}")))?;
+    drop(child_sock);
+    Ok::<_, FerriError>((child, parent_sock))
+  })?;
 
   parent_sock
     .set_nonblocking(true)

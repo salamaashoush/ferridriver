@@ -306,8 +306,7 @@ fn spawn_command(
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped());
-  let mut child = cmd
-    .spawn()
+  let mut child = ferridriver::backend::process::spawn_exclusive(|| cmd.spawn())
     .map_err(|e| ferridriver::FerriError::backend(format!("spawn '{command}': {e}")))?;
   if let Some(stdout) = child.stdout.take() {
     drain_output(stdout);

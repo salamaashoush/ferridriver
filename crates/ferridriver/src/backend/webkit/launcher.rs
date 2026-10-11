@@ -141,7 +141,8 @@ pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) 
     args = ?cmd.get_args().collect::<Vec<_>>(),
     "spawning webkit"
   );
-  let child = tokio::process::Command::from(cmd).kill_on_drop(true).spawn()?;
+  let child =
+    crate::backend::process::spawn_exclusive(|| tokio::process::Command::from(cmd).kill_on_drop(true).spawn())?;
   Ok(ChildGroup::recorded(child, config.user_data_dir.as_deref(), false))
 }
 

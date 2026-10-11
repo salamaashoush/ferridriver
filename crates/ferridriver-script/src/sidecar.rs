@@ -344,7 +344,7 @@ fn spawn_child(spec: &SidecarSpec, child_in: &UnixStream, child_out: &UnixStream
       Ok(())
     });
   }
-  cmd.spawn().map_err(|e| SidecarError::Spawn(e.to_string()))
+  ferridriver::backend::process::spawn_exclusive(|| cmd.spawn()).map_err(|e| SidecarError::Spawn(e.to_string()))
 }
 
 #[cfg(not(unix))]

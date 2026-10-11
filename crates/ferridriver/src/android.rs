@@ -362,7 +362,7 @@ async fn launch_prepared(
   #[cfg(unix)]
   command.process_group(0);
   drop((console, device));
-  let mut child = command.spawn()?;
+  let mut child = crate::backend::process::spawn_exclusive(|| command.spawn())?;
   let stderr = drain_child_stderr(&mut child);
   let group = ChildGroup::new(child);
   *owner.group.lock().await = Some(group);
