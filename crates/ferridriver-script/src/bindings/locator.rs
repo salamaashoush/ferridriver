@@ -1322,6 +1322,7 @@ impl LocatorJs {
         let result = self
           .inner
           .evaluate(&source, serialized, is_fn)
+          .maybe_options(crate::bindings::convert::evaluate_options(options.0.as_ref())?)
           .await
           .into_js_with(&ctx)?;
         crate::bindings::convert::serialized_value_to_quickjs(&ctx, &result)
@@ -1385,6 +1386,7 @@ impl LocatorJs {
         let handle = self
           .inner
           .evaluate_handle(&source, serialized, is_fn)
+          .maybe_options(crate::bindings::convert::evaluate_options(options.0.as_ref())?)
           .await
           .into_js_with(&ctx)?;
         Ok(crate::bindings::js_handle::JSHandleJs::new(handle))

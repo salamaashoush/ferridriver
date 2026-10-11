@@ -293,6 +293,19 @@ impl ArgFunctions {
   }
 }
 
+/// The `{ timeout?: number }` of an evaluate option bag (Playwright
+/// `locator.evaluate(pageFunction, arg?, options?)`).
+pub fn evaluate_options(
+  options: Option<&Value<'_>>,
+) -> rquickjs::Result<Option<ferridriver::options::EvaluateOptions>> {
+  let Some(bag) = options.and_then(Value::as_object) else {
+    return Ok(None);
+  };
+  Ok(Some(ferridriver::options::EvaluateOptions {
+    timeout: bag.get::<_, Option<f64>>("timeout")?.map(ms_f64_to_u64),
+  }))
+}
+
 /// [`quickjs_arg_to_serialized`] with the functions in the argument
 /// handled as `functions` says.
 pub fn quickjs_arg_with_functions<'js>(

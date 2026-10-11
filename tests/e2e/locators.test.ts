@@ -432,6 +432,24 @@ describe('locators', () => {
     expect(await page.getByRole('button', { description: 'secondary action' }).textContent()).toBe('Cancel');
   });
 
+  test('locator_evaluate_gives_up_after_its_own_timeout', async ({ page }) => {
+    // Nothing matches, so each call waits out the timeout it was given
+    // and names it; the default would be far longer than the bound here.
+    await page.goto(dataUrl('<div id="here"></div>'));
+    const missing = page.locator('#missing');
+    for (const call of [
+      () => missing.evaluate((el: Element) => el.id, undefined, { timeout: 400 }),
+      () => missing.evaluateHandle((el: Element) => el, undefined, { timeout: 400 }),
+    ]) {
+      const started = Date.now();
+      const error = (await call().catch((e: Error) => e)) as Error;
+      expect(error.message).toContain('Timeout 400ms exceeded');
+      expect(Date.now() - started).toBeLessThan(5000);
+    }
+    // The bag does not get in the way of a call that succeeds.
+    expect(await page.locator('#here').evaluate((el: Element) => el.id, undefined, { timeout: 400 })).toBe('here');
+  });
+
   test('aria_snapshot_boxes', async ({ page }) => {
     // ariaSnapshot({ boxes: true }) appends [box=x,y,w,h] annotations;
     // the default snapshot does not (Playwright 1.60).
