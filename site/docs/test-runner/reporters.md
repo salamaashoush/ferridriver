@@ -99,6 +99,7 @@ boolean ones can also be flipped from the environment as
 | Option | Effect |
 |---|---|
 | `open` | `never` (default), `always`, or `on-failure` — whether to open the finished report in a browser. |
+| `mergeFiles` | Group tests by their outermost `describe` instead of the file they are in, so a suite split over several files reads as one. Also `FERRIDRIVER_HTML_MERGE_FILES=1`. |
 
 **`blob`**
 

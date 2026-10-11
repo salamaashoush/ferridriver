@@ -87,6 +87,10 @@ struct HtmlTest {
   #[serde(skip_serializing_if = "Option::is_none")]
   project: Option<String>,
   file: String,
+  /// What the report lists this test under: its file, or with
+  /// `mergeFiles` its outermost `describe`.
+  group: String,
+  /// The describes around the test, less the one it is grouped by.
   #[serde(skip_serializing_if = "Option::is_none")]
   suite: Option<String>,
   name: String,
@@ -141,6 +145,10 @@ struct HtmlReport {
   generated_at_ms: u64,
   #[serde(skip_serializing_if = "serde_json::Value::is_null")]
   metadata: serde_json::Value,
+  /// Groups are describes, listed by name, rather than files in run
+  /// order (Playwright's `mergeFiles`).
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  merge_files: bool,
 }
 
 /// When `finalize` opens the finished report in a browser. Mirrors
@@ -168,6 +176,7 @@ pub struct HtmlReporter {
   output_path: PathBuf,
   collector: ResultCollector,
   open: OpenMode,
+  merge_files: bool,
 }
 
 impl HtmlReporter {
@@ -176,7 +185,17 @@ impl HtmlReporter {
       output_path,
       collector: ResultCollector::new(),
       open: OpenMode::Never,
+      merge_files: false,
     }
+  }
+
+  /// Playwright's `mergeFiles`: group tests by their outermost
+  /// `describe` instead of the file they are in, so one suite split
+  /// over several files reads as one.
+  #[must_use]
+  pub fn with_merge_files(mut self, merge_files: bool) -> Self {
+    self.merge_files = merge_files;
+    self
   }
 
   /// Whether the finished report opens in a browser. `never` by
@@ -189,7 +208,12 @@ impl HtmlReporter {
 
   fn report(&self) -> HtmlReport {
     let counts = self.collector.counts();
-    let tests: Vec<HtmlTest> = self.collector.records().iter().map(html_test).collect();
+    let tests: Vec<HtmlTest> = self
+      .collector
+      .records()
+      .iter()
+      .map(|record| html_test(record, self.merge_files))
+      .collect();
     HtmlReport {
       projects: self
         .collector
@@ -223,6 +247,7 @@ impl HtmlReporter {
         .unwrap_or_default()
         .as_millis() as u64,
       metadata: self.collector.run.metadata.clone(),
+      merge_files: self.merge_files,
     }
   }
 
@@ -273,13 +298,29 @@ impl Reporter for HtmlReporter {
   }
 }
 
-fn html_test(record: &TestRecord) -> HtmlTest {
+/// Playwright's name for the group of a test outside every `describe`
+/// (`html-reporter/src/reportView.tsx::createMergedFilesModel`).
+const ANONYMOUS_GROUP: &str = "<anonymous>";
+
+fn html_test(record: &TestRecord, merge_files: bool) -> HtmlTest {
   let last = record.last();
   let id = record.id();
+  let (group, suite) = if merge_files {
+    // The file leads the title path and the test's own title ends it.
+    let titles = id.title_path();
+    let describes = titles.get(1..titles.len().saturating_sub(1)).unwrap_or_default();
+    match describes.split_first() {
+      Some((outermost, inner)) => (outermost.clone(), (!inner.is_empty()).then(|| inner.join(" \u{203a} "))),
+      None => (ANONYMOUS_GROUP.to_string(), None),
+    }
+  } else {
+    (id.file.clone(), id.suite.clone())
+  };
   HtmlTest {
     project: (!record.key.project.is_empty()).then(|| record.key.project.clone()),
     file: id.file.clone(),
-    suite: id.suite.clone(),
+    group,
+    suite,
     name: id.name.clone(),
     id: record.stable_id(),
     location: id.line.map(|line| format!("{}:{line}", id.file)),
@@ -595,10 +636,11 @@ function render() {
   if (state.sort === 'order') {
     const files = [];
     for (const test of tests) {
-      let group = files.find(f => f.file === test.file);
-      if (!group) { group = { file: test.file, tests: [] }; files.push(group); }
+      let group = files.find(f => f.file === test.group);
+      if (!group) { group = { file: test.group, tests: [] }; files.push(group); }
       group.tests.push(test);
     }
+    if (R.merge_files) files.sort((a, b) => a.file.localeCompare(b.file));
     for (const group of files) {
       html += `<div class="file"><div class="file-name">${esc(group.file)}</div>` +
         group.tests.map(renderTest).join('') + '</div>';
@@ -781,6 +823,71 @@ mod tests {
     let report = reporter.report();
     assert_eq!(report.tests.len(), 2, "same test, two projects, two rows");
     assert_eq!(report.projects, vec!["webkit", "cdp-pipe"]);
+  }
+
+  #[tokio::test]
+  async fn merge_files_groups_by_the_outermost_describe() {
+    let in_suite = |file: &str, suite: &str, name: &str| {
+      let mut test = outcome(name, TestStatus::Passed, 1);
+      test.test_id.file = file.into();
+      test.test_id.suite = Some(format!("{file}::{suite}"));
+      test
+    };
+    let outcomes = || {
+      vec![
+        in_suite("specs/b.spec.ts", "Checkout::card", "pays"),
+        outcome("loose", TestStatus::Passed, 1),
+        in_suite("specs/c.spec.ts", "Checkout", "refunds"),
+        in_suite("specs/b.spec.ts", "Account::profile::avatar", "uploads"),
+      ]
+    };
+
+    let mut merged = HtmlReporter::new(PathBuf::from("report.html")).with_merge_files(true);
+    for outcome in outcomes() {
+      record(&mut merged, outcome).await;
+    }
+    let report = merged.report();
+    assert!(report.merge_files);
+    let listed: Vec<(&str, Option<&str>, &str)> = report
+      .tests
+      .iter()
+      .map(|test| (test.group.as_str(), test.suite.as_deref(), test.name.as_str()))
+      .collect();
+    assert_eq!(
+      listed,
+      [
+        ("Checkout", Some("card"), "pays"),
+        ("<anonymous>", None, "loose"),
+        ("Checkout", None, "refunds"),
+        ("Account", Some("profile \u{203a} avatar"), "uploads"),
+      ]
+    );
+    assert!(
+      serde_json::to_string(&report)
+        .expect("json")
+        .contains("\"merge_files\":true")
+    );
+
+    let mut by_file = HtmlReporter::new(PathBuf::from("report.html"));
+    for outcome in outcomes() {
+      record(&mut by_file, outcome).await;
+    }
+    let report = by_file.report();
+    let groups: Vec<&str> = report.tests.iter().map(|test| test.group.as_str()).collect();
+    assert_eq!(
+      groups,
+      [
+        "specs/b.spec.ts",
+        "specs/a.spec.ts",
+        "specs/c.spec.ts",
+        "specs/b.spec.ts"
+      ]
+    );
+    assert_eq!(
+      report.tests[0].suite.as_deref(),
+      Some("specs/b.spec.ts::Checkout::card")
+    );
+    assert!(!serde_json::to_string(&report).expect("json").contains("merge_files"));
   }
 
   #[test]

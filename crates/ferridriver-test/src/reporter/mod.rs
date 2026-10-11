@@ -642,7 +642,8 @@ fn build_reporters(
 
       // ── Shared reporters (same for both modes) ──
       "html" => {
-        let mut reporter = html::HtmlReporter::new(out("report.html"));
+        let mut reporter =
+          html::HtmlReporter::new(out("report.html")).with_merge_files(base::bool_option(opts, "html", "mergeFiles"));
         if let Some(open) = base::str_option(opts, "open") {
           reporter = reporter.with_open_mode(html::OpenMode::parse(&open));
         }

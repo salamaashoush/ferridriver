@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from '@ferridriver/test';
-import { observation, runtimeProbe } from './support.mjs';
+import { observation, runtimeProbe, script } from './support.mjs';
 
 const id = (name, file = 'tests/login.spec.ts', suite = 'tests/login.spec.ts::auth', line = 12, column = 5) =>
   ({ file, suite, name, line, column });
@@ -197,4 +197,91 @@ test('the outputFile option selects the report path and leaves the default path 
   });
   assert.equal(await output.exists('custom/where.xml'), true);
   assert.equal(await output.exists('junit.xml'), false);
+});
+
+test('the perfetto reporter draws each attempt and its steps on the lane of its worker slot', async () => {
+  const late = { ...failed('rejects a bad password'), start_time_ms: 1700000000300 };
+  late.steps = [{ ...late.steps[0], start_us: 1700000000320000 }];
+  const output = await report(['perfetto'], runEvents([outcome('logs in'), late]));
+  const trace = JSON.parse(await output.read('perfetto.json'));
+  assert.equal(trace.displayTimeUnit, 'ms');
+  assert.equal(trace.metadata.status, 'failed');
+  const events = trace.traceEvents;
+  assert.deepEqual(events.filter(e => e.name === 'thread_name').map(e => e.args.name), ['Worker 2']);
+  const slice = name => events.find(e => e.ph === 'X' && e.name === name);
+
+  const passing = slice('logs in');
+  assert.deepEqual([passing.cat, passing.cname, passing.ts, passing.dur, passing.tid], ['test', 'good', 0, 250000, 3]);
+  const failing = slice('rejects a bad password');
+  assert.deepEqual([failing.cname, failing.ts, failing.dur, failing.tid], ['bad', 300000, 250000, 3]);
+  assert.equal(failing.args.title, 'auth \u203a rejects a bad password');
+  assert.equal(failing.args.project, 'chromium');
+  assert.equal(failing.args.location, 'login.spec.ts:12:5');
+  assert.equal(failing.args.tags, '@smoke');
+  assert.deepEqual(failing.args.annotations, ['issue: JIRA-1']);
+  assert.deepEqual(failing.args.attachments, ['screenshot']);
+  assert.equal(failing.args.stdout, 'trying to sign in\n');
+  assert.ok(failing.args.errors[0].includes('toHaveText'), failing.args.errors[0]);
+
+  const step = slice('sign in');
+  assert.deepEqual([step.cat, step.cname, step.ts, step.dur, step.tid], ['test.step', 'bad', 320000, 80000, 3]);
+  assert.deepEqual(step.args, { location: 'login.spec.ts:19:0', error: 'no such button' });
+});
+
+test('a perfetto outputFile ending in .gz is gzipped', async () => {
+  const output = await report(['perfetto'], runEvents([outcome('logs in')]), {
+    options: { outputFile: 'reports/trace.json.gz' },
+  });
+  assert.equal(await output.exists('perfetto.json'), false);
+  const { value } = await script(`
+    const { readFile } = await import('node:fs/promises');
+    const { gunzipSync } = await import('node:zlib');
+    const bytes = await readFile(${JSON.stringify(join(output.cwd, 'reports', 'trace.json.gz'))});
+    const trace = JSON.parse(gunzipSync(bytes).toString('utf8'));
+    return { magic: [bytes[0], bytes[1]], names: trace.traceEvents.filter(e => e.ph === 'X').map(e => e.name) };`);
+  assert.deepEqual(value, { magic: [0x1f, 0x8b], names: ['logs in'] });
+});
+
+// The groups a rendered HTML report lists, each with the tests under it.
+async function renderedGroups(cwd) {
+  const { value } = await script(`
+    const browser = await chromium().launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.goto(${JSON.stringify('file://' + join(cwd, 'reports', 'report.html'))});
+      await page.locator('.test-name').first().waitFor();
+      return await page.evaluate(() => [...document.querySelectorAll('.file')].map(group => [
+        group.querySelector('.file-name').textContent,
+        [...group.querySelectorAll('.test')].map(test =>
+          [test.querySelector('.test-name').textContent, test.querySelector('.test-suite')?.textContent ?? null]),
+      ]));
+    } finally {
+      await browser.close();
+    }`);
+  return value;
+}
+
+test('the HTML mergeFiles option groups tests by their outermost describe', async () => {
+  const within = (name, file, suite) => ({ ...outcome(name), test_id: id(name, file, suite) });
+  const outcomes = [
+    within('pays', 'tests/b.spec.ts', 'tests/b.spec.ts::Checkout::card'),
+    within('loose', 'tests/a.spec.ts', null),
+    within('refunds', 'tests/c.spec.ts', 'tests/c.spec.ts::Checkout'),
+    within('signs in', 'tests/b.spec.ts', 'tests/b.spec.ts::Account'),
+  ];
+  const events = [start(4), ...outcomes.map(testFinished), { ...finish(4, 4, 0), status: 'passed' }];
+
+  const merged = await report(['html'], events, { options: { mergeFiles: true } });
+  assert.deepEqual(await renderedGroups(merged.cwd), [
+    ['<anonymous>', [['loose', null]]],
+    ['Account', [['signs in', null]]],
+    ['Checkout', [['pays', 'card'], ['refunds', null]]],
+  ]);
+
+  const byFile = await report(['html'], events);
+  assert.deepEqual(await renderedGroups(byFile.cwd), [
+    ['tests/b.spec.ts', [['pays', 'tests/b.spec.ts::Checkout::card'], ['signs in', 'tests/b.spec.ts::Account']]],
+    ['tests/a.spec.ts', [['loose', null]]],
+    ['tests/c.spec.ts', [['refunds', 'tests/c.spec.ts::Checkout']]],
+  ]);
 });
