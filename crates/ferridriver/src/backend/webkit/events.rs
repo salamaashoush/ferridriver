@@ -552,7 +552,7 @@ fn handle_main_frame_commit(ctx: &TargetListenerCtx, params: &Value) {
     return;
   }
   ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
-  ctx.engine_injected.reset();
+  ctx.engine_injected.document_replaced();
   *ctx
     .global_object_id
     .lock()
@@ -626,6 +626,9 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_request_intercepted(&env.params, &target, &ctx.routes);
     },
     Some("Runtime.executionContextCreated") => {
+      if let Some(context) = env.params.pointer("/context/id").and_then(Value::as_i64) {
+        ctx.engine_injected.context_created(context);
+      }
       handle_exec_context_created(&env.params, &ctx.frame_contexts).await;
     },
     Some("Page.frameAttached") => {

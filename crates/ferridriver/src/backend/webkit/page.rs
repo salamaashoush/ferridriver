@@ -99,18 +99,40 @@ fn navigator_platform_for(user_agent: &str) -> Option<&'static str> {
   None
 }
 
-/// Whether `window.__fd` is in the page's current document.
+/// What `WebKit` answers a call anchored in a document that is gone. A
+/// call the document went from under, which it does not answer at all,
+/// is reported the same way.
+const STALE_ANCHOR: &str = "Missing injected script for given objectId";
+
+/// The page's current document: whether `window.__fd` is in it, and
+/// which execution contexts went with the documents before it.
 ///
-/// One word holds the document's generation and the flag, so an
+/// One word holds the document's generation and the engine flag, so an
 /// injection that finishes after its document was replaced cannot mark
 /// the new document as having the engine.
-#[derive(Default)]
-pub(crate) struct EngineLatch(std::sync::atomic::AtomicU64);
+pub(crate) struct EngineLatch {
+  state: std::sync::atomic::AtomicU64,
+  /// The newest execution context the live target has announced.
+  newest_context: std::sync::atomic::AtomicI64,
+  /// The target's generation, and the newest context of the documents
+  /// gone from it. A target numbers its contexts from one.
+  gone: tokio::sync::watch::Sender<(u64, i64)>,
+}
+
+impl Default for EngineLatch {
+  fn default() -> Self {
+    Self {
+      state: std::sync::atomic::AtomicU64::new(0),
+      newest_context: std::sync::atomic::AtomicI64::new(0),
+      gone: tokio::sync::watch::channel((0, 0)).0,
+    }
+  }
+}
 
 impl EngineLatch {
   /// The current document, when the engine is still to go into it.
   fn pending(&self) -> Option<u64> {
-    let state = self.0.load(Ordering::Acquire);
+    let state = self.state.load(Ordering::Acquire);
     (state & 1 == 0).then_some(state)
   }
 
@@ -118,7 +140,7 @@ impl EngineLatch {
   /// has replaced it.
   fn injected(&self, document: u64) -> bool {
     self
-      .0
+      .state
       .compare_exchange(document, document | 1, Ordering::AcqRel, Ordering::Acquire)
       .is_ok()
   }
@@ -126,8 +148,60 @@ impl EngineLatch {
   /// A new document, with nothing injected.
   pub(crate) fn reset(&self) {
     self
-      .0
+      .state
       .update(Ordering::AcqRel, Ordering::Acquire, |state| (state | 1) + 1);
+  }
+
+  pub(crate) fn context_created(&self, context: i64) {
+    self.newest_context.fetch_max(context, Ordering::AcqRel);
+  }
+
+  /// The main frame committed a new document: every context announced
+  /// so far went with the old one.
+  pub(crate) fn document_replaced(&self) {
+    self.reset();
+    let through = self.newest_context.load(Ordering::Acquire);
+    self.gone.send_modify(|gone| gone.1 = gone.1.max(through));
+  }
+
+  /// The page moved to another target.
+  fn target_replaced(&self) {
+    self.reset();
+    self.newest_context.store(0, Ordering::Release);
+    self.gone.send_modify(|gone| *gone = (gone.0 + 1, 0));
+  }
+
+  /// Watch for the document `context` belongs to going away.
+  fn watch(&self, context: i64) -> ContextWatch {
+    let gone = self.gone.subscribe();
+    let target = gone.borrow().0;
+    ContextWatch { gone, target, context }
+  }
+}
+
+struct ContextWatch {
+  gone: tokio::sync::watch::Receiver<(u64, i64)>,
+  target: u64,
+  context: i64,
+}
+
+impl ContextWatch {
+  fn is_gone(&self) -> bool {
+    let (target, through) = *self.gone.borrow();
+    target != self.target || self.context <= through
+  }
+
+  /// Whether the page is still on the target the context was on.
+  fn on_live_target(&self) -> bool {
+    self.gone.borrow().0 == self.target
+  }
+
+  async fn gone(&mut self) {
+    while !self.is_gone() {
+      if self.gone.changed().await.is_err() {
+        std::future::pending::<()>().await;
+      }
+    }
   }
 }
 
@@ -565,13 +639,36 @@ impl WebKitPage {
   /// true)`. Idempotent; no-op for pages that never deferred.
   pub(crate) async fn resume_popup(&self) -> crate::error::Result<()> {
     if self.popup_paused.swap(false, Ordering::SeqCst) {
+      let mut events = self.events.subscribe();
       self
         .proxy
         .send("Target.resume", json!({ "targetId": &*self.target_id() }))
         .await
         .map_err(|e| crate::error::FerriError::backend(format!("webkit Target.resume: {e}")))?;
+      self.first_document_committed(&mut events).await;
     }
     Ok(())
+  }
+
+  /// A popup starts on an empty document that is never the one it was
+  /// opened for. It is handed on once the first real one has committed,
+  /// or it has closed, so that what is done to it next lands in that
+  /// document (`wkPage.ts` waits on the same commit before `reportAsNew`).
+  async fn first_document_committed(&self, events: &mut crate::events::EventSubscription<crate::events::PageEvent>) {
+    loop {
+      let committed = self.lifecycle.notify.notified();
+      if self.lifecycle.seen(NavLifecycle::Commit) || self.is_closed() {
+        return;
+      }
+      tokio::select! {
+        () = committed => {},
+        event = events.recv() => {
+          if matches!(event, None | Some(crate::events::PageEvent::Close)) {
+            return;
+          }
+        },
+      }
+    }
   }
 
   #[must_use]
@@ -622,7 +719,7 @@ impl WebKitPage {
       .global_object_id
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    self.engine_injected.reset();
+    self.engine_injected.target_replaced();
     *self
       .frame_cache
       .lock()
@@ -709,11 +806,7 @@ impl WebKitPage {
       Some(id) => {
         let mut params = params;
         params["objectId"] = Value::String(self.frame_context_anchor(id).await?);
-        self
-          .target_session()
-          .send(protocol::RUNTIME_CALL_FUNCTION_ON, params)
-          .await
-          .map_err(conn_err)?
+        self.call_function_on(params).await.map_err(conn_err)?
       },
       None => self.call_on_global(params, false).await?,
     };
@@ -776,6 +869,44 @@ impl WebKitPage {
   /// given objectId" without running the function. The realm caches are
   /// dropped and the call is made once more on a fresh anchor, with the
   /// engine re-injected first when the function needs `window.__fd`.
+  /// `Runtime.callFunctionOn` on the live target. A call still running
+  /// when its document is replaced is one `WebKit` never answers, so it
+  /// is told apart from one that is merely slow: a target answers in
+  /// order, and once a command sent after the document went is
+  /// answered, a call sent before it has had its turn. It is reported
+  /// like a call anchored in a document already gone, for the caller to
+  /// make again in the document there now.
+  async fn call_function_on(&self, params: Value) -> std::result::Result<Value, super::connection::ConnectionError> {
+    use super::connection::ConnectionError;
+    let session = self.target_session();
+    let Some(context) = params
+      .get("objectId")
+      .and_then(Value::as_str)
+      .and_then(object_id_context)
+    else {
+      return session.send(protocol::RUNTIME_CALL_FUNCTION_ON, params).await;
+    };
+    let mut document = self.engine_injected.watch(context);
+    let mut call = Box::pin(session.send(protocol::RUNTIME_CALL_FUNCTION_ON, params));
+    tokio::select! {
+      biased;
+      answer = &mut call => return answer,
+      () = document.gone() => {},
+    }
+    if !document.on_live_target() {
+      return Err(ConnectionError::Protocol(STALE_ANCHOR.to_string()));
+    }
+    let later = session.send(
+      protocol::RUNTIME_EVALUATE,
+      json!({ "expression": "0", "returnByValue": true }),
+    );
+    tokio::select! {
+      biased;
+      answer = &mut call => answer,
+      _ = later => Err(ConnectionError::Protocol(STALE_ANCHOR.to_string())),
+    }
+  }
+
   async fn call_on_global(&self, mut params: Value, needs_engine: bool) -> Result<Value> {
     let mut retried = false;
     loop {
@@ -783,14 +914,8 @@ impl WebKitPage {
         self.ensure_engine_injected().await?;
       }
       params["objectId"] = Value::String(self.global_anchor().await?);
-      match self
-        .target_session()
-        .send(protocol::RUNTIME_CALL_FUNCTION_ON, params.clone())
-        .await
-      {
-        Err(super::connection::ConnectionError::Protocol(message))
-          if !retried && message.contains("Missing injected script for given objectId") =>
-        {
+      match self.call_function_on(params.clone()).await {
+        Err(super::connection::ConnectionError::Protocol(message)) if !retried && message.contains(STALE_ANCHOR) => {
           retried = true;
           self.reset_realm();
         },
@@ -926,16 +1051,12 @@ impl WebKitPage {
     let declaration =
       format!("function(frameId) {{ const s = window[{streamer_global:?}]; if (s) s.markIframe(this, frameId); }}");
     let call = self
-      .target_session()
-      .send(
-        protocol::RUNTIME_CALL_FUNCTION_ON,
-        json!({
-          "functionDeclaration": declaration,
-          "objectId": object_id,
-          "arguments": [{ "value": child_frame_id }],
-          "returnByValue": true,
-        }),
-      )
+      .call_function_on(json!({
+        "functionDeclaration": declaration,
+        "objectId": object_id,
+        "arguments": [{ "value": child_frame_id }],
+        "returnByValue": true,
+      }))
       .await
       .map_err(conn_err);
     let _ = self
@@ -1145,10 +1266,15 @@ impl WebKitPage {
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     // Until an injection lands in the document that is still current: one
     // that finishes after a navigation went into the document it replaced.
+    let mut gone = 0;
     while let Some(document) = self.engine_injected.pending() {
-      Box::pin(self.inject_engine()).await?;
-      if self.engine_injected.injected(document) {
-        break;
+      match Box::pin(self.inject_engine()).await {
+        Ok(()) if self.engine_injected.injected(document) => break,
+        Ok(()) => {},
+        Err(error) if gone < crate::backend::cdp::ENGINE_ATTEMPTS && error.to_string().contains(STALE_ANCHOR) => {
+          gone += 1;
+        },
+        Err(error) => return Err(error),
       }
     }
     Ok(())
@@ -1273,16 +1399,12 @@ impl WebKitPage {
     let js = crate::selectors::build_lazy_inject_js();
     let wrapper = format!("function(){{ return ({js}); }}");
     let resp = self
-      .target_session()
-      .send(
-        protocol::RUNTIME_CALL_FUNCTION_ON,
-        json!({
-          "objectId": anchor,
-          "functionDeclaration": wrapper,
-          "returnByValue": false,
-          "awaitPromise": true,
-        }),
-      )
+      .call_function_on(json!({
+        "objectId": anchor,
+        "functionDeclaration": wrapper,
+        "returnByValue": false,
+        "awaitPromise": true,
+      }))
       .await
       .map_err(conn_err)?;
     if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
@@ -2485,6 +2607,34 @@ impl WebKitPage {
     is_function: Option<bool>,
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
+    use crate::backend::cdp::{ENGINE_ATTEMPTS, ENGINE_MISSING};
+    let mut attempt = 1;
+    loop {
+      let result =
+        Box::pin(self.call_utility_evaluate_once(fn_source, args, handles, frame_id, is_function, return_by_value))
+          .await;
+      match result {
+        Err(error) if attempt < ENGINE_ATTEMPTS && error.to_string().contains(ENGINE_MISSING) => {
+          // The document the engine went into was replaced before the
+          // call ran; nothing of the caller's has run yet.
+          self.engine_injected.reset();
+          self.frame_engine_contexts.write().await.clear();
+          attempt += 1;
+        },
+        result => return result,
+      }
+    }
+  }
+
+  async fn call_utility_evaluate_once(
+    &self,
+    fn_source: &str,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
+    frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult> {
     self.ensure_engine_injected().await?;
 
     // Frame-scoped evaluate: resolve the frame's execution context and
@@ -2557,11 +2707,7 @@ impl WebKitPage {
       Some(anchor) => {
         let mut params = params;
         params["objectId"] = Value::String(anchor);
-        self
-          .target_session()
-          .send(protocol::RUNTIME_CALL_FUNCTION_ON, params)
-          .await
-          .map_err(conn_err)?
+        self.call_function_on(params).await.map_err(conn_err)?
       },
       None => self.call_on_global(params, true).await?,
     };
@@ -2824,6 +2970,26 @@ mod tests {
     assert_eq!(latch.pending(), None);
     latch.reset();
     assert!(latch.pending().is_some_and(|third| third != second));
+  }
+
+  #[tokio::test]
+  async fn a_call_fails_once_its_document_is_replaced_and_not_before() {
+    let latch = EngineLatch::default();
+    latch.context_created(1);
+    latch.context_created(2);
+    let mut old = latch.watch(1);
+    assert!(!old.is_gone());
+    latch.document_replaced();
+    old.gone().await;
+    latch.context_created(3);
+    assert!(latch.watch(2).is_gone());
+    let mut current = latch.watch(3);
+    assert!(!current.is_gone());
+    // Another target numbers its contexts afresh; what ran on the old one is gone.
+    latch.target_replaced();
+    current.gone().await;
+    latch.context_created(1);
+    assert!(!latch.watch(1).is_gone());
   }
 
   #[test]

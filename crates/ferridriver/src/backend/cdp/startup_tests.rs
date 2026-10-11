@@ -118,3 +118,13 @@ async fn dropping_attach_tasks_cancels_their_transport_ownership() {
   drop(tasks);
   assert!(task.await.unwrap_err().is_cancelled());
 }
+
+#[test]
+fn the_utility_wrapper_names_a_missing_engine_before_running_anything() {
+  let wrapper = super::UTILITY_EVAL_WRAPPER;
+  let refusal = wrapper
+    .find(super::ENGINE_MISSING)
+    .expect("the wrapper throws the sentinel the backends retry on");
+  let evaluate = wrapper.find("us.evaluate(").expect("the wrapper evaluates");
+  assert!(refusal < evaluate);
+}

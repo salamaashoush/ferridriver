@@ -32,6 +32,9 @@ pub(super) struct PausedSetup {
   /// The protocol identifier of each init script registered while
   /// paused, by the identifier handed out before the answer came.
   scripts: std::sync::Mutex<FxHashMap<String, String>>,
+  /// The main frame's URL as the frame tree written during the pause
+  /// reported it.
+  main_frame_url: std::sync::OnceLock<String>,
 }
 
 impl PausedSetup {
@@ -66,6 +69,18 @@ impl PausedSetup {
   pub(super) fn resume(&self) -> Vec<PendingAnswer> {
     self.paused.store(false, Ordering::Release);
     std::mem::take(&mut *self.answers.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+  }
+
+  pub(super) fn main_frame_url_answered(&self, url: &str) {
+    let _ = self.main_frame_url.set(url.to_string());
+  }
+
+  /// Whether the popup may still be on the empty document it starts
+  /// with, which Chromium reports with an empty URL (`:` before
+  /// r1651606). A popup opened for `about:blank` in a new browsing
+  /// instance is past it by its first answer and commits nothing more.
+  pub(super) fn on_initial_document(&self) -> bool {
+    self.main_frame_url.get().is_none_or(|url| url.is_empty() || url == ":")
   }
 
   /// An identifier for an init script whose protocol one is still owed.
@@ -131,6 +146,21 @@ mod tests {
       .unwrap_err();
     assert!(error.to_string().contains("refused"));
     assert!(setup.resume().is_empty());
+  }
+
+  #[test]
+  fn a_popup_is_on_its_initial_document_until_its_frame_tree_names_another() {
+    for (url, initial) in [
+      ("", true),
+      (":", true),
+      ("about:blank", false),
+      ("https://example.com/", false),
+    ] {
+      let setup = PausedSetup::paused();
+      assert!(setup.on_initial_document());
+      setup.main_frame_url_answered(url);
+      assert_eq!(setup.on_initial_document(), initial, "{url:?}");
+    }
   }
 
   #[test]

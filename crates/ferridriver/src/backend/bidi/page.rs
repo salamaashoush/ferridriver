@@ -3388,8 +3388,35 @@ impl BidiPage {
   ///
   /// Returns a String on transport failure, page-side exception, or
   /// handle/backend mismatch.
-  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
   pub async fn call_utility_evaluate(
+    &self,
+    fn_source: &str,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
+    frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult> {
+    use crate::backend::cdp::{ENGINE_ATTEMPTS, ENGINE_MISSING};
+    let mut attempt = 1;
+    loop {
+      let result =
+        Box::pin(self.call_utility_evaluate_once(fn_source, args, handles, frame_id, is_function, return_by_value))
+          .await;
+      match result {
+        Err(error) if attempt < ENGINE_ATTEMPTS && error.to_string().contains(ENGINE_MISSING) => {
+          // The document the engine went into was replaced before the
+          // call ran; nothing of the caller's has run yet.
+          self.injected_script.reset();
+          attempt += 1;
+        },
+        result => return result,
+      }
+    }
+  }
+
+  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+  async fn call_utility_evaluate_once(
     &self,
     fn_source: &str,
     args: &[crate::protocol::SerializedValue],

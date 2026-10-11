@@ -783,6 +783,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
     };
     page.setup.write(Box::pin(enable)).await?;
+    let setup = Arc::clone(&page.setup);
+    page
+      .write_paused("Page.getFrameTree", super::empty_params(), move |tree| {
+        let url = tree.pointer("/frameTree/frame/url").and_then(|url| url.as_str());
+        setup.main_frame_url_answered(url.unwrap_or_default());
+        Ok(())
+      })
+      .await?;
     Ok(page)
   }
 
@@ -1771,10 +1779,21 @@ impl LifecycleState {
 /// mirrors Playwright's `argCount` to the utility script — the
 /// utility script slices `...argsAndHandles` into the first `count`
 /// as arguments and the remainder as handles.
+/// What [`UTILITY_EVAL_WRAPPER`] throws, before it runs anything of the
+/// caller's, in a document that does not have the engine. A backend that
+/// injects on demand can have checked a document that a navigation then
+/// replaced; it injects again and repeats the call.
+pub(crate) const ENGINE_MISSING: &str = "ferridriver: selector engine missing";
+
+/// How many documents in a row may replace the one the engine went into
+/// before a call gives up on catching one.
+pub(crate) const ENGINE_ATTEMPTS: usize = 5;
+
 pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, count, serializedArgs, ...handles) {\
+    const fd = window.__fd;\
+    if (!fd) throw new Error('ferridriver: selector engine missing');\
     const parsed = count > 0 ? JSON.parse(serializedArgs) : [];\
-    const us = (window.__fd && window.__fd.__us) ||\
-               (window.__fd.__us = window.__fd.newUtilityScript());\
+    const us = fd.__us || (fd.__us = fd.newUtilityScript());\
     const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);\
     /* Hybrid sync/async path: if the user's expression returns a\
        Promise, chain a .then so CDP's awaitPromise:true picks up the\
@@ -2277,7 +2296,7 @@ impl<T: CdpWrap> CdpPage<T> {
       return result;
     }
     tracing::debug!("paused popup did not answer {method}; resuming it early");
-    self.resume_popup().await?;
+    self.release_popup().await?;
     answer.await
   }
 
@@ -2316,6 +2335,16 @@ impl<T: CdpWrap> CdpPage<T> {
   /// answers the setup left owed are collected here, behind the resume
   /// on the wire.
   pub(crate) async fn resume_popup(&self) -> Result<()> {
+    let mut events = self.setup.is_paused().then(|| self.events.subscribe());
+    self.release_popup().await?;
+    if let Some(events) = events.as_mut() {
+      self.first_document_committed(events).await;
+    }
+    Ok(())
+  }
+
+  /// Let a paused popup run, and collect the answers its setup left owed.
+  async fn release_popup(&self) -> Result<()> {
     let owed = self.setup.resume();
     let resume = self.transport.send_command(
       self.session_id.as_deref(),
@@ -2327,6 +2356,33 @@ impl<T: CdpWrap> CdpPage<T> {
       tracing::debug!("popup setup: {error}");
     }
     resumed.map(|_| ())
+  }
+
+  /// A popup starts on an empty document that is not the one it was
+  /// opened for. It is handed on once the first real one has committed,
+  /// or it has closed, so that what is done to it next lands in that
+  /// document (`crPage.ts` holds its initialization on the same commit).
+  /// One whose frame tree already named a URL is past the empty document
+  /// and has nothing left to commit.
+  async fn first_document_committed(&self, events: &mut crate::events::EventSubscription<crate::events::PageEvent>) {
+    loop {
+      let committed = self.lifecycle_notify.notified();
+      let (commits, crashed) = {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (lifecycle.nav_committed_seq, lifecycle.crashed)
+      };
+      if commits > 0 || crashed || self.is_closed() || !self.setup.on_initial_document() {
+        return;
+      }
+      tokio::select! {
+        () = committed => {},
+        event = events.recv() => {
+          if matches!(event, None | Some(crate::events::PageEvent::Close)) {
+            return;
+          }
+        },
+      }
+    }
   }
 
   // ---- Navigation ----
