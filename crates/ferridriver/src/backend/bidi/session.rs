@@ -40,6 +40,8 @@ pub(crate) struct BidiSession {
   pub browser_version: String,
   pub classic: Option<Arc<crate::backend::webdriver::session::WebDriverSession>>,
   input_transport: Arc<std::sync::atomic::AtomicU8>,
+  /// What each user context hands the pages the browser opens in it.
+  pub(super) scopes: Arc<super::scope::ContextScopes>,
 }
 
 // WebKit accepts module subscriptions without expanding them (WebKit bug
@@ -191,6 +193,7 @@ impl BidiSession {
       browser_version,
       classic,
       input_transport: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+      scopes: Arc::default(),
     })
   }
 

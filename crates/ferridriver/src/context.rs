@@ -602,11 +602,11 @@ impl ContextRef {
     };
     for (name, binding) in bindings {
       let binding_for_page = bind_source(binding, composite.clone());
-      page.expose_binding(&name, binding_for_page).await?;
+      page.expose_context_binding(&name, binding_for_page).await?;
     }
     for (name, binding) in self.context_callbacks().await {
       page
-        .expose_callback(&name, bind_source(binding, composite.clone()))
+        .expose_context_callback(&name, bind_source(binding, composite.clone()))
         .await?;
     }
     Ok(())
@@ -1503,7 +1503,7 @@ impl ContextRef {
     for page in &pages {
       for function in &arg.functions {
         page
-          .expose_callback(&function.name, bind_source(function.binding.clone(), composite.clone()))
+          .expose_context_callback(&function.name, bind_source(function.binding.clone(), composite.clone()))
           .await?;
       }
     }
@@ -1569,7 +1569,7 @@ impl ContextRef {
       state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
     };
     for page in inner_pages {
-      let id = page.add_init_script(&source).await?;
+      let id = page.add_context_init_script(registry_id, &source).await?;
       installed
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1603,13 +1603,13 @@ impl ContextRef {
         .map(|entries| {
           entries
             .iter()
-            .map(|e| (e.source.clone(), Arc::clone(&e.installed)))
+            .map(|e| (e.id, e.source.clone(), Arc::clone(&e.installed)))
             .collect()
         })
         .unwrap_or_default()
     };
-    for (source, installed) in scripts {
-      let id = page.inner().add_init_script(&source).await?;
+    for (key, source, installed) in scripts {
+      let id = page.inner().add_context_init_script(key, &source).await?;
       installed
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2015,7 +2015,7 @@ impl ContextRef {
     let composite = self.key.to_composite();
     for page in &pages {
       let binding_for_page = bind_source(callback.clone(), composite.clone());
-      page.expose_binding(name, binding_for_page).await?;
+      page.expose_context_binding(name, binding_for_page).await?;
     }
     Ok(crate::disposable::Disposable::new({
       let this = self.clone();

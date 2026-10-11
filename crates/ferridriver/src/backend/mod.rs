@@ -1782,8 +1782,35 @@ impl AnyPage {
       AnyPage::CdpPipe(p) => p.expose_binding_pre_doc(name, binding).await,
       AnyPage::CdpWs(p) => p.expose_binding_pre_doc(name, binding).await,
       AnyPage::WebKit(p) => p.expose_binding_pre_doc(name, binding).await,
-      AnyPage::Bidi(p) => p.expose_binding(name, binding).await,
+      AnyPage::Bidi(p) => p.expose_context_binding(name, binding).await,
       AnyPage::WebDriver(p) => p.expose_binding(name, binding).await,
+    }
+  }
+
+  /// [`Self::expose_binding`] for a binding the page's whole context has.
+  /// A backend that cannot hold a popup back before its first document
+  /// registers it on the context, where the popup inherits it.
+  pub(crate) async fn expose_context_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    match self {
+      AnyPage::Bidi(p) => p.expose_context_binding(name, binding).await,
+      _ => self.expose_binding(name, binding).await,
+    }
+  }
+
+  /// [`Self::expose_callback`] for a callback the page's whole context has.
+  pub(crate) async fn expose_context_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    match self {
+      AnyPage::Bidi(p) => p.expose_context_callback(name, binding).await,
+      _ => self.expose_callback(name, binding).await,
+    }
+  }
+
+  /// [`Self::add_init_script`] for a script the page's whole context has,
+  /// `key` naming it across the context's pages.
+  pub(crate) async fn add_context_init_script(&self, key: u64, source: &str) -> Result<String> {
+    match self {
+      AnyPage::Bidi(p) => p.add_context_init_script(key, source).await,
+      _ => self.add_init_script(source).await,
     }
   }
 
@@ -1809,7 +1836,7 @@ impl AnyPage {
       AnyPage::CdpPipe(p) => p.expose_callback_pre_doc(name, binding).await,
       AnyPage::CdpWs(p) => p.expose_callback_pre_doc(name, binding).await,
       AnyPage::WebKit(p) => p.expose_callback_pre_doc(name, binding).await,
-      AnyPage::Bidi(p) => p.expose_callback(name, binding).await,
+      AnyPage::Bidi(p) => p.expose_context_callback(name, binding).await,
       AnyPage::WebDriver(p) => p.expose_callback(name, binding).await,
     }
   }

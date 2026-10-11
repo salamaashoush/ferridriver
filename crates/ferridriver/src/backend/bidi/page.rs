@@ -33,6 +33,10 @@ use crate::state::DialogEvent;
 /// `kPlaywrightBindingChannel` in `bidiPage.ts`.
 const BINDING_CHANNEL: &str = "ferridriverBindingChannel";
 
+/// Prefix of the identifier of an init script installed for a whole
+/// user context rather than one page.
+const CONTEXT_SCRIPT: &str = "context-init-";
+
 /// Convert a raw `BiDi` `Script.RemoteValue` JSON payload into a
 /// [`crate::js_handle::JSHandleBacking`]. DOM nodes become
 /// remote-backed via their `sharedId`; other object-like types
@@ -297,6 +301,10 @@ pub struct BidiPage {
   /// re-spawn it — a second listener would double-dispatch `continueRequest`
   /// for every blocked request.
   pub(crate) route_listener_started: Arc<AtomicBool>,
+  /// The blocked requests of a page the browser opened by itself, handed
+  /// on in wire order by the listener that saw it created. A tap of the
+  /// page's own would start after its first request had gone by.
+  forwarded_requests: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<super::transport::BidiEvent>>>>,
   /// Abort handles for this page's long-lived listener tasks (the
   /// main event listener, the route listener, the screencast
   /// navigation tap). They subscribe to the SESSION-wide event
@@ -463,11 +471,26 @@ impl BidiPage {
       frame_listener_started: Arc::new(AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       route_listener_started: Arc::new(AtomicBool::new(false)),
+      forwarded_requests: Arc::new(std::sync::Mutex::new(None)),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       http_credentials: Arc::new(std::sync::Mutex::new(None)),
       permissions: Arc::new(std::sync::Mutex::new(BidiPermissions::default())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
     }
+  }
+
+  /// Take up a page the browser opened by itself: it starts with its
+  /// context's routes, and resolves the blocked requests `requests`
+  /// brings, the first of which its own tap would be too late for.
+  pub(super) fn adopt_popup(&self, requests: tokio::sync::mpsc::UnboundedReceiver<super::transport::BidiEvent>) {
+    if let Ok(mut routes) = self.routes.try_write() {
+      *routes = self.session.scopes.routes(&self.user_context);
+    }
+    *self
+      .forwarded_requests
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(requests);
+    self.start_route_listener();
   }
 
   fn track_listener(&self, handle: tokio::task::AbortHandle) {
@@ -1632,6 +1655,22 @@ impl BidiPage {
       .map(|_| ())
   }
 
+  /// Apply an emulation override to this page. In a user context of its
+  /// own the override goes onto the context as well, where a page the
+  /// browser opens there has it for its first request; the default user
+  /// context is shared by pages configured apart, so it gets none.
+  async fn emulate(&self, method: &'static str, mut params: serde_json::Value) -> Result<()> {
+    if &*self.user_context != "default" {
+      let mut for_context = params.clone();
+      for_context["userContexts"] = json!([&*self.user_context]);
+      if let Err(error) = self.cmd(method, for_context).await {
+        tracing::debug!("{method} for user context {}: {error}", self.user_context);
+      }
+    }
+    params["contexts"] = json!([&*self.context_id]);
+    self.cmd(method, params).await.map(|_| ())
+  }
+
   /// Apply a [`crate::options::BrowserContextOptions`] bag to this
   /// page. Every `BiDi` command is inlined — no per-field helpers
   /// remain. Mirrors Playwright's
@@ -1724,50 +1763,30 @@ impl BidiPage {
       .as_deref()
       .map(|ua| async move {
         self
-          .cmd(
-            "emulation.setUserAgentOverride",
-            json!({"contexts": [&*self.context_id], "userAgent": ua}),
-          )
+          .emulate("emulation.setUserAgentOverride", json!({"userAgent": ua}))
           .await
-          .map(|_| ())
       })
       .into();
     let locale_fut: OptionFuture<_> = opts
       .locale
       .as_deref()
-      .map(|l| async move {
-        self
-          .cmd(
-            "emulation.setLocaleOverride",
-            json!({"contexts": [&*self.context_id], "locale": l}),
-          )
-          .await
-          .map(|_| ())
-      })
+      .map(|l| async move { self.emulate("emulation.setLocaleOverride", json!({"locale": l})).await })
       .into();
     let tz_fut: OptionFuture<_> = opts
       .timezone_id
       .as_deref()
       .map(|tz| async move {
         self
-          .cmd(
-            "emulation.setTimezoneOverride",
-            json!({"contexts": [&*self.context_id], "timezone": tz}),
-          )
+          .emulate("emulation.setTimezoneOverride", json!({"timezone": tz}))
           .await
-          .map(|_| ())
       })
       .into();
     let js_fut: OptionFuture<_> = opts
       .java_script_enabled
       .map(|v| async move {
         self
-          .cmd(
-            "emulation.setScriptingEnabled",
-            json!({"contexts": [&*self.context_id], "enabled": v}),
-          )
+          .emulate("emulation.setScriptingEnabled", json!({"enabled": v}))
           .await
-          .map(|_| ())
       })
       .into();
     let dl_fut: OptionFuture<_> = opts
@@ -2952,6 +2971,23 @@ impl BidiPage {
   // ── Network Interception ────────────────────────────────────────────────
 
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
+    if route.scope == crate::route::RouteScope::Context {
+      self
+        .session
+        .scopes
+        .add_route(&self.session, &self.user_context, &route)
+        .await?;
+    }
+    // A popup starts with its context's routes already in place.
+    if self
+      .routes
+      .read()
+      .await
+      .iter()
+      .any(|known| known.scope == route.scope && known.handler_id() == route.handler_id())
+    {
+      return Ok(());
+    }
     let needs_intercept = self.intercept_ids.read().await.is_empty();
     if needs_intercept {
       // Register a single intercept for ALL requests on this context (no urlPatterns).
@@ -2986,6 +3022,86 @@ impl BidiPage {
     Ok(())
   }
 
+  /// Resolve one request an intercept blocked: through the page's routes
+  /// when one matches, straight on otherwise.
+  async fn resolve_blocked_request(
+    session: &Arc<BidiSession>,
+    routes: &Arc<RwLock<Vec<crate::route::RegisteredRoute>>>,
+    event: &super::transport::BidiEvent,
+  ) {
+    let req_obj = event.params.get("request");
+    let request_id = req_obj
+      .and_then(|v| v.get("request"))
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+    let url = req_obj
+      .and_then(|v| v.get("url"))
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+
+    let has_match = {
+      let guard = routes.read().await;
+      crate::route::any_matching_route(&guard, url)
+    };
+
+    if has_match {
+      let method = req_obj
+        .and_then(|r| r.get("method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET");
+      let headers: FxHashMap<String, String> = req_obj
+        .and_then(|r| r.get("headers"))
+        .map(parse_bidi_headers)
+        .unwrap_or_default();
+
+      // The original method/headers are forwarded when a `url` override
+      // is applied (continue resolves to the new URL's content with the
+      // request's own cookies/headers), so keep a copy before the
+      // `InterceptedRequest` moves them into the handler's `Route`.
+      let orig_method = method.to_string();
+      let orig_headers = headers.clone();
+
+      let intercepted = crate::route::InterceptedRequest {
+        request_id: request_id.to_string(),
+        url: url.to_string(),
+        method: method.to_string(),
+        headers,
+        post_data: None,
+        resource_type: String::new(),
+      };
+
+      // Resolve each blocked request on its own task — running the
+      // user handler + resolution round-trip inline serialized all
+      // intercepted requests behind the slowest handler and, once
+      // the broadcast lapped, dropped `beforeRequestSent` events
+      // whose requests then hung blocked forever. Same shape as
+      // the CDP Fetch listener.
+      let session2 = Arc::clone(session);
+      let request_id_owned = request_id.to_string();
+      let routes2 = Arc::clone(routes);
+      tokio::spawn(async move {
+        let action = crate::route::run_route_chain(&routes2, intercepted).await;
+        execute_bidi_route_action(
+          &session2.transport,
+          &request_id_owned,
+          action,
+          &orig_method,
+          &orig_headers,
+        )
+        .await;
+      });
+    } else {
+      let session2 = Arc::clone(session);
+      let request_id_owned = request_id.to_string();
+      tokio::spawn(async move {
+        let _ = session2
+          .transport
+          .send_command("network.continueRequest", json!({"request": request_id_owned}))
+          .await;
+      });
+    }
+  }
+
   /// Spawn the `network.beforeRequestSent` route listener exactly once per
   /// page. Guarded by `route_listener_started`, NOT `intercept_ids`: a
   /// `route`/`unroute` cycle drains `intercept_ids`, so guarding the spawn
@@ -3001,13 +3117,25 @@ impl BidiPage {
     {
       return;
     }
-    let mut rx = self.session.transport.tap_events();
+    let forwarded = self
+      .forwarded_requests
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take();
+    let mut tap = forwarded.is_none().then(|| self.session.transport.tap_events());
+    let mut forwarded = forwarded;
     let intercept_ids = self.intercept_ids.clone();
     let session = self.session.clone();
     let routes = self.routes.clone();
 
     let route_listener = tokio::spawn(async move {
-      while let Some(event) = rx.recv().await {
+      loop {
+        let event = match (&mut forwarded, &mut tap) {
+          (Some(requests), _) => requests.recv().await,
+          (None, Some(tap)) => tap.recv().await,
+          (None, None) => None,
+        };
+        let Some(event) = event else { break };
         if event.method != "network.beforeRequestSent" {
           continue;
         }
@@ -3021,8 +3149,9 @@ impl BidiPage {
         }
         // The intercept covers this page's iframes too, whose requests
         // carry their own browsing context; what makes a blocked request
-        // this page's to resolve is that this page's intercept blocked it.
-        let blocked_by_us = {
+        // this page's to resolve is that this page's intercept blocked it,
+        // or that it was forwarded here as this page's.
+        let blocked_by_us = forwarded.is_some() || {
           let ours = intercept_ids.read().await;
           event
             .params
@@ -3039,77 +3168,7 @@ impl BidiPage {
           continue;
         }
 
-        let req_obj = event.params.get("request");
-        let request_id = req_obj
-          .and_then(|v| v.get("request"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-        let url = req_obj
-          .and_then(|v| v.get("url"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-
-        let has_match = {
-          let guard = routes.read().await;
-          crate::route::any_matching_route(&guard, url)
-        };
-
-        if has_match {
-          let method = req_obj
-            .and_then(|r| r.get("method"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("GET");
-          let headers: FxHashMap<String, String> = req_obj
-            .and_then(|r| r.get("headers"))
-            .map(parse_bidi_headers)
-            .unwrap_or_default();
-
-          // The original method/headers are forwarded when a `url` override
-          // is applied (continue resolves to the new URL's content with the
-          // request's own cookies/headers), so keep a copy before the
-          // `InterceptedRequest` moves them into the handler's `Route`.
-          let orig_method = method.to_string();
-          let orig_headers = headers.clone();
-
-          let intercepted = crate::route::InterceptedRequest {
-            request_id: request_id.to_string(),
-            url: url.to_string(),
-            method: method.to_string(),
-            headers,
-            post_data: None,
-            resource_type: String::new(),
-          };
-
-          // Resolve each blocked request on its own task — running the
-          // user handler + resolution round-trip inline serialized all
-          // intercepted requests behind the slowest handler and, once
-          // the broadcast lapped, dropped `beforeRequestSent` events
-          // whose requests then hung blocked forever. Same shape as
-          // the CDP Fetch listener.
-          let session2 = session.clone();
-          let request_id_owned = request_id.to_string();
-          let routes2 = routes.clone();
-          tokio::spawn(async move {
-            let action = crate::route::run_route_chain(&routes2, intercepted).await;
-            execute_bidi_route_action(
-              &session2.transport,
-              &request_id_owned,
-              action,
-              &orig_method,
-              &orig_headers,
-            )
-            .await;
-          });
-        } else {
-          let session2 = session.clone();
-          let request_id_owned = request_id.to_string();
-          tokio::spawn(async move {
-            let _ = session2
-              .transport
-              .send_command("network.continueRequest", json!({"request": request_id_owned}))
-              .await;
-          });
-        }
+        Self::resolve_blocked_request(&session, &routes, &event).await;
       }
     });
     self.track_listener(route_listener.abort_handle());
@@ -3121,10 +3180,18 @@ impl BidiPage {
     scope: crate::route::RouteScope,
     handler_id: Option<usize>,
   ) -> Result<()> {
-    let mut routes = self.routes.write().await;
-    routes.retain(|r| {
+    let keep = |r: &crate::route::RegisteredRoute| {
       r.scope != scope || !r.matcher.equivalent(matcher) || handler_id.is_some_and(|id| r.handler_id() != id)
-    });
+    };
+    if scope == crate::route::RouteScope::Context {
+      self
+        .session
+        .scopes
+        .retain_routes(&self.session, &self.user_context, keep)
+        .await;
+    }
+    let mut routes = self.routes.write().await;
+    routes.retain(keep);
 
     // If no routes left, remove the intercept entirely
     if routes.is_empty() {
@@ -3142,6 +3209,13 @@ impl BidiPage {
     _behavior: crate::options::UnrouteBehavior,
     scope: Option<crate::route::RouteScope>,
   ) -> Result<()> {
+    if scope == Some(crate::route::RouteScope::Context) {
+      self
+        .session
+        .scopes
+        .retain_routes(&self.session, &self.user_context, |_| false)
+        .await;
+    }
     let mut routes = self.routes.write().await;
     match scope {
       Some(scope) => routes.retain(|r| r.scope != scope),
@@ -3235,7 +3309,34 @@ impl BidiPage {
     Ok(our_id)
   }
 
+  /// Install an init script its whole context has, once for the user
+  /// context: the pages the browser opens in it run the script in their
+  /// first document, which a per-page preload registered after the page
+  /// appeared would miss. `key` names the script across the context's
+  /// pages.
+  pub async fn add_context_init_script(&self, key: u64, source: &str) -> Result<String> {
+    self
+      .session
+      .scopes
+      .add_script(&self.session, &self.user_context, key, &format!("() => {{ {source} }}"))
+      .await?;
+    Ok(format!("{CONTEXT_SCRIPT}{key}"))
+  }
+
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
+    if let Some(key) = identifier.strip_prefix(CONTEXT_SCRIPT) {
+      let key = key
+        .parse()
+        .map_err(|_| FerriError::invalid_argument("identifier", format!("init script '{identifier}' not found")))?;
+      // Every page of the context holds the identifier; the first to
+      // give it up removes the one preload behind it.
+      if let Some(script) = self.session.scopes.take_script(&self.user_context, key) {
+        self
+          .cmd("script.removePreloadScript", json!({"script": script}))
+          .await?;
+      }
+      return Ok(());
+    }
     let bidi_id = self
       .preload_scripts
       .write()
@@ -3627,6 +3728,22 @@ impl BidiPage {
   // ── Exposed Functions ───────────────────────────────────────────────────
 
   pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.expose_binding_in(name, binding, false).await
+  }
+
+  /// [`Self::expose_binding`] for a binding its whole context has. Its
+  /// preload goes onto the user context, so a page the browser opens in
+  /// it has the function in its first document.
+  pub async fn expose_context_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.expose_binding_in(name, binding, true).await
+  }
+
+  async fn expose_binding_in(
+    &self,
+    name: &str,
+    binding: crate::events::ExposedBinding,
+    context_wide: bool,
+  ) -> Result<()> {
     // The shim receives a BiDi channel as its argument and sends
     // `JSON.stringify({name, id, args})` through it — the driver gets a
     // `script.message` event carrying the payload plus the calling
@@ -3653,14 +3770,7 @@ impl BidiPage {
     }]);
 
     self
-      .cmd(
-        "script.addPreloadScript",
-        json!({
-          "functionDeclaration": js,
-          "arguments": channel_arg,
-          "contexts": [&*self.context_id]
-        }),
-      )
+      .preload(&format!("binding:{name}"), &js, &channel_arg, context_wide)
       .await?;
 
     // Also execute it now for the current page (Playwright does the
@@ -3685,9 +3795,44 @@ impl BidiPage {
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global.
   pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
-    self.ensure_binding_controller().await?;
+    self.ensure_binding_controller(false).await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
+  }
+
+  /// [`Self::expose_callback`] for a callback its whole context has.
+  pub async fn expose_context_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+    self.ensure_binding_controller(true).await?;
+    self.exposed_fns.write().await.insert(name.to_string(), binding);
+    Ok(())
+  }
+
+  /// Register a channel preload script: on this page, or once on its
+  /// user context when the whole context has it.
+  async fn preload(&self, name: &str, function: &str, arguments: &serde_json::Value, context_wide: bool) -> Result<()> {
+    if !context_wide {
+      self
+        .cmd(
+          "script.addPreloadScript",
+          json!({"functionDeclaration": function, "arguments": arguments, "contexts": [&*self.context_id]}),
+        )
+        .await?;
+      return Ok(());
+    }
+    let scopes = &self.session.scopes;
+    if !scopes.claim_preload(&self.user_context, name) {
+      return Ok(());
+    }
+    let installed = self
+      .cmd(
+        "script.addPreloadScript",
+        json!({"functionDeclaration": function, "arguments": arguments, "userContexts": [&*self.user_context]}),
+      )
+      .await;
+    if installed.is_err() {
+      scopes.release_preload(&self.user_context, name);
+    }
+    installed.map(|_| ())
   }
 
   pub async fn remove_callback(&self, name: &str) {
@@ -3697,9 +3842,9 @@ impl BidiPage {
   /// Install the controller in every document of this page, present and
   /// future. It speaks the same channel payload as an exposed binding, so
   /// the `script.message` dispatcher settles its calls unchanged.
-  async fn ensure_binding_controller(&self) -> Result<()> {
+  async fn ensure_binding_controller(&self, context_wide: bool) -> Result<()> {
     let mut installed = self.binding_controller.lock().await;
-    if *installed {
+    if *installed && !context_wide {
       return Ok(());
     }
     let js = format!(
@@ -3722,16 +3867,10 @@ impl BidiPage {
       "type": "channel",
       "value": { "channel": BINDING_CHANNEL },
     }]);
-    self
-      .cmd(
-        "script.addPreloadScript",
-        json!({
-          "functionDeclaration": js,
-          "arguments": channel_arg,
-          "contexts": [&*self.context_id]
-        }),
-      )
-      .await?;
+    self.preload("controller", &js, &channel_arg, context_wide).await?;
+    if *installed {
+      return Ok(());
+    }
     for frame in self.get_frame_tree().await? {
       let _ = self
         .cmd(

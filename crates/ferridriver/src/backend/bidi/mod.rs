@@ -16,6 +16,7 @@ pub mod element;
 pub mod input;
 pub mod page;
 mod profile;
+mod scope;
 pub(crate) mod session;
 #[cfg(test)]
 mod session_tests;

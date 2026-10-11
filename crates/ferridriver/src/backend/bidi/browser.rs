@@ -13,6 +13,9 @@ use super::session::BidiSession;
 use crate::backend::{AnyPage, NavLifecycle};
 use crate::error::{FerriError, Result};
 
+/// The blocked requests of each popup, by its top-level context.
+type PopupRequests = rustc_hash::FxHashMap<String, tokio::sync::mpsc::UnboundedSender<super::transport::BidiEvent>>;
+
 #[derive(Clone)]
 /// Browser instance using the `WebDriver` `BiDi` protocol.
 pub struct BidiBrowser {
@@ -272,18 +275,36 @@ impl BidiBrowser {
     let downloads_dir = Arc::clone(downloads_dir);
     let listener_taps = Arc::clone(&taps);
     tokio::spawn(async move {
+      // This loop is the one place that sees a popup created and then its
+      // first request, in that order, so it is what hands a popup's
+      // blocked requests to the popup, and what lets through a request
+      // only the session intercept blocked on a page with no say in it.
+      let mut popups: PopupRequests = rustc_hash::FxHashMap::default();
+      let mut parents: rustc_hash::FxHashMap<String, String> = rustc_hash::FxHashMap::default();
       while let Some(event) = rx.recv().await {
-        if event.method != "browsingContext.contextCreated" {
-          continue;
-        }
-        let is_child = event.params.get("parent").and_then(|v| v.as_str()).is_some();
-        let Some(opener) = event.params.get("originalOpener").and_then(|v| v.as_str()) else {
-          continue;
-        };
-        if is_child {
-          continue;
+        match event.method.as_str() {
+          "browsingContext.contextCreated" => {},
+          "browsingContext.contextDestroyed" => {
+            if let Some(context) = event.params.get("context").and_then(|v| v.as_str()) {
+              popups.remove(context);
+              parents.remove(context);
+            }
+            continue;
+          },
+          "network.beforeRequestSent" => {
+            Self::forward_blocked_request(&session, &popups, &parents, event);
+            continue;
+          },
+          _ => continue,
         }
         let Some(context_id) = event.params.get("context").and_then(|v| v.as_str()) else {
+          continue;
+        };
+        if let Some(parent) = event.params.get("parent").and_then(|v| v.as_str()) {
+          parents.insert(context_id.to_string(), parent.to_string());
+          continue;
+        }
+        let Some(opener) = event.params.get("originalOpener").and_then(|v| v.as_str()) else {
           continue;
         };
         let user_context = event
@@ -298,6 +319,9 @@ impl BidiBrowser {
           Some(&user_context),
           Arc::clone(&downloads_dir),
         );
+        let (requests, forwarded) = tokio::sync::mpsc::unbounded_channel();
+        page.adopt_popup(forwarded);
+        popups.insert(context_id.to_string(), requests);
         // Claimed inline: BidiPage::create is pure construction (no
         // wire round-trip), and readiness is the pump's business.
         let delivered = crate::backend::push_popup(
@@ -318,6 +342,48 @@ impl BidiBrowser {
       }
     });
     taps
+  }
+
+  /// Route one blocked request: to the popup whose page it belongs to,
+  /// or straight through when only the session intercept blocked it and
+  /// the page it belongs to resolves nothing but its own intercept's.
+  fn forward_blocked_request(
+    session: &Arc<BidiSession>,
+    popups: &PopupRequests,
+    parents: &rustc_hash::FxHashMap<String, String>,
+    event: super::transport::BidiEvent,
+  ) {
+    if event.params.get("isBlocked").and_then(serde_json::Value::as_bool) != Some(true) {
+      return;
+    }
+    let mut top = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
+    while let Some(parent) = parents.get(top) {
+      top = parent;
+    }
+    if let Some(popup) = popups.get(top) {
+      let _ = popup.send(event);
+      return;
+    }
+    let intercepts: Vec<&str> = event
+      .params
+      .get("intercepts")
+      .and_then(serde_json::Value::as_array)
+      .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).collect())
+      .unwrap_or_default();
+    if !session.scopes.blocked_by_session_only(&intercepts) {
+      return;
+    }
+    let Some(request) = event.params.pointer("/request/request").and_then(|v| v.as_str()) else {
+      return;
+    };
+    let session = Arc::clone(session);
+    let request = request.to_string();
+    tokio::spawn(async move {
+      let _ = session
+        .transport
+        .send_command("network.continueRequest", json!({"request": request}))
+        .await;
+    });
   }
 
   /// Create a new isolated user context. `proxy` is wired via
