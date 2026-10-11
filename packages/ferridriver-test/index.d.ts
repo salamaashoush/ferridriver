@@ -2200,6 +2200,28 @@ export interface APIResponse {
   headersArray(): Array<{ name: string; value: string }>;
   header(name: string): string | null;
   serverAddr(): { ipAddress: string; port: number } | null;
+  // The server certificate, or null without TLS. Synchronous here; the
+  // negotiated protocol version is not reported.
+  securityDetails(): {
+    protocol?: string;
+    subjectName?: string;
+    issuer?: string;
+    validFrom?: number;
+    validTo?: number;
+  } | null;
+  // Milliseconds from startTime; -1 for a phase that did not happen.
+  // secureConnectionStart is always -1.
+  timing(): {
+    startTime: number;
+    domainLookupStart: number;
+    domainLookupEnd: number;
+    connectStart: number;
+    secureConnectionStart: number;
+    connectEnd: number;
+    requestStart: number;
+    responseStart: number;
+    responseEnd: number;
+  };
   body(): Promise<Uint8Array>;
   text(): Promise<string>;
   json(): Promise<unknown>;
@@ -2234,6 +2256,11 @@ export interface APIRequestContext {
   delete(url: string, options?: APIRequestOptions): Promise<APIResponse>;
   head(url: string, options?: APIRequestOptions): Promise<APIResponse>;
   fetch(urlOrRequest: string | Request, options?: APIRequestOptions & { method?: string }): Promise<APIResponse>;
+  // The cookies of the browser context a `context.request` is bound to,
+  // or of a standalone client's own jar.
+  cookies(urls?: string | string[]): Promise<Cookie[]>;
+  addCookies(cookies: Cookie[]): Promise<void>;
+  clearCookies(options?: { name?: string | RegExp; domain?: string | RegExp; path?: string | RegExp }): Promise<void>;
   dispose(): Promise<void>;
 }
 

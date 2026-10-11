@@ -67,10 +67,6 @@ fn basic_authorization(credentials: &HttpCredentials) -> String {
   format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(pair))
 }
 
-fn same_origin(a: &reqwest::Url, b: &str) -> bool {
-  reqwest::Url::parse(b).is_ok_and(|b| a.origin() == b.origin())
-}
-
 /// Per-request options (overrides context defaults). This is the
 /// Playwright `request` option bag; it is lowered into a
 /// [`fetch::Request`] before the engine sees it.
@@ -171,7 +167,61 @@ pub struct HttpResponse {
   redirected: bool,
   unfollowed_redirect: bool,
   response_type: ResponseType,
+  timing: crate::network::RequestTiming,
+  peer_certificate: Option<Vec<u8>>,
   disposed: bool,
+}
+
+/// Playwright's `ResourceTiming` for the hop that produced a response
+/// (`server/fetch.ts::notifyRequestFinished`): milliseconds from
+/// `start_time`, `-1` for a phase that did not happen. The transport
+/// reports when a connection was ready and not when its TLS handshake
+/// began, so `secure_connection_start` is always `-1`.
+fn resource_timing(timing: &fetch::Timing, ended: std::time::SystemTime) -> crate::network::RequestTiming {
+  let ms = |offset: Duration| offset.as_secs_f64() * 1000.0;
+  let since_epoch = |time: std::time::SystemTime| {
+    time
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0)
+  };
+  let start_time = since_epoch(timing.start_time);
+  crate::network::RequestTiming {
+    start_time,
+    domain_lookup_start: timing.dns_end.map_or(-1.0, |_| 0.0),
+    domain_lookup_end: timing.dns_end.map_or(-1.0, ms),
+    connect_start: timing.connect_end.map_or(-1.0, |_| timing.dns_end.map_or(0.0, ms)),
+    secure_connection_start: -1.0,
+    connect_end: timing.connect_end.map_or(-1.0, ms),
+    // A connection the pool already had is written to at once.
+    request_start: timing.connect_end.map_or(0.0, ms),
+    response_start: ms(timing.response_start),
+    response_end: (since_epoch(ended) - start_time).max(ms(timing.response_start)),
+  }
+}
+
+/// Playwright's `SecurityDetails` from the server's leaf certificate
+/// (`server/fetch.ts::captureSecurityDetails`): the first common name of
+/// the subject and of the issuer, and the validity window in seconds.
+/// The transport does not report the negotiated protocol version.
+fn security_details(certificate: &[u8]) -> Option<crate::network::SecurityDetails> {
+  let (_, certificate) = x509_parser::parse_x509_certificate(certificate).ok()?;
+  let common_name = |name: &x509_parser::x509::X509Name<'_>| {
+    name
+      .iter_common_name()
+      .next()
+      .and_then(|cn| cn.as_str().ok())
+      .map(ToString::to_string)
+  };
+  // Certificate dates are whole seconds, well inside what `f64` holds.
+  #[allow(clippy::cast_precision_loss)]
+  let seconds = |time: x509_parser::time::ASN1Time| time.timestamp() as f64;
+  Some(crate::network::SecurityDetails {
+    protocol: None,
+    subject_name: common_name(certificate.subject()),
+    issuer: common_name(certificate.issuer()),
+    valid_from: Some(seconds(certificate.validity().not_before)),
+    valid_to: Some(seconds(certificate.validity().not_after)),
+  })
 }
 
 impl HttpResponse {
@@ -187,6 +237,8 @@ impl HttpResponse {
       unfollowed_redirect,
       server_addr,
       type_,
+      timing,
+      peer_certificate,
     } = response;
     let body_bytes = body.collect().await?;
     Ok(Self {
@@ -199,8 +251,24 @@ impl HttpResponse {
       redirected,
       unfollowed_redirect,
       response_type: type_,
+      timing: resource_timing(&timing, std::time::SystemTime::now()),
+      peer_certificate,
       disposed: false,
     })
+  }
+
+  /// Playwright: `apiResponse.timing(): ResourceTiming`, the phases of
+  /// the request that produced this response.
+  #[must_use]
+  pub fn timing(&self) -> crate::network::RequestTiming {
+    self.timing
+  }
+
+  /// Playwright: `apiResponse.securityDetails()`. `None` for a response
+  /// that did not arrive over TLS.
+  #[must_use]
+  pub fn security_details(&self) -> Option<crate::network::SecurityDetails> {
+    self.peer_certificate.as_deref().and_then(security_details)
   }
 
   /// HTTP status code.
@@ -384,6 +452,7 @@ impl HttpStreamResponse {
       unfollowed_redirect,
       server_addr,
       type_,
+      ..
     } = response;
     Self {
       status_code: status,
@@ -488,7 +557,99 @@ pub struct HttpClient {
   /// BROWSER on every hop, defaults come live from the context options.
   /// `None` = the standalone client with its own reqwest jar.
   bridge: Option<Arc<dyn ContextBridge>>,
+  /// The context a bound client reads and writes cookies through.
+  context: Option<crate::context::ContextRef>,
   credentials: CredentialSource,
+}
+
+/// Playwright's `rewriteCookies` (`server/network.ts`): a cookie given
+/// by `url` becomes the domain, the directory of the path and the
+/// `secure` that URL stands for, before any jar sees it. A browser asked
+/// to resolve the URL itself picks a different path, or drops the cookie.
+///
+/// # Errors
+///
+/// Returns an error for a cookie with neither a `url` nor a domain and
+/// path, with both, or with an `expires` that is not `-1` or positive.
+pub(crate) fn rewrite_cookie(
+  mut cookie: crate::backend::CookieData,
+) -> crate::error::Result<crate::backend::CookieData> {
+  let invalid = |message: String| crate::error::FerriError::invalid_argument("cookies", message);
+  match cookie.url.take() {
+    Some(url) => {
+      // The conversion from `SetCookieParams` fills an absent path in,
+      // so only a domain beside the url can be told apart.
+      if !cookie.domain.is_empty() {
+        return Err(invalid("Cookie should have either url or domain".into()));
+      }
+      if url == "about:blank" {
+        return Err(invalid(format!("Blank page can not have cookie \"{}\"", cookie.name)));
+      }
+      if url.starts_with("data:") {
+        return Err(invalid(format!(
+          "Data URL page can not have cookie \"{}\"",
+          cookie.name
+        )));
+      }
+      let parsed = reqwest::Url::parse(&url).map_err(|e| invalid(format!("Invalid cookie url {url:?}: {e}")))?;
+      cookie.domain = parsed.host_str().unwrap_or_default().to_string();
+      let path = parsed.path();
+      cookie.path = path[..=path.rfind('/').unwrap_or(0)].to_string();
+      cookie.secure = parsed.scheme() == "https";
+    },
+    None if cookie.domain.is_empty() || cookie.path.is_empty() => {
+      return Err(invalid("Cookie should have a url or a domain/path pair".into()));
+    },
+    None => {},
+  }
+  if cookie
+    .expires
+    .is_some_and(|expires| expires < 0.0 && (expires + 1.0).abs() > f64::EPSILON)
+  {
+    return Err(invalid(
+      "Cookie should have a valid expires, only -1 or a positive number for the unix timestamp in seconds is allowed"
+        .into(),
+    ));
+  }
+  Ok(cookie)
+}
+
+/// A cookie as Playwright's request context stores it
+/// (`GlobalAPIRequestContext.addCookies`): rewritten, a session cookie
+/// unless it says when it expires, `Lax` unless it says otherwise.
+fn stored_cookie(cookie: crate::backend::CookieData) -> crate::error::Result<crate::backend::CookieData> {
+  let mut cookie = rewrite_cookie(cookie)?;
+  cookie.expires.get_or_insert(-1.0);
+  cookie.same_site.get_or_insert(crate::backend::SameSite::Lax);
+  Ok(cookie)
+}
+
+/// Playwright's `filterCookies`: the cookies a request to any of `urls`
+/// would carry, or all of them without a URL.
+///
+/// # Errors
+///
+/// Returns an error for a URL that does not parse.
+pub fn cookies_for_urls(
+  cookies: Vec<crate::backend::CookieData>,
+  urls: &[String],
+) -> crate::error::Result<Vec<crate::backend::CookieData>> {
+  if urls.is_empty() {
+    return Ok(cookies);
+  }
+  let urls = urls
+    .iter()
+    .map(|url| {
+      reqwest::Url::parse(url)
+        .map_err(|e| crate::error::FerriError::invalid_argument("urls", format!("Invalid URL {url:?}: {e}")))
+    })
+    .collect::<crate::error::Result<Vec<_>>>()?;
+  Ok(
+    cookies
+      .into_iter()
+      .filter(|cookie| urls.iter().any(|url| fetch::cookie::cookie_matches_url(cookie, url)))
+      .collect(),
+  )
 }
 
 impl HttpClient {
@@ -502,6 +663,7 @@ impl HttpClient {
       default_timeout: options.timeout.unwrap_or(Duration::from_secs(30)),
       default_ignore_https: options.ignore_https_errors,
       bridge: None,
+      context: None,
       credentials: CredentialSource::Fixed(options.http_credentials),
     }
   }
@@ -520,7 +682,79 @@ impl HttpClient {
       default_timeout: Duration::from_secs(30),
       default_ignore_https: false,
       bridge: Some(bridge),
+      context: None,
       credentials: CredentialSource::Fixed(Vec::new()),
+    }
+  }
+
+  /// The context whose cookies `cookies()` / `add_cookies()` /
+  /// `clear_cookies()` read and write, for a client bound to one.
+  #[must_use]
+  pub fn with_context(mut self, context: crate::context::ContextRef) -> Self {
+    self.context = Some(context);
+    self
+  }
+
+  /// Playwright: `apiRequestContext.cookies(urls?)`. The cookies a
+  /// request to any of `urls` would carry, or every cookie without one:
+  /// the browser context's for a bound client, this client's own jar
+  /// otherwise.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for a URL that does not parse, or if the context's
+  /// cookies cannot be read.
+  pub async fn cookies(&self, urls: &[String]) -> crate::error::Result<Vec<crate::backend::CookieData>> {
+    let all = match (&self.context, self.pool.jar()) {
+      (Some(context), _) => match context.cookies().await {
+        Ok(cookies) => cookies,
+        // A context has no jar in the browser before its first page.
+        Err(crate::error::FerriError::InvalidArgument { .. }) => Vec::new(),
+        Err(e) => return Err(e),
+      },
+      (None, Some(jar)) => jar.all(),
+      (None, None) => Vec::new(),
+    };
+    cookies_for_urls(all, urls)
+  }
+
+  /// Playwright: `apiRequestContext.addCookies(cookies)`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for a cookie with neither a `url` nor a
+  /// `domain`/`path` pair, or if the context refuses it.
+  pub async fn add_cookies(&self, cookies: Vec<crate::backend::CookieData>) -> crate::error::Result<()> {
+    match (&self.context, self.pool.jar()) {
+      (Some(context), _) => context.add_cookies(cookies).await,
+      (None, Some(jar)) => {
+        let cookies = cookies
+          .into_iter()
+          .map(stored_cookie)
+          .collect::<crate::error::Result<Vec<_>>>()?;
+        jar.add(cookies);
+        Ok(())
+      },
+      (None, None) => Ok(()),
+    }
+  }
+
+  /// Playwright: `apiRequestContext.clearCookies(options?)`. Without a
+  /// filter every cookie goes; with one, those matching all of it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if a filter's regex does not compile, or if the
+  /// context's cookies cannot be cleared.
+  pub async fn clear_cookies(&self, options: &crate::backend::ClearCookieOptions) -> crate::error::Result<()> {
+    match (&self.context, self.pool.jar()) {
+      (Some(context), _) => context.clear_cookies_filtered(options).await,
+      (None, Some(jar)) => {
+        let filter = options.compile()?;
+        jar.remove(|cookie| filter.matches(cookie));
+        Ok(())
+      },
+      (None, None) => Ok(()),
     }
   }
 
@@ -538,39 +772,19 @@ impl HttpClient {
     }
   }
 
-  /// Send `request`, answering a Basic challenge once with the matching
-  /// credentials, as Playwright's `_sendRequest` does (`server/fetch.ts`):
-  /// a 401 to a request that carried no `authorization` is sent again
-  /// with one. A challenge reached through a redirect to another origin
-  /// is left alone, since the retry starts from the first URL and would
-  /// hand that origin the header.
-  async fn send_answering_challenge(
-    &self,
-    url: &str,
-    opts: &RequestOptions,
-    request: fetch::Request,
-  ) -> crate::error::Result<fetch::Response> {
-    let unauthenticated = request.headers.get("authorization").is_none();
-    let asked = request.url.clone();
-    let response = fetch::send(&self.pool, self.bridge.as_ref(), request).await?;
-    let challenged = response.status == 401
-      && unauthenticated
-      && same_origin(&asked, &response.url)
-      && response
-        .headers
-        .get("www-authenticate")
-        .is_some_and(|scheme| scheme.trim_start().starts_with("Basic"));
-    if !challenged {
-      return Ok(response);
-    }
+  /// Send `request`, letting the engine answer a Basic challenge with
+  /// the credentials matching the URL that raised it, as Playwright's
+  /// `_sendRequest` does (`server/fetch.ts`): a 401 to a hop that carried
+  /// no `authorization` is sent again with one, a hop reached through a
+  /// redirect to another origin included.
+  async fn send_answering_challenge(&self, mut request: fetch::Request) -> crate::error::Result<fetch::Response> {
     let credentials = self.http_credentials().await;
-    let Some(entry) = crate::options::matching_http_credentials(&credentials, asked.as_str()) else {
-      return Ok(response);
-    };
-    drop(response);
-    let mut again = self.build_request(url, opts).await?;
-    again.headers.set("authorization", basic_authorization(entry));
-    Ok(fetch::send(&self.pool, self.bridge.as_ref(), again).await?)
+    if !credentials.is_empty() {
+      request.challenge = Some(fetch::ChallengeAnswer::new(move |url| {
+        crate::options::matching_http_credentials(&credentials, url.as_str()).map(basic_authorization)
+      }));
+    }
+    Ok(fetch::send(&self.pool, self.bridge.as_ref(), request).await?)
   }
 
   /// Effective per-request defaults. Bridged: read live from the browser
@@ -683,6 +897,7 @@ impl HttpClient {
         timeout: request.timeout.unwrap_or(self.default_timeout),
         ignore_https_errors: defaults.ignore_https_errors,
         net_guard: request.net_guard,
+        challenge: None,
       },
     )
     .await
@@ -758,6 +973,7 @@ impl HttpClient {
       timeout: opts.timeout.unwrap_or(self.default_timeout),
       ignore_https_errors: opts.ignore_https_errors.unwrap_or(ignore_default),
       net_guard: opts.net_guard.clone(),
+      challenge: None,
     })
   }
 
@@ -823,7 +1039,7 @@ impl HttpClient {
   pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     let opts = options.unwrap_or_default();
     let request = self.build_request(url, &opts).await?;
-    let response = self.send_answering_challenge(url, &opts, request).await?;
+    let response = self.send_answering_challenge(request).await?;
     let http = HttpResponse::buffer(response).await?;
     if opts.fail_on_status_code.unwrap_or(false) && !http.ok() {
       return Err(crate::error::FerriError::Backend(format!(
@@ -852,7 +1068,7 @@ impl HttpClient {
   ) -> crate::error::Result<HttpStreamResponse> {
     let opts = options.unwrap_or_default();
     let request = self.build_request(url, &opts).await?;
-    let response = self.send_answering_challenge(url, &opts, request).await?;
+    let response = self.send_answering_challenge(request).await?;
     if opts.fail_on_status_code.unwrap_or(false) && !response.ok() {
       return Err(crate::error::FerriError::Backend(format!(
         "{} {} failed: {} {}",
@@ -971,6 +1187,125 @@ fn resolve_url(base_url: Option<&str>, url: &str) -> crate::error::Result<reqwes
 mod response_tests {
   use super::*;
 
+  fn cookie(url: Option<&str>, domain: &str, path: &str) -> crate::backend::CookieData {
+    crate::backend::CookieData {
+      name: "a".into(),
+      value: "1".into(),
+      domain: domain.into(),
+      path: path.into(),
+      secure: false,
+      http_only: false,
+      expires: None,
+      same_site: None,
+      url: url.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn a_cookie_url_becomes_its_host_directory_and_scheme() {
+    let rewritten = |url: &str| {
+      let cookie = rewrite_cookie(cookie(Some(url), "", "")).unwrap();
+      (cookie.domain, cookie.path, cookie.secure, cookie.url)
+    };
+    assert_eq!(
+      rewritten("https://example.com/app/page.html?q=1"),
+      ("example.com".into(), "/app/".into(), true, None)
+    );
+    assert_eq!(
+      rewritten("http://example.com"),
+      ("example.com".into(), "/".into(), false, None)
+    );
+    assert_eq!(
+      rewritten("http://127.0.0.1:8080/a/b/"),
+      ("127.0.0.1".into(), "/a/b/".into(), false, None)
+    );
+
+    let refused = |cookie| rewrite_cookie(cookie).unwrap_err().to_string();
+    assert!(refused(cookie(None, "", "/")).contains("a url or a domain/path pair"));
+    assert!(refused(cookie(None, "example.com", "")).contains("a url or a domain/path pair"));
+    assert!(refused(cookie(Some("http://example.com/"), "example.com", "")).contains("either url or domain"));
+    assert!(refused(cookie(Some("about:blank"), "", "")).contains("Blank page can not have cookie \"a\""));
+    assert!(refused(cookie(Some("data:text/plain,x"), "", "")).contains("Data URL page can not have cookie"));
+    let mut expired = cookie(None, "example.com", "/");
+    expired.expires = Some(-5.0);
+    assert!(refused(expired).contains("valid expires"));
+    let mut session = cookie(None, "example.com", "/");
+    session.expires = Some(-1.0);
+    assert!(rewrite_cookie(session).is_ok());
+
+    let stored = stored_cookie(cookie(None, "example.com", "/")).unwrap();
+    assert_eq!(
+      (stored.expires, stored.same_site),
+      (Some(-1.0), Some(crate::backend::SameSite::Lax))
+    );
+  }
+
+  #[test]
+  fn timing_is_milliseconds_from_the_start_with_absent_phases_at_minus_one() {
+    let start = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let new_connection = resource_timing(
+      &fetch::Timing {
+        start_time: start,
+        dns_end: Some(Duration::from_millis(3)),
+        connect_end: Some(Duration::from_millis(10)),
+        response_start: Duration::from_millis(25),
+      },
+      start + Duration::from_millis(40),
+    );
+    assert_eq!(
+      (
+        new_connection.start_time,
+        new_connection.domain_lookup_start,
+        new_connection.domain_lookup_end,
+        new_connection.connect_start,
+        new_connection.secure_connection_start,
+        new_connection.connect_end,
+        new_connection.request_start,
+        new_connection.response_start,
+        new_connection.response_end,
+      ),
+      (1_700_000_000_000.0, 0.0, 3.0, 3.0, -1.0, 10.0, 10.0, 25.0, 40.0)
+    );
+
+    let reused = resource_timing(
+      &fetch::Timing {
+        start_time: start,
+        dns_end: None,
+        connect_end: None,
+        response_start: Duration::from_millis(5),
+      },
+      // A clock that stepped back never reports an end before the head.
+      start,
+    );
+    assert_eq!(
+      (
+        reused.domain_lookup_start,
+        reused.domain_lookup_end,
+        reused.connect_start,
+        reused.connect_end,
+        reused.request_start,
+        reused.response_start,
+        reused.response_end,
+      ),
+      (-1.0, -1.0, -1.0, -1.0, 0.0, 5.0, 5.0)
+    );
+
+    // An address literal connects without a lookup.
+    let literal = resource_timing(
+      &fetch::Timing {
+        start_time: start,
+        dns_end: None,
+        connect_end: Some(Duration::from_millis(2)),
+        response_start: Duration::from_millis(4),
+      },
+      start + Duration::from_millis(4),
+    );
+    assert_eq!(
+      (literal.domain_lookup_end, literal.connect_start, literal.connect_end),
+      (-1.0, 0.0, 2.0)
+    );
+  }
+
   fn response(headers: Vec<(&str, &str)>, body: &[u8]) -> HttpResponse {
     HttpResponse {
       status_code: 200,
@@ -987,6 +1322,8 @@ mod response_tests {
       redirected: false,
       unfollowed_redirect: false,
       response_type: ResponseType::Basic,
+      timing: crate::network::RequestTiming::default(),
+      peer_certificate: None,
       disposed: false,
     }
   }

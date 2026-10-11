@@ -769,6 +769,17 @@ impl ContextRef {
       .map(|c| c.network_log.clone())
   }
 
+  /// Playwright: `browserContext.cookies(urls?)`. The cookies a request
+  /// to any of `urls` would carry; all of them without one.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for a URL that does not parse, or if the context
+  /// does not exist or its cookies cannot be read.
+  pub async fn cookies_for(&self, urls: &[String]) -> Result<Vec<CookieData>> {
+    crate::http_client::cookies_for_urls(self.cookies().await?, urls)
+  }
+
   /// Get all cookies in this context.
   ///
   /// # Errors
@@ -1042,6 +1053,11 @@ impl ContextRef {
     let count = cookies.len();
     self
       .traced("addCookies", serde_json::json!({ "cookies": count }), async move {
+        // Playwright resolves a cookie's `url` here, not in the browser.
+        let cookies = cookies
+          .into_iter()
+          .map(crate::http_client::rewrite_cookie)
+          .collect::<Result<Vec<_>>>()?;
         let page = {
           let state = self.state.read().await;
           state.context(&self.name)?.active_page().cloned()
@@ -1073,8 +1089,9 @@ impl ContextRef {
   #[must_use]
   pub fn http_client(&self) -> crate::http_client::HttpClient {
     let context = self.clone();
-    crate::http_client::HttpClient::context_bound(std::sync::Arc::new(self.clone())).with_live_http_credentials(
-      std::sync::Arc::new(move || {
+    crate::http_client::HttpClient::context_bound(std::sync::Arc::new(self.clone()))
+      .with_context(self.clone())
+      .with_live_http_credentials(std::sync::Arc::new(move || {
         let context = context.clone();
         Box::pin(async move {
           let state = context.state.read().await;
@@ -1083,8 +1100,7 @@ impl ContextRef {
             .and_then(|options| options.http_credentials)
             .unwrap_or_default()
         })
-      }),
-    )
+      }))
   }
 
   /// Clear all cookies in this context.

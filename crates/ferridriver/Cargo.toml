@@ -32,6 +32,7 @@ arc-swap = { workspace = true }
 sha2 = { workspace = true }
 ring = { workspace = true }
 ferrijs-fetch = { workspace = true }
+x509-parser = { version = "0.18", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form", "gzip", "brotli", "deflate", "zstd"] }
 httpdate = "1"
 serde_urlencoded = "0.7"

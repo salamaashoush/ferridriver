@@ -217,6 +217,21 @@ impl HttpResponse {
     self.inner.ok()
   }
 
+  /// Playwright: `apiResponse.timing(): ResourceTiming`. Milliseconds
+  /// from `startTime`; `-1` for a phase that did not happen.
+  #[napi]
+  pub fn timing(&self) -> crate::network::RequestTiming {
+    self.inner.timing().into()
+  }
+
+  /// Playwright: `apiResponse.securityDetails(): Promise<SecurityDetails | null>`.
+  /// The server certificate's subject, issuer and validity; `null` for
+  /// a response that did not arrive over TLS.
+  #[napi]
+  pub fn security_details(&self) -> Option<crate::network::SecurityDetails> {
+    self.inner.security_details().map(Into::into)
+  }
+
   /// Playwright: `apiResponse.serverAddr(): Promise<RemoteAddr | null>`.
   /// Resolved peer address, or `null` when the transport didn't surface
   /// one.
@@ -412,4 +427,34 @@ impl HttpClient {
   /// Dispose the request context.
   #[napi]
   pub fn dispose(&self) {}
+
+  /// Playwright: `apiRequestContext.cookies(urls?: string | string[])`.
+  /// The cookies of the browser context this client is bound to, or of
+  /// its own jar.
+  #[napi(ts_args_type = "urls?: string | string[]")]
+  pub async fn cookies(
+    &self,
+    urls: Option<napi::Either<String, Vec<String>>>,
+  ) -> Result<Vec<crate::types::CookieData>> {
+    let cookies = self
+      .inner
+      .cookies(&crate::context::cookie_urls(urls))
+      .await
+      .into_napi()?;
+    Ok(cookies.iter().map(crate::types::CookieData::from).collect())
+  }
+
+  /// Playwright: `apiRequestContext.addCookies(cookies)`.
+  #[napi]
+  pub async fn add_cookies(&self, cookies: Vec<crate::types::CookieData>) -> Result<()> {
+    let cookies = cookies.iter().map(ferridriver::backend::CookieData::from).collect();
+    self.inner.add_cookies(cookies).await.into_napi()
+  }
+
+  /// Playwright: `apiRequestContext.clearCookies(options?: { name?, domain?, path? })`.
+  #[napi]
+  pub async fn clear_cookies(&self, options: Option<crate::types::ClearCookieOptions>) -> Result<()> {
+    let filter: ferridriver::backend::ClearCookieOptions = options.map(Into::into).unwrap_or_default();
+    self.inner.clear_cookies(&filter).await.into_napi()
+  }
 }

@@ -156,9 +156,11 @@ impl BrowserContext {
 
   // ── Cookies ──
 
-  #[napi]
-  pub async fn cookies(&self) -> Result<Vec<CookieData>> {
-    let cookies = self.inner.cookies().await.into_napi()?;
+  /// Playwright: `context.cookies(urls?: string | string[])`. With
+  /// URLs, only the cookies a request to one of them would carry.
+  #[napi(ts_args_type = "urls?: string | string[]")]
+  pub async fn cookies(&self, urls: Option<napi::Either<String, Vec<String>>>) -> Result<Vec<CookieData>> {
+    let cookies = self.inner.cookies_for(&cookie_urls(urls)).await.into_napi()?;
     Ok(cookies.iter().map(CookieData::from).collect())
   }
 
@@ -1397,5 +1399,14 @@ fn resolve_storage_state_input(input: serde_json::Value) -> std::result::Result<
       serde_json::from_str(&text).map_err(|e| format!("setStorageState: parse JSON from {path}: {e}"))
     },
     other => Ok(other),
+  }
+}
+
+/// The `urls?: string | string[]` of `cookies()`.
+pub(crate) fn cookie_urls(urls: Option<napi::Either<String, Vec<String>>>) -> Vec<String> {
+  match urls {
+    None => Vec::new(),
+    Some(napi::Either::A(one)) => vec![one],
+    Some(napi::Either::B(many)) => many,
   }
 }

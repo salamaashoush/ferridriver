@@ -340,6 +340,31 @@ impl HttpClientJs {
   /// than tearing the shared pool down under other holders.
   #[qjs(rename = "dispose")]
   pub fn dispose(&self) {}
+
+  /// Playwright: `cookies(urls?: string | string[])`. The cookies of
+  /// the browser context this client is bound to, or of its own jar.
+  #[qjs(rename = "cookies")]
+  pub async fn cookies<'js>(&self, ctx: Ctx<'js>, urls: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let urls = crate::bindings::context::cookie_urls(&ctx, urls.0)?;
+    let cookies = self.inner.cookies(&urls).await.into_js_with(&ctx)?;
+    crate::bindings::convert::serde_to_js(&ctx, &cookies)
+  }
+
+  /// Playwright: `addCookies(cookies)`.
+  #[qjs(rename = "addCookies")]
+  pub async fn add_cookies<'js>(&self, ctx: Ctx<'js>, cookies: Value<'js>) -> rquickjs::Result<()> {
+    let parsed: Vec<ferridriver::backend::SetCookieParams> = serde_from_js(&ctx, cookies)?;
+    let cookies = parsed.into_iter().map(Into::into).collect();
+    self.inner.add_cookies(cookies).await.into_js_with(&ctx)
+  }
+
+  /// Playwright: `clearCookies(options?: { name?, domain?, path? })`.
+  #[qjs(rename = "clearCookies")]
+  pub async fn clear_cookies<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let filter = crate::bindings::context::clear_cookie_options(&ctx, options.0, "APIRequestContext.clearCookies")?
+      .unwrap_or_default();
+    self.inner.clear_cookies(&filter).await.into_js_with(&ctx)
+  }
 }
 
 /// Method, headers and body carried over from a page-network `Request`
@@ -440,6 +465,51 @@ impl HttpResponseJs {
       },
       None => Ok(Value::new_null(ctx)),
     }
+  }
+
+  /// Playwright: `apiResponse.timing(): ResourceTiming`. Milliseconds
+  /// from `startTime`; `-1` for a phase that did not happen.
+  #[qjs(rename = "timing")]
+  pub fn timing<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let timing = self.inner.timing();
+    let obj = rquickjs::Object::new(ctx)?;
+    obj.set("startTime", timing.start_time)?;
+    obj.set("domainLookupStart", timing.domain_lookup_start)?;
+    obj.set("domainLookupEnd", timing.domain_lookup_end)?;
+    obj.set("connectStart", timing.connect_start)?;
+    obj.set("secureConnectionStart", timing.secure_connection_start)?;
+    obj.set("connectEnd", timing.connect_end)?;
+    obj.set("requestStart", timing.request_start)?;
+    obj.set("responseStart", timing.response_start)?;
+    obj.set("responseEnd", timing.response_end)?;
+    Ok(obj.into_value())
+  }
+
+  /// Playwright: `apiResponse.securityDetails(): Promise<SecurityDetails | null>`.
+  /// The server certificate's subject, issuer and validity; `null` for
+  /// a response that did not arrive over TLS.
+  #[qjs(rename = "securityDetails")]
+  pub fn security_details<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let Some(details) = self.inner.security_details() else {
+      return Ok(Value::new_null(ctx));
+    };
+    let obj = rquickjs::Object::new(ctx)?;
+    if let Some(protocol) = details.protocol {
+      obj.set("protocol", protocol)?;
+    }
+    if let Some(subject_name) = details.subject_name {
+      obj.set("subjectName", subject_name)?;
+    }
+    if let Some(issuer) = details.issuer {
+      obj.set("issuer", issuer)?;
+    }
+    if let Some(valid_from) = details.valid_from {
+      obj.set("validFrom", valid_from)?;
+    }
+    if let Some(valid_to) = details.valid_to {
+      obj.set("validTo", valid_to)?;
+    }
+    Ok(obj.into_value())
   }
 
   /// All response headers as an array of `{name, value}` tuples (Playwright's

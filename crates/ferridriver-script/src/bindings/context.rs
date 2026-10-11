@@ -89,15 +89,20 @@ impl BrowserContextJs {
   ///
   /// Returns an array of `{ name, value, domain, path, secure, httpOnly,
   /// expires, sameSite }` objects matching Playwright's cookie shape.
+  ///
+  /// Playwright: `cookies(urls?: string | string[])` — with URLs, only
+  /// the cookies a request to one of them would carry.
   #[qjs(rename = "cookies")]
   pub async fn cookies<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
+    urls: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
     call_site
       .scope(async move {
-        let cookies = self.inner.cookies().await.into_js_with(&ctx)?;
+        let urls = cookie_urls(&ctx, urls.0)?;
+        let cookies = self.inner.cookies_for(&urls).await.into_js_with(&ctx)?;
         serde_to_js(&ctx, &cookies)
       })
       .await
@@ -138,27 +143,9 @@ impl BrowserContextJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        match options.0 {
+        match clear_cookie_options(&ctx, options.0, "BrowserContext.clearCookies")? {
           None => self.inner.clear_cookies().await.into_js_with(&ctx),
-          Some(v) if v.is_undefined() || v.is_null() => self.inner.clear_cookies().await.into_js_with(&ctx),
-          Some(v) => {
-            let obj = v
-              .as_object()
-              .ok_or_else(|| type_error(&ctx, "BrowserContext.clearCookies: expected an options object"))?;
-            let field = |key: &str| -> rquickjs::Result<Option<ferridriver::options::StringOrRegex>> {
-              let value: rquickjs::Value<'_> = obj.get(key)?;
-              if value.is_undefined() || value.is_null() {
-                return Ok(None);
-              }
-              crate::bindings::page::options::string_or_regex_from_js(value).map(Some)
-            };
-            let core = ferridriver::backend::ClearCookieOptions {
-              name: field("name")?,
-              domain: field("domain")?,
-              path: field("path")?,
-            };
-            self.inner.clear_cookies_filtered(&core).await.into_js_with(&ctx)
-          },
+          Some(core) => self.inner.clear_cookies_filtered(&core).await.into_js_with(&ctx),
         }
       })
       .await
@@ -1089,6 +1076,45 @@ impl BrowserContextJs {
       },
     }
   }
+}
+
+/// The `urls?: string | string[]` of `cookies()`.
+pub(crate) fn cookie_urls<'js>(ctx: &Ctx<'js>, urls: Option<Value<'js>>) -> rquickjs::Result<Vec<String>> {
+  match urls {
+    None => Ok(Vec::new()),
+    Some(value) if value.is_undefined() || value.is_null() => Ok(Vec::new()),
+    Some(value) => match value.as_string() {
+      Some(one) => Ok(vec![one.to_string()?]),
+      None => serde_from_js(ctx, value),
+    },
+  }
+}
+
+/// The `options?: { name?, domain?, path? }` of `clearCookies()`, each a
+/// `string | RegExp`. `None` when the caller passed no filter at all.
+pub(crate) fn clear_cookie_options<'js>(
+  ctx: &Ctx<'js>,
+  options: Option<Value<'js>>,
+  method: &str,
+) -> rquickjs::Result<Option<ferridriver::backend::ClearCookieOptions>> {
+  let Some(value) = options.filter(|value| !value.is_undefined() && !value.is_null()) else {
+    return Ok(None);
+  };
+  let obj = value
+    .as_object()
+    .ok_or_else(|| type_error(ctx, format!("{method}: expected an options object")))?;
+  let field = |key: &str| -> rquickjs::Result<Option<ferridriver::options::StringOrRegex>> {
+    let value: Value<'_> = obj.get(key)?;
+    if value.is_undefined() || value.is_null() {
+      return Ok(None);
+    }
+    crate::bindings::page::options::string_or_regex_from_js(value).map(Some)
+  };
+  Ok(Some(ferridriver::backend::ClearCookieOptions {
+    name: field("name")?,
+    domain: field("domain")?,
+    path: field("path")?,
+  }))
 }
 
 impl BrowserContextJs {
