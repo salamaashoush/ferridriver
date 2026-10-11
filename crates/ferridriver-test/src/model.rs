@@ -787,7 +787,7 @@ impl TestInfo {
     category: StepCategory,
     location: Option<StepLocation>,
   ) -> impl std::future::Future<Output = StepHandle> {
-    std::future::ready(self.open_step(title, category, None, location))
+    std::future::ready(self.open_step(title, category, None, location, StepDetails::default()))
   }
 
   /// Begin a nested step (child of a parent step).
@@ -797,7 +797,7 @@ impl TestInfo {
     category: StepCategory,
     parent_step_id: &str,
   ) -> impl std::future::Future<Output = StepHandle> {
-    std::future::ready(self.open_step(title, category, Some(parent_step_id), None))
+    std::future::ready(self.open_step(title, category, Some(parent_step_id), None, StepDetails::default()))
   }
 
   /// [`Self::begin_child_step`] with the child's own source location.
@@ -808,7 +808,7 @@ impl TestInfo {
     parent_step_id: &str,
     location: Option<StepLocation>,
   ) -> impl std::future::Future<Output = StepHandle> {
-    std::future::ready(self.open_step(title, category, Some(parent_step_id), location))
+    std::future::ready(self.open_step(title, category, Some(parent_step_id), location, StepDetails::default()))
   }
 
   /// The one place a live step is opened: allocates the id, streams
@@ -820,6 +820,7 @@ impl TestInfo {
     category: StepCategory,
     parent_step_id: Option<&str>,
     location: Option<StepLocation>,
+    details: StepDetails,
   ) -> StepHandle {
     let title = title.into();
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
@@ -834,6 +835,8 @@ impl TestInfo {
           title: title.clone(),
           category: category.clone(),
           location: location.clone(),
+          subtitle: details.subtitle.clone(),
+          params: details.params.clone(),
         },
       )));
     }
@@ -859,6 +862,8 @@ impl TestInfo {
       parent_step_id: parent_step_id.map(ToString::to_string),
       start: Instant::now(),
       started_at: SystemTime::now(),
+      subtitle: details.subtitle,
+      params: details.params,
       metadata: None,
       location,
       annotations: Vec::new(),
@@ -892,6 +897,8 @@ impl TestInfo {
           title: title.clone(),
           category: category.clone(),
           location: None,
+          subtitle: None,
+          params: None,
         },
       )));
       bus.emit(crate::reporter::ReporterEvent::StepFinished(Arc::new(
@@ -918,6 +925,8 @@ impl TestInfo {
       title,
       category,
       duration,
+      subtitle: None,
+      params: None,
       start_time: SystemTime::now()
         .checked_sub(duration)
         .unwrap_or(SystemTime::UNIX_EPOCH),
@@ -1078,18 +1087,17 @@ impl crate::step::StepDriver for TestInfo {
       title_path.extend(open.iter().map(|s| s.title.clone()));
       title_path.push(spec.title.clone());
 
-      let mut handle = match open.last().map(|s| s.handle.step_id.clone()) {
-        Some(parent) => {
-          self
-            .begin_child_step_at(spec.title.clone(), spec.category, &parent, location.clone())
-            .await
+      let parent = open.last().map(|s| s.handle.step_id.clone());
+      let mut handle = self.open_step(
+        spec.title.clone(),
+        spec.category,
+        parent.as_deref(),
+        location.clone(),
+        StepDetails {
+          subtitle: spec.options.subtitle.clone(),
+          params: spec.options.params.clone(),
         },
-        None => {
-          self
-            .begin_step_at(spec.title.clone(), spec.category, location.clone())
-            .await
-        },
-      };
+      );
       handle.metadata.clone_from(&spec.metadata);
       let started = crate::step::StepStarted {
         step_id: handle.step_id.clone(),
@@ -1261,6 +1269,14 @@ enum TraceParentGuard {
   RestoreTo(Option<String>),
 }
 
+/// What a step says about itself beyond its title, as
+/// `test.step(…, { subtitle, params })` gives it.
+#[derive(Debug, Clone, Default)]
+struct StepDetails {
+  subtitle: Option<String>,
+  params: Option<serde_json::Value>,
+}
+
 /// Handle to an in-progress step. Must be completed via `end()`.
 ///
 /// On `end()`:
@@ -1277,6 +1293,10 @@ pub struct StepHandle {
   pub start: Instant,
   /// Wall-clock twin of [`Self::start`], recorded into [`TestStep::start_time`].
   pub started_at: SystemTime,
+  /// Recorded into [`TestStep::subtitle`].
+  pub subtitle: Option<String>,
+  /// Recorded into [`TestStep::params`].
+  pub params: Option<serde_json::Value>,
   /// Arbitrary metadata attached to this step (set before calling `end()`).
   pub metadata: Option<serde_json::Value>,
   /// Source location recorded into [`TestStep::location`].
@@ -1343,6 +1363,8 @@ impl StepHandle {
       title: self.title,
       category: self.category,
       duration,
+      subtitle: self.subtitle,
+      params: self.params,
       start_time: self.started_at,
       status,
       error,
@@ -1366,6 +1388,12 @@ pub struct TestStep {
   pub title: String,
   pub category: StepCategory,
   pub duration: Duration,
+  /// Playwright's `TestStep.subtitle`: what complements the title, as
+  /// `test.step(…, { subtitle })` gave it.
+  pub subtitle: Option<String>,
+  /// Playwright's `TestStep.params`: the parameters the test author
+  /// passed as `test.step(…, { params })`.
+  pub params: Option<serde_json::Value>,
   /// Wall-clock start, which places the step on a timeline. The epoch
   /// when it was never recorded (a report merged from an older blob).
   pub start_time: SystemTime,

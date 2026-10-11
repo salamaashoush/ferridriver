@@ -449,6 +449,8 @@ mod tests {
       title: "Given a user".into(),
       category: StepCategory::TestStep,
       duration: Duration::from_millis(4),
+      subtitle: None,
+      params: None,
       start_time: std::time::SystemTime::UNIX_EPOCH,
       status: StepStatus::Passed,
       error: None,

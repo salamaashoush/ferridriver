@@ -115,6 +115,10 @@ export interface StepOptions {
   /// Unlike Playwright's, this deadline stands still while the run is
   /// parked at `--debug`.
   timeout?: number;
+  /// What the step was called with, for reports (`TestStep.params`).
+  params?: { [key: string]: any };
+  /// Shown beside the title in reports (`TestStep.subtitle`).
+  subtitle?: string;
 }
 
 export interface StepFunction {
@@ -2308,6 +2312,10 @@ export interface ReporterTestStep {
   startTime: Date;
   error?: ReporterTestError;
   location?: Location;
+  /// What complements the title: `test.step(…, { subtitle })`.
+  subtitle?: string;
+  /// The parameters the step was given: `test.step(…, { params })`.
+  params?: { [key: string]: any };
   annotations: TestDetailsAnnotation[];
   attachments: ReporterAttachment[];
   steps: ReporterTestStep[];

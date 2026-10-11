@@ -112,6 +112,8 @@ struct HtmlTest {
 #[derive(serde::Serialize)]
 struct HtmlStep {
   title: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  subtitle: Option<String>,
   status: String,
   duration_ms: u64,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -484,6 +486,7 @@ fn serialize_html_steps(steps: &[TestStep]) -> Vec<HtmlStep> {
     .filter(|step| step.category.is_visible())
     .map(|step| HtmlStep {
       title: step.title.clone(),
+      subtitle: step.subtitle.clone(),
       status: format!("{:?}", step.status).to_ascii_lowercase(),
       duration_ms: step.duration.as_millis() as u64,
       error: step.error.clone(),
@@ -728,7 +731,8 @@ function renderSteps(steps) {
       : step.status === 'failed' ? '<span class="fail">x</span>'
       : '<span class="skip">-</span>';
     const where = step.location ? ` <span class="muted">${esc(step.location)}</span>` : '';
-    let line = `<div>${mark} ${esc(step.title)} <span class="muted">(${dur(step.duration_ms)})</span>${where}</div>`;
+    const subtitle = step.subtitle ? ` <span class="muted step-subtitle">${esc(step.subtitle)}</span>` : '';
+    let line = `<div>${mark} ${esc(step.title)}${subtitle} <span class="muted">(${dur(step.duration_ms)})</span>${where}</div>`;
     if (step.error) line += `<div class="fail" style="margin-left:16px">${esc(step.error)}</div>`;
     if (step.steps && step.steps.length) line += `<div class="step">${renderSteps(step.steps)}</div>`;
     return line;

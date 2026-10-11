@@ -1225,6 +1225,8 @@ impl Worker {
                 title: step_title.clone(),
                 category: StepCategory::Hook,
                 location: None,
+                subtitle: None,
+                params: None,
               },
             )));
           }
@@ -1453,6 +1455,8 @@ impl Worker {
               title: step_title.clone(),
               category: StepCategory::Hook,
               location: None,
+              subtitle: None,
+              params: None,
             },
           )));
         }

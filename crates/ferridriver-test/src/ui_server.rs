@@ -1071,6 +1071,8 @@ mod tests {
       title: "Given a blank page".into(),
       category: crate::model::StepCategory::TestStep,
       location: None,
+      subtitle: None,
+      params: None,
     }));
     let json = reporter_event_to_json(&started, Path::new("/tmp"));
     assert_eq!(json["type"].as_str(), Some("stepStarted"));

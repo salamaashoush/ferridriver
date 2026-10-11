@@ -615,6 +615,12 @@ fn step_obj<'js>(ctx: &Ctx<'js>, step: &api::Step, parent: Option<&Object<'js>>)
   if let Some(location) = &step.location {
     obj.set("location", loc_obj(ctx, location)?)?;
   }
+  if let Some(subtitle) = &step.subtitle {
+    obj.set("subtitle", subtitle.clone())?;
+  }
+  if let Some(params) = &step.params {
+    obj.set("params", crate::bindings::convert::json_to_js(ctx, params)?)?;
+  }
   obj.set("annotations", annotation_objs(ctx, &step.annotations)?)?;
   obj.set(
     "attachments",
@@ -1173,6 +1179,8 @@ impl Reporter for JsReporter {
           title: started.title.clone(),
           category: started.category.to_string(),
           start_time: api::epoch_ms(std::time::SystemTime::now()),
+          subtitle: started.subtitle.clone(),
+          params: started.params.clone(),
           location: started.location.as_ref().map(|l| api::Location {
             file: l.file.clone(),
             line: usize::try_from(l.line).unwrap_or(0),

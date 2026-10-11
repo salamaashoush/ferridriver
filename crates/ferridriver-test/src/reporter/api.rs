@@ -106,6 +106,10 @@ pub struct Step {
   pub annotations: Vec<Annotation>,
   pub attachments: Vec<Attachment>,
   pub steps: Vec<Step>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub subtitle: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub params: Option<serde_json::Value>,
 }
 
 /// Playwright's `TestResult` — one attempt.
@@ -580,7 +584,9 @@ pub fn step(step: &ModelStep) -> Step {
     title: step.title.clone(),
     category: step.category.to_string(),
     duration: ms(step.duration),
-    start_time: 0,
+    start_time: epoch_ms(step.start_time),
+    subtitle: step.subtitle.clone(),
+    params: step.params.clone(),
     error: step.error.as_ref().map(|message| ReportedError {
       message: base::strip_ansi(message).into_owned(),
       ..ReportedError::default()

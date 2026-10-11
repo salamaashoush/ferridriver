@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use crate::model::{StepCategory, StepLocation, StepStatus, TestAnnotation};
 
-/// Playwright's `test.step(title, body, { box, location, timeout })`.
+/// Playwright's `test.step(title, body, { box, location, timeout, params, subtitle })`.
 #[derive(Debug, Clone, Default)]
 pub struct StepOptions {
   /// Attribute an error inside the step to the step's own call site
@@ -35,6 +35,10 @@ pub struct StepOptions {
   pub location: Option<StepLocation>,
   /// Fail the step (not the test) when the body outlives this.
   pub timeout: Option<Duration>,
+  /// Playwright's `subtitle`: shown beside the title.
+  pub subtitle: Option<String>,
+  /// Playwright's `params`: what the step was called with, for reports.
+  pub params: Option<serde_json::Value>,
 }
 
 /// `test.step` vs `test.step.skip`.

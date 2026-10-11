@@ -45,6 +45,10 @@ pub struct StepStartedEvent {
   /// test's: an explicit `test.step(…, { location })` and every BDD
   /// step name one the spec does not.
   pub location: Option<StepLocation>,
+  /// See [`crate::model::TestStep::subtitle`].
+  pub subtitle: Option<String>,
+  /// See [`crate::model::TestStep::params`].
+  pub params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

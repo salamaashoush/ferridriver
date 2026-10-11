@@ -1667,8 +1667,8 @@ fn body_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> StepBodyError {
   }
 }
 
-/// `{ box?, location?, timeout? }` — Playwright's option bag
-/// (`packages/playwright/types/test.d.ts:6728`).
+/// `{ box?, location?, timeout?, params?, subtitle? }` — Playwright's
+/// option bag (`packages/playwright/types/test.d.ts`, `test.step`).
 fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rquickjs::Result<StepOptions> {
   let Some(options) = options.and_then(Value::as_object) else {
     return Ok(StepOptions::default());
@@ -1680,6 +1680,16 @@ fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rqui
       .get::<_, Option<f64>>("timeout")?
       .filter(|ms| *ms > 0.0)
       .map(|ms| std::time::Duration::from_millis(ms as u64)),
+    subtitle: options.get::<_, Option<String>>("subtitle")?,
+    // Reports carry the params as JSON, which is what they are written as.
+    params: match options.get::<_, Option<Object<'js>>>("params")? {
+      Some(params) => ctx
+        .json_stringify(params)?
+        .map(|text| text.to_string())
+        .transpose()?
+        .and_then(|text| serde_json::from_str(&text).ok()),
+      None => None,
+    },
   };
   if let Some(location) = options.get::<_, Option<Object<'js>>>("location")? {
     let file: String = location.get("file").map_err(|_| {

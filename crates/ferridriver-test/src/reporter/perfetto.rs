@@ -162,6 +162,9 @@ impl PerfettoReporter {
 
   fn step_args(&self, step: &TestStep, attempt: &TestOutcome) -> Option<serde_json::Value> {
     let mut args = serde_json::Map::new();
+    if let Some(params) = &step.params {
+      args.insert("params".into(), params.clone());
+    }
     if let Some(location) = &step.location {
       args.insert(
         "location".into(),
@@ -316,7 +319,10 @@ impl StepSlices<'_> {
     let start = step_start.clamp(parent_start, parent_end);
     let end = (step_start + duration_micros(step.duration)).clamp(start, parent_end);
     self.events.push(TraceEvent {
-      name: step.title.clone(),
+      name: match &step.subtitle {
+        Some(subtitle) => format!("{} {subtitle}", step.title),
+        None => step.title.clone(),
+      },
       cat: step.category.to_string(),
       ph: "X",
       ts: start,
@@ -550,6 +556,8 @@ mod tests {
       title: title.into(),
       category,
       duration: Duration::from_millis(millis),
+      subtitle: None,
+      params: None,
       start_time: at(start),
       status: StepStatus::Passed,
       error: None,
@@ -787,6 +795,19 @@ mod tests {
     assert_eq!(slice(&trace, "early")["ts"], test["ts"]);
     // The overrunning step stretched the test past its own duration.
     assert_eq!(end(&test), 520_000);
+  }
+
+  #[tokio::test]
+  async fn a_step_shows_its_subtitle_and_params() {
+    let mut buys = outcome("buys", 0, 30, TestStatus::Passed);
+    let mut checkout = step("s1", None, "checkout", StepCategory::TestStep, 1_000, 20);
+    checkout.subtitle = Some("SKU 42".into());
+    checkout.params = Some(serde_json::json!({ "orderId": 42 }));
+    buys.steps = vec![checkout, step("s2", None, "plain", StepCategory::TestStep, 22_000, 1)];
+    let trace = trace("perfetto.json", vec![buys], Vec::new(), RunStatus::Passed).await;
+    let checkout = slice(&trace, "checkout SKU 42");
+    assert_eq!(checkout["args"], serde_json::json!({ "params": { "orderId": 42 } }));
+    assert!(slice(&trace, "plain").get("args").is_none());
   }
 
   #[tokio::test]

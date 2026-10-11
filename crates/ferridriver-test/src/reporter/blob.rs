@@ -254,6 +254,10 @@ pub struct WireStep {
   /// steps carried a start.
   #[serde(default)]
   pub start_us: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub subtitle: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub params: Option<serde_json::Value>,
   pub status: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
@@ -359,6 +363,8 @@ fn wire_steps(steps: &[TestStep]) -> Vec<WireStep> {
         .ok()
         .and_then(|since| u64::try_from(since.as_micros()).ok())
         .unwrap_or_default(),
+      subtitle: s.subtitle.clone(),
+      params: s.params.clone(),
       status: step_status_str(s.status).to_string(),
       error: s.error.clone(),
       location: s.location.clone().map(WireStepLocation::from),
@@ -378,6 +384,8 @@ fn runtime_steps(steps: Vec<WireStep>) -> Vec<TestStep> {
       title: s.title,
       category: parse_step_category(&s.category),
       duration: Duration::from_millis(s.duration_ms),
+      subtitle: s.subtitle,
+      params: s.params,
       start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(s.start_us),
       status: parse_step_status(&s.status),
       error: s.error,
@@ -638,6 +646,8 @@ impl WireEvent {
         title,
         category: parse_step_category(&category),
         location: location.and_then(WireStepLocation::into_runtime),
+        subtitle: None,
+        params: None,
       })),
       Self::StepFinished {
         test_id,
@@ -1029,6 +1039,8 @@ mod tests {
         title: "outer".into(),
         category: StepCategory::TestStep,
         duration: Duration::from_millis(5),
+        subtitle: Some("SKU 42".into()),
+        params: Some(serde_json::json!({ "orderId": 42 })),
         start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_250),
         status: StepStatus::Failed,
         error: Some("nope".into()),
@@ -1041,6 +1053,8 @@ mod tests {
           title: "inner".into(),
           category: StepCategory::TestStep,
           duration: Duration::from_millis(2),
+          subtitle: None,
+          params: None,
           start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_001_500),
           status: StepStatus::Passed,
           error: None,
@@ -1097,6 +1111,10 @@ mod tests {
     assert_eq!(back.steps.len(), 1);
     assert_eq!(back.steps[0].steps.len(), 1);
     assert_eq!(back.steps[0].steps[0].title, "inner");
+    assert_eq!(back.steps[0].subtitle.as_deref(), Some("SKU 42"));
+    assert_eq!(back.steps[0].params, Some(serde_json::json!({ "orderId": 42 })));
+    assert_eq!(back.steps[0].steps[0].subtitle, None);
+    assert_eq!(back.steps[0].steps[0].params, None);
     assert_eq!(
       back.steps[0].start_time,
       std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_250)

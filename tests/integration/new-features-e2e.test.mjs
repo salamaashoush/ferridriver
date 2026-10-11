@@ -76,6 +76,51 @@ test.fail('expected failure', async ({ testInfo }) => {
   assert.match(result.text, /1 passed/);
 });
 
+test('test.step params and subtitle reach reporters', async () => {
+  const cwd = await workspace({
+    'ferridriver.toml': '[test]\ntestMatch = ["steps.spec.ts"]\nworkers = 1\nretries = 0\n' +
+      'reporter = [{ name = "perfetto" }, { name = "html" }, { name = "./recorder.ts" }]\n',
+    'recorder.ts': `
+import { writeFileSync } from 'node:fs';
+const seen = { begin: [], end: [], tree: [] };
+const pick = step => ({ title: step.title, subtitle: step.subtitle ?? null, params: step.params ?? null });
+export default class Recorder {
+  onStepBegin(test, result, step) { if (step.category === 'test.step') seen.begin.push(pick(step)); }
+  onStepEnd(test, result, step) { if (step.category === 'test.step') seen.end.push(pick(step)); }
+  onTestEnd(test, result) {
+    const walk = steps => steps.filter(s => s.category === 'test.step').map(s => ({ ...pick(s), steps: walk(s.steps) }));
+    seen.tree = walk(result.steps);
+  }
+  onEnd() { writeFileSync('steps.json', JSON.stringify(seen)); }
+}
+`,
+    'steps.spec.ts': `
+import { test } from '@ferridriver/test';
+test('buys', async () => {
+  await test.step('checkout', async () => {
+    await test.step('pay', async () => {}, { subtitle: 'card' });
+  }, { params: { orderId: 42, items: ['a', 'b'] }, subtitle: 'SKU 42' });
+  await test.step('plain', async () => {});
+});
+`,
+  });
+  passed(await run(['test', '--no-inherit', '--headless'], { cwd }));
+
+  const checkout = { title: 'checkout', subtitle: 'SKU 42', params: { orderId: 42, items: ['a', 'b'] } };
+  const pay = { title: 'pay', subtitle: 'card', params: null };
+  const plain = { title: 'plain', subtitle: null, params: null };
+  const seen = JSON.parse(await readFile(join(cwd, 'steps.json'), 'utf8'));
+  assert.deepEqual(seen.begin, [checkout, pay, plain]);
+  assert.deepEqual(seen.tree, [{ ...checkout, steps: [{ ...pay, steps: [] }] }, { ...plain, steps: [] }]);
+
+  const trace = JSON.parse(await readFile(join(cwd, 'test-results', 'perfetto.json'), 'utf8'));
+  const slices = trace.traceEvents.filter(e => e.cat === 'test.step').map(e => [e.name, e.args?.params ?? null]);
+  assert.deepEqual(slices, [['checkout SKU 42', checkout.params], ['pay card', null], ['plain', null]]);
+
+  const html = await readFile(join(cwd, 'test-results', 'report.html'), 'utf8');
+  assert.ok(html.includes('"title":"checkout","subtitle":"SKU 42"'), 'the HTML report carries the subtitle');
+});
+
 test('native JS runner writes the HTML reporter artifact', async () => {
   const cwd = await workspace({
     'ferridriver.toml': '[test]\ntestMatch = ["report.spec.ts"]\nworkers = 1\nreporter = ["html"]\n',
