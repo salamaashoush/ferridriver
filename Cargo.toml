@@ -135,9 +135,9 @@ opt-level = 1
 # request context needs all four, which are at this commit of ferrijs main,
 # so the crates come from there. `cargo publish` ignores this section.
 [patch.crates-io]
-ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "805d0c3087cd6a482d976d96742173faaaed2e5a" }
-ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "805d0c3087cd6a482d976d96742173faaaed2e5a" }
-ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "805d0c3087cd6a482d976d96742173faaaed2e5a" }
-ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "805d0c3087cd6a482d976d96742173faaaed2e5a" }
-ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "805d0c3087cd6a482d976d96742173faaaed2e5a" }
-ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "805d0c3087cd6a482d976d96742173faaaed2e5a" }
+ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
+ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
+ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
+ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
+ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
+ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }

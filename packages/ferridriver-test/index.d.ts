@@ -2539,6 +2539,7 @@ declare global {
     rmdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     stat(path: string): Promise<Stats>;
     lstat(path: string): Promise<Stats>;
+    realpath(path: string): Promise<string>;
     chmod(path: string, mode: number | string): Promise<void>;
     symlink(target: string, path: string, type?: string): Promise<void>;
     constants: { F_OK: number; R_OK: number; W_OK: number; X_OK: number };
@@ -2560,6 +2561,7 @@ declare global {
     rmdirSync(path: string, options?: { recursive?: boolean }): void;
     statSync(path: string): Stats;
     lstatSync(path: string): Stats;
+    realpathSync(path: string): string;
     chmodSync(path: string, mode: number | string): void;
     renameSync(from: string, to: string): void;
     symlinkSync(target: string, path: string, type?: string): void;
