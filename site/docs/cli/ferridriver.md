@@ -171,12 +171,16 @@ their options.
 ## `ferridriver install`
 
 ```
-ferridriver install [BROWSERS]... [--with-deps]
+ferridriver install [BROWSERS]... [--with-deps] [--no-remove]
 ```
 
 Browsers: `chromium`, `chromium-headless-shell`, `firefox`, `webkit`.
 Defaults to `chromium`. `--with-deps` also installs Linux system
 libraries via the platform package manager.
+
+An install removes the cached versions of that browser older than the
+one it just installed, and reports them. Newer versions and other
+browsers stay. `--no-remove` keeps every version.
 
 `ferridriver install webkit` downloads Playwright's WebKit build into the
 ferridriver cache. Alternatively, point `FERRIDRIVER_WEBKIT` at a

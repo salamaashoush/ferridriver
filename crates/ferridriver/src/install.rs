@@ -171,6 +171,79 @@ pub enum InstallProgress {
   DepsInstalled,
 }
 
+/// A set of versioned directories in the cache that `install` adds to,
+/// one version at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheFamily {
+  Chromium,
+  ChromiumHeadlessShell,
+  Firefox,
+  WebKit,
+  AxeCore,
+}
+
+impl CacheFamily {
+  /// The family `ferridriver install <target>` adds to, if it has one.
+  /// Safari, Android and iOS are not versioned directories of the cache.
+  #[must_use]
+  pub fn of_target(target: &str) -> Option<Self> {
+    Some(match target {
+      "chromium" => Self::Chromium,
+      "chromium-headless-shell" => Self::ChromiumHeadlessShell,
+      "firefox" => Self::Firefox,
+      "webkit" => Self::WebKit,
+      "axe" => Self::AxeCore,
+      _ => return None,
+    })
+  }
+
+  fn root(self, cache_dir: &Path) -> PathBuf {
+    match self {
+      Self::WebKit => cache_dir.join("webkit"),
+      _ => cache_dir.to_path_buf(),
+    }
+  }
+
+  fn prefix(self) -> &'static str {
+    match self {
+      Self::Chromium => "chromium-",
+      Self::ChromiumHeadlessShell => "chromium-headless-shell-",
+      Self::Firefox => "firefox-",
+      Self::WebKit => "webkit-",
+      Self::AxeCore => "axe-core-",
+    }
+  }
+
+  /// The version a directory of this family is named after.
+  fn version_of(self, name: &str) -> Option<&str> {
+    // `chromium-headless-shell-*` also starts with `chromium-`, and it
+    // is another family.
+    if self == Self::Chromium && name.starts_with(Self::ChromiumHeadlessShell.prefix()) {
+      return None;
+    }
+    name.strip_prefix(self.prefix()).filter(|version| !version.is_empty())
+  }
+}
+
+/// A version `install` cleared out of the cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedVersion {
+  pub version: String,
+  pub path: PathBuf,
+}
+
+/// Where a version sorts among the others: by its runs of digits as
+/// numbers, so `99.0` comes before `155.0` and `158.0` before `158.0b5`.
+/// Comparing the names as text puts `99` after `155`.
+fn version_order(name: &str) -> (Vec<u64>, String) {
+  let numbers = name
+    .split(|c: char| !c.is_ascii_digit())
+    .filter(|run| !run.is_empty())
+    .map(|run| run.parse().unwrap_or(u64::MAX))
+    .collect();
+  (numbers, name.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Installer
 // ---------------------------------------------------------------------------
@@ -260,6 +333,48 @@ impl BrowserInstaller {
   #[must_use]
   pub fn cache_dir(&self) -> &Path {
     &self.cache_dir
+  }
+
+  /// Remove the versions of `family` that `kept` replaced: the ones
+  /// that sort before it. Playwright's `install` removes the browsers no
+  /// installation refers to any more (`--no-remove` keeps them); here a
+  /// launch takes the newest version in the cache, so an older one is
+  /// what nothing will run again. A version newer than `kept` is what a
+  /// launch would pick, and is left alone.
+  ///
+  /// Only directories of this family, directly in the cache, are
+  /// touched; a symlink is not followed or removed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if a version that should go cannot be removed.
+  pub async fn remove_older_versions(&self, family: CacheFamily, kept: &str) -> Result<Vec<RemovedVersion>> {
+    let root = family.root(&self.cache_dir);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+      return Ok(Vec::new());
+    };
+    let kept_order = version_order(kept);
+    let mut removed = Vec::new();
+    for entry in entries.filter_map(std::result::Result::ok) {
+      let name = entry.file_name().to_string_lossy().into_owned();
+      let Some(version) = family.version_of(&name) else {
+        continue;
+      };
+      let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+      if !is_dir || version == kept || version_order(version) >= kept_order {
+        continue;
+      }
+      let path = entry.path();
+      tokio::fs::remove_dir_all(&path)
+        .await
+        .map_err(|e| backend_err(format!("could not remove {}: {e}", path.display())))?;
+      removed.push(RemovedVersion {
+        version: version.to_string(),
+        path,
+      });
+    }
+    removed.sort_by_key(|gone| version_order(&gone.version));
+    Ok(removed)
   }
 
   /// Install the latest stable Chromium.
@@ -593,8 +708,8 @@ impl BrowserInstaller {
         name.starts_with("chromium-") && !name.starts_with("chromium-headless-shell-")
       })
       .collect();
-    // Sort by name descending (newest version first)
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    // Newest version first.
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
 
     let platform = current_platform();
     for entry in candidates {
@@ -739,7 +854,7 @@ impl BrowserInstaller {
       .filter_map(std::result::Result::ok)
       .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-headless-shell-"))
       .collect();
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
 
     let platform = current_platform();
     for entry in candidates {
@@ -1011,7 +1126,7 @@ impl BrowserInstaller {
       .filter_map(std::result::Result::ok)
       .filter(|e| e.file_name().to_string_lossy().starts_with("firefox-"))
       .collect();
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
 
     for entry in candidates {
       let marker = entry.path().join(".downloaded");
@@ -1756,4 +1871,132 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod removal_tests {
+  use super::{BrowserInstaller, CacheFamily, version_order};
+
+  /// A cache holding `dirs`, each a directory with a file in it.
+  fn cache(dirs: &[&str]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("cache");
+    for dir in dirs {
+      std::fs::create_dir_all(root.path().join(dir)).expect("version");
+      std::fs::write(root.path().join(dir).join(".downloaded"), "").expect("marker");
+    }
+    root
+  }
+
+  fn left(root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+      .expect("cache")
+      .filter_map(Result::ok)
+      .map(|entry| entry.file_name().to_string_lossy().into_owned())
+      .collect();
+    names.sort();
+    names
+  }
+
+  #[test]
+  fn versions_sort_by_their_numbers() {
+    let mut versions = vec!["155.0.8059.39", "99.0.1", "158.0b5", "158.0", "157.0.1", "2374"];
+    versions.sort_by_key(|v| version_order(v));
+    assert_eq!(
+      versions,
+      ["99.0.1", "155.0.8059.39", "157.0.1", "158.0", "158.0b5", "2374"]
+    );
+  }
+
+  #[tokio::test]
+  async fn only_older_versions_of_the_same_family_go() {
+    let root = cache(&[
+      "chromium-99.0.4844.51",
+      "chromium-154.0.1.2",
+      "chromium-155.0.8059.39",
+      "chromium-156.0.1.1",
+      "chromium-headless-shell-154.0.1.2",
+      "chromium-headless-shell-155.0.8059.39",
+      "chromedriver-154.0.1.2",
+      "firefox-157.0.1",
+      "firefox-158.0b5",
+      "chromium-",
+    ]);
+    std::fs::write(root.path().join("chromium-1.0"), "a file, not a version").expect("file");
+    let installer = BrowserInstaller::with_cache_dir(root.path().to_path_buf());
+
+    let removed = installer
+      .remove_older_versions(CacheFamily::Chromium, "155.0.8059.39")
+      .await
+      .expect("remove");
+    let versions: Vec<&str> = removed.iter().map(|gone| gone.version.as_str()).collect();
+    assert_eq!(versions, ["99.0.4844.51", "154.0.1.2"]);
+    assert_eq!(removed[1].path, root.path().join("chromium-154.0.1.2"));
+    assert_eq!(
+      left(root.path()),
+      [
+        "chromedriver-154.0.1.2",
+        "chromium-",
+        "chromium-1.0",
+        "chromium-155.0.8059.39",
+        "chromium-156.0.1.1",
+        "chromium-headless-shell-154.0.1.2",
+        "chromium-headless-shell-155.0.8059.39",
+        "firefox-157.0.1",
+        "firefox-158.0b5",
+      ]
+    );
+
+    // What a launch would pick over the installed one stays.
+    let none = installer
+      .remove_older_versions(CacheFamily::Firefox, "157.0.1")
+      .await
+      .expect("remove");
+    assert_eq!(none, Vec::new());
+    let shell = installer
+      .remove_older_versions(CacheFamily::ChromiumHeadlessShell, "155.0.8059.39")
+      .await
+      .expect("remove");
+    assert_eq!(shell.len(), 1);
+    assert!(!root.path().join("chromium-headless-shell-154.0.1.2").exists());
+  }
+
+  #[tokio::test]
+  async fn webkit_revisions_live_in_their_own_directory() {
+    let root = cache(&["webkit/webkit-2300", "webkit/webkit-2374", "webkit-2000"]);
+    let installer = BrowserInstaller::with_cache_dir(root.path().to_path_buf());
+    let removed = installer
+      .remove_older_versions(CacheFamily::WebKit, "2374")
+      .await
+      .expect("remove");
+    assert_eq!(removed.len(), 1);
+    assert_eq!(left(&root.path().join("webkit")), ["webkit-2374"]);
+    // A directory of the same name outside the family's root is not its.
+    assert!(root.path().join("webkit-2000").exists());
+
+    let empty = BrowserInstaller::with_cache_dir(root.path().join("no-such-cache"));
+    assert_eq!(
+      empty
+        .remove_older_versions(CacheFamily::AxeCore, "4.12.1")
+        .await
+        .expect("remove"),
+      Vec::new()
+    );
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_symlink_is_neither_followed_nor_removed() {
+    let root = cache(&["firefox-157.0.1"]);
+    let elsewhere = tempfile::tempdir().expect("elsewhere");
+    std::fs::write(elsewhere.path().join("keep.txt"), "sashoush").expect("file");
+    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("firefox-100.0")).expect("link");
+    let installer = BrowserInstaller::with_cache_dir(root.path().to_path_buf());
+    let removed = installer
+      .remove_older_versions(CacheFamily::Firefox, "157.0.1")
+      .await
+      .expect("remove");
+    assert_eq!(removed, Vec::new());
+    assert!(elsewhere.path().join("keep.txt").exists());
+    assert!(root.path().join("firefox-100.0").exists());
+  }
 }

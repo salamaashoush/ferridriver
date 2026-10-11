@@ -51,6 +51,12 @@ pub struct InstallArgs {
   #[arg(long)]
   pub with_deps: bool,
 
+  /// Keep the older versions of a browser this install replaces. Without
+  /// it they are removed from the cache: a launch takes the newest
+  /// version there, so nothing would run them again.
+  #[arg(long)]
+  pub no_remove: bool,
+
   #[arg(long)]
   pub accept_licenses: bool,
 

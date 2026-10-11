@@ -8,7 +8,7 @@
 
 use std::sync::Mutex;
 
-use ferridriver::install::{BrowserInstaller, InstallProgress};
+use ferridriver::install::{BrowserInstaller, CacheFamily, InstallProgress};
 
 use crate::cli;
 use crate::ui;
@@ -38,7 +38,7 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
   }
 
   let installer = BrowserInstaller::new();
-  let mut on_disk: Vec<(String, String)> = Vec::new();
+  let mut on_disk: Vec<Installed> = Vec::new();
 
   if args.with_deps {
     let phase = Phase::new("system dependencies");
@@ -78,15 +78,36 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
       phase.finish_failed();
       return Err(anyhow::anyhow!("installing {browser}: {error}"));
     }
-    if let Some(done) = phase.finish() {
-      on_disk.push((browser.clone(), done));
+    let Some((version, path)) = phase.finish() else {
+      continue;
+    };
+    // What this version replaced is cleared out only once it is in
+    // place, and never when the caller asked to keep it.
+    let removed = match CacheFamily::of_target(browser) {
+      Some(family) if !args.no_remove => installer
+        .remove_older_versions(family, &version)
+        .await
+        .map_err(|error| anyhow::anyhow!("removing older {browser} versions: {error}"))?,
+      _ => Vec::new(),
+    };
+    for gone in &removed {
+      ui::note(&format!(
+        "removed {browser} {} {}",
+        gone.version,
+        ui::dim(&ui::short_path(&gone.path, 60))
+      ));
     }
+    on_disk.push(Installed {
+      browser: browser.clone(),
+      path,
+      removed: removed.into_iter().map(|gone| gone.version).collect(),
+    });
   }
 
   if ui::json() {
     let payload: Vec<serde_json::Value> = on_disk
       .iter()
-      .map(|(name, path)| serde_json::json!({ "browser": name, "path": path }))
+      .map(|done| serde_json::json!({ "browser": done.browser, "path": done.path, "removed": done.removed }))
       .collect();
     return ui::print_json(&payload);
   }
@@ -95,6 +116,13 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
     ("run a suite", "ferridriver test".to_string()),
   ]);
   Ok(())
+}
+
+/// One target this run left on disk, and the versions it replaced.
+struct Installed {
+  browser: String,
+  path: String,
+  removed: Vec<String>,
 }
 
 /// What a phase turned out to have done, read back once it ends.
@@ -158,9 +186,9 @@ impl Phase {
     }
   }
 
-  /// Close the line, and return where the browser landed when this phase
-  /// installed one.
-  fn finish(self) -> Option<String> {
+  /// Close the line, and return the version and where it landed when
+  /// this phase installed a browser.
+  fn finish(self) -> Option<(String, String)> {
     let bar = self.bar.into_inner().ok()?;
     match self.outcome.into_inner().ok().flatten() {
       Some(Outcome::Deps) => {
@@ -173,7 +201,7 @@ impl Phase {
           self.label,
           ui::dim(&ui::short_path(std::path::Path::new(&path), 60))
         ));
-        Some(path)
+        Some((version, path))
       },
       None => {
         bar.finish_quiet(&format!("{}: nothing to do", self.label));

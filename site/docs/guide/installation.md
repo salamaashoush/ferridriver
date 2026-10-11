@@ -75,6 +75,15 @@ Override the cache location with `FERRIDRIVER_BROWSERS_PATH`. Defaults:
 - macOS: `~/Library/Caches/ferridriver/`
 - Windows: `%LOCALAPPDATA%/ferridriver/`
 
+Installing a browser removes the older versions of that same browser from
+the cache, and prints each one it removed. A version newer than the one just
+installed is kept (a beta beside a stable build, for example), and so is every
+other browser. Pass `--no-remove` to keep everything:
+
+```bash
+ferridriver install --no-remove chromium
+```
+
 ### WebKit backend
 
 The WebKit backend speaks Playwright's WebKit Inspector protocol over
