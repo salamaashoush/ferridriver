@@ -147,10 +147,23 @@ impl BrowserContext {
     Ok(crate::identity::PageObject(page))
   }
 
-  /// Get all pages in this context.
+  /// Playwright: `browserContext.pages(): Page[]`. The pages open in
+  /// this context, in the order they were opened.
+  #[napi(ts_return_type = "Page[]")]
+  pub fn pages(&self) -> Vec<crate::identity::PageObject> {
+    // A page this handle has not wrapped before starts its frame
+    // listener, which needs the runtime a synchronous call is outside of.
+    let pages = napi::bindgen_prelude::within_runtime_if_available(|| self.inner.pages());
+    pages.into_iter().map(crate::identity::PageObject).collect()
+  }
+
+  /// [`Self::pages`] after asking the browser which windows it has. A
+  /// classic `WebDriver` session is not told of a window opened behind
+  /// its back, or of one that closed; every other backend is, and this
+  /// only waits for it. Not in Playwright, which drives no such browser.
   #[napi(ts_return_type = "Promise<Page[]>")]
-  pub async fn pages(&self) -> Result<Vec<crate::identity::PageObject>> {
-    let pages = self.inner.pages().await.into_napi()?;
+  pub async fn discover_pages(&self) -> Result<Vec<crate::identity::PageObject>> {
+    let pages = self.inner.discover_pages().await.into_napi()?;
     Ok(pages.into_iter().map(crate::identity::PageObject).collect())
   }
 

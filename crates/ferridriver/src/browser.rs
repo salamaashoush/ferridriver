@@ -582,7 +582,7 @@ impl Browser {
   ///
   pub async fn page(&self) -> Result<Arc<Page>> {
     let ctx = self.default_context();
-    let mut pages = ctx.pages().await.unwrap_or_default();
+    let mut pages = ctx.discover_pages().await.unwrap_or_default();
     if pages.is_empty() {
       Box::pin(ctx.new_page()).await
     } else {

@@ -23,4 +23,26 @@ for (const backend of ["cdp-pipe", "cdp-raw", "bidi", "webkit"]) {
       await browser.close();
     }
   });
+
+  // Playwright: `browserContext.pages(): Page[]` is synchronous.
+  test(`${backend}: pages() answers at once, with the pages a caller already holds`, async () => {
+    const browser = await launchForBackend(backend);
+    try {
+      const context = await browser.newContext();
+      expect(Array.isArray(context.pages())).toBe(true);
+      expect(context.pages().length).toBe(0);
+      const first = await context.newPage();
+      const second = await context.newPage();
+      const [a, b] = context.pages();
+      expect([a === first, b === second, context.pages().length]).toEqual([true, true, 2]);
+      await first.close();
+      expect(context.pages().length).toBe(1);
+      expect(context.pages()[0] === second).toBe(true);
+      expect((await context.discoverPages()).length).toBe(1);
+      await context.close();
+      expect(context.pages()).toEqual([]);
+    } finally {
+      await browser.close();
+    }
+  });
 }

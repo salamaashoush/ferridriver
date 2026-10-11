@@ -464,6 +464,9 @@ pub struct BrowserState {
   /// `BrowserContext._origins`. `storageState()` reads the ones no live
   /// page is on through a page of its own.
   pub visited_origins: VisitedOrigins,
+  /// Each context's open pages, readable without this state's lock:
+  /// what makes `context.pages()` synchronous, as in Playwright.
+  pub context_pages: ContextPages,
   /// Contexts whose `recordHar` recorder has been installed. Same
   /// once-per-context reason as `storage_state_hydrated`: the option
   /// bag is applied on every page, and the archive covers the context.
@@ -573,6 +576,7 @@ impl BrowserState {
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       visited_origins: VisitedOrigins::default(),
+      context_pages: ContextPages::default(),
       record_har_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
       popup_pumps: HashMap::default(),
@@ -1140,11 +1144,12 @@ impl BrowserState {
         self.default_viewport.clone()
       };
       let index = self.pending_instance_index(generation)?;
+      let context_pages = self.context_pages.clone();
       let instance = self.pending_cleanup[index]
         .1
         .instance_mut()
         .ok_or_else(|| FerriError::backend("browser is not ready for adoption"))?;
-      if let Err(error) = Self::adopt_instance_pages(instance_name, instance, viewport.as_ref()).await {
+      if let Err(error) = Self::adopt_instance_pages(instance_name, instance, viewport.as_ref(), &context_pages).await {
         return match self.cleanup_instances(Some(instance_name)).await {
           Ok(()) => Err(error),
           Err(cleanup) => Err(FerriError::backend(format!(
@@ -1180,6 +1185,7 @@ impl BrowserState {
     instance_name: &str,
     inst: &mut BrowserInstance,
     viewport: Option<&crate::options::ViewportConfig>,
+    context_pages: &ContextPages,
   ) -> Result<()> {
     // Adopt existing pages into the "default" context of this instance.
     // For launch mode, pages are created on demand by the caller (the
@@ -1201,6 +1207,7 @@ impl BrowserState {
       page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
       ctx.pages.push(page);
     }
+    context_pages.set(&format!("{instance_name}:default"), &ctx.pages);
     if let Some(vp) = viewport {
       for page in &inst.context_mut("default").pages {
         if let Err(e) = page.emulate_viewport(vp).await {
@@ -1943,6 +1950,8 @@ impl BrowserState {
     let composite = key.to_composite();
     let context_events = self.get_or_create_context_events(&composite);
     let visited_origins = self.visited_origins.clone();
+    let context_pages = self.context_pages.clone();
+    let listed_under = composite.clone();
 
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut(&key.context);
@@ -2022,6 +2031,7 @@ impl BrowserState {
 
     ctx.pages.push(page);
     ctx.active_page_idx = ctx.pages.len() - 1;
+    context_pages.set(&listed_under, &ctx.pages);
     Ok(())
   }
 
@@ -2160,6 +2170,7 @@ impl BrowserState {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .remove(composite);
     self.visited_origins.forget(composite);
+    self.context_pages.forget(composite);
     self
       .record_har_installed
       .lock()
@@ -2231,6 +2242,7 @@ impl BrowserState {
   /// Returns an error if the context does not exist or the index is out of range.
   pub async fn close_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
     let key = self.session_key(context);
+    let context_pages = self.context_pages.clone();
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
     if page_idx >= ctx.pages.len() {
@@ -2240,6 +2252,7 @@ impl BrowserState {
     if ctx.active_page_idx >= ctx.pages.len() {
       ctx.active_page_idx = ctx.pages.len().saturating_sub(1);
     }
+    context_pages.set(&key.to_composite(), &ctx.pages);
     // A page whose target is already gone (crashed, closed from the
     // page itself) still needs its local teardown, so the close failure
     // is logged rather than propagated.
@@ -2361,6 +2374,7 @@ impl BrowserState {
   pub async fn refresh_pages(&mut self, context: &str) -> Result<usize> {
     let key = self.session_key(context);
     let viewport = self.default_viewport.clone();
+    let context_pages = self.context_pages.clone();
     let inst = self.instance_mut(&key.instance)?;
     let current_pages = Box::pin(inst.browser.pages()).await?;
     let owned_pages: rustc_hash::FxHashSet<_> = inst
@@ -2387,6 +2401,7 @@ impl BrowserState {
       ctx.pages.push(page);
     }
     let total = ctx.pages.len();
+    context_pages.set(&key.to_composite(), &ctx.pages);
 
     // A tab that appeared in the browser after the instance was adopted
     // is as new to this context as the ones adopted at connect time, and
@@ -3406,6 +3421,43 @@ fn find_playwright_chrome() -> Option<String> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn find_playwright_chrome() -> Option<String> {
   None
+}
+
+/// Each context's open pages, by composite session key, outside the
+/// state lock. Everything that changes a context's page list writes it
+/// here too; a page the browser closed on its own stays listed until the
+/// next such write, so a reader drops the closed ones.
+#[derive(Clone, Default)]
+pub struct ContextPages {
+  by_context: Arc<std::sync::Mutex<HashMap<String, Vec<AnyPage>>>>,
+}
+
+impl ContextPages {
+  fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Vec<AnyPage>>> {
+    self
+      .by_context
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  pub(crate) fn set(&self, composite: &str, pages: &[AnyPage]) {
+    self.lock().insert(composite.to_string(), pages.to_vec());
+  }
+
+  /// The pages of `composite` that are still open, in the order they
+  /// were opened.
+  #[must_use]
+  pub fn open(&self, composite: &str) -> Vec<AnyPage> {
+    self
+      .lock()
+      .get(composite)
+      .map(|pages| pages.iter().filter(|page| !page.is_closed()).cloned().collect())
+      .unwrap_or_default()
+  }
+
+  fn forget(&self, composite: &str) {
+    self.lock().remove(composite);
+  }
 }
 
 /// Per-context visited origins, by composite session key. Shared with the

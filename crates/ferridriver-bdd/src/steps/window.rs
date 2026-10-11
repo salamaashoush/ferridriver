@@ -35,7 +35,7 @@ async fn open_new_tab(world: &mut BrowserWorld) {
 async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
   let pages = world
     .context()?
-    .pages()
+    .discover_pages()
     .await
     .map_err(|e| StepError::wrap("list tabs", e))?;
 
@@ -64,7 +64,7 @@ async fn close_current_tab(world: &mut BrowserWorld) {
   // After closing, switch to the first remaining page if available.
   let pages = world
     .context()?
-    .pages()
+    .discover_pages()
     .await
     .map_err(|e| StepError::wrap("list tabs after close", e))?;
 
@@ -80,7 +80,7 @@ async fn should_see_tab_count(world: &mut BrowserWorld, expected: i64) {
   expect_poll(
     move || {
       let c = ctx.clone();
-      async move { c.pages().await.map(|p| p.len()).unwrap_or(0) }
+      async move { c.discover_pages().await.map(|p| p.len()).unwrap_or(0) }
     },
     Duration::from_secs(5),
   )

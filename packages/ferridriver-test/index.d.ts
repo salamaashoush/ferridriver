@@ -1989,7 +1989,10 @@ export interface BrowserContext {
   newPage(): Promise<Page>;
   // Playwright's pages() is synchronous; ferridriver resolves the list
   // from the Rust browser state, so it is a promise here.
-  pages(): Promise<Page[]>;
+  pages(): Page[];
+  // pages() after asking the browser which windows it has: a classic
+  // WebDriver session is not told of one opened behind its back.
+  discoverPages(): Promise<Page[]>;
   close(): Promise<void>;
   cookies(urls?: string | string[]): Promise<Cookie[]>;
   addCookies(cookies: Cookie[]): Promise<void>;

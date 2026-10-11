@@ -263,6 +263,11 @@ pub struct ContextRef {
   /// [`BrowserState::context_closed`]). `false` from handle creation
   /// until [`Self::close`] flips it `true`; backs [`Self::is_closed`].
   closed: Arc<std::sync::atomic::AtomicBool>,
+  /// The state's lock-free page registry, shared by every clone of this
+  /// handle. Empty until the handle has reached the state once: at
+  /// construction when its lock was free, or on the first call that
+  /// awaits or finds it free.
+  pages: Arc<std::sync::OnceLock<crate::state::ContextPages>>,
 }
 
 impl ContextRef {
@@ -276,7 +281,7 @@ impl ContextRef {
   /// deterministically. Anywhere there is an `.await` to spend, spend it
   /// here instead of degrading.
   pub(crate) async fn new_async(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
-    let (key, events, closed, test_id_attribute) = {
+    let (key, events, closed, test_id_attribute, pages) = {
       let s = state.read().await;
       let key = s.session_key(&name);
       (
@@ -284,9 +289,12 @@ impl ContextRef {
         s.get_or_create_context_events(&key.to_composite()),
         s.get_or_create_context_closed(&key.to_composite()),
         s.get_or_create_context_test_id_attribute(&key.to_composite()),
+        s.context_pages.clone(),
       )
     };
-    Self::from_parts(state, name, key, events, closed, test_id_attribute)
+    let context = Self::from_parts(state, name, key, events, closed, test_id_attribute);
+    let _ = context.pages.set(pages);
+    context
   }
 
   fn from_parts(
@@ -307,7 +315,19 @@ impl ContextRef {
       events,
       browser: None,
       closed,
+      pages: Arc::new(std::sync::OnceLock::new()),
     }
+  }
+
+  /// The page registry, reached through the state if this handle has
+  /// not reached it before and its lock is free right now.
+  fn page_registry(&self) -> Option<&crate::state::ContextPages> {
+    if self.pages.get().is_none()
+      && let Ok(state) = self.state.try_read()
+    {
+      let _ = self.pages.set(state.context_pages.clone());
+    }
+    self.pages.get()
   }
 
   pub fn new(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
@@ -322,7 +342,7 @@ impl ContextRef {
     // only, matching the old behaviour. `get_or_create_context_events`
     // itself uses a `std::sync::Mutex` so it doesn't need the tokio
     // read guard to stay alive beyond the call.
-    let (key, events, closed, test_id_attribute) = match state.try_read() {
+    let (key, events, closed, test_id_attribute, pages) = match state.try_read() {
       Ok(s) => {
         let key = s.session_key(&name);
         (
@@ -330,6 +350,7 @@ impl ContextRef {
           s.get_or_create_context_events(&key.to_composite()),
           s.get_or_create_context_closed(&key.to_composite()),
           s.get_or_create_context_test_id_attribute(&key.to_composite()),
+          Some(s.context_pages.clone()),
         )
       },
       Err(_) => (
@@ -337,9 +358,16 @@ impl ContextRef {
         crate::events::ContextEventEmitter::new(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(std::sync::RwLock::new(None)),
+        // The page registry is the state's own: there is no stand-in,
+        // and `page_registry` reaches it once the lock is free.
+        None,
       ),
     };
-    Self::from_parts(state, name, key, events, closed, test_id_attribute)
+    let context = Self::from_parts(state, name, key, events, closed, test_id_attribute);
+    if let Some(pages) = pages {
+      let _ = context.pages.set(pages);
+    }
+    context
   }
 
   /// Attach the parent [`crate::Browser`] handle so [`Self::browser`]
@@ -655,12 +683,36 @@ impl ContextRef {
     Ok(())
   }
 
-  /// Get all pages in this context as Page handles.
+  /// Playwright: `browserContext.pages(): Page[]`. The pages open in
+  /// this context, in the order they were opened, without waiting on
+  /// anything: a context that has not opened in the browser yet, or has
+  /// closed, has none.
+  ///
+  /// A browser driven over classic `WebDriver` does not announce a
+  /// window opened behind the session's back; [`Self::discover_pages`]
+  /// asks it.
+  #[must_use]
+  pub fn pages(&self) -> Vec<Arc<Page>> {
+    let Some(registry) = self.page_registry() else {
+      return Vec::new();
+    };
+    registry
+      .open(&self.key.to_composite())
+      .into_iter()
+      .map(|inner| Page::with_context(inner, self.clone()))
+      .collect()
+  }
+
+  /// [`Self::pages`] after asking the browser which windows it has,
+  /// which is how a classic `WebDriver` session learns of one it did not
+  /// open and forgets one that closed. Every other backend is told as it
+  /// happens, and this only waits for the state.
   ///
   /// # Errors
   ///
-  /// Returns an error if the context does not exist.
-  pub async fn pages(&self) -> Result<Vec<Arc<Page>>> {
+  /// Returns an error if the context does not exist, or the browser
+  /// cannot list its windows.
+  pub async fn discover_pages(&self) -> Result<Vec<Arc<Page>>> {
     let needs_discovery = self
       .state
       .read()
@@ -844,7 +896,7 @@ impl ContextRef {
       Vec::new()
     };
 
-    let pages = self.pages().await?;
+    let pages = self.discover_pages().await?;
     let mut origins: Vec<crate::options::OriginState> = Vec::new();
     // Origins whose storage has been read, with or without anything in it.
     let mut read: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
@@ -964,7 +1016,7 @@ impl ContextRef {
     self.clear_cookies().await?;
 
     // Clear localStorage on every live page (each in its own origin scope).
-    let pages = self.pages().await?;
+    let pages = self.discover_pages().await?;
     for page in &pages {
       let _ = page.inner.evaluate("localStorage.clear()").await;
     }
@@ -1243,7 +1295,7 @@ impl ContextRef {
       state.set_context_options(&composite, opts.clone());
       opts
     };
-    let pages = Box::pin(self.pages()).await?;
+    let pages = Box::pin(self.discover_pages()).await?;
     for page in pages {
       Box::pin(page.apply_context_options(&updated)).await?;
     }
@@ -1284,7 +1336,7 @@ impl ContextRef {
       .traced("clearPermissions", serde_json::json!({}), async {
         // Reset via the backend's `Browser.resetPermissions` on every
         // page, then drop the list from the options bag.
-        let pages = self.pages().await?;
+        let pages = self.discover_pages().await?;
         for page in &pages {
           page.inner().reset_permissions().await?;
         }
@@ -1843,7 +1895,7 @@ impl ContextRef {
       opts.http_credentials.clone_from(&credentials);
       state.set_context_options(&composite, opts);
     }
-    let pages = self.pages().await?;
+    let pages = self.discover_pages().await?;
     for page in pages {
       page.set_http_credentials(credentials.clone()).await?;
     }

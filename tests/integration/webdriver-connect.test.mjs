@@ -291,12 +291,12 @@ server.server_close()
         const browser = await safari().connect('http://127.0.0.1:${port}', {timeout: 1000});
         try {
           const context = browser.contexts()[0];
-          const old = (await context.pages())[0];
-          const discovered = await context.pages();
+          const old = (await context.discoverPages())[0];
+          const discovered = await context.discoverPages();
           const count = discovered.length;
-          const afterClose = (await context.pages()).length;
+          const afterClose = (await context.discoverPages()).length;
           const oldClosed = old.isClosed(), newOpen = !discovered[1].isClosed();
-          const replacement = (await context.pages()).length;
+          const replacement = (await context.discoverPages()).length;
           return {count, afterClose, oldClosed, newOpen, replacement, replacedClosed: discovered[1].isClosed()};
         } finally {await browser.close();}
       `,

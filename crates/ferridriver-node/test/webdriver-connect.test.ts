@@ -189,17 +189,21 @@ test("Classic context pages discovers reordered handles and removes closed tabs"
     const browser = await safari().connect(mock.endpoint, { timeout: 1000 });
     try {
       const context = browser.contexts()[0];
-      const old = (await context.pages())[0];
+      const old = (await context.discoverPages())[0];
       handles = ["new", "old"];
-      const discovered = await context.pages();
+      // A classic session is not told of a window it did not open:
+      // pages() is what it knows, discoverPages() asks the browser.
+      expect(context.pages().length).toBe(1);
+      const discovered = await context.discoverPages();
       expect(discovered.length).toBe(2);
+      expect(context.pages().length).toBe(2);
       expect(old.isClosed()).toBe(false);
       handles = ["new"];
-      expect((await context.pages()).length).toBe(1);
+      expect((await context.discoverPages()).length).toBe(1);
       expect(old.isClosed()).toBe(true);
       expect(discovered[1].isClosed()).toBe(false);
       handles = ["replacement"];
-      expect((await context.pages()).length).toBe(1);
+      expect((await context.discoverPages()).length).toBe(1);
       expect(discovered[1].isClosed()).toBe(true);
     } finally { await browser.close(); }
   } finally { mock.server.stop(true); }

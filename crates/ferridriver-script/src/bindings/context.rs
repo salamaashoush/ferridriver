@@ -733,18 +733,20 @@ impl BrowserContextJs {
 
   /// Playwright: `browserContext.pages(): Page[]` —
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts`.
-  /// All open pages in this context (Rust core resolves them from the
-  /// browser state, so the list is a promise here).
+  /// The pages open in this context, in the order they were opened.
   #[qjs(rename = "pages")]
-  pub async fn pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    use rquickjs::IntoJs;
-    let pages = self.inner.pages().await.into_js_with(&ctx)?;
-    let arr = rquickjs::Array::new(ctx.clone())?;
-    for (i, page) in pages.into_iter().enumerate() {
-      let instance = crate::bindings::identity::page_object(&ctx, page)?;
-      arr.set(i, instance)?;
-    }
-    arr.into_js(&ctx)
+  pub fn pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Array<'js>> {
+    page_array(&ctx, self.inner.pages())
+  }
+
+  /// [`Self::pages`] after asking the browser which windows it has. A
+  /// classic `WebDriver` session is not told of a window opened behind
+  /// its back, or of one that closed; every other backend is, and this
+  /// only waits for it. Not in Playwright, which drives no such browser.
+  #[qjs(rename = "discoverPages")]
+  pub async fn discover_pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Array<'js>> {
+    let pages = self.inner.discover_pages().await.into_js_with(&ctx)?;
+    page_array(&ctx, pages)
   }
 
   // ── Video recording ────────────────────────────────────────────────────
@@ -1076,6 +1078,15 @@ impl BrowserContextJs {
       },
     }
   }
+}
+
+/// Pages as the objects that already stand for them.
+fn page_array<'js>(ctx: &Ctx<'js>, pages: Vec<Arc<ferridriver::Page>>) -> rquickjs::Result<rquickjs::Array<'js>> {
+  let array = rquickjs::Array::new(ctx.clone())?;
+  for (index, page) in pages.into_iter().enumerate() {
+    array.set(index, crate::bindings::identity::page_object(ctx, page)?)?;
+  }
+  Ok(array)
 }
 
 /// The `urls?: string | string[]` of `cookies()`.

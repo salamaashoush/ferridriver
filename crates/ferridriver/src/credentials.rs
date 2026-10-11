@@ -304,7 +304,7 @@ impl Credentials {
     let script = self.context.add_init_script_source(WEBAUTHN_JS.to_string()).await?;
     *installed = Some((binding, script));
     drop(installed);
-    for page in self.context.pages().await? {
+    for page in self.context.discover_pages().await? {
       for frame in page.frames() {
         let _ = frame
           .evaluate_untraced(WEBAUTHN_JS, crate::protocol::SerializedArgument::default(), Some(false))

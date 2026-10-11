@@ -920,7 +920,7 @@ fn wants_page_snapshot<E>(result: &Result<Result<(), TestFailure>, E>, test_info
 /// The first page of the test's context, as an AI-mode aria snapshot,
 /// within the five seconds upstream gives it.
 async fn take_page_snapshot(context: Option<Arc<ferridriver::ContextRef>>) -> Option<String> {
-  let page = context?.pages().await.ok()?.into_iter().next()?;
+  let page = context?.discover_pages().await.ok()?.into_iter().next()?;
   let options = ferridriver::options::AriaSnapshotOptions {
     mode: Some(ferridriver::options::AriaSnapshotMode::Ai),
     timeout: Some(5000),

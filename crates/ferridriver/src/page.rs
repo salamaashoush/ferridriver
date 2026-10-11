@@ -4652,11 +4652,13 @@ impl Page {
     // Remove closed page from context's page list so context.pages() stays accurate.
     if let Some(ctx) = &self.context_ref {
       let mut state = ctx.state.write().await;
+      let context_pages = state.context_pages.clone();
       if let Ok(browser_ctx) = state.context_mut_checked(&ctx.name) {
         browser_ctx.pages.retain(|p| !p.is_closed());
         if browser_ctx.active_page_idx >= browser_ctx.pages.len() && !browser_ctx.pages.is_empty() {
           browser_ctx.active_page_idx = browser_ctx.pages.len() - 1;
         }
+        context_pages.set(&ctx.key.to_composite(), &browser_ctx.pages);
       }
     }
 

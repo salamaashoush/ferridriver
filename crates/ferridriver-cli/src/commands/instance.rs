@@ -97,7 +97,7 @@ pub async fn provision_instance(
     browser.default_context()
   };
   let existing = if created_session {
-    ctx_ref.pages().await?
+    ctx_ref.discover_pages().await?
   } else {
     Vec::new()
   };
