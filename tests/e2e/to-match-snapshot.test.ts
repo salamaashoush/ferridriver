@@ -52,8 +52,11 @@ describe('toMatchSnapshot', () => {
   test('path segments name the file and an unnamed Buffer takes its image extension', async ({ page }, testInfo) => {
     expect('nested').toMatchSnapshot(['group', 'nested.txt']);
     expect(existsSync(testInfo.snapshotPath('group', 'nested.txt'))).toBe(true);
-    await page.setContent('<p>shot</p>');
-    expect(await page.screenshot()).toMatchSnapshot();
+    // A flat block rather than text: glyph antialiasing follows the
+    // system appearance, and this test is about how the file is named.
+    await page.setViewportSize({ width: 120, height: 60 });
+    await page.setContent('<style>html,body{margin:0;background:#fff}</style><div style="width:40px;height:20px;background:#0a0"></div>');
+    expect(await page.screenshot({ scale: 'css' })).toMatchSnapshot();
     expect(existsSync(testInfo.snapshotPath(`${testInfo.titlePath.slice(1).join('-').replace(/[^\w-]+/g, '-')}-1.png`)))
       .toBe(true);
   });
