@@ -489,7 +489,7 @@ impl ContextRef {
       apply_context_options(&page, opts).await?;
       self.install_record_har(opts).await;
 
-      self.hydrate_storage_state(opts, &page).await?;
+      self.hydrate_storage_state(opts).await?;
     }
 
     // If the context was configured with `recordVideo`, spawn the
@@ -835,16 +835,25 @@ impl ContextRef {
 
     let pages = self.pages().await?;
     let mut origins: Vec<crate::options::OriginState> = Vec::new();
-    let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-
-    for page in &pages {
-      let collect = crate::selectors::storage_script_call(
+    // Origins whose storage has been read, with or without anything in it.
+    let mut read: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    let collect = |page: &Page| {
+      crate::selectors::storage_script_call(
         page.inner.kind(),
         &format!(
           "script.collect({{ indexedDB: {indexed_db}, opfs: {file_system} }}).then(storage => ({{ origin: location.origin, ...storage }}))"
         ),
-      );
-      let raw = match page.inner.evaluate(&collect).await {
+      )
+    };
+    let parse = |raw: &serde_json::Value| {
+      raw
+        .as_str()
+        .and_then(|s| serde_json::from_str::<crate::options::OriginState>(s).ok())
+        .filter(|state| !state.origin.is_empty() && state.origin != "null")
+    };
+
+    for page in &pages {
+      let raw = match page.inner.evaluate(&collect(page)).await {
         Ok(Some(raw)) => raw,
         // What was asked for and could not be read is an error, as it is
         // upstream once the origin is retried on a blank page. Anything
@@ -853,16 +862,41 @@ impl ContextRef {
         Err(error) if error.to_string().contains("Unable to serialize") => return Err(error),
         Ok(None) | Err(_) => continue,
       };
-      let parsed: Option<crate::options::OriginState> = raw
-        .as_str()
-        .and_then(|s| serde_json::from_str::<crate::options::OriginState>(s).ok());
-      let Some(state) = parsed else { continue };
-      if state.origin.is_empty() || state.origin == "null" || !state.has_storage() {
-        continue;
-      }
-      if seen.insert(state.origin.clone()) {
+      let Some(state) = parse(&raw) else { continue };
+      if read.insert(state.origin.clone()) && state.has_storage() {
         origins.push(state);
       }
+    }
+
+    // Playwright's `visitOrigins`: what the context visited and no live
+    // page is on any more (a closed page, a page that navigated away, a
+    // cross-origin frame) is read from a page of its own.
+    let unread: Vec<String> = self
+      .state
+      .read()
+      .await
+      .visited_origins
+      .of(&self.key.to_composite())
+      .into_iter()
+      .filter(|origin| !read.contains(origin))
+      .collect();
+    if !unread.is_empty() && self.is_open().await {
+      let page = self.open_storage_page().await?;
+      let visited = async {
+        for origin in &unread {
+          page.goto_blank_origin(origin).await?;
+          let Some(raw) = page.inner.evaluate(&collect(&page)).await? else {
+            continue;
+          };
+          if let Some(state) = parse(&raw).filter(crate::options::OriginState::has_storage) {
+            origins.push(state);
+          }
+        }
+        Ok::<(), crate::error::FerriError>(())
+      }
+      .await;
+      let _ = page.close_impl(None).await;
+      visited?;
     }
 
     let credentials = match opts.as_ref().and_then(|o| o.credentials) {
@@ -924,14 +958,79 @@ impl ContextRef {
       let _ = page.inner.evaluate("localStorage.clear()").await;
     }
 
-    // Apply the new state through a page (Playwright applies cookies +
-    // per-origin localStorage). Reuse an existing page or open one.
-    let page = match pages.into_iter().next() {
-      Some(p) => p,
-      None => Box::pin(self.new_page()).await?,
-    };
-    page.set_storage_state(state).await?;
+    // A context opens in the browser with its first page.
+    if pages.is_empty() && !self.is_open().await {
+      Box::pin(self.new_page()).await?;
+    }
+    Box::pin(self.restore_storage_state(state, true)).await?;
     self.credentials().restore(state_credentials(state)?).await
+  }
+
+  /// Write `state` into the context through a page of its own, as
+  /// Playwright's `setStorageState` does: cookies, then each origin's
+  /// storage from a document of that origin. With `reset`, every origin
+  /// the context visited is emptied too, so what `state` holds is all
+  /// that remains.
+  async fn restore_storage_state(&self, state: &serde_json::Value, reset: bool) -> Result<()> {
+    let composite = self.key.to_composite();
+    let entries: Vec<(&str, &serde_json::Value)> = state
+      .get("origins")
+      .and_then(|v| v.as_array())
+      .into_iter()
+      .flatten()
+      .filter_map(|entry| {
+        let origin = entry.get("origin").and_then(|v| v.as_str())?;
+        (!origin.is_empty()).then_some((origin, entry))
+      })
+      .collect();
+    let emptied: Vec<String> = if reset {
+      let visited = self.state.read().await.visited_origins.of(&composite);
+      visited
+        .into_iter()
+        .filter(|origin| !entries.iter().any(|(restored, _)| restored == origin))
+        .collect()
+    } else {
+      Vec::new()
+    };
+
+    let page = self.open_storage_page().await?;
+    let restored = async {
+      page.restore_cookies(state).await?;
+      for origin in &emptied {
+        page.restore_origin_storage(origin, None).await?;
+      }
+      for (origin, entry) in &entries {
+        page.restore_origin_storage(origin, Some(entry)).await?;
+      }
+      Ok::<(), crate::error::FerriError>(())
+    }
+    .await;
+    let _ = page.close_impl(None).await;
+    restored?;
+
+    self
+      .state
+      .read()
+      .await
+      .visited_origins
+      .replace(&composite, entries.iter().map(|(origin, _)| (*origin).to_string()));
+    Ok(())
+  }
+
+  /// A page of this context that nothing else is told about: it is in
+  /// no page list, raises no `page` event, and carries none of the
+  /// context's routes, scripts or recordings. Playwright's
+  /// `newPage(forStorageState)`, for reading and writing storage from a
+  /// document of each origin without borrowing a page the caller holds.
+  async fn open_storage_page(&self) -> Result<Arc<Page>> {
+    let plan = self.state.read().await.page_open_plan(&self.key)?;
+    let page = Box::pin(
+      plan
+        .browser
+        .new_page("about:blank", plan.browser_context_id.as_deref(), None),
+    )
+    .await?;
+    Ok(Page::new(page))
   }
 
   /// Add cookies to this context.
@@ -1222,7 +1321,7 @@ impl ContextRef {
   /// the same context inherit them (cookies are context-scoped,
   /// localStorage persists per origin). Mirrors Playwright's
   /// `server/browserContext.ts::setStorageState`.
-  async fn hydrate_storage_state(&self, opts: &crate::options::BrowserContextOptions, page: &Arc<Page>) -> Result<()> {
+  async fn hydrate_storage_state(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     let Some(storage) = opts.storage_state.as_ref() else {
       return Ok(());
     };
@@ -1233,7 +1332,7 @@ impl ContextRef {
     if !should_hydrate {
       return Ok(());
     }
-    page.set_storage_state(&storage_state_value(storage)?).await
+    Box::pin(self.restore_storage_state(&storage_state_value(storage)?, false)).await
   }
 
   /// Whether the context has opened in the browser, which it does with

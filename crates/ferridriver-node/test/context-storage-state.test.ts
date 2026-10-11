@@ -102,6 +102,22 @@ for (const backend of BACKENDS) {
       }
     });
 
+    it("keeps an origin whose page has closed, without opening a page of the context", async () => {
+      const context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        await page.goto(testUrl);
+        await page.evaluate("localStorage.setItem('token', 'kept')");
+        await page.close();
+        expect((await context.pages()).length).toBe(0);
+        const state = await context.storageState();
+        expect(state.origins).toEqual([{ origin: testUrl, localStorage: [{ name: "token", value: "kept" }] }]);
+        expect((await context.pages()).length).toBe(0);
+      } finally {
+        await context.close();
+      }
+    });
+
     it("omits origins with empty localStorage", async () => {
       const ctx = browser.newContext();
       try {

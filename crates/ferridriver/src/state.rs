@@ -459,6 +459,11 @@ pub struct BrowserState {
   /// origin across subsequent pages). Mirrors Playwright's
   /// "set storage state once at context creation".
   pub storage_state_hydrated: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+  /// The http(s) origins each context's frames have committed a document
+  /// of, or were restored a storage state for: Playwright's
+  /// `BrowserContext._origins`. `storageState()` reads the ones no live
+  /// page is on through a page of its own.
+  pub visited_origins: VisitedOrigins,
   /// Contexts whose `recordHar` recorder has been installed. Same
   /// once-per-context reason as `storage_state_hydrated`: the option
   /// bag is applied on every page, and the archive covers the context.
@@ -567,6 +572,7 @@ impl BrowserState {
       clock_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
+      visited_origins: VisitedOrigins::default(),
       record_har_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
       popup_pumps: HashMap::default(),
@@ -1936,6 +1942,7 @@ impl BrowserState {
     // fanned out here.
     let composite = key.to_composite();
     let context_events = self.get_or_create_context_events(&composite);
+    let visited_origins = self.visited_origins.clone();
 
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut(&key.context);
@@ -1987,6 +1994,7 @@ impl BrowserState {
             }
           },
           PageEvent::FrameNavigated(info) => {
+            visited_origins.visit(&composite, &info.url);
             if let Some(page) = upgrade() {
               emit(ContextEvent::FrameNavigated {
                 page,
@@ -2151,6 +2159,7 @@ impl BrowserState {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .remove(composite);
+    self.visited_origins.forget(composite);
     self
       .record_har_installed
       .lock()
@@ -3399,6 +3408,60 @@ fn find_playwright_chrome() -> Option<String> {
   None
 }
 
+/// Per-context visited origins, by composite session key. Shared with the
+/// tasks that watch each page, so it sits outside the state lock.
+#[derive(Clone, Default)]
+pub struct VisitedOrigins {
+  by_context: Arc<std::sync::Mutex<HashMap<String, std::collections::BTreeSet<String>>>>,
+}
+
+impl VisitedOrigins {
+  fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, std::collections::BTreeSet<String>>> {
+    self
+      .by_context
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// Record the origin of a document a frame of `composite` committed.
+  /// Only http(s) documents have storage to speak of, as in Playwright's
+  /// `Frame.origin()`.
+  pub fn visit(&self, composite: &str, url: &str) {
+    if let Some(origin) = http_origin(url) {
+      self.lock().entry(composite.to_string()).or_default().insert(origin);
+    }
+  }
+
+  /// The origins of `composite`, in a stable order.
+  #[must_use]
+  pub fn of(&self, composite: &str) -> Vec<String> {
+    self
+      .lock()
+      .get(composite)
+      .map(|origins| origins.iter().cloned().collect())
+      .unwrap_or_default()
+  }
+
+  /// Replace the origins of `composite`, as restoring a storage state
+  /// does: what it wrote is all the context has.
+  pub fn replace(&self, composite: &str, origins: impl IntoIterator<Item = String>) {
+    self.lock().insert(composite.to_string(), origins.into_iter().collect());
+  }
+
+  fn forget(&self, composite: &str) {
+    self.lock().remove(composite);
+  }
+}
+
+/// The origin of an http(s) URL; `None` for every other scheme.
+fn http_origin(url: &str) -> Option<String> {
+  if !url.starts_with("http") {
+    return None;
+  }
+  let origin = reqwest::Url::parse(url).ok()?.origin();
+  origin.is_tuple().then(|| origin.ascii_serialization())
+}
+
 #[cfg(test)]
 mod discovery_tests {
   use super::{discover_ws_from_http, parse_devtools_active_port};
@@ -4145,5 +4208,31 @@ mod tests {
     let _ = Box::pin(state.ensure_instance("test")).await;
     // Resolver was called exactly once (regardless of whether launch succeeded)
     assert_eq!(call_count.load(Ordering::Relaxed), 1);
+  }
+}
+
+#[cfg(test)]
+mod visited_origin_tests {
+  use super::VisitedOrigins;
+
+  #[test]
+  fn only_http_origins_are_kept_per_context() {
+    let visited = VisitedOrigins::default();
+    visited.visit("a", "https://example.com/login?next=/");
+    visited.visit("a", "http://127.0.0.1:8080/x");
+    visited.visit("a", "https://example.com/other");
+    visited.visit("a", "about:blank");
+    visited.visit("a", "data:text/html,<p>x</p>");
+    visited.visit("a", "file:///tmp/report.html");
+    visited.visit("b", "https://acme.test/");
+    assert_eq!(visited.of("a"), ["http://127.0.0.1:8080", "https://example.com"]);
+    assert_eq!(visited.of("b"), ["https://acme.test"]);
+    assert_eq!(visited.of("c"), Vec::<String>::new());
+
+    visited.replace("a", ["https://acme.test".to_string()]);
+    assert_eq!(visited.of("a"), ["https://acme.test"]);
+    visited.forget("a");
+    assert_eq!(visited.of("a"), Vec::<String>::new());
+    assert_eq!(visited.of("b"), ["https://acme.test"]);
   }
 }

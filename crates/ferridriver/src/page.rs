@@ -2935,80 +2935,96 @@ impl Page {
   ///
   /// Returns an error if cookies or localStorage cannot be restored.
   pub async fn set_storage_state(&self, state: &serde_json::Value) -> Result<()> {
-    // Restore cookies.
-    if let Some(cookies) = state.get("cookies").and_then(|v| v.as_array()) {
-      for c in cookies {
-        let cookie = CookieData {
-          name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          domain: c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          path: c.get("path").and_then(|v| v.as_str()).unwrap_or("/").to_string(),
-          secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
-          http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
-          expires: c.get("expires").and_then(serde_json::Value::as_f64),
-          same_site: c
-            .get("sameSite")
-            .and_then(|v| v.as_str())
-            .and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
-          url: None,
-        };
-        self.inner.set_cookie(cookie).await?;
-      }
-    }
-
-    // Restore each origin through Playwright's `StorageScript.restore`,
-    // from a document of that origin: it empties the origin's storage and
-    // puts back `localStorage`, `IndexedDB` and the private file system.
+    self.restore_cookies(state).await?;
     if let Some(origins) = state.get("origins").and_then(|v| v.as_array()) {
       for origin_entry in origins {
         let origin = origin_entry.get("origin").and_then(|v| v.as_str()).unwrap_or("");
         if origin.is_empty() {
           continue;
         }
-        // A network error page has an opaque origin. Restore storage without
-        // depending on the origin's server serving a successful root document.
-        let current_origin = self
-          .inner
-          .evaluate("location.origin")
-          .await
-          .ok()
-          .flatten()
-          .and_then(|v| v.as_str().map(str::to_string))
-          .unwrap_or_default();
-        if current_origin != origin {
-          let matcher = crate::url_matcher::UrlMatcher::glob(format!("{origin}/**"))?;
-          let handler: crate::route::RouteHandler = Arc::new(|route| {
-            route.fulfill(crate::route::FulfillResponse {
-              status: 200,
-              content_type: Some("text/html".into()),
-              body: b"<!doctype html><html></html>".to_vec(),
-              ..Default::default()
-            });
-          });
-          let handler_id = crate::route::route_handler_id(&handler);
-          self
-            .inner
-            .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, Some(1)))
-            .await?;
-          let navigation = self
-            .inner
-            .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
-            .await;
-          let cleanup = self
-            .inner
-            .unroute(&matcher, crate::route::RouteScope::Page, Some(handler_id))
-            .await;
-          navigation?;
-          cleanup?;
-        }
-        let restore = crate::selectors::storage_script_call(
-          self.inner.kind(),
-          &format!("script.restore({origin_entry}).then(() => true)"),
-        );
-        self.inner.evaluate(&restore).await?;
+        self.restore_origin_storage(origin, Some(origin_entry)).await?;
       }
     }
+    Ok(())
+  }
 
+  /// Add the cookies of a storage state to this page's context.
+  pub(crate) async fn restore_cookies(&self, state: &serde_json::Value) -> Result<()> {
+    let Some(cookies) = state.get("cookies").and_then(|v| v.as_array()) else {
+      return Ok(());
+    };
+    for c in cookies {
+      let cookie = CookieData {
+        name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        domain: c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        path: c.get("path").and_then(|v| v.as_str()).unwrap_or("/").to_string(),
+        secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        expires: c.get("expires").and_then(serde_json::Value::as_f64),
+        same_site: c
+          .get("sameSite")
+          .and_then(|v| v.as_str())
+          .and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
+        url: None,
+      };
+      self.inner.set_cookie(cookie).await?;
+    }
+    Ok(())
+  }
+
+  /// Put this page on an empty document of `origin`, which is what
+  /// reading or writing that origin's storage takes. The document is
+  /// served here: a network error page has an opaque origin, and the
+  /// origin's own server need not answer at its root.
+  pub(crate) async fn goto_blank_origin(&self, origin: &str) -> Result<()> {
+    let current_origin = self
+      .inner
+      .evaluate("location.origin")
+      .await
+      .ok()
+      .flatten()
+      .and_then(|v| v.as_str().map(str::to_string))
+      .unwrap_or_default();
+    if current_origin == origin {
+      return Ok(());
+    }
+    let matcher = crate::url_matcher::UrlMatcher::glob(format!("{origin}/**"))?;
+    let handler: crate::route::RouteHandler = Arc::new(|route| {
+      route.fulfill(crate::route::FulfillResponse {
+        status: 200,
+        content_type: Some("text/html".into()),
+        body: b"<!doctype html><html></html>".to_vec(),
+        ..Default::default()
+      });
+    });
+    let handler_id = crate::route::route_handler_id(&handler);
+    self
+      .inner
+      .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, Some(1)))
+      .await?;
+    let navigation = self
+      .inner
+      .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
+      .await;
+    let cleanup = self
+      .inner
+      .unroute(&matcher, crate::route::RouteScope::Page, Some(handler_id))
+      .await;
+    navigation?;
+    cleanup
+  }
+
+  /// Run Playwright's `StorageScript.restore` for `origin` from a
+  /// document of that origin: it empties the origin's storage and puts
+  /// back the `localStorage`, `IndexedDB` and private file system of
+  /// `entry`, or nothing when the state has no entry for the origin.
+  pub(crate) async fn restore_origin_storage(&self, origin: &str, entry: Option<&serde_json::Value>) -> Result<()> {
+    self.goto_blank_origin(origin).await?;
+    let entry = entry.map_or_else(|| String::from("undefined"), ToString::to_string);
+    let restore =
+      crate::selectors::storage_script_call(self.inner.kind(), &format!("script.restore({entry}).then(() => true)"));
+    self.inner.evaluate(&restore).await?;
     Ok(())
   }
 
