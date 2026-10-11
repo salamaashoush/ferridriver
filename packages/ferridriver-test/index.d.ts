@@ -1920,11 +1920,36 @@ export interface Cookie {
   sameSite?: 'Strict' | 'Lax' | 'None';
 }
 
+/** One IndexedDB database of an origin, as Playwright's `storageState` writes it. */
+export interface IndexedDBDatabase {
+  name: string;
+  version: number;
+  stores: Array<{
+    name: string;
+    autoIncrement: boolean;
+    keyPath?: string;
+    keyPathArray?: string[];
+    records: Array<{ key?: unknown; keyEncoded?: unknown; value?: unknown; valueEncoded?: unknown }>;
+    indexes: Array<{ name: string; keyPath?: string; keyPathArray?: string[]; multiEntry: boolean; unique: boolean }>;
+  }>;
+}
+
+/** One file or directory of an origin's private file system. */
+export interface OPFSEntry {
+  path: string;
+  type: 'file' | 'directory';
+  base64?: string;
+}
+
 export interface StorageState {
   cookies: Cookie[];
   origins: Array<{
     origin: string;
     localStorage: Array<{ name: string; value: string }>;
+    /** Present when asked for with `storageState({ indexedDB: true })`. */
+    indexedDB?: IndexedDBDatabase[];
+    /** Present when asked for with `storageState({ opfs: true })`. */
+    opfs?: OPFSEntry[];
   }>;
   credentials?: VirtualCredential[];
 }
@@ -1966,7 +1991,7 @@ export interface BrowserContext {
   setGeolocation(geolocation: { latitude: number; longitude: number; accuracy?: number } | null): Promise<void>;
   setOffline(offline: boolean): Promise<void>;
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
-  storageState(options?: { path?: string; indexedDB?: boolean; credentials?: boolean }): Promise<StorageState>;
+  storageState(options?: { path?: string; indexedDB?: boolean; opfs?: boolean; credentials?: boolean }): Promise<StorageState>;
   addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown, options?: EvaluateOptions): Promise<Disposable>;
   // Context-level expose returns a Disposable that unregisters the
   // binding and removes the page-side window proxy (a ferridriver

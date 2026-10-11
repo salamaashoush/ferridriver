@@ -194,20 +194,22 @@ impl BrowserContext {
 
   // ── Storage state ──
 
-  /// Playwright: `context.storageState(options?: { path?, indexedDB? })
-  ///   : Promise<{ cookies, origins }>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`).
-  /// Exports cookies + per-origin localStorage. `path` writes the JSON to disk;
-  /// `indexedDB` is accepted for parity but IndexedDB is not yet collected.
+  /// Playwright: `context.storageState(options?: { path?, indexedDB?,
+  ///   opfs?, credentials? }): Promise<StorageState>`
+  /// (`packages/playwright-core/src/client/browserContext.ts`). Exports
+  /// cookies and per-origin `localStorage`, plus `IndexedDB` and the
+  /// origin private file system when asked for. `path` writes the JSON
+  /// to disk.
   #[napi]
   pub async fn storage_state(&self, options: Option<NapiStorageStateOptions>) -> Result<NapiStorageState> {
     let core_opts = options.map(|o| ferridriver::options::StorageStateOptions {
       path: o.path.map(std::path::PathBuf::from),
       indexed_db: o.indexed_db,
+      opfs: o.opfs,
       credentials: o.credentials,
     });
     let state = self.inner.storage_state().maybe_options(core_opts).await.into_napi()?;
-    Ok(NapiStorageState::from(state))
+    NapiStorageState::try_from(state)
   }
 
   /// Playwright: `context.setStorageState(storageState: string |
@@ -1085,13 +1087,16 @@ pub struct NapiViewportSize {
   pub height: f64,
 }
 
-/// NAPI shape for Playwright's `storageState(options?)` —
-/// `{ path?: string, indexedDB?: boolean }`
-/// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`).
+/// NAPI shape for Playwright's `storageState(options?)`:
+/// `{ path?: string, indexedDB?: boolean, opfs?: boolean, credentials?: boolean }`
+/// (`packages/playwright-core/src/client/browserContext.ts`).
 #[napi(object)]
 pub struct NapiStorageStateOptions {
   pub path: Option<String>,
+  // napi would spell this `indexedDb`, a key no caller writes.
+  #[napi(js_name = "indexedDB")]
   pub indexed_db: Option<bool>,
+  pub opfs: Option<bool>,
   pub credentials: Option<bool>,
 }
 
@@ -1102,11 +1107,20 @@ pub struct NapiNameValue {
   pub value: String,
 }
 
-/// Per-origin storage snapshot — Playwright `OriginStorage` (minus indexedDB).
+/// Per-origin storage snapshot — Playwright `OriginStorage`.
 #[napi(object)]
 pub struct NapiOriginState {
   pub origin: String,
   pub local_storage: Vec<NapiNameValue>,
+  /// Present when `storageState` was called with `indexedDB: true`.
+  #[napi(
+    js_name = "indexedDB",
+    ts_type = "Array<{ name: string; version: number; stores: Array<{ name: string; autoIncrement: boolean; keyPath?: string; keyPathArray?: string[]; records: Array<{ key?: any; keyEncoded?: any; value?: any; valueEncoded?: any }>; indexes: Array<{ name: string; keyPath?: string; keyPathArray?: string[]; multiEntry: boolean; unique: boolean }> }> }>"
+  )]
+  pub indexed_db: Option<serde_json::Value>,
+  /// Present when `storageState` was called with `opfs: true`.
+  #[napi(ts_type = "Array<{ path: string; type: 'file' | 'directory'; base64?: string }>")]
+  pub opfs: Option<serde_json::Value>,
 }
 
 /// Result of `context.storageState()` — Playwright `StorageState`.
@@ -1117,14 +1131,27 @@ pub struct NapiStorageState {
   pub credentials: Option<Vec<crate::credentials::VirtualCredential>>,
 }
 
-impl From<ferridriver::options::StorageState> for NapiStorageState {
-  fn from(s: ferridriver::options::StorageState) -> Self {
-    Self {
-      cookies: s.cookies.iter().map(CookieData::from).collect(),
-      origins: s
-        .origins
-        .into_iter()
-        .map(|o| NapiOriginState {
+impl TryFrom<ferridriver::options::StorageState> for NapiStorageState {
+  type Error = napi::Error;
+
+  fn try_from(s: ferridriver::options::StorageState) -> Result<Self> {
+    let origins = s
+      .origins
+      .into_iter()
+      .map(|o| {
+        Ok(NapiOriginState {
+          indexed_db: o
+            .indexed_db
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(storage_json_error)?,
+          opfs: o
+            .opfs
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(storage_json_error)?,
           origin: o.origin,
           local_storage: o
             .local_storage
@@ -1135,10 +1162,18 @@ impl From<ferridriver::options::StorageState> for NapiStorageState {
             })
             .collect(),
         })
-        .collect(),
+      })
+      .collect::<Result<Vec<_>>>()?;
+    Ok(Self {
+      cookies: s.cookies.iter().map(CookieData::from).collect(),
+      origins,
       credentials: s.credentials.map(|list| list.into_iter().map(Into::into).collect()),
-    }
+    })
   }
+}
+
+fn storage_json_error(error: serde_json::Error) -> napi::Error {
+  napi::Error::from_reason(format!("storageState: {error}"))
 }
 
 impl NapiBrowserContextOptions {

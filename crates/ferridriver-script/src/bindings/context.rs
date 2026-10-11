@@ -184,13 +184,14 @@ impl BrowserContextJs {
       .await
   }
 
-  /// Export the current storage state — cookies + per-origin localStorage.
+  /// Export the current storage state: cookies and per-origin
+  /// `localStorage`, plus `IndexedDB` and the origin private file system
+  /// when asked for.
   ///
-  /// Playwright: `storageState(options?: { path?, indexedDB? })
-  ///   : Promise<{ cookies, origins }>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`).
-  /// `path` writes the JSON to disk; `indexedDB` is accepted for parity but
-  /// IndexedDB is not yet collected.
+  /// Playwright: `storageState(options?: { path?, indexedDB?, opfs?,
+  ///   credentials? }): Promise<StorageState>`
+  /// (`packages/playwright-core/src/client/browserContext.ts`). `path`
+  /// writes the JSON to disk.
   #[qjs(rename = "storageState")]
   pub async fn storage_state<'js>(
     &self,
@@ -204,7 +205,10 @@ impl BrowserContextJs {
         #[serde(rename_all = "camelCase")]
         struct JsStorageStateOptions {
           path: Option<String>,
+          // camelCase would spell this `indexedDb`, a key no caller writes.
+          #[serde(rename = "indexedDB")]
           indexed_db: Option<bool>,
+          opfs: Option<bool>,
           credentials: Option<bool>,
         }
         let core_opts = match options.0 {
@@ -213,6 +217,7 @@ impl BrowserContextJs {
             Some(ferridriver::options::StorageStateOptions {
               path: parsed.path.map(std::path::PathBuf::from),
               indexed_db: parsed.indexed_db,
+              opfs: parsed.opfs,
               credentials: parsed.credentials,
             })
           },

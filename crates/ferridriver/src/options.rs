@@ -2386,6 +2386,90 @@ pub fn matching_http_credentials<'a>(credentials: &'a [HttpCredentials], url: &s
 }
 
 #[cfg(test)]
+mod origin_state_tests {
+  use super::{OpfsEntryKind, OriginState};
+
+  /// The shape Playwright writes (`packages/protocol/src/structs.d.ts`).
+  const WRITTEN: &str = r#"{
+    "origin": "https://example.com",
+    "localStorage": [{ "name": "theme", "value": "dark" }],
+    "indexedDB": [{
+      "name": "library",
+      "version": 2,
+      "stores": [{
+        "name": "books",
+        "autoIncrement": false,
+        "keyPath": "id",
+        "records": [
+          { "value": { "id": 1 } },
+          { "keyEncoded": { "d": "1970-01-01T00:00:00.000Z" }, "valueEncoded": { "o": [], "id": 1 } }
+        ],
+        "indexes": [{ "name": "by_name", "keyPathArray": ["a", "b"], "multiEntry": false, "unique": true }]
+      }]
+    }],
+    "opfs": [
+      { "path": "docs", "type": "directory" },
+      { "path": "docs/note.txt", "type": "file", "base64": "aGk=" }
+    ]
+  }"#;
+
+  #[test]
+  fn an_origin_reads_and_writes_the_shape_playwright_does() {
+    let state: OriginState = serde_json::from_str(WRITTEN).unwrap();
+    let store = &state.indexed_db.as_ref().unwrap()[0].stores[0];
+    assert_eq!(store.key_path.as_deref(), Some("id"));
+    assert_eq!(store.records[0].value, Some(serde_json::json!({ "id": 1 })));
+    assert!(store.records[1].value.is_none() && store.records[1].value_encoded.is_some());
+    assert_eq!(
+      store.indexes[0].key_path_array,
+      Some(vec!["a".to_string(), "b".to_string()])
+    );
+    let opfs = state.opfs.as_ref().unwrap();
+    assert_eq!(
+      (opfs[0].kind, opfs[0].base64.as_deref()),
+      (OpfsEntryKind::Directory, None)
+    );
+    assert_eq!(
+      (opfs[1].kind, opfs[1].base64.as_deref()),
+      (OpfsEntryKind::File, Some("aGk="))
+    );
+
+    let written = serde_json::to_value(&state).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(WRITTEN).unwrap();
+    assert_eq!(written, expected);
+  }
+
+  #[test]
+  fn what_was_not_asked_for_is_left_out_of_the_json() {
+    let state: OriginState =
+      serde_json::from_str(r#"{ "origin": "https://example.com", "localStorage": [] }"#).unwrap();
+    assert!(state.indexed_db.is_none() && state.opfs.is_none());
+    assert_eq!(
+      serde_json::to_value(&state).unwrap(),
+      serde_json::json!({ "origin": "https://example.com", "localStorage": [] })
+    );
+  }
+
+  #[test]
+  fn an_origin_is_kept_for_any_kind_of_storage() {
+    let with = |json: &str| serde_json::from_str::<OriginState>(json).unwrap().has_storage();
+    assert!(!with(r#"{ "origin": "o", "localStorage": [] }"#));
+    assert!(!with(
+      r#"{ "origin": "o", "localStorage": [], "indexedDB": [], "opfs": [] }"#
+    ));
+    assert!(with(
+      r#"{ "origin": "o", "localStorage": [{ "name": "a", "value": "b" }] }"#
+    ));
+    assert!(with(
+      r#"{ "origin": "o", "localStorage": [], "opfs": [{ "path": "d", "type": "directory" }] }"#
+    ));
+    assert!(with(
+      r#"{ "origin": "o", "localStorage": [], "indexedDB": [{ "name": "db", "version": 1, "stores": [] }] }"#
+    ));
+  }
+}
+
+#[cfg(test)]
 mod http_credentials_tests {
   use super::{HttpCredentials, matching_http_credentials};
 
@@ -2575,14 +2659,106 @@ pub enum WebStorageKind {
   Session,
 }
 
-/// Per-origin storage snapshot — `{ origin, localStorage }`.
-/// Mirrors Playwright's `OriginStorage` (protocol channels.d.ts:5158),
-/// minus `indexedDB` (not yet collected — see [`StorageState`]).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Per-origin storage snapshot: `{ origin, localStorage, indexedDB?,
+/// opfs? }`. Mirrors Playwright's `OriginStorage`
+/// (`packages/protocol/src/structs.d.ts`). The last two are present only
+/// when `storageState` was asked for them.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OriginState {
   pub origin: String,
+  #[serde(default)]
   pub local_storage: Vec<NameValue>,
+  #[serde(default, rename = "indexedDB", skip_serializing_if = "Option::is_none")]
+  pub indexed_db: Option<Vec<IndexedDbDatabase>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub opfs: Option<Vec<OpfsEntry>>,
+}
+
+impl OriginState {
+  /// Whether there is anything here worth keeping in a storage state
+  /// (Playwright's `hasStorage`, `server/browserContext.ts`).
+  #[must_use]
+  pub fn has_storage(&self) -> bool {
+    !self.local_storage.is_empty()
+      || self.indexed_db.as_ref().is_some_and(|databases| !databases.is_empty())
+      || self.opfs.as_ref().is_some_and(|entries| !entries.is_empty())
+  }
+}
+
+/// One `IndexedDB` database of an origin. Mirrors Playwright's
+/// `IndexedDBDatabase` (`packages/protocol/src/structs.d.ts`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDbDatabase {
+  pub name: String,
+  pub version: u64,
+  pub stores: Vec<IndexedDbStore>,
+}
+
+/// One object store of an [`IndexedDbDatabase`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDbStore {
+  pub name: String,
+  pub auto_increment: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key_path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key_path_array: Option<Vec<String>>,
+  pub records: Vec<IndexedDbRecord>,
+  pub indexes: Vec<IndexedDbIndex>,
+}
+
+/// One record of an [`IndexedDbStore`]. A key or value that is plain JSON
+/// is held as it is; anything richer (a `Date`, a typed array, a cycle)
+/// is held in Playwright's evaluate-argument encoding, which only the
+/// page-side script reads back.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDbRecord {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key_encoded: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub value: Option<serde_json::Value>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub value_encoded: Option<serde_json::Value>,
+}
+
+/// One index of an [`IndexedDbStore`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDbIndex {
+  pub name: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key_path: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub key_path_array: Option<Vec<String>>,
+  pub multi_entry: bool,
+  pub unique: bool,
+}
+
+/// One file or directory of an origin's private file system. Mirrors
+/// Playwright's `OPFSEntry` (`packages/protocol/src/structs.d.ts`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OpfsEntry {
+  /// Path from the root, `/`-separated.
+  pub path: String,
+  #[serde(rename = "type")]
+  pub kind: OpfsEntryKind,
+  /// A file's contents; absent for a directory.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub base64: Option<String>,
+}
+
+/// What an [`OpfsEntry`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpfsEntryKind {
+  File,
+  Directory,
 }
 
 /// The state EXPORTED by `context.storageState()` — `{ cookies, origins }`.
@@ -2591,9 +2767,8 @@ pub struct OriginState {
 /// Serializes to the same JSON shape consumed by [`StorageStateInput`], so a
 /// round-trip (export -> `new_context` `storageState`) preserves state.
 ///
-/// `indexedDB` is intentionally NOT collected yet; Playwright gates it behind
-/// `storageState({ indexedDB: true })`. We accept the option for signature
-/// parity but always emit an empty `IndexedDB` set.
+/// `IndexedDB` and the origin private file system are in an origin's entry
+/// only when asked for (`storageState({ indexedDB: true, opfs: true })`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StorageState {
   pub cookies: Vec<crate::backend::CookieData>,
@@ -2605,15 +2780,17 @@ pub struct StorageState {
 }
 
 /// Options for `context.storageState(options?)`.
-/// `{ path?: string, indexedDB?: boolean }` —
-/// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`.
+/// `{ path?: string, indexedDB?: boolean, opfs?: boolean, credentials?: boolean }`
+/// (`packages/playwright-core/src/client/browserContext.ts`).
 #[derive(Debug, Clone, Default)]
 pub struct StorageStateOptions {
   /// Write the JSON-serialized state to this file (pretty-printed, 2-space).
   pub path: Option<std::path::PathBuf>,
-  /// Collect `IndexedDB` databases as well. Not yet implemented; accepted for
-  /// signature parity. When `true`, the export is unaffected (empty set).
+  /// Collect each origin's `IndexedDB` databases as well.
   pub indexed_db: Option<bool>,
+  /// Collect each origin's private file system as well. An engine that
+  /// has none for the context fails the call rather than leaving it out.
+  pub opfs: Option<bool>,
   /// Include the context's `WebAuthn` credentials.
   pub credentials: Option<bool>,
 }
@@ -3392,6 +3569,7 @@ mod storage_state_tests {
           name: "token".into(),
           value: "t1".into(),
         }],
+        ..OriginState::default()
       }],
       credentials: None,
     };

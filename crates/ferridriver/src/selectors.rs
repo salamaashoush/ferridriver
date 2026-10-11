@@ -724,6 +724,27 @@ pub(crate) const UTILITY_SCRIPT_JS: &str = include_str!("injected/dist/utility-s
 pub(crate) const MCP_SUPPORT_JS: &str = include_str!("injected/dist/mcp-support.min.js");
 pub(crate) const AX_SUPPORT_JS: &str = include_str!("injected/dist/ax-support.min.js");
 
+/// Playwright's `StorageScript` class, as an expression. It collects and
+/// restores an origin's `localStorage`, `IndexedDB` and private file
+/// system from inside a page of that origin.
+pub(crate) const STORAGE_SCRIPT_JS: &str = include_str!("injected/dist/storage.min.js");
+
+/// `expression` run with a `StorageScript` for `browser` bound to
+/// `script`, its result awaited and stringified so every backend ships
+/// it back as one flat string.
+pub(crate) fn storage_script_call(browser: crate::backend::BackendKind, expression: &str) -> String {
+  let name = match browser {
+    crate::backend::BackendKind::Bidi => "firefox",
+    crate::backend::BackendKind::WebKit => "webkit",
+    crate::backend::BackendKind::CdpPipe
+    | crate::backend::BackendKind::CdpWs
+    | crate::backend::BackendKind::WebDriver => "chromium",
+  };
+  format!(
+    "(async () => {{ const script = new ({STORAGE_SCRIPT_JS})({name:?}); return JSON.stringify(await ({expression})); }})()"
+  )
+}
+
 /// On-demand aria-template parser (`window.__fdAria`). Evaluated only by
 /// [`crate::Locator::match_aria_snapshot`] — it carries the `yaml`
 /// library, which has no business in the always-injected engine.

@@ -2943,60 +2943,56 @@ impl Page {
       }
     }
 
-    // Restore per-origin localStorage (Playwright format).
+    // Restore each origin through Playwright's `StorageScript.restore`,
+    // from a document of that origin: it empties the origin's storage and
+    // puts back `localStorage`, `IndexedDB` and the private file system.
     if let Some(origins) = state.get("origins").and_then(|v| v.as_array()) {
       for origin_entry in origins {
         let origin = origin_entry.get("origin").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(items) = origin_entry.get("localStorage").and_then(|v| v.as_array()) {
-          // A network error page has an opaque origin. Restore storage without
-          // depending on the origin's server serving a successful root document.
-          let current_origin = self
-            .inner
-            .evaluate("location.origin")
-            .await
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default();
-          if !origin.is_empty() && current_origin != origin {
-            let matcher = crate::url_matcher::UrlMatcher::glob(format!("{origin}/**"))?;
-            let handler: crate::route::RouteHandler = Arc::new(|route| {
-              route.fulfill(crate::route::FulfillResponse {
-                status: 200,
-                content_type: Some("text/html".into()),
-                body: b"<!doctype html><html></html>".to_vec(),
-                ..Default::default()
-              });
-            });
-            let handler_id = crate::route::route_handler_id(&handler);
-            self
-              .inner
-              .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, Some(1)))
-              .await?;
-            let navigation = self
-              .inner
-              .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
-              .await;
-            let cleanup = self
-              .inner
-              .unroute(&matcher, crate::route::RouteScope::Page, Some(handler_id))
-              .await;
-            navigation?;
-            cleanup?;
-          }
-          for item in items {
-            let key = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let val = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
-            self
-              .inner
-              .evaluate(&format!(
-                "localStorage.setItem('{}', '{}')",
-                crate::steps::js_escape(key),
-                crate::steps::js_escape(val)
-              ))
-              .await?;
-          }
+        if origin.is_empty() {
+          continue;
         }
+        // A network error page has an opaque origin. Restore storage without
+        // depending on the origin's server serving a successful root document.
+        let current_origin = self
+          .inner
+          .evaluate("location.origin")
+          .await
+          .ok()
+          .flatten()
+          .and_then(|v| v.as_str().map(str::to_string))
+          .unwrap_or_default();
+        if current_origin != origin {
+          let matcher = crate::url_matcher::UrlMatcher::glob(format!("{origin}/**"))?;
+          let handler: crate::route::RouteHandler = Arc::new(|route| {
+            route.fulfill(crate::route::FulfillResponse {
+              status: 200,
+              content_type: Some("text/html".into()),
+              body: b"<!doctype html><html></html>".to_vec(),
+              ..Default::default()
+            });
+          });
+          let handler_id = crate::route::route_handler_id(&handler);
+          self
+            .inner
+            .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, Some(1)))
+            .await?;
+          let navigation = self
+            .inner
+            .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
+            .await;
+          let cleanup = self
+            .inner
+            .unroute(&matcher, crate::route::RouteScope::Page, Some(handler_id))
+            .await;
+          navigation?;
+          cleanup?;
+        }
+        let restore = crate::selectors::storage_script_call(
+          self.inner.kind(),
+          &format!("script.restore({origin_entry}).then(() => true)"),
+        );
+        self.inner.evaluate(&restore).await?;
       }
     }
 

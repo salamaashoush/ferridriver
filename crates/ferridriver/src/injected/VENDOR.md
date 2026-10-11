@@ -30,11 +30,12 @@ cd crates/ferridriver/src/injected
 for f in domUtils highlight injectedScript layoutSelectorUtils roleSelectorEngine \
          roleUtils selectorEngine selectorEvaluator selectorGenerator selectorUtils \
          utilityScript webSocketMock xpathSelectorEngine ariaSnapshot \
-         ariaSnapshotDistiller clock consoleApi webAuthn; do
+         ariaSnapshotDistiller clock consoleApi webAuthn storageScript; do
   cp /tmp/playwright/packages/injected/src/$f.ts $f.ts
 done
-for f in ariaSnapshot ariaSnapshotRenderer cssParser cssTokenizer locatorGenerators \
-         locatorParser locatorUtils selectorParser stringUtils utilityScriptSerializers; do
+for f in ariaSnapshot ariaSnapshotRenderer cssParser cssTokenizer istanbulCoverage \
+         locatorGenerators locatorParser locatorUtils selectorParser stringUtils \
+         utilityScriptSerializers; do
   cp /tmp/playwright/packages/isomorphic/$f.ts isomorphic/$f.ts
 done
 cp /tmp/playwright/packages/injected/src/highlight.css highlight.css
@@ -56,20 +57,21 @@ the Rust side `include_str!`s them.
 `highlight.ts`, `highlight.css`, `injectedScript.ts`,
 `layoutSelectorUtils.ts`, `roleSelectorEngine.ts`, `roleUtils.ts`,
 `selectorEngine.ts`, `selectorEvaluator.ts`, `selectorGenerator.ts`,
-`selectorUtils.ts`, `utilityScript.ts`, `webAuthn.ts`, `webSocketMock.ts`,
-`xpathSelectorEngine.ts`.
+`selectorUtils.ts`, `storageScript.ts`, `utilityScript.ts`, `webAuthn.ts`,
+`webSocketMock.ts`, `xpathSelectorEngine.ts`.
 
 `packages/isomorphic/` → `isomorphic/`: `ariaSnapshot.ts`,
 `ariaSnapshotRenderer.ts`, `cssParser.ts`, `cssTokenizer.ts`,
-`locatorGenerators.ts`, `locatorParser.ts`, `locatorUtils.ts`,
-`selectorParser.ts`, `stringUtils.ts`, `utilityScriptSerializers.ts`.
+`istanbulCoverage.ts`, `locatorGenerators.ts`, `locatorParser.ts`,
+`locatorUtils.ts`, `selectorParser.ts`, `stringUtils.ts`,
+`utilityScriptSerializers.ts`.
 
 ## ferridriver's own
 
 Entry points and support bundles, all built by `build.ts`: `index.ts`
 (the `window.__fd` surface the Rust side calls), `ariaSupport.ts`,
 `axSupport.ts`, `mcpSupport.ts`, `recorderSupport.ts`, `clockEntry.ts`,
-`webAuthnEntry.ts`, `webSocketMockEntry.ts`, `snapshotter_injected.js`, `isomorphic/yaml.ts`,
+`webAuthnEntry.ts`, `webSocketMockEntry.ts`, `storageEntry.ts`, `snapshotter_injected.js`, `isomorphic/yaml.ts`,
 `stubs/`.
 
 `local/` holds code that exists only because a vendored file needs

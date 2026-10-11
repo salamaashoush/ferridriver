@@ -115,6 +115,116 @@ for (const backend of BACKENDS) {
       }
     });
 
+    // `put` then read back through the page's own IndexedDB and OPFS, so
+    // the test fails if the option key does not reach core or the restore
+    // does nothing.
+    const SEED_DB = `new Promise((resolve, reject) => {
+      const open = indexedDB.open('library', 3);
+      open.onupgradeneeded = () => open.result.createObjectStore('books', { keyPath: 'id' });
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const tx = open.result.transaction('books', 'readwrite');
+        tx.objectStore('books').put({ id: 1, title: 'plain' });
+        tx.objectStore('books').put({ id: 2, title: 'rich', when: new Date(0) });
+        tx.oncomplete = () => { open.result.close(); resolve(true); };
+        tx.onerror = () => reject(tx.error);
+      };
+    })`;
+    const READ_DB = `new Promise((resolve, reject) => {
+      const open = indexedDB.open('library');
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result;
+        if (!db.objectStoreNames.contains('books')) { db.close(); resolve(JSON.stringify({ version: db.version })); return; }
+        const all = db.transaction('books', 'readonly').objectStore('books').getAll();
+        all.onerror = () => reject(all.error);
+        all.onsuccess = () => {
+          const rich = all.result.find(row => row.id === 2);
+          resolve(JSON.stringify({
+            version: db.version,
+            titles: all.result.map(row => row.title),
+            when: rich && rich.when instanceof Date ? rich.when.getTime() : 'not a Date',
+          }));
+          db.close();
+        };
+      };
+    })`;
+
+    it("exports IndexedDB with { indexedDB: true } and restores it into a new context", async () => {
+      const seed = browser.newContext();
+      let state;
+      try {
+        const page = await seed.newPage();
+        await page.goto(testUrl, null);
+        await page.evaluate(SEED_DB);
+        expect((await seed.storageState()).origins.find((o) => o.origin === testUrl)).toBeUndefined();
+        state = await seed.storageState({ indexedDB: true });
+        const origin = state.origins.find((o) => o.origin === testUrl);
+        expect(origin?.indexedDB?.length).toBe(1);
+        expect(origin!.indexedDB![0].name).toBe("library");
+        expect(origin!.indexedDB![0].version).toBe(3);
+        expect(origin!.indexedDB![0].stores[0].records.length).toBe(2);
+        expect(origin!.indexedDB![0].stores[0].records[0].value).toEqual({ id: 1, title: "plain" });
+        expect(origin!.indexedDB![0].stores[0].records[1].valueEncoded).toBeDefined();
+      } finally {
+        await seed.close();
+      }
+
+      const restored = browser.newContext({ storageState: state });
+      try {
+        const page = await restored.newPage();
+        await page.goto(testUrl, null);
+        expect(JSON.parse((await page.evaluate(READ_DB)) as string)).toEqual({
+          version: 3,
+          titles: ["plain", "rich"],
+          when: 0,
+        });
+      } finally {
+        await restored.close();
+      }
+    });
+
+    it("exports the origin private file system with { opfs: true } and restores it", async () => {
+      const seed = browser.newContext();
+      let state;
+      try {
+        const page = await seed.newPage();
+        await page.goto(testUrl, null);
+        await page.evaluate(`(async () => {
+          const root = await navigator.storage.getDirectory();
+          const dir = await root.getDirectoryHandle('docs', { create: true });
+          const writable = await (await dir.getFileHandle('note.txt', { create: true })).createWritable();
+          await writable.write('hello opfs');
+          await writable.close();
+          return true;
+        })()`);
+        state = await seed.storageState({ opfs: true });
+        const entries = [...(state.origins.find((o) => o.origin === testUrl)?.opfs ?? [])].sort((a, b) =>
+          a.path.localeCompare(b.path),
+        );
+        expect(entries).toEqual([
+          { path: "docs", type: "directory" },
+          { path: "docs/note.txt", type: "file", base64: Buffer.from("hello opfs").toString("base64") },
+        ]);
+      } finally {
+        await seed.close();
+      }
+
+      const restored = browser.newContext({ storageState: state });
+      try {
+        const page = await restored.newPage();
+        await page.goto(testUrl, null);
+        const text = await page.evaluate(`(async () => {
+          const root = await navigator.storage.getDirectory();
+          const file = await (await (await root.getDirectoryHandle('docs')).getFileHandle('note.txt')).getFile();
+          return file.text();
+        })()`);
+        expect(text).toBe("hello opfs");
+      } finally {
+        await restored.close();
+      }
+    });
+
     it("hydrates a new context from storageState({ path })", async () => {
       const out = join(tmpdir(), `ferri-reload-path-${backend}-${Date.now()}.json`);
       const seed = browser.newContext();

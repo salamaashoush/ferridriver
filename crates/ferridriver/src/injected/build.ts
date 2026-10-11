@@ -73,5 +73,8 @@ await build('./webSocketMockEntry.ts', './dist/websocket-mock.min.js', output =>
 await build('./clockEntry.ts', './dist/clock.min.js', output => output);
 await build('./webAuthnEntry.ts', './dist/webauthn.min.js', output => output);
 await build('./ariaSupport.ts', './dist/aria-support.min.js', output => output);
+// An expression: the caller needs the class, and a page must not find it
+// on its globals afterwards.
+await build('./storageEntry.ts', './dist/storage.min.js', output => `(function(){var __fdStorageScript;${output};return __fdStorageScript})()`);
 
 await build('./utilityScriptEntry.ts', './dist/utility-script.min.js', output => output);

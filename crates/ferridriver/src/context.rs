@@ -790,21 +790,21 @@ impl ContextRef {
       .await
   }
 
-  /// Export the current storage state of this context — cookies plus a
-  /// per-origin `localStorage` snapshot.
+  /// Export the current storage state of this context: cookies plus a
+  /// per-origin snapshot of `localStorage` and, when asked for,
+  /// `IndexedDB` and the origin private file system.
   ///
-  /// Playwright: `storageState(options?: { path?: string, indexedDB?: boolean })
-  ///   : Promise<{ cookies, origins }>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`;
-  /// server collection at `.../server/browserContext.ts:609`).
+  /// Playwright: `storageState(options?: { path?: string, indexedDB?:
+  ///   boolean, opfs?: boolean, credentials?: boolean }): Promise<StorageState>`
+  /// (`packages/playwright-core/src/client/browserContext.ts`; server
+  /// collection in `server/browserContext.ts`).
   ///
-  /// Cookies are read via the existing [`Self::cookies`] surface. For each
-  /// live page in the context we evaluate `Object.entries(localStorage)` to
-  /// snapshot its origin's storage, grouping by `location.origin` and skipping
-  /// origins with no entries (mirrors Playwright's `if (storage.localStorage
-  /// .length)` filter). `opts.path`, when set, writes the JSON-serialized
-  /// state (pretty-printed) to disk; `opts.indexed_db` is accepted for
-  /// signature parity but does not yet collect `IndexedDB` databases.
+  /// Cookies are read via the existing [`Self::cookies`] surface. Each
+  /// live page runs Playwright's `StorageScript.collect` for its origin;
+  /// origins with nothing stored are left out. An origin the context
+  /// visited that no page is on any more is not collected: upstream
+  /// revisits those on a blank page, which this does not do. `opts.path`,
+  /// when set, writes the JSON-serialized state (pretty-printed) to disk.
   ///
   /// # Errors
   ///
@@ -822,13 +822,8 @@ impl ContextRef {
     &self,
     opts: Option<crate::options::StorageStateOptions>,
   ) -> Result<crate::options::StorageState> {
-    // Page-side wrapper JSON-stringifies the result so the backend ships flat
-    // strings rather than re-serializing via its own RemoteValue path (see
-    // CLAUDE.md "utility-script JSON.stringify wrapper trick").
-    const COLLECT_JS: &str = r"JSON.stringify({
-      origin: location.origin,
-      localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value }))
-    })";
+    let indexed_db = opts.as_ref().and_then(|o| o.indexed_db).unwrap_or(false);
+    let file_system = opts.as_ref().and_then(|o| o.opfs).unwrap_or(false);
 
     // A context opens lazily, with its first page: one that never had a
     // page has no cookies to read yet, only what it was created with.
@@ -843,17 +838,26 @@ impl ContextRef {
     let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
 
     for page in &pages {
-      // `Ok(None)` (no value) and `Err` (opaque origin / mid-navigation, where
-      // localStorage access throws) are both skipped, matching Playwright's
-      // per-page try/catch.
-      let Ok(Some(raw)) = page.inner.evaluate(COLLECT_JS).await else {
-        continue;
+      let collect = crate::selectors::storage_script_call(
+        page.inner.kind(),
+        &format!(
+          "script.collect({{ indexedDB: {indexed_db}, opfs: {file_system} }}).then(storage => ({{ origin: location.origin, ...storage }}))"
+        ),
+      );
+      let raw = match page.inner.evaluate(&collect).await {
+        Ok(Some(raw)) => raw,
+        // What was asked for and could not be read is an error, as it is
+        // upstream once the origin is retried on a blank page. Anything
+        // else is a page with no storage to speak of: an opaque origin,
+        // or one caught mid-navigation.
+        Err(error) if error.to_string().contains("Unable to serialize") => return Err(error),
+        Ok(None) | Err(_) => continue,
       };
       let parsed: Option<crate::options::OriginState> = raw
         .as_str()
         .and_then(|s| serde_json::from_str::<crate::options::OriginState>(s).ok());
       let Some(state) = parsed else { continue };
-      if state.origin.is_empty() || state.origin == "null" || state.local_storage.is_empty() {
+      if state.origin.is_empty() || state.origin == "null" || !state.has_storage() {
         continue;
       }
       if seen.insert(state.origin.clone()) {
