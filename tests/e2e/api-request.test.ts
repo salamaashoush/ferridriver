@@ -11,7 +11,7 @@ describe('api request', () => {
     // end-to-end.
     const expectedPort = Number(new URL(baseURL!).port);
     const resp = await request.get(`${baseURL}/fx/landed`);
-    const addr = resp.serverAddr();
+    const addr = await resp.serverAddr();
     expect(resp.status()).toBe(200);
     expect(addr).not.toBeNull();
     expect(addr!.ipAddress).toBe('127.0.0.1');

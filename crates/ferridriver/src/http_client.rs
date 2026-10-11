@@ -186,7 +186,9 @@ fn resource_timing(timing: &fetch::Timing, ended: std::time::SystemTime) -> crat
   };
   let start_time = since_epoch(timing.start_time);
   crate::network::RequestTiming {
-    start_time,
+    // A wall-clock reading in whole milliseconds, as `Date.now()` gives
+    // Playwright's; the offsets below keep their fractions.
+    start_time: start_time.floor(),
     domain_lookup_start: timing.dns_end.map_or(-1.0, |_| 0.0),
     domain_lookup_end: timing.dns_end.map_or(-1.0, ms),
     connect_start: timing.connect_end.map_or(-1.0, |_| timing.dns_end.map_or(0.0, ms)),

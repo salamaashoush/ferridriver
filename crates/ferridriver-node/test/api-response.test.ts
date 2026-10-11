@@ -1,5 +1,8 @@
 // NAPI coverage for the apiResponse surface (Playwright 1.61):
 // serverAddr(), the RawHeaders-shaped header accessors, and dispose().
+// The shape is Playwright's APIResponse: status(), statusText() and url()
+// are methods, and the body accessors, serverAddr(), securityDetails()
+// and dispose() return promises.
 
 import { describe, it, expect } from "bun:test";
 import { HttpClient } from "../index.js";
@@ -41,13 +44,13 @@ describe("apiResponse headers", () => {
     try {
       const client = HttpClient.create();
       const resp = await client.get(`http://127.0.0.1:${server.port}/d`);
-      expect(resp.text()).toBe("payload");
+      expect(await resp.text()).toBe("payload");
 
-      resp.dispose();
+      await resp.dispose();
 
-      expect(() => resp.body()).toThrow(/disposed/);
-      expect(() => resp.text()).toThrow(/disposed/);
-      expect(resp.status).toBe(200);
+      await expect(resp.body()).rejects.toThrow(/disposed/);
+      await expect(resp.text()).rejects.toThrow(/disposed/);
+      expect(resp.status()).toBe(200);
       expect(resp.headers()["content-type"]).toContain("text/plain");
     } finally {
       server.stop(true);
@@ -61,8 +64,8 @@ describe("apiResponse.serverAddr", () => {
     try {
       const client = HttpClient.create();
       const resp = await client.get(`http://127.0.0.1:${server.port}/api`);
-      expect(resp.status).toBe(200);
-      const addr = resp.serverAddr();
+      expect(resp.status()).toBe(200);
+      const addr = await resp.serverAddr();
       expect(addr).not.toBeNull();
       expect(addr!.ipAddress).toBe("127.0.0.1");
       expect(addr!.port).toBe(server.port);
@@ -90,7 +93,7 @@ describe("apiResponse.timing and securityDetails", () => {
       expect(t.requestStart).toBe(t.connectEnd);
       expect(t.responseStart).toBeGreaterThanOrEqual(t.requestStart);
       expect(t.responseEnd).toBeGreaterThanOrEqual(t.responseStart);
-      expect(first.securityDetails()).toBeNull();
+      expect(await first.securityDetails()).toBeNull();
 
       const again = (await client.get(`http://localhost:${server.port}/t`)).timing();
       expect([again.domainLookupStart, again.domainLookupEnd, again.connectStart, again.connectEnd]).toEqual([
@@ -129,13 +132,13 @@ describe("request context cookies", () => {
       });
       expect(await names(`${origin}/other`)).toEqual(["sid"]);
       expect(await names([`${origin}/app/x`, "http://example.com/"])).toEqual(["sid", "token"]);
-      expect((await client.get(`${origin}/app/echo`)).text()).toBe("token=one; sid=abc");
+      expect(await (await client.get(`${origin}/app/echo`)).text()).toBe("token=one; sid=abc");
 
       await client.clearCookies({ name: /^s/ });
       expect(await names()).toEqual(["token"]);
       await client.clearCookies();
       expect(await client.cookies()).toEqual([]);
-      expect((await client.get(`${origin}/app/echo`)).text()).toBe("");
+      expect(await (await client.get(`${origin}/app/echo`)).text()).toBe("");
 
       await expect(client.addCookies([{ ...blank, name: "a", value: "1" }])).rejects.toThrow(
         /Cookie should have a url or a domain\/path pair/,

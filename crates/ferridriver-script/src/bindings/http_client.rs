@@ -398,6 +398,15 @@ fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
 
 // ── HttpResponseJs ────────────────────────────────────────────────────────────
 
+/// What Playwright's `APIResponse` hands back as a promise and this
+/// response already holds: the body is buffered when the response is
+/// made, so the promise is settled when it is returned.
+type Settled<T> = Promised<std::future::Ready<rquickjs::Result<T>>>;
+
+fn settled<T>(value: rquickjs::Result<T>) -> Settled<T> {
+  Promised::from(std::future::ready(value))
+}
+
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "HttpResponse")]
 pub struct HttpResponseJs {
@@ -417,6 +426,29 @@ impl HttpResponseJs {
   #[must_use]
   pub fn inner_clone(&self) -> HttpResponse {
     self.inner.clone()
+  }
+
+  fn security_details_object<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let Some(details) = self.inner.security_details() else {
+      return Ok(Value::new_null(ctx));
+    };
+    let obj = rquickjs::Object::new(ctx)?;
+    if let Some(protocol) = details.protocol {
+      obj.set("protocol", protocol)?;
+    }
+    if let Some(subject_name) = details.subject_name {
+      obj.set("subjectName", subject_name)?;
+    }
+    if let Some(issuer) = details.issuer {
+      obj.set("issuer", issuer)?;
+    }
+    if let Some(valid_from) = details.valid_from {
+      obj.set("validFrom", valid_from)?;
+    }
+    if let Some(valid_to) = details.valid_to {
+      obj.set("validTo", valid_to)?;
+    }
+    Ok(obj.into_value())
   }
 }
 
@@ -455,16 +487,15 @@ impl HttpResponseJs {
   /// Playwright: `apiResponse.serverAddr(): Promise<{ ipAddress, port } | null>`.
   /// Resolved peer address, or `null` when the transport didn't surface one.
   #[qjs(rename = "serverAddr")]
-  pub fn server_addr<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    match self.inner.server_addr() {
-      Some(addr) => {
-        let obj = rquickjs::Object::new(ctx.clone())?;
+  pub fn server_addr<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
+    settled(match self.inner.server_addr() {
+      Some(addr) => rquickjs::Object::new(ctx.clone()).and_then(|obj| {
         obj.set("ipAddress", addr.ip_address.clone())?;
         obj.set("port", addr.port)?;
         Ok(obj.into_value())
-      },
+      }),
       None => Ok(Value::new_null(ctx)),
-    }
+    })
   }
 
   /// Playwright: `apiResponse.timing(): ResourceTiming`. Milliseconds
@@ -489,27 +520,56 @@ impl HttpResponseJs {
   /// The server certificate's subject, issuer and validity; `null` for
   /// a response that did not arrive over TLS.
   #[qjs(rename = "securityDetails")]
-  pub fn security_details<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let Some(details) = self.inner.security_details() else {
-      return Ok(Value::new_null(ctx));
-    };
-    let obj = rquickjs::Object::new(ctx)?;
-    if let Some(protocol) = details.protocol {
-      obj.set("protocol", protocol)?;
-    }
-    if let Some(subject_name) = details.subject_name {
-      obj.set("subjectName", subject_name)?;
-    }
-    if let Some(issuer) = details.issuer {
-      obj.set("issuer", issuer)?;
-    }
-    if let Some(valid_from) = details.valid_from {
-      obj.set("validFrom", valid_from)?;
-    }
-    if let Some(valid_to) = details.valid_to {
-      obj.set("validTo", valid_to)?;
-    }
-    Ok(obj.into_value())
+  pub fn security_details<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
+    settled(self.security_details_object(ctx))
+  }
+
+  /// Playwright: `apiResponse.dispose(): Promise<void>` — release the
+  /// buffered body. Status, headers and URL stay readable; body
+  /// accessors then reject.
+  #[qjs(rename = "dispose")]
+  pub fn dispose(&mut self) -> Settled<()> {
+    self.inner.dispose();
+    settled(Ok(()))
+  }
+
+  /// Playwright: `apiResponse.body(): Promise<Buffer>` — raw bytes as
+  /// a `Uint8Array`.
+  ///
+  /// The view is built directly over the response's own buffer instead
+  /// of copying it twice (slice -> `Vec` -> JS heap), which matters for
+  /// a large body. rquickjs keeps the `Bytes` alive for as long as the
+  /// `ArrayBuffer` lives, and marks it immutable — so writing through
+  /// the returned array throws rather than corrupting a buffer other
+  /// readers of the same response still share.
+  #[qjs(rename = "body")]
+  pub fn body<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
+    settled(self.inner.body_shared().into_js_with(&ctx).and_then(|bytes| {
+      let buffer = rquickjs::ArrayBuffer::from_source_immutable(ctx.clone(), bytes)?;
+      Ok(rquickjs::TypedArray::<u8>::from_arraybuffer(buffer)?.into_value())
+    }))
+  }
+
+  /// Playwright: `apiResponse.text(): Promise<string>`.
+  #[qjs(rename = "text")]
+  pub fn text(&self, ctx: rquickjs::Ctx<'_>) -> Settled<String> {
+    settled(self.inner.text().into_js_with(&ctx))
+  }
+
+  /// Playwright: `apiResponse.json(): Promise<Serializable>`.
+  #[qjs(rename = "json")]
+  pub fn json<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
+    // Parse the raw body straight into a JS value with QuickJS's C JSON
+    // parser — no serde_json::Value middle allocation. `json_parse`
+    // does not touch the JS `JSON` global, so a reassigned
+    // `globalThis.JSON` cannot affect it.
+    settled(
+      self
+        .inner
+        .text()
+        .into_js_with(&ctx)
+        .and_then(|text| ctx.json_parse(text)),
+    )
   }
 
   /// All response headers as an array of `{name, value}` tuples (Playwright's
@@ -536,45 +596,5 @@ impl HttpResponseJs {
   #[qjs(rename = "header")]
   pub fn header(&self, name: String) -> crate::bindings::convert::Null<String> {
     crate::bindings::convert::Null(self.inner.header(&name))
-  }
-
-  /// Playwright: `apiResponse.dispose()` — release the buffered body.
-  /// Status, headers and URL stay readable; body accessors then throw.
-  #[qjs(rename = "dispose")]
-  pub fn dispose(&mut self) {
-    self.inner.dispose();
-  }
-
-  /// Playwright: `apiResponse.body(): Promise<Buffer>` — raw bytes as
-  /// a `Uint8Array`.
-  ///
-  /// The view is built directly over the response's own buffer instead
-  /// of copying it twice (slice -> `Vec` -> JS heap), which matters for
-  /// a large body. rquickjs keeps the `Bytes` alive for as long as the
-  /// `ArrayBuffer` lives, and marks it immutable — so writing through
-  /// the returned array throws rather than corrupting a buffer other
-  /// readers of the same response still share.
-  #[qjs(rename = "body")]
-  pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let bytes = self.inner.body_shared().into_js_with(&ctx)?;
-    let buffer = rquickjs::ArrayBuffer::from_source_immutable(ctx.clone(), bytes)?;
-    Ok(rquickjs::TypedArray::<u8>::from_arraybuffer(buffer)?.into_value())
-  }
-
-  /// Response body as UTF-8 text.
-  #[qjs(rename = "text")]
-  pub fn text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
-    self.inner.text().into_js_with(&ctx)
-  }
-
-  /// Response body parsed as JSON.
-  #[qjs(rename = "json")]
-  pub fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    // Parse the raw body straight into a JS value with QuickJS's C JSON
-    // parser — no serde_json::Value middle allocation. `json_parse`
-    // does not touch the JS `JSON` global, so a reassigned
-    // `globalThis.JSON` cannot affect it.
-    let text = self.inner.text().into_js_with(&ctx)?;
-    ctx.json_parse(text)
   }
 }

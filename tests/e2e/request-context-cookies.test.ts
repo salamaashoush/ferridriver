@@ -134,7 +134,7 @@ describe('response timing and security details', () => {
     const response = await request.get(`${ORIGIN}/fx/slow?ms=40`);
     const after = Date.now();
     const t = response.timing();
-    expect(t.startTime).toBeGreaterThanOrEqual(before - 1);
+    expect(t.startTime).toBeGreaterThanOrEqual(before);
     expect(t.startTime).toBeLessThanOrEqual(after);
     expect(t.responseStart).toBeGreaterThan(0);
     expect(t.responseEnd).toBeGreaterThanOrEqual(t.responseStart);
@@ -156,7 +156,7 @@ describe('response timing and security details', () => {
   test('security details describe the server certificate', async ({ request, baseURL }) => {
     const { tls } = (await (await request.get(`${baseURL}/fx/endpoints`)).json()) as { tls: string };
     const secure = await request.get(`${tls}/secure`, { ignoreHTTPSErrors: true });
-    const details = secure.securityDetails()!;
+    const details = (await secure.securityDetails())!;
     expect(details.subjectName).toBe('rcgen self signed cert');
     expect(details.issuer).toBe('rcgen self signed cert');
     const now = Date.now() / 1000;
@@ -168,7 +168,7 @@ describe('response timing and security details', () => {
     expect(t.requestStart).toBe(t.connectEnd);
 
     const plain = await request.get(`${ORIGIN}/fx/landed`);
-    expect(plain.securityDetails()).toBeNull();
+    expect(await plain.securityDetails()).toBeNull();
   });
 });
 

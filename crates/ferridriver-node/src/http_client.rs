@@ -3,6 +3,7 @@
 
 use crate::error::IntoNapi;
 use napi::Result;
+use napi::bindgen_prelude::PromiseRaw;
 use napi_derive::napi;
 
 /// Options for creating an `HttpClient`.
@@ -181,6 +182,16 @@ pub struct HttpResponse {
   pub(crate) inner: ferridriver::http_client::HttpResponse,
 }
 
+/// What Playwright's `APIResponse` hands back as a promise and this
+/// response already holds: its body is buffered when it is made. An
+/// error rejects the promise, as a disposed body does upstream.
+fn settled<T>(env: &napi::Env, value: Result<T>) -> Result<PromiseRaw<'_, T>>
+where
+  T: napi::bindgen_prelude::ToNapiValue + Send + 'static,
+{
+  env.spawn_future(async move { value })
+}
+
 #[napi]
 impl HttpResponse {
   #[napi]
@@ -193,20 +204,20 @@ impl HttpResponse {
     self.inner.unfollowed_redirect()
   }
 
-  /// HTTP status code.
-  #[napi(getter)]
+  /// Playwright: `apiResponse.status(): number`.
+  #[napi]
   pub fn status(&self) -> i32 {
     self.inner.status() as i32
   }
 
-  /// HTTP status text (e.g., "OK", "Not Found").
-  #[napi(getter)]
+  /// Playwright: `apiResponse.statusText(): string` (e.g. "OK").
+  #[napi]
   pub fn status_text(&self) -> String {
     self.inner.status_text().to_string()
   }
 
-  /// Final URL after redirects.
-  #[napi(getter)]
+  /// Playwright: `apiResponse.url(): string`, the URL after redirects.
+  #[napi]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
   }
@@ -227,20 +238,27 @@ impl HttpResponse {
   /// Playwright: `apiResponse.securityDetails(): Promise<SecurityDetails | null>`.
   /// The server certificate's subject, issuer and validity; `null` for
   /// a response that did not arrive over TLS.
-  #[napi]
-  pub fn security_details(&self) -> Option<crate::network::SecurityDetails> {
-    self.inner.security_details().map(Into::into)
+  #[napi(ts_return_type = "Promise<SecurityDetails | null>")]
+  pub fn security_details<'env>(
+    &self,
+    env: &'env napi::Env,
+  ) -> Result<PromiseRaw<'env, Option<crate::network::SecurityDetails>>> {
+    settled(env, Ok(self.inner.security_details().map(Into::into)))
   }
 
   /// Playwright: `apiResponse.serverAddr(): Promise<RemoteAddr | null>`.
   /// Resolved peer address, or `null` when the transport didn't surface
   /// one.
-  #[napi(ts_return_type = "{ ipAddress: string, port: number } | null")]
-  pub fn server_addr(&self) -> Option<crate::network::RemoteAddr> {
-    self.inner.server_addr().map(|a| crate::network::RemoteAddr {
+  #[napi(ts_return_type = "Promise<{ ipAddress: string, port: number } | null>")]
+  pub fn server_addr<'env>(
+    &self,
+    env: &'env napi::Env,
+  ) -> Result<PromiseRaw<'env, Option<crate::network::RemoteAddr>>> {
+    let addr = self.inner.server_addr().map(|a| crate::network::RemoteAddr {
       ip_address: a.ip_address.clone(),
       port: u32::from(a.port),
-    })
+    });
+    settled(env, Ok(addr))
   }
 
   /// Playwright: `apiResponse.headers(): { [key: string]: string }` —
@@ -276,29 +294,31 @@ impl HttpResponse {
     self.inner.header(&name)
   }
 
-  /// Response body as string.
+  /// Playwright: `apiResponse.text(): Promise<string>`.
   #[napi]
-  pub fn text(&self) -> Result<String> {
-    self.inner.text().into_napi()
+  pub fn text<'env>(&self, env: &'env napi::Env) -> Result<PromiseRaw<'env, String>> {
+    settled(env, self.inner.text().into_napi())
   }
 
-  /// Response body parsed as JSON.
-  #[napi]
-  pub fn json(&self) -> Result<serde_json::Value> {
-    self.inner.json_value().into_napi()
+  /// Playwright: `apiResponse.json(): Promise<Serializable>`.
+  #[napi(ts_return_type = "Promise<any>")]
+  pub fn json<'env>(&self, env: &'env napi::Env) -> Result<PromiseRaw<'env, serde_json::Value>> {
+    settled(env, self.inner.json_value().into_napi())
   }
 
-  /// Raw response body as Buffer.
+  /// Playwright: `apiResponse.body(): Promise<Buffer>`.
   #[napi]
-  pub fn body(&self) -> Result<napi::bindgen_prelude::Buffer> {
-    self.inner.body().map(|b| b.to_vec().into()).into_napi()
+  pub fn body<'env>(&self, env: &'env napi::Env) -> Result<PromiseRaw<'env, napi::bindgen_prelude::Buffer>> {
+    settled(env, self.inner.body().map(|b| b.to_vec().into()).into_napi())
   }
 
-  /// Playwright: `apiResponse.dispose()` — release the buffered body.
-  /// Status, headers and URL stay readable; body accessors then throw.
-  #[napi]
-  pub fn dispose(&mut self) {
+  /// Playwright: `apiResponse.dispose(): Promise<void>` — release the
+  /// buffered body. Status, headers and URL stay readable; body
+  /// accessors then reject.
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn dispose<'env>(&mut self, env: &'env napi::Env) -> Result<PromiseRaw<'env, ()>> {
     self.inner.dispose();
+    settled(env, Ok(()))
   }
 }
 
@@ -424,9 +444,13 @@ impl HttpClient {
     Ok(HttpResponse { inner: resp })
   }
 
-  /// Dispose the request context.
-  #[napi]
-  pub fn dispose(&self) {}
+  /// Playwright: `apiRequestContext.dispose(): Promise<void>`. The
+  /// client is shared with whatever vended it, so there is nothing of
+  /// its own to tear down.
+  #[napi(ts_return_type = "Promise<void>")]
+  pub fn dispose<'env>(&self, env: &'env napi::Env) -> Result<PromiseRaw<'env, ()>> {
+    settled(env, Ok(()))
+  }
 
   /// Playwright: `apiRequestContext.cookies(urls?: string | string[])`.
   /// The cookies of the browser context this client is bound to, or of

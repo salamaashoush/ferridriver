@@ -2199,16 +2199,16 @@ export interface APIResponse {
   headers(): Record<string, string>;
   headersArray(): Array<{ name: string; value: string }>;
   header(name: string): string | null;
-  serverAddr(): { ipAddress: string; port: number } | null;
-  // The server certificate, or null without TLS. Synchronous here; the
-  // negotiated protocol version is not reported.
-  securityDetails(): {
+  serverAddr(): Promise<{ ipAddress: string; port: number } | null>;
+  // The server certificate, or null without TLS. The negotiated
+  // protocol version is not reported.
+  securityDetails(): Promise<{
     protocol?: string;
     subjectName?: string;
     issuer?: string;
     validFrom?: number;
     validTo?: number;
-  } | null;
+  } | null>;
   // Milliseconds from startTime; -1 for a phase that did not happen.
   // secureConnectionStart is always -1.
   timing(): {

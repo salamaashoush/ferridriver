@@ -267,14 +267,14 @@ for (const backend of BACKENDS) {
       const ctx = browser.newContext({});
       try {
         await ctx.newPage();
-        expect((await ctx.request.get(srv.url)).status).toBe(401);
+        expect((await ctx.request.get(srv.url)).status()).toBe(401);
         await ctx.setHTTPCredentials([
           { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
           { username: "user", password: "pass", origin: new URL(srv.url).origin },
         ]);
         const authed = await ctx.request.get(srv.url);
-        expect(authed.status).toBe(200);
-        expect(authed.text()).toContain("AUTHED");
+        expect(authed.status()).toBe(200);
+        expect(await authed.text()).toContain("AUTHED");
       } finally {
         await ctx.close();
         await srv.close();
@@ -285,16 +285,16 @@ for (const backend of BACKENDS) {
       const srv = await startBasicAuthServer();
       try {
         const none = HttpClient.create();
-        expect((await none.get(srv.url)).status).toBe(401);
+        expect((await none.get(srv.url)).status()).toBe(401);
         const one = HttpClient.create({ httpCredentials: { username: "user", password: "pass" } });
-        expect((await one.get(srv.url)).status).toBe(200);
+        expect((await one.get(srv.url)).status()).toBe(200);
         const many = HttpClient.create({
           httpCredentials: [
             { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
             { username: "user", password: "pass", send: "always" },
           ],
         });
-        expect((await many.get(srv.url)).status).toBe(200);
+        expect((await many.get(srv.url)).status()).toBe(200);
       } finally {
         await srv.close();
       }

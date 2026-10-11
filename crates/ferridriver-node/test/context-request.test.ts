@@ -60,8 +60,8 @@ for (const backend of BACKENDS) {
         { name: "napictx", value: "browser-side", domain: "127.0.0.1", path: "/", secure: false, httpOnly: false },
       ]);
       const resp = await page.request.get(`${base}/echo`);
-      expect(resp.status).toBe(200);
-      expect(resp.text()).toContain("napictx=browser-side");
+      expect(resp.status()).toBe(200);
+      expect(await resp.text()).toContain("napictx=browser-side");
     });
 
     it("accepts Playwright option shapes: headers object + params scalars", async () => {
@@ -69,8 +69,8 @@ for (const backend of BACKENDS) {
         headers: { "x-napi-probe": "shape-ok" },
         params: { q: "find me", n: 7 },
       });
-      expect(resp.status).toBe(200);
-      const echoed = resp.json() as any;
+      expect(resp.status()).toBe(200);
+      const echoed = (await resp.json()) as any;
       expect(echoed.probe).toBe("shape-ok");
       expect(String(echoed.url)).toContain("q=find");
       expect(String(echoed.url)).toContain("n=7");
@@ -79,7 +79,7 @@ for (const backend of BACKENDS) {
     it("Set-Cookie from context.request lands in the browser", async () => {
       const context = page.context();
       const resp = await context.request.get(`${base}/set`);
-      expect(resp.status).toBe(200);
+      expect(resp.status()).toBe(200);
       const cookies = await context.cookies();
       const stored = cookies.find((c: any) => c.name === "napisid");
       expect(stored?.value).toBe("from-server");
