@@ -64,9 +64,19 @@ impl Frame {
   /// -- `url(): string` sync.
   #[must_use]
   pub fn url(&self) -> String {
-    self
-      .page
-      .with_frame_cache(|c| c.record(&self.id).map(|r| r.info.url.clone()).unwrap_or_default())
+    let (url, is_main) = self.page.with_frame_cache(|c| {
+      (
+        c.record(&self.id).map(|r| r.info.url.clone()).unwrap_or_default(),
+        c.main_frame_id().as_deref() == Some(&*self.id),
+      )
+    });
+    // A page is on its initial empty document until a navigation
+    // commits, and no backend reports that one: Playwright's
+    // `page.url()` reads `about:blank` there.
+    if url.is_empty() && is_main {
+      return String::from("about:blank");
+    }
+    url
   }
 
   /// Whether this is the main (top-level) frame. Mirrors Playwright's

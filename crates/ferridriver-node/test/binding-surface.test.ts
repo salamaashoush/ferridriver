@@ -28,6 +28,17 @@ for (const backend of BACKENDS) {
 
     // ── Frame additions ──────────────────────────────────────────────
 
+    it("a page that has not navigated is at about:blank", async () => {
+      const fresh = await browser.newPage();
+      try {
+        expect(fresh.url()).toBe("about:blank");
+        expect(fresh.mainFrame().url()).toBe("about:blank");
+        expect(await fresh.evaluate("location.href")).toBe("about:blank");
+      } finally {
+        await fresh.close();
+      }
+    });
+
     it("frame.getByTitle resolves an element with a title attribute", async () => {
       await page.setContent("<button title='hello'>x</button>");
       const loc = page.mainFrame().getByTitle("hello");

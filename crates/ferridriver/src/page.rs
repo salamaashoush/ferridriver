@@ -929,11 +929,16 @@ impl Page {
   /// same source [`Frame::url`] uses — no backend round-trip.
   #[must_use]
   pub fn url(&self) -> String {
-    self.with_frame_cache(|c| {
+    let url = self.with_frame_cache(|c| {
       c.main_frame_id()
         .and_then(|id| c.record(&id).map(|r| r.info.url.clone()))
         .unwrap_or_default()
-    })
+    });
+    // See [`Frame::url`]: no navigation has committed yet.
+    if url.is_empty() {
+      return String::from("about:blank");
+    }
+    url
   }
 
   /// Get the current page title.
