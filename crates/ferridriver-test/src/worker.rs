@@ -2340,7 +2340,7 @@ impl Worker {
     };
 
     // Collect tracked test steps and attachments.
-    let steps = test_info.steps.lock().await.clone();
+    let steps = crate::model::nest_steps(test_info.steps.lock().await.clone());
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
 

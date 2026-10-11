@@ -1413,6 +1413,34 @@ pub struct TestStep {
   pub steps: Vec<TestStep>,
 }
 
+/// The steps of an attempt as the tree its reporters walk.
+///
+/// The runner records each step as it finishes, in one list, with the
+/// id of the step it ran inside: a child therefore precedes its parent.
+/// Every report reads [`TestStep::steps`] instead, in the order the
+/// steps started, which is Playwright's `TestResult.steps`.
+#[must_use]
+pub fn nest_steps(finished: Vec<TestStep>) -> Vec<TestStep> {
+  let known: rustc_hash::FxHashSet<String> = finished.iter().map(|step| step.step_id.clone()).collect();
+  let mut waiting: rustc_hash::FxHashMap<String, Vec<TestStep>> = rustc_hash::FxHashMap::default();
+  let mut roots = Vec::new();
+  for mut step in finished {
+    if let Some(mut children) = waiting.remove(&step.step_id) {
+      children.sort_by_key(|child| child.start_time);
+      step.steps.extend(children);
+    }
+    match step.parent_step_id.clone().filter(|parent| known.contains(parent)) {
+      Some(parent) => waiting.entry(parent).or_default().push(step),
+      None => roots.push(step),
+    }
+  }
+  // A step still waiting names a parent that finished before it did,
+  // which only a step outliving its own body does: it is kept, at the top.
+  roots.extend(waiting.into_values().flatten());
+  roots.sort_by_key(|step| step.start_time);
+  roots
+}
+
 /// Status of a completed test step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
@@ -1893,6 +1921,77 @@ pub struct TestFixtures {
 mod tests {
   use super::*;
   use ferridriver::FerriError;
+
+  fn finished(id: &str, parent: Option<&str>, start_ms: u64) -> TestStep {
+    TestStep {
+      step_id: id.into(),
+      title: id.into(),
+      category: StepCategory::TestStep,
+      duration: Duration::from_millis(1),
+      subtitle: None,
+      params: None,
+      start_time: SystemTime::UNIX_EPOCH + Duration::from_millis(start_ms),
+      status: StepStatus::Passed,
+      error: None,
+      location: None,
+      annotations: Vec::new(),
+      parent_step_id: parent.map(Into::into),
+      metadata: None,
+      steps: Vec::new(),
+    }
+  }
+
+  fn outline(steps: &[TestStep]) -> String {
+    steps
+      .iter()
+      .map(|step| {
+        if step.steps.is_empty() {
+          step.title.clone()
+        } else {
+          format!("{}({})", step.title, outline(&step.steps))
+        }
+      })
+      .collect::<Vec<_>>()
+      .join(" ")
+  }
+
+  #[test]
+  fn steps_nest_under_the_step_they_ran_inside_in_start_order() {
+    // Finish order, as the runner records them: every child before its
+    // parent.
+    let tree = nest_steps(vec![
+      finished("charge", Some("pay"), 3),
+      finished("pay", Some("checkout"), 2),
+      finished("receipt", Some("checkout"), 4),
+      finished("checkout", None, 1),
+      finished("plain", None, 5),
+    ]);
+    assert_eq!(outline(&tree), "checkout(pay(charge) receipt) plain");
+  }
+
+  #[test]
+  fn steps_that_overlap_keep_their_start_order() {
+    // Two concurrent roots: the one that started first finishes last.
+    let tree = nest_steps(vec![
+      finished("b-child", Some("b"), 4),
+      finished("b", None, 2),
+      finished("a-child", Some("a"), 3),
+      finished("a", None, 1),
+    ]);
+    assert_eq!(outline(&tree), "a(a-child) b(b-child)");
+  }
+
+  #[test]
+  fn a_step_without_its_parent_stays_visible() {
+    // The parent never finished (the test timed out inside it), or
+    // finished before a child that outlived its body.
+    let tree = nest_steps(vec![
+      finished("orphan", Some("never-finished"), 2),
+      finished("early-parent", None, 1),
+      finished("late-child", Some("early-parent"), 3),
+    ]);
+    assert_eq!(outline(&tree), "early-parent orphan late-child");
+  }
 
   #[test]
   fn a_plain_pass_is_expected() {

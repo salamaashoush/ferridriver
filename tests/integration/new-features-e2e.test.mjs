@@ -79,7 +79,7 @@ test.fail('expected failure', async ({ testInfo }) => {
 test('test.step params and subtitle reach reporters', async () => {
   const cwd = await workspace({
     'ferridriver.toml': '[test]\ntestMatch = ["steps.spec.ts"]\nworkers = 1\nretries = 0\n' +
-      'reporter = [{ name = "perfetto" }, { name = "html" }, { name = "./recorder.ts" }]\n',
+      'reporter = [{ name = "perfetto" }, { name = "html" }, { name = "json" }, { name = "./recorder.ts" }]\n',
     'recorder.ts': `
 import { writeFileSync } from 'node:fs';
 const seen = { begin: [], end: [], tree: [] };
@@ -119,6 +119,14 @@ test('buys', async () => {
 
   const html = await readFile(join(cwd, 'test-results', 'report.html'), 'utf8');
   assert.ok(html.includes('"title":"checkout","subtitle":"SKU 42"'), 'the HTML report carries the subtitle');
+
+  // A report lists steps as the tree they ran as, in the order they started.
+  const outline = steps => steps.map(step => [step.title, outline(step.steps ?? [])]);
+  const json = JSON.parse(await readFile(join(cwd, 'test-results', 'results.json'), 'utf8'));
+  const result = json.suites[0].specs[0].tests[0].results[0];
+  assert.deepEqual(outline(result.steps), [['checkout', [['pay', []]]], ['plain', []]]);
+  const report = JSON.parse(html.match(/<script[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/)[1].replaceAll('<\\/', '</'));
+  assert.deepEqual(outline(report.tests[0].attempts[0].steps), [['checkout', [['pay', []]]], ['plain', []]]);
 });
 
 test('native JS runner writes the HTML reporter artifact', async () => {
