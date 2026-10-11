@@ -858,6 +858,7 @@ impl TestInfo {
       category,
       parent_step_id: parent_step_id.map(ToString::to_string),
       start: Instant::now(),
+      started_at: SystemTime::now(),
       metadata: None,
       location,
       annotations: Vec::new(),
@@ -917,6 +918,9 @@ impl TestInfo {
       title,
       category,
       duration,
+      start_time: SystemTime::now()
+        .checked_sub(duration)
+        .unwrap_or(SystemTime::UNIX_EPOCH),
       status,
       error,
       location: None,
@@ -1271,6 +1275,8 @@ pub struct StepHandle {
   pub category: StepCategory,
   pub parent_step_id: Option<String>,
   pub start: Instant,
+  /// Wall-clock twin of [`Self::start`], recorded into [`TestStep::start_time`].
+  pub started_at: SystemTime,
   /// Arbitrary metadata attached to this step (set before calling `end()`).
   pub metadata: Option<serde_json::Value>,
   /// Source location recorded into [`TestStep::location`].
@@ -1337,6 +1343,7 @@ impl StepHandle {
       title: self.title,
       category: self.category,
       duration,
+      start_time: self.started_at,
       status,
       error,
       location: self.location,
@@ -1359,6 +1366,9 @@ pub struct TestStep {
   pub title: String,
   pub category: StepCategory,
   pub duration: Duration,
+  /// Wall-clock start, which places the step on a timeline. The epoch
+  /// when it was never recorded (a report merged from an older blob).
+  pub start_time: SystemTime,
   /// Step completion status.
   pub status: StepStatus,
   pub error: Option<String>,

@@ -56,7 +56,7 @@ pub struct RunnerArgs {
   /// Terminal: `list` (default), `line`, `dot`, `progress`, `github`,
   /// `tap`, `tap-flat`, `teamcity`, `usage`, `null`.
   /// Files: `json`, `junit`, `html`, `blob`, `markdown`, `ctrf`,
-  /// `allure`, `rerun`, `cucumber-json`, `messages`.
+  /// `perfetto`, `allure`, `rerun`, `cucumber-json`, `messages`.
   ///
   /// File reporters write into the run's output directory; set paths and
   /// per-reporter options with `[[test.reporter]]` in the config file, or

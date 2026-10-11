@@ -674,6 +674,7 @@ mod tests {
       title: "enter card".into(),
       category: StepCategory::TestStep,
       duration: Duration::from_millis(20),
+      start_time: std::time::SystemTime::UNIX_EPOCH,
       status: StepStatus::Failed,
       error: Some("declined".into()),
       location: None,

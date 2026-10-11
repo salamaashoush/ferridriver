@@ -250,6 +250,10 @@ pub struct WireStep {
   pub title: String,
   pub category: String,
   pub duration_ms: u64,
+  /// Microseconds since the Unix epoch; zero in a blob written before
+  /// steps carried a start.
+  #[serde(default)]
+  pub start_us: u64,
   pub status: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
@@ -349,6 +353,12 @@ fn wire_steps(steps: &[TestStep]) -> Vec<WireStep> {
       title: s.title.clone(),
       category: step_category_str(&s.category).to_string(),
       duration_ms: u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX),
+      start_us: s
+        .start_time
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_micros()).ok())
+        .unwrap_or_default(),
       status: step_status_str(s.status).to_string(),
       error: s.error.clone(),
       location: s.location.clone().map(WireStepLocation::from),
@@ -368,6 +378,7 @@ fn runtime_steps(steps: Vec<WireStep>) -> Vec<TestStep> {
       title: s.title,
       category: parse_step_category(&s.category),
       duration: Duration::from_millis(s.duration_ms),
+      start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(s.start_us),
       status: parse_step_status(&s.status),
       error: s.error,
       location: s.location.and_then(WireStepLocation::into_runtime),
@@ -1018,6 +1029,7 @@ mod tests {
         title: "outer".into(),
         category: StepCategory::TestStep,
         duration: Duration::from_millis(5),
+        start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_250),
         status: StepStatus::Failed,
         error: Some("nope".into()),
         location: Some(StepLocation::new("a.spec.ts", 10)),
@@ -1029,6 +1041,7 @@ mod tests {
           title: "inner".into(),
           category: StepCategory::TestStep,
           duration: Duration::from_millis(2),
+          start_time: std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_001_500),
           status: StepStatus::Passed,
           error: None,
           location: None,
@@ -1084,6 +1097,14 @@ mod tests {
     assert_eq!(back.steps.len(), 1);
     assert_eq!(back.steps[0].steps.len(), 1);
     assert_eq!(back.steps[0].steps[0].title, "inner");
+    assert_eq!(
+      back.steps[0].start_time,
+      std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_000_250)
+    );
+    assert_eq!(
+      back.steps[0].steps[0].start_time,
+      std::time::SystemTime::UNIX_EPOCH + Duration::from_micros(1_700_000_000_001_500)
+    );
     assert_eq!(back.steps[0].status, StepStatus::Failed);
     assert_eq!(back.attachments.len(), 1);
     assert!(matches!(&back.attachments[0].body, AttachmentBody::Bytes(b) if b == &[9, 9, 9]));

@@ -14,6 +14,7 @@ pub mod json;
 pub mod junit;
 pub mod line;
 pub mod markdown;
+pub mod perfetto;
 pub mod progress;
 pub mod rerun;
 pub mod tap;
@@ -523,6 +524,7 @@ pub const REPORTER_NAMES: &[&str] = &[
   "teamcity",
   "ctrf",
   "markdown",
+  "perfetto",
   "allure",
   "progress",
   "rerun",
@@ -660,6 +662,12 @@ fn build_reporters(
       },
       "markdown" => {
         reporters.push(Box::new(markdown::MarkdownReporter::new(out("report.md"))));
+      },
+      "perfetto" => {
+        reporters.push(Box::new(
+          perfetto::PerfettoReporter::new(out("perfetto.json"))
+            .with_root_dir(config.test_dir.as_deref().unwrap_or(".")),
+        ));
       },
       "allure" => {
         let dir = base::str_option(opts, "output_dir")

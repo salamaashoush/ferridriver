@@ -52,6 +52,7 @@ reporter = ["list", "html"]
 | `tap` / `tap-flat` | terminal | TAP version 13, nested per file or one flat plan. |
 | `teamcity` | terminal | JetBrains service messages, streamed live. |
 | `ctrf` | `ctrf-report.json` | [Common Test Report Format](https://ctrf.io). |
+| `perfetto` | `perfetto.json` | Chrome trace events: one lane per worker, tests and their steps as nested slices. Opens in [ui.perfetto.dev](https://ui.perfetto.dev); an `outputFile` ending in `.gz` is gzipped. |
 | `allure` | `allure-results/` | Allure 2.x results plus attachments. |
 | `rerun` | `@rerun.txt` | Failed test locations for `--last-failed`. Always on. |
 | `cucumber-json` | `cucumber.json` | Cucumber JSON, for BDD runs. |

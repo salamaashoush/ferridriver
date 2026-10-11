@@ -2023,6 +2023,7 @@ dependencies = [
  "ferridriver-expect",
  "ferridriver-test-macros",
  "ferridriver-viewer",
+ "flate2",
  "futures",
  "glob",
  "http",
