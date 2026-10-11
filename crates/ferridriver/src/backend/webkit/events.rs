@@ -451,7 +451,7 @@ struct TargetListenerCtx {
   /// only surface here — without this reset the cached global anchor
   /// points into the dead document and every evaluate fails with
   /// "Missing injected script for given objectId".
-  engine_injected: Arc<std::sync::atomic::AtomicBool>,
+  engine_injected: Arc<super::page::EngineLatch>,
   global_object_id: Arc<std::sync::Mutex<Option<String>>>,
   /// Exposed-binding registry, shared with the page. `Runtime.bindingCalled`
   /// is dispatched here (not from a separate task pinned to one target
@@ -552,7 +552,7 @@ fn handle_main_frame_commit(ctx: &TargetListenerCtx, params: &Value) {
     return;
   }
   ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
-  ctx.engine_injected.store(false, std::sync::atomic::Ordering::Relaxed);
+  ctx.engine_injected.reset();
   *ctx
     .global_object_id
     .lock()

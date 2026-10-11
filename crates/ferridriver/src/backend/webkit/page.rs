@@ -99,6 +99,38 @@ fn navigator_platform_for(user_agent: &str) -> Option<&'static str> {
   None
 }
 
+/// Whether `window.__fd` is in the page's current document.
+///
+/// One word holds the document's generation and the flag, so an
+/// injection that finishes after its document was replaced cannot mark
+/// the new document as having the engine.
+#[derive(Default)]
+pub(crate) struct EngineLatch(std::sync::atomic::AtomicU64);
+
+impl EngineLatch {
+  /// The current document, when the engine is still to go into it.
+  fn pending(&self) -> Option<u64> {
+    let state = self.0.load(Ordering::Acquire);
+    (state & 1 == 0).then_some(state)
+  }
+
+  /// Record the injection made for `document`, unless a newer document
+  /// has replaced it.
+  fn injected(&self, document: u64) -> bool {
+    self
+      .0
+      .compare_exchange(document, document | 1, Ordering::AcqRel, Ordering::Acquire)
+      .is_ok()
+  }
+
+  /// A new document, with nothing injected.
+  pub(crate) fn reset(&self) {
+    self
+      .0
+      .update(Ordering::AcqRel, Ordering::Acquire, |state| (state | 1) + 1);
+  }
+}
+
 /// Playwright `WebKit` page. Cheaply cloneable; clones share the
 /// underlying sessions + managers.
 #[derive(Clone)]
@@ -120,7 +152,7 @@ pub struct WebKitPage {
   /// target; cleared (and `Target.resume` sent) by `Self::resume_popup`.
   popup_paused: Arc<AtomicBool>,
   /// Latch: the `window.__fd` selector engine has been injected.
-  engine_injected: Arc<AtomicBool>,
+  engine_injected: Arc<EngineLatch>,
   /// Cached `objectId` of the main-world global. `Runtime.callFunctionOn`
   /// needs an `objectId` anchor (no `contextId` form); evaluating
   /// `"this"` once gives a stable handle into the page's main realm.
@@ -470,7 +502,7 @@ impl WebKitPage {
         context_id: context_id.map(Arc::from),
         closed: Arc::new(AtomicBool::new(false)),
         popup_paused: Arc::new(AtomicBool::new(false)),
-        engine_injected: Arc::new(AtomicBool::new(false)),
+        engine_injected: Arc::default(),
         global_object_id: Arc::new(std::sync::Mutex::new(None)),
         exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         binding_initialized: Arc::new(AtomicBool::new(false)),
@@ -590,7 +622,7 @@ impl WebKitPage {
       .global_object_id
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    self.engine_injected.store(false, Ordering::Relaxed);
+    self.engine_injected.reset();
     *self
       .frame_cache
       .lock()
@@ -618,7 +650,7 @@ impl WebKitPage {
     self.intercept_enabled.load(Ordering::SeqCst)
   }
 
-  pub(crate) fn engine_injected_flag(&self) -> Arc<AtomicBool> {
+  pub(crate) fn engine_injected_flag(&self) -> Arc<EngineLatch> {
     Arc::clone(&self.engine_injected)
   }
 
@@ -706,7 +738,7 @@ impl WebKitPage {
   /// Drop realm-scoped caches — a new document invalidates the engine
   /// injection and the cached global `objectId`.
   fn reset_realm(&self) {
-    self.engine_injected.store(false, Ordering::Relaxed);
+    self.engine_injected.reset();
     *self
       .global_object_id
       .lock()
@@ -1107,13 +1139,22 @@ impl WebKitPage {
 
   /// See [`crate::backend::AnyPage::forget_engine`].
   pub fn forget_engine(&self) {
-    self.engine_injected.store(false, Ordering::Relaxed);
+    self.engine_injected.reset();
   }
 
   pub async fn ensure_engine_injected(&self) -> Result<()> {
-    if self.engine_injected.load(Ordering::Relaxed) {
-      return Ok(());
+    // Until an injection lands in the document that is still current: one
+    // that finishes after a navigation went into the document it replaced.
+    while let Some(document) = self.engine_injected.pending() {
+      Box::pin(self.inject_engine()).await?;
+      if self.engine_injected.injected(document) {
+        break;
+      }
     }
+    Ok(())
+  }
+
+  async fn inject_engine(&self) -> Result<()> {
     // The lazy-inject script is an async IIFE returning a promise.
     // `Runtime.evaluate` has no `awaitPromise`; route the call through
     // `Runtime.callFunctionOn` (which does) anchored on the global, so
@@ -1139,7 +1180,6 @@ impl WebKitPage {
         .to_string();
       return Err(FerriError::evaluation(text));
     }
-    self.engine_injected.store(true, Ordering::Relaxed);
     Ok(())
   }
 
@@ -2770,7 +2810,21 @@ fn parse_eval_response(resp: &Value, return_by_value: bool) -> Result<crate::js_
 
 #[cfg(test)]
 mod tests {
-  use super::{DESKTOP_ORIENTATION_SHIM, SAFARI_SURFACE_SHIM, WebKitPage, navigator_platform_for};
+  use super::{DESKTOP_ORIENTATION_SHIM, EngineLatch, SAFARI_SURFACE_SHIM, WebKitPage, navigator_platform_for};
+
+  #[test]
+  fn an_injection_into_a_replaced_document_does_not_count() {
+    let latch = EngineLatch::default();
+    let first = latch.pending().expect("nothing injected yet");
+    latch.reset();
+    assert!(!latch.injected(first));
+    let second = latch.pending().expect("the new document has no engine");
+    assert_ne!(first, second);
+    assert!(latch.injected(second));
+    assert_eq!(latch.pending(), None);
+    latch.reset();
+    assert!(latch.pending().is_some_and(|third| third != second));
+  }
 
   #[test]
   fn platform_follows_the_emulated_user_agent() {
