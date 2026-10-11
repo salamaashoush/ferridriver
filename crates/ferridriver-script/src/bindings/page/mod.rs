@@ -3256,8 +3256,8 @@ impl PageJs {
   /// Playwright: `page.exposeBinding(name, callback)`
   /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:371`).
   /// Like [`Self::expose_function`], but the callback receives a
-  /// `BindingSource` object (`{ context, page, frame }` identifiers) as
-  /// its first argument, then the spread page-side call arguments.
+  /// `BindingSource` object (the live `{ context, page, frame }`) as its
+  /// first argument, then the spread page-side call arguments.
   #[qjs(rename = "exposeBinding")]
   pub fn expose_binding<'js>(
     &self,
@@ -3294,12 +3294,8 @@ impl PageJs {
               let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
               // Playwright passes the source object first, then spreads
               // the page-side call arguments: `callback(source, ...args)`.
-              let source_obj = rquickjs::Object::new(ctx.clone())?;
               let source: ferridriver::events::BindingSource = source;
-              source_obj.set("context", source.context)?;
-              source_obj.set("page", source.page)?;
-              source_obj.set("frame", source.frame)?;
-              call_args.push_arg(source_obj.into_value())?;
+              call_args.push_arg(binding_source_object(&ctx, &source)?)?;
               for v in args {
                 call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
               }

@@ -1158,11 +1158,7 @@ impl BrowserContextJs {
             // first argument; for exposeFunction it is omitted.
             let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
             if with_source {
-              let src = rquickjs::Object::new(ctx.clone())?;
-              src.set("context", source.context.clone())?;
-              src.set("page", source.page.clone())?;
-              src.set("frame", source.frame.clone())?;
-              call_args.push_arg(src)?;
+              call_args.push_arg(crate::bindings::page::binding_source_object(&ctx, &source)?)?;
             }
             for v in &args {
               // `json_to_js` (NOT serde): a transitive dep force-enables

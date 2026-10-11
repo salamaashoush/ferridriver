@@ -513,6 +513,7 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
     context: String::new(),
     page: main_frame,
     frame: source_frame,
+    live: None,
   };
 
   let maybe_fn = ctx.exposed_fns.read().await.get(&fn_name).cloned();

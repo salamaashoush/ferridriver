@@ -828,7 +828,7 @@ impl BrowserContext {
   /// settles with what it returns or throws. Returns a `Disposable`
   /// whose `dispose()` removes the binding from every page.
   #[napi(
-    ts_args_type = "name: string, callback: (source: { context: string, page: string, frame: string }, ...args: any[]) => any",
+    ts_args_type = "name: string, callback: (source: { context: BrowserContext, page: Page, frame: Frame }, ...args: any[]) => any",
     ts_return_type = "Promise<Disposable>"
   )]
   // napi `AsyncBlockBuilder::build` takes `&Env`; matches the sibling `route` binding.
@@ -897,17 +897,29 @@ impl BrowserContext {
   }
 }
 
-/// JS-visible shape of Playwright's `BindingSource`
-/// (`/tmp/playwright/packages/playwright-core/types/structs.d.ts:45`).
-/// ferridriver delivers identity strings (composite context key, page
-/// id, frame id) rather than live `BrowserContext`/`Page`/`Frame`
-/// handles because the binding dispatch runs outside the handle
-/// lifetime.
-#[napi(object)]
-pub struct BindingSourceJs {
-  pub context: String,
-  pub page: String,
-  pub frame: String,
+/// Playwright's `BindingSource` for an `exposeBinding` callback
+/// (`packages/playwright-core/types/structs.d.ts`): the live
+/// `{ context, page, frame }` the call came from. The page and frame are
+/// the objects that already stand for them; a source with no page behind
+/// it (the page went away as its call was dispatched) has none of the
+/// three.
+pub struct BindingSourceJs(pub ferridriver::events::BindingSource);
+
+impl napi::bindgen_prelude::ToNapiValue for BindingSourceJs {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+    let js_env = napi::Env::from_raw(env);
+    let mut object = napi::bindgen_prelude::Object::new(&js_env)?;
+    if let Some(context) = val.0.live_context() {
+      object.set("context", BrowserContext::wrap(context))?;
+    }
+    if let Some(page) = val.0.live_page() {
+      object.set("page", crate::identity::PageObject(page))?;
+    }
+    if let Some(frame) = val.0.live_frame() {
+      object.set("frame", crate::identity::FrameObject(frame))?;
+    }
+    unsafe { napi::bindgen_prelude::Object::to_napi_value(env, object) }
+  }
 }
 
 /// Lower a JS listener `Function<'_>` (which is `!Send` because it

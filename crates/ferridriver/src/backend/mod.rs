@@ -1776,8 +1776,9 @@ impl AnyPage {
   /// expression its page-side caller resolves with.
   fn page_binding(&self, binding: crate::events::ExposedBinding) -> PageBinding {
     let page = self.page_backref_handle();
-    Arc::new(move |source, args| {
+    Arc::new(move |mut source, args| {
       let frame = source.frame.clone();
+      source.live = page.upgrade();
       let returned = binding(source, args);
       let page = page.clone();
       Box::pin(async move { binding_result_expression(&page, &frame, returned.await?).await })

@@ -534,6 +534,28 @@ pub(crate) fn get_exposed_callback(ctx: &rquickjs::Ctx<'_>, name: &str) -> rquic
   with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
 }
 
+/// Playwright's `BindingSource` for an `exposeBinding` callback: the
+/// live `{ context, page, frame }` the call came from, each the object
+/// that already stands for it. A source with no page behind it (the
+/// page went away as its call was dispatched) has none of the three.
+pub(crate) fn binding_source_object<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  source: &ferridriver::events::BindingSource,
+) -> rquickjs::Result<rquickjs::Object<'js>> {
+  let object = rquickjs::Object::new(ctx.clone())?;
+  if let Some(context) = source.live_context() {
+    let wrapper = crate::bindings::context::BrowserContextJs::new(Arc::new(context));
+    object.set("context", rquickjs::Class::instance(ctx.clone(), wrapper)?)?;
+  }
+  if let Some(page) = source.live_page() {
+    object.set("page", crate::bindings::identity::page_object(ctx, page)?)?;
+  }
+  if let Some(frame) = source.live_frame() {
+    object.set("frame", crate::bindings::identity::frame_object(ctx, frame)?)?;
+  }
+  Ok(object)
+}
+
 /// Call an exposed callback and settle it the way the page-side caller
 /// sees it: the awaited return value, or the message it threw.
 pub(crate) async fn settle_exposed_call<'js>(

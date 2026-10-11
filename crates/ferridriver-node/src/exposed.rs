@@ -37,14 +37,7 @@ pub(crate) fn binding(env: Env, callback: Unknown<'_>, with_source: bool) -> nap
   Ok(Arc::new(move |source, args| {
     let tsfn = Arc::clone(&tsfn);
     Box::pin(async move {
-      let call = FnArgs::from((
-        BindingSourceJs {
-          context: source.context,
-          page: source.page,
-          frame: source.frame,
-        },
-        serde_json::Value::Array(args),
-      ));
+      let call = FnArgs::from((BindingSourceJs(source), serde_json::Value::Array(args)));
       let returned = tsfn.call_async(call).await.map_err(|e| e.reason.clone())?;
       let result = returned.await.map_err(|e| e.reason.clone())?;
       let argument = result.into_argument(false).map_err(|e| e.reason.clone())?;

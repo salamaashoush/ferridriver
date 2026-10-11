@@ -6,7 +6,7 @@
 // Rust fn names.
 
 import { test, describe, expect } from '@ferridriver/test';
-import type { Page } from '@ferridriver/test';
+import type { BindingSource, Page } from '@ferridriver/test';
 import { dataUrl } from './helpers/html';
 
 // A labelled button, an image with alt text, and an iframe so every
@@ -135,18 +135,42 @@ describe('binding surface', () => {
 
   test('page_expose_binding', async ({ page }) => {
     // page.exposeBinding = page.exposeFunction plus a leading
-    // BindingSource ({ context, page, frame }). Prove the source object
-    // arrives, the spread args follow it, and the callback's return
-    // value reaches the page-side caller.
+    // BindingSource: the live { context, page, frame } the call came
+    // from (types/structs.d.ts). Prove the source is those objects, the
+    // spread args follow it, and the callback's return value reaches the
+    // page-side caller.
     await setup(page);
-    let sourceKeys: string[] | null = null;
-    await page.exposeBinding('__page_bind', (source: Record<string, unknown>, ...a: number[]) => {
-      sourceKeys = Object.keys(source).sort();
-      return { sum: a.reduce((x, y) => x + y, 0), hasPage: typeof source.page };
+    let seen: { keys: string[]; page: boolean; frame: boolean; pages: number } | null = null;
+    await page.exposeBinding('__page_bind', async (source: BindingSource, ...a: number[]) => {
+      seen = {
+        keys: Object.keys(source).sort(),
+        page: source.page === page,
+        frame: source.frame === page.mainFrame(),
+        pages: (await source.context.pages()).length,
+      };
+      return { sum: a.reduce((x, y) => x + y, 0), title: await source.page.title() };
     });
     expect(await page.evaluate('typeof window.__page_bind')).toBe('function');
-    expect(await page.evaluate('window.__page_bind(2, 3, 5)')).toEqual({ sum: 10, hasPage: 'string' });
-    expect(sourceKeys).toEqual(['context', 'frame', 'page']);
+    await page.evaluate("document.title = 'bound'");
+    expect(await page.evaluate('window.__page_bind(2, 3, 5)')).toEqual({ sum: 10, title: 'bound' });
+    expect(seen).toEqual({ keys: ['context', 'frame', 'page'], page: true, frame: true, pages: 1 });
+  });
+
+  test('a binding called from a frame is given that frame', async ({ page }) => {
+    // Ported from browsercontext-expose-function.spec.ts "should work":
+    // the callback acts through the frame it is handed, and what it
+    // returns is a handle made in that frame.
+    await setup(page);
+    const inner = page.frames().find((f) => f !== page.mainFrame())!;
+    await inner.waitForSelector('#inner');
+    const frames: boolean[] = [];
+    await page.exposeBinding('__add_handle', async (source: BindingSource, a: number, b: number) => {
+      frames.push(source.frame === inner);
+      return source.frame.evaluateHandle(([x, y]: number[]) => x + y, [a, b]);
+    });
+    expect(await page.evaluate('window.__add_handle(5, 6)')).toBe(11);
+    expect(await inner.evaluate('window.__add_handle(20, 22)')).toBe(42);
+    expect(frames).toEqual([false, true]);
   });
 
   test('context_expose_binding', async ({ browser }) => {
@@ -156,16 +180,19 @@ describe('binding surface', () => {
     // binding applied to a page created AFTER registration.
     const ctx = await browser.newContext();
     try {
-      let sourceKeys: string[] | null = null;
-      const disp = await ctx.exposeBinding('__ctx_bind', (source: Record<string, unknown>, ...a: number[]) => {
-        sourceKeys = Object.keys(source).sort();
-        return { sum: a.reduce((x, y) => x + y, 0), hasContext: typeof source.context };
+      let opened: Page | null = null;
+      let sourceIsPage: boolean | null = null;
+      const disp = await ctx.exposeBinding('__ctx_bind', async (source: BindingSource, ...a: number[]) => {
+        sourceIsPage = source.page === opened;
+        return { sum: a.reduce((x, y) => x + y, 0), url: (await source.context.pages())[0].url() };
       });
       const p = await ctx.newPage();
-      await p.goto(dataUrl('<title>x</title>'));
+      opened = p;
+      const url = dataUrl('<title>x</title>');
+      await p.goto(url);
       expect(await p.evaluate('typeof window.__ctx_bind')).toBe('function');
-      expect(await p.evaluate('window.__ctx_bind(2, 3, 5)')).toEqual({ sum: 10, hasContext: 'string' });
-      expect(sourceKeys).toEqual(['context', 'frame', 'page']);
+      expect(await p.evaluate('window.__ctx_bind(2, 3, 5)')).toEqual({ sum: 10, url });
+      expect(sourceIsPage).toBe(true);
       // After dispose the page-side proxy is gone.
       await disp.dispose();
       expect(await p.evaluate('typeof window.__ctx_bind')).toBe('undefined');

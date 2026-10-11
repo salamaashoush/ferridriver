@@ -213,18 +213,16 @@ pub type ExposedFnFuture = Pin<Box<dyn Future<Output = Result<BindingReturn, Str
 /// dispatch must `await` this before resolving the page binding.
 pub type ExposedFn = Arc<dyn Fn(Vec<serde_json::Value>) -> ExposedFnFuture + Send + Sync>;
 
-/// The `source` object Playwright passes as the first argument to an
-/// `exposeBinding` callback. Mirrors
-/// `BindingSource = { context, page, frame }` from
-/// `/tmp/playwright/packages/playwright-core/types/structs.d.ts:45`.
+/// The `source` Playwright passes as the first argument to an
+/// `exposeBinding` callback: `BindingSource = { context, page, frame }`
+/// (`packages/playwright-core/types/structs.d.ts`).
 ///
-/// ferridriver delivers identity strings rather than live handles
-/// because the backend binding dispatch runs outside the
-/// `BrowserContext`/`Page` handle lifetime; the binding layers
-/// reconstruct the JS-visible `{ context, page, frame }` object from
-/// these identifiers. `context` is the composite session key,
-/// `page` the page's stable id, `frame` the calling frame id.
-#[derive(Debug, Clone, Default)]
+/// A backend names the caller by identifiers, which is all it has when
+/// the call arrives. The page then attaches itself, and
+/// [`Self::live_page`], [`Self::live_frame`] and [`Self::live_context`]
+/// are the objects Playwright hands a callback: what a binding layer
+/// passes on, and what a Rust callback acts through.
+#[derive(Clone, Default)]
 pub struct BindingSource {
   /// Composite session key of the context the call originated from.
   pub context: String,
@@ -233,6 +231,40 @@ pub struct BindingSource {
   /// Frame id of the calling frame (the main frame when the call
   /// comes from the top document).
   pub frame: String,
+  /// The calling page, once the call has reached it.
+  pub(crate) live: Option<Arc<crate::page::Page>>,
+}
+
+impl BindingSource {
+  /// The page the call came from. `None` only for a source built by
+  /// hand, or when the page went away before its call was dispatched.
+  #[must_use]
+  pub fn live_page(&self) -> Option<Arc<crate::page::Page>> {
+    self.live.clone()
+  }
+
+  /// The frame the call came from: the main frame, or a child frame.
+  #[must_use]
+  pub fn live_frame(&self) -> Option<crate::frame::Frame> {
+    self.live.as_ref().map(|page| page.frame_for_id(&self.frame))
+  }
+
+  /// The context of the page the call came from.
+  #[must_use]
+  pub fn live_context(&self) -> Option<crate::context::ContextRef> {
+    self.live.as_ref().and_then(|page| page.context().cloned())
+  }
+}
+
+impl std::fmt::Debug for BindingSource {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("BindingSource")
+      .field("context", &self.context)
+      .field("page", &self.page)
+      .field("frame", &self.frame)
+      .field("live", &self.live.is_some())
+      .finish()
+  }
 }
 
 /// Callback type for context/page bindings registered via

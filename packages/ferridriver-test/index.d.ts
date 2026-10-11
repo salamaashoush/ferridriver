@@ -1800,7 +1800,7 @@ export interface Page {
   addScriptTag(options?: { url?: string; path?: string; content?: string; type?: string }): Promise<ElementHandle>;
   addStyleTag(options?: { url?: string; path?: string; content?: string }): Promise<ElementHandle>;
   exposeFunction(name: string, callback: Function): Promise<void>;
-  exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<void>;
+  exposeBinding(name: string, callback: (source: BindingSource, ...args: any[]) => any, options?: { handle?: boolean }): Promise<void>;
 
   waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
@@ -1914,6 +1914,13 @@ export interface Disposable {
   dispose(): Promise<void>;
 }
 
+/** What an `exposeBinding` callback is called with first: where the call came from. */
+export interface BindingSource {
+  context: BrowserContext;
+  page: Page;
+  frame: Frame;
+}
+
 export interface Cookie {
   name: string;
   value: string;
@@ -2003,7 +2010,7 @@ export interface BrowserContext {
   // binding and removes the page-side window proxy (a ferridriver
   // extension over Playwright's void return).
   exposeFunction(name: string, callback: Function): Promise<Disposable>;
-  exposeBinding(name: string, callback: Function, options?: { handle?: boolean }): Promise<Disposable>;
+  exposeBinding(name: string, callback: (source: BindingSource, ...args: any[]) => any, options?: { handle?: boolean }): Promise<Disposable>;
   route(url: string | RegExp | ((url: URL) => boolean), handler: (route: Route, request: Request) => void | Promise<void>, options?: { times?: number }): Promise<void>;
   routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;

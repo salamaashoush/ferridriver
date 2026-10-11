@@ -1956,9 +1956,9 @@ impl Page {
   /// Playwright: `page.exposeBinding(name, callback)`
   /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:371`).
   /// Like [`Self::expose_function`], but the callback first receives a
-  /// `BindingSource` (`{ context, page, frame }` identifiers).
+  /// `BindingSource` (the live `{ context, page, frame }`).
   #[napi(
-    ts_args_type = "name: string, callback: (source: { context: string, page: string, frame: string }, ...args: any[]) => any",
+    ts_args_type = "name: string, callback: (source: { context: BrowserContext, page: Page, frame: Frame }, ...args: any[]) => any",
     ts_return_type = "Promise<void>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`

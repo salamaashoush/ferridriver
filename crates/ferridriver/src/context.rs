@@ -2597,6 +2597,7 @@ mod tests {
       context: "inst:ctx".into(),
       page: "frame-1".into(),
       frame: "frame-1".into(),
+      live: None,
     };
     let out = binding(source, vec![serde_json::json!(20), serde_json::json!(22)]).await;
     assert_eq!(seen.load(Ordering::SeqCst), 2);

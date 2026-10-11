@@ -2440,6 +2440,7 @@ impl BidiPage {
               context: String::new(),
               page: (*exposed_ctx).to_string(),
               frame: call_ctx.clone(),
+              live: None,
             };
             let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
             let exposed_session = exposed_session.clone();

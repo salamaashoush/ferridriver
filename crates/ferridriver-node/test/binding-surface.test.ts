@@ -270,24 +270,26 @@ for (const backend of BACKENDS) {
       expect(() => page.pause()).toThrow(/pause|inspector|unsupported/i);
     });
 
-    it("page.exposeBinding delivers the BindingSource plus spread args", async () => {
-      const seenSource: Record<string, unknown>[] = [];
-      const seenArgs: unknown[][] = [];
-      await page.exposeBinding(
-        "__page_bind",
-        (source: { context: string; page: string; frame: string }, ...args: number[]) => {
-          seenSource.push(source);
-          seenArgs.push(args);
-          return args[0] + args[1];
-        },
-      );
+    it("page.exposeBinding delivers the live BindingSource plus spread args", async () => {
+      // Playwright: `BindingSource = { context, page, frame }`, the
+      // objects the call came from (types/structs.d.ts).
+      const seen: unknown[] = [];
+      await page.exposeBinding("__page_bind", async (source, ...args: number[]) => {
+        seen.push({
+          keys: Object.keys(source).sort(),
+          page: source.page === page,
+          frame: source.frame === page.mainFrame(),
+          pages: (await source.context.pages()).length,
+          args,
+        });
+        // The callback acts through the frame it was handed, and returns
+        // a handle made there.
+        return source.frame.evaluateHandle(([a, b]: number[]) => a + b, args);
+      });
       await page.setContent("<button>x</button>");
       expect(await page.evaluate(`typeof window.__page_bind`)).toBe("function");
       expect(await page.evaluate(`window.__page_bind(2, 3)`)).toBe(5);
-      expect(seenArgs.length).toBe(1);
-      expect(seenArgs[0]).toEqual([2, 3]);
-      expect(Object.keys(seenSource[0]).sort()).toEqual(["context", "frame", "page"]);
-      expect(typeof seenSource[0].page).toBe("string");
+      expect(seen).toEqual([{ keys: ["context", "frame", "page"], page: true, frame: true, pages: 1, args: [2, 3] }]);
     });
 
     it("locator.waitForFunction polls the element until truthy", async () => {
@@ -327,32 +329,20 @@ for (const backend of BACKENDS) {
       // observe window[name] is present and the BindingSource reached
       // the callback.
       const ctx = browser.newContext();
-      const seenSource: Record<string, unknown>[] = [];
-      const seenArgs: unknown[][] = [];
-      const disposable = await ctx.exposeBinding(
-        "__ctx_bind",
-        (
-          source: { context: string; page: string; frame: string },
-          ...args: number[]
-        ) => {
-          seenSource.push(source);
-          seenArgs.push(args);
-          return args[0] * args[1];
-        },
-      );
+      let opened: Page | undefined;
+      const seen: unknown[] = [];
+      const disposable = await ctx.exposeBinding("__ctx_bind", async (source, ...args: number[]) => {
+        seen.push({ page: source.page === opened, title: await source.page.title(), args });
+        return args[0] * args[1];
+      });
       const p = await ctx.newPage();
+      opened = p;
       await p.goto("data:text/html,<title>x</title>");
       const installed = await p.evaluate(`typeof window.__ctx_bind`);
       expect(installed).toBe("function");
       expect(await p.evaluate(`window.__ctx_bind(2, 3)`)).toBe(6);
-      expect(seenArgs.length).toBe(1);
-      expect(seenArgs[0]).toEqual([2, 3]);
-      expect(Object.keys(seenSource[0]).sort()).toEqual([
-        "context",
-        "frame",
-        "page",
-      ]);
-      expect(typeof seenSource[0].context).toBe("string");
+      // The source is the page that called, opened after registration.
+      expect(seen).toEqual([{ page: true, title: "x", args: [2, 3] }]);
       // dispose() removes the page-side proxy.
       await disposable.dispose();
       const afterDispose = await p.evaluate(`typeof window.__ctx_bind`);

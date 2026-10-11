@@ -6550,6 +6550,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         context: String::new(),
         page: main_frame_id.to_string(),
         frame: source_frame,
+        live: None,
       },
     })
   }
