@@ -342,11 +342,10 @@ impl BrowserContextJs {
       .await
   }
 
-  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
-  /// null)` —
-  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:355`.
-  /// Accepts `{ username, password, origin?, send? }` or `null` /
-  /// `undefined` (clears stored credentials).
+  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials:
+  /// HttpCredentials | HttpCredentials[] | null)`
+  /// (`packages/playwright-core/src/client/browserContext.ts`). `null`,
+  /// `undefined` and an empty list clear the stored credentials.
   #[qjs(rename = "setHTTPCredentials")]
   pub async fn set_http_credentials<'js>(
     &self,
@@ -357,29 +356,10 @@ impl BrowserContextJs {
     call_site
       .scope(async move {
         let creds = match credentials.0 {
-          None => None,
-          Some(v) if v.is_undefined() || v.is_null() => None,
-          Some(v) => {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct JsCreds {
-              username: String,
-              password: String,
-              origin: Option<String>,
-              send: Option<String>,
-            }
-            let parsed: JsCreds = serde_from_js(&ctx, v)?;
-            Some(ferridriver::options::HttpCredentials {
-              username: parsed.username,
-              password: parsed.password,
-              origin: parsed.origin,
-              send: parsed.send.and_then(|s| match s.as_str() {
-                "always" => Some(ferridriver::options::HttpCredentialsSend::Always),
-                "unauthorized" => Some(ferridriver::options::HttpCredentialsSend::Unauthorized),
-                _ => None,
-              }),
-            })
+          Some(v) if !v.is_undefined() && !v.is_null() => {
+            serde_from_js::<crate::bindings::browser::JsHttpCredentialsInput>(&ctx, v)?.into_core()
           },
+          _ => None,
         };
         self.inner.set_http_credentials(creds).await.into_js_with(&ctx)
       })

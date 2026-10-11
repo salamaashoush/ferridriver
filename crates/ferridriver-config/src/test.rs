@@ -825,7 +825,9 @@ pub struct ContextConfig {
   pub permissions: Vec<String>,
   #[serde(default)]
   pub extra_http_headers: BTreeMap<String, String>,
-  pub http_credentials: Option<HttpCredentialsConfig>,
+  /// One set of credentials or a list, as Playwright's `httpCredentials`.
+  #[serde(default, deserialize_with = "one_or_many_credentials")]
+  pub http_credentials: Vec<HttpCredentialsConfig>,
   pub ignore_https_errors: bool,
   pub proxy: Option<ProxyConfig>,
   pub service_workers: Option<String>,
@@ -853,6 +855,22 @@ pub struct HttpCredentialsConfig {
   pub username: String,
   pub password: String,
   pub origin: Option<String>,
+}
+
+fn one_or_many_credentials<'de, D: serde::Deserializer<'de>>(
+  deserializer: D,
+) -> Result<Vec<HttpCredentialsConfig>, D::Error> {
+  #[derive(Deserialize)]
+  #[serde(untagged)]
+  enum OneOrMany {
+    Many(Vec<HttpCredentialsConfig>),
+    One(HttpCredentialsConfig),
+  }
+  Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+    Some(OneOrMany::Many(list)) => list,
+    Some(OneOrMany::One(credentials)) => vec![credentials],
+    None => Vec::new(),
+  })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -893,7 +911,7 @@ impl Default for ContextConfig {
       geolocation: None,
       permissions: Vec::new(),
       extra_http_headers: BTreeMap::new(),
-      http_credentials: None,
+      http_credentials: Vec::new(),
       ignore_https_errors: false,
       proxy: None,
       service_workers: None,
@@ -1847,7 +1865,7 @@ fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   if !overlay.extra_http_headers.is_empty() {
     base.extra_http_headers.clone_from(&overlay.extra_http_headers);
   }
-  if overlay.http_credentials.is_some() {
+  if !overlay.http_credentials.is_empty() {
     base.http_credentials.clone_from(&overlay.http_credentials);
   }
   if overlay.ignore_https_errors != defaults.ignore_https_errors {
@@ -2128,6 +2146,38 @@ mod use_options_tests {
 
   fn config(toml_src: &str) -> TestConfig {
     toml::from_str::<TestConfig>(toml_src).expect("parse")
+  }
+
+  #[test]
+  fn http_credentials_take_one_table_or_a_list_of_them() {
+    let one = config(
+      r#"
+        [browser.use]
+        httpCredentials = { username = "user", password = "pass" }
+      "#,
+    );
+    let one = &one.browser.use_options.http_credentials;
+    assert_eq!(one.len(), 1);
+    assert_eq!((one[0].username.as_str(), one[0].origin.as_deref()), ("user", None));
+
+    let many = config(
+      r#"
+        [[browser.use.httpCredentials]]
+        username = "alice"
+        password = "secret"
+        origin = "https://example.com"
+
+        [[browser.use.httpCredentials]]
+        username = "user"
+        password = "pass"
+      "#,
+    );
+    let many = &many.browser.use_options.http_credentials;
+    assert_eq!(many.len(), 2);
+    assert_eq!(many[0].origin.as_deref(), Some("https://example.com"));
+    assert_eq!(many[1].username, "user");
+
+    assert!(config("").browser.use_options.http_credentials.is_empty());
   }
 
   #[test]

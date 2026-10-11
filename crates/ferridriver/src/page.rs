@@ -2803,7 +2803,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend cannot apply the credentials.
-  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+  pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     self.inner.set_http_credentials(creds).await
   }
 

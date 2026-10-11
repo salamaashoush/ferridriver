@@ -414,7 +414,7 @@ action_options!(crate::options::BrowserContextOptions {
   raw forced_colors: crate::options::MediaOverride,
   opt geolocation: crate::options::Geolocation,
   opt has_touch: bool,
-  opt http_credentials: crate::options::HttpCredentials,
+  opt http_credentials: Vec<crate::options::HttpCredentials>,
   opt ignore_https_errors: bool,
   named mobile is_mobile: bool,
   opt java_script_enabled: bool,

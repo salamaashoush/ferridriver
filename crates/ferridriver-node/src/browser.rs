@@ -151,7 +151,7 @@ impl Browser {
     forcedColors?: 'active' | 'none' | null;
     geolocation?: { latitude: number; longitude: number; accuracy?: number };
     hasTouch?: boolean;
-    httpCredentials?: { username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' };
+    httpCredentials?: { username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | Array<{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' }>;
     ignoreHTTPSErrors?: boolean;
     isMobile?: boolean;
     javaScriptEnabled?: boolean;

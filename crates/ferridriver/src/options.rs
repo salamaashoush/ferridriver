@@ -2359,6 +2359,98 @@ pub struct HttpCredentials {
   pub send: Option<HttpCredentialsSend>,
 }
 
+/// Playwright takes one set of credentials or a list of them
+/// (`httpCredentials?: HttpCredentials | HttpCredentials[]`).
+impl From<HttpCredentials> for Vec<HttpCredentials> {
+  fn from(credentials: HttpCredentials) -> Self {
+    vec![credentials]
+  }
+}
+
+/// The credentials that answer a challenge from `url`: the first entry
+/// bound to no origin, or to the origin of `url` whatever its case.
+/// Playwright `findMatchingHttpCredentials` (`server/browserContext.ts`).
+#[must_use]
+pub fn matching_http_credentials<'a>(credentials: &'a [HttpCredentials], url: &str) -> Option<&'a HttpCredentials> {
+  let origin = reqwest::Url::parse(url)
+    .ok()
+    .map(|url| url.origin().ascii_serialization());
+  credentials.iter().find(
+    |entry| match entry.origin.as_deref().filter(|bound| !bound.is_empty()) {
+      None => true,
+      Some(bound) => origin
+        .as_deref()
+        .is_some_and(|origin| bound.eq_ignore_ascii_case(origin)),
+    },
+  )
+}
+
+#[cfg(test)]
+mod http_credentials_tests {
+  use super::{HttpCredentials, matching_http_credentials};
+
+  fn entry(username: &str, origin: Option<&str>) -> HttpCredentials {
+    HttpCredentials {
+      username: username.to_string(),
+      origin: origin.map(str::to_string),
+      ..HttpCredentials::default()
+    }
+  }
+
+  fn chosen<'a>(list: &'a [HttpCredentials], url: &str) -> Option<&'a str> {
+    matching_http_credentials(list, url).map(|entry| entry.username.as_str())
+  }
+
+  #[test]
+  fn the_first_entry_that_matches_answers() {
+    let list = [
+      entry("other", Some("https://other.example.com")),
+      entry("bound", Some("https://example.com")),
+      entry("any", None),
+    ];
+    assert_eq!(chosen(&list, "https://example.com/a?b#c"), Some("bound"));
+    assert_eq!(chosen(&list, "https://other.example.com/"), Some("other"));
+    assert_eq!(chosen(&list, "https://third.example.com/"), Some("any"));
+    assert_eq!(
+      chosen(&[entry("any", None), list[1].clone()], "https://example.com/"),
+      Some("any")
+    );
+  }
+
+  #[test]
+  fn an_origin_is_scheme_host_and_port_whatever_the_case() {
+    let list = [entry("bound", Some("HTTP://Example.com:8080"))];
+    assert_eq!(chosen(&list, "http://example.com:8080/path"), Some("bound"));
+    assert_eq!(chosen(&list, "https://example.com:8080/"), None);
+    assert_eq!(chosen(&list, "http://example.com/"), None);
+    assert_eq!(chosen(&list, "http://www.example.com:8080/"), None);
+    // The default port is not part of an origin.
+    assert_eq!(
+      chosen(
+        &[entry("bound", Some("https://example.com"))],
+        "https://example.com:443/"
+      ),
+      Some("bound")
+    );
+  }
+
+  #[test]
+  fn an_entry_bound_to_an_origin_does_not_answer_a_url_without_one() {
+    assert_eq!(
+      chosen(&[entry("bound", Some("https://example.com"))], "not a url"),
+      None
+    );
+    assert_eq!(chosen(&[entry("any", Some(""))], "not a url"), Some("any"));
+    assert_eq!(chosen(&[], "https://example.com/"), None);
+  }
+
+  #[test]
+  fn one_set_of_credentials_is_a_list_of_one() {
+    let list: Vec<HttpCredentials> = entry("only", None).into();
+    assert_eq!(list.len(), 1);
+  }
+}
+
 /// Send policy for [`HttpCredentials`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HttpCredentialsSend {
@@ -2578,7 +2670,7 @@ pub struct BrowserContextOptions {
   pub forced_colors: MediaOverride,
   pub geolocation: Option<Geolocation>,
   pub has_touch: Option<bool>,
-  pub http_credentials: Option<HttpCredentials>,
+  pub http_credentials: Option<Vec<HttpCredentials>>,
   pub ignore_https_errors: Option<bool>,
   pub is_mobile: Option<bool>,
   pub java_script_enabled: Option<bool>,

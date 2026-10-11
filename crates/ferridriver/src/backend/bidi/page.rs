@@ -320,7 +320,7 @@ pub struct BidiPage {
   /// `authRequired`-phase intercept at connect, so unanswered
   /// challenges are cancelled (surfacing the native 401) rather than
   /// left paused.
-  pub(crate) http_credentials: Arc<std::sync::Mutex<Option<crate::options::HttpCredentials>>>,
+  pub(crate) http_credentials: Arc<std::sync::Mutex<Option<Vec<crate::options::HttpCredentials>>>>,
   /// Context-level permission grants. `BiDi`'s
   /// `permissions.setPermission` requires a concrete origin, but our
   /// context-level grant is origin-global — mirror Playwright's `BiDi`
@@ -1933,7 +1933,7 @@ impl BidiPage {
   /// surfaces).
   pub fn set_http_credentials(
     &self,
-    creds: Option<crate::options::HttpCredentials>,
+    creds: Option<Vec<crate::options::HttpCredentials>>,
   ) -> impl std::future::Future<Output = Result<()>> {
     if let Ok(mut slot) = self.http_credentials.lock() {
       *slot = creds;
@@ -3964,7 +3964,7 @@ struct BidiNetworkTracker {
   nav_request_slot: crate::network::NavRequestSlot,
   /// Shared with [`BidiPage::http_credentials`] — answers
   /// `network.authRequired` challenges.
-  credentials: Arc<std::sync::Mutex<Option<crate::options::HttpCredentials>>>,
+  credentials: Arc<std::sync::Mutex<Option<Vec<crate::options::HttpCredentials>>>>,
   /// Request ids already answered with `provideCredentials`. A repeat
   /// challenge for the same request means the credentials were wrong —
   /// cancel instead of looping (Playwright's
@@ -3977,7 +3977,7 @@ impl BidiNetworkTracker {
     session: Arc<super::session::BidiSession>,
     context_id: Arc<str>,
     nav_request_slot: crate::network::NavRequestSlot,
-    credentials: Arc<std::sync::Mutex<Option<crate::options::HttpCredentials>>>,
+    credentials: Arc<std::sync::Mutex<Option<Vec<crate::options::HttpCredentials>>>>,
   ) -> Self {
     Self {
       session,
@@ -4169,12 +4169,11 @@ impl BidiNetworkTracker {
       .and_then(|r| r.get("url"))
       .and_then(|v| v.as_str())
       .unwrap_or("");
-    let origin_matches = |c: &crate::options::HttpCredentials| match c.origin.as_deref() {
-      None => true,
-      Some(expected) => permissions_origin(url).is_some_and(|o| o.eq_ignore_ascii_case(expected)),
-    };
-    let answer = match creds {
-      Some(c) if is_basic && origin_matches(&c) => {
+    let matching = creds
+      .as_deref()
+      .and_then(|list| crate::options::matching_http_credentials(list, url));
+    let answer = match matching {
+      Some(c) if is_basic => {
         let mut attempted = self.attempted_auth.lock().await;
         if attempted.insert(request_id.to_string()) {
           json!({

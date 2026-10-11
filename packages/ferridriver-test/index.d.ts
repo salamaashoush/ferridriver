@@ -1959,7 +1959,7 @@ export interface BrowserContext {
   // ferridriver extension mirroring the NAPI binding.
   deleteCookie(name: string, domain?: string): Promise<void>;
   setStorageState(state: StorageState): Promise<void>;
-  setHTTPCredentials(credentials: { username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | null): Promise<void>;
+  setHTTPCredentials(credentials: HttpCredentials | HttpCredentials[] | null): Promise<void>;
   isClosed(): Promise<boolean>;
   grantPermissions(permissions: string[], options?: { origin?: string }): Promise<void>;
   clearPermissions(): Promise<void>;
@@ -2068,6 +2068,15 @@ export interface ConnectOptions {
   capabilities?: Record<string, unknown>;
 }
 
+/** Credentials for HTTP authentication, as Playwright's `httpCredentials`. */
+export interface HttpCredentials {
+  username: string;
+  password: string;
+  /** Restricts the credentials to one origin (`scheme://host:port`). */
+  origin?: string;
+  send?: 'always' | 'unauthorized';
+}
+
 export interface BrowserContextOptions {
   viewport?: { width: number; height: number } | null;
   userAgent?: string;
@@ -2076,7 +2085,7 @@ export interface BrowserContextOptions {
   geolocation?: { latitude: number; longitude: number; accuracy?: number };
   permissions?: string[];
   extraHTTPHeaders?: Record<string, string>;
-  httpCredentials?: { username: string; password: string; origin?: string };
+  httpCredentials?: HttpCredentials | HttpCredentials[];
   offline?: boolean;
   colorScheme?: 'light' | 'dark' | 'no-preference';
   reducedMotion?: 'reduce' | 'no-preference';

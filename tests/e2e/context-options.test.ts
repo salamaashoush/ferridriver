@@ -266,6 +266,99 @@ describe('context options', () => {
     }
   });
 
+  // The fixture server answers on both names, which are two origins.
+  // `/fx/auth?expect=name:secret` says which credentials it wants.
+  const otherOrigin = (baseURL: string) => baseURL.replace('127.0.0.1', 'localhost');
+
+  test('http_credentials_list_answers_each_origin_with_its_own_entry', async ({ browser, baseURL }) => {
+    const other = otherOrigin(baseURL!);
+    const ctx = await browser.newContext({
+      httpCredentials: [
+        { username: 'alice', password: 'secret', origin: other },
+        { username: 'user', password: 'pass', origin: baseURL },
+      ],
+    });
+    try {
+      const p = await ctx.newPage();
+      const first = await p.goto(`${other}/fx/auth?expect=alice:secret`);
+      expect(first?.status()).toBe(200);
+      expect(await p.evaluate(() => document.body.textContent)).toContain('AUTHED');
+      const second = await p.goto(`${baseURL}/fx/auth`);
+      expect(second?.status()).toBe(200);
+      expect(await p.evaluate(() => document.body.textContent)).toContain('AUTHED');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('http_credentials_list_takes_the_first_entry_that_matches', async ({ browser, baseURL }) => {
+    // The unbound entry comes first, so it wins over the one bound to
+    // this very origin.
+    const ctx = await browser.newContext({});
+    try {
+      const p = await ctx.newPage();
+      await ctx.setHTTPCredentials([
+        { username: 'alice', password: 'secret' },
+        { username: 'user', password: 'pass', origin: baseURL },
+      ]);
+      const r = await p.goto(`${baseURL}/fx/auth?expect=alice:secret`);
+      expect(r?.status()).toBe(200);
+      expect(await p.evaluate(() => document.body.textContent)).toContain('AUTHED');
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('http_credentials_origin_matches_whatever_its_case', async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({
+      httpCredentials: [{ username: 'user', password: 'pass', origin: baseURL!.toUpperCase() }],
+    });
+    try {
+      const p = await ctx.newPage();
+      const r = await p.goto(`${baseURL}/fx/auth`);
+      expect(r?.status()).toBe(200);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('http_credentials_bound_to_another_origin_are_not_sent', async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({
+      httpCredentials: [{ username: 'user', password: 'pass', origin: otherOrigin(baseURL!) }],
+    });
+    try {
+      const p = await ctx.newPage();
+      const r = await p.goto(`${baseURL}/fx/auth`);
+      expect(r?.status()).toBe(401);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('http_credentials_the_server_refuses_surface_the_401', async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({
+      httpCredentials: [{ username: 'user', password: 'wrong' }],
+    });
+    try {
+      const p = await ctx.newPage();
+      const r = await p.goto(`${baseURL}/fx/auth`);
+      expect(r?.status()).toBe(401);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('http_credentials_empty_list_is_no_credentials', async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({ httpCredentials: [] });
+    try {
+      const p = await ctx.newPage();
+      const r = await p.goto(`${baseURL}/fx/auth`);
+      expect(r?.status()).toBe(401);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_pages_lists_open_tabs', async ({ browser, baseURL }) => {
     // context.pages() returns every open page in creation order with
     // live Page handles (url() reflects each tab's document).

@@ -579,12 +579,18 @@ async fn handle_fx(
     "set-cookie" => fx_set_cookie(query.as_deref()),
     "set-cookie-redirect" => fx_set_cookie_redirect(query.as_deref()),
     "auth" => {
+      // `?expect=name:secret` names the credentials this request must
+      // carry, so one server can ask different origins for different ones.
+      let expected = query_values(query.as_deref(), "expect")
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "user:pass".to_string());
       let authed = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Basic "))
         .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok())
-        .is_some_and(|creds| creds == b"user:pass");
+        .is_some_and(|creds| creds == expected.as_bytes());
       if authed {
         fx_html("AUTHED")
       } else {

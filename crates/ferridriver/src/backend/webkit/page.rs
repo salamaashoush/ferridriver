@@ -1841,8 +1841,9 @@ impl WebKitPage {
   /// Backs [`crate::Page::set_http_credentials`]. Mirrors Playwright's
   /// `wkPage.updateHttpCredentials` — `Emulation.setAuthCredentials` on
   /// the page-proxy session; clearing sends an empty credentials list.
-  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+  pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     let credentials: Vec<Value> = creds
+      .unwrap_or_default()
       .into_iter()
       .map(|creds| {
         let mut value = json!({ "username": creds.username, "password": creds.password });

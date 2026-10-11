@@ -222,6 +222,46 @@ for (const backend of BACKENDS) {
       }
     });
 
+    it("httpCredentials takes a list and answers with the first entry that matches", async () => {
+      const srv = await startBasicAuthServer();
+      const origin = new URL(srv.url).origin;
+      // The entry bound elsewhere is skipped; had the list been read as
+      // one entry, or the wrong one sent, the server would answer 401.
+      const ctx = browser.newContext({
+        httpCredentials: [
+          { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
+          { username: "user", password: "pass", origin },
+        ],
+      });
+      try {
+        const page = await ctx.newPage();
+        const r = await page.goto(srv.url);
+        expect(r?.status()).toBe(200);
+        expect(await page.evaluate("document.body.textContent")).toContain("AUTHED");
+      } finally {
+        await ctx.close();
+        await srv.close();
+      }
+    });
+
+    it("setHTTPCredentials takes a list", async () => {
+      const srv = await startBasicAuthServer();
+      const ctx = browser.newContext({});
+      try {
+        const page = await ctx.newPage();
+        await ctx.setHTTPCredentials([
+          { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
+          { username: "user", password: "pass" },
+        ]);
+        const r = await page.goto(srv.url);
+        expect(r?.status()).toBe(200);
+        expect(await page.evaluate("document.body.textContent")).toContain("AUTHED");
+      } finally {
+        await ctx.close();
+        await srv.close();
+      }
+    });
+
     it("without setHTTPCredentials a 401 nav is not auto-authenticated", async () => {
       const srv = await startBasicAuthServer();
       const ctx = browser.newContext({});

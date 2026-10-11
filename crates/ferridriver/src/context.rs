@@ -1668,8 +1668,11 @@ impl ContextRef {
       .await
   }
 
-  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
-  /// null)` (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:355`).
+  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials:
+  /// HttpCredentials | HttpCredentials[] | null)`
+  /// (`packages/playwright-core/src/client/browserContext.ts`). A
+  /// challenge is answered with the first entry bound to no origin or to
+  /// the request's.
   /// Stores the credentials on the context options bag so pages opened
   /// later inherit them, and applies them to every already-open page.
   /// Passing `None` clears stored credentials — future 401 challenges
@@ -1685,7 +1688,7 @@ impl ContextRef {
   ///
   /// Returns an error if any open page's backend rejects the change
   /// (e.g. a backend that does not support auth-challenge interception).
-  pub async fn set_http_credentials(&self, credentials: Option<crate::options::HttpCredentials>) -> Result<()> {
+  pub async fn set_http_credentials(&self, credentials: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     self
       .traced(
         "setHTTPCredentials",
@@ -1695,7 +1698,13 @@ impl ContextRef {
       .await
   }
 
-  async fn set_http_credentials_untraced(&self, credentials: Option<crate::options::HttpCredentials>) -> Result<()> {
+  async fn set_http_credentials_untraced(
+    &self,
+    credentials: Option<Vec<crate::options::HttpCredentials>>,
+  ) -> Result<()> {
+    // An empty list is no credentials, as in Playwright's
+    // `toHttpCredentialsProtocol`.
+    let credentials = credentials.filter(|list| !list.is_empty());
     let composite = self.key.to_composite();
     {
       let state = self.state.read().await;

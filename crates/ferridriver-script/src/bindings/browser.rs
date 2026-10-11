@@ -426,7 +426,7 @@ pub(super) struct JsBrowserContextOptions {
   forced_colors: Option<serde_json::Value>,
   geolocation: Option<JsGeolocation>,
   has_touch: Option<bool>,
-  http_credentials: Option<JsHttpCredentials>,
+  http_credentials: Option<JsHttpCredentialsInput>,
   #[serde(rename = "ignoreHTTPSErrors")]
   ignore_https_errors: Option<bool>,
   is_mobile: Option<bool>,
@@ -459,11 +459,44 @@ struct JsGeolocation {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct JsHttpCredentials {
+pub(crate) struct JsHttpCredentials {
   username: String,
   password: String,
   origin: Option<String>,
   send: Option<String>,
+}
+
+/// Playwright `HttpCredentials | HttpCredentials[]`.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+pub(crate) enum JsHttpCredentialsInput {
+  Many(Vec<JsHttpCredentials>),
+  One(JsHttpCredentials),
+}
+
+impl JsHttpCredentialsInput {
+  /// The list core takes, or `None` for an empty one.
+  pub(crate) fn into_core(self) -> Option<Vec<ferridriver::options::HttpCredentials>> {
+    use ferridriver::options as fo;
+    let entries = match self {
+      Self::Many(entries) => entries,
+      Self::One(entry) => vec![entry],
+    };
+    let list: Vec<_> = entries
+      .into_iter()
+      .map(|c| fo::HttpCredentials {
+        username: c.username,
+        password: c.password,
+        origin: c.origin,
+        send: c.send.and_then(|s| match s.as_str() {
+          "always" => Some(fo::HttpCredentialsSend::Always),
+          "unauthorized" => Some(fo::HttpCredentialsSend::Unauthorized),
+          _ => None,
+        }),
+      })
+      .collect();
+    (!list.is_empty()).then_some(list)
+  }
 }
 
 #[derive(serde::Deserialize)]
@@ -538,16 +571,7 @@ impl JsBrowserContextOptions {
       },
     };
 
-    let http_credentials = self.http_credentials.map(|c| fo::HttpCredentials {
-      username: c.username,
-      password: c.password,
-      origin: c.origin,
-      send: c.send.and_then(|s| match s.as_str() {
-        "always" => Some(fo::HttpCredentialsSend::Always),
-        "unauthorized" => Some(fo::HttpCredentialsSend::Unauthorized),
-        _ => None,
-      }),
-    });
+    let http_credentials = self.http_credentials.and_then(JsHttpCredentialsInput::into_core);
     let proxy = self.proxy.map(|p| fo::ProxyConfig {
       server: p.server,
       bypass: p.bypass,

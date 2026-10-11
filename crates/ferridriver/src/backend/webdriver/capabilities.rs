@@ -38,7 +38,7 @@ impl WebDriverPage {
     "Classic WebDriver does not expose request header overrides"
   );
   unavailable!(
-    set_http_credentials(_credentials: Option<crate::options::HttpCredentials>) -> (),
+    set_http_credentials(_credentials: Option<Vec<crate::options::HttpCredentials>>) -> (),
     "Classic WebDriver does not expose HTTP authentication interception"
   );
   unavailable!(reset_permissions() -> (), "Classic WebDriver does not expose browser permission overrides");

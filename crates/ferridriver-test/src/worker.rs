@@ -508,17 +508,21 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
         ctx_config.extra_http_headers = headers;
       }
     }
-    if let Some(creds) = opts.get("httpCredentials").and_then(|v| v.as_object())
-      && let (Some(user), Some(pass)) = (
-        creds.get("username").and_then(|v| v.as_str()),
-        creds.get("password").and_then(|v| v.as_str()),
-      )
-    {
-      ctx_config.http_credentials = Some(crate::config::HttpCredentialsConfig {
-        username: user.to_string(),
-        password: pass.to_string(),
-        origin: creds.get("origin").and_then(|v| v.as_str()).map(String::from),
-      });
+    if let Some(value) = opts.get("httpCredentials") {
+      let entries = value.as_array().map_or(std::slice::from_ref(value), Vec::as_slice);
+      let credentials: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| {
+          Some(crate::config::HttpCredentialsConfig {
+            username: entry.get("username")?.as_str()?.to_string(),
+            password: entry.get("password")?.as_str()?.to_string(),
+            origin: entry.get("origin").and_then(|v| v.as_str()).map(String::from),
+          })
+        })
+        .collect();
+      if !credentials.is_empty() {
+        ctx_config.http_credentials = credentials;
+      }
     }
   }
 
@@ -690,13 +694,19 @@ fn build_context_options(
   if ctx_config.accept_downloads && !is_webkit {
     let _ = std::fs::create_dir_all(output_dir.join("downloads"));
   }
-  if let Some(ref creds) = ctx_config.http_credentials {
-    opts.http_credentials = Some(ferridriver::options::HttpCredentials {
-      username: creds.username.clone(),
-      password: creds.password.clone(),
-      origin: None,
-      send: None,
-    });
+  if !ctx_config.http_credentials.is_empty() {
+    opts.http_credentials = Some(
+      ctx_config
+        .http_credentials
+        .iter()
+        .map(|creds| ferridriver::options::HttpCredentials {
+          username: creds.username.clone(),
+          password: creds.password.clone(),
+          origin: creds.origin.clone(),
+          send: None,
+        })
+        .collect(),
+    );
   }
   if ctx_config.service_workers.as_deref() == Some("block") {
     opts.service_workers = Some(ferridriver::options::ServiceWorkerPolicy::Block);

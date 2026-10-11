@@ -277,16 +277,16 @@ impl BrowserContext {
     self.inner.set_offline(offline).await.into_napi()
   }
 
-  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
-  /// null)` —
-  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:355`.
-  /// Passing `null`/`undefined` clears stored credentials.
+  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials:
+  /// HttpCredentials | HttpCredentials[] | null)`
+  /// (`packages/playwright-core/src/client/browserContext.ts`). `null`,
+  /// `undefined` and an empty list clear the stored credentials.
   #[napi(
     js_name = "setHTTPCredentials",
-    ts_args_type = "httpCredentials: { username: string, password: string, origin?: string, send?: 'always' | 'unauthorized' } | null"
+    ts_args_type = "httpCredentials: { username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | Array<{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' }> | null"
   )]
-  pub async fn set_http_credentials(&self, http_credentials: Option<NapiHttpCredentials>) -> Result<()> {
-    let creds = http_credentials.map(ferridriver::options::HttpCredentials::from);
+  pub async fn set_http_credentials(&self, http_credentials: Option<NapiHttpCredentialsInput>) -> Result<()> {
+    let creds = http_credentials.and_then(http_credentials_list);
     self.inner.set_http_credentials(creds).await.into_napi()
   }
 
@@ -980,7 +980,10 @@ pub struct NapiBrowserContextOptions {
   pub forced_colors: Option<String>,
   pub geolocation: Option<NapiGeolocation>,
   pub has_touch: Option<bool>,
-  pub http_credentials: Option<NapiHttpCredentials>,
+  #[napi(
+    ts_type = "{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | Array<{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' }>"
+  )]
+  pub http_credentials: Option<NapiHttpCredentialsInput>,
   #[napi(js_name = "ignoreHTTPSErrors")]
   pub ignore_https_errors: Option<bool>,
   pub is_mobile: Option<bool>,
@@ -1027,6 +1030,19 @@ pub struct NapiHttpCredentials {
   pub password: String,
   pub origin: Option<String>,
   pub send: Option<String>,
+}
+
+/// Playwright `HttpCredentials | HttpCredentials[]`. The list comes first:
+/// an array is an object too, and would be read as one entry.
+pub type NapiHttpCredentialsInput = napi::Either<Vec<NapiHttpCredentials>, NapiHttpCredentials>;
+
+/// The list core takes, or `None` for an empty one.
+fn http_credentials_list(input: NapiHttpCredentialsInput) -> Option<Vec<ferridriver::options::HttpCredentials>> {
+  let list: Vec<_> = match input {
+    napi::Either::A(entries) => entries.into_iter().map(Into::into).collect(),
+    napi::Either::B(entry) => vec![entry.into()],
+  };
+  (!list.is_empty()).then_some(list)
 }
 
 impl From<NapiHttpCredentials> for ferridriver::options::HttpCredentials {
@@ -1172,7 +1188,7 @@ impl NapiBrowserContextOptions {
       }
       fx
     });
-    let http_credentials = self.http_credentials.map(fo::HttpCredentials::from);
+    let http_credentials = self.http_credentials.and_then(http_credentials_list);
     let proxy = self.proxy.map(|p| fo::ProxyConfig {
       server: p.server,
       bypass: p.bypass,

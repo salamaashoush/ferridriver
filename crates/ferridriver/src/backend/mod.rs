@@ -1512,7 +1512,7 @@ impl AnyPage {
   /// Set (or clear) HTTP credentials. Backs
   /// [`crate::ContextRef::set_http_credentials`] (Playwright
   /// `browserContext.setHTTPCredentials(creds | null)`).
-  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+  pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     page_dispatch!(self, set_http_credentials(creds))
   }
 

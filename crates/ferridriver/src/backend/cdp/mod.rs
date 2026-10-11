@@ -1851,7 +1851,7 @@ pub struct CdpPage<T: CdpTransport> {
   routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
   fetch: Arc<renderer::FetchState>,
   /// HTTP credentials for Fetch.authRequired handling (digest/NTLM/basic).
-  http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
+  http_credentials: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
   main_frame_id: Arc<tokio::sync::OnceCell<String>>,
   /// Most recently applied `Emulation.setDeviceMetricsOverride`
@@ -5450,7 +5450,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `browserContext.setHTTPCredentials(creds | null)`). Passing `None`
   /// clears stored credentials so future 401 challenges surface as the
   /// browser's native auth dialog (`CancelAuth`).
-  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+  pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     *self.http_credentials.write().await = creds;
     // Re-arm Fetch so `handleAuthRequests` tracks the new state.
     self.ensure_fetch_enabled().await
@@ -6855,7 +6855,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
-    http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
+    http_credentials: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
   ) -> tokio::task::AbortHandle {
     // Subscribe before enabling Fetch: Chrome can pause a request before its enable reply.
     let rx = transport.tap_event_domains(&["Fetch"], session_id.as_deref());
@@ -6892,21 +6892,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
-    http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
+    http_credentials: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>,
   ) {
-    // Extract `scheme://host[:port]` from a request URL for
-    // origin-scoped credential matching. Handles `http(s)://host[:port]/path`;
-    // `data:` / `file:` / opaque schemes return `None` (credentials
-    // don't apply to them).
-    fn origin_of_url(url: &str) -> Option<String> {
-      let (scheme, rest) = url.split_once("://")?;
-      let host_and_port = rest.split(['/', '?', '#']).next().unwrap_or("");
-      if host_and_port.is_empty() {
-        return None;
-      }
-      Some(format!("{scheme}://{host_and_port}"))
-    }
+    let mut attempted_auth = rustc_hash::FxHashSet::<String>::default();
     while let Some(event) = rx.recv().await {
       if let Some(ref expected_sid) = session_id {
         let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -6917,11 +6906,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       let method = event.get("method").and_then(|m| m.as_str());
 
       // ── Handle Fetch.authRequired — respond with stored credentials ──
-      // Playwright scopes credentials to `options.httpCredentials.origin`
-      // (see `crNetworkManager.ts::_authenticate`): when `origin` is
-      // set and the incoming request's origin doesn't match, we
-      // answer `Default` so the browser surfaces the native 401
-      // instead of silently authenticating on the wrong host.
+      // Playwright answers with the first entry bound to no origin or to
+      // the request's (`crNetworkManager.ts::_onAuthRequired`). When none
+      // matches, the browser's default stands and the 401 surfaces, rather
+      // than credentials going to a host they were not meant for.
       if method == Some("Fetch.authRequired") {
         let Some(params) = event.get("params") else { continue };
         let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
@@ -6931,34 +6919,24 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .and_then(|v| v.as_str())
           .unwrap_or("");
         let creds = http_credentials.read().await;
-        let response = if let Some(ref c) = *creds {
-          let origin_matches = match c.origin.as_deref() {
-            None => true,
-            Some(expected) => origin_of_url(req_url).is_some_and(|o| o.eq_ignore_ascii_case(expected)),
-          };
-          if origin_matches {
-            serde_json::json!({
-              "requestId": request_id,
-              "authChallengeResponse": {
-                "response": "ProvideCredentials",
-                "username": c.username,
-                "password": c.password,
-              }
-            })
-          } else {
-            // Defer to the browser's default (cancel) so the 401
-            // surfaces — matches Playwright's origin-mismatch path.
-            serde_json::json!({
-              "requestId": request_id,
-              "authChallengeResponse": { "response": "Default" }
-            })
-          }
-        } else {
-          serde_json::json!({
-            "requestId": request_id,
-            "authChallengeResponse": { "response": "CancelAuth" }
-          })
+        let challenge = match creds.as_deref() {
+          Some(list) => match crate::options::matching_http_credentials(list, req_url) {
+            // A second challenge for one request means the credentials
+            // were refused; answering again would never end.
+            Some(_) if !attempted_auth.insert(request_id.to_string()) => {
+              serde_json::json!({ "response": "CancelAuth" })
+            },
+            Some(entry) => serde_json::json!({
+              "response": "ProvideCredentials",
+              "username": entry.username,
+              "password": entry.password,
+            }),
+            None => serde_json::json!({ "response": "Default" }),
+          },
+          None => serde_json::json!({ "response": "CancelAuth" }),
         };
+        drop(creds);
+        let response = serde_json::json!({ "requestId": request_id, "authChallengeResponse": challenge });
         // Spawned so the auth round-trip never stalls the loop —
         // while this listener is blocked the broadcast buffer fills,
         // and a lapped `Fetch.requestPaused` is a request Chrome
