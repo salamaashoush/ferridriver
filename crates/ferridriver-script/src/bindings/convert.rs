@@ -451,10 +451,11 @@ impl<'js> ArgWalk<'_, 'js> {
     Ok(SerializedValue::Special(SpecialValue::Undefined))
   }
 
-  /// Upstream's `serializeValue` rich types: an `Error`, `Date`, `URL` or
-  /// `RegExp` crosses as itself rather than as its (empty) own keys.
+  /// Upstream's `serializeValue` rich types: an `Error`, `Date`, `URL`,
+  /// `RegExp`, `ArrayBuffer` or typed array crosses as itself rather than
+  /// as its own keys.
   fn rich_object(&self, v: &Value<'js>) -> rquickjs::Result<Option<ferridriver::protocol::SerializedValue>> {
-    use ferridriver::protocol::{ErrorValue, RegExpValue, SerializedValue};
+    use ferridriver::protocol::{ArrayBufferValue, ErrorValue, RegExpValue, SerializedValue, TypedArrayValue};
 
     let Some(obj) = v.as_object() else {
       return Ok(None);
@@ -497,6 +498,22 @@ impl<'js> ArgWalk<'_, 'js> {
         p: text("source")?,
         f: text("flags")?,
       })));
+    }
+    if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
+      return Ok(Some(SerializedValue::ArrayBuffer(ArrayBufferValue {
+        b: buffer_bytes(&buffer, 0, buffer.len()),
+      })));
+    }
+    for (class, k) in TYPED_ARRAYS {
+      if !is(class)? {
+        continue;
+      }
+      // A view covers `byteLength` bytes of its buffer from `byteOffset`,
+      // which is the whole of it only when nothing sliced it.
+      let buffer: rquickjs::ArrayBuffer<'js> = obj.get("buffer")?;
+      let (offset, length): (usize, usize) = (obj.get("byteOffset")?, obj.get("byteLength")?);
+      let b = buffer_bytes(&buffer, offset, length);
+      return Ok(Some(SerializedValue::TypedArray(TypedArrayValue { b, k })));
     }
     Ok(None)
   }
@@ -695,7 +712,6 @@ fn rehydrate_typed_array<'js>(
   kind: ferridriver::protocol::TypedArrayKind,
   bytes: &[u8],
 ) -> rquickjs::Result<Value<'js>> {
-  use ferridriver::protocol::TypedArrayKind;
   // Build the backing ArrayBuffer first (as bytes), then construct the
   // typed-array view via `new <Kind>Array(buffer)` so each variant
   // reuses one code path.
@@ -708,21 +724,43 @@ fn rehydrate_typed_array<'js>(
   for (i, byte) in bytes.iter().enumerate() {
     view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
   }
-  let ctor_name = match kind {
-    TypedArrayKind::I8 => "Int8Array",
-    TypedArrayKind::U8 => "Uint8Array",
-    TypedArrayKind::U8Clamped => "Uint8ClampedArray",
-    TypedArrayKind::I16 => "Int16Array",
-    TypedArrayKind::U16 => "Uint16Array",
-    TypedArrayKind::I32 => "Int32Array",
-    TypedArrayKind::U32 => "Uint32Array",
-    TypedArrayKind::F32 => "Float32Array",
-    TypedArrayKind::F64 => "Float64Array",
-    TypedArrayKind::BI64 => "BigInt64Array",
-    TypedArrayKind::BUI64 => "BigUint64Array",
-  };
+  let ctor_name = TYPED_ARRAYS
+    .iter()
+    .find(|(_, known)| *known == kind)
+    .map_or("Uint8Array", |(name, _)| name);
   construct_global(ctx, ctor_name, (ab,))
 }
+
+/// `length` bytes of `buffer` from `offset`, or none of them once it is
+/// detached. rquickjs forbids running JS while a buffer borrow is alive;
+/// this copies out at once.
+#[allow(unsafe_code)]
+fn buffer_bytes(buffer: &rquickjs::ArrayBuffer<'_>, offset: usize, length: usize) -> Vec<u8> {
+  // SAFETY: the borrow ends inside this expression, before any JS can
+  // run to detach or resize the buffer.
+  unsafe { buffer.as_bytes() }
+    .and_then(|bytes| bytes.get(offset..offset.saturating_add(length)))
+    .map(<[u8]>::to_vec)
+    .unwrap_or_default()
+}
+
+/// Each typed-array constructor and the tag it crosses the wire under.
+const TYPED_ARRAYS: [(&str, ferridriver::protocol::TypedArrayKind); 11] = {
+  use ferridriver::protocol::TypedArrayKind;
+  [
+    ("Int8Array", TypedArrayKind::I8),
+    ("Uint8Array", TypedArrayKind::U8),
+    ("Uint8ClampedArray", TypedArrayKind::U8Clamped),
+    ("Int16Array", TypedArrayKind::I16),
+    ("Uint16Array", TypedArrayKind::U16),
+    ("Int32Array", TypedArrayKind::I32),
+    ("Uint32Array", TypedArrayKind::U32),
+    ("Float32Array", TypedArrayKind::F32),
+    ("Float64Array", TypedArrayKind::F64),
+    ("BigInt64Array", TypedArrayKind::BI64),
+    ("BigUint64Array", TypedArrayKind::BUI64),
+  ]
+};
 
 /// Extract `(fn_source, is_function_hint)` from an evaluate `pageFunction`
 /// arg that can be a JS string or a JS function — matches Playwright's
