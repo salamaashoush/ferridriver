@@ -535,25 +535,24 @@ pub(crate) fn get_exposed_callback(ctx: &rquickjs::Ctx<'_>, name: &str) -> rquic
 }
 
 /// Call an exposed callback and settle it the way the page-side caller
-/// sees it: the awaited return value as JSON, or the message it threw.
+/// sees it: the awaited return value, or the message it threw.
 pub(crate) async fn settle_exposed_call<'js>(
   ctx: &rquickjs::Ctx<'js>,
   callback: &rquickjs::Function<'js>,
   args: rquickjs::function::Args<'js>,
-) -> rquickjs::Result<Result<serde_json::Value, String>> {
+) -> rquickjs::Result<Result<ferridriver::BindingReturn, String>> {
   let returned = async {
     let value: rquickjs::promise::MaybePromise<'js> = args.apply(callback)?;
-    value.into_future::<rquickjs::Value<'js>>().await
+    let value = value.into_future::<rquickjs::Value<'js>>().await?;
+    // Serialized as an evaluate argument, as Playwright's
+    // `serializeArgument(result)`: rich types and `undefined` cross as
+    // themselves, a `JSHandle` as the object it refers to, and a
+    // function is an error.
+    crate::bindings::convert::quickjs_arg_to_serialized(ctx, Some(value))
   }
   .await;
   match returned {
-    // `JSON.stringify` + serde_json's own parser: AP-safe both ways (a
-    // non-serde_json deserializer mis-handles numbers under
-    // `arbitrary_precision`). `undefined` and functions become null.
-    Ok(value) => Ok(Ok(match ctx.json_stringify(value)? {
-      Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
-      None => serde_json::Value::Null,
-    })),
+    Ok(argument) => Ok(Ok(argument.into())),
     Err(rquickjs::Error::Exception) => {
       let thrown = ctx.catch();
       let message = match thrown.as_exception() {
@@ -593,7 +592,7 @@ pub(crate) fn argument_function<'js>(
     let vm = vm.clone();
     let name = key.clone();
     Box::pin(async move {
-      let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
+      let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
         crate::vm_with!(vm => |ctx| {
           let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
             .ok_or_else(|| throw_named(&ctx, "Error", "exposed callback gone"))?;
@@ -614,8 +613,8 @@ pub(crate) fn argument_function<'js>(
 /// Flatten a VM round-trip of [`settle_exposed_call`] into the outcome an
 /// exposed binding hands back to the page.
 pub(crate) fn exposed_outcome<E: std::fmt::Display, F: std::fmt::Display>(
-  out: Result<Result<Result<serde_json::Value, String>, F>, E>,
-) -> Result<serde_json::Value, String> {
+  out: Result<Result<Result<ferridriver::BindingReturn, String>, F>, E>,
+) -> Result<ferridriver::BindingReturn, String> {
   match out {
     Ok(Ok(outcome)) => outcome,
     Ok(Err(e)) => Err(e.to_string()),

@@ -170,10 +170,34 @@ impl PageEvent {
   }
 }
 
+/// What an exposed callback hands back to its page-side caller.
+/// Playwright sends the result as an evaluate argument
+/// (`server/page.ts::PageBinding.dispatch`), so a `JSHandle` inside it
+/// arrives as the live object it refers to.
+#[derive(Debug, Clone)]
+pub enum BindingReturn {
+  /// A plain JSON value.
+  Json(serde_json::Value),
+  /// A value with rich types or handles in it, as an evaluate argument.
+  Argument(crate::protocol::SerializedArgument),
+}
+
+impl From<serde_json::Value> for BindingReturn {
+  fn from(value: serde_json::Value) -> Self {
+    Self::Json(value)
+  }
+}
+
+impl From<crate::protocol::SerializedArgument> for BindingReturn {
+  fn from(argument: crate::protocol::SerializedArgument) -> Self {
+    Self::Argument(argument)
+  }
+}
+
 /// Future returned by an [`ExposedFn`] — resolves to the page-visible
 /// result of the bound callback, or to the message of the error it threw,
 /// which the page-side call rejects with.
-pub type ExposedFnFuture = Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>;
+pub type ExposedFnFuture = Pin<Box<dyn Future<Output = Result<BindingReturn, String>> + Send>>;
 
 /// Callback type for exposed functions (`page.exposeFunction`).
 ///

@@ -298,7 +298,7 @@ impl Credentials {
     let answering = Arc::clone(&store);
     let binding: crate::events::ExposedBinding = Arc::new(move |_source, args| {
       let reply = answering.handle(args.first().unwrap_or(&serde_json::Value::Null));
-      Box::pin(async move { Ok(reply) })
+      Box::pin(async move { Ok(reply.into()) })
     });
     let binding = self.context.expose_binding(BINDING, binding).await?;
     let script = self.context.add_init_script_source(WEBAUTHN_JS.to_string()).await?;

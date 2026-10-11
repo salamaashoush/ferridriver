@@ -142,7 +142,7 @@ impl Recorder {
             let _ = out.flush();
           }
         }
-        Ok(serde_json::Value::Null)
+        Ok(serde_json::Value::Null.into())
       })
     });
 

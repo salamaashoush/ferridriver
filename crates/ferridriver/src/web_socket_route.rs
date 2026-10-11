@@ -633,7 +633,7 @@ pub fn binding_callback(router: Arc<PageWsRouter>) -> crate::events::ExposedBind
         let frame = (!source.frame.is_empty()).then_some(source.frame.as_str());
         router.handle_binding(&payload, frame).await;
       }
-      Ok(Value::Null)
+      Ok(Value::Null.into())
     })
   })
 }

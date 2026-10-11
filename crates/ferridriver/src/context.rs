@@ -2473,11 +2473,9 @@ mod tests {
     let seen_cb = seen.clone();
     let inner: crate::events::ExposedFn = Arc::new(move |args: Vec<serde_json::Value>| {
       seen_cb.store(args.len(), Ordering::SeqCst);
-      Box::pin(async move {
-        Ok(serde_json::json!(
-          args.iter().filter_map(serde_json::Value::as_i64).sum::<i64>()
-        ))
-      })
+      Box::pin(
+        async move { Ok(serde_json::json!(args.iter().filter_map(serde_json::Value::as_i64).sum::<i64>()).into()) },
+      )
     });
     let binding: crate::events::ExposedBinding = Arc::new(move |_source, args| inner(args));
     let source = crate::events::BindingSource {
@@ -2487,7 +2485,7 @@ mod tests {
     };
     let out = binding(source, vec![serde_json::json!(20), serde_json::json!(22)]).await;
     assert_eq!(seen.load(Ordering::SeqCst), 2);
-    assert_eq!(out, Ok(serde_json::json!(42)));
+    assert!(matches!(out, Ok(crate::events::BindingReturn::Json(sum)) if sum == serde_json::json!(42)));
   }
 
   #[tokio::test]

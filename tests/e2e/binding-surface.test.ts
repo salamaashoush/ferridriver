@@ -188,6 +188,25 @@ describe('binding surface', () => {
     }
   });
 
+  test('context function reaches a live child frame and leaves it on dispose', async ({ browser }) => {
+    // Playwright evaluates a new binding's script in every frame
+    // (`safeNonStallingEvaluateInAllFrames`), and its cleanup script too.
+    const ctx = await browser.newContext();
+    try {
+      const p = await ctx.newPage();
+      await setup(p);
+      const frame = p.frames().find((f) => f !== p.mainFrame())!;
+      await frame.waitForSelector('#inner');
+      const disp = await ctx.exposeFunction('__late_fn', (a: number, b: number) => a + b);
+      expect(await frame.evaluate('window.__late_fn(2, 3)')).toBe(5);
+      await disp.dispose();
+      expect(await frame.evaluate('typeof window.__late_fn')).toBe('undefined');
+      expect(await p.evaluate('typeof window.__late_fn')).toBe('undefined');
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_clear_cookies_filter', async ({ browser }) => {
     // Playwright: clearCookies({ name }) removes only the matching
     // cookie. String filters are exact matches; RegExp filters .test()

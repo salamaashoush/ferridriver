@@ -78,7 +78,7 @@ impl Lifecycle {
           .page()?
           .expose_function(
             &name,
-            Arc::new(move |args| Box::pin(async move { Ok(callback.call(&args)) })),
+            Arc::new(move |args| Box::pin(async move { Ok(callback.call(&args).into()) })),
           )
           .await?;
         Ok(Value::Null)

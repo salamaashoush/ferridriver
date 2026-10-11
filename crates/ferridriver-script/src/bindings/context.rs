@@ -1120,7 +1120,7 @@ impl BrowserContextJs {
       let vm = vm.clone();
       let name = name.clone();
       Box::pin(async move {
-        let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
+        let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
           crate::vm_with!(vm => |ctx| {
             let saved = crate::bindings::page::get_exposed_callback(&ctx, &name)?
               .ok_or_else(|| {

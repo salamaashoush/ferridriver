@@ -4143,7 +4143,7 @@ impl Page {
   /// page.expose_function("compute", Arc::new(|args| {
   ///     Box::pin(async move {
   ///         let x = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
-  ///         serde_json::json!(x * 2.0)
+  ///         Ok(serde_json::json!(x * 2.0).into())
   ///     })
   /// })).await?;
   ///

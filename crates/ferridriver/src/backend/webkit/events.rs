@@ -457,7 +457,7 @@ struct TargetListenerCtx {
   /// is dispatched here (not from a separate task pinned to one target
   /// session) so exposed functions keep working after a cross-process
   /// navigation swaps the live target — the main listener follows the swap.
-  exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
+  exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::backend::PageBinding>>>,
   /// Owning page's proxy id — stamped on every captured `Request` as
   /// its `page_guid` for context-level page attribution.
   page_proxy_id: Arc<str>,

@@ -3217,7 +3217,7 @@ impl PageJs {
         // (the previous fire-and-forget behaviour was a Playwright
         // incompatibility).
         Box::pin(async move {
-          let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
+          let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
             crate::vm_with!(vm => |ctx| {
               let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
                 .ok_or_else(|| {
@@ -3282,7 +3282,7 @@ impl PageJs {
         let vm = vm.clone();
         let name = name.clone();
         Box::pin(async move {
-          let out: Result<rquickjs::Result<Result<serde_json::Value, String>>, crate::error::ScriptError> =
+          let out: Result<rquickjs::Result<Result<ferridriver::BindingReturn, String>>, crate::error::ScriptError> =
             crate::vm_with!(vm => |ctx| {
               let saved = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?.ok_or_else(|| {
                 throw_named(&ctx, "Error", "page.exposeBinding: exposed callback gone")

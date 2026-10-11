@@ -239,7 +239,7 @@ pub struct BidiPage {
   intercept_ids: Arc<RwLock<Vec<String>>>,
   closed: Arc<AtomicBool>,
   preload_scripts: Arc<RwLock<FxHashMap<String, String>>>,
-  exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+  exposed_fns: Arc<RwLock<FxHashMap<String, crate::backend::PageBinding>>>,
   /// Whether `__playwright__binding__controller__` is installed, the way
   /// functions passed as arguments call back.
   binding_controller: Arc<tokio::sync::Mutex<bool>>,
@@ -2444,23 +2444,26 @@ impl BidiPage {
             let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
             let exposed_session = exposed_session.clone();
             let _ = binding_tx.send(Box::pin(async move {
-              let (settled, value) = match maybe_fn {
-                Some(callback) => match callback(source, args).await {
-                  Ok(value) => (true, value),
-                  Err(message) => (false, serde_json::Value::String(message)),
-                },
-                None => (false, serde_json::Value::String(format!("Function not found: {fn_name}"))),
+              let outcome = match maybe_fn {
+                Some(callback) => callback(source, args).await,
+                None => Err(format!("Function not found: {fn_name}")),
+              };
+              // The value is an expression evaluated in the calling
+              // context, only once its parked promise is found there.
+              let (settled, expression, message) = match outcome {
+                Ok(expression) => (true, expression, String::new()),
+                Err(message) => (false, String::from("undefined"), message),
               };
               let _ = exposed_session
                 .transport
                 .send_command(
                   "script.callFunction",
                   json!({
-                    "functionDeclaration": "(id, ok, value) => { const c = window.__ferri_exposed && window.__ferri_exposed[id]; if (c) { delete window.__ferri_exposed[id]; ok ? c.resolve(JSON.parse(value)) : c.reject(new Error(value)); } }",
+                    "functionDeclaration": format!("(id, ok, message) => {{ const c = window.__ferri_exposed && window.__ferri_exposed[id]; if (c) {{ delete window.__ferri_exposed[id]; ok ? c.resolve({expression}) : c.reject(new Error(message)); }} }}"),
                     "arguments": [
                       {"type": "string", "value": id},
                       {"type": "boolean", "value": settled},
-                      {"type": "string", "value": if settled { value.to_string() } else { value.as_str().unwrap_or_default().to_string() }},
+                      {"type": "string", "value": message},
                     ],
                     "target": {"context": call_ctx},
                     "awaitPromise": false,
@@ -3754,21 +3757,21 @@ impl BidiPage {
 
   // ── Exposed Functions ───────────────────────────────────────────────────
 
-  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.expose_binding_in(name, binding, false).await
   }
 
   /// [`Self::expose_binding`] for a binding its whole context has. Its
   /// preload goes onto the user context, so a page the browser opens in
   /// it has the function in its first document.
-  pub async fn expose_context_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_context_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.expose_binding_in(name, binding, true).await
   }
 
   async fn expose_binding_in(
     &self,
     name: &str,
-    binding: crate::events::ExposedBinding,
+    binding: crate::backend::PageBinding,
     context_wide: bool,
   ) -> Result<()> {
     // The shim receives a BiDi channel as its argument and sends
@@ -3800,20 +3803,9 @@ impl BidiPage {
       .preload(&format!("binding:{name}"), &js, &channel_arg, context_wide)
       .await?;
 
-    // Also execute it now for the current page (Playwright does the
+    // Also execute it now in every live frame (Playwright does the
     // same for already-live realms, with the same channel argument).
-    let _ = self
-      .cmd(
-        "script.callFunction",
-        json!({
-          "functionDeclaration": js,
-          "arguments": channel_arg,
-          "target": {"context": &*self.context_id},
-          "awaitPromise": false,
-          "resultOwnership": "none"
-        }),
-      )
-      .await;
+    self.call_in_frames(&js, &channel_arg).await;
 
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
@@ -3821,14 +3813,14 @@ impl BidiPage {
 
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global.
-  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_controller(false).await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
   }
 
   /// [`Self::expose_callback`] for a callback its whole context has.
-  pub async fn expose_context_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_context_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_controller(true).await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
@@ -3898,29 +3890,39 @@ impl BidiPage {
     if *installed {
       return Ok(());
     }
-    for frame in self.get_frame_tree().await? {
-      let _ = self
-        .cmd(
-          "script.callFunction",
-          json!({
-            "functionDeclaration": js,
-            "arguments": channel_arg,
-            "target": {"context": frame.frame_id},
-            "awaitPromise": false,
-            "resultOwnership": "none"
-          }),
-        )
-        .await;
-    }
+    self.call_in_frames(&js, &channel_arg).await;
     *installed = true;
     Ok(())
   }
 
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     self.exposed_fns.write().await.remove(name);
-    let js = format!("delete window['{name}']");
-    let _ = self.evaluate(&js).await;
+    let js = format!("() => {{ delete window['{name}'] }}");
+    self.call_in_frames(&js, &json!([])).await;
     Ok(())
+  }
+
+  /// Call `function` in the document of every frame of this page; the
+  /// page's own document alone if its frames cannot be listed.
+  async fn call_in_frames(&self, function: &str, arguments: &serde_json::Value) {
+    let contexts = match self.get_frame_tree().await {
+      Ok(frames) => frames.into_iter().map(|frame| frame.frame_id).collect(),
+      Err(_) => vec![self.context_id.to_string()],
+    };
+    for context in contexts {
+      let _ = self
+        .cmd(
+          "script.callFunction",
+          json!({
+            "functionDeclaration": function,
+            "arguments": arguments,
+            "target": {"context": context},
+            "awaitPromise": false,
+            "resultOwnership": "none"
+          }),
+        )
+        .await;
+    }
   }
 }
 

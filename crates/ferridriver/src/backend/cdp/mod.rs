@@ -1835,7 +1835,7 @@ pub struct CdpPage<T: CdpTransport> {
   frame_contexts_notify: Arc<tokio::sync::Notify>,
   /// Registered exposed binding callbacks (source-aware; plain exposed
   /// functions are wrapped by `AnyPage::expose_function`).
-  pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+  pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::backend::PageBinding>>>,
   /// Guards one-time bootstrap of the `__fd_bc` binding channel. A
   /// `Mutex<bool>` (not an `AtomicBool`): concurrent
   /// `exposeFunction`/`exposeBinding`/`routeWebSocket` callers must SERIALIZE
@@ -6567,7 +6567,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// binding call before it returns.
   async fn run_binding_call(
     call: BindingCall,
-    fns: &Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedBinding>>>,
+    fns: &Arc<tokio::sync::RwLock<FxHashMap<String, crate::backend::PageBinding>>>,
     transport: &Arc<T>,
     session_id: Option<&Arc<str>>,
   ) {
@@ -6603,8 +6603,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       ));
       return;
     };
-    let resolve_js =
-      move |result: &std::result::Result<serde_json::Value, String>| crate::backend::binding_settle_js(seq, result);
+    let resolve_js = move |result: &std::result::Result<String, String>| crate::backend::binding_settle_js(seq, result);
     let mut fut = Box::pin(callback(source, args));
     match futures::poll!(fut.as_mut()) {
       std::task::Poll::Ready(result) => deliver(resolve_js(&result)),
@@ -6617,7 +6616,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
   }
 
-  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
@@ -6634,7 +6633,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// installs are skipped: they would block until resume and deadlock
   /// the popup pump. Mirrors Playwright's `CRPage` binding install,
   /// which is init-script-only for exactly this reason.
-  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     {
       let mut initialized = self.binding_initialized.lock().await;
       if !*initialized {
@@ -6667,7 +6666,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global:
   /// the callback behind a function passed as an argument.
-  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
@@ -6675,7 +6674,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   /// [`Self::expose_callback`] for a page whose first document has not run
   /// yet: the controller arrives with that document's init scripts.
-  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     {
       let mut initialized = self.binding_initialized.lock().await;
       if !*initialized {

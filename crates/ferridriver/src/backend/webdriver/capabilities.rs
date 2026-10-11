@@ -65,7 +65,7 @@ impl WebDriverPage {
     "Classic WebDriver does not expose network interception"
   );
   unavailable!(
-    expose_binding(_name: &str, _binding: crate::events::ExposedBinding) -> (),
+    expose_binding(_name: &str, _binding: crate::backend::PageBinding) -> (),
     "Classic WebDriver does not expose browser-to-host script channels"
   );
   unavailable!(
@@ -73,7 +73,7 @@ impl WebDriverPage {
     "Classic WebDriver does not expose browser-to-host script channels"
   );
   unavailable!(
-    expose_callback(_name: &str, _binding: crate::events::ExposedBinding) -> (),
+    expose_callback(_name: &str, _binding: crate::backend::PageBinding) -> (),
     "Classic WebDriver does not expose browser-to-host script channels"
   );
   unavailable!(

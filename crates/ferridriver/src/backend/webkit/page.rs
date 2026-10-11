@@ -238,7 +238,7 @@ pub struct WebKitPage {
   /// back through these callbacks with the calling frame's
   /// `BindingSource` (plain exposed functions are wrapped source-less
   /// by `AnyPage::expose_function`).
-  pub(crate) exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
+  pub(crate) exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::backend::PageBinding>>>,
   /// Idempotent latch for the `Runtime.addBinding` + listener setup.
   binding_initialized: Arc<AtomicBool>,
   /// Held while the channel installs, so a concurrent caller waits for
@@ -2379,13 +2379,30 @@ impl WebKitPage {
 
   // ── Exposed functions / init scripts ──────────────────────────────────
 
-  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
     self.add_init_script(&register_js).await?;
     self.runtime_evaluate(&register_js, true).await?;
+    self.evaluate_in_frame_contexts(&register_js).await;
     Ok(())
+  }
+
+  /// Run `expression` in every frame's document. An init script reaches
+  /// only documents that load after it, so what a live child frame needs
+  /// is evaluated there directly.
+  async fn evaluate_in_frame_contexts(&self, expression: &str) {
+    let contexts: Vec<i64> = self.frame_contexts.read().await.values().copied().collect();
+    for context_id in contexts {
+      let _ = self
+        .target_session()
+        .send(
+          protocol::RUNTIME_EVALUATE,
+          json!({ "expression": expression, "contextId": context_id }),
+        )
+        .await;
+    }
   }
 
   /// [`Self::expose_binding`] for a popup target still held paused by
@@ -2393,7 +2410,7 @@ impl WebKitPage {
   /// (`Runtime.addBinding` + init scripts); the live-document evaluates
   /// would block until `Target.resume`. The popup's first document runs
   /// the controller + registration at document start.
-  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     if !self.binding_initialized.swap(true, Ordering::SeqCst) {
       self
         .target_session()
@@ -2430,6 +2447,7 @@ impl WebKitPage {
       crate::steps::js_escape(name)
     );
     let _ = self.runtime_evaluate(&js, true).await;
+    self.evaluate_in_frame_contexts(&js).await;
     Ok(())
   }
 
@@ -2458,27 +2476,17 @@ impl WebKitPage {
         true,
       )
       .await?;
-    // Child frames already running keep their documents, so the init
-    // script never reaches them: install the controller there directly.
-    let contexts: Vec<i64> = self.frame_contexts.read().await.values().copied().collect();
-    for context_id in contexts {
-      let _ = self
-        .target_session()
-        .send(
-          protocol::RUNTIME_EVALUATE,
-          json!({
-            "expression": crate::backend::cdp::CdpPage::<crate::backend::cdp::pipe::PipeTransport>::BINDING_CONTROLLER_JS,
-            "contextId": context_id,
-          }),
-        )
-        .await;
-    }
+    self
+      .evaluate_in_frame_contexts(
+        crate::backend::cdp::CdpPage::<crate::backend::cdp::pipe::PipeTransport>::BINDING_CONTROLLER_JS,
+      )
+      .await;
     Ok(())
   }
 
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global.
-  pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub async fn expose_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
     Ok(())
@@ -2486,7 +2494,7 @@ impl WebKitPage {
 
   /// [`Self::expose_callback`] for a popup still held paused: the
   /// controller arrives with its first document's init scripts.
-  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
+  pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     if !self.binding_initialized.swap(true, Ordering::SeqCst) {
       self
         .target_session()

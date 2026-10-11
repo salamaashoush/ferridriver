@@ -192,6 +192,45 @@ for (const backend of BACKENDS) {
       ).toBe("WOOF WOOF");
     });
 
+    it("page.exposeFunction hands a JSHandle in its result back as the object", async () => {
+      await page.setContent("<button id='main'>x</button>");
+      const fooHandle = await page.evaluateHandle(`window.fooValue = { bar: 2 }`);
+      const button = await page.$("#main");
+      await page.exposeFunction("__expose_handle", () => [{ foo: fooHandle, button, label: "kept" }]);
+      expect(
+        await page.evaluate(`window.__expose_handle().then(([r]) => ({
+          foo: r.foo === window.fooValue,
+          button: r.button === document.querySelector('#main'),
+          label: r.label,
+        }))`),
+      ).toEqual({ foo: true, button: true, label: "kept" });
+    });
+
+    it("page.exposeFunction results carry rich types and reject a function", async () => {
+      await page.exposeFunction("__expose_rich", () => ({ when: new Date(86400000), nan: NaN, big: 10n }));
+      await page.exposeFunction("__expose_void", () => {});
+      await page.exposeFunction("__expose_fn", () => ({ run: () => 1 }));
+      await page.setContent("<button>x</button>");
+      expect(
+        await page.evaluate(`(async () => {
+          const rich = await window.__expose_rich();
+          return {
+            when: rich.when instanceof Date && rich.when.getTime(),
+            nan: Number.isNaN(rich.nan),
+            big: typeof rich.big === 'bigint' && String(rich.big),
+            void: (await window.__expose_void()) === undefined,
+            fn: await window.__expose_fn().then(() => 'no error', (e) => e.message),
+          };
+        })()`),
+      ).toEqual({
+        when: 86400000,
+        nan: true,
+        big: "10",
+        void: true,
+        fn: expect.stringMatching(/Attempting to serialize unexpected value at position "run"/),
+      });
+    });
+
     it("page.$eval runs the function on the first match", async () => {
       await page.setContent("<ul><li data-v='a'>one</li><li data-v='b'>two</li></ul>");
       expect(await page.$eval("li", (el: Element) => el.getAttribute("data-v"))).toBe("a");
