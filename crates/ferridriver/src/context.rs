@@ -969,7 +969,19 @@ impl ContextRef {
   /// identity holds semantically, not by object identity.
   #[must_use]
   pub fn http_client(&self) -> crate::http_client::HttpClient {
-    crate::http_client::HttpClient::context_bound(std::sync::Arc::new(self.clone()))
+    let context = self.clone();
+    crate::http_client::HttpClient::context_bound(std::sync::Arc::new(self.clone())).with_live_http_credentials(
+      std::sync::Arc::new(move || {
+        let context = context.clone();
+        Box::pin(async move {
+          let state = context.state.read().await;
+          state
+            .get_context_options(&context.key.to_composite())
+            .and_then(|options| options.http_credentials)
+            .unwrap_or_default()
+        })
+      }),
+    )
   }
 
   /// Clear all cookies in this context.

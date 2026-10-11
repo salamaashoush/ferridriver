@@ -695,18 +695,7 @@ fn build_context_options(
     let _ = std::fs::create_dir_all(output_dir.join("downloads"));
   }
   if !ctx_config.http_credentials.is_empty() {
-    opts.http_credentials = Some(
-      ctx_config
-        .http_credentials
-        .iter()
-        .map(|creds| ferridriver::options::HttpCredentials {
-          username: creds.username.clone(),
-          password: creds.password.clone(),
-          origin: creds.origin.clone(),
-          send: None,
-        })
-        .collect(),
-    );
+    opts.http_credentials = Some(core_http_credentials(&ctx_config.http_credentials));
   }
   if ctx_config.service_workers.as_deref() == Some("block") {
     opts.service_workers = Some(ferridriver::options::ServiceWorkerPolicy::Block);
@@ -812,17 +801,36 @@ fn build_browser_fixture_defs(
 /// inside the test body, or we expose a per-test override fixture
 /// later (Playwright's `request` fixture has the same worker-scoped
 /// shape — `playwright/types/test.d.ts` `APIRequestContext`).
-fn build_worker_request_def(base_url: Option<String>) -> FixtureDef {
+fn core_http_credentials(
+  configured: &[crate::config::HttpCredentialsConfig],
+) -> Vec<ferridriver::options::HttpCredentials> {
+  configured
+    .iter()
+    .map(|creds| ferridriver::options::HttpCredentials {
+      username: creds.username.clone(),
+      password: creds.password.clone(),
+      origin: creds.origin.clone(),
+      send: None,
+    })
+    .collect()
+}
+
+fn build_worker_request_def(
+  base_url: Option<String>,
+  http_credentials: Vec<ferridriver::options::HttpCredentials>,
+) -> FixtureDef {
   FixtureDef {
     name: "request".into(),
     scope: FixtureScope::Worker,
     dependencies: vec![],
     setup: Arc::new(move |_pool| {
       let base_url = base_url.clone();
+      let http_credentials = http_credentials.clone();
       Box::pin(async move {
         Ok(Arc::new(ferridriver::http_client::HttpClient::new(
           ferridriver::http_client::HttpClientOptions {
             base_url,
+            http_credentials,
             ..Default::default()
           },
         )) as Arc<dyn std::any::Any + Send + Sync>)
@@ -1130,7 +1138,13 @@ impl Worker {
     // worker.
     let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
     worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(&browser_handle)));
-    worker_defs.insert("request".into(), build_worker_request_def(self.config.base_url.clone()));
+    worker_defs.insert(
+      "request".into(),
+      build_worker_request_def(
+        self.config.base_url.clone(),
+        core_http_credentials(&self.config.browser.use_options.http_credentials),
+      ),
+    );
     let root_fixture_pool = custom_fixture_pool;
     let custom_fixture_pool = root_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
 

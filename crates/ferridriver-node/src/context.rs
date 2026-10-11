@@ -1025,6 +1025,7 @@ pub struct NapiGeolocation {
 }
 
 #[napi(object)]
+#[derive(Debug, Clone)]
 pub struct NapiHttpCredentials {
   pub username: String,
   pub password: String,
@@ -1037,7 +1038,9 @@ pub struct NapiHttpCredentials {
 pub type NapiHttpCredentialsInput = napi::Either<Vec<NapiHttpCredentials>, NapiHttpCredentials>;
 
 /// The list core takes, or `None` for an empty one.
-fn http_credentials_list(input: NapiHttpCredentialsInput) -> Option<Vec<ferridriver::options::HttpCredentials>> {
+pub(crate) fn http_credentials_list(
+  input: NapiHttpCredentialsInput,
+) -> Option<Vec<ferridriver::options::HttpCredentials>> {
   let list: Vec<_> = match input {
     napi::Either::A(entries) => entries.into_iter().map(Into::into).collect(),
     napi::Either::B(entry) => vec![entry.into()],

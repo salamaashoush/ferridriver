@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import * as http from "node:http";
-import { type Browser, type Page } from "../index.js";
+import { type Browser, HttpClient, type Page } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 
 // Spawn an HTTP Basic-auth server: `user:pass` → 200 AUTHED, otherwise
@@ -258,6 +258,44 @@ for (const backend of BACKENDS) {
         expect(await page.evaluate("document.body.textContent")).toContain("AUTHED");
       } finally {
         await ctx.close();
+        await srv.close();
+      }
+    });
+
+    it("context.request answers a challenge with the context's credentials", async () => {
+      const srv = await startBasicAuthServer();
+      const ctx = browser.newContext({});
+      try {
+        await ctx.newPage();
+        expect((await ctx.request.get(srv.url)).status).toBe(401);
+        await ctx.setHTTPCredentials([
+          { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
+          { username: "user", password: "pass", origin: new URL(srv.url).origin },
+        ]);
+        const authed = await ctx.request.get(srv.url);
+        expect(authed.status).toBe(200);
+        expect(authed.text()).toContain("AUTHED");
+      } finally {
+        await ctx.close();
+        await srv.close();
+      }
+    });
+
+    it("a standalone request client takes httpCredentials, one or a list", async () => {
+      const srv = await startBasicAuthServer();
+      try {
+        const none = HttpClient.create();
+        expect((await none.get(srv.url)).status).toBe(401);
+        const one = HttpClient.create({ httpCredentials: { username: "user", password: "pass" } });
+        expect((await one.get(srv.url)).status).toBe(200);
+        const many = HttpClient.create({
+          httpCredentials: [
+            { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
+            { username: "user", password: "pass", send: "always" },
+          ],
+        });
+        expect((await many.get(srv.url)).status).toBe(200);
+      } finally {
         await srv.close();
       }
     });

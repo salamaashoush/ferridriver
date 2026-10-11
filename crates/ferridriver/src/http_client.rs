@@ -26,6 +26,8 @@ use futures::StreamExt as _;
 
 use ferrijs_fetch as fetch;
 
+use crate::options::{HttpCredentials, HttpCredentialsSend};
+
 pub use ferrijs_fetch::{
   BridgeFuture, ContextBridge, ContextDefaults, Credentials, FetchError, MultipartField, MultipartValue, NetGuard,
   NetPolicy, RedirectMode, RemoteAddr, ResponseType, multipart_boundary, multipart_boundary_of, parse_multipart,
@@ -43,6 +45,30 @@ pub struct HttpClientOptions {
   pub timeout: Option<Duration>,
   /// Ignore HTTPS certificate errors.
   pub ignore_https_errors: bool,
+  /// Playwright `httpCredentials`: what answers a Basic challenge, the
+  /// first entry bound to no origin or to the request's.
+  pub http_credentials: Vec<HttpCredentials>,
+}
+
+/// The credentials a context-bound client answers challenges with, read
+/// when one is needed so `setHTTPCredentials` after the client was made
+/// still counts.
+pub type LiveHttpCredentials = Arc<dyn Fn() -> futures::future::BoxFuture<'static, Vec<HttpCredentials>> + Send + Sync>;
+
+#[derive(Clone)]
+enum CredentialSource {
+  Fixed(Vec<HttpCredentials>),
+  Live(LiveHttpCredentials),
+}
+
+fn basic_authorization(credentials: &HttpCredentials) -> String {
+  use base64::Engine as _;
+  let pair = format!("{}:{}", credentials.username, credentials.password);
+  format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(pair))
+}
+
+fn same_origin(a: &reqwest::Url, b: &str) -> bool {
+  reqwest::Url::parse(b).is_ok_and(|b| a.origin() == b.origin())
 }
 
 /// Per-request options (overrides context defaults). This is the
@@ -462,6 +488,7 @@ pub struct HttpClient {
   /// BROWSER on every hop, defaults come live from the context options.
   /// `None` = the standalone client with its own reqwest jar.
   bridge: Option<Arc<dyn ContextBridge>>,
+  credentials: CredentialSource,
 }
 
 impl HttpClient {
@@ -475,6 +502,7 @@ impl HttpClient {
       default_timeout: options.timeout.unwrap_or(Duration::from_secs(30)),
       default_ignore_https: options.ignore_https_errors,
       bridge: None,
+      credentials: CredentialSource::Fixed(options.http_credentials),
     }
   }
 
@@ -492,7 +520,57 @@ impl HttpClient {
       default_timeout: Duration::from_secs(30),
       default_ignore_https: false,
       bridge: Some(bridge),
+      credentials: CredentialSource::Fixed(Vec::new()),
     }
+  }
+
+  /// Answer challenges with whatever `credentials` returns at the time.
+  #[must_use]
+  pub fn with_live_http_credentials(mut self, credentials: LiveHttpCredentials) -> Self {
+    self.credentials = CredentialSource::Live(credentials);
+    self
+  }
+
+  async fn http_credentials(&self) -> Vec<HttpCredentials> {
+    match &self.credentials {
+      CredentialSource::Fixed(list) => list.clone(),
+      CredentialSource::Live(read) => read().await,
+    }
+  }
+
+  /// Send `request`, answering a Basic challenge once with the matching
+  /// credentials, as Playwright's `_sendRequest` does (`server/fetch.ts`):
+  /// a 401 to a request that carried no `authorization` is sent again
+  /// with one. A challenge reached through a redirect to another origin
+  /// is left alone, since the retry starts from the first URL and would
+  /// hand that origin the header.
+  async fn send_answering_challenge(
+    &self,
+    url: &str,
+    opts: &RequestOptions,
+    request: fetch::Request,
+  ) -> crate::error::Result<fetch::Response> {
+    let unauthenticated = request.headers.get("authorization").is_none();
+    let asked = request.url.clone();
+    let response = fetch::send(&self.pool, self.bridge.as_ref(), request).await?;
+    let challenged = response.status == 401
+      && unauthenticated
+      && same_origin(&asked, &response.url)
+      && response
+        .headers
+        .get("www-authenticate")
+        .is_some_and(|scheme| scheme.trim_start().starts_with("Basic"));
+    if !challenged {
+      return Ok(response);
+    }
+    let credentials = self.http_credentials().await;
+    let Some(entry) = crate::options::matching_http_credentials(&credentials, asked.as_str()) else {
+      return Ok(response);
+    };
+    drop(response);
+    let mut again = self.build_request(url, opts).await?;
+    again.headers.set("authorization", basic_authorization(entry));
+    Ok(fetch::send(&self.pool, self.bridge.as_ref(), again).await?)
   }
 
   /// Effective per-request defaults. Bridged: read live from the browser
@@ -639,6 +717,15 @@ impl HttpClient {
       }
     }
 
+    // `send: 'always'` puts the header on before any challenge, over one
+    // the caller set (fetch.ts sets it after the request's own headers).
+    let credentials = self.http_credentials().await;
+    if let Some(entry) = crate::options::matching_http_credentials(&credentials, request_url.as_str())
+      && entry.send == Some(HttpCredentialsSend::Always)
+    {
+      headers.set("authorization", basic_authorization(entry));
+    }
+
     // Request body (mutually exclusive: multipart, json, form, raw data).
     let body = if let Some(fields) = &opts.multipart {
       let (bytes, content_type) = fetch::serialize_multipart(fields, &fetch::multipart_boundary());
@@ -736,7 +823,7 @@ impl HttpClient {
   pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     let opts = options.unwrap_or_default();
     let request = self.build_request(url, &opts).await?;
-    let response = fetch::send(&self.pool, self.bridge.as_ref(), request).await?;
+    let response = self.send_answering_challenge(url, &opts, request).await?;
     let http = HttpResponse::buffer(response).await?;
     if opts.fail_on_status_code.unwrap_or(false) && !http.ok() {
       return Err(crate::error::FerriError::Backend(format!(
@@ -765,7 +852,7 @@ impl HttpClient {
   ) -> crate::error::Result<HttpStreamResponse> {
     let opts = options.unwrap_or_default();
     let request = self.build_request(url, &opts).await?;
-    let response = fetch::send(&self.pool, self.bridge.as_ref(), request).await?;
+    let response = self.send_answering_challenge(url, &opts, request).await?;
     if opts.fail_on_status_code.unwrap_or(false) && !response.ok() {
       return Err(crate::error::FerriError::Backend(format!(
         "{} {} failed: {} {}",
@@ -1106,6 +1193,138 @@ mod context_bound_tests {
       }
     });
     (format!("http://{addr}"), log)
+  }
+
+  /// A server that wants `user:pass` and challenges with `scheme`. The log
+  /// holds the `authorization` header of each request, empty when absent.
+  fn spawn_auth_server(scheme: &'static str) -> (String, Arc<StdMutex<Vec<String>>>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let log: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+    let log_srv = Arc::clone(&log);
+    std::thread::spawn(move || {
+      for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { break };
+        let log = Arc::clone(&log_srv);
+        std::thread::spawn(move || {
+          let mut buf = Vec::new();
+          let mut byte = [0u8; 1];
+          while !buf.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+            buf.push(byte[0]);
+          }
+          let text = String::from_utf8_lossy(&buf).to_string();
+          let authorization = text
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.trim().to_string())
+            .unwrap_or_default();
+          log.lock().unwrap().push(authorization.clone());
+          // base64("user:pass")
+          let resp = if authorization == "Basic dXNlcjpwYXNz" {
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nAUTHED".to_string()
+          } else {
+            format!(
+              "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: {scheme} realm=\"x\"\r\nContent-Length: 6\r\nConnection: close\r\n\r\nNOAUTH"
+            )
+          };
+          let _ = stream.write_all(resp.as_bytes());
+          let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+      }
+    });
+    (format!("http://{addr}"), log)
+  }
+
+  fn credentials(password: &str, origin: Option<&str>, send: Option<HttpCredentialsSend>) -> HttpCredentials {
+    HttpCredentials {
+      username: "user".into(),
+      password: password.into(),
+      origin: origin.map(str::to_string),
+      send,
+    }
+  }
+
+  fn client_with(http_credentials: Vec<HttpCredentials>) -> HttpClient {
+    HttpClient::new(HttpClientOptions {
+      http_credentials,
+      ..HttpClientOptions::default()
+    })
+  }
+
+  #[tokio::test]
+  async fn a_basic_challenge_is_answered_once_with_the_matching_credentials() {
+    let (base, log) = spawn_auth_server("Basic");
+    let client = client_with(vec![
+      credentials("elsewhere", Some("http://elsewhere.example.com"), None),
+      credentials("pass", Some(&base), None),
+    ]);
+    let resp = client.get(&format!("{base}/"), None).await.unwrap();
+    assert_eq!((resp.status(), resp.text().unwrap().as_str()), (200, "AUTHED"));
+    assert_eq!(*log.lock().unwrap(), ["", "Basic dXNlcjpwYXNz"]);
+  }
+
+  #[tokio::test]
+  async fn credentials_sent_always_go_out_before_any_challenge() {
+    let (base, log) = spawn_auth_server("Basic");
+    let client = client_with(vec![credentials("pass", None, Some(HttpCredentialsSend::Always))]);
+    let resp = client.get(&format!("{base}/"), None).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(*log.lock().unwrap(), ["Basic dXNlcjpwYXNz"]);
+  }
+
+  #[tokio::test]
+  async fn refused_credentials_are_not_tried_again() {
+    let (base, log) = spawn_auth_server("Basic");
+    let client = client_with(vec![credentials("wrong", None, None)]);
+    let resp = client.get(&format!("{base}/"), None).await.unwrap();
+    assert_eq!(resp.status(), 401);
+    // base64("user:wrong")
+    assert_eq!(*log.lock().unwrap(), ["", "Basic dXNlcjp3cm9uZw=="]);
+  }
+
+  #[tokio::test]
+  async fn a_challenge_nothing_matches_is_returned_as_it_came() {
+    for (scheme, list, headers) in [
+      (
+        "Basic",
+        vec![credentials("pass", Some("http://elsewhere.example.com"), None)],
+        None,
+      ),
+      ("Basic", Vec::new(), None),
+      ("Digest", vec![credentials("pass", None, None)], None),
+      // The caller's own header is the answer it chose.
+      (
+        "Basic",
+        vec![credentials("pass", None, None)],
+        Some(vec![("Authorization".to_string(), "Bearer mine".to_string())]),
+      ),
+    ] {
+      let (base, log) = spawn_auth_server(scheme);
+      let sent = headers.as_ref().map_or("", |headers| headers[0].1.as_str()).to_string();
+      let options = RequestOptions {
+        headers,
+        ..RequestOptions::default()
+      };
+      let resp = client_with(list).get(&format!("{base}/"), Some(options)).await.unwrap();
+      assert_eq!(resp.status(), 401, "{scheme}");
+      assert_eq!(*log.lock().unwrap(), [sent], "{scheme}");
+    }
+  }
+
+  #[tokio::test]
+  async fn a_context_bound_client_reads_its_credentials_when_challenged() {
+    let (base, log) = spawn_auth_server("Basic");
+    let current: Arc<StdMutex<Vec<HttpCredentials>>> = Arc::default();
+    let read = Arc::clone(&current);
+    let client = HttpClient::context_bound(MockBridge::new()).with_live_http_credentials(Arc::new(move || {
+      let list = read.lock().unwrap().clone();
+      Box::pin(async move { list })
+    }));
+    assert_eq!(client.get(&format!("{base}/"), None).await.unwrap().status(), 401);
+    *current.lock().unwrap() = vec![credentials("pass", None, None)];
+    assert_eq!(client.get(&format!("{base}/"), None).await.unwrap().status(), 200);
+    assert_eq!(*log.lock().unwrap(), ["", "", "Basic dXNlcjpwYXNz"]);
   }
 
   #[tokio::test]

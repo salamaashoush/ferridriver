@@ -23,6 +23,11 @@ pub struct HttpClientOptions {
   /// Ignore HTTPS certificate errors.
   #[napi(js_name = "ignoreHTTPSErrors")]
   pub ignore_https_errors: Option<bool>,
+  /// What answers a Basic challenge: one set of credentials or a list.
+  #[napi(
+    ts_type = "{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | Array<{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' }>"
+  )]
+  pub http_credentials: Option<crate::context::NapiHttpCredentialsInput>,
 }
 
 /// Per-request options. Mirrors Playwright's `APIRequestContext`
@@ -319,6 +324,10 @@ impl HttpClient {
         .unwrap_or_default(),
       timeout: opts.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
       ignore_https_errors: opts.ignore_https_errors.unwrap_or(false),
+      http_credentials: opts
+        .http_credentials
+        .and_then(crate::context::http_credentials_list)
+        .unwrap_or_default(),
     };
     Ok(Self {
       inner: ferridriver::http_client::HttpClient::new(core_opts),

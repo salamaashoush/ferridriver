@@ -287,6 +287,58 @@ describe('request option bags', () => {
     expect(() => context.request.fetch(123 as never)).toThrow();
   });
 
+  // `/fx/auth` challenges for `user:pass`, or for `?expect=name:secret`.
+  // The fixture server answers on both names, which are two origins.
+  test('context_request_answers_a_challenge_with_the_entry_for_its_origin', async ({ browser, baseURL }) => {
+    const other = baseURL!.replace('127.0.0.1', 'localhost');
+    const ctx = await browser.newContext({
+      httpCredentials: [
+        { username: 'alice', password: 'secret', origin: other },
+        { username: 'user', password: 'pass', origin: baseURL },
+      ],
+    });
+    try {
+      const page = await ctx.newPage();
+      const own = await ctx.request.get(`${baseURL}/fx/auth`);
+      expect(own.status()).toBe(200);
+      expect(await own.text()).toContain('AUTHED');
+      const others = await page.request.get(`${other}/fx/auth?expect=alice:secret`);
+      expect(others.status()).toBe(200);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('context_request_follows_set_http_credentials', async ({ browser, baseURL }) => {
+    const ctx = await browser.newContext({});
+    try {
+      await ctx.newPage();
+      expect((await ctx.request.get(`${baseURL}/fx/auth`)).status()).toBe(401);
+      await ctx.setHTTPCredentials({ username: 'user', password: 'pass' });
+      expect((await ctx.request.get(`${baseURL}/fx/auth`)).status()).toBe(200);
+      await ctx.setHTTPCredentials(null);
+      expect((await ctx.request.get(`${baseURL}/fx/auth`)).status()).toBe(401);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test('context_request_sends_credentials_unasked_only_when_told_to', async ({ browser, baseURL }) => {
+    // `/fx/echo-headers` never challenges, so an `authorization` header
+    // there was sent up front.
+    for (const [send, expected] of [['always', 'Basic dXNlcjpwYXNz'], ['unauthorized', ''], [undefined, '']] as const) {
+      const ctx = await browser.newContext({ httpCredentials: { username: 'user', password: 'pass', send } });
+      try {
+        await ctx.newPage();
+        const resp = await ctx.request.get(`${baseURL}/fx/echo-headers`);
+        const headers = (await resp.json()) as Record<string, string>;
+        expect(String(headers.authorization ?? '')).toBe(expected);
+      } finally {
+        await ctx.close();
+      }
+    }
+  });
+
   test('dispose_leaves_the_shared_context_client_usable', async ({ context, baseURL }) => {
     // Playwright's dispose() releases the caller's handle; the browser
     // context that vended it keeps working.
