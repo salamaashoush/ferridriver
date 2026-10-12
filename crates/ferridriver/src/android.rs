@@ -16,7 +16,7 @@ mod api;
 mod network;
 mod wire;
 pub(crate) use adb::AdbEndpoint;
-pub use api::{Android, AndroidDevice, AndroidDevicesOptions, AndroidFile, AndroidSocket};
+pub use api::{Android, AndroidDevice, AndroidDevicesOptions, AndroidFile, AndroidLaunchBrowserOptions, AndroidSocket};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -73,7 +73,17 @@ const HOST_LOOPBACK_RULES: [&str; 3] = [
   "MAP 127.0.0.1 10.0.2.2",
 ];
 
+/// The command line of a managed emulator's browser: the launcher's own
+/// `DevTools` socket, and the host's loopback behind the emulator's alias.
 fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
+  command_line(pkg, args, "ferridriver_devtools_remote", true)
+}
+
+/// The command-line file Chromium on Android reads at start, for `pkg`
+/// listening for `DevTools` on the abstract socket `socket`. `emulator`
+/// adds the rules that send the device's loopback to the machine running
+/// it, which only an emulator has an address for.
+pub(crate) fn command_line(pkg: &str, args: &[String], socket: &str, emulator: bool) -> Result<String> {
   if pkg
     .split('.')
     .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
@@ -88,7 +98,7 @@ fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
   // launcher adds `--enable-automation` itself, so it is not part of that set either.
   let mut switches: Vec<String> = vec![
     "--disable-fre".into(),
-    "--remote-debugging-socket-name=ferridriver_devtools_remote".into(),
+    format!("--remote-debugging-socket-name={socket}"),
   ];
   switches.extend(
     crate::state::CHROMIUM_SWITCHES
@@ -149,8 +159,12 @@ fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
   crate::state::merge_feature_switches(&mut switches);
   // The emulator's own loopback is the device, where nothing a script started is listening. Chromium takes
   // the first rule that matches and an EXCLUDE before any of them, so the caller's rules decide first.
-  resolver_rules.extend(HOST_LOOPBACK_RULES);
-  switches.push(format!("--host-resolver-rules={}", resolver_rules.join(", ")));
+  if emulator {
+    resolver_rules.extend(HOST_LOOPBACK_RULES);
+  }
+  if !resolver_rules.is_empty() {
+    switches.push(format!("--host-resolver-rules={}", resolver_rules.join(", ")));
+  }
   let flags = std::iter::once("_")
     .chain(switches.iter().map(String::as_str))
     .chain(positional);
@@ -811,6 +825,27 @@ mod tests {
       "{line}"
     );
     assert_eq!(positional, "\"--host-resolver-rules=positional\"");
+  }
+
+  #[test]
+  fn a_device_that_is_no_emulator_keeps_its_own_loopback() {
+    let line = command_line("com.android.chrome", &[], "ferridriver_7_devtools_remote", false).unwrap();
+    assert!(
+      line.contains("\"--remote-debugging-socket-name=ferridriver_7_devtools_remote\""),
+      "{line}"
+    );
+    assert!(!line.contains("host-resolver-rules"), "{line}");
+    let line = command_line(
+      "com.android.chrome",
+      &["--host-resolver-rules=MAP app.example.com 192.0.2.1".into()],
+      "ferridriver_7_devtools_remote",
+      false,
+    )
+    .unwrap();
+    assert!(
+      line.contains("\"--host-resolver-rules=MAP app.example.com 192.0.2.1\""),
+      "{line}"
+    );
   }
 
   #[test]

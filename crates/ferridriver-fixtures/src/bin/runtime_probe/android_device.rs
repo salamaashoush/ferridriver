@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use ferridriver::android::{Android, AndroidDevicesOptions, AndroidFile};
+use ferridriver::android::{Android, AndroidDevicesOptions, AndroidFile, AndroidLaunchBrowserOptions};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -19,6 +19,13 @@ pub enum Action {
   Socket {
     command: String,
     write: Option<String>,
+  },
+  LaunchBrowser {
+    pkg: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    url: String,
+    expression: String,
   },
   Close,
 }
@@ -65,8 +72,29 @@ pub async fn run(host: Option<String>, port: Option<u16>, actions: Vec<Action>) 
         socket.close().await;
         json!(String::from_utf8_lossy(&heard))
       },
+      Action::LaunchBrowser {
+        pkg,
+        args,
+        url,
+        expression,
+      } => {
+        let context = device
+          .launch_browser(AndroidLaunchBrowserOptions {
+            pkg,
+            args,
+            ..Default::default()
+          })
+          .await?;
+        let pages = context.pages();
+        let page = pages.first().context("the launched browser has no page")?.clone();
+        page.goto(&url).await?;
+        let value = page.inner().evaluate(&expression).await?;
+        let listed = context.pages().len();
+        context.close().await?;
+        json!({ "pages": listed, "value": value, "closed": context.is_closed() })
+      },
       Action::Close => {
-        device.close();
+        device.close().await;
         Value::Null
       },
     });

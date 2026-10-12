@@ -18,6 +18,11 @@ const sdk = new TextDecoder().decode(await device.shell('getprop ro.build.versio
 const png = await device.screenshot({ path: 'screen.png' });
 await device.push(Buffer.from('note'), '/data/local/tmp/note.txt', { mode: 0o644 });
 await device.installApk('app.apk');
+
+const context = await device.launchBrowser({ args: ['--lang=en-US'] });
+const page = context.pages()[0];
+await page.goto('https://example.com');
+await context.close();
 await device.close();
 ```
 
@@ -29,20 +34,35 @@ returns an `AndroidSocket` on a device service such as `shell:logcat`.
 object for a device listed twice until it is closed. Its options take the
 server's `host` and `port`, `127.0.0.1:5037` when absent.
 
+`launchBrowser` starts the browser `pkg` (`com.android.chrome` when absent)
+afresh and returns its context, the one the device has: the options are a
+context's, plus `pkg` and `args`. The package is made the device's debug app,
+so a release build reads the command-line file without the browser's own
+"command line on non-rooted devices" flag. Closing the context disconnects;
+closing the device disconnects every browser it launched.
+
 In a script a device answers to the realm's permissions: the ADB server's
 host and port to its network grant, a file named by path to its read grant,
 and a screenshot `path` to its write grant.
 
-Not there yet: `open` in the two bindings, `launchBrowser`, `webView` and
-`webViews`, the device's events, the selector actions (`tap`, `fill`, `wait`
+Not there yet: `open` in the two bindings, `webView` and `webViews`, the
+device's events, the selector actions (`tap`, `fill`, `wait`
 and the rest) and `input`, which need Playwright's driver APK on the device,
 and `android.connect` / `launchServer`.
 
 ## Checking it on a device
 
 The protocol and both bindings are covered against a scripted ADB server
-(`ferridriver-adb-fixture`), which needs no Android. A real device is reached
-with any script, or through the runtime probe, with an ADB server on `port`:
+(`ferridriver-adb-fixture`), which needs no Android. A real device has a
+suite of its own, kept out of the default run, which takes the first usable
+device of the server at `ANDROID_ADB_SERVER_PORT` (it needs Chrome there):
+
+```bash
+ANDROID_ADB_SERVER_PORT=5037 target/debug/ferridriver test --no-inherit \
+  --config tests/device/ferridriver.toml
+```
+
+The Rust core alone is reached through the runtime probe:
 
 ```bash
 echo '[{"op":"android-device","port":5037,"actions":[

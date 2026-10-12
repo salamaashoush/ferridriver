@@ -297,6 +297,33 @@ impl BrowserType {
     Browser::from_ready_state(state, "default").await
   }
 
+  /// The default context of a Chromium reached over CDP, as the thing its
+  /// caller closes: closing it ends the connection. What Playwright's
+  /// `androidDevice.launchBrowser` returns, the device's one context.
+  pub(crate) async fn connect_persistent_over_cdp(
+    endpoint_url: &str,
+    context: crate::options::BrowserContextOptions,
+  ) -> Result<ContextRef> {
+    let plan = LaunchPlan {
+      backend: BackendKind::CdpWs,
+      kind: BrowserKind::Chromium,
+      ws_endpoint: Some(endpoint_url.to_string()),
+      default_viewport: None,
+      ..LaunchPlan::default()
+    };
+    let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(endpoint_url.to_string()), plan);
+    state.persistent_context = true;
+    let state = state.start_owned(None)?.await?;
+    let browser = Browser::from_ready_state(state, "default").await?;
+    let default_ctx = browser.default_context();
+    let composite = default_ctx.key.to_composite();
+    if let Some(rv) = context.record_video.clone() {
+      browser.state().read().await.set_record_video(&composite, rv);
+    }
+    browser.state().read().await.set_context_options(&composite, context);
+    Ok(default_ctx)
+  }
+
   /// Playwright: `browserType.launchPersistentContext(userDataDir, options?) -> BrowserContext`.
   /// Launches a browser whose default context shares storage with the
   /// supplied user-data directory and applies the provided

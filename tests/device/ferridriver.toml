@@ -1,0 +1,16 @@
+# Specs that need an Android device: an emulator or a phone attached to an
+# ADB server that is already running. Not part of the default run or the
+# gate. From the repository root:
+#
+#   ANDROID_ADB_SERVER_PORT=5037 target/debug/ferridriver test --no-inherit \
+#     --config tests/device/ferridriver.toml
+[test]
+testMatch = ["tests/device/*.test.ts"]
+workers = 1
+timeout = 120000
+retries = 0
+outputDir = "test-results/device"
+reporter = [{ name = "list" }]
+
+[scripting]
+allowEnv = ["ANDROID_ADB_SERVER_PORT"]

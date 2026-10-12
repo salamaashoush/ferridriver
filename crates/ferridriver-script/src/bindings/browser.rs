@@ -412,7 +412,7 @@ impl JsBindOptions {
 /// same parser for `launchPersistentContext`'s merged options bag.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub(super) struct JsBrowserContextOptions {
+pub(crate) struct JsBrowserContextOptions {
   accept_downloads: Option<bool>,
   #[serde(rename = "baseURL")]
   base_url: Option<String>,

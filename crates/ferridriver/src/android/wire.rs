@@ -117,6 +117,32 @@ impl AdbServer {
     )
   }
 
+  /// Forward a local TCP port the server picks to `remote` on the device,
+  /// `localabstract:<socket>` for example, and return the port.
+  pub async fn forward(&self, serial: &str, remote: &str) -> Result<u16> {
+    let mut stream = self.dial().await?;
+    Self::request(&mut stream, &format!("host-serial:{serial}:forward:tcp:0;{remote}")).await?;
+    // The first status says the request was understood, the second that
+    // the forward was made; the port follows the second.
+    let mut made = [0u8; 4];
+    stream.read_exact(&mut made).await?;
+    if &made != b"OKAY" {
+      let reason = Self::read_block(&mut stream).await?;
+      return Err(failure("forward", String::from_utf8_lossy(&reason)));
+    }
+    let port = Self::read_block(&mut stream).await?;
+    String::from_utf8_lossy(&port)
+      .trim()
+      .parse()
+      .map_err(|_| failure("forward", "the server did not name a port"))
+  }
+
+  /// Remove a forward [`Self::forward`] made.
+  pub async fn kill_forward(&self, serial: &str, port: u16) -> Result<()> {
+    let mut stream = self.dial().await?;
+    Self::request(&mut stream, &format!("host-serial:{serial}:killforward:tcp:{port}")).await
+  }
+
   /// Run `command` in the device's shell and return everything it wrote,
   /// byte for byte: a screenshot comes back through here.
   pub async fn shell(&self, serial: &str, command: &str) -> Result<Vec<u8>> {
@@ -280,6 +306,34 @@ mod tests {
     .await;
     let error = adb.shell("gone", "true").await.unwrap_err().to_string();
     assert!(error.contains("device 'gone' not found"), "{error}");
+    played.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn forward_returns_the_port_the_server_picked() {
+    let (adb, played) = server(
+      vec![(
+        "host-serial:emulator-5554:forward:tcp:0;localabstract:chrome_devtools_remote",
+        b"OKAYOKAY000551234",
+      )],
+      nothing,
+    )
+    .await;
+    assert_eq!(
+      adb
+        .forward("emulator-5554", "localabstract:chrome_devtools_remote")
+        .await
+        .unwrap(),
+      51234
+    );
+    played.await.unwrap();
+
+    let (adb, played) = server(
+      vec![("host-serial:emulator-5554:killforward:tcp:51234", b"OKAYOKAY")],
+      nothing,
+    )
+    .await;
+    adb.kill_forward("emulator-5554", 51234).await.unwrap();
     played.await.unwrap();
   }
 

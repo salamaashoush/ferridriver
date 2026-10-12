@@ -3,17 +3,16 @@
 //! Mirrors Playwright's `client/android.ts`: `_android.devices(options?)`
 //! and, on an `AndroidDevice`, `serial()`, `model()`, `shell(command)`,
 //! `screenshot(options?)`, `push(file, path, options?)`,
-//! `installApk(file, options?)` and `close()`.
+//! `installApk(file, options?)`, `launchBrowser(options?)` and `close()`.
 //!
 //! A device is authority the realm has to hold like any other. The ADB
 //! server is a host and a port, judged by the realm's network grant; a
 //! file named by path is read under its read grant, and a screenshot
 //! written to a path under its write grant.
 
-use ferridriver::android::{Android, AndroidDevice, AndroidDevicesOptions, AndroidFile};
+use ferridriver::android::{Android, AndroidDevice, AndroidDevicesOptions, AndroidFile, AndroidLaunchBrowserOptions};
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
-use rquickjs::promise::Promised;
 use rquickjs::{Class, Ctx, JsLifetime, Value};
 
 use crate::bindings::convert::{FerriResultCtxExt, serde_from_js};
@@ -173,11 +172,46 @@ impl AndroidDeviceJs {
     self.inner.install_apk(source, options.args).await.into_js_with(&ctx)
   }
 
+  /// Playwright: `androidDevice.launchBrowser(options?: BrowserContextOptions
+  /// & { pkg?: string, args?: string[] }): Promise<BrowserContext>`.
+  #[qjs(rename = "launchBrowser")]
+  pub async fn launch_browser<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    #[derive(serde::Deserialize, Default)]
+    struct Launch {
+      pkg: Option<String>,
+      #[serde(default)]
+      args: Vec<String>,
+    }
+    let (launch, mut context) = match options.0 {
+      Some(value) if !value.is_undefined() && !value.is_null() => (
+        serde_from_js::<Launch>(&ctx, value.clone())?,
+        serde_from_js::<crate::bindings::browser::JsBrowserContextOptions>(&ctx, value)?.into_core(),
+      ),
+      _ => (
+        Launch::default(),
+        ferridriver::options::BrowserContextOptions::default(),
+      ),
+    };
+    // A device has one context, so its proxy is the browser's.
+    let proxy = context.proxy.take();
+    let context = self
+      .inner
+      .launch_browser(AndroidLaunchBrowserOptions {
+        pkg: launch.pkg,
+        args: launch.args,
+        proxy,
+        context,
+      })
+      .await
+      .into_js_with(&ctx)?;
+    let wrapper = crate::bindings::context::BrowserContextJs::new(std::sync::Arc::new(context));
+    rquickjs::IntoJs::into_js(Class::instance(ctx.clone(), wrapper)?, &ctx)
+  }
+
   /// Playwright: `androidDevice.close(): Promise<void>`.
   #[qjs(rename = "close")]
-  pub fn close(&self) -> Promised<std::future::Ready<rquickjs::Result<()>>> {
-    self.inner.close();
-    Promised(std::future::ready(Ok(())))
+  pub async fn close(&self) {
+    self.inner.close().await;
   }
 }
 

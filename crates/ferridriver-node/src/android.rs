@@ -3,11 +3,11 @@
 //! Mirrors Playwright's `client/android.ts`: the module's `_android`
 //! object with `devices(options?)`, and on an `AndroidDevice` `serial()`,
 //! `model()`, `shell(command)`, `screenshot(options?)`,
-//! `push(file, path, options?)`, `installApk(file, options?)` and
-//! `close()`.
+//! `push(file, path, options?)`, `installApk(file, options?)`,
+//! `launchBrowser(options?)` and `close()`.
 
 use napi::Result;
-use napi::bindgen_prelude::{Buffer, Either, PromiseRaw};
+use napi::bindgen_prelude::{Buffer, Either, FromNapiValue, Object, TypeName, ValidateNapiValue};
 use napi_derive::napi;
 
 use crate::error::IntoNapi;
@@ -46,6 +46,38 @@ pub struct AndroidPushOptions {
 pub struct AndroidInstallApkOptions {
   /// Arguments for `cmd package install`. `-r -t -S` when absent.
   pub args: Option<Vec<String>>,
+}
+
+/// Playwright's `launchBrowser` options: a context's options and, in the
+/// same bag, the package and its extra switches.
+pub struct AndroidLaunchBrowserOptions {
+  context: crate::context::NapiBrowserContextOptions,
+  pkg: Option<String>,
+  args: Vec<String>,
+}
+
+impl TypeName for AndroidLaunchBrowserOptions {
+  fn type_name() -> &'static str {
+    "AndroidLaunchBrowserOptions"
+  }
+
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Object
+  }
+}
+
+impl ValidateNapiValue for AndroidLaunchBrowserOptions {}
+
+impl FromNapiValue for AndroidLaunchBrowserOptions {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, value: napi::sys::napi_value) -> Result<Self> {
+    let context = unsafe { crate::context::NapiBrowserContextOptions::from_napi_value(env, value) }?;
+    let bag = unsafe { Object::from_napi_value(env, value) }?;
+    Ok(Self {
+      context,
+      pkg: bag.get("pkg")?,
+      args: bag.get("args")?.unwrap_or_default(),
+    })
+  }
 }
 
 fn file(source: Either<String, Buffer>) -> ferridriver::android::AndroidFile {
@@ -168,10 +200,37 @@ impl AndroidDevice {
       .into_napi()
   }
 
+  /// Playwright: `androidDevice.launchBrowser(options?: BrowserContextOptions
+  /// & { pkg?: string, args?: string[] }): Promise<BrowserContext>`. The
+  /// browser `pkg`, `com.android.chrome` when absent, started afresh, and
+  /// its context: the one the device has.
+  #[napi(ts_args_type = "options?: Parameters<Browser['newContext']>[0] & { pkg?: string, args?: string[] }")]
+  pub async fn launch_browser(
+    &self,
+    options: Option<AndroidLaunchBrowserOptions>,
+  ) -> Result<crate::context::BrowserContext> {
+    let (pkg, args, mut context) = match options {
+      Some(options) => (options.pkg, options.args, options.context.into_core()),
+      None => (None, Vec::new(), ferridriver::options::BrowserContextOptions::default()),
+    };
+    // A device has one context, so its proxy is the browser's.
+    let proxy = context.proxy.take();
+    let context = self
+      .inner
+      .launch_browser(ferridriver::android::AndroidLaunchBrowserOptions {
+        pkg,
+        args,
+        proxy,
+        context,
+      })
+      .await
+      .into_napi()?;
+    Ok(crate::context::BrowserContext::wrap(context))
+  }
+
   /// Playwright: `androidDevice.close(): Promise<void>`.
-  #[napi(ts_return_type = "Promise<void>")]
-  pub fn close<'env>(&self, env: &'env napi::Env) -> Result<PromiseRaw<'env, ()>> {
-    self.inner.close();
-    env.spawn_future(async { Ok(()) })
+  #[napi]
+  pub async fn close(&self) {
+    self.inner.close().await;
   }
 }

@@ -43,6 +43,28 @@ impl AndroidFile {
   }
 }
 
+/// Playwright: `androidDevice.launchBrowser(options?: BrowserContextOptions
+/// & { pkg?, args?, proxy? })`.
+#[derive(Debug, Clone, Default)]
+pub struct AndroidLaunchBrowserOptions {
+  /// The browser's application package. `com.android.chrome` when absent.
+  pub pkg: Option<String>,
+  /// Switches added to the browser's command line.
+  pub args: Vec<String>,
+  /// The proxy every request of the browser goes through.
+  pub proxy: Option<crate::options::ProxyConfig>,
+  /// The options of the context returned, the device's one context.
+  pub context: crate::options::BrowserContextOptions,
+}
+
+/// Where Chromium on Android reads its command line from at start.
+const COMMAND_LINE_FILE: &str = "/data/local/tmp/chrome-command-line";
+
+/// How long a launched browser has to open its `DevTools` socket.
+const LAUNCH_TIMEOUT_MS: u64 = 30_000;
+
+static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 type Registry = Arc<std::sync::Mutex<Vec<AndroidDevice>>>;
 
 /// Playwright: `Android`, reached there as `playwright._android`.
@@ -100,6 +122,7 @@ impl Android {
           model: String::from_utf8_lossy(&model).trim().to_owned(),
           closed: AtomicBool::new(false),
           registry: Arc::downgrade(&self.devices),
+          browsers: tokio::sync::Mutex::new(Vec::new()),
         }),
       };
       self
@@ -127,6 +150,9 @@ struct DeviceInner {
   model: String,
   closed: AtomicBool,
   registry: std::sync::Weak<std::sync::Mutex<Vec<AndroidDevice>>>,
+  /// The browsers this device launched and the local port each one's
+  /// `DevTools` socket is forwarded to, for [`AndroidDevice::close`].
+  browsers: tokio::sync::Mutex<Vec<(crate::context::ContextRef, u16)>>,
 }
 
 /// Playwright: `AndroidDevice`.
@@ -257,10 +283,133 @@ impl AndroidDevice {
     Ok(AndroidSocket::new(stream))
   }
 
-  /// Playwright: `androidDevice.close(): Promise<void>`. Every later
-  /// call on the device fails, and `android.devices()` hands out a new
-  /// object for it.
-  pub fn close(&self) {
+  /// Playwright: `androidDevice.launchBrowser(options?): Promise<BrowserContext>`.
+  /// Start the browser `pkg` afresh with the command line its options
+  /// ask for and return its context, the one the device has.
+  ///
+  /// The package is made the device's debug app so that a release build
+  /// reads the command-line file too, where Playwright asks for the
+  /// browser's "command line on non-rooted devices" flag to be on.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device is closed, the package or an argument
+  /// is not usable, the browser does not start, or its `DevTools` socket
+  /// does not open within thirty seconds.
+  pub async fn launch_browser(&self, options: AndroidLaunchBrowserOptions) -> Result<crate::context::ContextRef> {
+    // Boxed here once, so a caller's own future does not carry the whole launch.
+    Box::pin(self.launch(options)).await
+  }
+
+  async fn launch(&self, options: AndroidLaunchBrowserOptions) -> Result<crate::context::ContextRef> {
+    self.ensure_open()?;
+    let server = &self.inner.server;
+    let serial = self.inner.serial.as_str();
+    let pkg = options.pkg.unwrap_or_else(|| "com.android.chrome".into());
+    let socket = format!(
+      "ferridriver_{}_{}_devtools_remote",
+      std::process::id(),
+      LAUNCHES.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut args = options
+      .proxy
+      .as_ref()
+      .map(|proxy| proxy.launch_flags(crate::backend::BackendKind::CdpWs))
+      .unwrap_or_default();
+    args.extend(options.args);
+    // Validates the package before it is spliced into a shell command.
+    let line = super::command_line(&pkg, &args, &socket, false)?;
+
+    server.shell(serial, &format!("am force-stop {pkg}")).await?;
+    let installed = server.shell(serial, &format!("pm path {pkg}")).await?;
+    if !installed.starts_with(b"package:") {
+      return Err(FerriError::backend(format!(
+        "Android browser package {pkg} is not installed on {serial}"
+      )));
+    }
+    let api_level = server.shell(serial, "getprop ro.build.version.sdk").await?;
+    if String::from_utf8_lossy(&api_level)
+      .trim()
+      .parse::<u32>()
+      .is_ok_and(|level| level >= 33)
+    {
+      // Otherwise Chrome's notification explainer covers the page.
+      server
+        .shell(serial, &format!("pm grant {pkg} android.permission.POST_NOTIFICATIONS"))
+        .await?;
+    }
+    server
+      .shell(serial, &format!("am set-debug-app --persistent {pkg}"))
+      .await?;
+    server.push(serial, line.as_bytes(), COMMAND_LINE_FILE, 0o644).await?;
+    let started = server
+      .shell(
+        serial,
+        &format!("am start -a android.intent.action.VIEW -d about:blank {pkg}"),
+      )
+      .await?;
+    let started = String::from_utf8_lossy(&started);
+    if started.contains("Error") {
+      return Err(FerriError::backend(format!(
+        "could not start {pkg}: {}",
+        started.trim()
+      )));
+    }
+
+    let port = server.forward(serial, &format!("localabstract:{socket}")).await?;
+    let connected = async {
+      let endpoint = format!("http://127.0.0.1:{port}");
+      Self::wait_for_devtools(&endpoint).await?;
+      let mut context = options.context;
+      if context.viewport == crate::options::ViewportOption::Default {
+        // The device has a screen of its own; Playwright connects with `noDefaultViewport`.
+        context.viewport = crate::options::ViewportOption::Null;
+      }
+      crate::BrowserType::connect_persistent_over_cdp(&endpoint, context).await
+    }
+    .await;
+    let removed = server.shell(serial, &format!("rm -f {COMMAND_LINE_FILE}")).await;
+    match connected {
+      Ok(context) => {
+        removed?;
+        self.inner.browsers.lock().await.push((context.clone(), port));
+        Ok(context)
+      },
+      Err(error) => {
+        let _ = server.kill_forward(serial, port).await;
+        Err(error)
+      },
+    }
+  }
+
+  /// Wait until the browser behind `endpoint` answers on its `DevTools`
+  /// socket: the forward exists as soon as it is asked for, the socket
+  /// behind it only once the browser has started.
+  async fn wait_for_devtools(endpoint: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+      .timeout(std::time::Duration::from_secs(2))
+      .build()
+      .map_err(|error| FerriError::backend(error.to_string()))?;
+    let url = format!("{endpoint}/json/version");
+    let ready = async {
+      loop {
+        if let Ok(response) = client.get(&url).send().await
+          && response.status().is_success()
+        {
+          return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+      }
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(LAUNCH_TIMEOUT_MS), ready)
+      .await
+      .map_err(|_| FerriError::timeout("waiting for the Android browser's DevTools socket", LAUNCH_TIMEOUT_MS))
+  }
+
+  /// Playwright: `androidDevice.close(): Promise<void>`. The browsers it
+  /// launched are disconnected, every later call on the device fails,
+  /// and `android.devices()` hands out a new object for it.
+  pub async fn close(&self) {
     if self.inner.closed.swap(true, Ordering::SeqCst) {
       return;
     }
@@ -269,6 +418,17 @@ impl AndroidDevice {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .retain(|device| !Arc::ptr_eq(&device.inner, &self.inner));
+    }
+    let browsers = std::mem::take(&mut *self.inner.browsers.lock().await);
+    for (context, port) in browsers {
+      if !context.is_closed()
+        && let Err(error) = context.close().await
+      {
+        tracing::debug!(target: "ferridriver::android", %error, "closing a launched browser failed");
+      }
+      if let Err(error) = self.inner.server.kill_forward(&self.inner.serial, port).await {
+        tracing::debug!(target: "ferridriver::android", %error, port, "removing a DevTools forward failed");
+      }
     }
   }
 }
@@ -410,7 +570,7 @@ mod tests {
     let again = android.devices(options.clone()).await.unwrap();
     assert!(devices[0] == again[0], "a listed device is the same object");
 
-    devices[0].close();
+    devices[0].close().await;
     let after = android.devices(options).await.unwrap();
     assert!(devices[0] != after[0], "a closed device is listed anew");
     assert!(devices[0].is_closed() && !after[0].is_closed());
@@ -441,7 +601,7 @@ mod tests {
       .await
       .unwrap()
       .remove(0);
-    device.close();
+    device.close().await;
     for error in [
       device.shell("true").await.unwrap_err(),
       device.screenshot(None).await.unwrap_err(),

@@ -4,7 +4,9 @@ testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts"]
 # `just acceptance`. Collected here they would run under this config
 # instead — against the wrong projects, with none of the settings they
 # assert.
-testIgnore = ["tests/acceptance/**"]
+# `tests/device` needs an Android device behind a running ADB server and
+# has its own config too (tests/device/ferridriver.toml).
+testIgnore = ["tests/acceptance/**", "tests/device/**"]
 steps = ["tests/steps/**/*.ts"]
 baseUrl = "http://127.0.0.1:47831"
 # Projects share the worker budget, including browser teardown.

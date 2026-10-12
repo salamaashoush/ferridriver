@@ -436,6 +436,11 @@ export interface AndroidDevice {
   push(file: string | Buffer | Uint8Array, path: string, options?: { mode?: number }): Promise<void>;
   /** Install an APK. `args` go to `cmd package install`, `-r -t -S` when absent. */
   installApk(file: string | Buffer | Uint8Array, options?: { args?: string[] }): Promise<void>;
+  /**
+   * Start the browser `pkg`, `com.android.chrome` when absent, afresh with
+   * `args` on its command line, and return its context: the one the device has.
+   */
+  launchBrowser(options?: BrowserContextOptions & { pkg?: string; args?: string[] }): Promise<BrowserContext>;
   close(): Promise<void>;
 }
 

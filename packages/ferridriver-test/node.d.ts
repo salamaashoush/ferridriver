@@ -1,5 +1,7 @@
 declare const process: {
   readonly platform: string;
+  /** The variables the session's `allowEnv` grants, and no others. */
+  readonly env: Record<string, string | undefined>;
 };
 
 declare module 'node:fs' {
