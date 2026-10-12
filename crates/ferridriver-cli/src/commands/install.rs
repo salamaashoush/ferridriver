@@ -17,7 +17,7 @@ use crate::ui;
 /// them. `axe` is not a browser; it is the accessibility engine, and it
 /// is here because it is provisioned the same way and to the same
 /// place, rather than vendored into the repository.
-const KNOWN: [&str; 8] = [
+const KNOWN: [&str; 9] = [
   "chromium",
   "chromium-headless-shell",
   "firefox",
@@ -25,6 +25,7 @@ const KNOWN: [&str; 8] = [
   "safari",
   "axe",
   "android",
+  "android-driver",
   "ios",
 ];
 
@@ -56,6 +57,7 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
       "safari" => installer.install_safari(phase.callback()).await,
       "ios" => installer.install_ios(phase.callback()).await,
       "axe" => installer.install_axe_core(phase.callback()).await,
+      "android-driver" => installer.install_android_driver(phase.callback()).await,
       "android" => {
         installer
           .install_android(

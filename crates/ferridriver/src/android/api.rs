@@ -9,8 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::driver::{AndroidDirection, AndroidElementInfo, AndroidSelector, Driver, key_code, key_codes};
 use super::wire::AdbServer;
 use crate::error::{FerriError, Result};
+use crate::options::Point;
 
 /// Playwright: `android.devices(options?: { host?, port?, omitDriverInstall? })`.
 #[derive(Debug, Clone, Default)]
@@ -60,6 +62,9 @@ pub struct AndroidLaunchBrowserOptions {
 /// Where Chromium on Android reads its command line from at start.
 const COMMAND_LINE_FILE: &str = "/data/local/tmp/chrome-command-line";
 
+/// Playwright's default for a call that waits, `DEFAULT_PLAYWRIGHT_TIMEOUT`.
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
 /// How long a launched browser has to open its `DevTools` socket.
 const LAUNCH_TIMEOUT_MS: u64 = 30_000;
 
@@ -90,6 +95,7 @@ impl Android {
   /// Returns an error if no ADB server answers at the address, or a
   /// listed device does not answer for its model.
   pub async fn devices(&self, options: AndroidDevicesOptions) -> Result<Vec<AndroidDevice>> {
+    let omit_driver_install = options.omit_driver_install.unwrap_or(false);
     let server = AdbServer {
       host: options.host.unwrap_or_else(|| AdbServer::default().host),
       port: options.port.unwrap_or_else(|| AdbServer::default().port),
@@ -123,6 +129,9 @@ impl Android {
           closed: AtomicBool::new(false),
           registry: Arc::downgrade(&self.devices),
           browsers: tokio::sync::Mutex::new(Vec::new()),
+          omit_driver_install,
+          driver: tokio::sync::Mutex::new(None),
+          default_timeout: std::sync::atomic::AtomicU64::new(DEFAULT_TIMEOUT_MS),
         }),
       };
       self
@@ -153,6 +162,10 @@ struct DeviceInner {
   /// The browsers this device launched and the local port each one's
   /// `DevTools` socket is forwarded to, for [`AndroidDevice::close`].
   browsers: tokio::sync::Mutex<Vec<(crate::context::ContextRef, u16)>>,
+  omit_driver_install: bool,
+  /// The driver, installed and started by the first call that needs it.
+  driver: tokio::sync::Mutex<Option<Arc<Driver>>>,
+  default_timeout: std::sync::atomic::AtomicU64,
 }
 
 /// Playwright: `AndroidDevice`.
@@ -281,6 +294,259 @@ impl AndroidDevice {
     self.ensure_open()?;
     let stream = self.inner.server.open(&self.inner.serial, command).await?;
     Ok(AndroidSocket::new(stream))
+  }
+
+  /// Playwright: `androidDevice.setDefaultTimeout(timeout: number)`. How
+  /// long a selector action waits for its view when given no timeout of
+  /// its own. It reaches the driver as it is, and the driver reads zero
+  /// as "look once", not as "wait for ever".
+  pub fn set_default_timeout(&self, timeout_ms: u64) {
+    self.inner.default_timeout.store(timeout_ms, Ordering::Relaxed);
+  }
+
+  fn timeout(&self, timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.unwrap_or_else(|| self.inner.default_timeout.load(Ordering::Relaxed))
+  }
+
+  /// The driver on the device, installed and started on first use.
+  async fn driver(&self) -> Result<Arc<Driver>> {
+    self.ensure_open()?;
+    let mut driver = self.inner.driver.lock().await;
+    if let Some(driver) = driver.as_ref() {
+      return Ok(Arc::clone(driver));
+    }
+    let apks = crate::install::BrowserInstaller::new().find_installed_android_driver();
+    let started = Arc::new(
+      Driver::start(
+        &self.inner.server,
+        &self.inner.serial,
+        self.inner.omit_driver_install,
+        apks.as_deref(),
+        self.timeout(None),
+      )
+      .await?,
+    );
+    *driver = Some(Arc::clone(&started));
+    Ok(started)
+  }
+
+  /// One selector call to the driver.
+  async fn act(
+    &self,
+    method: &str,
+    selector: &AndroidSelector,
+    mut params: serde_json::Value,
+    timeout_ms: Option<u64>,
+  ) -> Result<serde_json::Value> {
+    if let Some(bag) = params.as_object_mut() {
+      bag.insert("selector".to_owned(), selector.to_wire());
+    }
+    let driver = self.driver().await?;
+    driver.send(method, params, self.timeout(timeout_ms)).await
+  }
+
+  /// Playwright: `androidDevice.wait(selector, options?: { state?: 'gone',
+  /// timeout? })`. Until a view matches.
+  ///
+  /// `gone` is sent as Playwright sends it, and Playwright's driver
+  /// (revision 1001) does not read it: it waits for a match either way.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device is closed, the driver cannot start,
+  /// or the wait times out.
+  pub async fn wait(&self, selector: &AndroidSelector, gone: bool, timeout_ms: Option<u64>) -> Result<()> {
+    let params = if gone {
+      serde_json::json!({ "state": "gone" })
+    } else {
+      serde_json::json!({})
+    };
+    self.act("wait", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.fill(selector, text, options?)`. Taps
+  /// the view, then sets its text.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`], and if the view takes no text.
+  pub async fn fill(&self, selector: &AndroidSelector, text: &str, timeout_ms: Option<u64>) -> Result<()> {
+    self.act("click", selector, serde_json::json!({}), timeout_ms).await?;
+    self
+      .act("fill", selector, serde_json::json!({ "text": text }), timeout_ms)
+      .await
+      .map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.press(selector, key, options?)`. Taps
+  /// the view, then presses `key`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`], and for a key that is not an `AndroidKey`.
+  pub async fn press(&self, selector: &AndroidSelector, key: &str, timeout_ms: Option<u64>) -> Result<()> {
+    self.tap(selector, None, timeout_ms).await?;
+    self.input().press(key).await
+  }
+
+  /// Playwright: `androidDevice.tap(selector, options?: { duration?,
+  /// timeout? })`. `duration` is how long the tap is held, in
+  /// milliseconds.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn tap(&self, selector: &AndroidSelector, duration_ms: Option<f64>, timeout_ms: Option<u64>) -> Result<()> {
+    let params = match duration_ms {
+      Some(duration) => serde_json::json!({ "duration": duration }),
+      None => serde_json::json!({}),
+    };
+    self.act("click", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.longTap(selector, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn long_tap(&self, selector: &AndroidSelector, timeout_ms: Option<u64>) -> Result<()> {
+    self
+      .act("longClick", selector, serde_json::json!({}), timeout_ms)
+      .await
+      .map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.drag(selector, dest, options?: { speed?,
+  /// timeout? })`. `speed` is in pixels per second.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn drag(
+    &self,
+    selector: &AndroidSelector,
+    dest: Point,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let mut params = serde_json::json!({ "dest": { "x": dest.x, "y": dest.y } });
+    Self::with_speed(&mut params, speed);
+    self.act("drag", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.fling(selector, direction, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn fling(
+    &self,
+    selector: &AndroidSelector,
+    direction: AndroidDirection,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let mut params = serde_json::json!({ "direction": direction.as_str() });
+    Self::with_speed(&mut params, speed);
+    self.act("fling", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.pinchClose(selector, percent, options?)`.
+  /// `percent` is the size of the pinch as a fraction of the view.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn pinch_close(
+    &self,
+    selector: &AndroidSelector,
+    percent: f64,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let mut params = serde_json::json!({ "percent": percent });
+    Self::with_speed(&mut params, speed);
+    self.act("pinchClose", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.pinchOpen(selector, percent, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn pinch_open(
+    &self,
+    selector: &AndroidSelector,
+    percent: f64,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let mut params = serde_json::json!({ "percent": percent });
+    Self::with_speed(&mut params, speed);
+    self.act("pinchOpen", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.scroll(selector, direction, percent,
+  /// options?)`. `percent` is the distance as a fraction of the view.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn scroll(
+    &self,
+    selector: &AndroidSelector,
+    direction: AndroidDirection,
+    percent: f64,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let mut params = serde_json::json!({ "direction": direction.as_str(), "percent": percent });
+    Self::with_speed(&mut params, speed);
+    self.act("scroll", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  /// Playwright: `androidDevice.swipe(selector, direction, percent,
+  /// options?)`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::wait`].
+  pub async fn swipe(
+    &self,
+    selector: &AndroidSelector,
+    direction: AndroidDirection,
+    percent: f64,
+    speed: Option<f64>,
+    timeout_ms: Option<u64>,
+  ) -> Result<()> {
+    let mut params = serde_json::json!({ "direction": direction.as_str(), "percent": percent });
+    Self::with_speed(&mut params, speed);
+    self.act("swipe", selector, params, timeout_ms).await.map(|_| ())
+  }
+
+  fn with_speed(params: &mut serde_json::Value, speed: Option<f64>) {
+    if let (Some(bag), Some(speed)) = (params.as_object_mut(), speed) {
+      bag.insert("speed".to_owned(), speed.into());
+    }
+  }
+
+  /// Playwright: `androidDevice.info(selector): Promise<AndroidElementInfo>`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device is closed, the driver cannot start,
+  /// or no view matches.
+  pub async fn info(&self, selector: &AndroidSelector) -> Result<AndroidElementInfo> {
+    // Upstream gives this call no limit of its own.
+    let info = self.act("info", selector, serde_json::json!({}), Some(0)).await?;
+    serde_json::from_value(info).map_err(|error| FerriError::protocol("Android driver", format!("info: {error}")))
+  }
+
+  /// Playwright: `androidDevice.input`, raw input that addresses the
+  /// screen and not a view.
+  #[must_use]
+  pub fn input(&self) -> AndroidInput {
+    AndroidInput { device: self.clone() }
   }
 
   /// Playwright: `androidDevice.launchBrowser(options?): Promise<BrowserContext>`.
@@ -419,6 +685,8 @@ impl AndroidDevice {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .retain(|device| !Arc::ptr_eq(&device.inner, &self.inner));
     }
+    // Dropping the driver closes its socket and the shell it runs in.
+    self.inner.driver.lock().await.take();
     let browsers = std::mem::take(&mut *self.inner.browsers.lock().await);
     for (context, port) in browsers {
       if !context.is_closed()
@@ -430,6 +698,93 @@ impl AndroidDevice {
         tracing::debug!(target: "ferridriver::android", %error, port, "removing a DevTools forward failed");
       }
     }
+  }
+}
+
+/// Playwright: `AndroidInput`, reached as `androidDevice.input`.
+#[derive(Clone)]
+pub struct AndroidInput {
+  device: AndroidDevice,
+}
+
+impl AndroidInput {
+  async fn send(&self, method: &str, params: serde_json::Value) -> Result<()> {
+    let driver = self.device.driver().await?;
+    // Upstream gives the input calls no limit of their own.
+    driver.send(method, params, 0).await.map(|_| ())
+  }
+
+  /// Playwright: `androidInput.type(text: string)`. A key press per
+  /// character.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for a character no `AndroidKey` stands for, and
+  /// if the device is closed or the driver cannot start.
+  pub async fn type_text(&self, text: &str) -> Result<()> {
+    for code in key_codes(text)? {
+      self.send("inputPress", serde_json::json!({ "keyCode": code })).await?;
+    }
+    Ok(())
+  }
+
+  /// Playwright: `androidInput.press(key: AndroidKey)`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for a key that is not an `AndroidKey`, and if the
+  /// device is closed or the driver cannot start.
+  pub async fn press(&self, key: &str) -> Result<()> {
+    let code = key_code(key)?;
+    self.send("inputPress", serde_json::json!({ "keyCode": code })).await
+  }
+
+  /// Playwright: `androidInput.tap(point: { x, y })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device is closed or the driver cannot start.
+  pub async fn tap(&self, point: Point) -> Result<()> {
+    self
+      .send(
+        "inputClick",
+        serde_json::json!({ "point": { "x": point.x, "y": point.y } }),
+      )
+      .await
+  }
+
+  /// Playwright: `androidInput.swipe(from, segments, steps)`. From
+  /// `from` through each of `segments`, `steps` moves per segment.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device is closed or the driver cannot start.
+  pub async fn swipe(&self, from: Point, segments: &[Point], steps: u32) -> Result<()> {
+    let path: Vec<serde_json::Value> = std::iter::once(&from)
+      .chain(segments)
+      .map(|point| serde_json::json!({ "x": point.x, "y": point.y }))
+      .collect();
+    self
+      .send("inputSwipe", serde_json::json!({ "segments": path, "steps": steps }))
+      .await
+  }
+
+  /// Playwright: `androidInput.drag(from, to, steps)`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device is closed or the driver cannot start.
+  pub async fn drag(&self, from: Point, to: Point, steps: u32) -> Result<()> {
+    self
+      .send(
+        "inputDrag",
+        serde_json::json!({
+          "from": { "x": from.x, "y": from.y },
+          "to": { "x": to.x, "y": to.y },
+          "steps": steps,
+        }),
+      )
+      .await
   }
 }
 

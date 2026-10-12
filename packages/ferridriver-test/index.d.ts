@@ -424,10 +424,213 @@ export const safari: () => BrowserType;
 /** The session's HTTP client, the same object the `request` fixture holds. */
 export const request: APIRequestContext;
 
+/**
+ * Playwright's `AndroidSelector`: every field that is set must hold for a view to match.
+ * A `RegExp` is matched against the whole value, as a string is: `/Network.+/`, not `/Network/`.
+ */
+export interface AndroidSelector {
+  checkable?: boolean;
+  checked?: boolean;
+  /** The view's class name, whole or by pattern. */
+  clazz?: string | RegExp;
+  clickable?: boolean;
+  depth?: number;
+  /** The view's content description. */
+  desc?: string | RegExp;
+  enabled?: boolean;
+  focusable?: boolean;
+  focused?: boolean;
+  hasChild?: { selector: AndroidSelector };
+  hasDescendant?: { selector: AndroidSelector; maxDepth?: number };
+  longClickable?: boolean;
+  /** The package the view belongs to. */
+  pkg?: string | RegExp;
+  /** The view's resource id. */
+  res?: string | RegExp;
+  scrollable?: boolean;
+  selected?: boolean;
+  text?: string | RegExp;
+}
+
+/** Playwright's `AndroidKey`: the keys `press` takes, by Android's own names. */
+export type AndroidKey =
+  'Unknown' |
+  'SoftLeft' |
+  'SoftRight' |
+  'Home' |
+  'Back' |
+  'Call' |
+  'EndCall' |
+  '0' |
+  '1' |
+  '2' |
+  '3' |
+  '4' |
+  '5' |
+  '6' |
+  '7' |
+  '8' |
+  '9' |
+  'Star' |
+  '*' |
+  'Pound' |
+  '#' |
+  'DialUp' |
+  'DialDown' |
+  'DialLeft' |
+  'DialRight' |
+  'DialCenter' |
+  'VolumeUp' |
+  'VolumeDown' |
+  'Power' |
+  'Camera' |
+  'Clear' |
+  'A' |
+  'B' |
+  'C' |
+  'D' |
+  'E' |
+  'F' |
+  'G' |
+  'H' |
+  'I' |
+  'J' |
+  'K' |
+  'L' |
+  'M' |
+  'N' |
+  'O' |
+  'P' |
+  'Q' |
+  'R' |
+  'S' |
+  'T' |
+  'U' |
+  'V' |
+  'W' |
+  'X' |
+  'Y' |
+  'Z' |
+  'Comma' |
+  ',' |
+  'Period' |
+  '.' |
+  'AltLeft' |
+  'AltRight' |
+  'ShiftLeft' |
+  'ShiftRight' |
+  'Tab' |
+  '\\t' |
+  'Space' |
+  ' ' |
+  'Sym' |
+  'Explorer' |
+  'Envelop' |
+  'Enter' |
+  'Del' |
+  'Grave' |
+  'Minus' |
+  '-' |
+  'Equals' |
+  '=' |
+  'LeftBracket' |
+  '(' |
+  'RightBracket' |
+  ')' |
+  'Backslash' |
+  '\\' |
+  'Semicolon' |
+  ';' |
+  'Apostrophe' |
+  '`' |
+  'Slash' |
+  '/' |
+  'At' |
+  '@' |
+  'Num' |
+  'HeadsetHook' |
+  'Focus' |
+  'Plus' |
+  'Menu' |
+  'Notification' |
+  'Search' |
+  'MediaPlayPause' |
+  'MediaStop' |
+  'MediaNext' |
+  'MediaPrevious' |
+  'MediaRewind' |
+  'MediaFastForward' |
+  'MediaPlay' |
+  'MediaPause' |
+  'MediaClose' |
+  'MediaEject' |
+  'MediaRecord' |
+  'ChannelUp' |
+  'ChannelDown' |
+  'AppSwitch' |
+  'Assist' |
+  'MediaAudioTrack' |
+  'MediaTopMenu' |
+  'MediaSkipForward' |
+  'MediaSkipBackward' |
+  'MediaStepForward' |
+  'MediaStepBackward' |
+  'Cut' |
+  'Copy' |
+  'Paste';
+
+/** Playwright's `AndroidElementInfo`. */
+export interface AndroidElementInfo {
+  clazz: string;
+  desc: string;
+  res: string;
+  pkg: string;
+  text: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  checkable: boolean;
+  checked: boolean;
+  clickable: boolean;
+  enabled: boolean;
+  focusable: boolean;
+  focused: boolean;
+  longClickable: boolean;
+  scrollable: boolean;
+  selected: boolean;
+}
+
+/** Playwright's `AndroidInput`: raw input that addresses the screen and not a view. */
+export interface AndroidInput {
+  /** A key press per character. */
+  type(text: string): Promise<void>;
+  press(key: AndroidKey): Promise<void>;
+  tap(point: { x: number; y: number }): Promise<void>;
+  /** From `from` through each of `segments`, `steps` moves per segment. */
+  swipe(from: { x: number; y: number }, segments: { x: number; y: number }[], steps: number): Promise<void>;
+  drag(from: { x: number; y: number }, to: { x: number; y: number }, steps: number): Promise<void>;
+}
+
+type AndroidDirection = 'down' | 'up' | 'left' | 'right';
+
 /** Playwright's `AndroidDevice`: a device behind an ADB server. */
 export interface AndroidDevice {
   serial(): string;
   model(): string;
+  /** How long a selector action waits for its view when given no timeout; the driver reads `0` as "look once". */
+  setDefaultTimeout(timeout: number): void;
+  readonly input: AndroidInput;
+  /** Until a view matches. Playwright's driver does not read `state`, and waits for a match either way. */
+  wait(selector: AndroidSelector, options?: { state?: 'gone'; timeout?: number }): Promise<void>;
+  fill(selector: AndroidSelector, text: string, options?: { timeout?: number }): Promise<void>;
+  press(selector: AndroidSelector, key: AndroidKey, options?: { timeout?: number }): Promise<void>;
+  tap(selector: AndroidSelector, options?: { duration?: number; timeout?: number }): Promise<void>;
+  longTap(selector: AndroidSelector, options?: { timeout?: number }): Promise<void>;
+  drag(selector: AndroidSelector, dest: { x: number; y: number }, options?: { speed?: number; timeout?: number }): Promise<void>;
+  fling(selector: AndroidSelector, direction: AndroidDirection, options?: { speed?: number; timeout?: number }): Promise<void>;
+  pinchClose(selector: AndroidSelector, percent: number, options?: { speed?: number; timeout?: number }): Promise<void>;
+  pinchOpen(selector: AndroidSelector, percent: number, options?: { speed?: number; timeout?: number }): Promise<void>;
+  scroll(selector: AndroidSelector, direction: AndroidDirection, percent: number, options?: { speed?: number; timeout?: number }): Promise<void>;
+  swipe(selector: AndroidSelector, direction: AndroidDirection, percent: number, options?: { speed?: number; timeout?: number }): Promise<void>;
+  info(selector: AndroidSelector): Promise<AndroidElementInfo>;
   /** Everything `command` wrote in the device's shell. */
   shell(command: string): Promise<Uint8Array>;
   /** The screen as a PNG, also written to `path` when one is given. */

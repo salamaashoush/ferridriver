@@ -41,14 +41,47 @@ so a release build reads the command-line file without the browser's own
 "command line on non-rooted devices" flag. Closing the context disconnects;
 closing the device disconnects every browser it launched.
 
+## Native views
+
+The selector actions and `input` go through Playwright's own driver, two APKs
+that run UI Automator on the device. Fetch them once:
+
+```bash
+ferridriver install android-driver
+```
+
+The first call that needs the driver installs and starts it; pass
+`omitDriverInstall: true` to `devices()` for a device that has it already.
+
+```ts
+await device.wait({ pkg: 'com.android.settings' });
+const info = await device.info({ text: /Network.+/ });
+await device.tap({ text: /Network.+/ });
+await device.fill({ clazz: 'android.widget.EditText' }, 'wifi');
+await device.scroll({ scrollable: true }, 'down', 1);
+await device.input.press('Back');
+await device.input.tap({ x: 540, y: 1200 });
+```
+
+`wait`, `fill`, `press`, `tap`, `longTap`, `drag`, `fling`, `pinchClose`,
+`pinchOpen`, `scroll`, `swipe` and `info` take an `AndroidSelector`;
+`input` has `type`, `press`, `tap`, `swipe` and `drag`. Each call is sent as
+Playwright's own server sends it, so the driver's behaviour is upstream's,
+including three things worth knowing:
+
+- A `RegExp` is matched against the whole value, as a string is: `/Network/`
+  does not find "Network & internet", `/Network.+/` does.
+- `wait` with `state: 'gone'` is sent, and the driver (revision 1001) does not
+  read it: it waits for a match either way.
+- A `timeout` of `0` reaches the driver as zero, which it reads as "look
+  once".
+
 In a script a device answers to the realm's permissions: the ADB server's
 host and port to its network grant, a file named by path to its read grant,
 and a screenshot `path` to its write grant.
 
 Not there yet: `open` in the two bindings, `webView` and `webViews`, the
-device's events, the selector actions (`tap`, `fill`, `wait`
-and the rest) and `input`, which need Playwright's driver APK on the device,
-and `android.connect` / `launchServer`.
+device's events, and `android.connect` / `launchServer`.
 
 ## Checking it on a device
 

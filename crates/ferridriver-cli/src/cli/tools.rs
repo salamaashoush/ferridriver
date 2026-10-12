@@ -43,7 +43,9 @@ pub struct McpArgs {
 #[derive(Args)]
 pub struct InstallArgs {
   /// Browsers to install: `chromium`, `chromium-headless-shell`,
-  /// `firefox`, `webkit`, `safari`, `android`, `ios`, or `axe`. Defaults to `chromium`.
+  /// `firefox`, `webkit`, `safari`, `android`, `android-driver`, `ios`, or `axe`.
+  /// Defaults to `chromium`. `android-driver` is the pair of APKs the
+  /// Android device API installs on a device for its selector actions.
   pub browsers: Vec<String>,
 
   /// Also install required system libraries (Linux only; uses the

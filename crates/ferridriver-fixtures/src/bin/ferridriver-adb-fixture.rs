@@ -6,6 +6,12 @@
 //! `screencap -p` answers a PNG signature, `cat <path>` returns what was
 //! pushed there with its mode, and anything else is echoed back. A
 //! package whose bytes start with `BAD` is refused.
+//!
+//! It also plays Playwright's Android driver on the abstract socket
+//! `playwright_android_driver_socket`: every call is recorded and
+//! answered, `cat driver-calls` returns the record as a JSON array, a
+//! selector whose text is `^Missing$` is not found, and `info` describes
+//! one button.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,6 +24,45 @@ const SERIAL: &str = "emulator-5554";
 const PNG: &[u8] = &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 
 type Files = Arc<Mutex<HashMap<String, (u32, Vec<u8>)>>>;
+
+/// Where the driver's calls are recorded, among the pushed files.
+const DRIVER_CALLS: &str = "driver-calls";
+
+/// Playwright's driver: four bytes of big-endian length and a JSON
+/// `{ id, method, params }`, answered `{ id, result }` or `{ id, error }`.
+async fn driver(stream: &mut TcpStream, files: &Files) -> Result<()> {
+  loop {
+    let mut length = [0u8; 4];
+    if stream.read_exact(&mut length).await.is_err() {
+      return Ok(());
+    }
+    let mut message = vec![0u8; u32::from_be_bytes(length) as usize];
+    stream.read_exact(&mut message).await?;
+    let call: serde_json::Value = serde_json::from_slice(&message)?;
+    {
+      let mut files = files.lock().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+      let (_, recorded) = files.entry(DRIVER_CALLS.into()).or_insert_with(|| (0, b"[]".to_vec()));
+      let mut calls: Vec<serde_json::Value> = serde_json::from_slice(recorded)?;
+      calls.push(serde_json::json!({ "method": call["method"], "params": call["params"] }));
+      *recorded = serde_json::to_vec(&calls)?;
+    }
+    let answer = if call["params"]["selector"]["text"] == "^Missing$" {
+      serde_json::json!({ "id": call["id"], "error": "Timeout waiting for selector" })
+    } else if call["method"] == "info" {
+      serde_json::json!({ "id": call["id"], "result": {
+        "clazz": "android.widget.Button", "desc": null, "res": "com.example:id/save", "pkg": "com.example",
+        "text": "Save", "bounds": { "x": 10, "y": 20, "width": 300, "height": 120 },
+        "checkable": false, "checked": false, "clickable": true, "enabled": true, "focusable": true,
+        "focused": false, "longClickable": false, "scrollable": false, "selected": false,
+      } })
+    } else {
+      serde_json::json!({ "id": call["id"], "result": null })
+    };
+    let body = serde_json::to_vec(&answer)?;
+    stream.write_all(&u32::try_from(body.len())?.to_be_bytes()).await?;
+    stream.write_all(&body).await?;
+  }
+}
 
 async fn request(stream: &mut TcpStream) -> Result<String> {
   let mut digits = [0u8; 4];
@@ -78,6 +123,17 @@ async fn shell(stream: &mut TcpStream, command: &str, files: &Files) -> Result<(
     stream.write_all(b"Fixture Phone\n").await?;
   } else if command == "screencap -p" {
     stream.write_all(PNG).await?;
+  } else if command.starts_with("am instrument -w ") {
+    // The driver's shell stays open for as long as the driver runs.
+    let mut closed = [0u8; 1];
+    let _ = stream.read(&mut closed).await;
+  } else if command == format!("cat {DRIVER_CALLS}") {
+    let recorded = files
+      .lock()
+      .map_err(|error| anyhow::anyhow!(error.to_string()))?
+      .get(DRIVER_CALLS)
+      .map_or_else(|| b"[]".to_vec(), |(_, calls)| calls.clone());
+    stream.write_all(&recorded).await?;
   } else if let Some(path) = command.strip_prefix("cat ") {
     let stored = files
       .lock()
@@ -139,6 +195,8 @@ async fn serve(mut stream: TcpStream, files: Files) -> Result<()> {
     sync(&mut stream, &files).await
   } else if let Some(command) = service.strip_prefix("shell:") {
     shell(&mut stream, command, &files).await
+  } else if service == "localabstract:playwright_android_driver_socket" {
+    driver(&mut stream, &files).await
   } else {
     Ok(())
   }

@@ -9,12 +9,12 @@ const text = bytes => new TextDecoder().decode(bytes);
 
 // Playwright's `_android` against an ADB server that has no Android
 // behind it: the fixture lists one usable device and scripts its shell.
-async function device(body) {
+async function device(body, options = {}) {
   await commands.start('adb', { binary: join(repo, 'target/debug/ferridriver-adb-fixture') });
   try {
     const ready = await commands.waitForOutput('adb', '\n');
     const port = Number(ready.match(/listening (\d+)/)[1]);
-    const devices = await _android.devices({ port });
+    const devices = await _android.devices({ port, ...options });
     assert.equal(devices.length, 1, 'the unauthorized device is not listed');
     await body(devices[0], port);
   } finally { await commands.stop('adb'); }
@@ -67,6 +67,70 @@ test('installApk streams the package with the arguments it is given', async () =
     assert.equal(text(await phone.shell('cat installed')), '0:-g --user 0:4');
     await assert.rejects(phone.installApk(Buffer.from('BAD package')), /INSTALL_PARSE_FAILED_NOT_APK/);
   });
+});
+
+// The fixture plays Playwright's driver and records what it is sent, so
+// each action is checked as the call upstream's dispatcher makes for it.
+test('selector actions and input reach the driver as the calls Playwright makes', async () => {
+  await device(async phone => {
+    const wait = 30000;
+    await phone.tap({ text: 'Save', clickable: true }, { duration: 50, timeout: 1234 });
+    await phone.fill({ res: /id\/name$/ }, 'Salama');
+    await phone.press({ desc: 'Search' }, 'Enter');
+    await phone.longTap({ clazz: 'android.widget.Button' });
+    await phone.drag({ text: 'Card' }, { x: 10, y: 20 }, { speed: 500 });
+    await phone.fling({ scrollable: true }, 'down');
+    await phone.pinchClose({ res: 'map' }, 0.5);
+    await phone.pinchOpen({ res: 'map' }, 0.25, { speed: 100 });
+    await phone.scroll({ scrollable: true }, 'up', 0.75);
+    await phone.swipe({ hasChild: { selector: { text: 'Row' } } }, 'left', 0.5);
+    await phone.wait({ text: 'Done' }, { state: 'gone' });
+    const info = await phone.info({ hasDescendant: { selector: { text: 'Save' }, maxDepth: 2 } });
+    await phone.input.type('a1');
+    await phone.input.press('Back');
+    await phone.input.tap({ x: 1, y: 2 });
+    await phone.input.swipe({ x: 0, y: 0 }, [{ x: 5, y: 5 }, { x: 9, y: 9 }], 3);
+    await phone.input.drag({ x: 1, y: 1 }, { x: 2, y: 2 }, 4);
+    phone.setDefaultTimeout(777);
+    await phone.longTap({ selected: false });
+
+    assert.deepEqual(JSON.parse(text(await phone.shell('cat driver-calls'))), [
+      { method: 'click', params: { selector: { text: '^Save$', clickable: true }, duration: 50, timeout: 1234 } },
+      { method: 'click', params: { selector: { res: 'id\\/name$' }, timeout: wait } },
+      { method: 'fill', params: { selector: { res: 'id\\/name$' }, text: 'Salama', timeout: wait } },
+      { method: 'click', params: { selector: { desc: '^Search$' }, timeout: wait } },
+      { method: 'inputPress', params: { keyCode: 66, timeout: 0 } },
+      { method: 'longClick', params: { selector: { clazz: '^android\\.widget\\.Button$' }, timeout: wait } },
+      { method: 'drag', params: { selector: { text: '^Card$' }, dest: { x: 10, y: 20 }, speed: 500, timeout: wait } },
+      { method: 'fling', params: { selector: { scrollable: true }, direction: 'down', timeout: wait } },
+      { method: 'pinchClose', params: { selector: { res: '^map$' }, percent: 0.5, timeout: wait } },
+      { method: 'pinchOpen', params: { selector: { res: '^map$' }, percent: 0.25, speed: 100, timeout: wait } },
+      { method: 'scroll', params: { selector: { scrollable: true }, direction: 'up', percent: 0.75, timeout: wait } },
+      { method: 'swipe', params: { selector: { hasChild: { selector: { text: '^Row$' } } }, direction: 'left', percent: 0.5, timeout: wait } },
+      { method: 'wait', params: { selector: { text: '^Done$' }, state: 'gone', timeout: wait } },
+      { method: 'info', params: { selector: { hasDescendant: { selector: { text: '^Save$' }, maxDepth: 2 } }, timeout: 0 } },
+      { method: 'inputPress', params: { keyCode: 29, timeout: 0 } },
+      { method: 'inputPress', params: { keyCode: 8, timeout: 0 } },
+      { method: 'inputPress', params: { keyCode: 4, timeout: 0 } },
+      { method: 'inputClick', params: { point: { x: 1, y: 2 }, timeout: 0 } },
+      { method: 'inputSwipe', params: { segments: [{ x: 0, y: 0 }, { x: 5, y: 5 }, { x: 9, y: 9 }], steps: 3, timeout: 0 } },
+      { method: 'inputDrag', params: { from: { x: 1, y: 1 }, to: { x: 2, y: 2 }, steps: 4, timeout: 0 } },
+      { method: 'longClick', params: { selector: { selected: false }, timeout: 777 } },
+    ]);
+    assert.deepEqual(info, {
+      clazz: 'android.widget.Button', desc: '', res: 'com.example:id/save', pkg: 'com.example', text: 'Save',
+      bounds: { x: 10, y: 20, width: 300, height: 120 },
+      checkable: false, checked: false, clickable: true, enabled: true, focusable: true,
+      focused: false, longClickable: false, scrollable: false, selected: false,
+    });
+
+    await assert.rejects(phone.tap({ text: 'Missing' }), /Timeout waiting for selector/);
+    await assert.rejects(phone.input.press('NoSuchKey'), /Unknown key: NoSuchKey/);
+    await assert.rejects(phone.input.type('é'), /No mapping for é found/);
+    await assert.rejects(phone.fling({}, 'sideways'), /direction/);
+    await assert.rejects(phone.wait({}, { state: 'visible' }), /state/);
+    await assert.rejects(phone.tap({ text: 7 }), /selector\.text/);
+  }, { omitDriverInstall: true });
 });
 
 test('devices says where it looked when no ADB server answers', async () => {

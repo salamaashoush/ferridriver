@@ -1118,6 +1118,121 @@ impl BrowserInstaller {
     Ok(path)
   }
 
+  /// Download Playwright's Android driver: the two APKs `_android` installs
+  /// on a device for its selector actions and its `input`. The same
+  /// archive, from the same mirrors, that `playwright install android`
+  /// fetches.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the registry or every mirror is unreachable, or
+  /// the archive does not hold both APKs.
+  pub async fn install_android_driver<F>(&self, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    progress(InstallProgress::Resolving);
+    let browsers: PwBrowsersJson = self
+      .client
+      .get(PW_BROWSERS_JSON_URL)
+      .send()
+      .await
+      .map_err(|e| backend_err(format!("failed to fetch Playwright browsers.json: {e}")))?
+      .json()
+      .await
+      .map_err(|e| backend_err(format!("failed to parse Playwright browsers.json: {e}")))?;
+    let revision = browsers
+      .browsers
+      .into_iter()
+      .find(|b| b.name == "android")
+      .map(|b| b.revision)
+      .ok_or_else(|| backend_err("Playwright browsers.json missing android entry"))?;
+
+    let install_dir = self.cache_dir.join(format!("android-driver-{revision}"));
+    let marker_file = install_dir.join(".downloaded");
+    let complete = |dir: &Path| ANDROID_DRIVER_APKS.iter().all(|apk| dir.join(apk).exists());
+    if marker_file.exists() && complete(&install_dir) {
+      let path = install_dir.to_string_lossy().to_string();
+      progress(InstallProgress::AlreadyInstalled {
+        version: revision,
+        path: path.clone(),
+      });
+      return Ok(path);
+    }
+    if install_dir.exists() {
+      let _ = tokio::fs::remove_dir_all(&install_dir).await;
+    }
+
+    let tmp_dir = self.cache_dir.join(".tmp");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+    let zip_path = tmp_dir.join(format!("android-driver-{revision}.zip"));
+    let mut last_error = String::new();
+    'outer: for host in PW_CDN_MIRRORS {
+      let url = format!("{host}/builds/android/{revision}/android.zip");
+      for attempt in 1..=DOWNLOAD_RETRIES {
+        progress(InstallProgress::Downloading {
+          bytes_downloaded: 0,
+          total_bytes: None,
+        });
+        match self.download_file(&url, &zip_path, &progress).await {
+          Ok(()) => {
+            last_error.clear();
+            break 'outer;
+          },
+          Err(e) => {
+            last_error = format!("{host} attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
+            let _ = tokio::fs::remove_file(&zip_path).await;
+          },
+        }
+      }
+    }
+    if !last_error.is_empty() {
+      return Err(backend_err(format!(
+        "Android driver download failed after exhausting mirrors: {last_error}"
+      )));
+    }
+
+    progress(InstallProgress::Extracting);
+    tokio::fs::create_dir_all(&install_dir).await?;
+    let install_dir_clone = install_dir.clone();
+    let zip_path_clone = zip_path.clone();
+    tokio::task::spawn_blocking(move || extract_zip(&zip_path_clone, &install_dir_clone))
+      .await
+      .map_err(|e| backend_err(format!("extract task failed: {e}")))??;
+    let _ = tokio::fs::remove_file(&zip_path).await;
+    if !complete(&install_dir) {
+      return Err(backend_err(format!(
+        "extraction completed but the driver APKs are not in {}",
+        install_dir.display()
+      )));
+    }
+    let _ = tokio::fs::write(&marker_file, revision.as_bytes()).await;
+
+    let path = install_dir.to_string_lossy().to_string();
+    progress(InstallProgress::Complete {
+      version: revision,
+      path: path.clone(),
+    });
+    Ok(path)
+  }
+
+  /// The directory of an installed Android driver, the newest when there
+  /// are several, or `None` when [`Self::install_android_driver`] has not
+  /// run.
+  #[must_use]
+  pub fn find_installed_android_driver(&self) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(&self.cache_dir).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_name().to_string_lossy().starts_with("android-driver-"))
+      .collect();
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
+    candidates
+      .into_iter()
+      .map(|entry| entry.path())
+      .find(|dir| dir.join(".downloaded").exists() && ANDROID_DRIVER_APKS.iter().all(|apk| dir.join(apk).exists()))
+  }
+
   /// Return the path to an installed Firefox, or `None` if not installed.
   #[must_use]
   pub fn find_installed_firefox(&self) -> Option<String> {
@@ -1820,6 +1935,10 @@ fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Zip extraction (for Chrome)
 // ---------------------------------------------------------------------------
+
+/// What Playwright's Android driver archive holds: the driver and the
+/// instrumentation target it runs in.
+pub(crate) const ANDROID_DRIVER_APKS: [&str; 2] = ["android-driver.apk", "android-driver-target.apk"];
 
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
   let file = std::fs::File::open(zip_path)?;

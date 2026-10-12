@@ -63,6 +63,39 @@ test.describe('an Android device', () => {
     }
   });
 
+  // Needs Playwright's driver in the cache: `ferridriver install android-driver`.
+  test('finds and acts on native views through the driver', async () => {
+    const phone = await device();
+    await phone.shell('am force-stop com.android.settings');
+    await phone.shell('am start -a android.settings.SETTINGS');
+    try {
+      await phone.wait({ pkg: 'com.android.settings' });
+      const info = await phone.info({ text: /Network.*/ });
+      expect(info.pkg).toBe('com.android.settings');
+      expect(info.text).toContain('Network');
+      expect(info.bounds.width).toBeGreaterThan(0);
+
+      await phone.tap({ text: /Network.*/ });
+      await phone.wait({ text: /Internet|SIMs|Airplane mode/ }, { timeout: 15_000 });
+      await phone.input.press('Back');
+      await phone.wait({ text: /Network.*/ }, { timeout: 15_000 });
+
+      await phone.tap({ text: /Search.*/ });
+      await phone.fill({ clazz: 'android.widget.EditText' }, 'wifi');
+      expect((await phone.info({ clazz: 'android.widget.EditText' })).text).toBe('wifi');
+      await phone.input.press('Back');
+      await phone.input.press('Back');
+
+      const missing = await phone
+        .wait({ text: 'No such view anywhere' }, { timeout: 1_500 })
+        .then(() => 'found', (error: Error) => error.message);
+      expect(missing).toContain('Timed out waiting for selector');
+      await phone.scroll({ scrollable: true }, 'down', 1);
+    } finally {
+      await phone.input.press('Home');
+    }
+  });
+
   test('refuses every call once closed, and is listed anew', async () => {
     const phone = await device();
     await phone.close();
