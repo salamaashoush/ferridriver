@@ -2179,17 +2179,14 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Playwright: `wkPage.ts::_clearPermissions`. The override is the
+  /// page proxy's, like the grant it undoes.
   pub async fn reset_permissions(&self) -> Result<()> {
-    if let Some(ctx) = &self.context_id {
-      self
-        .browser
-        .send(
-          "Playwright.resetPermissions",
-          json!({ "browserContextId": ctx.to_string() }),
-        )
-        .await
-        .map_err(conn_err)?;
-    }
+    self
+      .proxy
+      .send("Emulation.resetPermissions", json!({}))
+      .await
+      .map_err(conn_err)?;
     Ok(())
   }
 
