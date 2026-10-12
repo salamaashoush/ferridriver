@@ -30,6 +30,13 @@ export interface DeviceDescriptor {
  */
 export declare const devices: Record<string, DeviceDescriptor>;
 
+/**
+ * Playwright's `_android`: the devices behind an ADB server. An object, as
+ * upstream, made when the addon loads because napi-rs derives a
+ * module-level value only from a `const`.
+ */
+export declare const _android: import('./index').Android;
+
 /** One node of `ariaSnapshotJSON()`: Playwright's `AriaNodeJSON`. */
 export interface AriaNodeJSON {
   role: string;

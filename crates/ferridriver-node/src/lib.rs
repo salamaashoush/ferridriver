@@ -52,6 +52,7 @@
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod abort;
+mod android;
 mod browser;
 mod browser_type;
 mod cdp_session;

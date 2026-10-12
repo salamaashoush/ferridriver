@@ -424,6 +424,29 @@ export const safari: () => BrowserType;
 /** The session's HTTP client, the same object the `request` fixture holds. */
 export const request: APIRequestContext;
 
+/** Playwright's `AndroidDevice`: a device behind an ADB server. */
+export interface AndroidDevice {
+  serial(): string;
+  model(): string;
+  /** Everything `command` wrote in the device's shell. */
+  shell(command: string): Promise<Uint8Array>;
+  /** The screen as a PNG, also written to `path` when one is given. */
+  screenshot(options?: { path?: string }): Promise<Uint8Array>;
+  /** Write a file to the device. `mode` is `0o644` when absent. */
+  push(file: string | Buffer | Uint8Array, path: string, options?: { mode?: number }): Promise<void>;
+  /** Install an APK. `args` go to `cmd package install`, `-r -t -S` when absent. */
+  installApk(file: string | Buffer | Uint8Array, options?: { args?: string[] }): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Playwright's `Android`, there `playwright._android`. */
+export interface Android {
+  /** The usable devices of the ADB server at `host:port`, `127.0.0.1:5037` when absent. */
+  devices(options?: { host?: string; port?: number; omitDriverInstall?: boolean }): Promise<AndroidDevice[]>;
+}
+
+export const _android: Android;
+
 /** The module object is the `test` function itself, as in Playwright. */
 declare const frameworkModule: TestType;
 export default frameworkModule;

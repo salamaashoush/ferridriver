@@ -50,3 +50,9 @@ env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "LD_LIBRARY_PATH", "CHROMIUM
 run = ["${binary}", "${url}"]
 persistent = true
 env = ["TOKIO_WORKER_THREADS"]
+
+# The scripted ADB server behind android-device.test.mjs.
+[scripting.allow.commands.adb]
+run = ["${binary}"]
+persistent = true
+env = ["TOKIO_WORKER_THREADS"]

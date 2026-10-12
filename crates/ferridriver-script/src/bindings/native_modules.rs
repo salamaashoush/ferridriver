@@ -527,6 +527,7 @@ const FERRIDRIVER_EXPORTS: &[&str] = &[
   "firefox",
   "webkit",
   "safari",
+  "_android",
 ];
 
 fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
@@ -564,7 +565,7 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   )?;
   ns.set("defineTool", fd_prop(ctx, "tool")?)?;
   for name in [
-    "page", "context", "browser", "request", "expect", "chromium", "firefox", "webkit", "safari",
+    "page", "context", "browser", "request", "expect", "chromium", "firefox", "webkit", "safari", "_android",
   ] {
     ns.set(name, global(ctx, name)?)?;
   }
@@ -591,7 +592,7 @@ pub struct FerridriverTestModule;
 /// Mirrors `@playwright/test`'s own export list (`packages/playwright/
 /// test.mjs`), minus what ferridriver has not implemented yet:
 /// `errors`, `by` and the
-/// `_electron` / `_android` / `_utilityTest` internals.
+/// `_electron` / `_utilityTest` internals.
 /// Exporting a name that resolves to `undefined` would be worse than not
 /// exporting it — the import succeeds and the call site fails somewhere
 /// else.
@@ -610,6 +611,7 @@ const TEST_EXPORTS: &[&str] = &[
   "firefox",
   "webkit",
   "safari",
+  "_android",
   "request",
 ];
 
@@ -634,6 +636,7 @@ fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     ("firefox", global(ctx, "firefox")?),
     ("webkit", global(ctx, "webkit")?),
     ("safari", global(ctx, "safari")?),
+    ("_android", global(ctx, "_android")?),
     ("request", global(ctx, "request")?),
   ];
   let ns = test.as_object().cloned().unwrap_or(Object::new(ctx.clone())?);

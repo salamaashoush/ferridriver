@@ -611,6 +611,7 @@ impl ferrijs::Extension for FerridriverExtension {
         crate::bindings::install_artifacts(&ctx, artifacts)?;
       }
       crate::bindings::install_browser_type(&ctx)?;
+      crate::bindings::install_android(&ctx)?;
 
       // expect() global (Jest value matchers, Playwright web-first
       // matchers, asymmetric matchers, expect.poll).

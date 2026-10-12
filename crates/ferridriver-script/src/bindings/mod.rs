@@ -19,6 +19,7 @@
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 
 pub mod abort;
+pub mod android;
 pub mod artifacts;
 pub mod bdd;
 pub mod browser;
@@ -63,6 +64,7 @@ pub mod web_mcp;
 pub mod web_socket_route;
 pub mod web_storage;
 
+pub use android::{AndroidDeviceJs, AndroidJs, install_android};
 pub use artifacts::ArtifactsJs;
 pub use bdd::{
   CollectedHook, CollectedRegistry, CollectedStep, HookArg, JsArg, ScenarioSpec, StepOutcome, begin_scenario,

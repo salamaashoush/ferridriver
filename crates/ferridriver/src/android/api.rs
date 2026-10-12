@@ -144,9 +144,23 @@ impl std::fmt::Debug for AndroidDevice {
   }
 }
 
+/// Two handles are equal when they are the same device object, which is
+/// what `android.devices()` hands out for a device until it is closed.
+impl PartialEq for AndroidDevice {
+  fn eq(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.inner, &other.inner)
+  }
+}
+
 impl AndroidDevice {
+  /// Whether [`Self::close`] has been called on this device.
+  #[must_use]
+  pub fn is_closed(&self) -> bool {
+    self.inner.closed.load(Ordering::SeqCst)
+  }
+
   fn ensure_open(&self) -> Result<()> {
-    if self.inner.closed.load(Ordering::SeqCst) {
+    if self.is_closed() {
       return Err(FerriError::target_closed(Some("Device is closed".into())));
     }
     Ok(())
@@ -394,17 +408,12 @@ mod tests {
     assert_eq!(devices[0].model(), "Pixel 7");
 
     let again = android.devices(options.clone()).await.unwrap();
-    assert!(
-      Arc::ptr_eq(&devices[0].inner, &again[0].inner),
-      "a listed device is the same object"
-    );
+    assert!(devices[0] == again[0], "a listed device is the same object");
 
     devices[0].close();
     let after = android.devices(options).await.unwrap();
-    assert!(
-      !Arc::ptr_eq(&devices[0].inner, &after[0].inner),
-      "a closed device is listed anew"
-    );
+    assert!(devices[0] != after[0], "a closed device is listed anew");
+    assert!(devices[0].is_closed() && !after[0].is_closed());
   }
 
   #[tokio::test]

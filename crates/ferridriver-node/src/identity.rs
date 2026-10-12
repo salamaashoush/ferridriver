@@ -18,6 +18,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{JavaScriptClassExt, Reference, ToNapiValue, TypeName, ValueType};
 use napi::{Env, sys};
 
+use crate::android::AndroidDevice;
 use crate::dialog::Dialog;
 use crate::frame::Frame;
 use crate::page::Page;
@@ -68,6 +69,8 @@ thread_local! {
   static PAGES: RefCell<Cache<Arc<ferridriver::Page>, Page>> = const { RefCell::new(Cache::new()) };
   static FRAMES: RefCell<Cache<ferridriver::Frame, Frame>> = const { RefCell::new(Cache::new()) };
   static DIALOGS: RefCell<Cache<ferridriver::dialog::Dialog, Dialog>> = const { RefCell::new(Cache::new()) };
+  static ANDROID_DEVICES: RefCell<Cache<ferridriver::android::AndroidDevice, AndroidDevice>> =
+    const { RefCell::new(Cache::new()) };
 }
 
 /// A page on its way to JS, as the object that already stands for it.
@@ -98,6 +101,40 @@ impl ToNapiValue for PageObject {
       },
     };
     unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+/// A device on its way to JS: `android.devices()` hands out the same
+/// object for a device until it is closed.
+pub struct AndroidDeviceObject(pub ferridriver::android::AndroidDevice);
+
+impl ToNapiValue for AndroidDeviceObject {
+  unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
+    let js_env = Env::from_raw(env);
+    let found = ANDROID_DEVICES.with(|devices| devices.borrow().find(js_env, |device| *device == val.0))?;
+    let reference = match found {
+      Some(reference) => reference,
+      None => {
+        let reference = AndroidDevice::from_core(val.0.clone()).into_reference(js_env)?;
+        ANDROID_DEVICES.with(|devices| {
+          let mut devices = devices.borrow_mut();
+          devices.retain(|device| !device.is_closed());
+          devices.insert(js_env, val.0, &reference)
+        })?;
+        reference
+      },
+    };
+    unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+impl TypeName for AndroidDeviceObject {
+  fn type_name() -> &'static str {
+    "AndroidDevice"
+  }
+
+  fn value_type() -> ValueType {
+    ValueType::Object
   }
 }
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ferridriver::{Frame, Page};
 use rquickjs::{Class, Ctx, JsLifetime, Persistent};
 
+use crate::bindings::android::AndroidDeviceJs;
 use crate::bindings::dialog::DialogJs;
 use crate::bindings::frame::FrameJs;
 use crate::bindings::page::PageJs;
@@ -18,6 +19,10 @@ struct Wrappers {
   pages: Vec<(Arc<Page>, Persistent<Class<'static, PageJs>>)>,
   frames: Vec<(Frame, Persistent<Class<'static, FrameJs>>)>,
   dialogs: Vec<(ferridriver::dialog::Dialog, Persistent<Class<'static, DialogJs>>)>,
+  android_devices: Vec<(
+    ferridriver::android::AndroidDevice,
+    Persistent<Class<'static, AndroidDeviceJs>>,
+  )>,
 }
 
 impl Wrappers {
@@ -25,6 +30,7 @@ impl Wrappers {
   /// still hold but no binding will hand out again.
   fn prune(&mut self) {
     self.pages.retain(|(page, _)| !page.is_closed());
+    self.android_devices.retain(|(device, _)| !device.is_closed());
     self
       .frames
       .retain(|(frame, _)| !frame.is_detached() && !frame.page_arc().is_closed());
@@ -59,6 +65,30 @@ fn with_wrappers<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut Wrappers) -> R) -> R {
     Some(ud) => f(&mut ud.0.borrow_mut()),
     None => f(&mut Wrappers::default()),
   }
+}
+
+/// The device's object, made on first sight: `android.devices()` hands
+/// out the same `AndroidDevice` for a device until it is closed.
+pub(crate) fn android_device_object<'js>(
+  ctx: &Ctx<'js>,
+  device: ferridriver::android::AndroidDevice,
+) -> rquickjs::Result<Class<'js, AndroidDeviceJs>> {
+  let known = with_wrappers(ctx, |w| {
+    w.android_devices
+      .iter()
+      .find(|(known, _)| *known == device)
+      .map(|(_, object)| object.clone())
+  });
+  if let Some(object) = known {
+    return object.restore(ctx);
+  }
+  let object = Class::instance(ctx.clone(), AndroidDeviceJs::new(device.clone()))?;
+  let saved = Persistent::save(ctx, object.clone());
+  with_wrappers(ctx, |w| {
+    w.prune();
+    w.android_devices.push((device, saved));
+  });
+  Ok(object)
 }
 
 /// The page's object, made on first sight.
