@@ -449,11 +449,53 @@ async fn connect_device(
       .arg(apk);
     output(install, None, None).await?;
   }
+  enable_profile_overlay(sdk, &serial, &options.model).await?;
   let mut browser = Box::pin(start_chrome(sdk, &serial, &options.pkg, flags)).await?;
   network::wait_until_ready(&browser).await?;
   browser.android = Some(owner.clone());
   tracing::info!(%serial, pkg = options.pkg, "managed Android browser is ready");
   Ok(crate::backend::AnyBrowser::CdpWs(browser))
+}
+
+/// Whether `cmd overlay list` offers `overlay`, and if so whether it is on. A line is a state marker and a
+/// package: `[x]` enabled, `[ ]` disabled, `---` unusable on this device and so not offered.
+fn profile_overlay_state(listing: &str, overlay: &str) -> Option<bool> {
+  listing.lines().find_map(|line| {
+    let (marker, package) = line.trim().rsplit_once(' ')?;
+    match marker {
+      "[x]" if package == overlay => Some(true),
+      "[ ]" if package == overlay => Some(false),
+      _ => None,
+    }
+  })
+}
+
+/// Turn on the framework overlay of the emulator's hardware profile before the browser starts.
+///
+/// The emulator enables it by itself a few seconds after boot completes. A framework overlay changes every
+/// application's assets, Android answers that by recreating each running activity, and Chrome's takes its
+/// tabs with it: a browser started in between lost every page it had and refused new ones until its activity
+/// was back. Enabled here first, the emulator's own request finds nothing to change.
+async fn enable_profile_overlay(sdk: &AndroidSdk, serial: &str, model: &str) -> Result<()> {
+  let overlay = format!("com.android.internal.emulation.{model}");
+  let mut requested = false;
+  loop {
+    let listing = sdk.adb(serial, &["shell", "cmd", "overlay", "list"]).await?;
+    match profile_overlay_state(&listing, &overlay) {
+      // A profile without an overlay of its own has nothing the emulator will turn on later.
+      None | Some(true) => return Ok(()),
+      Some(false) if !requested => {
+        sdk
+          .adb(
+            serial,
+            &["shell", "cmd", "overlay", "enable-exclusive", "--category", &overlay],
+          )
+          .await?;
+        requested = true;
+      },
+      Some(false) => tokio::time::sleep(Duration::from_millis(100)).await,
+    }
+  }
 }
 
 async fn resolve_chrome_activity(sdk: &AndroidSdk, serial: &str, pkg: &str) -> Result<String> {
@@ -618,6 +660,31 @@ mod tests {
         .matches("--remote-debugging-socket-name=ferridriver_devtools_remote")
         .count(),
       1
+    );
+  }
+
+  #[test]
+  fn profile_overlay_is_found_by_its_whole_name_and_its_marker() {
+    let listing = "android\n[ ] com.android.internal.emulation.pixel_7_pro\n[x] com.android.internal.systemui.navbar.gestural\n--- com.android.internal.emulation.pixel_3\n[ ] com.android.internal.emulation.pixel_7\n\ncom.android.systemui\n[x] com.android.systemui.emulation.pixel_7\n";
+    assert_eq!(
+      profile_overlay_state(listing, "com.android.internal.emulation.pixel_7"),
+      Some(false)
+    );
+    assert_eq!(
+      profile_overlay_state(listing, "com.android.internal.emulation.pixel_3"),
+      None
+    );
+    assert_eq!(
+      profile_overlay_state(listing, "com.android.internal.systemui.navbar.gestural"),
+      Some(true)
+    );
+    assert_eq!(
+      profile_overlay_state(listing, "com.android.internal.emulation.medium_phone"),
+      None
+    );
+    assert_eq!(
+      profile_overlay_state("", "com.android.internal.emulation.pixel_7"),
+      None
     );
   }
 

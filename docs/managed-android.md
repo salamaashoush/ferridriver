@@ -47,6 +47,13 @@ its elements pass actionability checks. Custom `--disable-features` lists are
 merged with this default, preserving the caller's disabled features and native
 input reliability. Arguments after `--` remain positional arguments.
 
+Before Chrome starts, the launcher enables the framework overlay of the
+emulator's hardware profile (`com.android.internal.emulation.<model>`, where
+the image has one). The emulator enables it by itself a few seconds after boot,
+and Android answers a changed framework overlay by recreating every running
+activity: a Chrome started in between lost all its tabs and refused new ones
+until its activity returned.
+
 Startup waits for Chrome to complete a bounded request to a temporary endpoint
 on the host loopback interface, reached through the emulator's `10.0.2.2`
 alias. Wi-Fi association and `navigator.onLine` can precede installation of
