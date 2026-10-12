@@ -12,8 +12,11 @@ use crate::error::{FerriError, Result};
 pub use crate::device::DeviceTarget;
 
 mod adb;
+mod api;
 mod network;
+mod wire;
 pub(crate) use adb::AdbEndpoint;
+pub use api::{Android, AndroidDevice, AndroidDevicesOptions, AndroidFile, AndroidSocket};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]

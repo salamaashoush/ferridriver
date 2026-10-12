@@ -1,3 +1,5 @@
+#[path = "runtime_probe/android_device.rs"]
+mod android_device;
 #[path = "runtime_probe/bdd.rs"]
 mod bdd;
 #[path = "runtime_probe/browser_engine.rs"]
@@ -62,6 +64,11 @@ enum Operation {
   },
   BrowserEngine {
     scripts: Vec<browser_engine::Script>,
+  },
+  AndroidDevice {
+    host: Option<String>,
+    port: Option<u16>,
+    actions: Vec<android_device::Action>,
   },
   ConfigContracts {
     modes: Vec<(String, u32)>,
@@ -472,6 +479,7 @@ impl Probe {
       Operation::PersistentProfile { scenario } => Box::pin(persistent_profile::run(&self.root, scenario)).await,
       Operation::ProcessRecordPublication => process_records::run().await,
       Operation::CdpConnection { urls } => cdp_connection::run(&self.root, urls).await,
+      Operation::AndroidDevice { host, port, actions } => android_device::run(host, port, actions).await,
       Operation::BrowserLifecycle { backend, actions } => lifecycle::run(backend, actions).await,
       Operation::ReporterOutput { request } => reporter_output::run(request).await,
       Operation::ReporterApi { request } => reporter_api::run(request),
