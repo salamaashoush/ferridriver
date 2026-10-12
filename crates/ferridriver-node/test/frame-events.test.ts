@@ -346,9 +346,19 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
       messages.push(msg);
     });
 
+    // The events trail the evaluate that logged them, so wait for both
+    // to have been delivered before counting what `once` kept.
+    let delivered = 0;
+    let counted = () => {};
+    const both = new Promise<void>((resolve) => {
+      counted = () => {
+        if (++delivered === 2) resolve();
+      };
+    });
+    page.on("console", counted);
     await page.evaluate("console.log('first'); console.log('second')");
-    // One event loop tick for the TSFN callback to fire
-    await new Promise(r => setTimeout(r, 0));
+    await both;
+    page.off("console", counted);
 
     expect(messages.length).toBe(1);
   });
