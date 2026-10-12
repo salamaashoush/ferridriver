@@ -3004,10 +3004,23 @@ impl Page {
       });
     });
     let handler_id = crate::route::route_handler_id(&handler);
-    self
+    match self
       .inner
       .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, Some(1)))
-      .await?;
+      .await
+    {
+      Ok(()) => {},
+      // Classic WebDriver cannot answer a request itself, so the document
+      // of the origin has to be the origin's own.
+      Err(error) if error.is_unsupported() => {
+        return self
+          .inner
+          .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
+          .await
+          .map(|_| ());
+      },
+      Err(error) => return Err(error),
+    }
     let navigation = self
       .inner
       .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)

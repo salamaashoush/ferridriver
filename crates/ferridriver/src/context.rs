@@ -1798,7 +1798,16 @@ impl ContextRef {
   /// that field.
   pub(crate) async fn release_registrations(&self) -> Result<()> {
     let composite = self.key.to_composite();
-    self.unroute_all(None).await?;
+    // Only what was registered is undone: a backend that cannot route at
+    // all refuses to unroute too, and has no route to remove.
+    let routed = {
+      let registry = self.state.read().await.context_routes_handle();
+      let guard = registry.read().await;
+      guard.contains_key(&composite)
+    };
+    if routed {
+      self.unroute_all(None).await?;
+    }
 
     let bindings: Vec<String> = {
       let registry = self.state.read().await.context_bindings_handle();

@@ -456,7 +456,11 @@ impl Browser {
         page.dispose_local();
       }
       keeper.inner().clear_cookies().await?;
-      keeper.inner().reset_permissions().await?;
+      match keeper.inner().reset_permissions().await {
+        // A backend with no permission overrides granted none to take back.
+        Err(error) if error.is_unsupported() => {},
+        other => other?,
+      }
       for origin in &visited {
         keeper.restore_origin_storage(origin, None).await?;
       }
