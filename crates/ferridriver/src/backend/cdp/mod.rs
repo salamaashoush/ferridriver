@@ -17,6 +17,8 @@ pub mod transport;
 pub mod ws;
 
 #[cfg(test)]
+mod listener_tests;
+#[cfg(test)]
 mod startup_tests;
 
 use base64::Engine as _;
@@ -3834,8 +3836,10 @@ impl<T: CdpWrap> CdpPage<T> {
     frame_tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
   ) {
+    // Subscribed here, not in the task: frames sent before the task is
+    // first polled would otherwise have no receiver.
+    let mut rx = transport.subscribe_event_method("Page.screencastFrame");
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_event_method("Page.screencastFrame");
       let mut shutdown_rx = shutdown_rx;
       loop {
         let event = tokio::select! {
@@ -5672,14 +5676,14 @@ impl<T: CdpWrap> CdpPage<T> {
     let mut tasks: Vec<tokio::task::AbortHandle> = Vec::with_capacity(10);
 
     tasks.push(Self::spawn_console_listener(
-      transport.clone(),
+      &transport,
       session_id.clone(),
       console_log,
       emitter1,
       self.page_backref.clone(),
     ));
     tasks.push(Self::spawn_web_error_listener(
-      transport.clone(),
+      &transport,
       session_id.clone(),
       self.events.clone(),
       self.page_backref.clone(),
@@ -5721,7 +5725,7 @@ impl<T: CdpWrap> CdpPage<T> {
       self.page_backref.clone(),
     ));
     tasks.push(Self::spawn_file_chooser_listener(
-      self.transport.clone(),
+      &self.transport,
       self.session_id.clone(),
       self.file_chooser_manager.clone(),
       self.page_backref.clone(),
@@ -5743,14 +5747,17 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   fn spawn_console_listener(
-    transport: Arc<T>,
+    transport: &Arc<T>,
     session_id: Option<Arc<str>>,
     console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     emitter: crate::events::EventEmitter,
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
+    // Tapped here, not in the task: the tap delivers only what arrives
+    // after it exists, and a task is not polled the moment it is
+    // spawned. An event in between would never be seen.
+    let mut rx = transport.tap_event_methods(&["Runtime.consoleAPICalled"], session_id.as_deref());
     tokio::spawn(async move {
-      let mut rx = transport.tap_event_methods(&["Runtime.consoleAPICalled"], session_id.as_deref());
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -5826,12 +5833,15 @@ impl<T: CdpWrap> CdpPage<T> {
     let transport = transport.clone();
     let session_id = session_id.cloned();
     let emitter = emitter.clone();
+    // Tapped here, not in the task: the tap delivers only what arrives
+    // after it exists, and a task is not polled the moment it is
+    // spawned. An event in between would never be seen.
+    let mut rx = transport.tap_event_methods(
+      &["Page.loadEventFired", "Page.domContentEventFired"],
+      session_id.as_deref(),
+    );
     vec![
       tokio::spawn(async move {
-        let mut rx = transport.tap_event_methods(
-          &["Page.loadEventFired", "Page.domContentEventFired"],
-          session_id.as_deref(),
-        );
         while let Some(event) = rx.recv().await {
           if let Some(ref expected_sid) = session_id
             && event.get("sessionId").and_then(|v| v.as_str()) != Some(&**expected_sid)
@@ -5886,13 +5896,16 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   fn spawn_web_error_listener(
-    transport: Arc<T>,
+    transport: &Arc<T>,
     session_id: Option<Arc<str>>,
     emitter: crate::events::EventEmitter,
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
+    // Tapped here, not in the task: the tap delivers only what arrives
+    // after it exists, and a task is not polled the moment it is
+    // spawned. An event in between would never be seen.
+    let mut rx = transport.tap_event_methods(&["Runtime.exceptionThrown"], session_id.as_deref());
     tokio::spawn(async move {
-      let mut rx = transport.tap_event_methods(&["Runtime.exceptionThrown"], session_id.as_deref());
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -6011,11 +6024,15 @@ impl<T: CdpWrap> CdpPage<T> {
     dialog_manager: crate::dialog::DialogManager,
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
+    // Tapped here, not in the task: the tap delivers only what arrives
+    // after it exists, and a task is not polled the moment it is
+    // spawned. A dialog that opened in between was never answered, and
+    // the page stayed blocked behind it.
+    let mut rx = transport.tap_event_methods(
+      &["Page.javascriptDialogOpening", "Page.javascriptDialogClosed"],
+      session_id.as_deref(),
+    );
     tokio::spawn(async move {
-      let mut rx = transport.tap_event_methods(
-        &["Page.javascriptDialogOpening", "Page.javascriptDialogClosed"],
-        session_id.as_deref(),
-      );
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -6124,17 +6141,18 @@ impl<T: CdpWrap> CdpPage<T> {
   /// populated (matches the Playwright server's "frame/context may go
   /// away" guard).
   fn spawn_file_chooser_listener(
-    transport: Arc<T>,
+    transport: &Arc<T>,
     session_id: Option<Arc<str>>,
     file_chooser_manager: crate::file_chooser::FileChooserManager,
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
+    // Subscribe FIRST, and before the task exists, so we don't race:
+    // routed subscriptions only deliver events published AFTER
+    // subscription, a task is not polled the moment it is spawned, and a
+    // fast test can trigger the picker before our enable-intercept reply
+    // lands. The subscription call is synchronous and cheap.
+    let mut rx = transport.tap_event_methods(&["Page.fileChooserOpened"], session_id.as_deref());
     tokio::spawn(async move {
-      // Subscribe FIRST so we don't race: routed subscriptions only
-      // deliver events published AFTER subscription, and a fast
-      // test can trigger the picker before our enable-intercept
-      // reply lands. The subscription call is synchronous and cheap.
-      //
       // We do NOT fire `Page.setInterceptFileChooserDialog` here.
       // Mirrors Playwright's `_updateFileChooserInterception` lazy
       // pattern (`/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:1009`):
@@ -6143,8 +6161,6 @@ impl<T: CdpWrap> CdpPage<T> {
       // `update_file_chooser_intercept` from the page's
       // `on('filechooser', ...)` registration path. Saves one RTT per
       // newly-opened page (~5ms) when no test uses file pickers.
-      let mut rx = transport.tap_event_methods(&["Page.fileChooserOpened"], session_id.as_deref());
-
       while let Some(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -6234,8 +6250,10 @@ impl<T: CdpWrap> CdpPage<T> {
     downloads_dir: Arc<tempfile::TempDir>,
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
+    // Subscribe FIRST, and before the task exists, to avoid racing any
+    // future enable reply: a task is not polled the moment it is spawned.
+    let mut rx = transport.tap_event_domains(&["Browser"], session_id.as_deref());
     tokio::spawn(async move {
-      // Subscribe FIRST to avoid racing any future enable reply.
       // We do NOT fire `Browser.setDownloadBehavior` here. Mirrors
       // Playwright's lazy pattern: download behaviour is configured
       // when a `download` listener registers (`page.on('download', ...)`,
@@ -6246,8 +6264,6 @@ impl<T: CdpWrap> CdpPage<T> {
       // explicitly set, so opt-in callers keep working.
       let _ = browser_context_id;
       let _ = downloads_dir;
-      let mut rx = transport.tap_event_domains(&["Browser"], session_id.as_deref());
-
       while let Some(event) = rx.recv().await {
         // `Browser.downloadWillBegin` / `Browser.downloadProgress` fire
         // on the root browser session (no `sessionId`) when
