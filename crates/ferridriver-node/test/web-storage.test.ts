@@ -25,6 +25,7 @@ for (const backend of BACKENDS) {
 
     it("localStorage / sessionStorage round-trip against real storage", async () => {
       const server = Bun.serve({
+        hostname: "127.0.0.1",
         port: 0,
         fetch: () =>
           new Response("<!doctype html><body>web-storage</body>", {

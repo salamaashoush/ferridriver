@@ -28,6 +28,7 @@ for (const backend of BACKENDS) {
 
     it("startHar/stopHar records network into a HAR file", async () => {
       const server = Bun.serve({
+        hostname: "127.0.0.1",
         port: 0,
         fetch: () => new Response("<!doctype html><body>har</body>", { headers: { "content-type": "text/html" } }),
       });
@@ -52,6 +53,7 @@ for (const backend of BACKENDS) {
 
     it("startHar to .zip packs har.har plus attached bodies; routeFromHAR replays it offline", async () => {
       const server = Bun.serve({
+        hostname: "127.0.0.1",
         port: 0,
         fetch: () =>
           new Response("<!doctype html><body>zipped-har-body</body>", {
@@ -83,6 +85,7 @@ for (const backend of BACKENDS) {
 
     it("routeFromHAR update: true records and writes on context close; RegExp url filters", async () => {
       const server = Bun.serve({
+        hostname: "127.0.0.1",
         port: 0,
         fetch: (req) =>
           new Response(`<!doctype html><body>${new URL(req.url).pathname}</body>`, {

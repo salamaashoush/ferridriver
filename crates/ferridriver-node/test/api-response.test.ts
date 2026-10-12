@@ -10,6 +10,7 @@ import { HttpClient } from "../index.js";
 describe("apiResponse headers", () => {
   it("headers() lowercases and joins, headersArray() stays verbatim", async () => {
     const server = Bun.serve({
+      hostname: "127.0.0.1",
       port: 0,
       fetch: () => {
         const headers = new Headers();
@@ -40,7 +41,7 @@ describe("apiResponse headers", () => {
   });
 
   it("dispose() releases the body and keeps the metadata", async () => {
-    const server = Bun.serve({ port: 0, fetch: () => new Response("payload") });
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("payload") });
     try {
       const client = HttpClient.create();
       const resp = await client.get(`http://127.0.0.1:${server.port}/d`);
@@ -60,7 +61,7 @@ describe("apiResponse headers", () => {
 
 describe("apiResponse.serverAddr", () => {
   it("reports the resolved peer address", async () => {
-    const server = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
     try {
       const client = HttpClient.create();
       const resp = await client.get(`http://127.0.0.1:${server.port}/api`);
@@ -77,7 +78,7 @@ describe("apiResponse.serverAddr", () => {
 
 describe("apiResponse.timing and securityDetails", () => {
   it("reports lookup and connect for a new connection, and neither for a reused one", async () => {
-    const server = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
     try {
       const client = HttpClient.create();
       const before = Date.now();
@@ -110,6 +111,7 @@ describe("apiResponse.timing and securityDetails", () => {
 describe("request context cookies", () => {
   it("reads, fills and empties the client's own jar", async () => {
     const server = Bun.serve({
+      hostname: "127.0.0.1",
       port: 0,
       fetch: (req) =>
         new URL(req.url).pathname === "/set"

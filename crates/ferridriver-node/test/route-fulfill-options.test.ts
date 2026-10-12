@@ -4,7 +4,7 @@ import { launchForBackend } from "./_helpers.js";
 
 for (const backend of ["cdp-pipe", "cdp-raw", "bidi", "webkit"]) {
   test(`${backend}: fulfillment options reach the browser`, async () => {
-    const server = Bun.serve({ port: 0, fetch: () => new Response("upstream") });
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("upstream") });
     const browser = await launchForBackend(backend);
     try {
       const page = await browser.newPage();

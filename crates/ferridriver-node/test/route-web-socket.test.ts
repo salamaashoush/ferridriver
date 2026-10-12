@@ -21,6 +21,7 @@ for (const backend of BACKENDS) {
       browser = await launchForBackend(backend);
       page = await browser.newPage();
       server = Bun.serve({
+        hostname: "127.0.0.1",
         port: 0,
         fetch(req, srv) {
           if (req.headers.get("upgrade") === "websocket") {

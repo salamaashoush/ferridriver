@@ -93,6 +93,7 @@ describe(`[${backend}] signal option`, () => {
     let release = () => {};
     const held = new Promise<void>(resolve => (release = resolve));
     const server = Bun.serve({
+      hostname: "127.0.0.1",
       port: 0,
       hostname: "127.0.0.1",
       fetch: async () => {
