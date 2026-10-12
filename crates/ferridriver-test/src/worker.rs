@@ -271,9 +271,16 @@ impl TestBrowserResources {
           return Ok(ctx);
         }
         let opts = build_context_options(&self.effective, &self.output_dir, browser.backend_kind());
-        let ctx = Arc::new(new_test_context(&browser, opts).await?);
+        let (ctx, page) = new_test_context(&browser, opts).await?;
+        let ctx = Arc::new(ctx);
         self.adopt_context(&ctx).await;
-        *state = TestBrowserState::Context(Arc::clone(&ctx));
+        *state = match page {
+          Some(page) => TestBrowserState::Page {
+            ctx: Arc::clone(&ctx),
+            page,
+          },
+          None => TestBrowserState::Context(Arc::clone(&ctx)),
+        };
         Ok(ctx)
       },
     }
@@ -309,9 +316,14 @@ impl TestBrowserResources {
           return Ok(page);
         }
         let opts = build_context_options(&self.effective, &self.output_dir, backend);
-        let ctx = Arc::new(new_test_context(&browser, opts.clone()).await?);
+        let (ctx, page) = new_test_context(&browser, opts.clone()).await?;
+        let ctx = Arc::new(ctx);
         self.adopt_context(&ctx).await;
-        match create_ready_page(&ctx, backend).await {
+        let page = match page {
+          Some(page) => Ok(page),
+          None => create_ready_page(&ctx, backend).await,
+        };
+        match page {
           Ok(page) => {
             *state = TestBrowserState::Page {
               ctx: Arc::clone(&ctx),
@@ -323,9 +335,13 @@ impl TestBrowserResources {
             if is_retryable_bidi_page_error(&err) {
               self.discard_tracing(&ctx).await;
               let _ = ctx.close().await;
-              let ctx = Arc::new(new_test_context(&browser, opts).await?);
+              let (ctx, page) = new_test_context(&browser, opts).await?;
+              let ctx = Arc::new(ctx);
               self.adopt_context(&ctx).await;
-              let page = create_ready_page(&ctx, backend).await?;
+              let page = match page {
+                Some(page) => page,
+                None => create_ready_page(&ctx, backend).await?,
+              };
               *state = TestBrowserState::Page {
                 ctx,
                 page: Arc::clone(&page),
@@ -349,19 +365,16 @@ impl TestBrowserResources {
       },
       TestBrowserState::Page { ctx, page } => {
         self.discard_tracing(&ctx).await;
-        // When a backend shares the persistent default context the
-        // page is the only per-test resource we own — closing the
-        // context itself would tear down the persistent default and
-        // break later tests. For isolated-context backends (CDP, BiDi,
-        // Playwright WebKit) the context's `disposeBrowserContext`
-        // already closes every page in it, so an explicit `page.close()`
-        // would only add a redundant `closeTarget` round-trip per test
-        // (~3-5ms each on the bench's tight loop).
-        if ctx.name() == "default" {
-          let _ = page.close().await;
-        } else {
-          drop(page);
-        }
+        // A backend that shares the persistent default context keeps
+        // both: closing the context would tear down the only one there
+        // is, and its page is the tab the browser must never be without.
+        // The next test's reset replaces them. For isolated-context
+        // backends (CDP, BiDi, Playwright WebKit) the context's
+        // `disposeBrowserContext` already closes every page in it, so an
+        // explicit `page.close()` would only add a redundant
+        // `closeTarget` round-trip per test (~3-5ms each on the bench's
+        // tight loop).
+        drop(page);
         close_test_context(&ctx).await;
       },
       TestBrowserState::Empty | TestBrowserState::Failed(_) => {},
@@ -371,23 +384,24 @@ impl TestBrowserResources {
 
 /// Open a per-test browsing container. Backends that support
 /// isolated contexts get a fresh `Browser::new_context(None)`. All
-/// desktop backends create isolated contexts. Android Chrome uses its
-/// device context and retains the device viewport unless explicitly set.
+/// desktop backends create isolated contexts. Android Chrome has only
+/// its device context, which every test on the worker therefore shares:
+/// it is reset to a new context's state and comes back with the one
+/// blank page it must always keep. It retains the device viewport unless
+/// one is explicitly set.
 async fn new_test_context(
   browser: &Arc<ferridriver::Browser>,
   opts: ferridriver::options::BrowserContextOptions,
-) -> ferridriver::error::Result<ferridriver::ContextRef> {
+) -> ferridriver::error::Result<(ferridriver::ContextRef, Option<Arc<ferridriver::Page>>)> {
   if browser.supports_isolated_contexts() {
-    browser.new_context().options(opts).await
+    Ok((browser.new_context().options(opts).await?, None))
   } else {
-    let context = browser.default_context();
     let mut opts = opts;
     if opts.viewport == ferridriver::options::ViewportOption::Default {
       opts.viewport = ferridriver::options::ViewportOption::Null;
     }
-    let state = browser.state().read().await;
-    state.set_context_options(&state.session_key(context.name()).to_composite(), opts);
-    Ok(context)
+    let (context, page) = Box::pin(browser.reset_default_context(opts)).await?;
+    Ok((context, Some(page)))
   }
 }
 

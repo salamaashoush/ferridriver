@@ -371,32 +371,107 @@ impl Browser {
     }
     let ctx = ContextRef::new(self.state.clone(), name).with_browser(self.clone());
     if let Some(opts) = options {
-      let composite = ctx.key.to_composite();
-      if let Some(ref attr) = opts.test_id_attribute {
-        ctx.set_test_id_attribute(attr.clone());
-      }
-      // Mirror `record_video` into the legacy per-video registry too,
-      // so the recording runtime (which still reads via
-      // `BrowserState::get_record_video`) continues to kick in on
-      // every new_page without waiting for that registry to be
-      // retired.
-      if let Some(ref rv) = opts.record_video {
-        let mut rv_map = match self.record_video.lock() {
-          Ok(g) => g,
-          Err(poisoned) => poisoned.into_inner(),
-        };
-        rv_map.insert(composite.clone(), rv.clone());
-      }
-      let mut map = match self.context_options.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-      };
-      map.insert(composite, opts);
+      self.seed_context_options(&ctx, opts);
     }
     if listed {
       self.emit_context_created(ctx.clone());
     }
     ctx
+  }
+
+  /// Record the options a context starts with, where its pages read
+  /// them as they open.
+  fn seed_context_options(&self, ctx: &ContextRef, opts: crate::options::BrowserContextOptions) {
+    let composite = ctx.key.to_composite();
+    if let Some(ref attr) = opts.test_id_attribute {
+      ctx.set_test_id_attribute(attr.clone());
+    }
+    // Mirror `record_video` into the legacy per-video registry too,
+    // so the recording runtime (which still reads via
+    // `BrowserState::get_record_video`) continues to kick in on
+    // every new_page without waiting for that registry to be
+    // retired.
+    if let Some(ref rv) = opts.record_video {
+      let mut rv_map = match self.record_video.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+      };
+      rv_map.insert(composite.clone(), rv.clone());
+    }
+    let mut map = match self.context_options.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    map.insert(composite, opts);
+  }
+
+  /// Hand the default context to its next user as if it had just been
+  /// created, with `options` and one blank page.
+  ///
+  /// Playwright's `server/browser.ts::newContextForReuse` and the
+  /// `resetForReuse` behind it, which its runner calls where tests share
+  /// a context. Android Chrome is that case here: the device's context is
+  /// the only one it has, so nothing else separates one test from the
+  /// next.
+  ///
+  /// What the previous user left goes: its pages, its routes, bindings,
+  /// init scripts, listeners and recordings, the cookies, the granted
+  /// permissions, and the storage of every origin it visited. A
+  /// [`ContextRef`] obtained before the reset keeps the listeners it was
+  /// given and hears nothing further.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser is gone, or if clearing the old
+  /// state or opening the page fails. The context is left with a page
+  /// either way: a browser whose one context is the device's must never
+  /// be without a tab.
+  pub async fn reset_default_context(
+    &self,
+    options: crate::options::BrowserContextOptions,
+  ) -> crate::error::Result<(ContextRef, Arc<crate::Page>)> {
+    let previous = self.default_context();
+    Box::pin(crate::state::BrowserState::ensure_instance_shared(
+      &self.state,
+      &previous.key.instance,
+    ))
+    .await?;
+    previous.flush_har_updates().await?;
+    previous.release_registrations().await?;
+    let (visited, old_pages) = {
+      let mut state = self.state.write().await;
+      let visited = state.visited_origins.of(&previous.key.to_composite());
+      (visited, state.reset_context(previous.name()).await)
+    };
+
+    // The registries are gone, so this handle gets the context's new
+    // emitter, and the pages it opens carry nothing over.
+    let context = self.default_context();
+    let keeper = context.open_storage_page().await?;
+    let cleared = async {
+      for page in old_pages {
+        if let Err(error) = page.close_page(crate::options::PageCloseOptions::default()).await {
+          tracing::debug!(target: "ferridriver::browser", %error, "reset: closing a page of the previous user failed");
+        }
+        page.dispose_local();
+      }
+      keeper.inner().clear_cookies().await?;
+      keeper.inner().reset_permissions().await?;
+      for origin in &visited {
+        keeper.restore_origin_storage(origin, None).await?;
+      }
+      Ok::<(), crate::FerriError>(())
+    }
+    .await;
+
+    let restore = options.clone();
+    self.seed_context_options(&context, options);
+    let page = Box::pin(context.new_page()).await;
+    let _ = keeper.close_impl(None).await;
+    cleared?;
+    let page = page?;
+    context.restore_storage_state_credentials(&restore).await?;
+    Ok((context, page))
   }
 
   /// Fire `browser.on('context')` for an explicitly-created context (not

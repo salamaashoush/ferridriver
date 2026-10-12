@@ -96,6 +96,8 @@ enum Operation {
     urls: Vec<String>,
   },
   BrowserLifecycle {
+    #[serde(default)]
+    backend: lifecycle::Backend,
     actions: Vec<lifecycle::Action>,
   },
   ReporterOutput {
@@ -470,7 +472,7 @@ impl Probe {
       Operation::PersistentProfile { scenario } => Box::pin(persistent_profile::run(&self.root, scenario)).await,
       Operation::ProcessRecordPublication => process_records::run().await,
       Operation::CdpConnection { urls } => cdp_connection::run(&self.root, urls).await,
-      Operation::BrowserLifecycle { actions } => lifecycle::run(actions).await,
+      Operation::BrowserLifecycle { backend, actions } => lifecycle::run(backend, actions).await,
       Operation::ReporterOutput { request } => reporter_output::run(request).await,
       Operation::ReporterApi { request } => reporter_api::run(request),
       Operation::ReporterBus { subscribers, actions } => reporters::bus(subscribers, actions).await,

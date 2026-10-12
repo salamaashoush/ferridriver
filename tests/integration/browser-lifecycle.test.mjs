@@ -18,7 +18,7 @@ test('closing five contexts restores every per-context registry', async () => {
   assert.deepEqual(Object.keys(before).sort(), [
     'context_options', 'context_events', 'context_closed', 'record_video', 'har_recorders',
     'context_har_updates', 'clock_installed', 'storage_state_hydrated', 'context_bindings',
-    'context_ws_routes', 'context_routes', 'context_init_scripts',
+    'context_ws_routes', 'context_routes', 'context_init_scripts', 'context_test_id_attribute',
   ].sort());
   for (let cycle = 0; cycle < 5; cycle++) {
     const populated = results[1 + cycle * 6 + 3];

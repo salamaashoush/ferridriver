@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ferridriver::options::{BrowserContextOptions, LaunchOptions};
+use ferridriver::backend::BackendKind;
+use ferridriver::browser_type::BrowserType;
+use ferridriver::options::{BrowserContextOptions, BrowserKind, LaunchOptions};
 use ferridriver::protocol::SerializedArgument;
-use ferridriver::{Browser, Page, chromium};
+use ferridriver::{Browser, Page};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,6 +25,20 @@ pub enum Action {
   ExposeFunction { name: String, callback: Callback },
   RemoveExposedFunction { name: String },
   CloseContext,
+  DefaultContext,
+  AddInitScript { source: String },
+  ContextState,
+  ResetDefaultContext { test_id_attribute: Option<String> },
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Backend {
+  #[default]
+  CdpPipe,
+  CdpRaw,
+  Bidi,
+  Webkit,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -139,7 +155,36 @@ impl Lifecycle {
         self.context()?.close().await?;
         Ok(Value::Null)
       },
+      Action::DefaultContext => {
+        self.context = Some(self.browser.default_context());
+        self.page = None;
+        Ok(Value::Null)
+      },
+      Action::AddInitScript { source } => {
+        self.context()?.add_init_script(source.into(), None).await?;
+        Ok(Value::Null)
+      },
+      Action::ContextState => self.context_state().await,
+      Action::ResetDefaultContext { test_id_attribute } => {
+        let (context, page) = Box::pin(self.browser.reset_default_context(BrowserContextOptions {
+          test_id_attribute,
+          ..Default::default()
+        }))
+        .await?;
+        self.context = Some(context);
+        self.page = Some(page);
+        Ok(Value::Null)
+      },
     }
+  }
+
+  async fn context_state(&self) -> Result<Value> {
+    let context = self.context()?;
+    Ok(json!({
+      "pages": context.pages().iter().map(|page| page.url()).collect::<Vec<_>>(),
+      "cookies": context.cookies().await?.into_iter().map(|cookie| cookie.name).collect::<Vec<_>>(),
+      "testIdAttribute": context.test_id_attribute(),
+    }))
   }
 }
 
@@ -160,7 +205,8 @@ async fn registries(browser: &Browser) -> Result<Value> {
     har_recorders,
     context_har_updates,
     clock_installed,
-    storage_state_hydrated
+    storage_state_hydrated,
+    context_test_id_attribute
   );
   sizes.insert(
     "context_bindings".into(),
@@ -178,8 +224,14 @@ async fn registries(browser: &Browser) -> Result<Value> {
   Ok(Value::Object(sizes))
 }
 
-pub async fn run(actions: Vec<Action>) -> Result<Value> {
-  let browser = chromium()
+pub async fn run(backend: Backend, actions: Vec<Action>) -> Result<Value> {
+  let (kind, backend) = match backend {
+    Backend::CdpPipe => (BrowserKind::Chromium, BackendKind::CdpPipe),
+    Backend::CdpRaw => (BrowserKind::Chromium, BackendKind::CdpWs),
+    Backend::Bidi => (BrowserKind::Firefox, BackendKind::Bidi),
+    Backend::Webkit => (BrowserKind::WebKit, BackendKind::WebKit),
+  };
+  let browser = BrowserType::with_backend(kind, backend)
     .launch(LaunchOptions {
       headless: Some(true),
       ..Default::default()
@@ -190,13 +242,13 @@ pub async fn run(actions: Vec<Action>) -> Result<Value> {
     context: None,
     page: None,
   };
-  let result: Result<Value> = async {
+  let result: Result<Value> = Box::pin(async {
     let mut results = Vec::new();
     for action in actions {
-      results.push(lifecycle.run(action).await?);
+      results.push(Box::pin(lifecycle.run(action)).await?);
     }
     Ok(json!(results))
-  }
+  })
   .await;
   let closed = lifecycle.browser.close().await;
   let observations = result?;

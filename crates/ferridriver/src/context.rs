@@ -1085,7 +1085,7 @@ impl ContextRef {
   /// context's routes, scripts or recordings. Playwright's
   /// `newPage(forStorageState)`, for reading and writing storage from a
   /// document of each origin without borrowing a page the caller holds.
-  async fn open_storage_page(&self) -> Result<Arc<Page>> {
+  pub(crate) async fn open_storage_page(&self) -> Result<Arc<Page>> {
     let plan = self.state.read().await.page_open_plan(&self.key)?;
     let page = Box::pin(
       plan
@@ -1457,7 +1457,7 @@ impl ContextRef {
   /// Write every `routeFromHAR(update: true)` recording registered on
   /// this context. Consumes the registry entries so a double close does
   /// not rewrite the files.
-  async fn flush_har_updates(&self) -> Result<()> {
+  pub(crate) async fn flush_har_updates(&self) -> Result<()> {
     let recorders = {
       let registry = self.state.read().await.context_har_updates.clone();
       let mut guard = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1773,6 +1773,69 @@ impl ContextRef {
       }
       Ok(())
     }))
+  }
+
+  /// Undo what callers registered on the context through each
+  /// registration's own removal path, while its pages are still open to
+  /// be told. Dropping the registries and closing the pages is not
+  /// enough where the browser holds a registration for the context
+  /// rather than the page: a Firefox preload script outlives every page
+  /// it ran in.
+  ///
+  /// Options a context can only be created with (locale, user agent and
+  /// the like) have no removal path and are not undone here; a backend
+  /// that scopes one to its context keeps it until the next options set
+  /// that field.
+  pub(crate) async fn release_registrations(&self) -> Result<()> {
+    let composite = self.key.to_composite();
+    self.unroute_all(None).await?;
+
+    let bindings: Vec<String> = {
+      let registry = self.state.read().await.context_bindings_handle();
+      let guard = registry.read().await;
+      guard
+        .get(&composite)
+        .map(|names| names.keys().cloned().collect())
+        .unwrap_or_default()
+    };
+    for name in bindings {
+      self.remove_exposed_binding(&name).await?;
+    }
+
+    let scripts = {
+      let registry = self.state.read().await.context_init_scripts.clone();
+      registry.write().await.remove(&composite).unwrap_or_default()
+    };
+    for script in scripts {
+      let installed = std::mem::take(
+        &mut *script
+          .installed
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner),
+      );
+      for (page, id) in installed {
+        if !page.is_closed() {
+          page.remove_init_script(&id).await?;
+        }
+      }
+    }
+
+    let options = self.state.read().await.get_context_options(&composite);
+    if let Some(options) = options {
+      if options.geolocation.is_some() {
+        self.set_geolocation(None).await?;
+      }
+      if options.offline == Some(true) {
+        self.set_offline(false).await?;
+      }
+      if options.extra_http_headers.is_some_and(|headers| !headers.is_empty()) {
+        self.set_extra_http_headers(&rustc_hash::FxHashMap::default()).await?;
+      }
+      if options.http_credentials.is_some() {
+        self.set_http_credentials(None).await?;
+      }
+    }
+    Ok(())
   }
 
   /// Install every registered context-level init script onto a fresh

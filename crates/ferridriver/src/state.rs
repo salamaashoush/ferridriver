@@ -2134,7 +2134,7 @@ impl BrowserState {
 
   /// Drop every per-context registry entry for `composite`.
   ///
-  /// Twelve registries are keyed by composite session key, and context
+  /// Thirteen registries are keyed by composite session key, and context
   /// names come from a process-wide counter that never reuses a value, so
   /// without this each one grows by an entry for every context the process
   /// ever opens. The costs are not uniform: a `storageState` bag holds the
@@ -2155,6 +2155,7 @@ impl BrowserState {
     }
     drop_key(&self.context_events, composite);
     drop_key(&self.context_closed, composite);
+    drop_key(&self.context_test_id_attribute, composite);
     drop_key(&self.record_video, composite);
     drop_key(&self.context_options, composite);
     drop_key(&self.har_recorders, composite);
@@ -2186,6 +2187,22 @@ impl BrowserState {
     self.context_ws_routes.write().await.remove(composite);
     self.context_routes.write().await.remove(composite);
     self.context_init_scripts.write().await.remove(composite);
+  }
+
+  /// Empty a context for its next user without closing its pages: they
+  /// leave the page list and every per-context registry is dropped, as
+  /// [`Self::remove_context`] drops them. The pages come back still open,
+  /// for the caller to close once the context has another tab to live in.
+  pub(crate) async fn reset_context(&mut self, context: &str) -> Vec<AnyPage> {
+    let key = self.session_key(context);
+    let pages = self
+      .instances
+      .get_mut(&*key.instance)
+      .and_then(|inst| inst.contexts.remove(&*key.context))
+      .map(|ctx| ctx.pages)
+      .unwrap_or_default();
+    self.purge_context_registries(&key.to_composite()).await;
+    pages
   }
 
   /// Remove a context. If it has a CDP browser context ID, dispose it

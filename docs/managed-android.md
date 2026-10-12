@@ -106,7 +106,17 @@ It does not require a local Appium server. Remote Appium targets continue to use
 
 This is Chrome running on an Android emulator, not native application automation
 or desktop mobile emulation. Android Chrome has a persistent browser context;
-independent incognito contexts are not supported by its CDP implementation.
+independent incognito contexts are not supported by its CDP implementation, so
+`browser.newContext()` is refused there.
+
+`ferridriver test` therefore gives every test the device's one context, reset
+before each: the previous test's pages are closed, its routes, exposed
+functions, init scripts, listeners and recordings are removed, and the cookies,
+granted permissions and the storage of every origin it visited are cleared. The
+test's `page` is the context's only tab. `use` options apply as they do to a
+new context, except that the device keeps its own viewport unless one is set.
+Options a context can only be created with are not undone between tests when a
+later test leaves them unset.
 The launcher supports Linux x86-64 and macOS Intel/Apple Silicon host layouts.
 Installed Safari through `safaridriver`, iOS simulator lifecycle, Windows hosts,
 and native Appium application views are not implemented by this launcher.
