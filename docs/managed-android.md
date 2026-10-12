@@ -31,8 +31,12 @@ ports outside the shared ADB scan range, and closing the browser stops both
 owned processes. The normal ADB server, connected devices, and authentication
 keys remain separate.
 
-Chrome starts with `--disable-fre`, `--no-first-run`, and
-`--no-default-browser-check`. On Android 13 and newer, the launcher grants
+Chrome starts with `--disable-fre` and the switches a desktop Chromium launch
+gets, Playwright's `chromiumSwitches`, less `--disable-sync` and
+`--enable-automation`: the back/forward cache and the field-trial
+configuration are off, as they are on desktop. `--enable-features` and
+`--disable-features` in `args` merge into those defaults feature by feature,
+the caller's choice winning. On Android 13 and newer, the launcher grants
 Chrome's OS notification permission before starting it. This prevents Chrome's
 notification explainer from covering the browser; website permissions remain
 controlled by the browser context API.

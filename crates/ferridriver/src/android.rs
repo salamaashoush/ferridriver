@@ -80,18 +80,23 @@ fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
       "expected an Android application package identifier",
     ));
   }
-  let mut flags = vec![
-    "_",
-    "--disable-fre",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--remote-debugging-socket-name=ferridriver_devtools_remote",
+  // Playwright's Android launch (`server/android/android.ts::_defaultArgs`): its own three switches, then
+  // `chromiumSwitches({ android: true })`, which is every desktop switch but `--disable-sync`. The desktop
+  // launcher adds `--enable-automation` itself, so it is not part of that set either.
+  let mut switches: Vec<String> = vec![
+    "--disable-fre".into(),
+    "--remote-debugging-socket-name=ferridriver_devtools_remote".into(),
   ];
+  switches.extend(
+    crate::state::CHROMIUM_SWITCHES
+      .iter()
+      .filter(|switch| !["--disable-sync", "--enable-automation"].contains(switch))
+      .map(|switch| (*switch).to_owned()),
+  );
   // Chromium's native navigation blur suppresses CDP input after DOM load and actionability checks.
-  let mut disabled_features = vec!["AndroidNavigationBlurTransitionAnimation"];
-  let mut feature_names: rustc_hash::FxHashSet<&str> = disabled_features.iter().copied().collect();
+  switches.push("--disable-features=AndroidNavigationBlurTransitionAnimation".into());
   let mut resolver_rules: Vec<&str> = Vec::new();
-  let mut parsing_switches = true;
+  let mut positional: Vec<&str> = Vec::new();
   for arg in args {
     if arg.is_empty() || arg.contains('\0') {
       return Err(FerriError::invalid_argument(
@@ -99,59 +104,54 @@ fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
         "Android browser arguments must be nonempty and contain no NUL bytes",
       ));
     }
-    let switch = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'));
-    if parsing_switches
-      && let Some(flag) = switch
-      && [
-        "remote-debugging-socket-name",
-        "remote-debugging-port",
-        "remote-debugging-pipe",
-      ]
-      .contains(&flag.split('=').next().unwrap_or_default())
-    {
-      return Err(FerriError::invalid_argument(
-        "args",
-        "managed Android owns its debugging socket",
-      ));
+    if !positional.is_empty() {
+      positional.push(arg);
+      continue;
     }
     if arg == "--" {
-      parsing_switches = false;
+      positional.push(arg);
+      continue;
     }
-    if parsing_switches
-      && let Some(features) = switch.and_then(|flag| {
-        flag
-          .strip_prefix("disable-features=")
-          .or_else(|| (flag == "disable-features").then_some(""))
-      })
-    {
-      for feature in features.split(',').map(str::trim).filter(|feature| !feature.is_empty()) {
-        if feature_names.insert(feature) {
-          disabled_features.push(feature);
+    let switch = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'));
+    let (name, value) = switch.map_or(("", None), |flag| {
+      flag
+        .split_once('=')
+        .map_or((flag, None), |(name, value)| (name, Some(value)))
+    });
+    match name {
+      "remote-debugging-socket-name" | "remote-debugging-port" | "remote-debugging-pipe" => {
+        return Err(FerriError::invalid_argument(
+          "args",
+          "managed Android owns its debugging socket",
+        ));
+      },
+      // One spelling, so the lists merge with the defaults above instead of replacing them.
+      "enable-features" | "disable-features" => {
+        if let Some(features) = value.filter(|features| !features.is_empty()) {
+          switches.push(format!("--{name}={features}"));
         }
-      }
-      continue;
+      },
+      "host-resolver-rules" => {
+        resolver_rules.extend(
+          value
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|rule| !rule.is_empty()),
+        );
+      },
+      _ => switches.push(arg.clone()),
     }
-    if parsing_switches
-      && let Some(rules) = switch.and_then(|flag| {
-        flag
-          .strip_prefix("host-resolver-rules=")
-          .or_else(|| (flag == "host-resolver-rules").then_some(""))
-      })
-    {
-      resolver_rules.extend(rules.split(',').map(str::trim).filter(|rule| !rule.is_empty()));
-      continue;
-    }
-    flags.push(arg);
   }
-  let disabled_features = format!("--disable-features={}", disabled_features.join(","));
-  flags.insert(1, &disabled_features);
+  crate::state::merge_feature_switches(&mut switches);
   // The emulator's own loopback is the device, where nothing a script started is listening. Chromium takes
   // the first rule that matches and an EXCLUDE before any of them, so the caller's rules decide first.
   resolver_rules.extend(HOST_LOOPBACK_RULES);
-  let resolver_rules = format!("--host-resolver-rules={}", resolver_rules.join(", "));
-  flags.insert(2, &resolver_rules);
+  switches.push(format!("--host-resolver-rules={}", resolver_rules.join(", ")));
+  let flags = std::iter::once("_")
+    .chain(switches.iter().map(String::as_str))
+    .chain(positional);
   let line = flags
-    .into_iter()
     .map(|arg| {
       // Chromium treats backslashes literally except before quotes; close quotes before trailing backslashes.
       let prefix = arg.trim_end_matches('\\');
@@ -589,6 +589,15 @@ async fn start_chrome(
 mod tests {
   use super::*;
 
+  fn disabled_features(line: &str) -> Vec<&str> {
+    line
+      .split("\"--disable-features=")
+      .nth(1)
+      .and_then(|rest| rest.split('"').next())
+      .map(|features| features.split(',').collect())
+      .unwrap_or_default()
+  }
+
   #[test]
   fn browser_arguments_preserve_chromium_quote_and_backslash_rules() {
     let line = chromium_command_line(
@@ -626,10 +635,11 @@ mod tests {
   #[test]
   fn managed_browser_disables_native_navigation_input_suppression() {
     let line = chromium_command_line("org.chromium.chrome", &["--".into(), "about:blank".into()]).unwrap();
-    let animation = line
-      .find("--disable-features=AndroidNavigationBlurTransitionAnimation")
-      .unwrap();
-    assert!(animation < line.find("\"--\"").unwrap(), "{line}");
+    let (switches, _) = line.split_once("\"--\"").unwrap();
+    assert!(
+      disabled_features(switches).contains(&"AndroidNavigationBlurTransitionAnimation"),
+      "{line}"
+    );
   }
 
   #[test]
@@ -646,9 +656,14 @@ mod tests {
     )
     .unwrap();
     let (switches, positional) = line.split_once("\"--\"").unwrap();
-    assert!(
-      switches.contains("\"--disable-features=AndroidNavigationBlurTransitionAnimation,OtherFeature,SecondFeature\"")
-    );
+    let disabled = disabled_features(switches);
+    for feature in [
+      "AndroidNavigationBlurTransitionAnimation",
+      "OtherFeature",
+      "SecondFeature",
+    ] {
+      assert_eq!(disabled.iter().filter(|named| **named == feature).count(), 1, "{line}");
+    }
     assert_eq!(switches.matches("disable-features=").count(), 1);
     assert_eq!(
       positional.trim(),
@@ -657,8 +672,44 @@ mod tests {
     for flag in ["--disable-features", "--disable-features=", "-disable-features="] {
       let line = chromium_command_line("org.chromium.chrome", &[flag.into()]).unwrap();
       assert_eq!(line.matches("disable-features").count(), 1, "{line}");
-      assert!(line.contains("--disable-features=AndroidNavigationBlurTransitionAnimation"));
+      assert!(
+        disabled_features(&line).contains(&"AndroidNavigationBlurTransitionAnimation"),
+        "{line}"
+      );
     }
+  }
+
+  #[test]
+  fn managed_browser_starts_with_the_desktop_switches_and_merges_feature_lists() {
+    let line = chromium_command_line(
+      "org.chromium.chrome",
+      &[
+        "--enable-features=WebMCP".into(),
+        "--enable-features=PaintHolding".into(),
+      ],
+    )
+    .unwrap();
+    for switch in [
+      "--disable-back-forward-cache",
+      "--disable-field-trial-config",
+      "--disable-popup-blocking",
+    ] {
+      assert_eq!(line.matches(&format!("\"{switch}\"")).count(), 1, "{line}");
+    }
+    for absent in ["--disable-sync", "--enable-automation"] {
+      assert!(!line.contains(absent), "{line}");
+    }
+    assert_eq!(line.matches("--no-first-run").count(), 1, "{line}");
+    assert_eq!(line.matches("enable-features=").count(), 1, "{line}");
+    let enabled = line
+      .split("\"--enable-features=")
+      .nth(1)
+      .and_then(|rest| rest.split('"').next())
+      .unwrap();
+    for feature in ["CDPScreenshotNewSurface", "WebMCP", "PaintHolding"] {
+      assert!(enabled.split(',').any(|named| named == feature), "{line}");
+    }
+    assert!(!disabled_features(&line).contains(&"PaintHolding"), "{line}");
   }
 
   #[test]

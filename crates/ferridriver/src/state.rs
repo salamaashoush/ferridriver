@@ -2828,7 +2828,7 @@ pub fn chrome_flags_with(
 /// that gate those separately: `WebMCPTesting` for `getTools()` and
 /// `DevToolsWebMCPSupport` for the `DevTools` domain. Chrome 153 enables both
 /// with `WebMCP` already; a caller who disables one keeps it disabled.
-fn merge_feature_switches(flags: &mut Vec<String>) {
+pub(crate) fn merge_feature_switches(flags: &mut Vec<String>) {
   const ENABLE: &str = "--enable-features=";
   const DISABLE: &str = "--disable-features=";
   // A feature may carry a field trial or parameters: `Name<Trial:key/value`.
@@ -2886,7 +2886,7 @@ fn merge_feature_switches(flags: &mut Vec<String>) {
 
 /// Chrome switches matching Playwright's `chromiumSwitches()` exactly.
 /// See: playwright/packages/playwright-core/src/server/chromium/chromiumSwitches.ts
-const CHROMIUM_SWITCHES: &[&str] = &[
+pub(crate) const CHROMIUM_SWITCHES: &[&str] = &[
   "--disable-field-trial-config",
   "--disable-background-networking",
   "--disable-background-timer-throttling",
