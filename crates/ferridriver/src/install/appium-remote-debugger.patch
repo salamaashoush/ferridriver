@@ -19,7 +19,7 @@ index 495a9ba..0df036c 100644
      appIdKey,
      pageIdKey,
 diff --git c/lib/mixins/navigate.ts w/lib/mixins/navigate.ts
-index e56319e..cc00f6b 100644
+index e56319e..d7152aa 100644
 --- c/lib/mixins/navigate.ts
 +++ w/lib/mixins/navigate.ts
 @@ -174,8 +174,7 @@ export async function checkPageIsReady(this: RemoteDebugger, timeoutMs?: number)
@@ -50,7 +50,7 @@ index e56319e..cc00f6b 100644
        return resolve();
      }, readinessTimeoutMs);
  
-@@ -228,28 +225,27 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
+@@ -228,28 +225,37 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
          clearTimeout(onPageLoadedTimeout);
          onPageLoadedTimeout = null;
        }
@@ -67,32 +67,40 @@ index e56319e..cc00f6b 100644
 -    // and the timeout above, so a rejection here (e.g. the RPC connection dropping mid-navigation,
 -    // which happens routinely around window/tab switches) must not go unhandled - that would
 -    // crash the whole process instead of just failing this one navigation.
+-    rpcClient
+-      .send('Runtime.evaluate', {
 +    // iOS 26.4 removed Page.navigate (appium/appium#21976); older versions still
 +    // need it for navigations that script-initiated location assignments cannot perform.
-     rpcClient
--      .send('Runtime.evaluate', {
--        expression: `window.location.href = ${JSON.stringify(url)};`,
--        appIdKey,
--        pageIdKey,
++    const navigateByScript = async () => {
++      await rpcClient.send('Runtime.evaluate', {
+         expression: `window.location.href = ${JSON.stringify(url)};`,
+         appIdKey,
+         pageIdKey,
+-      })
+-      .catch((err: any) => {
+-        this.log.warn(`Failed to set 'window.location.href' to '${url}': ${err.message}`);
+       });
++    };
++    rpcClient
 +      .send('Page.navigate', {url, appIdKey, pageIdKey})
++      .then(async (response: any) => {
++        // A page target answers through Target.dispatchMessageFromTarget, where
++        // "method not found" arrives as the response itself and nothing is thrown.
++        if (response?.error?.code === -32601) {
++          await navigateByScript();
++        }
++      })
 +      .catch(async (err: any) => {
 +        if (err.code !== -32601) {
 +          throw err;
 +        }
-+        await rpcClient.send('Runtime.evaluate', {
-+          expression: `window.location.href = ${JSON.stringify(url)};`,
-+          appIdKey,
-+          pageIdKey,
-+        });
-       })
--      .catch((err: any) => {
--        this.log.warn(`Failed to set 'window.location.href' to '${url}': ${err.message}`);
--      });
++        await navigateByScript();
++      })
 +      .catch(reject);
    });
    const cancellationPromise = (async () => {
      try {
-@@ -263,8 +259,9 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
+@@ -263,8 +269,9 @@ export async function navToUrl(this: RemoteDebugger, url: string): Promise<void>
      setPageLoading(this, false);
      isPageLoading = false;
      setNavigatingToPage(this, false);
@@ -410,10 +418,10 @@ index f7d3c35..f5c3e94 100644
      it('should execute atom and call send event on rpc client', async function () {
        const ctx: any = {
 diff --git c/test/unit/mixins/navigate.spec.ts w/test/unit/mixins/navigate.spec.ts
-index f67d79e..e0027f6 100644
+index f67d79e..7ff2a3a 100644
 --- c/test/unit/mixins/navigate.spec.ts
 +++ w/test/unit/mixins/navigate.spec.ts
-@@ -1,8 +1,85 @@
+@@ -1,8 +1,98 @@
  import assert from 'node:assert/strict';
 +import {EventEmitter} from 'node:events';
  import {describe, it} from 'node:test';
@@ -455,6 +463,19 @@ index f67d79e..e0027f6 100644
 +    calls.push(method);
 +    if (method === 'Page.navigate') {
 +      throw Object.assign(new Error('Method not found'), {code: -32601});
++    }
++    events.emit('Page.loadEventFired');
++  });
++  await navToUrl.call(context, 'https://example.com/');
++  assert.deepEqual(calls, ['Page.navigate', 'Runtime.evaluate']);
++});
++
++it('falls back when a page target answers method not found instead of throwing', async () => {
++  const calls: string[] = [];
++  const {context} = navigationContext(async (method, _options, events) => {
++    calls.push(method);
++    if (method === 'Page.navigate') {
++      return {error: {code: -32601, message: "'Page.navigate' was not found"}, id: 90};
 +    }
 +    events.emit('Page.loadEventFired');
 +  });
