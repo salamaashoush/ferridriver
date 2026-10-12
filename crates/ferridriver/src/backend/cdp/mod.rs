@@ -1527,6 +1527,16 @@ fn u64_to_u32_saturating(n: u64) -> u32 {
   u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// A `Runtime.callFunctionOn` whose function threw answers without a
+/// protocol error: the throw is in `exceptionDetails`, and a caller that
+/// does not look reports success for a call that failed.
+fn thrown_in_page(result: &serde_json::Value) -> Result<()> {
+  match result.get("exceptionDetails") {
+    Some(exception) => Err(FerriError::Backend(cdp_get_exception_message(exception))),
+    None => Ok(()),
+  }
+}
+
 /// Convert a CDP `Runtime.ExceptionDetails` JSON payload into a
 /// [`crate::web_error::ErrorDetails`]. Mirrors Playwright's
 /// `server/chromium/crProtocolHelper.ts::{getExceptionMessage, exceptionToError}`
@@ -7371,6 +7381,7 @@ impl<T: CdpTransport> CdpElement<T> {
         }),
       )
       .await?;
+    thrown_in_page(&result)?;
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }
 
@@ -7509,7 +7520,7 @@ impl<T: CdpTransport> CdpElement<T> {
 
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     let object_id = self.object_id().await?;
-    self
+    let result = self
       .cmd(
         "Runtime.callFunctionOn",
         serde_json::json!({
@@ -7518,7 +7529,7 @@ impl<T: CdpTransport> CdpElement<T> {
         }),
       )
       .await?;
-    Ok(())
+    thrown_in_page(&result)
   }
 
   pub async fn scroll_into_view(&self) -> Result<()> {
