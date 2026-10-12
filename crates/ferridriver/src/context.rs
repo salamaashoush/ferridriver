@@ -1403,6 +1403,16 @@ impl ContextRef {
     Box::pin(self.restore_storage_state(&storage_state_value(storage)?, false)).await
   }
 
+  /// Whether a path on this machine names the same file to the
+  /// context's browser.
+  pub(crate) async fn shares_host_files(&self) -> bool {
+    let state = self.state.read().await;
+    state
+      .page_open_plan(&self.key)
+      .ok()
+      .is_none_or(|plan| plan.browser.shares_host_files())
+  }
+
   /// Whether the context has opened in the browser, which it does with
   /// its first page.
   async fn is_open(&self) -> bool {

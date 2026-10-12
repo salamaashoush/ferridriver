@@ -662,6 +662,17 @@ impl AnyBrowser {
     }
   }
 
+  /// Whether a path on this machine names the same file to the browser.
+  /// Chrome on an Android device has a filesystem of its own, and it is
+  /// the one browser recognised here as being somewhere else.
+  pub(crate) fn shares_host_files(&self) -> bool {
+    match self {
+      Self::CdpPipe(browser) => browser.isolated_contexts,
+      Self::CdpWs(browser) => browser.isolated_contexts,
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => true,
+    }
+  }
+
   /// Subscribe to browser-created pages (popups). Lossless unbounded
   /// tap — the popup pump must never miss one (a missed CDP popup is a
   /// target parked on `waitForDebuggerOnStart` forever).

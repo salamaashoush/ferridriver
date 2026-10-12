@@ -1196,60 +1196,37 @@ impl Locator {
     files: crate::options::InputFiles,
     opts: Option<crate::options::SetInputFilesOptions>,
   ) -> Result<()> {
-    // Lower `Payloads` to temp-file paths so the wire-level CDP
-    // `DOM.setFileInputFiles` command can carry them unchanged — the
-    // alternative would be a separate per-backend `setFileInputBytes`
-    // op, which only Playwright's internal CDP protocol supports.
-    // Temp files live for the action only; we delete them after the
-    // backend call returns regardless of success/failure.
     let timeout_ms = opts
       .and_then(|o| o.timeout)
       .unwrap_or_else(|| self.frame.page_arc().default_timeout());
-    let paths: Vec<String> = match files {
-      crate::options::InputFiles::Paths(paths) => paths.into_iter().map(|p| p.display().to_string()).collect(),
-      crate::options::InputFiles::Payloads(payloads) => {
-        // Each payload gets its own subdirectory so the filename on
-        // disk matches `payload.name` verbatim — otherwise the page
-        // would see a ferridriver-internal `{i}-` prefix and
-        // duplicate names would collide in the shared temp root.
-        // Matches Playwright's `setInputFilePaths` server path which
-        // materialises each payload to a temporary directory unique
-        // to the upload.
-        //
-        // We deliberately DO NOT delete these temp files after the
-        // upload call returns. CDP's `DOM.setFileInputFiles` only
-        // records the paths on the `<input>`; the browser does not
-        // actually read file content until the page JS calls
-        // `input.files[i].size` / `reader.readAsText(...)` — which
-        // happens AFTER this function returns. Deleting on the
-        // success path leaves the page with zero-byte files (the
-        // handle survives but the backing file is gone). The
-        // process-scoped root is cleaned up by the OS on reboot and
-        // the per-upload subdirs share that root, so we don't leak
-        // indefinitely across a test run.
-        let tmp_root = std::env::temp_dir().join(format!("ferridriver-files-{}", std::process::id()));
-        tokio::fs::create_dir_all(&tmp_root)
-          .await
-          .map_err(|e| crate::error::FerriError::Backend(format!("failed to create upload temp dir: {e}")))?;
-        let upload_id = std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .map_or(0, |d| d.as_nanos());
-        let mut paths: Vec<String> = Vec::new();
-        for (i, p) in payloads.iter().enumerate() {
-          let sub = tmp_root.join(format!("{upload_id}-{i}"));
-          tokio::fs::create_dir_all(&sub)
-            .await
-            .map_err(|e| crate::error::FerriError::Backend(format!("failed to create payload subdir: {e}")))?;
-          let safe_name = p.name.replace(['/', '\\', '\0'], "_");
-          let path = sub.join(&safe_name);
-          tokio::fs::write(&path, &p.buffer)
-            .await
-            .map_err(|e| crate::error::FerriError::Backend(format!("failed to write upload payload: {e}")))?;
-          paths.push(path.display().to_string());
-        }
-        paths
+    // Playwright's `dom.ts::_setInputFiles`: payloads become `File`
+    // objects in the page and never touch a disk, and only paths go to
+    // the browser as paths. An empty list is no paths, so it clears the
+    // input in the page as well (`client/elementHandle.ts::convertInputFiles`).
+    // A browser on a device cannot open a path of this machine, so there
+    // the files are read here and sent as payloads too.
+    let paths = match files {
+      crate::options::InputFiles::Paths(paths) if !paths.is_empty() && self.shares_host_files().await => paths,
+      files => {
+        let payloads = serde_json::Value::Array(lower_drop_files(Some(files))?);
+        let names: Vec<&str> = payloads
+          .as_array()
+          .into_iter()
+          .flatten()
+          .filter_map(|file| file.get("name").and_then(serde_json::Value::as_str))
+          .collect();
+        let js = format!("function() {{ const payloads = {payloads};{SET_INPUT_FILES_BODY} }}");
+        let js_ref = js.as_str();
+        return retry_resolve!(
+          self,
+          Some(timeout_ms),
+          "setInputFiles",
+          ::serde_json::json!({ "files": names }),
+          |el, _page| async move { el.call_js_fn(js_ref).await }
+        );
       },
     };
+    let paths: Vec<String> = paths.into_iter().map(|p| p.display().to_string()).collect();
 
     // Resolve the element through the standard action retry funnel and
     // address it directly (mirrors Playwright's
@@ -1267,6 +1244,16 @@ impl Locator {
       ::serde_json::json!({ "files": paths_ref }),
       |el, page| async move { page.set_input_files_element(&el, paths_ref).await }
     )
+  }
+
+  /// Whether a path on this machine names the same file to the browser
+  /// behind this locator. A page that belongs to no context is a local
+  /// one.
+  async fn shares_host_files(&self) -> bool {
+    match self.frame.page_arc().context() {
+      Some(context) => context.shares_host_files().await,
+      None => true,
+    }
   }
 
   /// Scroll the element into the visible area of the viewport.
@@ -3109,9 +3096,29 @@ const DROP_BODY: &str = r"
   return 'accepted';
 ";
 
-/// Lower a [`crate::options::DropPayload`]'s files into the page-side
-/// `{name, mimeType, buffer(base64)}` records that [`DROP_BODY`] rebuilds
-/// into `File` objects. Disk paths are read into buffers (matching
+/// Playwright's `injectedScript.ts::setInputFiles`, with `this` as the
+/// node and `payloads` in scope: the files a script names become the
+/// input's `FileList`, and the page hears `input` then `change`.
+const SET_INPUT_FILES_BODY: &str = "
+  if (this.nodeType !== Node.ELEMENT_NODE)
+    throw new Error('Node is not of type HTMLElement');
+  if (this.nodeName !== 'INPUT')
+    throw new Error('Not an <input> element');
+  if ((this.getAttribute('type') || '').toLowerCase() !== 'file')
+    throw new Error('Not an input[type=file] element');
+  const transfer = new DataTransfer();
+  for (const file of payloads) {
+    const bytes = Uint8Array.from(atob(file.buffer), c => c.charCodeAt(0));
+    transfer.items.add(new File([bytes], file.name, { type: file.mimeType }));
+  }
+  this.files = transfer.files;
+  this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  this.dispatchEvent(new Event('change', { bubbles: true }));
+";
+
+/// Lower files into the page-side `{name, mimeType, buffer(base64)}`
+/// records that [`DROP_BODY`] and [`SET_INPUT_FILES_BODY`] rebuild into
+/// `File` objects. Disk paths are read into buffers (matching
 /// Playwright's co-located server path); in-memory payloads carry their
 /// bytes already.
 fn lower_drop_files(files: Option<crate::options::InputFiles>) -> Result<Vec<serde_json::Value>> {
@@ -3121,7 +3128,7 @@ fn lower_drop_files(files: Option<crate::options::InputFiles>) -> Result<Vec<ser
       let mut out = Vec::with_capacity(paths.len());
       for p in paths {
         let bytes = std::fs::read(&p)
-          .map_err(|e| crate::error::FerriError::Backend(format!("failed to read drop file {}: {e}", p.display())))?;
+          .map_err(|e| crate::error::FerriError::Backend(format!("failed to read file {}: {e}", p.display())))?;
         let name = p
           .file_name()
           .map(|n| n.to_string_lossy().into_owned())
