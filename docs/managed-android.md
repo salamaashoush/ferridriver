@@ -51,6 +51,15 @@ on completion or cancellation, and verifies the emulator-to-host path. DNS and
 external Internet availability remain properties of the host network. See the
 [emulator address-space documentation](https://developer.android.com/studio/run/emulator-networking-address).
 
+A page that navigates to `localhost`, a `*.localhost` name or `127.0.0.1`
+reaches the machine running the emulator, not the device: Chrome starts with
+`--host-resolver-rules` mapping those names to `10.0.2.2`. The page keeps the
+URL it was given, so a `baseUrl` or a `webServer` on the host loopback works
+as it does on a desktop browser. A caller's own `--host-resolver-rules` in
+`args` is merged in front of these, and Chromium takes the first match, so
+`EXCLUDE 127.0.0.1` restores the device's own loopback. The IPv6 loopback
+`[::1]` is not mapped.
+
 The default image is Android API 35 with Google APIs and the `pixel_7` hardware
 profile. The device options are `apiLevel`, `model`, `sdkPath`, `timeout` in
 milliseconds, `acceptLicenses`, `pkg`, and `apkPath`. The launch deadline includes provisioning;

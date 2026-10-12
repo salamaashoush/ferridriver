@@ -62,6 +62,14 @@ impl AndroidOptions {
   }
 }
 
+/// The host's loopback as the emulator sees it: `10.0.2.2` is the emulator's alias for `127.0.0.1` on the
+/// machine running it. A page keeps the URL it was given; only the connection goes to the alias.
+const HOST_LOOPBACK_RULES: [&str; 3] = [
+  "MAP localhost 10.0.2.2",
+  "MAP *.localhost 10.0.2.2",
+  "MAP 127.0.0.1 10.0.2.2",
+];
+
 fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
   if pkg
     .split('.')
@@ -82,6 +90,7 @@ fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
   // Chromium's native navigation blur suppresses CDP input after DOM load and actionability checks.
   let mut disabled_features = vec!["AndroidNavigationBlurTransitionAnimation"];
   let mut feature_names: rustc_hash::FxHashSet<&str> = disabled_features.iter().copied().collect();
+  let mut resolver_rules: Vec<&str> = Vec::new();
   let mut parsing_switches = true;
   for arg in args {
     if arg.is_empty() || arg.contains('\0') {
@@ -122,10 +131,25 @@ fn chromium_command_line(pkg: &str, args: &[String]) -> Result<String> {
       }
       continue;
     }
+    if parsing_switches
+      && let Some(rules) = switch.and_then(|flag| {
+        flag
+          .strip_prefix("host-resolver-rules=")
+          .or_else(|| (flag == "host-resolver-rules").then_some(""))
+      })
+    {
+      resolver_rules.extend(rules.split(',').map(str::trim).filter(|rule| !rule.is_empty()));
+      continue;
+    }
     flags.push(arg);
   }
   let disabled_features = format!("--disable-features={}", disabled_features.join(","));
   flags.insert(1, &disabled_features);
+  // The emulator's own loopback is the device, where nothing a script started is listening. Chromium takes
+  // the first rule that matches and an EXCLUDE before any of them, so the caller's rules decide first.
+  resolver_rules.extend(HOST_LOOPBACK_RULES);
+  let resolver_rules = format!("--host-resolver-rules={}", resolver_rules.join(", "));
+  flags.insert(2, &resolver_rules);
   let line = flags
     .into_iter()
     .map(|arg| {
@@ -635,6 +659,37 @@ mod tests {
       assert_eq!(line.matches("disable-features").count(), 1, "{line}");
       assert!(line.contains("--disable-features=AndroidNavigationBlurTransitionAnimation"));
     }
+  }
+
+  #[test]
+  fn host_loopback_reaches_the_host_unless_the_caller_rules_otherwise() {
+    let line = chromium_command_line("org.chromium.chrome", &[]).unwrap();
+    assert!(
+      line
+        .contains("\"--host-resolver-rules=MAP localhost 10.0.2.2, MAP *.localhost 10.0.2.2, MAP 127.0.0.1 10.0.2.2\""),
+      "{line}"
+    );
+
+    let line = chromium_command_line(
+      "org.chromium.chrome",
+      &[
+        "--host-resolver-rules=EXCLUDE 127.0.0.1, MAP app.example.com 10.0.2.2".into(),
+        "-host-resolver-rules=MAP localhost 192.0.2.1".into(),
+        "--".into(),
+        "--host-resolver-rules=positional".into(),
+      ],
+    )
+    .unwrap();
+    let (switches, positional) = line.split_once(" \"--\" ").unwrap();
+    assert_eq!(switches.matches("host-resolver-rules=").count(), 1, "{line}");
+    assert!(
+      switches.contains(
+        "\"--host-resolver-rules=EXCLUDE 127.0.0.1, MAP app.example.com 10.0.2.2, MAP localhost 192.0.2.1, \
+         MAP localhost 10.0.2.2, MAP *.localhost 10.0.2.2, MAP 127.0.0.1 10.0.2.2\""
+      ),
+      "{line}"
+    );
+    assert_eq!(positional, "\"--host-resolver-rules=positional\"");
   }
 
   #[test]
