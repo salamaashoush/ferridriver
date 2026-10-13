@@ -40,6 +40,11 @@ so a release build reads the command-line file without the browser's own
 "command line on non-rooted devices" flag. Closing the context disconnects;
 closing the device disconnects every browser it launched.
 
+A download in that browser is written on the device, under
+`/sdcard/Download`, and fetched over ADB when it completes, so
+`download.path()` and `saveAs` name a file on this machine. The device's copy
+is removed once fetched.
+
 ## Native views
 
 The selector actions and `input` go through Playwright's own driver, two APKs

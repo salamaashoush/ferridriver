@@ -71,6 +71,10 @@ as it does on a desktop browser. A caller's own `--host-resolver-rules` in
 `EXCLUDE 127.0.0.1` restores the device's own loopback. The IPv6 loopback
 `[::1]` is not mapped.
 
+Chrome writes a download on the device, under `/sdcard/Download`. It is
+fetched over ADB when it completes, so `download.path()` and `saveAs` name a
+file on the host as they do for a desktop browser.
+
 The default image is Android API 35 with Google APIs and the `pixel_7` hardware
 profile. The device options are `apiLevel`, `model`, `sdkPath`, `timeout` in
 milliseconds, `acceptLicenses`, `pkg`, and `apkPath`. The launch deadline includes provisioning;

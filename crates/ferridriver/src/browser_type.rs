@@ -303,6 +303,7 @@ impl BrowserType {
   pub(crate) async fn connect_persistent_over_cdp(
     endpoint_url: &str,
     context: crate::options::BrowserContextOptions,
+    remote_downloads: Option<crate::download::RemoteDownloads>,
   ) -> Result<ContextRef> {
     let plan = LaunchPlan {
       backend: BackendKind::CdpWs,
@@ -317,6 +318,13 @@ impl BrowserType {
     let browser = Browser::from_ready_state(state, "default").await?;
     let default_ctx = browser.default_context();
     let composite = default_ctx.key.to_composite();
+    if let Some(remote) = remote_downloads {
+      let state = browser.state().read().await;
+      state
+        .page_open_plan(&default_ctx.key)?
+        .browser
+        .set_remote_downloads(remote);
+    }
     if let Some(rv) = context.record_video.clone() {
       browser.state().read().await.set_record_video(&composite, rv);
     }

@@ -474,6 +474,14 @@ async fn connect_device(
   enable_profile_overlay(sdk, &serial, &options.model).await?;
   let mut browser = Box::pin(start_chrome(sdk, &serial, &options.pkg, flags)).await?;
   network::wait_until_ready(&browser).await?;
+  let adb = wire::AdbServer {
+    port: sdk
+      .adb
+      .as_ref()
+      .map_or(wire::AdbServer::default().port, |endpoint| endpoint.port),
+    ..wire::AdbServer::default()
+  };
+  browser.set_remote_downloads(adb.remote_downloads(&serial));
   browser.android = Some(owner.clone());
   tracing::info!(%serial, pkg = options.pkg, "managed Android browser is ready");
   Ok(crate::backend::AnyBrowser::CdpWs(browser))

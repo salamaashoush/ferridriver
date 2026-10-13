@@ -452,7 +452,7 @@ mod tests {
       popup_taps: Arc::default(),
       create_ledger: Arc::default(),
       user_data_dir: None,
-      downloads_dir: Arc::new(tempfile::tempdir().unwrap()),
+      downloads_dir: crate::backend::cdp::new_downloads_dir().unwrap(),
       attach_tasks: Arc::new(AttachTasks(Vec::new())),
       webdriver: None,
       android: None,

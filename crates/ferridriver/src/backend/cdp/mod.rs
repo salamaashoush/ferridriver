@@ -109,7 +109,7 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// opens. Chrome names downloads uniquely (`allowAndName`), so a
   /// per-page directory bought nothing and cost a mkdir on every page
   /// open plus a leaked directory whenever teardown was skipped.
-  downloads_dir: Arc<tempfile::TempDir>,
+  downloads_dir: Arc<DownloadsDir>,
   /// Abort handles for the two attach-listener tasks.
   ///
   /// Both hold an `Arc` clone of the transport while parked on one of its
@@ -152,6 +152,13 @@ impl<T: CdpTransport> CdpBrowser<T> {
   #[must_use]
   pub fn version(&self) -> &str {
     &self.version
+  }
+
+  /// Have this browser's downloads written on its own machine and
+  /// fetched from there. For the first caller only, and before a page
+  /// asks for downloads: the directory is told to the browser once.
+  pub(crate) fn set_remote_downloads(&self, remote: crate::download::RemoteDownloads) {
+    let _ = self.downloads_dir.remote.set(remote);
   }
 
   /// Shared transport handle for attaching a public raw
@@ -260,7 +267,7 @@ type AttachedTargets = Arc<std::sync::Mutex<FxHashMap<String, Option<String>>>>;
 struct AttachCtx<T: CdpTransport> {
   transport: Arc<T>,
   taps: crate::backend::PopupTaps,
-  downloads_dir: Arc<tempfile::TempDir>,
+  downloads_dir: Arc<DownloadsDir>,
   ledger: Arc<CreateLedger>,
   attached: AttachedTargets,
   headful: bool,
@@ -501,7 +508,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// `crBrowser._onAttachedToTarget` → `CRPage` path).
   fn spawn_attach_listener(
     transport: &Arc<T>,
-    downloads_dir: &Arc<tempfile::TempDir>,
+    downloads_dir: &Arc<DownloadsDir>,
     attached: &AttachedTargets,
     headful: bool,
   ) -> (crate::backend::PopupTaps, Arc<CreateLedger>, AttachTasks) {
@@ -654,7 +661,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   fn claim_parked_popup(
     transport: &Arc<T>,
     taps: &crate::backend::PopupTaps,
-    downloads_dir: &Arc<tempfile::TempDir>,
+    downloads_dir: &Arc<DownloadsDir>,
     parked: ParkedTarget,
     headful: bool,
   ) {
@@ -713,7 +720,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// resumes after context configuration is applied.
   async fn claim_popup(
     transport: &Arc<T>,
-    downloads_dir: &Arc<tempfile::TempDir>,
+    downloads_dir: &Arc<DownloadsDir>,
     session_id: &str,
     target_id: &str,
     browser_context_id: Option<&str>,
@@ -1755,13 +1762,36 @@ pub struct LifecycleState {
 
 /// Per-page temp directory Chrome writes downloads into. Shared by the
 /// two `CdpPage` construction sites (attach-to-existing and `new_page`).
-fn new_downloads_dir() -> Result<Arc<tempfile::TempDir>> {
-  Ok(Arc::new(
-    tempfile::Builder::new()
+fn new_downloads_dir() -> Result<Arc<DownloadsDir>> {
+  Ok(Arc::new(DownloadsDir {
+    local: tempfile::Builder::new()
       .prefix("ferridriver-downloads-")
       .tempdir()
       .map_err(|e| FerriError::Backend(format!("downloads tempdir: {e}")))?,
-  ))
+    remote: std::sync::OnceLock::new(),
+  }))
+}
+
+/// Where a browser's downloads are kept on this machine, and where the
+/// browser writes them when that is somewhere else.
+pub(crate) struct DownloadsDir {
+  local: tempfile::TempDir,
+  remote: std::sync::OnceLock<crate::download::RemoteDownloads>,
+}
+
+impl DownloadsDir {
+  /// The directory on this machine a finished download is read from.
+  pub(crate) fn path(&self) -> &std::path::Path {
+    self.local.path()
+  }
+
+  /// The directory the browser is told to download into.
+  fn browser_path(&self) -> std::borrow::Cow<'_, str> {
+    match self.remote.get() {
+      Some(remote) => std::borrow::Cow::Borrowed(&remote.directory),
+      None => self.local.path().to_string_lossy(),
+    }
+  }
 }
 
 impl LifecycleState {
@@ -1974,12 +2004,12 @@ pub struct CdpPage<T: CdpTransport> {
   pub accept_downloads: Arc<std::sync::atomic::AtomicBool>,
   /// Per-page temp directory that Chrome is configured to write
   /// downloads into (via `Browser.setDownloadBehavior({ behavior:
-  /// 'allowAndName', downloadPath, eventsEnabled: true })`). Held as
-  /// `Arc<TempDir>` so the directory lives as long as any [`crate::download::Download`]
+  /// 'allowAndName', downloadPath, eventsEnabled: true })`). Held in
+  /// an `Arc` so the directory lives as long as any [`crate::download::Download`]
   /// referencing a file under it — drop cleans up orphaned files
   /// (matches Playwright's per-context `_downloadsPath` cleanup on
   /// close).
-  pub downloads_dir: Arc<tempfile::TempDir>,
+  pub(crate) downloads_dir: Arc<DownloadsDir>,
   /// Weak back-reference to the outer [`crate::page::Page`] that wraps
   /// this backend page. Populated by [`crate::page::Page::new`] /
   /// `Page::with_context` every time a new `Arc<Page>` is constructed;
@@ -2868,7 +2898,7 @@ impl<T: CdpWrap> CdpPage<T> {
     };
     let mut params = serde_json::json!({
       "behavior": behavior,
-      "downloadPath": self.downloads_dir.path().to_string_lossy(),
+      "downloadPath": self.downloads_dir.browser_path(),
       "eventsEnabled": true,
     });
     if let Some(ref ctx) = self.browser_context_id
@@ -6247,7 +6277,7 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     browser_context_id: Option<Arc<str>>,
     download_manager: crate::download::DownloadManager,
-    downloads_dir: Arc<tempfile::TempDir>,
+    downloads_dir: Arc<DownloadsDir>,
     page_backref: crate::backend::PageBackref,
   ) -> tokio::task::AbortHandle {
     // Subscribe FIRST, and before the task exists, to avoid racing any
@@ -6344,7 +6374,19 @@ impl<T: CdpWrap> CdpPage<T> {
             match state {
               "completed" => {
                 if let Some(d) = download_manager.take_for_guid(&guid) {
-                  d.report_finished(None, None);
+                  match downloads_dir.remote.get() {
+                    None => d.report_finished(None, None),
+                    // The file is on the browser's machine. It is brought
+                    // here before the download counts as finished, off
+                    // this task so later events are not held up.
+                    Some(remote) => {
+                      let fetched = (remote.fetch)(guid.clone(), downloads_dir.path().join(&guid));
+                      tokio::spawn(async move {
+                        let error = fetched.await.err().map(|error| error.to_string());
+                        d.report_finished(None, error);
+                      });
+                    },
+                  }
                 }
               },
               "canceled" => {

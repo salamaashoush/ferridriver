@@ -662,6 +662,16 @@ impl AnyBrowser {
     }
   }
 
+  /// Have a Chromium on another machine download there and each file
+  /// fetched from it. The other backends keep downloads on this machine.
+  pub(crate) fn set_remote_downloads(&self, remote: crate::download::RemoteDownloads) {
+    match self {
+      Self::CdpPipe(browser) => browser.set_remote_downloads(remote),
+      Self::CdpWs(browser) => browser.set_remote_downloads(remote),
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => {},
+    }
+  }
+
   /// Whether a path on this machine names the same file to the browser.
   /// Chrome on an Android device has a filesystem of its own, and it is
   /// the one browser recognised here as being somewhere else.

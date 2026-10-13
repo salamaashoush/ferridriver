@@ -2,7 +2,7 @@
 // ANDROID_ADB_SERVER_PORT (5037 when unset) reports as usable. Needs Chrome
 // on the device for the browser tests.
 import { test, expect, _android } from '@ferridriver/test';
-import type { AndroidDevice } from '@ferridriver/test';
+import type { AndroidDevice, Download } from '@ferridriver/test';
 
 const port = Number(process.env.ANDROID_ADB_SERVER_PORT ?? 5037);
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
@@ -64,6 +64,33 @@ test.describe('an Android device', () => {
   });
 
   // Needs Playwright's driver in the cache: `ferridriver install android-driver`.
+  // The browser writes on the device; the file is fetched from there.
+  test('brings a download in the launched browser to this machine', async () => {
+    const phone = await device();
+    const context = await phone.launchBrowser();
+    try {
+      const page = context.pages()[0];
+      const payload = 'salama '.repeat(20_000);
+      await page.goto("data:text/html,<a id='a' download='note.txt'>get</a>");
+      await page.evaluate((body: string) => {
+        const link = document.getElementById('a') as HTMLAnchorElement;
+        link.href = URL.createObjectURL(new Blob([body], { type: 'text/plain' }));
+      }, payload);
+      const downloading = page.waitForEvent('download', { timeout: 15_000 });
+      await page.locator('#a').click();
+      const download = (await downloading) as Download;
+      expect(download.suggestedFilename()).toBe('note.txt');
+      expect(fs.readFileSync(await download.path(), 'utf8')).toBe(payload);
+
+      const saved = test.info().outputPath('saved.txt');
+      await download.saveAs(saved);
+      expect(fs.readFileSync(saved, 'utf8')).toBe(payload);
+      expect(text(await phone.shell('ls -d /sdcard/Download/ferridriver-* 2>/dev/null')).trim()).toBe('');
+    } finally {
+      await context.close();
+    }
+  });
+
   test('finds and acts on native views through the driver', async () => {
     const phone = await device();
     await phone.shell('am force-stop com.android.settings');

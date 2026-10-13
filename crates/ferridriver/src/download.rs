@@ -102,6 +102,27 @@ pub type DownloadCanceler = Arc<
     + Sync,
 >;
 
+/// Copies the download named by its GUID from the browser's machine to
+/// the path given on this one.
+pub(crate) type RemoteDownloadFetch = Arc<
+  dyn Fn(
+      String,
+      PathBuf,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), FerriError>> + Send>>
+    + Send
+    + Sync,
+>;
+
+/// The downloads of a browser that does not share this machine's files,
+/// Chrome on an Android device: it is told to write into a directory of
+/// its own, and each finished download is fetched from there.
+#[derive(Clone)]
+pub(crate) struct RemoteDownloads {
+  /// The directory the browser writes into, a path on its machine.
+  pub directory: String,
+  pub fetch: RemoteDownloadFetch,
+}
+
 /// Live download handle. Cheaply cloneable — every clone shares the
 /// same underlying state watch. Mirrors Playwright's `Download` client
 /// class.

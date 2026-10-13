@@ -185,6 +185,77 @@ impl AdbServer {
     Err(failure(&format!("push to {path}"), String::from_utf8_lossy(&reason)))
   }
 
+  /// Copy the device's file at `path` to `destination` on this machine,
+  /// through the `sync:` service.
+  pub async fn pull(&self, serial: &str, path: &str, destination: &std::path::Path) -> Result<()> {
+    let refused = |reason: &dyn std::fmt::Display| failure(&format!("pull of {path}"), reason);
+    let length = u32::try_from(path.len()).map_err(|_| refused(&"path longer than 4 GiB"))?;
+    let mut stream = self.open(serial, "sync:").await?;
+    stream.write_all(b"RECV").await?;
+    stream.write_all(&length.to_le_bytes()).await?;
+    stream.write_all(path.as_bytes()).await?;
+
+    let mut file = tokio::fs::File::create(destination).await?;
+    loop {
+      let mut header = [0u8; 8];
+      stream.read_exact(&mut header).await?;
+      let length = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+      match &header[..4] {
+        b"DATA" => {
+          let mut chunk = vec![0u8; length];
+          stream.read_exact(&mut chunk).await?;
+          file.write_all(&chunk).await?;
+        },
+        b"DONE" => break,
+        b"FAIL" => {
+          let mut reason = vec![0u8; length];
+          stream.read_exact(&mut reason).await?;
+          drop(file);
+          let _ = tokio::fs::remove_file(destination).await;
+          return Err(refused(&String::from_utf8_lossy(&reason)));
+        },
+        other => {
+          return Err(refused(&format!(
+            "unexpected reply {:?}",
+            String::from_utf8_lossy(other)
+          )));
+        },
+      }
+    }
+    file.flush().await?;
+    Ok(())
+  }
+
+  /// A directory on the device for a browser there to download into, and
+  /// the way each download comes back to this machine. Chrome writes
+  /// under the shared `Download` folder, which the device's shell reads;
+  /// a directory of the shell's own it reports as written and leaves
+  /// empty. Chrome makes the directory with its first download, and it
+  /// is removed again once the last file in it has been fetched.
+  pub fn remote_downloads(&self, serial: &str) -> crate::download::RemoteDownloads {
+    static DIRECTORIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let directory = format!(
+      "/sdcard/Download/ferridriver-{}-{}",
+      std::process::id(),
+      DIRECTORIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let (server, device, from) = (self.clone(), serial.to_owned(), directory.clone());
+    crate::download::RemoteDownloads {
+      directory,
+      fetch: std::sync::Arc::new(move |guid, destination| {
+        let (server, device, from) = (server.clone(), device.clone(), from.clone());
+        Box::pin(async move {
+          let path = format!("{from}/{guid}");
+          server.pull(&device, &path, &destination).await?;
+          server
+            .shell(&device, &format!("rm -f {path}; rmdir {from} 2>/dev/null"))
+            .await?;
+          Ok(())
+        })
+      }),
+    }
+  }
+
   /// Install an APK by streaming it to the package manager, with the
   /// arguments Playwright's `installApk` passes when given none.
   pub async fn install(&self, serial: &str, apk: &[u8], args: &[String]) -> Result<()> {
@@ -414,6 +485,71 @@ mod tests {
       .to_string();
     assert!(error.contains("push to /system/x: Permission denied"), "{error}");
     played.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn pull_writes_every_chunk_the_sync_service_sends() {
+    let content: Vec<u8> = (0..70_000u32).map(|byte| (byte % 251) as u8).collect();
+    let sent = content.clone();
+    let (adb, played) = server(
+      vec![("host:transport:emulator-5554", b"OKAY"), ("sync:", b"OKAY")],
+      |mut stream| async move {
+        let path = "/sdcard/Download/note.bin";
+        let mut asked = vec![0u8; 8 + path.len()];
+        stream.read_exact(&mut asked).await.unwrap();
+        assert_eq!(&asked[..4], b"RECV");
+        assert_eq!(&asked[8..], path.as_bytes());
+        for chunk in sent.chunks(SYNC_CHUNK) {
+          stream.write_all(b"DATA").await.unwrap();
+          stream
+            .write_all(&u32::try_from(chunk.len()).unwrap().to_le_bytes())
+            .await
+            .unwrap();
+          stream.write_all(chunk).await.unwrap();
+        }
+        stream.write_all(b"DONE\0\0\0\0").await.unwrap();
+        Vec::new()
+      },
+    )
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("note.bin");
+    adb
+      .pull("emulator-5554", "/sdcard/Download/note.bin", &destination)
+      .await
+      .unwrap();
+    played.await.unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), content);
+  }
+
+  #[tokio::test]
+  async fn a_refused_pull_carries_the_devices_reason_and_leaves_no_file() {
+    let (adb, played) = server(
+      vec![("host:transport:emulator-5554", b"OKAY"), ("sync:", b"OKAY")],
+      |mut stream| async move {
+        let mut asked = vec![0u8; 8 + "/sdcard/none".len()];
+        stream.read_exact(&mut asked).await.unwrap();
+        stream
+          .write_all(b"FAIL\x19\0\0\0No such file or directory")
+          .await
+          .unwrap();
+        Vec::new()
+      },
+    )
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("none");
+    let error = adb
+      .pull("emulator-5554", "/sdcard/none", &destination)
+      .await
+      .unwrap_err()
+      .to_string();
+    played.await.unwrap();
+    assert!(
+      error.contains("pull of /sdcard/none: No such file or directory"),
+      "{error}"
+    );
+    assert!(!destination.exists(), "a refused pull leaves nothing behind");
   }
 
   #[tokio::test]
