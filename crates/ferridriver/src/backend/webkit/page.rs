@@ -1719,6 +1719,14 @@ impl WebKitPage {
     // Context-wide store via the root browser session (mirrors Playwright's
     // `Playwright.getAllCookies`); `Page.getCookies` only returns cookies the
     // current page's origin can see, which breaks context-level reads.
+    //
+    // A `document.cookie` write leaves the page's process as a message
+    // to the network process, and the store read below travels another
+    // route there, so under load it could arrive first and miss a cookie
+    // the page had just set. Reading the cookie in the page goes the
+    // page's own route and comes back after its writes have landed. A
+    // page that cannot evaluate just now has no write of its own waiting.
+    let _ = self.evaluate("void document.cookie").await;
     let resp = self
       .browser
       .send(super::protocol::PLAYWRIGHT_GET_ALL_COOKIES, self.cookie_ctx_params())
