@@ -35,6 +35,12 @@ struct HighlightEntry {
   style: Option<String>,
 }
 
+/// What [`Page::screenshot_turn`] hands out, released when dropped.
+pub(crate) struct ScreenshotTurn<'a> {
+  _queue: tokio::sync::MutexGuard<'a, ()>,
+  _front: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 pub struct Page {
   pub(crate) inner: AnyPage,
   default_timeout: AtomicU64,
@@ -46,7 +52,7 @@ pub struct Page {
   snapshot_tracker: Arc<AsyncMutex<snapshot::SnapshotTracker>>,
   /// Screenshots of one page run one at a time, as Playwright's
   /// `Screenshotter` queues them: each prepares and restores the page.
-  pub(crate) screenshot_queue: AsyncMutex<()>,
+  screenshot_queue: AsyncMutex<()>,
   /// Playwright's `HighlightController`: the highlights `locator.highlight()`
   /// asked for, by frame. Re-applied every second while any remain, so a
   /// highlight survives the frame re-rendering or navigating.
@@ -2324,6 +2330,29 @@ impl Page {
   /// Returns an error if the injection evaluate fails.
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     self.inner.ensure_engine_injected().await
+  }
+
+  /// This page's turn to be captured: one screenshot of a page at a
+  /// time. In a browser that draws only the tab in front it is also one
+  /// page at a time, and the page is brought to the front for it.
+  pub(crate) async fn screenshot_turn(&self) -> Result<ScreenshotTurn<'_>> {
+    let queue = self.screenshot_queue.lock().await;
+    let front = match self.context() {
+      Some(context) => context.front_tab_turn().await,
+      None => None,
+    };
+    let front = match front {
+      Some(turn) => {
+        let held = turn.lock_owned().await;
+        self.inner.bring_to_front_drawn().await?;
+        Some(held)
+      },
+      None => None,
+    };
+    Ok(ScreenshotTurn {
+      _queue: queue,
+      _front: front,
+    })
   }
 
   /// Implementation of [`Self::screenshot`].

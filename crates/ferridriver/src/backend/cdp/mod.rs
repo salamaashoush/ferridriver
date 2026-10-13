@@ -89,6 +89,9 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// and discover paths never saw one, and the browser on the other end
   /// of a discover command is the only thing that knows how it started.
   headful: bool,
+  /// Held by whichever page is being captured in a browser that draws
+  /// only the tab in front. See [`Self::front_tab_turn`].
+  front_tab: Arc<tokio::sync::Mutex<()>>,
   /// Popup announcement subscriptions (see
   /// [`crate::backend::PopupInfo`]). Arc-shared across browser clones
   /// so a pump subscribed through any clone observes popups claimed by
@@ -154,6 +157,16 @@ impl<T: CdpTransport> CdpBrowser<T> {
     &self.version
   }
 
+  /// The lock a page holds while it is captured, for a browser that
+  /// draws only the tab in front: Chrome on an Android device, the one
+  /// browser with a single context. A tab behind another there never
+  /// produces the frame a capture waits for, so the page is brought to
+  /// the front first and nothing else may take its place until the
+  /// capture is done. `None` for a browser that draws every tab.
+  pub(crate) fn front_tab_turn(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+    (!self.isolated_contexts).then(|| Arc::clone(&self.front_tab))
+  }
+
   /// Have this browser's downloads written on its own machine and
   /// fetched from there. For the first caller only, and before a page
   /// asks for downloads: the directory is told to the browser once.
@@ -177,6 +190,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       version: Arc::clone(&self.version),
       isolated_contexts: self.isolated_contexts,
       headful: self.headful,
+      front_tab: Arc::clone(&self.front_tab),
       popup_taps: Arc::clone(&self.popup_taps),
       create_ledger: Arc::clone(&self.create_ledger),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
@@ -258,6 +272,11 @@ const fn window_insets(headful: bool) -> (i64, i64) {
     (24, 88)
   }
 }
+
+/// How long a tab brought to the front has to answer a capture before
+/// it is brought to the front again, and how many times that is tried.
+const FRONT_TAB_DRAWN: Duration = Duration::from_millis(750);
+const FRONT_TAB_ATTEMPTS: usize = 12;
 
 /// Shared targetId -> sessionId cache. See [`CdpBrowser::attached_targets`].
 type AttachedTargets = Arc<std::sync::Mutex<FxHashMap<String, Option<String>>>>;
@@ -476,6 +495,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       version,
       isolated_contexts,
       headful,
+      front_tab: Arc::default(),
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       downloads_dir,
       popup_taps,
@@ -1459,6 +1479,7 @@ impl CdpBrowser<ws::WsTransport> {
       version,
       isolated_contexts,
       headful,
+      front_tab: Arc::default(),
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
@@ -2648,6 +2669,28 @@ impl<T: CdpWrap> CdpPage<T> {
 
   pub async fn bring_to_front(&self) -> Result<()> {
     self.cmd("Page.bringToFront", serde_json::json!({})).await?;
+    Ok(())
+  }
+
+  /// Bring the page to the front of a browser that draws only the tab
+  /// in front, and return once it is drawn there. A tab asked to the
+  /// front while another is still opening is overtaken by it, and
+  /// nothing says so: its animation frames keep firing either way. A
+  /// capture is what only the tab in front answers, so one pixel of one
+  /// is the evidence, and the request is made again until it arrives.
+  /// When it never does, the caller's capture reports its own timeout.
+  pub async fn bring_to_front_drawn(&self) -> Result<()> {
+    let pixel = serde_json::json!({
+      "format": "png",
+      "clip": { "x": 0, "y": 0, "width": 1, "height": 1, "scale": 1 },
+    });
+    for _ in 0..FRONT_TAB_ATTEMPTS {
+      self.bring_to_front().await?;
+      let drawn = self.cmd("Page.captureScreenshot", pixel.clone());
+      if let Ok(answer) = tokio::time::timeout(FRONT_TAB_DRAWN, drawn).await {
+        return answer.map(|_| ());
+      }
+    }
     Ok(())
   }
 

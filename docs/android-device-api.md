@@ -45,6 +45,9 @@ A download in that browser is written on the device, under
 `download.path()` and `saveAs` name a file on this machine. The device's copy
 is removed once fetched.
 
+Only the tab in front is drawn on a device, so a screenshot brings its page to
+the front first and the page stays there.
+
 ## Native views
 
 The selector actions and `input` go through Playwright's own driver, two APKs

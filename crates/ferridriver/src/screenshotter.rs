@@ -270,7 +270,7 @@ struct Size {
 pub(crate) async fn screenshot_page(page: &Page, options: &ScreenshotOptions) -> Result<Vec<u8>> {
   let request = Request::from(options);
   let format = request.validate(options.clip)?;
-  let _queue = page.screenshot_queue.lock().await;
+  let _turn = page.screenshot_turn().await?;
   let viewport = original_viewport_size(page).await?;
   prepare(page, &request).await;
   let result = async {

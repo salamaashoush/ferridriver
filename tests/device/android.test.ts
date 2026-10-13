@@ -64,6 +64,32 @@ test.describe('an Android device', () => {
   });
 
   // Needs Playwright's driver in the cache: `ferridriver install android-driver`.
+  // A phone draws one tab, so a capture brings its page to the front.
+  test('captures tabs that are behind another, together', async () => {
+    const phone = await device();
+    const context = await phone.launchBrowser();
+    try {
+      const behind = context.pages()[0];
+      await behind.goto("data:text/html,<body style='background:red'><h1 id='h'>behind</h1>");
+      const middle = await context.newPage();
+      await middle.goto("data:text/html,<body style='background:blue'><h1>middle</h1>");
+      const front = await context.newPage();
+      await front.goto('data:text/html,<h1>front</h1>');
+
+      const [first, second, heading] = await Promise.all([
+        behind.screenshot({ timeout: 10_000 }),
+        middle.screenshot({ timeout: 10_000 }),
+        behind.locator('#h').screenshot({ timeout: 10_000 }),
+      ]);
+      expect([...first.slice(1, 4)]).toEqual([0x50, 0x4e, 0x47]);
+      expect(first.length).toBeGreaterThan(1_000);
+      expect(heading.length).toBeGreaterThan(100);
+      expect(first).not.toEqual(second);
+    } finally {
+      await context.close();
+    }
+  });
+
   // The browser writes on the device; the file is fetched from there.
   test('brings a download in the launched browser to this machine', async () => {
     const phone = await device();

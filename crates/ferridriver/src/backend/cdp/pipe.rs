@@ -449,6 +449,7 @@ mod tests {
       version: Arc::from("Chrome/fixture"),
       isolated_contexts: true,
       headful: false,
+      front_tab: Arc::default(),
       popup_taps: Arc::default(),
       create_ledger: Arc::default(),
       user_data_dir: None,

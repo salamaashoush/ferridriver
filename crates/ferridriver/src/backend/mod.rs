@@ -662,6 +662,16 @@ impl AnyBrowser {
     }
   }
 
+  /// The lock a page holds while it is captured, when this browser
+  /// draws only the tab in front. `None` when it draws every tab.
+  pub(crate) fn front_tab_turn(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+    match self {
+      Self::CdpPipe(browser) => browser.front_tab_turn(),
+      Self::CdpWs(browser) => browser.front_tab_turn(),
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => None,
+    }
+  }
+
   /// Have a Chromium on another machine download there and each file
   /// fetched from it. The other backends keep downloads on this machine.
   pub(crate) fn set_remote_downloads(&self, remote: crate::download::RemoteDownloads) {
@@ -1172,6 +1182,17 @@ impl AnyPage {
 
   pub async fn bring_to_front(&self) -> Result<()> {
     page_dispatch!(self, bring_to_front())
+  }
+
+  /// Bring the page to the front and return once it is drawn there, for
+  /// a browser that draws only the tab in front. The CDP backends are
+  /// the ones that drive such a browser.
+  pub async fn bring_to_front_drawn(&self) -> Result<()> {
+    match self {
+      Self::CdpPipe(page) => page.bring_to_front_drawn().await,
+      Self::CdpWs(page) => page.bring_to_front_drawn().await,
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => self.bring_to_front().await,
+    }
   }
 
   /// Mark a child frame's `<iframe>` element in its parent frame with

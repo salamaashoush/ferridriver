@@ -1413,6 +1413,13 @@ impl ContextRef {
       .is_none_or(|plan| plan.browser.shares_host_files())
   }
 
+  /// The lock a page of this context holds while it is captured, when
+  /// its browser draws only the tab in front.
+  pub(crate) async fn front_tab_turn(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+    let state = self.state.read().await;
+    state.page_open_plan(&self.key).ok()?.browser.front_tab_turn()
+  }
+
   /// Whether the context has opened in the browser, which it does with
   /// its first page.
   async fn is_open(&self) -> bool {

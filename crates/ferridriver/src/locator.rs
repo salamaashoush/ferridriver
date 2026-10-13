@@ -1872,7 +1872,7 @@ impl Locator {
     let request = crate::screenshotter::Request::from(&opts);
     let format = request.validate(None)?;
     let page = Arc::clone(self.frame.page_arc());
-    let _queue = page.screenshot_queue.lock().await;
+    let _turn = page.screenshot_turn().await?;
     let (page_ref, request_ref) = (&page, &request);
     let bytes = retry_resolve!(self, opts.timeout, "screenshot", |el, _page| async move {
       crate::screenshotter::screenshot_resolved_element(page_ref, &el, format, request_ref).await

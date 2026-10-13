@@ -653,7 +653,7 @@ impl ElementHandle {
     page.inner.ensure_engine_injected().await?;
     let timeout_ms = opts.timeout.unwrap_or_else(|| page.default_timeout());
     let deadline = (timeout_ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms));
-    let _queue = page.screenshot_queue.lock().await;
+    let _turn = page.screenshot_turn().await?;
     let mut attempt = 0usize;
     let bytes = loop {
       let backoff =
