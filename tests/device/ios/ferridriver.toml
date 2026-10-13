@@ -1,0 +1,29 @@
+# Specs for mobile Safari in an iOS simulator this run creates and deletes.
+# Needs macOS with Xcode and an iOS runtime (`ferridriver install ios`). Not
+# part of the default run or the gate. From the repository root:
+#
+#   target/debug/ferridriver test --no-inherit --config tests/device/ios/ferridriver.toml
+[test]
+testMatch = ["tests/device/ios/*.test.ts"]
+workers = 1
+timeout = 120000
+retries = 0
+outputDir = "test-results/device-ios"
+reporter = [{ name = "list" }]
+baseUrl = "http://127.0.0.1:47831"
+
+[test.browser]
+instance = "phone"
+
+[[test.webServer]]
+name = "fixtures"
+command = "target/debug/ferridriver-fixtures --port 47831 --static tests/assets"
+url = "http://127.0.0.1:47831/fx/landed"
+reuseExistingServer = true
+
+[browser.instances.phone]
+headless = true
+
+[browser.instances.phone.device]
+platform = "ios"
+timeout = 900000

@@ -461,8 +461,15 @@ impl Browser {
         Err(error) if error.is_unsupported() => {},
         other => other?,
       }
+      // A Classic WebDriver session reads and deletes the cookies of the
+      // document it is on and no others, so the one above took nothing
+      // from a blank page: each origin's go while the keeper stands on it.
+      let cookies_follow_the_document = keeper.inner().kind() == crate::backend::BackendKind::WebDriver;
       for origin in &visited {
         keeper.restore_origin_storage(origin, None).await?;
+        if cookies_follow_the_document {
+          keeper.inner().clear_cookies().await?;
+        }
       }
       Ok::<(), crate::FerriError>(())
     }

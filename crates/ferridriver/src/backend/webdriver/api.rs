@@ -307,6 +307,24 @@ impl WebDriverPage {
   }
 
   pub async fn set_cookie(&self, cookie: crate::backend::CookieData) -> Result<()> {
+    if super::capabilities::uses_xcuitest(&self.capabilities) {
+      // Appium writes the cookie through the document, which drops one for
+      // another host and reports success.
+      let host = self.execute_script("return location.hostname;", vec![]).await?;
+      let host = host.as_str().unwrap_or_default();
+      let domain = cookie.domain.trim_start_matches('.');
+      let held = host.eq_ignore_ascii_case(domain)
+        || host
+          .len()
+          .checked_sub(domain.len() + 1)
+          .is_some_and(|dot| host.as_bytes()[dot] == b'.' && host[dot + 1..].eq_ignore_ascii_case(domain));
+      if !held {
+        return Err(FerriError::unsupported(format!(
+          "Safari on iOS sets a cookie through the document it is on, and a document of {host:?} cannot hold one for {:?}",
+          cookie.domain
+        )));
+      }
+    }
     let mut value = serde_json::to_value(cookie)?;
     let object = value
       .as_object_mut()
@@ -401,6 +419,31 @@ mod tests {
     let mut page = WebDriverPage::new(session, super::super::session::Target::default(), 1000);
     page.capabilities = Arc::new(json!({"platformName":"iOS","automationName":"XCUITest"}));
     (page, server)
+  }
+
+  #[tokio::test]
+  async fn a_cookie_for_another_host_is_refused_before_it_is_sent() {
+    let (page, server) = callback_page(vec![json!({"ok":true,"value":"shop.example.com"})]).await;
+    let cookie = |domain: &str| crate::backend::CookieData {
+      name: "session".into(),
+      value: "1".into(),
+      domain: domain.into(),
+      path: "/".into(),
+      secure: false,
+      http_only: false,
+      expires: None,
+      same_site: None,
+      url: None,
+    };
+    // The server panics on a cookie request, so a refusal that came after
+    // sending one would fail here.
+    for domain in ["example.org", "p.example.com", "other.shop.example.com"] {
+      let error = page.set_cookie(cookie(domain)).await.unwrap_err();
+      assert!(error.is_unsupported(), "{domain}: {error}");
+      assert!(error.to_string().contains(&format!("cannot hold one for {domain:?}")));
+    }
+    page.session.close().await.unwrap();
+    assert_eq!(server.await.unwrap(), 3);
   }
 
   #[tokio::test]

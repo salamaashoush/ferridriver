@@ -161,7 +161,15 @@ impl WebDriverSession {
         timeout_ms,
       )
       .await?;
-    let field = self.request(Command::get(&["element", "active"]), timeout_ms).await?;
+    // The tap returns before Safari has moved focus into the address field.
+    let field = loop {
+      match self.request(Command::get(&["element", "active"]), timeout_ms).await {
+        Err(FerriError::Protocol { message, .. }) if message.contains("error no such element") => {
+          tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        },
+        field => break field?,
+      }
+    };
     let field = element_id(&field)?;
     self
       .request(Command::post(&["element", field, "clear"], json!({})), timeout_ms)
@@ -345,6 +353,22 @@ mod tests {
   use super::*;
   use tokio::io::AsyncWriteExt;
 
+  /// What the device answers the steps of a navigation that always succeed.
+  fn navigation_reply(request: &(String, Value)) -> Value {
+    if request.1["script"]
+      .as_str()
+      .is_some_and(|script| script.contains("document.visibilityState"))
+    {
+      json!(true)
+    } else if request.1["value"] == "TabBarItemTitle" {
+      json!({"element-6066-11e4-a52e-4f735466cecf":"address"})
+    } else if request.0.starts_with("GET /session/navigation/element/active ") {
+      json!({"element-6066-11e4-a52e-4f735466cecf":"field"})
+    } else {
+      Value::Null
+    }
+  }
+
   async fn navigation_case(reject: bool, cancel: bool, never_commit: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = reqwest::Url::parse(&format!("http://{}/session", listener.local_addr().unwrap())).unwrap();
@@ -358,37 +382,40 @@ mod tests {
       let mut release = Some(release_rx);
       let mut restored = Some(restored);
       let mut reads = 0;
+      let mut focus_reads = 0;
       loop {
         let (mut socket, _) = listener.accept().await.unwrap();
         let request = super::super::tests::request(&mut socket).await;
         let script = request.1["script"].as_str().unwrap_or_default();
         let input = request.0.starts_with("POST /session/navigation/element/field/value ");
+        // The tap on the address field returns before focus has moved into it.
+        let unfocused = request.0.starts_with("GET /session/navigation/element/active ") && {
+          focus_reads += 1;
+          focus_reads == 1
+        };
         if input {
           started.take().unwrap().send(()).unwrap();
           release.take().unwrap().await.unwrap();
         }
-        let value = if input && reject {
-          json!({"error":"unknown error","message":"URL entry rejected"})
-        } else if script.contains("document.visibilityState") {
-          json!(true)
-        } else if request.1["value"] == "TabBarItemTitle" {
-          json!({"element-6066-11e4-a52e-4f735466cecf":"address"})
-        } else if request.0.starts_with("GET /session/navigation/element/active ") {
-          json!({"element-6066-11e4-a52e-4f735466cecf":"field"})
+        let (status, value) = if input && reject {
+          (
+            "500 Internal Server Error",
+            json!({"error":"unknown error","message":"URL entry rejected"}),
+          )
+        } else if unfocused {
+          (
+            "404 Not Found",
+            json!({"error":"no such element","message":"unable to find an element using '(null)', value '(null)'"}),
+          )
         } else if script.starts_with("const expected=") {
           reads += 1;
-          json!(!never_commit && reads > 1)
+          ("200 OK", json!(!never_commit && reads > 1))
         } else {
-          Value::Null
+          ("200 OK", navigation_reply(&request))
         };
         let cleanup = script.contains("if(state.element)");
         let done = request.0.starts_with("DELETE ");
         let body = json!({"value":value}).to_string();
-        let status = if input && reject {
-          "500 Internal Server Error"
-        } else {
-          "200 OK"
-        };
         socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         requests.push(request);
         if cleanup {
@@ -467,6 +494,11 @@ mod tests {
     if !reject && !never_commit {
       assert_eq!(reads, 2);
     }
+    let focus_reads = requests
+      .iter()
+      .filter(|request| request.0.starts_with("GET /session/navigation/element/active "))
+      .count();
+    assert_eq!(focus_reads, 2);
   }
 
   #[tokio::test]

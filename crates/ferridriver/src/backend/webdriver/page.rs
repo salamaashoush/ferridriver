@@ -63,7 +63,7 @@ impl WebDriverPage {
     {
       return self
         .session
-        .native_navigate(self.target.clone(), url.as_str(), timeout_ms)
+        .native_navigate(self.target.clone(), &address_field_text(url.as_str()), timeout_ms)
         .await;
     }
     self
@@ -81,6 +81,47 @@ impl WebDriverPage {
       )
       .await?;
     Ok(())
+  }
+
+  /// Appium opens a tab with `window.open('about:blank')`. `WebKit` makes the
+  /// first navigation out of that document replace its history entry, and when
+  /// the navigation also swaps processes the entry Safari keeps still says
+  /// `about:blank`: going back to the first page a tab visited lands on a blank
+  /// document. With an entry underneath, the first navigation is an ordinary push.
+  pub(super) async fn seed_history(&self) -> Result<()> {
+    self.ensure_open()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(self.timeout_ms);
+    self
+      .session
+      .execute(
+        self.target.clone(),
+        Command::post(
+          &["execute", "sync"],
+          json!({"script":"location.href='about:blank#';location.href='about:blank';","args":[]}),
+        ),
+        self.timeout_ms,
+      )
+      .await?;
+    loop {
+      let settled = self
+        .session
+        .execute(
+          self.target.clone(),
+          Command::post(
+            &["execute", "sync"],
+            json!({"script":"return location.href==='about:blank'&&document.readyState==='complete';","args":[]}),
+          ),
+          self.timeout_ms,
+        )
+        .await?;
+      if settled == json!(true) {
+        return Ok(());
+      }
+      if self.timeout_ms != 0 && std::time::Instant::now() >= deadline {
+        return Err(FerriError::timeout("preparing a Safari tab's history", self.timeout_ms));
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
   }
 
   pub async fn evaluate(&self, expression: &str) -> Result<Option<Value>> {
@@ -482,9 +523,49 @@ impl WebDriverPage {
   }
 }
 
+/// What to type into Safari's address field to reach `url`. The field takes
+/// text with a space in it for a search, so anything a URL would percent-encode
+/// in transit is encoded before it is typed.
+fn address_field_text(url: &str) -> String {
+  use std::fmt::Write;
+  let mut text = String::with_capacity(url.len());
+  for character in url.chars() {
+    if character.is_ascii_graphic() && !matches!(character, '"' | '<' | '>' | '`' | '{' | '}' | '|' | '\\' | '^') {
+      text.push(character);
+      continue;
+    }
+    let mut bytes = [0; 4];
+    for byte in character.encode_utf8(&mut bytes).bytes() {
+      let _ = write!(text, "%{byte:02X}");
+    }
+  }
+  text
+}
+
 fn coordinate(value: &Value, key: &str) -> Result<f64> {
   value[key]
     .as_f64()
     .filter(|number| number.is_finite())
     .ok_or_else(|| FerriError::protocol("XCUITest coordinate translation", format!("missing or invalid {key}")))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::address_field_text;
+
+  #[test]
+  fn address_field_text_encodes_what_safari_would_search_for() {
+    assert_eq!(
+      address_field_text("data:text/html,<title>No frames</title>"),
+      "data:text/html,%3Ctitle%3ENo%20frames%3C/title%3E"
+    );
+    assert_eq!(
+      address_field_text("data:text/html,%3Cp%3Ekept%3C%2Fp%3E"),
+      "data:text/html,%3Cp%3Ekept%3C%2Fp%3E"
+    );
+    assert_eq!(
+      address_field_text("data:text/plain,caf\u{e9}"),
+      "data:text/plain,caf%C3%A9"
+    );
+  }
 }

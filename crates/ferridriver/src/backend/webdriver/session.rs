@@ -30,6 +30,7 @@ pub struct WebDriverSession {
   shutdown: tokio::sync::watch::Sender<bool>,
   uncertain: std::sync::atomic::AtomicBool,
   script_timeout_scoped: std::sync::atomic::AtomicBool,
+  selected_window: std::sync::Mutex<Option<String>>,
 }
 
 pub struct CreatedSession {
@@ -81,6 +82,17 @@ impl Command {
 impl WebDriverSession {
   pub(crate) fn protocol_error(&self, method: &str, message: &str) -> FerriError {
     FerriError::protocol(method, self.secrets.redact(message).into_owned())
+  }
+
+  /// The window the session last drove. Classic `WebDriver` does not say
+  /// which window opened another, and a window that appears was almost
+  /// always opened by the one just acted on.
+  pub(crate) fn selected_window(&self) -> Option<String> {
+    self
+      .selected_window
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   pub(crate) fn is_closed(&self) -> bool {
@@ -153,6 +165,7 @@ impl WebDriverSession {
       shutdown: tokio::sync::watch::channel(false).0,
       uncertain: std::sync::atomic::AtomicBool::new(false),
       script_timeout_scoped: std::sync::atomic::AtomicBool::new(false),
+      selected_window: std::sync::Mutex::default(),
     })
   }
 
@@ -308,6 +321,10 @@ impl WebDriverSession {
       self
         .request(Command::post(&["window"], json!({"handle": window})), timeout_ms)
         .await?;
+      *self
+        .selected_window
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(window.clone());
       self
         .request(Command::post(&["frame"], json!({"id": null})), timeout_ms)
         .await?;
@@ -335,7 +352,10 @@ impl WebDriverSession {
         .is_some_and(|body| body.len() == 1);
     let mut request = self.client.request(command.method, url);
     if let Some(body) = command.body {
+      tracing::trace!(target: "ferridriver::webdriver::wire", "> {method} {}", self.wire_excerpt(&body));
       request = request.json(&body);
+    } else {
+      tracing::trace!(target: "ferridriver::webdriver::wire", "> {method}");
     }
     if let Some(budget) = OperationBudget::capture() {
       budget
@@ -356,11 +376,21 @@ impl WebDriverSession {
     {
       self.secrets.redact_json(message);
     }
+    tracing::trace!(target: "ferridriver::webdriver::wire", "< {method} {status} {}", self.wire_excerpt(&payload));
     match decode_response(status, payload, &method, timeout_ms) {
       Err(error @ (FerriError::InvalidArgument { .. } | FerriError::Unsupported(_))) if unlimited_script => Err(
         FerriError::unsupported(format!("WebDriver provider rejects unlimited script timeouts: {error}")),
       ),
       result => result,
+    }
+  }
+
+  fn wire_excerpt(&self, value: &Value) -> String {
+    let text = value.to_string();
+    let text = self.secrets.redact(&text);
+    match text.char_indices().nth(600) {
+      Some((end, _)) => format!("{}...", &text[..end]),
+      None => text.into_owned(),
     }
   }
 

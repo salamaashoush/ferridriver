@@ -73,3 +73,37 @@ The unchanged keyboard workflow passed on iOS Safari 26.2, Chromium over pipe
 and WebSocket, Firefox/BiDi, and WebKit. The iOS run also checked trusted
 positioned clicks and owned-device cleanup. See
 [the native input verification record](ios-native-input-verification-2026-09-13.json).
+
+## How Safari on iOS differs
+
+The session is Classic WebDriver through Appium, which reports no events and
+sees one document at a time. Where that shows:
+
+- **History.** Appium opens a tab with `window.open('about:blank')`. WebKit
+  makes the first navigation out of that document replace its history entry,
+  and Safari's own copy of the entry keeps `about:blank`, so `goBack()` to the
+  first page a tab visited used to land on a blank document. A new tab is
+  therefore given one entry underneath before it is handed over: the first
+  navigation is an ordinary push, `history.length` on a new page is 2, and one
+  more `goBack()` than on a desktop browser is needed to run out of history.
+- **`data:` URLs.** Safari refuses a scripted top-level navigation to one, so
+  it is typed into the address field. Text with a space in it would be taken
+  for a search, so the URL is percent-encoded first and `page.url()` reports
+  that encoded form.
+- **Popups.** A window the page opened is found by asking for the window
+  handles every 250 ms. Its opener is taken to be the page the session last
+  drove, since the protocol does not say. Safari blocks `window.open()` that
+  no tap led to, so only a popup opened by a click or a tap arrives.
+- **Cookies.** `context.cookies()` and `clearCookies()` reach the cookies the
+  current document can see: its host, and the paths above its own.
+  `addCookies()` for another host is refused, since the cookie is written
+  through the document and would be dropped. Between tests, the cookies of
+  each origin the last test visited are cleared from that origin's root, which
+  leaves one set for a deeper path.
+
+`tests/device/ios` holds the specs for these, run against a simulator:
+
+```bash
+ferridriver test --no-inherit --config tests/device/ios/ferridriver.toml
+```
+

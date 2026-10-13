@@ -703,7 +703,7 @@ impl AnyBrowser {
       Self::CdpWs(b) => b.popup_taps(),
       Self::WebKit(b) => b.popup_taps(),
       Self::Bidi(b) => b.popup_taps(),
-      Self::WebDriver(b) => b.popup_taps.clone(),
+      Self::WebDriver(b) => b.popup_taps(),
     };
     taps.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(tx);
     rx

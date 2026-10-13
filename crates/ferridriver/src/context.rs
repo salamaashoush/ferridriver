@@ -2533,10 +2533,13 @@ async fn register_popup(
   popup.page.resume_popup().await?;
 
   // BiDi popups are never paused; their first navigation can commit before
-  // the context pump installs the frame-cache listener.
+  // the context pump installs the frame-cache listener. A Classic WebDriver
+  // window is found some time after it opened and reports no navigation.
   // A popup that closed at once still counts: Playwright reports it.
-  if matches!(&popup.page, crate::backend::AnyPage::Bidi(_))
-    && let Err(e) = page.sync_frames().await
+  if matches!(
+    &popup.page,
+    crate::backend::AnyPage::Bidi(_) | crate::backend::AnyPage::WebDriver(_)
+  ) && let Err(e) = page.sync_frames().await
   {
     tracing::debug!("popup frames: {e}");
   }

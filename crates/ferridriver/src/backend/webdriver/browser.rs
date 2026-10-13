@@ -7,6 +7,18 @@ use super::session::{Command, Target, WebDriverSession};
 use crate::backend::process::ChildGroup;
 use crate::error::{FerriError, Result};
 
+/// How often a session with a popup listener asks for its window handles.
+const WINDOW_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Default)]
+struct Windows {
+  pages: rustc_hash::FxHashMap<String, WebDriverPage>,
+  /// Windows handed to the popup listener, which registers them itself.
+  announced: rustc_hash::FxHashSet<String>,
+  /// The windows a session starts with were opened by nobody.
+  listed: bool,
+}
+
 #[derive(Clone)]
 pub struct WebDriverBrowser {
   pub(crate) session: Arc<WebDriverSession>,
@@ -14,8 +26,9 @@ pub struct WebDriverBrowser {
   pub(crate) child: Arc<tokio::sync::Mutex<Option<ChildGroup>>>,
   pub(crate) ios_owner: Option<Arc<crate::ios::IosOwner>>,
   timeout_ms: u64,
-  pages: Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, WebDriverPage>>>,
-  pub(crate) popup_taps: crate::backend::PopupTaps,
+  windows: Arc<tokio::sync::Mutex<Windows>>,
+  popup_taps: crate::backend::PopupTaps,
+  watching: Arc<std::sync::atomic::AtomicBool>,
   pub(crate) product: String,
   version: String,
 }
@@ -99,48 +112,51 @@ impl WebDriverBrowser {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       ios_owner: None,
       timeout_ms: 30_000,
-      pages: Arc::default(),
+      windows: Arc::default(),
       popup_taps: Arc::default(),
+      watching: Arc::default(),
       product,
       version,
     })
   }
 
   pub async fn pages(&self) -> Result<Vec<WebDriverPage>> {
-    let mut pages = self.pages.lock().await;
-    let handles = self
-      .session
-      .execute(Target::default(), Command::get(&["window", "handles"]), self.timeout_ms)
-      .await?;
-    let handles = handles
-      .as_array()
-      .ok_or_else(|| FerriError::protocol("WebDriver window handles", "expected an array"))?
-      .iter()
-      .map(|handle| {
-        let handle = handle
-          .as_str()
-          .ok_or_else(|| FerriError::protocol("WebDriver window handles", "expected a string handle"))?;
-        Ok(handle)
-      })
-      .collect::<Result<Vec<_>>>()?;
-    pages.retain(|handle, page| {
-      if handles.contains(&handle.as_str()) {
-        return true;
-      }
-      page.dispose_local();
-      false
-    });
-    Ok(
-      handles
-        .into_iter()
-        .map(|handle| {
-          pages
-            .entry(handle.to_owned())
-            .or_insert_with(|| self.page(handle))
-            .clone()
-        })
-        .collect(),
+    list_windows(
+      &self.session,
+      &self.windows,
+      &self.capabilities,
+      self.timeout_ms,
+      &self.popup_taps,
     )
+    .await
+  }
+
+  /// Classic `WebDriver` announces nothing, so a window the page opened is
+  /// found by asking for the handles. The first subscriber starts the asking,
+  /// which ends with the session or with the last handle on this browser.
+  pub(crate) fn popup_taps(&self) -> crate::backend::PopupTaps {
+    if !self.watching.swap(true, std::sync::atomic::Ordering::AcqRel) {
+      let session = Arc::downgrade(&self.session);
+      let windows = Arc::downgrade(&self.windows);
+      let capabilities = self.capabilities.clone();
+      let timeout_ms = self.timeout_ms;
+      let taps = self.popup_taps.clone();
+      tokio::spawn(async move {
+        loop {
+          tokio::time::sleep(WINDOW_POLL).await;
+          let (Some(session), Some(windows)) = (session.upgrade(), windows.upgrade()) else {
+            return;
+          };
+          if session.is_closed() {
+            return;
+          }
+          if let Err(error) = list_windows(&session, &windows, &capabilities, timeout_ms, &taps).await {
+            tracing::debug!(target: "ferridriver::webdriver", %error, "listing windows for popups failed");
+          }
+        }
+      });
+    }
+    self.popup_taps.clone()
   }
 
   pub async fn new_page(&self, url: &str) -> Result<WebDriverPage> {
@@ -159,7 +175,7 @@ impl WebDriverBrowser {
       .first()
       .map(|page| page.target.clone())
       .ok_or_else(|| FerriError::target_closed(Some("WebDriver session has no open windows".into())))?;
-    let mut pages = self.pages.lock().await;
+    let mut windows = self.windows.lock().await;
     let result = self
       .session
       .execute(
@@ -172,35 +188,27 @@ impl WebDriverBrowser {
       .get("handle")
       .and_then(Value::as_str)
       .ok_or_else(|| FerriError::protocol("WebDriver new window", "response omitted handle"))?;
-    let page = self.page(handle);
-    pages.insert(handle.to_owned(), page.clone());
-    if url != "about:blank"
-      && let Err(error) = page.navigate(url, self.timeout_ms).await
-    {
+    let page = window_page(&self.session, &self.capabilities, self.timeout_ms, handle);
+    windows.pages.insert(handle.to_owned(), page.clone());
+    let prepared = async {
+      if super::capabilities::uses_xcuitest(&self.capabilities) {
+        page.seed_history().await?;
+      }
+      if url != "about:blank" {
+        page.navigate(url, self.timeout_ms).await?;
+      }
+      Ok(())
+    };
+    if let Err(error) = prepared.await {
       if let Err(cleanup) = page.close().await {
         return Err(FerriError::backend(format!(
           "Creating WebDriver page failed: {error}; closing its window failed: {cleanup}"
         )));
       }
-      pages.remove(handle);
+      windows.pages.remove(handle);
       return Err(error);
     }
     Ok(page)
-  }
-
-  fn page(&self, handle: &str) -> WebDriverPage {
-    let mut page = WebDriverPage::new(
-      self.session.clone(),
-      Target {
-        appium_context: super::capabilities::uses_xcuitest(&self.capabilities)
-          .then(|| format!("WEBVIEW_{}", handle.trim_start_matches("WEBVIEW_"))),
-        window: Some(handle.to_owned()),
-        ..Default::default()
-      },
-      self.timeout_ms,
-    );
-    page.capabilities = Arc::new(self.capabilities.clone());
-    page
   }
 
   pub async fn close(&self) -> Result<()> {
@@ -212,7 +220,7 @@ impl WebDriverBrowser {
 
   async fn close_owned(&self) -> Result<()> {
     self.session.close().await?;
-    for (_, page) in self.pages.lock().await.drain() {
+    for (_, page) in self.windows.lock().await.pages.drain() {
       page.dispose_local();
     }
     let mut child = self.child.lock().await;
@@ -228,6 +236,83 @@ impl WebDriverBrowser {
     }
     Ok(())
   }
+}
+
+fn window_page(session: &Arc<WebDriverSession>, capabilities: &Value, timeout_ms: u64, handle: &str) -> WebDriverPage {
+  let mut page = WebDriverPage::new(
+    session.clone(),
+    Target {
+      appium_context: super::capabilities::uses_xcuitest(capabilities)
+        .then(|| format!("WEBVIEW_{}", handle.trim_start_matches("WEBVIEW_"))),
+      window: Some(handle.to_owned()),
+      ..Default::default()
+    },
+    timeout_ms,
+  );
+  page.capabilities = Arc::new(capabilities.clone());
+  page
+}
+
+/// The session's windows, less the ones a popup listener was handed. A
+/// window nobody here opened goes to that listener when there is one, with
+/// the window the session last drove as its opener.
+async fn list_windows(
+  session: &Arc<WebDriverSession>,
+  windows: &tokio::sync::Mutex<Windows>,
+  capabilities: &Value,
+  timeout_ms: u64,
+  popup_taps: &crate::backend::PopupTaps,
+) -> Result<Vec<WebDriverPage>> {
+  let mut windows = windows.lock().await;
+  let opener = session.selected_window();
+  let handles = session
+    .execute(Target::default(), Command::get(&["window", "handles"]), timeout_ms)
+    .await?;
+  let handles = handles
+    .as_array()
+    .ok_or_else(|| FerriError::protocol("WebDriver window handles", "expected an array"))?
+    .iter()
+    .map(|handle| {
+      handle
+        .as_str()
+        .ok_or_else(|| FerriError::protocol("WebDriver window handles", "expected a string handle"))
+    })
+    .collect::<Result<Vec<_>>>()?;
+  windows.pages.retain(|handle, page| {
+    if handles.contains(&handle.as_str()) {
+      return true;
+    }
+    page.dispose_local();
+    false
+  });
+  windows.announced.retain(|handle| handles.contains(&handle.as_str()));
+  let opened_here = std::mem::replace(&mut windows.listed, true);
+  let mut listed = Vec::with_capacity(handles.len());
+  for handle in handles {
+    if let Some(page) = windows.pages.get(handle) {
+      if !windows.announced.contains(handle) {
+        listed.push(page.clone());
+      }
+      continue;
+    }
+    let page = window_page(session, capabilities, timeout_ms, handle);
+    windows.pages.insert(handle.to_owned(), page.clone());
+    let announced = opened_here
+      && crate::backend::push_popup(
+        popup_taps,
+        crate::backend::PopupInfo {
+          page: crate::backend::AnyPage::WebDriver(page.clone()),
+          browser_context_id: None,
+          opener_target_id: opener.clone(),
+        },
+      );
+    if announced {
+      windows.announced.insert(handle.to_owned());
+    } else {
+      listed.push(page);
+    }
+  }
+  Ok(listed)
 }
 
 struct PendingPage(Option<WebDriverPage>);
@@ -510,7 +595,7 @@ mod tests {
       .unwrap();
     assert_eq!(browser.version(), "26.2");
     assert!(browser.capabilities.get("browserVersion").is_none());
-    let mut page = browser.page("device");
+    let mut page = window_page(&browser.session, &browser.capabilities, browser.timeout_ms, "device");
     page.target = Target::default();
     assert!(!page.supports_window_resize());
     assert_eq!(
@@ -605,6 +690,55 @@ mod tests {
     assert_eq!(requests[8].1, json!({"handle":"remaining"}));
     assert_eq!(requests[10].0, "POST /session/pages/window/new HTTP/1.1");
     assert_eq!(requests[12].0, "DELETE /session/pages HTTP/1.1");
+  }
+
+  #[tokio::test]
+  async fn a_window_nobody_here_opened_goes_to_the_popup_listener() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+      for value in [
+        json!({"sessionId":"popups","capabilities":{"browserName":"safari","browserVersion":"26.6.1"}}),
+        json!(["first"]),
+        Value::Null,
+        Value::Null,
+        json!("Opener"),
+        json!(["first", "second"]),
+        json!(["first", "second"]),
+        Value::Null,
+      ] {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        super::super::session::tests::request(&mut socket).await;
+        let body = json!({"value":value}).to_string();
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+      }
+    });
+    let browser = WebDriverBrowser::connect(&endpoint, "safari", None, None, Some(1000))
+      .await
+      .unwrap();
+    // Subscribed without `popup_taps()`, whose polling would ask for handles
+    // this server does not expect.
+    let (tap, mut popups) = tokio::sync::mpsc::unbounded_channel();
+    browser.popup_taps.lock().unwrap().push(tap);
+
+    // The windows the session started with are nobody's popups.
+    let initial = browser.pages().await.unwrap();
+    assert_eq!(initial.len(), 1);
+    assert!(popups.try_recv().is_err());
+
+    assert_eq!(initial[0].title().await.unwrap().as_deref(), Some("Opener"));
+    let listed = browser.pages().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].page_guid(), "first");
+    let popup = popups.try_recv().unwrap();
+    assert_eq!(popup.page.backend_target_id(), "second");
+    assert_eq!(popup.opener_target_id.as_deref(), Some("first"));
+
+    // The listener registers it; listing it again would register it twice.
+    assert_eq!(browser.pages().await.unwrap().len(), 1);
+    assert!(popups.try_recv().is_err());
+    browser.close().await.unwrap();
+    server.await.unwrap();
   }
 
   #[tokio::test]
