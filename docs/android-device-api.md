@@ -26,9 +26,8 @@ await context.close();
 await device.close();
 ```
 
-The Node addon exports the same `_android` object, and Rust has it as
-`ferridriver::android::{Android, AndroidDevice}`, where `open(command)` also
-returns an `AndroidSocket` on a device service such as `shell:logcat`.
+The Node addon exports the same `_android`, and Rust has it as
+`ferridriver::android::{Android, AndroidDevice}`.
 
 `devices` returns the devices the server reports as usable, and the same
 object for a device listed twice until it is closed. Its options take the
@@ -80,8 +79,48 @@ In a script a device answers to the realm's permissions: the ADB server's
 host and port to its network grant, a file named by path to its read grant,
 and a screenshot `path` to its write grant.
 
-Not there yet: `open` in the two bindings, `webView` and `webViews`, the
-device's events, and `android.connect` / `launchServer`.
+## Web views, events and sockets
+
+A device is asked twice a second which web views it has, as upstream asks:
+every `webview_devtools_remote_<pid>` socket is one, named with the package
+of the process behind it.
+
+```ts
+device.on('webview', view => console.log(view.pkg(), view.pid()));
+const view = await device.webView({ pkg: 'com.example.app' });
+const page = await view.page();
+await page.goto('https://example.com');
+view.once('close', () => console.log('gone'));
+```
+
+`webViews()` is the list as last read. `webView(selector, options?)` takes a
+`pkg`, a `socketName`, or both, answers with a view already there, and
+otherwise waits for one within `timeout` (the device's default when absent).
+A view is the same object for as long as its socket lives. `page()` connects
+to the view on first use and gives that page every time after.
+
+A device emits `webview` and `close`, a view emits `close`, and each takes
+`on`, `once` and `off`. `device.waitForEvent(event, { timeout, predicate })`
+resolves with the next one the predicate accepts, and rejects when the device
+closes first. `setDefaultTimeout` sets what a call without a `timeout` uses,
+on one device or, from `_android`, on every device listed afterwards.
+
+`open(command)` returns an `AndroidSocket` on a device service:
+
+```ts
+const shell = await device.open('shell:read line; echo "heard $line"');
+shell.on('data', chunk => console.log(new TextDecoder().decode(chunk)));
+await shell.write(new TextEncoder().encode('hello\n'));
+await shell.close();
+```
+
+It emits `data` with the bytes that arrived and `close` when the service
+ends.
+
+`_android.connect` and `_android.launchServer` reject with an unsupported
+error. Upstream they speak Playwright's own client and server protocol, which
+ferridriver does not implement. A device on another machine is reached
+through its ADB server: `_android.devices({ host, port })`.
 
 ## Checking it on a device
 

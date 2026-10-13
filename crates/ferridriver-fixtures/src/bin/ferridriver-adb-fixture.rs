@@ -7,6 +7,10 @@
 //! pushed there with its mode, and anything else is echoed back. A
 //! package whose bytes start with `BAD` is refused.
 //!
+//! Its web views are what was pushed to `webviews`, a line of
+//! `/proc/net/unix` each, and every process is `com.example.app`. The
+//! shell command `upper` reads a line and answers it in upper case.
+//!
 //! It also plays Playwright's Android driver on the abstract socket
 //! `playwright_android_driver_socket`: every call is recorded and
 //! answered, `cat driver-calls` returns the record as a JSON array, a
@@ -123,6 +127,27 @@ async fn shell(stream: &mut TcpStream, command: &str, files: &Files) -> Result<(
     stream.write_all(b"Fixture Phone\n").await?;
   } else if command == "screencap -p" {
     stream.write_all(PNG).await?;
+  } else if command == "cat /proc/net/unix | grep webview_devtools_remote" {
+    let listed = files
+      .lock()
+      .map_err(|error| anyhow::anyhow!(error.to_string()))?
+      .get("webviews")
+      .map_or_else(Vec::new, |(_, lines)| lines.clone());
+    stream.write_all(&listed).await?;
+  } else if let Some(pid) = command.strip_prefix("ps -A | grep ") {
+    stream
+      .write_all(format!("u0_a145 {pid} 901 15200000 120000 0 0 S com.example.app\n").as_bytes())
+      .await?;
+  } else if command == "upper" {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while stream.read_exact(&mut byte).await.is_ok() {
+      line.push(byte[0]);
+      if byte[0] == b'\n' {
+        break;
+      }
+    }
+    stream.write_all(&line.to_ascii_uppercase()).await?;
   } else if command.starts_with("am instrument -w ") {
     // The driver's shell stays open for as long as the driver runs.
     let mut closed = [0u8; 1];

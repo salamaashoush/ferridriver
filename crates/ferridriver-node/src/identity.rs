@@ -18,7 +18,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{JavaScriptClassExt, Reference, ToNapiValue, TypeName, ValueType};
 use napi::{Env, sys};
 
-use crate::android::AndroidDevice;
+use crate::android::{AndroidDevice, AndroidWebView};
 use crate::dialog::Dialog;
 use crate::frame::Frame;
 use crate::page::Page;
@@ -71,6 +71,8 @@ thread_local! {
   static DIALOGS: RefCell<Cache<ferridriver::dialog::Dialog, Dialog>> = const { RefCell::new(Cache::new()) };
   static ANDROID_DEVICES: RefCell<Cache<ferridriver::android::AndroidDevice, AndroidDevice>> =
     const { RefCell::new(Cache::new()) };
+  static ANDROID_WEB_VIEWS: RefCell<Cache<ferridriver::android::AndroidWebView, AndroidWebView>> =
+    const { RefCell::new(Cache::new()) };
 }
 
 /// A page on its way to JS, as the object that already stands for it.
@@ -106,6 +108,7 @@ impl ToNapiValue for PageObject {
 
 /// A device on its way to JS: `android.devices()` hands out the same
 /// object for a device until it is closed.
+#[derive(Clone)]
 pub struct AndroidDeviceObject(pub ferridriver::android::AndroidDevice);
 
 impl ToNapiValue for AndroidDeviceObject {
@@ -125,6 +128,41 @@ impl ToNapiValue for AndroidDeviceObject {
       },
     };
     unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+/// A web view on its way to JS: the same object each time a device
+/// lists, finds or announces it.
+#[derive(Clone)]
+pub struct AndroidWebViewObject(pub ferridriver::android::AndroidWebView);
+
+impl ToNapiValue for AndroidWebViewObject {
+  unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
+    let js_env = Env::from_raw(env);
+    let found = ANDROID_WEB_VIEWS.with(|views| views.borrow().find(js_env, |view| *view == val.0))?;
+    let reference = match found {
+      Some(reference) => reference,
+      None => {
+        let reference = AndroidWebView::from_core(val.0.clone()).into_reference(js_env)?;
+        ANDROID_WEB_VIEWS.with(|views| {
+          let mut views = views.borrow_mut();
+          views.retain(|view| !view.is_closed());
+          views.insert(js_env, val.0, &reference)
+        })?;
+        reference
+      },
+    };
+    unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+impl TypeName for AndroidWebViewObject {
+  fn type_name() -> &'static str {
+    "AndroidWebView"
+  }
+
+  fn value_type() -> ValueType {
+    ValueType::Object
   }
 }
 

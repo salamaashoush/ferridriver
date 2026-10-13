@@ -6,25 +6,20 @@
 //! `push(file, path, options?)`, `installApk(file, options?)`,
 //! `launchBrowser(options?)` and `close()`, the selector actions (`wait`,
 //! `fill`, `press`, `tap`, `longTap`, `drag`, `fling`, `pinchClose`,
-//! `pinchOpen`, `scroll`, `swipe`, `info`) and `input`.
+//! `pinchOpen`, `scroll`, `swipe`, `info`) and `input`, `open(command)`
+//! with its `AndroidSocket`, `webViews()`, `webView(selector, options?)`
+//! with `AndroidWebView`, the `webview` and `close` events, and
+//! `waitForEvent`.
 
 use napi::Result;
-use napi::bindgen_prelude::{Buffer, Either, FromNapiValue, Object, TypeName, ValidateNapiValue};
+use napi::bindgen_prelude::{
+  AsyncBlock, AsyncBlockBuilder, Buffer, Either, FromNapiValue, Object, TypeName, ValidateNapiValue,
+};
 use napi_derive::napi;
 
 use crate::error::IntoNapi;
 
-/// Playwright: `android.devices(options?)`.
-#[napi(object, object_to_js = false)]
-#[derive(Debug, Clone, Default)]
-pub struct AndroidDevicesOptions {
-  /// Where the ADB server listens. `127.0.0.1` when absent.
-  pub host: Option<String>,
-  /// The ADB server's port. `5037` when absent.
-  pub port: Option<u32>,
-  /// Leave the device's driver as it is instead of installing it.
-  pub omit_driver_install: Option<bool>,
-}
+mod namespace;
 
 /// Playwright: `androidDevice.screenshot(options?)`.
 #[napi(object, object_to_js = false)]
@@ -227,6 +222,175 @@ fn direction(direction: &str) -> Result<ferridriver::android::AndroidDirection> 
   ferridriver::android::AndroidDirection::parse(direction).into_napi()
 }
 
+type Tsfn<A> = napi::threadsafe_function::ThreadsafeFunction<A, (), A, napi::Status, false, true, 0>;
+
+struct Listener<A: napi::bindgen_prelude::JsValuesTupleIntoVec + 'static> {
+  id: u64,
+  event: String,
+  once: bool,
+  call: Tsfn<A>,
+}
+
+/// The listeners JS put on one object, called from the task that reads
+/// the object's events. A listener is matched for `off` by the function
+/// itself, which only the JS thread can compare.
+/// A listener's id and event beside the function JS passed, kept to
+/// match it again in `off`.
+type Functions<A> = Vec<(u64, String, napi::bindgen_prelude::FunctionRef<A, ()>)>;
+
+struct Emitter<A: napi::bindgen_prelude::JsValuesTupleIntoVec + 'static> {
+  listeners: std::sync::Arc<std::sync::Mutex<Vec<Listener<A>>>>,
+  functions: std::sync::Mutex<Functions<A>>,
+  next: std::sync::atomic::AtomicU64,
+  pumping: std::sync::atomic::AtomicBool,
+}
+
+impl<A> Emitter<A>
+where
+  A: napi::bindgen_prelude::JsValuesTupleIntoVec
+    + napi::bindgen_prelude::ToNapiValue
+    + napi::bindgen_prelude::TypeName
+    + Clone
+    + Send
+    + 'static,
+{
+  fn new() -> Self {
+    Self {
+      listeners: std::sync::Arc::default(),
+      functions: std::sync::Mutex::new(Vec::new()),
+      next: std::sync::atomic::AtomicU64::new(0),
+      pumping: std::sync::atomic::AtomicBool::new(false),
+    }
+  }
+
+  /// Register `listener`, and say whether this is the first one: the
+  /// moment to start reading events.
+  fn add(&self, event: String, listener: &napi::bindgen_prelude::Function<'static, A, ()>, once: bool) -> Result<bool> {
+    let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let function = listener.create_ref()?;
+    let call: Tsfn<A> = listener
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    self
+      .functions
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push((id, event.clone(), function));
+    self
+      .listeners
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(Listener { id, event, once, call });
+    Ok(!self.pumping.swap(true, std::sync::atomic::Ordering::SeqCst))
+  }
+
+  fn remove(
+    &self,
+    env: napi::Env,
+    event: &str,
+    listener: &napi::bindgen_prelude::Function<'static, A, ()>,
+  ) -> Result<()> {
+    let incoming = listener.create_ref()?;
+    let mut functions = self.functions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut removed = Vec::new();
+    let mut index = 0;
+    while index < functions.len() {
+      let same = functions[index].1 == event
+        && env.strict_equals(incoming.borrow_back(&env)?, functions[index].2.borrow_back(&env)?)?;
+      if same {
+        removed.push(functions.remove(index).0);
+      } else {
+        index += 1;
+      }
+    }
+    self
+      .listeners
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .retain(|listener| !removed.contains(&listener.id));
+    Ok(())
+  }
+
+  /// Call every listener of `event`, in the order they were added.
+  fn emit(listeners: &std::sync::Mutex<Vec<Listener<A>>>, event: &str, argument: &A) {
+    let mut listeners = listeners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for listener in listeners.iter().filter(|listener| listener.event == event) {
+      listener.call.call(
+        argument.clone(),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+      );
+    }
+    listeners.retain(|listener| !(listener.event == event && listener.once));
+  }
+}
+
+/// What a device's listener is called with: the web view that appeared,
+/// or the device that closed.
+#[derive(Clone)]
+pub enum AndroidDeviceEventArg {
+  WebView(crate::identity::AndroidWebViewObject),
+  Device(crate::identity::AndroidDeviceObject),
+}
+
+impl TypeName for AndroidDeviceEventArg {
+  fn type_name() -> &'static str {
+    "AndroidWebView | AndroidDevice"
+  }
+
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Object
+  }
+}
+
+impl napi::bindgen_prelude::ToNapiValue for AndroidDeviceEventArg {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, value: Self) -> Result<napi::sys::napi_value> {
+    match value {
+      Self::WebView(view) => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, view) },
+      Self::Device(device) => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, device) },
+    }
+  }
+}
+
+/// What a socket's listener is called with: the bytes that arrived, or
+/// nothing when it closed.
+#[derive(Clone)]
+pub enum AndroidSocketEventArg {
+  Data(Vec<u8>),
+  Close,
+}
+
+impl TypeName for AndroidSocketEventArg {
+  fn type_name() -> &'static str {
+    "Buffer | undefined"
+  }
+
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ToNapiValue for AndroidSocketEventArg {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, value: Self) -> Result<napi::sys::napi_value> {
+    match value {
+      Self::Data(bytes) => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, Buffer::from(bytes)) },
+      Self::Close => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, ()) },
+    }
+  }
+}
+
+/// Playwright: `androidDevice.webView(selector)`.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct AndroidWebViewSelector {
+  /// The package the web view runs in.
+  pub pkg: Option<String>,
+  /// The name of its DevTools socket.
+  pub socket_name: Option<String>,
+}
+
 fn file(source: Either<String, Buffer>) -> ferridriver::android::AndroidFile {
   match source {
     Either::A(path) => ferridriver::android::AndroidFile::Path(path.into()),
@@ -234,50 +398,55 @@ fn file(source: Either<String, Buffer>) -> ferridriver::android::AndroidFile {
   }
 }
 
-/// Playwright `Android`, the module's `_android`.
-#[napi]
-#[derive(Default)]
-pub struct Android {
-  inner: ferridriver::android::Android,
-}
-
-#[napi]
-impl Android {
-  /// Playwright: `android.devices(options?: { host?, port?,
-  /// omitDriverInstall? }): Promise<AndroidDevice[]>`. The usable devices
-  /// of the ADB server at `host:port`, `127.0.0.1:5037` when absent.
-  #[napi(ts_return_type = "Promise<Array<AndroidDevice>>")]
-  pub async fn devices(
-    &self,
-    options: Option<AndroidDevicesOptions>,
-  ) -> Result<Vec<crate::identity::AndroidDeviceObject>> {
-    let options = options.unwrap_or_default();
-    let port = options
-      .port
-      .map(|port| u16::try_from(port).map_err(|_| napi::Error::from_reason(format!("port {port} is out of range"))))
-      .transpose()?;
-    let devices = self
-      .inner
-      .devices(ferridriver::android::AndroidDevicesOptions {
-        host: options.host,
-        port,
-        omit_driver_install: options.omit_driver_install,
-      })
-      .await
-      .into_napi()?;
-    Ok(devices.into_iter().map(crate::identity::AndroidDeviceObject).collect())
-  }
-}
-
 /// Playwright `AndroidDevice`: a device behind an ADB server.
 #[napi]
 pub struct AndroidDevice {
   inner: ferridriver::android::AndroidDevice,
+  events: Emitter<AndroidDeviceEventArg>,
 }
 
 impl AndroidDevice {
   pub(crate) fn from_core(inner: ferridriver::android::AndroidDevice) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      events: Emitter::new(),
+    }
+  }
+
+  fn listen(
+    &self,
+    event: String,
+    listener: &napi::bindgen_prelude::Function<'static, AndroidDeviceEventArg, ()>,
+    once: bool,
+  ) -> Result<()> {
+    if !self.events.add(event, listener, once)? {
+      return Ok(());
+    }
+    let mut events = self.inner.subscribe();
+    let device = self.inner.clone();
+    let listeners = std::sync::Arc::clone(&self.events.listeners);
+    napi::bindgen_prelude::spawn(async move {
+      loop {
+        match events.recv().await {
+          Ok(ferridriver::android::AndroidDeviceEvent::WebView(view)) => Emitter::emit(
+            &listeners,
+            "webview",
+            &AndroidDeviceEventArg::WebView(crate::identity::AndroidWebViewObject(view)),
+          ),
+          Ok(ferridriver::android::AndroidDeviceEvent::Close) => {
+            Emitter::emit(
+              &listeners,
+              "close",
+              &AndroidDeviceEventArg::Device(crate::identity::AndroidDeviceObject(device.clone())),
+            );
+            return;
+          },
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+      }
+    });
+    Ok(())
   }
 }
 
@@ -345,6 +514,172 @@ impl AndroidDevice {
       .install_apk(source, options.and_then(|options| options.args))
       .await
       .into_napi()
+  }
+
+  /// Playwright: `androidDevice.on(event: 'webview' | 'close', listener)`.
+  #[napi(ts_args_type = "event: 'webview' | 'close', listener: (arg: AndroidWebView | AndroidDevice) => void")]
+  pub fn on(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, AndroidDeviceEventArg, ()>,
+  ) -> Result<()> {
+    self.listen(event, &listener, false)
+  }
+
+  /// Playwright: `androidDevice.once(event, listener)`.
+  #[napi(ts_args_type = "event: 'webview' | 'close', listener: (arg: AndroidWebView | AndroidDevice) => void")]
+  pub fn once(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, AndroidDeviceEventArg, ()>,
+  ) -> Result<()> {
+    self.listen(event, &listener, true)
+  }
+
+  /// Playwright: `androidDevice.off(event, listener)`.
+  #[napi(ts_args_type = "event: 'webview' | 'close', listener: (arg: AndroidWebView | AndroidDevice) => void")]
+  // napi-rs injects Env only as `&Env` (no by-value FromNapiValue).
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn off(
+    &self,
+    env: &napi::Env,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, AndroidDeviceEventArg, ()>,
+  ) -> Result<()> {
+    self.events.remove(*env, &event, &listener)
+  }
+
+  /// Playwright: `androidDevice.waitForEvent(event, optionsOrPredicate?)`.
+  /// `webview` resolves to the `AndroidWebView`, `close` to the device.
+  #[napi(
+    ts_args_type = "event: 'webview' | 'close', optionsOrPredicate?: ((arg: AndroidWebView | AndroidDevice) => boolean | Promise<boolean>) | { predicate?: (arg: AndroidWebView | AndroidDevice) => boolean | Promise<boolean>; timeout?: number }",
+    ts_return_type = "Promise<AndroidWebView | AndroidDevice>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn wait_for_event(
+    &self,
+    env: &napi::Env,
+    event: String,
+    options_or_predicate: Option<
+      Either<napi::bindgen_prelude::Function<'_, AndroidDeviceEventArg, crate::page::PredReturn>, Object<'_>>,
+    >,
+  ) -> Result<AsyncBlock<AndroidDeviceEventArg>> {
+    let build = |function: napi::bindgen_prelude::Function<'_, AndroidDeviceEventArg, crate::page::PredReturn>| {
+      function
+        .build_threadsafe_function::<AndroidDeviceEventArg>()
+        .callee_handled::<false>()
+        .weak::<false>()
+        .max_queue_size::<0>()
+        .build()
+    };
+    let mut timeout = None;
+    let mut predicate = None;
+    match options_or_predicate {
+      None => {},
+      Some(Either::A(function)) => predicate = Some(build(function)?),
+      Some(Either::B(bag)) => {
+        timeout = bag.get::<f64>("timeout")?;
+        if let Some(function) = bag.get("predicate")? {
+          predicate = Some(build(function)?);
+        }
+      },
+    }
+    let timeout_ms = timeout.map_or_else(|| self.inner.default_timeout(), crate::types::f64_to_u64);
+    let device = self.inner.clone();
+    let closed = || napi::Error::from_reason("Target page, context or browser has been closed: Device is closed");
+    // Subscribed before the promise exists, so no event in between is missed.
+    let mut events = self.inner.subscribe();
+    AsyncBlockBuilder::new(async move {
+      // Refusals reject the promise the call returns, as every other does.
+      if event != "webview" && event != "close" {
+        return Err(napi::Error::from_reason(format!(
+          "waitForEvent: unknown event \"{event}\""
+        )));
+      }
+      if event == "webview" && device.is_closed() {
+        return Err(closed());
+      }
+      let happened = async {
+        loop {
+          let candidate = match events.recv().await {
+            Ok(ferridriver::android::AndroidDeviceEvent::WebView(view)) if event == "webview" => {
+              AndroidDeviceEventArg::WebView(crate::identity::AndroidWebViewObject(view))
+            },
+            Ok(ferridriver::android::AndroidDeviceEvent::WebView(_))
+            | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Ok(ferridriver::android::AndroidDeviceEvent::Close) if event == "close" => {
+              AndroidDeviceEventArg::Device(crate::identity::AndroidDeviceObject(device.clone()))
+            },
+            Ok(ferridriver::android::AndroidDeviceEvent::Close)
+            | Err(tokio::sync::broadcast::error::RecvError::Closed) => return Err(closed()),
+          };
+          let Some(predicate) = &predicate else {
+            return Ok(candidate);
+          };
+          let verdict = predicate
+            .call_async(candidate.clone())
+            .await
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+          if crate::page::resolve_pred(verdict).await {
+            return Ok(candidate);
+          }
+        }
+      };
+      if timeout_ms == 0 {
+        return happened.await;
+      }
+      tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), happened)
+        .await
+        .map_err(|_| {
+          napi::Error::from_reason(format!(
+            "Timeout {timeout_ms}ms exceeded while waiting for event \"{event}\""
+          ))
+        })?
+    })
+    .build(env)
+  }
+
+  /// Playwright: `androidDevice.webViews(): AndroidWebView[]`.
+  #[napi(ts_return_type = "Array<AndroidWebView>")]
+  pub fn web_views(&self) -> Vec<crate::identity::AndroidWebViewObject> {
+    self
+      .inner
+      .web_views()
+      .into_iter()
+      .map(crate::identity::AndroidWebViewObject)
+      .collect()
+  }
+
+  /// Playwright: `androidDevice.webView(selector: { pkg?, socketName? },
+  /// options?: { timeout? }): Promise<AndroidWebView>`.
+  #[napi(ts_return_type = "Promise<AndroidWebView>")]
+  pub async fn web_view(
+    &self,
+    selector: AndroidWebViewSelector,
+    options: Option<AndroidTimeoutOptions>,
+  ) -> Result<crate::identity::AndroidWebViewObject> {
+    self
+      .inner
+      .web_view(
+        &ferridriver::android::AndroidWebViewSelector {
+          pkg: selector.pkg,
+          socket_name: selector.socket_name,
+        },
+        limit(options.and_then(|options| options.timeout)),
+      )
+      .await
+      .map(crate::identity::AndroidWebViewObject)
+      .into_napi()
+  }
+
+  /// Playwright: `androidDevice.open(command: string): Promise<AndroidSocket>`.
+  #[napi]
+  pub async fn open(&self, command: String) -> Result<AndroidSocket> {
+    let socket = self.inner.open(&command).await.into_napi()?;
+    Ok(AndroidSocket {
+      inner: std::sync::Arc::new(socket),
+      events: Emitter::new(),
+    })
   }
 
   /// Playwright: `androidDevice.setDefaultTimeout(timeout: number): void`.
@@ -661,5 +996,163 @@ impl AndroidInput {
   #[napi]
   pub async fn drag(&self, from: crate::types::Point, to: crate::types::Point, steps: u32) -> Result<()> {
     self.inner.drag(from.into(), to.into(), steps).await.into_napi()
+  }
+}
+
+/// Playwright `AndroidWebView`: a web view an application on the device
+/// shows.
+#[napi]
+pub struct AndroidWebView {
+  inner: ferridriver::android::AndroidWebView,
+  events: Emitter<()>,
+}
+
+impl AndroidWebView {
+  pub(crate) fn from_core(inner: ferridriver::android::AndroidWebView) -> Self {
+    Self {
+      inner,
+      events: Emitter::new(),
+    }
+  }
+
+  fn listen(
+    &self,
+    event: String,
+    listener: &napi::bindgen_prelude::Function<'static, (), ()>,
+    once: bool,
+  ) -> Result<()> {
+    if !self.events.add(event, listener, once)? {
+      return Ok(());
+    }
+    let view = self.inner.clone();
+    let listeners = std::sync::Arc::clone(&self.events.listeners);
+    napi::bindgen_prelude::spawn(async move {
+      view.closed().await;
+      Emitter::emit(&listeners, "close", &());
+    });
+    Ok(())
+  }
+}
+
+#[napi]
+impl AndroidWebView {
+  /// Playwright: `androidWebView.pid(): number`.
+  #[napi]
+  pub fn pid(&self) -> i64 {
+    self.inner.pid()
+  }
+
+  /// Playwright: `androidWebView.pkg(): string`.
+  #[napi]
+  pub fn pkg(&self) -> String {
+    self.inner.pkg().to_owned()
+  }
+
+  /// Playwright: `androidWebView.page(): Promise<Page>`.
+  #[napi(ts_return_type = "Promise<Page>")]
+  pub async fn page(&self) -> Result<crate::identity::PageObject> {
+    self.inner.page().await.map(crate::identity::PageObject).into_napi()
+  }
+
+  /// Playwright: `androidWebView.on('close', listener)`.
+  #[napi(ts_args_type = "event: 'close', listener: () => void")]
+  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'static, (), ()>) -> Result<()> {
+    self.listen(event, &listener, false)
+  }
+
+  /// Playwright: `androidWebView.once('close', listener)`.
+  #[napi(ts_args_type = "event: 'close', listener: () => void")]
+  pub fn once(&self, event: String, listener: napi::bindgen_prelude::Function<'static, (), ()>) -> Result<()> {
+    self.listen(event, &listener, true)
+  }
+
+  /// Playwright: `androidWebView.off('close', listener)`.
+  #[napi(ts_args_type = "event: 'close', listener: () => void")]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn off(
+    &self,
+    env: &napi::Env,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, (), ()>,
+  ) -> Result<()> {
+    self.events.remove(*env, &event, &listener)
+  }
+}
+
+/// Playwright `AndroidSocket`: a connection `androidDevice.open` made.
+#[napi]
+pub struct AndroidSocket {
+  inner: std::sync::Arc<ferridriver::android::AndroidSocket>,
+  events: Emitter<AndroidSocketEventArg>,
+}
+
+impl AndroidSocket {
+  /// What the device sent is held until the first listener asks, then
+  /// delivered in order: `data` a chunk at a time, `close` at the end.
+  fn listen(
+    &self,
+    event: String,
+    listener: &napi::bindgen_prelude::Function<'static, AndroidSocketEventArg, ()>,
+    once: bool,
+  ) -> Result<()> {
+    if !self.events.add(event, listener, once)? {
+      return Ok(());
+    }
+    let socket = std::sync::Arc::clone(&self.inner);
+    let listeners = std::sync::Arc::clone(&self.events.listeners);
+    napi::bindgen_prelude::spawn(async move {
+      while let Some(chunk) = socket.next_data().await {
+        Emitter::emit(&listeners, "data", &AndroidSocketEventArg::Data(chunk));
+      }
+      Emitter::emit(&listeners, "close", &AndroidSocketEventArg::Close);
+    });
+    Ok(())
+  }
+}
+
+#[napi]
+impl AndroidSocket {
+  /// Playwright: `androidSocket.write(data: Buffer): Promise<void>`.
+  #[napi]
+  pub async fn write(&self, data: Buffer) -> Result<()> {
+    self.inner.write(&data).await.into_napi()
+  }
+
+  /// Playwright: `androidSocket.close(): Promise<void>`.
+  #[napi]
+  pub async fn close(&self) {
+    self.inner.close().await;
+  }
+
+  /// Playwright: `androidSocket.on(event: 'data' | 'close', listener)`.
+  #[napi(ts_args_type = "event: 'data' | 'close', listener: (data?: Buffer) => void")]
+  pub fn on(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, AndroidSocketEventArg, ()>,
+  ) -> Result<()> {
+    self.listen(event, &listener, false)
+  }
+
+  /// Playwright: `androidSocket.once(event, listener)`.
+  #[napi(ts_args_type = "event: 'data' | 'close', listener: (data?: Buffer) => void")]
+  pub fn once(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, AndroidSocketEventArg, ()>,
+  ) -> Result<()> {
+    self.listen(event, &listener, true)
+  }
+
+  /// Playwright: `androidSocket.off(event, listener)`.
+  #[napi(ts_args_type = "event: 'data' | 'close', listener: (data?: Buffer) => void")]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn off(
+    &self,
+    env: &napi::Env,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'static, AndroidSocketEventArg, ()>,
+  ) -> Result<()> {
+    self.events.remove(*env, &event, &listener)
   }
 }

@@ -150,8 +150,99 @@ describe("_android", () => {
     }
   });
 
+  it("web views are listed, announced and closed, and a socket carries bytes both ways", async () => {
+    const own = Bun.spawn([resolve(import.meta.dir, "../../../target/debug/ferridriver-adb-fixture")], {
+      stdout: "pipe",
+      stderr: "inherit",
+    });
+    try {
+      const reader = (own.stdout as ReadableStream<Uint8Array>).getReader();
+      const { value } = await reader.read();
+      reader.releaseLock();
+      const ownPort = Number(text(value!).match(/listening (\d+)/)![1]);
+      const [device] = await _android.devices({ port: ownPort });
+
+      expect(device.webViews()).toEqual([]);
+      const announced = device.waitForEvent("webview");
+      const seen: unknown[] = [];
+      const listener = (view: unknown) => seen.push(view);
+      device.on("webview", listener);
+      await device.push(
+        Buffer.from("0000: 0002 0000 0001 0001 01 5841881 @webview_devtools_remote_4242\n"),
+        "webviews",
+      );
+      const view = (await announced) as import("../index.js").AndroidWebView;
+      expect(view.pid()).toBe(4242);
+      expect(view.pkg()).toBe("com.example.app");
+      expect(device.webViews()[0]).toBe(view);
+      expect(await device.webView({ pkg: "com.example.app" })).toBe(view);
+      expect(await device.webView({ socketName: "webview_devtools_remote_4242" })).toBe(view);
+      expect(seen).toEqual([view]);
+      device.off("webview", listener);
+
+      const dropped = new Promise<void>((done) => view.once("close", done));
+      await device.push(Buffer.from(""), "webviews");
+      await dropped;
+      expect(device.webViews()).toEqual([]);
+      await expect(device.webView({ pkg: "com.example.absent" }, { timeout: 700 })).rejects.toThrow(
+        /Timeout 700ms exceeded while waiting for event "webview"/,
+      );
+      await expect(device.waitForEvent("webview", { timeout: 600, predicate: () => false })).rejects.toThrow(
+        /Timeout 600ms/,
+      );
+
+      const socket = await device.open("shell:upper");
+      const chunks: string[] = [];
+      const ended = new Promise<void>((done) => socket.on("close", () => done()));
+      socket.on("data", (chunk) => chunks.push(text(chunk!)));
+      await socket.write(Buffer.from("salama\n"));
+      await ended;
+      expect(chunks.join("")).toBe("SALAMA\n");
+      await socket.close();
+      await expect(socket.write(Buffer.from("late"))).rejects.toThrow(/Socket is closed/);
+
+      const closing = device.waitForEvent("close");
+      const heard = new Promise<unknown>((done) => device.on("close", done));
+      await device.close();
+      expect(await closing).toBe(device);
+      expect(await heard).toBe(device);
+      await expect(device.waitForEvent("webview", { timeout: 1000 })).rejects.toThrow(/Device is closed/);
+      expect(seen.length).toBe(1);
+    } finally {
+      own.kill();
+    }
+  });
+
   it("devices says where it looked when no ADB server answers", async () => {
     await expect(_android.devices({ port: 1 })).rejects.toThrow(/no ADB server at 127\.0\.0\.1:1/);
     await expect(_android.devices({ port: 70000 })).rejects.toThrow(/port 70000 is out of range/);
+  });
+
+  it("a Playwright Android server is refused, with the way that does work", async () => {
+    const why = /Playwright's own client\/server protocol[\s\S]*android\.devices\(\{ host, port \}\)/;
+    await expect(_android.connect("ws://127.0.0.1:9/")).rejects.toThrow(why);
+    await expect(_android.launchServer()).rejects.toThrow(why);
+  });
+
+  it("a device listed after android.setDefaultTimeout starts with that timeout", async () => {
+    const own = Bun.spawn([resolve(import.meta.dir, "../../../target/debug/ferridriver-adb-fixture")], {
+      stdout: "pipe",
+      stderr: "inherit",
+    });
+    try {
+      const reader = (own.stdout as ReadableStream<Uint8Array>).getReader();
+      const { value } = await reader.read();
+      reader.releaseLock();
+      const ownPort = Number(text(value!).match(/listening (\d+)/)![1]);
+      _android.setDefaultTimeout(4321);
+      const [device] = await _android.devices({ port: ownPort, omitDriverInstall: true });
+      _android.setDefaultTimeout(30000);
+      await device.tap({ text: "Save" });
+      expect(JSON.parse(text(await device.shell("cat driver-calls")))).toEqual([
+        { method: "click", params: { selector: { text: "^Save$" }, timeout: 4321 } },
+      ]);
+    } finally {
+      own.kill();
+    }
   });
 });

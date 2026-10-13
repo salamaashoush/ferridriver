@@ -18,7 +18,8 @@ mod network;
 mod wire;
 pub(crate) use adb::AdbEndpoint;
 pub use api::{
-  Android, AndroidDevice, AndroidDevicesOptions, AndroidFile, AndroidInput, AndroidLaunchBrowserOptions, AndroidSocket,
+  Android, AndroidDevice, AndroidDeviceEvent, AndroidDevicesOptions, AndroidFile, AndroidInput,
+  AndroidLaunchBrowserOptions, AndroidSocket, AndroidWebView, AndroidWebViewSelector,
 };
 pub use driver::{AndroidBounds, AndroidDirection, AndroidElementInfo, AndroidSelector, AndroidText};
 

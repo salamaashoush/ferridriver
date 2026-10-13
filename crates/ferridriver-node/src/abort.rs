@@ -184,10 +184,7 @@ mod load {
 })";
 
   #[napi(module_exports)]
-  pub fn wrap_classes(env: Env, mut exports: Object<'_>) -> Result<()> {
-    // Playwright exports `_android` as an object, which napi-rs derives
-    // only from a `const`; the classes exist by now, so it is made here.
-    exports.set_named_property("_android", crate::android::Android::default().into_instance(&env)?)?;
+  pub fn wrap_classes(env: Env, exports: Object<'_>) -> Result<()> {
     let arm = env.create_function_from_closure::<FnArgs<(bool, String)>, External<AbortSignal>, _>("arm", |ctx| {
       let reason: String = ctx.get(1)?;
       Ok(External::new(if ctx.get::<bool>(0)? {

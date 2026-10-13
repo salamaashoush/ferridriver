@@ -30,12 +30,8 @@ export interface DeviceDescriptor {
  */
 export declare const devices: Record<string, DeviceDescriptor>;
 
-/**
- * Playwright's `_android`: the devices behind an ADB server. An object, as
- * upstream, made when the addon loads because napi-rs derives a
- * module-level value only from a `const`.
- */
-export declare const _android: import('./index').Android;
+/** Playwright's `Android`: the type of the module's `_android`. */
+export type Android = typeof import('./index')._android;
 
 /** Playwright's `AndroidSelector`: every field that is set must hold for a view to match. */
 export interface AndroidSelector {

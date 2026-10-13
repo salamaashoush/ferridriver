@@ -70,20 +70,87 @@ const LAUNCH_TIMEOUT_MS: u64 = 30_000;
 
 static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// How often a device is asked for the web views it has, as upstream.
+const WEB_VIEW_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What a device tells its listeners. Playwright: the `webview` and
+/// `close` events of `AndroidDevice`.
+#[derive(Clone)]
+pub enum AndroidDeviceEvent {
+  /// A web view appeared on the device.
+  WebView(AndroidWebView),
+  /// The device was closed.
+  Close,
+}
+
+/// Playwright: `androidDevice.webView(selector)`. The first that is set
+/// decides.
+#[derive(Debug, Clone, Default)]
+pub struct AndroidWebViewSelector {
+  /// The package the web view runs in.
+  pub pkg: Option<String>,
+  /// The name of its `DevTools` socket.
+  pub socket_name: Option<String>,
+}
+
 type Registry = Arc<std::sync::Mutex<Vec<AndroidDevice>>>;
 
 /// Playwright: `Android`, reached there as `playwright._android`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Android {
   /// The devices handed out and not yet closed. A device listed again is
   /// the same object, as in Playwright's `Android._devices`.
   devices: Registry,
+  /// What a device made from here on starts with as its default timeout.
+  default_timeout: Arc<std::sync::atomic::AtomicU64>,
 }
+
+impl Default for Android {
+  fn default() -> Self {
+    Self {
+      devices: Registry::default(),
+      default_timeout: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_TIMEOUT_MS)),
+    }
+  }
+}
+
+/// Why `android.connect` and `android.launchServer` are refused.
+const NO_PLAYWRIGHT_SERVER: &str = concat!(
+  "the Android server Playwright launches and connects to speaks Playwright's own client/server protocol, ",
+  "which ferridriver does not implement; reach a device on another machine through its ADB server with ",
+  "android.devices({ host, port })"
+);
 
 impl Android {
   #[must_use]
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// Playwright: `android.setDefaultTimeout(timeout: number)`. The
+  /// default timeout of every device listed from now on; a device
+  /// already handed out keeps its own.
+  pub fn set_default_timeout(&self, timeout_ms: u64) {
+    self.default_timeout.store(timeout_ms, Ordering::Relaxed);
+  }
+
+  /// Playwright: `android.connect(endpoint, options?): Promise<AndroidDevice>`.
+  ///
+  /// # Errors
+  ///
+  /// Always: the endpoint is a Playwright server, whose protocol is not
+  /// spoken here.
+  pub fn connect(_endpoint: &str) -> Result<AndroidDevice> {
+    Err(FerriError::unsupported(NO_PLAYWRIGHT_SERVER))
+  }
+
+  /// Playwright: `android.launchServer(options?): Promise<BrowserServer>`.
+  ///
+  /// # Errors
+  ///
+  /// Always, for the reason [`Self::connect`] gives.
+  pub fn launch_server() -> Result<()> {
+    Err(FerriError::unsupported(NO_PLAYWRIGHT_SERVER))
   }
 
   /// Playwright: `android.devices(options?): Promise<AndroidDevice[]>`.
@@ -131,9 +198,15 @@ impl Android {
           browsers: tokio::sync::Mutex::new(Vec::new()),
           omit_driver_install,
           driver: tokio::sync::Mutex::new(None),
-          default_timeout: std::sync::atomic::AtomicU64::new(DEFAULT_TIMEOUT_MS),
+          default_timeout: std::sync::atomic::AtomicU64::new(self.default_timeout.load(Ordering::Relaxed)),
+          web_views: std::sync::Mutex::new(Vec::new()),
+          events: tokio::sync::broadcast::channel(64).0,
         }),
       };
+      // Upstream lists the web views once before it hands the device
+      // out, then keeps asking.
+      device.refresh_web_views().await?;
+      device.watch_web_views();
       self
         .devices
         .lock()
@@ -166,6 +239,8 @@ struct DeviceInner {
   /// The driver, installed and started by the first call that needs it.
   driver: tokio::sync::Mutex<Option<Arc<Driver>>>,
   default_timeout: std::sync::atomic::AtomicU64,
+  web_views: std::sync::Mutex<Vec<AndroidWebView>>,
+  events: tokio::sync::broadcast::Sender<AndroidDeviceEvent>,
 }
 
 /// Playwright: `AndroidDevice`.
@@ -302,6 +377,13 @@ impl AndroidDevice {
   /// as "look once", not as "wait for ever".
   pub fn set_default_timeout(&self, timeout_ms: u64) {
     self.inner.default_timeout.store(timeout_ms, Ordering::Relaxed);
+  }
+
+  /// The limit [`Self::set_default_timeout`] set, thirty seconds until
+  /// it is called.
+  #[must_use]
+  pub fn default_timeout(&self) -> u64 {
+    self.inner.default_timeout.load(Ordering::Relaxed)
   }
 
   fn timeout(&self, timeout_ms: Option<u64>) -> u64 {
@@ -549,6 +631,158 @@ impl AndroidDevice {
     AndroidInput { device: self.clone() }
   }
 
+  /// The device's `webview` and `close` events, from now on.
+  #[must_use]
+  pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<AndroidDeviceEvent> {
+    self.inner.events.subscribe()
+  }
+
+  /// Playwright: `androidDevice.webViews(): AndroidWebView[]`. The web
+  /// views the device had when it was last asked, twice a second.
+  #[must_use]
+  pub fn web_views(&self) -> Vec<AndroidWebView> {
+    self
+      .inner
+      .web_views
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+
+  /// Playwright: `androidDevice.webView(selector: { pkg?, socketName? },
+  /// options?): Promise<AndroidWebView>`. The web view that matches, once
+  /// there is one.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the device closes first, or none appears within
+  /// the timeout (the device's default when `None`, no limit when zero).
+  pub async fn web_view(&self, selector: &AndroidWebViewSelector, timeout_ms: Option<u64>) -> Result<AndroidWebView> {
+    self.ensure_open()?;
+    let matches = |view: &AndroidWebView| match (&selector.pkg, &selector.socket_name) {
+      (Some(pkg), _) => view.pkg() == pkg,
+      (None, Some(socket_name)) => view.socket_name() == socket_name,
+      (None, None) => false,
+    };
+    // Subscribed before the list is read, so a view that appears in between is not missed.
+    let mut events = self.subscribe();
+    if let Some(view) = self.web_views().into_iter().find(|view| matches(view)) {
+      return Ok(view);
+    }
+    let timeout_ms = self.timeout(timeout_ms);
+    let appeared = async {
+      loop {
+        match events.recv().await {
+          Ok(AndroidDeviceEvent::WebView(view)) if matches(&view) => return Ok(view),
+          Ok(AndroidDeviceEvent::Close) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            return Err(FerriError::target_closed(Some("Device is closed".into())));
+          },
+          // A lagged receiver may have missed the view: look at the list again.
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+            if let Some(view) = self.web_views().into_iter().find(|view| matches(view)) {
+              return Ok(view);
+            }
+          },
+          Ok(AndroidDeviceEvent::WebView(_)) => {},
+        }
+      }
+    };
+    if timeout_ms == 0 {
+      return appeared.await;
+    }
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), appeared)
+      .await
+      .map_err(|_| FerriError::timeout("waiting for event \"webview\"", timeout_ms))?
+  }
+
+  /// Ask the device which web views it has and tell listeners what
+  /// changed: `server/android/android.ts::_refreshWebViews`.
+  async fn refresh_web_views(&self) -> Result<()> {
+    let listing = self
+      .inner
+      .server
+      .shell(&self.inner.serial, "cat /proc/net/unix | grep webview_devtools_remote")
+      .await?;
+    let listed = web_view_sockets(&String::from_utf8_lossy(&listing));
+    let known: Vec<String> = self
+      .web_views()
+      .iter()
+      .map(|view| view.socket_name().to_owned())
+      .collect();
+    for (socket_name, pid) in &listed {
+      if known.contains(socket_name) {
+        continue;
+      }
+      let pkg = match pid {
+        Some(pid) => {
+          let processes = self
+            .inner
+            .server
+            .shell(&self.inner.serial, &format!("ps -A | grep {pid}"))
+            .await?;
+          process_package(&String::from_utf8_lossy(&processes), *pid)
+        },
+        None => String::new(),
+      };
+      if self.is_closed() {
+        return Ok(());
+      }
+      let view = AndroidWebView {
+        inner: Arc::new(WebViewInner {
+          device: Arc::downgrade(&self.inner),
+          pid: pid.map_or(-1, i64::from),
+          pkg,
+          socket_name: socket_name.clone(),
+          page: tokio::sync::OnceCell::new(),
+          closed: tokio::sync::watch::channel(false).0,
+        }),
+      };
+      self
+        .inner
+        .web_views
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(view.clone());
+      let _ = self.inner.events.send(AndroidDeviceEvent::WebView(view));
+    }
+    let gone: Vec<AndroidWebView> = {
+      let mut views = self
+        .inner
+        .web_views
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      let (kept, gone) = std::mem::take(&mut *views)
+        .into_iter()
+        .partition(|view| listed.iter().any(|(socket_name, _)| socket_name == view.socket_name()));
+      *views = kept;
+      gone
+    };
+    for view in gone {
+      view.inner.closed.send_replace(true);
+    }
+    Ok(())
+  }
+
+  /// Keep the list of web views current until the device closes. A
+  /// device that stops answering is closed, as upstream closes it.
+  fn watch_web_views(&self) {
+    let device = Arc::downgrade(&self.inner);
+    tokio::spawn(async move {
+      loop {
+        tokio::time::sleep(WEB_VIEW_POLL).await;
+        let Some(inner) = device.upgrade() else { return };
+        let device = AndroidDevice { inner };
+        if device.is_closed() {
+          return;
+        }
+        if device.refresh_web_views().await.is_err() {
+          device.close().await;
+          return;
+        }
+      }
+    });
+  }
+
   /// Playwright: `androidDevice.launchBrowser(options?): Promise<BrowserContext>`.
   /// Start the browser `pkg` afresh with the command line its options
   /// ask for and return its context, the one the device has.
@@ -687,6 +921,17 @@ impl AndroidDevice {
     }
     // Dropping the driver closes its socket and the shell it runs in.
     self.inner.driver.lock().await.take();
+    let views = std::mem::take(
+      &mut *self
+        .inner
+        .web_views
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for view in views {
+      view.inner.closed.send_replace(true);
+    }
+    let _ = self.inner.events.send(AndroidDeviceEvent::Close);
     let browsers = std::mem::take(&mut *self.inner.browsers.lock().await);
     for (context, port) in browsers {
       if !context.is_closed()
@@ -698,6 +943,167 @@ impl AndroidDevice {
         tracing::debug!(target: "ferridriver::android", %error, port, "removing a DevTools forward failed");
       }
     }
+  }
+}
+
+/// The `DevTools` sockets of web views in a `/proc/net/unix` listing, each
+/// with the process id its name ends in when it has one:
+/// `webview_devtools_remote_32327`, `webview_devtools_remote_32327_zeus`
+/// and `webview_devtools_remote_zeus` are all names upstream expects.
+fn web_view_sockets(listing: &str) -> Vec<(String, Option<u32>)> {
+  const MARKER: &str = "webview_devtools_remote";
+  let mut sockets: Vec<(String, Option<u32>)> = Vec::new();
+  for line in listing.lines() {
+    let Some((_, name)) = line.split_once('@') else {
+      continue;
+    };
+    let name = name.trim();
+    let Some(at) = name.find(MARKER) else {
+      continue;
+    };
+    let digits: String = name[at + MARKER.len()..]
+      .trim_start_matches('_')
+      .chars()
+      .take_while(char::is_ascii_digit)
+      .collect();
+    if !sockets.iter().any(|(known, _)| known == name) {
+      sockets.push((name.to_owned(), digits.parse().ok()));
+    }
+  }
+  sockets
+}
+
+/// The package of process `pid` in a `ps -A` listing: the last column of
+/// the line whose second column is the pid.
+fn process_package(listing: &str, pid: u32) -> String {
+  listing
+    .lines()
+    .find_map(|line| {
+      let mut columns = line.split_whitespace();
+      let listed: u32 = columns.nth(1)?.parse().ok()?;
+      (listed == pid).then(|| line.split_whitespace().last().unwrap_or_default().to_owned())
+    })
+    .unwrap_or_default()
+}
+
+struct WebViewInner {
+  device: std::sync::Weak<DeviceInner>,
+  pid: i64,
+  pkg: String,
+  socket_name: String,
+  page: tokio::sync::OnceCell<Arc<crate::Page>>,
+  /// Set once the device no longer lists the view, or closes.
+  closed: tokio::sync::watch::Sender<bool>,
+}
+
+/// Playwright: `AndroidWebView`, a web view an application on the device
+/// shows.
+#[derive(Clone)]
+pub struct AndroidWebView {
+  inner: Arc<WebViewInner>,
+}
+
+impl PartialEq for AndroidWebView {
+  fn eq(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.inner, &other.inner)
+  }
+}
+
+impl std::fmt::Debug for AndroidWebView {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("AndroidWebView")
+      .field("pid", &self.inner.pid)
+      .field("pkg", &self.inner.pkg)
+      .field("socket_name", &self.inner.socket_name)
+      .finish_non_exhaustive()
+  }
+}
+
+impl AndroidWebView {
+  /// Playwright: `androidWebView.pid(): number`. `-1` when the socket's
+  /// name carries none.
+  #[must_use]
+  pub fn pid(&self) -> i64 {
+    self.inner.pid
+  }
+
+  /// Playwright: `androidWebView.pkg(): string`. Empty when the process
+  /// could not be named.
+  #[must_use]
+  pub fn pkg(&self) -> &str {
+    &self.inner.pkg
+  }
+
+  /// The name of the view's `DevTools` socket.
+  #[must_use]
+  pub fn socket_name(&self) -> &str {
+    &self.inner.socket_name
+  }
+
+  /// Whether the view is gone: Playwright's `close` event has fired.
+  #[must_use]
+  pub fn is_closed(&self) -> bool {
+    *self.inner.closed.borrow()
+  }
+
+  /// Resolves when the view is gone, at once if it already is.
+  /// Playwright's `close` event of `AndroidWebView`.
+  pub async fn closed(&self) {
+    let mut closed = self.inner.closed.subscribe();
+    let _ = closed.wait_for(|closed| *closed).await;
+  }
+
+  /// Playwright: `androidWebView.page(): Promise<Page>`. The page the
+  /// view shows, connected to on first use.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the view or its device is gone, or its
+  /// `DevTools` socket cannot be reached.
+  pub async fn page(&self) -> Result<Arc<crate::Page>> {
+    let page = self
+      .inner
+      .page
+      .get_or_try_init(|| async {
+        if self.is_closed() {
+          return Err(FerriError::target_closed(Some("WebView has been closed".into())));
+        }
+        let inner = self
+          .inner
+          .device
+          .upgrade()
+          .ok_or_else(|| FerriError::target_closed(Some("Device is closed".into())))?;
+        let device = AndroidDevice { inner };
+        device.ensure_open()?;
+        let server = &device.inner.server;
+        let serial = device.inner.serial.as_str();
+        let port = server
+          .forward(serial, &format!("localabstract:{}", self.inner.socket_name))
+          .await?;
+        let context = crate::BrowserType::connect_persistent_over_cdp(
+          &format!("http://127.0.0.1:{port}"),
+          crate::options::BrowserContextOptions {
+            viewport: crate::options::ViewportOption::Null,
+            ..Default::default()
+          },
+        )
+        .await;
+        let context = match context {
+          Ok(context) => context,
+          Err(error) => {
+            let _ = server.kill_forward(serial, port).await;
+            return Err(error);
+          },
+        };
+        device.inner.browsers.lock().await.push((context.clone(), port));
+        context
+          .pages()
+          .into_iter()
+          .next()
+          .ok_or_else(|| FerriError::backend("the web view has no page"))
+      })
+      .await?;
+    Ok(Arc::clone(page))
   }
 }
 
@@ -911,6 +1317,153 @@ mod tests {
       port: Some(port),
       omit_driver_install: None,
     }
+  }
+
+  #[test]
+  fn web_view_sockets_are_read_with_the_process_their_name_carries() {
+    let listing = "0000000000000000: 00000002 00000000 00010000 0001 01 5841881 @webview_devtools_remote_32327\n\
+      0000000000000000: 00000002 00000000 00010000 0001 01 5841882 @webview_devtools_remote_zeus\n\
+      0000000000000000: 00000002 00000000 00010000 0001 01 5841883 @webview_devtools_remote_4242_zeus\n\
+      0000000000000000: 00000002 00000000 00010000 0001 01 5841884 @chrome_devtools_remote\n\
+      0000000000000000: 00000002 00000000 00010000 0001 01 5841881 @webview_devtools_remote_32327\n\
+      shell:cat /proc/net/unix | grep webview_devtools_remote\n";
+    assert_eq!(
+      web_view_sockets(listing),
+      [
+        ("webview_devtools_remote_32327".to_owned(), Some(32327)),
+        ("webview_devtools_remote_zeus".to_owned(), None),
+        ("webview_devtools_remote_4242_zeus".to_owned(), Some(4242)),
+      ]
+    );
+  }
+
+  #[test]
+  fn a_process_is_named_by_the_line_with_its_pid() {
+    let listing = "u0_a120      14242   901 14500000 90000 0 0 S com.example.other\n\
+      u0_a145       4242   901 15200000 120000 0 0 S com.example.app\n";
+    assert_eq!(process_package(listing, 4242), "com.example.app");
+    assert_eq!(process_package(listing, 7), "");
+  }
+
+  /// An ADB server with one device whose web views are what `views`
+  /// holds: a line of `/proc/net/unix` each.
+  async fn adb_with_views(views: Arc<std::sync::Mutex<String>>) -> AndroidDevicesOptions {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+      loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+          return;
+        };
+        let views = Arc::clone(&views);
+        tokio::spawn(async move {
+          let request = async |stream: &mut tokio::net::TcpStream| {
+            let mut digits = [0u8; 4];
+            stream.read_exact(&mut digits).await.ok()?;
+            let length = usize::from_str_radix(std::str::from_utf8(&digits).ok()?, 16).ok()?;
+            let mut message = vec![0u8; length];
+            stream.read_exact(&mut message).await.ok()?;
+            String::from_utf8(message).ok()
+          };
+          let Some(first) = request(&mut stream).await else {
+            return;
+          };
+          if first == "host:devices" {
+            let _ = stream.write_all(b"OKAY0015emulator-5554\tdevice\n").await;
+            return;
+          }
+          let _ = stream.write_all(b"OKAY").await;
+          let Some(service) = request(&mut stream).await else {
+            return;
+          };
+          let _ = stream.write_all(b"OKAY").await;
+          let answer = match service.as_str() {
+            "shell:getprop ro.product.model" => "Pixel 7\n".to_owned(),
+            "shell:cat /proc/net/unix | grep webview_devtools_remote" => views.lock().unwrap().clone(),
+            "shell:ps -A | grep 4242" => "u0_a145       4242   901 15200000 120000 0 0 S com.example.app\n".to_owned(),
+            other => other.to_owned(),
+          };
+          let _ = stream.write_all(answer.as_bytes()).await;
+        });
+      }
+    });
+    AndroidDevicesOptions {
+      host: None,
+      port: Some(port),
+      omit_driver_install: None,
+    }
+  }
+
+  #[tokio::test]
+  async fn web_views_follow_the_device_and_announce_themselves() {
+    const SHOWN: &str = "0000000000000000: 00000002 00000000 00010000 0001 01 5841881 @webview_devtools_remote_4242\n";
+    let views = Arc::new(std::sync::Mutex::new(SHOWN.to_owned()));
+    let android = Android::new();
+    let device = android
+      .devices(adb_with_views(Arc::clone(&views)).await)
+      .await
+      .unwrap()
+      .remove(0);
+
+    let listed = device.web_views();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].pid(), listed[0].pkg()), (4242, "com.example.app"));
+    assert_eq!(listed[0].socket_name(), "webview_devtools_remote_4242");
+    let found = device
+      .web_view(
+        &AndroidWebViewSelector {
+          pkg: Some("com.example.app".into()),
+          socket_name: None,
+        },
+        None,
+      )
+      .await
+      .unwrap();
+    assert!(found == listed[0], "the listed view is the one found");
+
+    // The view goes away: it closes and leaves the list.
+    views.lock().unwrap().clear();
+    tokio::time::timeout(std::time::Duration::from_secs(5), listed[0].closed())
+      .await
+      .expect("the view closed");
+    assert!(listed[0].is_closed());
+    assert_eq!(device.web_views().len(), 0);
+    let gone = listed[0].page().await.unwrap_err().to_string();
+    assert!(gone.contains("WebView has been closed"), "{gone}");
+
+    // One that appears later is announced, and found by a waiting call.
+    let mut events = device.subscribe();
+    let by_socket = AndroidWebViewSelector {
+      pkg: None,
+      socket_name: Some("webview_devtools_remote_4242".into()),
+    };
+    let waiting = device.web_view(&by_socket, Some(5_000));
+    *views.lock().unwrap() = SHOWN.to_owned();
+    let appeared = waiting.await.unwrap();
+    assert_eq!(appeared.pkg(), "com.example.app");
+    assert!(appeared != listed[0], "a view that comes back is a new one");
+    assert!(matches!(events.recv().await, Ok(AndroidDeviceEvent::WebView(view)) if view == appeared));
+
+    let missing = device
+      .web_view(
+        &AndroidWebViewSelector {
+          pkg: Some("com.example.absent".into()),
+          socket_name: None,
+        },
+        Some(700),
+      )
+      .await
+      .unwrap_err()
+      .to_string();
+    assert!(missing.contains("700ms") && missing.contains("webview"), "{missing}");
+
+    device.close().await;
+    assert!(appeared.is_closed());
+    let mut closed = false;
+    while let Ok(event) = events.try_recv() {
+      closed |= matches!(event, AndroidDeviceEvent::Close);
+    }
+    assert!(closed, "close is announced");
   }
 
   #[tokio::test]

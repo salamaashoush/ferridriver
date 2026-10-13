@@ -96,6 +96,54 @@ test.describe('an Android device', () => {
     }
   });
 
+  test('opens a socket on a device service and talks both ways', async () => {
+    const phone = await device();
+    const log = await phone.open('shell:logcat -d -t 20');
+    let bytes = 0;
+    const ended = new Promise<void>(resolve => log.on('close', () => resolve()));
+    log.on('data', chunk => {
+      bytes += chunk.length;
+    });
+    await ended;
+    await log.close();
+    expect(bytes).toBeGreaterThan(0);
+
+    const shell = await phone.open('shell:read line; echo "heard $line"');
+    const said = new Promise<string>(resolve => shell.once('data', chunk => resolve(text(chunk))));
+    await shell.write(new TextEncoder().encode('salama\n'));
+    expect((await said).trim()).toBe('heard salama');
+    await shell.close();
+  });
+
+  // The HTML viewer every image ships shows its file in a web view.
+  test('announces a web view an application shows and drives the page in it', async () => {
+    const phone = await device();
+    const viewer = 'com.android.htmlviewer';
+    await phone.shell(`am force-stop ${viewer}`);
+    const announced = phone.waitForEvent('webview', { timeout: 20_000, predicate: view => view.pkg() === viewer });
+    await phone.shell(
+      `am start -n ${viewer}/.HTMLViewerActivity -a android.intent.action.VIEW -t text/html -d file:///sdcard/Download/none.html`,
+    );
+    const view = await announced;
+    try {
+      expect(view.pid()).toBeGreaterThan(0);
+      expect(phone.webViews().includes(view)).toBe(true);
+      expect((await phone.webView({ pkg: viewer })) === view).toBe(true);
+
+      const page = await view.page();
+      await page.goto("data:text/html,<title>inside a web view</title><h1 id='h'>Salama</h1>");
+      expect(await page.title()).toBe('inside a web view');
+      expect(await page.locator('#h').textContent()).toBe('Salama');
+
+      const dropped = new Promise<void>(resolve => view.once('close', () => resolve()));
+      await phone.shell(`am force-stop ${viewer}`);
+      await dropped;
+      expect(phone.webViews().includes(view)).toBe(false);
+    } finally {
+      await phone.shell(`am force-stop ${viewer}`);
+    }
+  });
+
   test('refuses every call once closed, and is listed anew', async () => {
     const phone = await device();
     await phone.close();

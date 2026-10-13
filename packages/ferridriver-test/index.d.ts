@@ -611,6 +611,30 @@ export interface AndroidInput {
 
 type AndroidDirection = 'down' | 'up' | 'left' | 'right';
 
+/** Playwright's `AndroidWebView`: a web view an application on the device shows. */
+export interface AndroidWebView {
+  /** The process the view runs in, `-1` when its socket's name carries none. */
+  pid(): number;
+  pkg(): string;
+  /** The page the view shows, connected to on first use. */
+  page(): Promise<Page>;
+  on(event: 'close', listener: () => void): void;
+  once(event: 'close', listener: () => void): void;
+  off(event: 'close', listener: () => void): void;
+}
+
+/** Playwright's `AndroidSocket`: a connection `androidDevice.open` made. */
+export interface AndroidSocket {
+  write(data: Buffer | Uint8Array): Promise<void>;
+  close(): Promise<void>;
+  /** `data` is a chunk the device sent; `close` comes once, at the end. */
+  on(event: 'data', listener: (data: Uint8Array) => void): void;
+  on(event: 'close', listener: () => void): void;
+  once(event: 'data', listener: (data: Uint8Array) => void): void;
+  once(event: 'close', listener: () => void): void;
+  off(event: 'data' | 'close', listener: (...args: any[]) => void): void;
+}
+
 /** Playwright's `AndroidDevice`: a device behind an ADB server. */
 export interface AndroidDevice {
   serial(): string;
@@ -631,6 +655,25 @@ export interface AndroidDevice {
   scroll(selector: AndroidSelector, direction: AndroidDirection, percent: number, options?: { speed?: number; timeout?: number }): Promise<void>;
   swipe(selector: AndroidSelector, direction: AndroidDirection, percent: number, options?: { speed?: number; timeout?: number }): Promise<void>;
   info(selector: AndroidSelector): Promise<AndroidElementInfo>;
+  /** A connection to an ADB service on the device, `shell:logcat` for example. */
+  open(command: string): Promise<AndroidSocket>;
+  /** The web views the device had when last asked, twice a second. */
+  webViews(): AndroidWebView[];
+  /** The web view of `pkg`, or behind `socketName`, once there is one. */
+  webView(selector: { pkg?: string; socketName?: string }, options?: { timeout?: number }): Promise<AndroidWebView>;
+  on(event: 'webview', listener: (webView: AndroidWebView) => void): void;
+  on(event: 'close', listener: (device: AndroidDevice) => void): void;
+  once(event: 'webview', listener: (webView: AndroidWebView) => void): void;
+  once(event: 'close', listener: (device: AndroidDevice) => void): void;
+  off(event: 'webview' | 'close', listener: (...args: any[]) => void): void;
+  waitForEvent(
+    event: 'webview',
+    optionsOrPredicate?: ((webView: AndroidWebView) => boolean) | { predicate?: (webView: AndroidWebView) => boolean; timeout?: number },
+  ): Promise<AndroidWebView>;
+  waitForEvent(
+    event: 'close',
+    optionsOrPredicate?: ((device: AndroidDevice) => boolean) | { predicate?: (device: AndroidDevice) => boolean; timeout?: number },
+  ): Promise<AndroidDevice>;
   /** Everything `command` wrote in the device's shell. */
   shell(command: string): Promise<Uint8Array>;
   /** The screen as a PNG, also written to `path` when one is given. */
@@ -651,6 +694,15 @@ export interface AndroidDevice {
 export interface Android {
   /** The usable devices of the ADB server at `host:port`, `127.0.0.1:5037` when absent. */
   devices(options?: { host?: string; port?: number; omitDriverInstall?: boolean }): Promise<AndroidDevice[]>;
+  /** The default timeout of every device listed from now on. */
+  setDefaultTimeout(timeout: number): void;
+  /**
+   * Rejects: the endpoint is a Playwright server, whose protocol ferridriver does not speak.
+   * Reach a device on another machine through its ADB server with `devices({ host, port })`.
+   */
+  connect(endpoint: string, options?: object): Promise<AndroidDevice>;
+  /** Rejects, for the reason `connect` gives. */
+  launchServer(options?: object): Promise<never>;
 }
 
 export const _android: Android;

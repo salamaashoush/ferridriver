@@ -133,8 +133,70 @@ test('selector actions and input reach the driver as the calls Playwright makes'
   }, { omitDriverInstall: true });
 });
 
+test('web views are listed, announced and closed as the device shows and drops them', async () => {
+  await device(async phone => {
+    assert.deepEqual(phone.webViews(), []);
+    const announced = phone.waitForEvent('webview');
+    const seen = [];
+    phone.on('webview', view => seen.push(view));
+    await phone.push(Buffer.from('0000: 0002 0000 0001 0001 01 5841881 @webview_devtools_remote_4242\n'), 'webviews');
+
+    const view = await announced;
+    assert.equal(view.pid(), 4242);
+    assert.equal(view.pkg(), 'com.example.app');
+    assert.equal(phone.webViews().length, 1);
+    assert.equal(phone.webViews()[0], view);
+    assert.equal(await phone.webView({ pkg: 'com.example.app' }), view);
+    assert.equal(await phone.webView({ socketName: 'webview_devtools_remote_4242' }), view);
+    assert.deepEqual(seen, [view]);
+
+    const dropped = new Promise(resolve => view.once('close', resolve));
+    await phone.push(Buffer.from(''), 'webviews');
+    await dropped;
+    assert.deepEqual(phone.webViews(), []);
+
+    await assert.rejects(phone.webView({ pkg: 'com.example.absent' }, { timeout: 700 }),
+      /Timeout 700ms exceeded while waiting for event "webview"/);
+    await assert.rejects(phone.waitForEvent('webview', { timeout: 600, predicate: () => false }), /Timeout 600ms/);
+    await assert.rejects(phone.waitForEvent('tap'), /unknown event "tap"/);
+
+    const closing = phone.waitForEvent('close');
+    const heard = new Promise(resolve => phone.on('close', resolve));
+    await phone.close();
+    assert.equal(await closing, phone);
+    assert.equal(await heard, phone);
+    await assert.rejects(phone.waitForEvent('webview', { timeout: 1000 }), /Device is closed/);
+  });
+});
+
+test('a socket carries bytes both ways and says when it closes', async () => {
+  await device(async phone => {
+    const socket = await phone.open('shell:upper');
+    const chunks = [];
+    const closed = new Promise(resolve => socket.on('close', resolve));
+    socket.on('data', chunk => chunks.push(text(chunk)));
+    await socket.write(Buffer.from('salama\n'));
+    await closed;
+    assert.equal(chunks.join(''), 'SALAMA\n');
+    await socket.close();
+    await assert.rejects(socket.write(Buffer.from('late')), /Socket is closed/);
+
+    // What arrived before anyone listened is delivered to the first listener.
+    const early = await phone.open('shell:held until asked');
+    const first = await new Promise(resolve => early.once('data', chunk => resolve(text(chunk))));
+    assert.equal(first, 'held until asked');
+    await early.close();
+  });
+});
+
 test('devices says where it looked when no ADB server answers', async () => {
   await assert.rejects(_android.devices({ port: 1 }), /no ADB server at 127\.0\.0\.1:1/);
+});
+
+test('a Playwright Android server is refused, with the way that does work', async () => {
+  const why = /Playwright's own client\/server protocol.*android\.devices\(\{ host, port \}\)/s;
+  await assert.rejects(_android.connect('ws://127.0.0.1:9/'), why);
+  await assert.rejects(_android.launchServer(), why);
 });
 
 test('a device answers to the realm: its server to net, a file to read, a screenshot path to write', async () => {

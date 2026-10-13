@@ -6,21 +6,27 @@
 //! `installApk(file, options?)`, `launchBrowser(options?)` and `close()`,
 //! the selector actions (`wait`, `fill`, `press`, `tap`, `longTap`,
 //! `drag`, `fling`, `pinchClose`, `pinchOpen`, `scroll`, `swipe`, `info`)
-//! and `input`.
+//! and `input`, `open(command)` with its `AndroidSocket`, `webViews()`,
+//! `webView(selector, options?)` with `AndroidWebView`, the `webview` and
+//! `close` events, and `waitForEvent`.
 //!
 //! A device is authority the realm has to hold like any other. The ADB
 //! server is a host and a port, judged by the realm's network grant; a
 //! file named by path is read under its read grant, and a screenshot
 //! written to a path under its write grant.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use ferridriver::android::{
-  Android, AndroidDevice, AndroidDevicesOptions, AndroidDirection, AndroidFile, AndroidInput,
-  AndroidLaunchBrowserOptions, AndroidSelector, AndroidText,
+  Android, AndroidDevice, AndroidDeviceEvent, AndroidDevicesOptions, AndroidDirection, AndroidFile, AndroidInput,
+  AndroidLaunchBrowserOptions, AndroidSelector, AndroidSocket, AndroidText, AndroidWebView, AndroidWebViewSelector,
 };
 use ferridriver::options::Point;
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
-use rquickjs::{Class, Ctx, JsLifetime, Value};
+use rquickjs::promise::Promised;
+use rquickjs::{Class, Ctx, Function, JsLifetime, Persistent, Value};
 
 use crate::bindings::convert::{FerriResultCtxExt, ms_f64_to_u64, serde_from_js, serde_to_js, type_error};
 
@@ -123,6 +129,37 @@ fn point<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Point> {
 }
 #[rquickjs::methods]
 impl AndroidJs {
+  /// Playwright: `android.setDefaultTimeout(timeout: number): void`.
+  #[qjs(rename = "setDefaultTimeout")]
+  pub fn set_default_timeout(&self, timeout: f64) {
+    self.inner.set_default_timeout(ms_f64_to_u64(timeout));
+  }
+
+  /// Playwright: `android.connect(endpoint, options?): Promise<AndroidDevice>`.
+  /// Refused: the endpoint is a Playwright server.
+  #[qjs(rename = "connect")]
+  pub fn connect<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    endpoint: String,
+    _options: Opt<Value<'js>>,
+  ) -> Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js> {
+    // The error is made when the promise is settled: one thrown now
+    // would be gone from the context by then.
+    Promised(async move { Android::connect(&endpoint).map(|_| ()).into_js_with(&ctx) })
+  }
+
+  /// Playwright: `android.launchServer(options?): Promise<BrowserServer>`.
+  /// Refused, for the same reason.
+  #[qjs(rename = "launchServer")]
+  pub fn launch_server<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    _options: Opt<Value<'js>>,
+  ) -> Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js> {
+    Promised(async move { Android::launch_server().into_js_with(&ctx) })
+  }
+
   /// Playwright: `android.devices(options?: { host?, port?,
   /// omitDriverInstall? }): Promise<AndroidDevice[]>`.
   #[qjs(rename = "devices")]
@@ -163,17 +200,150 @@ impl AndroidJs {
   }
 }
 
+/// The listeners a script put on one object. They are called on the
+/// interpreter's own thread, by a pump that reads the object's events.
+#[derive(Default)]
+struct Listeners {
+  entries: RefCell<Vec<(String, Persistent<Function<'static>>, bool)>>,
+}
+
+impl Listeners {
+  fn add<'js>(&self, ctx: &Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
+    self
+      .entries
+      .borrow_mut()
+      .push((event, Persistent::save(ctx, listener), once));
+  }
+
+  fn remove<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: &Function<'js>) -> rquickjs::Result<()> {
+    let mut kept = Vec::new();
+    for (name, saved, once) in self.entries.take() {
+      let same = name == event && saved.clone().restore(ctx)?.as_value() == listener.as_value();
+      if !same {
+        kept.push((name, saved, once));
+      }
+    }
+    // Anything registered while the list was out is kept as well.
+    kept.append(&mut self.entries.borrow_mut());
+    *self.entries.borrow_mut() = kept;
+    Ok(())
+  }
+
+  /// Call every listener of `event` with `argument`, in the order they
+  /// were added. One that throws does not stop the rest.
+  async fn emit<'js>(&self, ctx: &Ctx<'js>, event: &str, argument: Value<'js>) {
+    let due: Vec<Persistent<Function<'static>>> = {
+      let mut entries = self.entries.borrow_mut();
+      let due = entries
+        .iter()
+        .filter(|(name, _, _)| name == event)
+        .map(|(_, saved, _)| saved.clone())
+        .collect();
+      entries.retain(|(name, _, once)| !(name == event && *once));
+      due
+    };
+    for saved in due {
+      let Ok(listener) = saved.restore(ctx) else { continue };
+      let returned: rquickjs::Result<Value<'js>> = listener.call((argument.clone(),));
+      if let Ok(value) = returned
+        && let Some(promise) = value.as_promise()
+      {
+        let _ = promise.clone().into_future::<Value<'js>>().await;
+      }
+    }
+  }
+}
+
+/// One JS object per web view of a device, as Playwright's
+/// `AndroidDevice._webViews` gives.
+type ViewObjects = Rc<RefCell<Vec<(AndroidWebView, Persistent<Class<'static, AndroidWebViewJs>>)>>>;
+
+fn view_object<'js>(
+  ctx: &Ctx<'js>,
+  views: &ViewObjects,
+  view: AndroidWebView,
+) -> rquickjs::Result<Class<'js, AndroidWebViewJs>> {
+  let known = views
+    .borrow()
+    .iter()
+    .find(|(known, _)| *known == view)
+    .map(|(_, object)| object.clone());
+  if let Some(object) = known {
+    return object.restore(ctx);
+  }
+  let object = Class::instance(
+    ctx.clone(),
+    AndroidWebViewJs {
+      inner: view.clone(),
+      listeners: Rc::default(),
+      pumping: Cell::new(false),
+    },
+  )?;
+  let mut views = views.borrow_mut();
+  views.retain(|(known, _)| !known.is_closed());
+  views.push((view, Persistent::save(ctx, object.clone())));
+  Ok(object)
+}
+
+/// JS truthiness of what a predicate returned.
+fn truthy<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<bool> {
+  let boolean: Function<'js> = ctx.globals().get("Boolean")?;
+  boolean.call((value,))
+}
+
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "AndroidDevice")]
 pub struct AndroidDeviceJs {
   #[qjs(skip_trace)]
   inner: AndroidDevice,
+  #[qjs(skip_trace)]
+  listeners: Rc<Listeners>,
+  #[qjs(skip_trace)]
+  views: ViewObjects,
+  #[qjs(skip_trace)]
+  pumping: Cell<bool>,
 }
 
 impl AndroidDeviceJs {
   #[must_use]
   pub fn new(inner: AndroidDevice) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      listeners: Rc::default(),
+      views: Rc::default(),
+      pumping: Cell::new(false),
+    }
+  }
+
+  /// Start delivering the device's events to its listeners, once.
+  fn pump(&self, ctx: &Ctx<'_>) {
+    if self.pumping.replace(true) {
+      return;
+    }
+    let mut events = self.inner.subscribe();
+    let device = self.inner.clone();
+    let listeners = Rc::clone(&self.listeners);
+    let views = Rc::clone(&self.views);
+    let ctx = ctx.clone();
+    ctx.clone().spawn(async move {
+      loop {
+        match events.recv().await {
+          Ok(AndroidDeviceEvent::WebView(view)) => {
+            if let Ok(object) = view_object(&ctx, &views, view) {
+              listeners.emit(&ctx, "webview", object.into_value()).await;
+            }
+          },
+          Ok(AndroidDeviceEvent::Close) => {
+            let this = crate::bindings::identity::android_device_object(&ctx, device.clone())
+              .map_or_else(|_| Value::new_undefined(ctx.clone()), Class::into_value);
+            listeners.emit(&ctx, "close", this).await;
+            return;
+          },
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+      }
+    });
   }
 }
 
@@ -247,6 +417,157 @@ impl AndroidDeviceJs {
     let options: Options = bag(&ctx, options)?;
     let source = file(&ctx, &source)?;
     self.inner.install_apk(source, options.args).await.into_js_with(&ctx)
+  }
+
+  /// Playwright: `androidDevice.on(event: 'webview' | 'close', listener)`.
+  #[qjs(rename = "on")]
+  pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
+    self.listeners.add(&ctx, event, listener, false);
+    self.pump(&ctx);
+  }
+
+  /// Playwright: `androidDevice.once(event, listener)`.
+  #[qjs(rename = "once")]
+  pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
+    self.listeners.add(&ctx, event, listener, true);
+    self.pump(&ctx);
+  }
+
+  /// Playwright: `androidDevice.off(event, listener)`.
+  #[qjs(rename = "off")]
+  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) -> rquickjs::Result<()> {
+    self.listeners.remove(&ctx, &event, &listener)
+  }
+
+  /// Playwright: `androidDevice.waitForEvent(event, optionsOrPredicate?)`.
+  /// `webview` resolves to the `AndroidWebView`, `close` to the device.
+  #[qjs(rename = "waitForEvent")]
+  pub async fn wait_for_event<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    event: String,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
+    if event != "webview" && event != "close" {
+      return Err(type_error(&ctx, format!("waitForEvent: unknown event \"{event}\"")));
+    }
+    let (predicate, timeout): (Option<Function<'js>>, Option<f64>) = match options.0 {
+      Some(value) if value.is_function() => (value.into_function(), None),
+      Some(value) if value.is_object() => {
+        let bag = value.as_object().cloned();
+        let predicate: Option<Function<'js>> = bag.as_ref().map(|bag| bag.get("predicate")).transpose()?.flatten();
+        let timeout: Option<f64> = bag.as_ref().map(|bag| bag.get("timeout")).transpose()?.flatten();
+        (predicate, timeout)
+      },
+      _ => (None, None),
+    };
+    let timeout_ms = timeout.map_or_else(|| self.inner.default_timeout(), ms_f64_to_u64);
+    // Subscribed before anything is awaited, so no event in between is missed.
+    let mut events = self.inner.subscribe();
+    let accepted = |candidate: &Value<'js>| -> rquickjs::Result<bool> {
+      match &predicate {
+        Some(predicate) => truthy(&ctx, predicate.call((candidate.clone(),))?),
+        None => Ok(true),
+      }
+    };
+    let closed = || {
+      crate::bindings::convert::ferri_throw(
+        &ctx,
+        &ferridriver::FerriError::target_closed(Some("Device is closed".into())),
+      )
+    };
+    // A closed device shows no more web views; say so now, not at the timeout.
+    if event == "webview" && self.inner.is_closed() {
+      return Err(closed());
+    }
+    let happened = async {
+      loop {
+        match events.recv().await {
+          Ok(AndroidDeviceEvent::WebView(view)) if event == "webview" => {
+            let object = view_object(&ctx, &self.views, view)?.into_value();
+            if accepted(&object)? {
+              return Ok(object);
+            }
+          },
+          Ok(AndroidDeviceEvent::WebView(_)) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+          Ok(AndroidDeviceEvent::Close) if event == "close" => {
+            let this = crate::bindings::identity::android_device_object(&ctx, self.inner.clone())?.into_value();
+            if accepted(&this)? {
+              return Ok(this);
+            }
+          },
+          Ok(AndroidDeviceEvent::Close) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            return Err(closed());
+          },
+        }
+      }
+    };
+    if timeout_ms == 0 {
+      return happened.await;
+    }
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), happened).await {
+      Ok(outcome) => outcome,
+      Err(_) => Err(crate::bindings::convert::ferri_throw(
+        &ctx,
+        &ferridriver::FerriError::timeout(format!("waiting for event \"{event}\""), timeout_ms),
+      )),
+    }
+  }
+
+  /// Playwright: `androidDevice.webViews(): AndroidWebView[]`.
+  #[qjs(rename = "webViews")]
+  pub fn web_views<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Vec<Class<'js, AndroidWebViewJs>>> {
+    self
+      .inner
+      .web_views()
+      .into_iter()
+      .map(|view| view_object(&ctx, &self.views, view))
+      .collect()
+  }
+
+  /// Playwright: `androidDevice.webView(selector: { pkg?, socketName? },
+  /// options?: { timeout? }): Promise<AndroidWebView>`.
+  #[qjs(rename = "webView")]
+  pub async fn web_view<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    target: Value<'js>,
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Class<'js, AndroidWebViewJs>> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct Target {
+      pkg: Option<String>,
+      socket_name: Option<String>,
+    }
+    let target: Target = serde_from_js(&ctx, target)?;
+    let options: ActionOptions = bag(&ctx, options)?;
+    let view = self
+      .inner
+      .web_view(
+        &AndroidWebViewSelector {
+          pkg: target.pkg,
+          socket_name: target.socket_name,
+        },
+        options.timeout(),
+      )
+      .await
+      .into_js_with(&ctx)?;
+    view_object(&ctx, &self.views, view)
+  }
+
+  /// Playwright: `androidDevice.open(command: string): Promise<AndroidSocket>`.
+  #[qjs(rename = "open")]
+  pub async fn open<'js>(&self, ctx: Ctx<'js>, command: String) -> rquickjs::Result<Class<'js, AndroidSocketJs>> {
+    let socket = self.inner.open(&command).await.into_js_with(&ctx)?;
+    Class::instance(
+      ctx,
+      AndroidSocketJs {
+        inner: Rc::new(socket),
+        listeners: Rc::default(),
+        pumping: Cell::new(false),
+      },
+    )
   }
 
   /// Playwright: `androidDevice.setDefaultTimeout(timeout: number): void`.
@@ -513,6 +834,142 @@ impl AndroidDeviceJs {
   }
 }
 
+/// Playwright: `AndroidWebView`.
+#[derive(JsLifetime, Trace)]
+#[rquickjs::class(rename = "AndroidWebView")]
+pub struct AndroidWebViewJs {
+  #[qjs(skip_trace)]
+  inner: AndroidWebView,
+  #[qjs(skip_trace)]
+  listeners: Rc<Listeners>,
+  #[qjs(skip_trace)]
+  pumping: Cell<bool>,
+}
+
+impl AndroidWebViewJs {
+  fn listen<'js>(&self, ctx: &Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
+    self.listeners.add(ctx, event, listener, once);
+    if self.pumping.replace(true) {
+      return;
+    }
+    let view = self.inner.clone();
+    let listeners = Rc::clone(&self.listeners);
+    let ctx = ctx.clone();
+    ctx.clone().spawn(async move {
+      view.closed().await;
+      listeners.emit(&ctx, "close", Value::new_undefined(ctx.clone())).await;
+    });
+  }
+}
+
+#[rquickjs::methods]
+impl AndroidWebViewJs {
+  /// Playwright: `androidWebView.pid(): number`.
+  #[qjs(rename = "pid")]
+  pub fn pid(&self) -> i64 {
+    self.inner.pid()
+  }
+
+  /// Playwright: `androidWebView.pkg(): string`.
+  #[qjs(rename = "pkg")]
+  pub fn pkg(&self) -> String {
+    self.inner.pkg().to_owned()
+  }
+
+  /// Playwright: `androidWebView.page(): Promise<Page>`.
+  #[qjs(rename = "page")]
+  pub async fn page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, crate::bindings::page::PageJs>> {
+    let page = self.inner.page().await.into_js_with(&ctx)?;
+    crate::bindings::identity::page_object(&ctx, page)
+  }
+
+  /// Playwright: `androidWebView.on('close', listener)`.
+  #[qjs(rename = "on")]
+  pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
+    self.listen(&ctx, event, listener, false);
+  }
+
+  /// Playwright: `androidWebView.once('close', listener)`.
+  #[qjs(rename = "once")]
+  pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
+    self.listen(&ctx, event, listener, true);
+  }
+
+  /// Playwright: `androidWebView.off('close', listener)`.
+  #[qjs(rename = "off")]
+  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) -> rquickjs::Result<()> {
+    self.listeners.remove(&ctx, &event, &listener)
+  }
+}
+
+/// Playwright: `AndroidSocket`, a connection `androidDevice.open` made.
+#[derive(JsLifetime, Trace)]
+#[rquickjs::class(rename = "AndroidSocket")]
+pub struct AndroidSocketJs {
+  #[qjs(skip_trace)]
+  inner: Rc<AndroidSocket>,
+  #[qjs(skip_trace)]
+  listeners: Rc<Listeners>,
+  #[qjs(skip_trace)]
+  pumping: Cell<bool>,
+}
+
+impl AndroidSocketJs {
+  /// What the device sent is held until the first listener asks, then
+  /// delivered in order: `data` a chunk at a time, `close` at the end.
+  fn listen<'js>(&self, ctx: &Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
+    self.listeners.add(ctx, event, listener, once);
+    if self.pumping.replace(true) {
+      return;
+    }
+    let socket = Rc::clone(&self.inner);
+    let listeners = Rc::clone(&self.listeners);
+    let ctx = ctx.clone();
+    ctx.clone().spawn(async move {
+      while let Some(chunk) = socket.next_data().await {
+        if let Ok(data) = rquickjs::IntoJs::into_js(chunk, &ctx) {
+          listeners.emit(&ctx, "data", data).await;
+        }
+      }
+      listeners.emit(&ctx, "close", Value::new_undefined(ctx.clone())).await;
+    });
+  }
+}
+
+#[rquickjs::methods]
+impl AndroidSocketJs {
+  /// Playwright: `androidSocket.write(data: Buffer): Promise<void>`.
+  #[qjs(rename = "write")]
+  pub async fn write<'js>(&self, ctx: Ctx<'js>, data: Value<'js>) -> rquickjs::Result<()> {
+    let data = ferrijs::std::node::bytes::value_to_bytes(&ctx, &data, None)?;
+    self.inner.write(&data).await.into_js_with(&ctx)
+  }
+
+  /// Playwright: `androidSocket.close(): Promise<void>`.
+  #[qjs(rename = "close")]
+  pub async fn close(&self) {
+    self.inner.close().await;
+  }
+
+  /// Playwright: `androidSocket.on(event: 'data' | 'close', listener)`.
+  #[qjs(rename = "on")]
+  pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
+    self.listen(&ctx, event, listener, false);
+  }
+
+  /// Playwright: `androidSocket.once(event, listener)`.
+  #[qjs(rename = "once")]
+  pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
+    self.listen(&ctx, event, listener, true);
+  }
+
+  /// Playwright: `androidSocket.off(event, listener)`.
+  #[qjs(rename = "off")]
+  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) -> rquickjs::Result<()> {
+    self.listeners.remove(&ctx, &event, &listener)
+  }
+}
+
 /// Playwright: `AndroidInput`, reached as `androidDevice.input`.
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "AndroidInput")]
@@ -570,6 +1027,8 @@ pub fn install_android(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<AndroidJs>::define(&ctx.globals())?;
   Class::<AndroidDeviceJs>::define(&ctx.globals())?;
   Class::<AndroidInputJs>::define(&ctx.globals())?;
+  Class::<AndroidWebViewJs>::define(&ctx.globals())?;
+  Class::<AndroidSocketJs>::define(&ctx.globals())?;
   ctx.globals().set(
     "_android",
     Class::instance(ctx.clone(), AndroidJs { inner: Android::new() })?,
