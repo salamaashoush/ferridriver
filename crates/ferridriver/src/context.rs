@@ -270,6 +270,15 @@ pub struct ContextRef {
   pages: Arc<std::sync::OnceLock<crate::state::ContextPages>>,
 }
 
+impl std::fmt::Debug for ContextRef {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ContextRef")
+      .field("name", &self.name)
+      .field("closed", &self.is_closed())
+      .finish_non_exhaustive()
+  }
+}
+
 impl ContextRef {
   /// [`Self::new`] for a caller that can await.
   ///
@@ -1360,7 +1369,7 @@ impl ContextRef {
   }
 
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::ContextCloseOptions>) -> Result<()> {
-    self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let first_close = !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst);
     // Flush `routeFromHAR(update: true)` recorders while the network log
     // is still reachable — Playwright writes the updated HAR on context
     // close (`browserContext.ts` exports every live HAR recorder).
@@ -1380,7 +1389,19 @@ impl ContextRef {
       // `/tmp/playwright/packages/playwright-core/types/types.d.ts:15199`.
       state.shutdown().await?;
     }
+    drop(state);
+    if first_close {
+      self.events.emit(crate::events::ContextEvent::Close(self.clone()));
+    }
     Ok(())
+  }
+
+  /// The context went away with its browser: `close` fires once, as it
+  /// does for [`Self::close`].
+  pub(crate) fn did_close(&self) {
+    if !self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      self.events.emit(crate::events::ContextEvent::Close(self.clone()));
+    }
   }
 
   /// Apply `storageState` to the context, once.

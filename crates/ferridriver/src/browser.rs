@@ -693,11 +693,17 @@ impl Browser {
   }
 
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
+    let contexts = self.contexts();
     let mut state = self.state.write().await;
     if let Some(reason) = opts.and_then(|o| o.reason) {
       state.set_close_reason(reason);
     }
-    state.shutdown().await
+    let result = state.shutdown().await;
+    drop(state);
+    for context in contexts {
+      context.did_close();
+    }
+    result
   }
 
   /// Access the internal state (for MCP server integration).

@@ -3,8 +3,8 @@
 //!
 //! Mirrors Playwright's client-side `ConsoleMessage` class from
 //! `/tmp/playwright/packages/playwright-core/src/client/consoleMessage.ts`:
-//! sync `type()` / `text()` / `args()` / `location()` / `timestamp()`.
-//! `page()` is omitted (symmetric with `DownloadJs` / `FileChooserJs`).
+//! sync `type()` / `text()` / `args()` / `location()` / `timestamp()` /
+//! `page()`.
 
 use ferridriver::console_message::ConsoleMessage as CoreConsoleMessage;
 use rquickjs::JsLifetime;
@@ -60,6 +60,20 @@ impl ConsoleMessageJs {
     obj.set("lineNumber", loc.line_number)?;
     obj.set("columnNumber", loc.column_number)?;
     rquickjs::IntoJs::into_js(obj, &ctx)
+  }
+
+  /// Playwright: `consoleMessage.page(): Page | null`.
+  #[qjs(rename = "page")]
+  pub fn page<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<Class<'js, crate::bindings::page::PageJs>>> {
+    self
+      .inner
+      .page()
+      .map(|page| crate::bindings::identity::page_object(&ctx, page))
+      .transpose()
+      .map(crate::bindings::convert::Null)
   }
 
   /// Playwright: `consoleMessage.timestamp(): number`.

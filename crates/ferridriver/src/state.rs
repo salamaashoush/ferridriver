@@ -2024,6 +2024,27 @@ impl BrowserState {
               emit(ContextEvent::PageLoad(page));
             }
           },
+          PageEvent::Console(message) => emit(ContextEvent::Console(message)),
+          PageEvent::Request(request) => {
+            if let Some(page) = upgrade() {
+              emit(ContextEvent::Request { page, request });
+            }
+          },
+          PageEvent::Response(response) => {
+            if let Some(page) = upgrade() {
+              emit(ContextEvent::Response { page, response });
+            }
+          },
+          PageEvent::RequestFinished(request) => {
+            if let Some(page) = upgrade() {
+              emit(ContextEvent::RequestFinished { page, request });
+            }
+          },
+          PageEvent::RequestFailed(request) => {
+            if let Some(page) = upgrade() {
+              emit(ContextEvent::RequestFailed { page, request });
+            }
+          },
           _ => {},
         }
       }

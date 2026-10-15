@@ -1,7 +1,8 @@
 // NAPI coverage for context/browser lifecycle-observation events
 // (Playwright 1.60): BrowserContext mirrors page-level
 // framenavigated / pageload / pageclose, and browser emits 'context'
-// on newContext(). Exercised via both waitForEvent and once.
+// on newContext(). Exercised via both waitForEvent and once. The
+// network, console and close events run on every backend.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { type Browser, type Page } from "../index.js";
@@ -83,6 +84,66 @@ for (const backend of BACKENDS) {
       });
       browser.newContext();
       expect(await got).toBe(true);
+    });
+  });
+}
+
+const NETWORK_BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
+  ? [process.env.FERRIDRIVER_BACKEND]
+  : ["cdp-pipe", "cdp-raw", ...(process.platform === "darwin" ? ["webkit"] : [])];
+
+async function until(condition: () => boolean) {
+  for (let i = 0; i < 100 && !condition(); i++) await Bun.sleep(20);
+}
+
+for (const backend of NETWORK_BACKENDS) {
+  describe(`[${backend}] context network, console and close events`, () => {
+    let browser: Browser;
+    let server: ReturnType<typeof Bun.serve>;
+    let origin: string;
+
+    beforeAll(async () => {
+      server = Bun.serve({
+        port: 0,
+        fetch: () => new Response("<title>ok</title>", { headers: { "content-type": "text/html" } }),
+      });
+      origin = `http://127.0.0.1:${server.port}`;
+      browser = await launchForBackend(backend);
+    });
+
+    afterAll(async () => {
+      await browser.close();
+      server.stop(true);
+    });
+
+    it("hears requests, responses and console from its pages", async () => {
+      const context = await browser.newContext();
+      const requests: string[] = [];
+      const responses: number[] = [];
+      context.on("request", (r: any) => requests.push(r.url()));
+      context.on("response", (r: any) => responses.push(r.status()));
+      const page = await context.newPage();
+      await page.goto(`${origin}/first`);
+      await until(() => requests.includes(`${origin}/first`) && responses.includes(200));
+      expect(requests).toContain(`${origin}/first`);
+      expect(responses).toContain(200);
+
+      const messages: string[] = [];
+      context.on("console", (m: any) => messages.push(m.text()));
+      await page.evaluate(() => console.log("context hears this"));
+      await until(() => messages.includes("context hears this"));
+      expect(messages).toContain("context hears this");
+      await context.close();
+    });
+
+    it("fires close once", async () => {
+      const context = await browser.newContext();
+      let closes = 0;
+      context.on("close", () => closes++);
+      await context.close();
+      await context.close();
+      await until(() => closes > 0);
+      expect(closes).toBe(1);
     });
   });
 }

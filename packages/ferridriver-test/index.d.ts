@@ -2005,6 +2005,7 @@ export interface ConsoleMessage {
   text(): string;
   args(): JSHandle[];
   location(): { url: string; lineNumber: number; columnNumber: number };
+  page(): Page | null;
 }
 
 export interface Dialog {
@@ -2060,6 +2061,24 @@ export interface Worker {
   evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   waitForEvent(event: 'close', optionsOrTimeout?: number | { timeout?: number }): Promise<Worker>;
 }
+
+export type BrowserContextEvent =
+  | 'close'
+  | 'console'
+  | 'dialog'
+  | 'dialogclosed'
+  | 'download'
+  | 'frameattached'
+  | 'framedetached'
+  | 'framenavigated'
+  | 'page'
+  | 'pageclose'
+  | 'pageload'
+  | 'request'
+  | 'requestfailed'
+  | 'requestfinished'
+  | 'response'
+  | 'weberror';
 
 export type PageEvent =
   | 'close'
@@ -2406,14 +2425,14 @@ export interface BrowserContext {
   routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
-  waitForEvent(event: string, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
-  on(event: string, handler: (arg: unknown) => void): this;
-  addListener(event: string, handler: (arg: unknown) => void): this;
-  once(event: string, handler: (arg: unknown) => void): this;
-  prependListener(event: string, handler: (arg: unknown) => void): this;
-  prependOnceListener(event: string, handler: (arg: unknown) => void): this;
-  off(event: string, handler?: (arg: unknown) => void): this;
-  removeListener(event: string, handler?: (arg: unknown) => void): this;
+  waitForEvent(event: BrowserContextEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
+  on(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
+  addListener(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
+  once(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
+  prependListener(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
+  prependOnceListener(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
+  off(event: BrowserContextEvent, handler?: (arg: unknown) => void): this;
+  removeListener(event: BrowserContextEvent, handler?: (arg: unknown) => void): this;
   removeAllListeners(event?: string): this;
   removeAllListeners(event: string | undefined, options: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   listeners(event: string): ((arg: unknown) => void)[];

@@ -1044,12 +1044,8 @@ impl BrowserContextJs {
 
   // ── Context-level events ───────────────────────────────────────────────
 
-  /// Wait for the next context-scoped event. Supports `'page'` (new
-  /// page created via `newPage`) and `'weberror'` plus the
-  /// page-lifecycle mirror events (`'download'`, `'frameattached'`,
-  /// `'framedetached'`, `'framenavigated'`, `'pageclose'`, `'pageload'`),
-  /// resolving with the matching live class instance. Playwright:
-  /// `browserContext.waitForEvent(event, options?)`.
+  /// Playwright: `browserContext.waitForEvent(event, optionsOrPredicate?)`,
+  /// resolving with the live class instance the event carries.
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,
@@ -1057,30 +1053,54 @@ impl BrowserContextJs {
     event: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
-    use ferridriver::events::ContextEvent;
-    use rquickjs::IntoJs;
-    use rquickjs::class::Class;
-    let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?
-      .unwrap_or_else(|| self.inner.default_timeout());
-    let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
-    match ev {
-      ContextEvent::Dialog(d) | ContextEvent::DialogClosed(d) => {
-        crate::bindings::identity::dialog_object(&ctx, d)?.into_js(&ctx)
-      },
-      ContextEvent::WebError(err) => {
-        Class::instance(ctx.clone(), crate::bindings::web_error::WebErrorJs::new(err))?.into_js(&ctx)
-      },
-      ContextEvent::Download(d) => {
-        Class::instance(ctx.clone(), crate::bindings::download::DownloadJs::new(d))?.into_js(&ctx)
-      },
-      ContextEvent::FrameAttached { page, frame_id }
-      | ContextEvent::FrameDetached { page, frame_id }
-      | ContextEvent::FrameNavigated { page, frame_id } => {
-        crate::bindings::identity::frame_object(&ctx, page.frame_for_id(&frame_id))?.into_js(&ctx)
-      },
-      ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
-        crate::bindings::identity::page_object(&ctx, page)?.into_js(&ctx)
-      },
+    use ferridriver::events::EmitterEvent;
+    let mut timeout_ms: Option<f64> = None;
+    let mut predicate: Option<rquickjs::Function<'js>> = None;
+    if let Some(value) = options.0 {
+      if let Some(n) = value.as_number() {
+        timeout_ms = Some(n);
+      } else if let Some(f) = value.as_function() {
+        predicate = Some(f.clone());
+      } else if let Some(bag) = value.as_object() {
+        let timeout: Value<'js> = bag.get("timeout")?;
+        timeout_ms = timeout.as_number();
+        let found: Value<'js> = bag.get("predicate")?;
+        predicate = found.as_function().cloned();
+      }
+    }
+    let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+    let Some(predicate) = predicate else {
+      let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
+      return context_event_to_js(&ctx, ev);
+    };
+    let mut rx = self.inner.events().subscribe();
+    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    loop {
+      let next = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, rx.recv()).await.ok(),
+        None => Some(rx.recv().await),
+      };
+      let Some(next) = next else {
+        return Err(crate::bindings::convert::throw_named(
+          &ctx,
+          "TimeoutError",
+          format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
+        ));
+      };
+      let Some(ev) = next else {
+        return Err(crate::bindings::convert::throw_named(
+          &ctx,
+          "Error",
+          "context closed while waiting for event",
+        ));
+      };
+      if !ferridriver::events::ContextEvent::matches_name(&event, &ev) {
+        continue;
+      }
+      let arg = context_event_to_js(&ctx, ev.clone())?;
+      if crate::bindings::page::call_predicate_truthy(&predicate, arg, &ctx).await? {
+        return context_event_to_js(&ctx, ev);
+      }
     }
   }
 }
@@ -1342,6 +1362,26 @@ fn context_event_to_js<'js>(ctx: &Ctx<'js>, event: ferridriver::events::ContextE
     },
     ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => {
       crate::bindings::identity::page_object(ctx, page)?.into_js(ctx)
+    },
+    ContextEvent::Console(message) => Class::instance(
+      ctx.clone(),
+      crate::bindings::console_message::ConsoleMessageJs::new(message),
+    )?
+    .into_js(ctx),
+    ContextEvent::Request { page, request }
+    | ContextEvent::RequestFinished { page, request }
+    | ContextEvent::RequestFailed { page, request } => Class::instance(
+      ctx.clone(),
+      crate::bindings::network::RequestJs::new_with_page(request, page),
+    )?
+    .into_js(ctx),
+    ContextEvent::Response { page, response } => Class::instance(
+      ctx.clone(),
+      crate::bindings::network::ResponseJs::new_with_page(response, page),
+    )?
+    .into_js(ctx),
+    ContextEvent::Close(context) => {
+      Class::instance(ctx.clone(), BrowserContextJs::new(Arc::new(context)))?.into_js(ctx)
     },
   }
 }

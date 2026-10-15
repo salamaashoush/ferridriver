@@ -919,11 +919,9 @@ pub type EventEmitter = Emitter<PageEvent>;
 
 // ── Context-level event system ─────────────────────────────────────────
 
-/// Events emitted by browser contexts. Mirrors the subset of
-/// Playwright's `BrowserContextEventMap` that ferridriver supports:
-/// `'weberror'` plus the page-lifecycle mirror events added in
-/// Playwright 1.60 (`'download'`, `'frameattached'`, `'framedetached'`,
-/// `'framenavigated'`, `'pageclose'`, `'pageload'`).
+/// Events emitted by browser contexts: Playwright's
+/// `BrowserContextEventMap`, less the Chromium-only `'serviceworker'`
+/// and `'backgroundpage'`.
 #[derive(Debug, Clone)]
 pub enum ContextEvent {
   /// Unhandled error / rejection in any page in this context. Mirrors
@@ -967,6 +965,34 @@ pub enum ContextEvent {
   /// A dialog on a page in this context closed.
   /// `browserContext.on('dialogclosed', (dialog: Dialog) => ...)`.
   DialogClosed(Dialog),
+  /// A console message on a page in this context.
+  /// `browserContext.on('console', (message: ConsoleMessage) => ...)`.
+  Console(ConsoleMessage),
+  /// A page in this context issued a request.
+  /// `browserContext.on('request', (request: Request) => ...)`.
+  Request {
+    page: Arc<crate::page::Page>,
+    request: Request,
+  },
+  /// A response arrived for a page in this context.
+  /// `browserContext.on('response', (response: Response) => ...)`.
+  Response {
+    page: Arc<crate::page::Page>,
+    response: Response,
+  },
+  /// `browserContext.on('requestfinished', (request: Request) => ...)`.
+  RequestFinished {
+    page: Arc<crate::page::Page>,
+    request: Request,
+  },
+  /// `browserContext.on('requestfailed', (request: Request) => ...)`.
+  RequestFailed {
+    page: Arc<crate::page::Page>,
+    request: Request,
+  },
+  /// The context closed, by `close()` or with its browser.
+  /// `browserContext.on('close', (context: BrowserContext) => ...)`.
+  Close(crate::context::ContextRef),
 }
 
 impl EmitterEvent for ContextEvent {
@@ -983,6 +1009,12 @@ impl EmitterEvent for ContextEvent {
         | ("pageload", ContextEvent::PageLoad(_))
         | ("dialog", ContextEvent::Dialog(_))
         | ("dialogclosed", ContextEvent::DialogClosed(_))
+        | ("console", ContextEvent::Console(_))
+        | ("request", ContextEvent::Request { .. })
+        | ("response", ContextEvent::Response { .. })
+        | ("requestfinished", ContextEvent::RequestFinished { .. })
+        | ("requestfailed", ContextEvent::RequestFailed { .. })
+        | ("close", ContextEvent::Close(_))
     )
   }
 }

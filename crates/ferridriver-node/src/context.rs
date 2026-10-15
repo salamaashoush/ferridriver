@@ -617,15 +617,12 @@ impl BrowserContext {
 
   // ── Context-level events ──
 
-  /// Register a context-level event listener. Supports `'page'` and
-  /// `'weberror'` plus the page-lifecycle mirror events (`'download'`,
-  /// `'frameattached'`, `'framedetached'`, `'framenavigated'`,
-  /// `'pageclose'`, `'pageload'`). Playwright:
-  /// `browserContext.on(event, listener)` — the callback receives a
-  /// live class instance (WebError / Download / Frame / Page), and the
-  /// context is returned so registrations chain.
+  /// Register a context-level event listener. Playwright:
+  /// `browserContext.on(event, listener)` — the callback receives the
+  /// live class instance the event carries, and the context is returned
+  /// so registrations chain.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   pub fn on<'env>(
@@ -640,7 +637,7 @@ impl BrowserContext {
 
   /// Node's `addListener`, an alias of [`Self::on`].
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   pub fn add_listener<'env>(
@@ -654,7 +651,7 @@ impl BrowserContext {
 
   /// One-shot variant of [`Self::on`]. Auto-removed after first match.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   pub fn once<'env>(
@@ -670,7 +667,7 @@ impl BrowserContext {
   /// Node's `prependListener`: runs before the listeners already
   /// attached to the same event.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_listener<'env>(
@@ -685,7 +682,7 @@ impl BrowserContext {
 
   /// Node's `prependOnceListener`.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_once_listener<'env>(
@@ -702,7 +699,7 @@ impl BrowserContext {
   /// `off(event, listener)`. `off(event)` alone drops every listener
   /// for that event.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener?: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener?: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -742,7 +739,7 @@ impl BrowserContext {
 
   /// Node's `removeListener`, an alias of [`Self::off`].
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', listener?: (arg: WebError | Download | Frame | Page | Dialog) => void",
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener?: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -816,13 +813,11 @@ impl BrowserContext {
   }
 
   /// Wait for a context-level event. Playwright:
-  /// `browserContext.waitForEvent(event, options?)`. Supports `'page'`
-  /// (new page created via `newPage`) and `'weberror'` plus the
-  /// page-lifecycle mirror events; resolves with the matching live
-  /// class instance.
+  /// `browserContext.waitForEvent(event, options?)`; resolves with the
+  /// matching live class instance.
   #[napi(
-    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed', timeoutMs?: number",
-    ts_return_type = "Promise<WebError | Download | Frame | Page | Dialog>"
+    ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', timeoutMs?: number",
+    ts_return_type = "Promise<WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext>"
   )]
   pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<ContextEventArg> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
@@ -1356,6 +1351,16 @@ pub enum ContextEventArg {
   },
   Page(std::sync::Arc<ferridriver::Page>),
   Dialog(ferridriver::dialog::Dialog),
+  Console(ferridriver::console_message::ConsoleMessage),
+  Request {
+    page: std::sync::Arc<ferridriver::Page>,
+    request: ferridriver::network::Request,
+  },
+  Response {
+    page: std::sync::Arc<ferridriver::Page>,
+    response: ferridriver::network::Response,
+  },
+  Context(ferridriver::context::ContextRef),
 }
 
 impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
@@ -1377,6 +1382,19 @@ impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
       ContextEventArg::Dialog(dialog) => unsafe {
         crate::identity::DialogObject::to_napi_value(env, crate::identity::DialogObject(dialog))
       },
+      ContextEventArg::Console(message) => unsafe {
+        crate::console_message::ConsoleMessage::to_napi_value(
+          env,
+          crate::console_message::ConsoleMessage::from_core(message),
+        )
+      },
+      ContextEventArg::Request { page, request } => unsafe {
+        crate::network::Request::to_napi_value(env, crate::network::Request::from_core_with_page(request, page))
+      },
+      ContextEventArg::Response { page, response } => unsafe {
+        crate::network::Response::to_napi_value(env, crate::network::Response::from_core_with_page(response, page))
+      },
+      ContextEventArg::Context(context) => unsafe { BrowserContext::to_napi_value(env, BrowserContext::wrap(context)) },
     }
   }
 }
@@ -1393,6 +1411,12 @@ impl ContextEventArg {
       | ContextEvent::FrameNavigated { page, frame_id } => Self::Frame { page, frame_id },
       ContextEvent::Page(page) | ContextEvent::PageClose(page) | ContextEvent::PageLoad(page) => Self::Page(page),
       ContextEvent::Dialog(dialog) | ContextEvent::DialogClosed(dialog) => Self::Dialog(dialog),
+      ContextEvent::Console(message) => Self::Console(message),
+      ContextEvent::Request { page, request }
+      | ContextEvent::RequestFinished { page, request }
+      | ContextEvent::RequestFailed { page, request } => Self::Request { page, request },
+      ContextEvent::Response { page, response } => Self::Response { page, response },
+      ContextEvent::Close(context) => Self::Context(context),
     }
   }
 }

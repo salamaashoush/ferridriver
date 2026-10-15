@@ -4,7 +4,7 @@
 // (`server/browserContext.ts::storageState` / `visitOrigins`); restoring
 // goes through the same kind of page, so no page the caller holds moves.
 import { test, describe, expect } from '@ferridriver/test';
-import type { BrowserContext, Page } from '@ferridriver/test';
+import type { BrowserContext, Page, Request } from '@ferridriver/test';
 
 const ORIGIN = 'http://127.0.0.1:47831';
 const OTHER = 'http://localhost:47831';
@@ -54,9 +54,15 @@ describe('storage state of visited origins', () => {
     try {
       const opened: Page[] = [];
       context.on('page', page => opened.push(page as Page));
+      // Only requests from a page other than the caller's would be the
+      // reader's; the caller's own page may still fetch (a favicon) late.
       const requests: string[] = [];
-      context.on('request', request => requests.push((request as { url(): string }).url()));
-      const page = await context.newPage();
+      let page: Page | undefined;
+      context.on('request', request => {
+        const r = request as Request;
+        if (r.frame()?.page() !== page) requests.push(r.url());
+      });
+      page = await context.newPage();
       await page.goto(`${ORIGIN}/fx/landed`);
       await seed(page, 'token', 'kept');
       await page.goto(`${OTHER}/fx/landed`);
