@@ -779,7 +779,10 @@ impl AnyBrowser {
       Self::CdpPipe(b) => b.new_context(proxy).await,
       Self::CdpWs(b) => b.new_context(proxy).await,
       Self::WebKit(b) => b.new_context_with_options(options).await,
-      Self::Bidi(b) => b.new_context(proxy).await,
+      Self::Bidi(b) => {
+        b.new_context(proxy, options.is_some_and(|o| o.ignore_https_errors == Some(true)))
+          .await
+      },
       Self::WebDriver(_) => Err(FerriError::unsupported(
         "A Classic WebDriver session has one browser context; use the session's default context",
       )),

@@ -417,7 +417,9 @@ impl HttpClient {
         req.url(),
         Some(ferridriver::http_client::RequestOptions {
           method: Some(req.method()),
-          headers: Some(ferridriver::http_client::replayable_headers(req.inner.headers().into_iter().collect())),
+          headers: Some(ferridriver::http_client::replayable_headers(
+            req.inner.headers().into_iter().collect(),
+          )),
           data: req.inner.post_data_buffer(),
           ..Default::default()
         }),

@@ -1840,6 +1840,10 @@ export interface Route {
 }
 
 export interface Request {
+  /** Byte counts for this request and its response, once it has finished. */
+  sizes(): Promise<{ requestBodySize: number; requestHeadersSize: number; responseBodySize: number; responseHeadersSize: number }>;
+  /** The service worker that issued this request; always `null` here. */
+  serviceWorker(): null;
   url(): string;
   method(): string;
   headers(): Record<string, string>;
@@ -1861,6 +1865,9 @@ export interface Request {
 }
 
 export interface Response {
+  fromServiceWorker(): boolean;
+  serverAddr(): Promise<{ ipAddress: string; port: number } | null>;
+  securityDetails(): Promise<{ protocol?: string; subjectName?: string; issuer?: string; validFrom?: number; validTo?: number } | null>;
   url(): string;
   status(): number;
   statusText(): string;
@@ -1970,6 +1977,8 @@ export interface WebSocket {
 }
 
 export interface WebSocketRoute {
+  /** The subprotocols the page asked for. */
+  protocols(): string[];
   url(): string;
   send(message: string | Uint8Array | Buffer): void;
   close(options?: { code?: number; reason?: string }): void;
@@ -1985,6 +1994,8 @@ export interface WebError {
 }
 
 export interface ConsoleMessage {
+  /** When the message was logged, in milliseconds since the epoch. */
+  timestamp(): number;
   type(): string;
   text(): string;
   args(): JSHandle[];
@@ -2110,6 +2121,8 @@ export interface Page {
 
   click(selector: string, options?: ClickOptions): Promise<void>;
   dblclick(selector: string, options?: ClickOptions): Promise<void>;
+  setChecked(selector: string, checked: boolean, options?: ClickOptions): Promise<void>;
+  dispatchEvent(selector: string, type: string, eventInit?: Record<string, unknown>, options?: TimeoutOption): Promise<void>;
   fill(selector: string, value: string, options?: FillOptions): Promise<void>;
   press(selector: string, key: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
   type(selector: string, text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
@@ -2422,6 +2435,9 @@ export interface BrowserContext {
 }
 
 export interface Tracing {
+  /** Nests the actions up to `groupEnd()` under one entry in the trace viewer. */
+  group(name: string, options?: { location?: { file: string; line?: number; column?: number } }): void;
+  groupEnd(): void;
   start(options?: { title?: string; screenshots?: boolean; snapshots?: boolean; sources?: boolean }): Promise<void>;
   startChunk(options?: { title?: string }): Promise<void>;
   stopChunk(options?: { path?: string }): Promise<void>;
@@ -2536,6 +2552,9 @@ export interface BrowserContextOptions {
 }
 
 export interface Browser {
+  /** Publishes this browser under `title` for other clients to attach to. */
+  bind(title: string, options?: { workspaceDir?: string; metadata?: Record<string, unknown>; host?: string; port?: number }): Promise<{ endpoint: string }>;
+  unbind(): Promise<void>;
   newContext(options?: BrowserContextOptions): Promise<BrowserContext>;
   newPage(options?: BrowserContextOptions): Promise<Page>;
   contexts(): BrowserContext[];

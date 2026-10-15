@@ -153,6 +153,50 @@ describe('response timing and security details', () => {
     }
   });
 
+  test('a page response reports its certificate and server address', async ({ browser, browserName, request, baseURL }) => {
+    const { tls } = (await (await request.get(`${baseURL}/fx/endpoints`)).json()) as { tls: string };
+    const context = await browser.newContext({ ignoreHTTPSErrors: true });
+    try {
+      const page = await context.newPage();
+      const response = (await page.goto(`${tls}/secure`))!;
+      // What each browser's protocol reports, as Playwright reports it:
+      // WebDriver BiDi carries no certificate and WebKit no issuer.
+      const details = await response.securityDetails();
+      if (browserName === 'firefox') {
+        expect(details).toBeNull();
+      } else {
+        expect(details!.subjectName).toBe('rcgen self signed cert');
+        expect(details!.issuer).toBe(browserName === 'webkit' ? undefined : 'rcgen self signed cert');
+        const now = Date.now() / 1000;
+        expect(details!.validFrom!).toBeLessThan(now);
+        expect(details!.validTo!).toBeGreaterThan(now);
+        expect(Object.keys(details!).every(key => !key.includes('_'))).toBe(true);
+      }
+      // WebDriver BiDi reports no server address, as in Playwright.
+      const address = await response.serverAddr();
+      if (browserName === 'firefox') {
+        expect(address).toBeNull();
+      } else {
+        expect(address!.ipAddress).toBe('127.0.0.1');
+        expect(address!.port).toBe(Number(new URL(tls).port));
+      }
+      expect(await response.finished()).toBeNull();
+      expect(response.fromServiceWorker()).toBe(false);
+      const plain = (await page.goto(`${ORIGIN}/fx/landed`))!;
+      expect(await plain.securityDetails()).toBeNull();
+    } finally {
+      await context.close();
+    }
+    // Without the option the same certificate is refused.
+    const strict = await browser.newContext();
+    try {
+      const refused = await (await strict.newPage()).goto(`${tls}/secure`).then(() => 'loaded', () => 'refused');
+      expect(refused).toBe('refused');
+    } finally {
+      await strict.close();
+    }
+  });
+
   test('security details describe the server certificate', async ({ request, baseURL }) => {
     const { tls } = (await (await request.get(`${baseURL}/fx/endpoints`)).json()) as { tls: string };
     const secure = await request.get(`${tls}/secure`, { ignoreHTTPSErrors: true });

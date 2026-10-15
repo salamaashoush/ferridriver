@@ -95,6 +95,7 @@ pub struct RequestSizes {
 
 /// Server IP + port. Resolved from CDP `responseReceived.response.remoteIPAddress`.
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteAddr {
   pub ip_address: String,
   pub port: u16,
@@ -102,11 +103,17 @@ pub struct RemoteAddr {
 
 /// TLS certificate info. Resolved from CDP `responseReceived.response.securityDetails`.
 #[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SecurityDetails {
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub protocol: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub subject_name: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub issuer: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub valid_from: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub valid_to: Option<f64>,
 }
 
@@ -996,11 +1003,18 @@ impl Response {
     serde_json::from_str(&text).map_err(FerriError::from)
   }
 
+  /// Playwright: `response.serverAddr()`. Some backends learn the address
+  /// only once the body has arrived, so this waits for the response to
+  /// finish, as Playwright's does.
   pub async fn server_addr(&self) -> Option<RemoteAddr> {
+    let _ = self.finished().await;
     self.inner.state.read().await.remote_addr.clone()
   }
 
+  /// Playwright: `response.securityDetails()`. Waits for the response to
+  /// finish, as Playwright's does.
   pub async fn security_details(&self) -> Option<SecurityDetails> {
+    let _ = self.finished().await;
     self.inner.state.read().await.security_details.clone()
   }
 
@@ -1016,6 +1030,10 @@ impl Response {
 
   pub async fn set_raw_headers(&self, raw: Vec<HeaderEntry>) {
     self.inner.state.write().await.raw_headers = Some(raw);
+  }
+
+  pub async fn set_server_addr(&self, addr: RemoteAddr) {
+    self.inner.state.write().await.remote_addr = Some(addr);
   }
 
   pub async fn finish_success(&self) {

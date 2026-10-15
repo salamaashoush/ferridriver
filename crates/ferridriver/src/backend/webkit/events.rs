@@ -601,7 +601,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_response_received(&env.params, &ctx.requests, &target, &ctx.emitter).await;
     },
     Some("Network.loadingFinished") => {
-      handle_loading_finished(&env.params, &ctx.requests, &ctx.emitter);
+      handle_loading_finished(&env.params, &ctx.requests, &ctx.emitter).await;
     },
     Some("Network.loadingFailed") => {
       if let (Some(request_id), error_text) = (
@@ -616,7 +616,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
           .lifecycle
           .mark_failed(request_id.to_string(), error_text.to_string());
       }
-      handle_loading_failed(&env.params, &ctx.requests, &ctx.emitter);
+      handle_loading_failed(&env.params, &ctx.requests, &ctx.emitter).await;
     },
     Some("Page.loadEventFired") => {
       ctx.lifecycle.mark(crate::backend::NavLifecycle::Load);
@@ -836,12 +836,14 @@ fn build_response(request: NetworkRequest, response: &Value, body_fn: Option<Bod
       ip_address: ip.to_string(),
       port: u16::try_from(response.get("remotePort").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0),
     });
-  let security_details: Option<SecurityDetails> = response.get("security").map(|s| SecurityDetails {
-    protocol: s.get("protocol").and_then(Value::as_str).map(String::from),
-    subject_name: s.get("subjectName").and_then(Value::as_str).map(String::from),
-    issuer: s.get("issuer").and_then(Value::as_str).map(String::from),
-    valid_from: s.get("validFrom").and_then(Value::as_f64),
-    valid_to: s.get("validTo").and_then(Value::as_f64),
+  // `wkPage.ts` reads the certificate the same way; WebKit reports no
+  // issuer.
+  let security_details: Option<SecurityDetails> = response.pointer("/security/certificate").map(|c| SecurityDetails {
+    protocol: None,
+    subject_name: c.get("subject").and_then(Value::as_str).map(String::from),
+    issuer: None,
+    valid_from: c.get("validFrom").and_then(Value::as_f64),
+    valid_to: c.get("validUntil").and_then(Value::as_f64),
   });
   Response::new(ResponseInit {
     request,
@@ -914,18 +916,30 @@ fn build_body_fn(target: super::connection::Session, request_id: String) -> Body
   })
 }
 
-fn handle_loading_finished(params: &Value, requests: &Requests, emitter: &crate::events::EventEmitter) {
+/// `Network.loadingFinished`: the response is complete, and its metrics
+/// carry the server's address (`wkPage.ts::_onLoadingFinished`).
+async fn handle_loading_finished(params: &Value, requests: &Requests, emitter: &crate::events::EventEmitter) {
   let request_id = params.get("requestId").and_then(Value::as_str).unwrap_or("");
   let req = requests
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .remove(request_id);
   if let Some(req) = req {
+    if let Some(response) = req.existing_response().await {
+      if let Some(addr) = params
+        .pointer("/metrics/remoteAddress")
+        .and_then(Value::as_str)
+        .and_then(parse_remote_address)
+      {
+        response.set_server_addr(addr).await;
+      }
+      response.finish_success().await;
+    }
     emitter.emit(crate::events::PageEvent::RequestFinished(req));
   }
 }
 
-fn handle_loading_failed(params: &Value, requests: &Requests, emitter: &crate::events::EventEmitter) {
+async fn handle_loading_failed(params: &Value, requests: &Requests, emitter: &crate::events::EventEmitter) {
   let request_id = params.get("requestId").and_then(Value::as_str).unwrap_or("");
   let req = requests
     .lock()
@@ -937,9 +951,28 @@ fn handle_loading_failed(params: &Value, requests: &Requests, emitter: &crate::e
       .and_then(Value::as_str)
       .unwrap_or("")
       .to_string();
+    if let Some(response) = req.existing_response().await {
+      response
+        .finish_failure(crate::error::FerriError::backend(error_text.clone()))
+        .await;
+    }
     req.set_failure(error_text);
     emitter.emit(crate::events::PageEvent::RequestFailed(req));
   }
+}
+
+/// `host:port` as `WebKit` reports it, an IPv6 host bare and bracketed in
+/// the result (`wkPage.ts::parseRemoteAddress`).
+fn parse_remote_address(value: &str) -> Option<RemoteAddr> {
+  let colon = value.rfind(':')?;
+  let port = value[colon + 1..].parse().ok()?;
+  let host = &value[..colon];
+  let ip_address = if host.contains(':') && !host.starts_with('[') {
+    format!("[{host}]")
+  } else {
+    host.to_string()
+  };
+  Some(RemoteAddr { ip_address, port })
 }
 
 /// Convert one PW `WebKit` `Runtime.RemoteObject` JSON payload into a
@@ -1601,5 +1634,17 @@ mod frame_event_tests {
     let current = cache.lock().unwrap();
     assert_eq!(current.live_ids().count(), 2);
     assert!(!current.record("child").unwrap().detached);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn a_remote_address_splits_on_its_last_colon() {
+    let v4 = super::parse_remote_address("127.0.0.1:8443").unwrap();
+    assert_eq!((v4.ip_address.as_str(), v4.port), ("127.0.0.1", 8443));
+    let v6 = super::parse_remote_address("::1:443").unwrap();
+    assert_eq!((v6.ip_address.as_str(), v6.port), ("[::1]", 443));
+    assert!(super::parse_remote_address("no-port").is_none());
   }
 }

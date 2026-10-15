@@ -392,8 +392,16 @@ impl BidiBrowser {
   /// sslProxy, socksProxy, socksVersion, noProxy`). For the common
   /// `http://host:port` / `socks5://host:port` input we decompose into
   /// the equivalent `BiDi` shape.
-  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
-    let mut params = json!({});
+  ///
+  /// `acceptInsecureCerts` is always sent: left out, a user context
+  /// inherits the session's, which accepts them so that the default
+  /// context can serve `ignoreHTTPSErrors`.
+  pub async fn new_context(
+    &self,
+    proxy: Option<&crate::options::ProxyConfig>,
+    accept_insecure_certs: bool,
+  ) -> Result<String> {
+    let mut params = json!({ "acceptInsecureCerts": accept_insecure_certs });
     if let Some(p) = proxy {
       params["proxy"] = bidi_proxy_capability(p);
     }

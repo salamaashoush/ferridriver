@@ -402,6 +402,17 @@ impl WebKitBrowser {
           .await
           .map_err(BrowserError::from)?;
       }
+      if opts.ignore_https_errors == Some(true) {
+        self
+          .inner
+          .root
+          .send(
+            "Playwright.setIgnoreCertificateErrors",
+            json!({ "browserContextId": ctx_id.clone(), "ignore": true }),
+          )
+          .await
+          .map_err(BrowserError::from)?;
+      }
       if let Some(locale) = opts.locale.as_deref() {
         let _ = self
           .inner

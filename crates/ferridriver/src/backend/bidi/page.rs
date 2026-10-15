@@ -1936,7 +1936,6 @@ impl BidiPage {
     // ['Desktop Firefox'] }` fail on Firefox.
     for (label, asked) in [
       ("bypassCSP", opts.bypass_csp == Some(true)),
-      ("ignoreHTTPSErrors", opts.ignore_https_errors == Some(true)),
       // browsingContext.setViewport has no touch-emulation field and
       // Firefox exposes no other command for it.
       ("hasTouch", opts.has_touch == Some(true)),
