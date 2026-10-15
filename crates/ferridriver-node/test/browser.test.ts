@@ -1450,14 +1450,16 @@ for (const backend of BACKENDS) {
 
     it("addScriptTag injects inline script", async () => {
       await page.setContent("<body></body>");
-      await page.addScriptTag(undefined, "document.title = 'script_injected'");
+      const script = await page.addScriptTag({ content: "document.title = 'script_injected'" });
+      expect(await script.evaluate((e: Element) => e.tagName)).toBe("SCRIPT");
       const title = await page.title();
       expect(title).toBe("script_injected");
     });
 
     it("addStyleTag injects inline CSS", async () => {
       await page.setContent('<div id="box">test</div>');
-      await page.addStyleTag(undefined, "#box { color: red }");
+      const style = await page.addStyleTag({ content: "#box { color: red }" });
+      expect(await style.evaluate((e: Element) => e.tagName)).toBe("STYLE");
       const color = await page.evaluate(
         "getComputedStyle(document.getElementById('box')).color"
       );

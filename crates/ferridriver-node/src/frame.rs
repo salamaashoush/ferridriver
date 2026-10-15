@@ -209,22 +209,135 @@ impl Frame {
 
   // ── Navigation ────────────────────────────────────────────────────────
 
-  /// Navigate this frame to a URL. Returns the main-document
-  /// `Response` when the frame is the main frame and the backend can
-  /// observe it; `null` otherwise (child frame navigation / same-doc
-  /// navigation / unobservable backend).
+  /// Playwright: `frame.goto(url, options?: { referer?, timeout?,
+  /// waitUntil? }): Promise<Response | null>`. `null` for a navigation
+  /// within the document.
   #[napi(ts_return_type = "Promise<Response | null>")]
-  pub async fn goto(&self, url: String) -> Result<Option<crate::network::Response>> {
-    let resp = self.inner.goto(&url).await.into_napi()?;
+  pub async fn goto(
+    &self,
+    url: String,
+    options: Option<crate::types::GotoOptions>,
+  ) -> Result<Option<crate::network::Response>> {
+    let resp = self.inner.goto(&url).bag(options)?.await.into_napi()?;
     let page = self.inner.page_arc().clone();
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
   }
 
   // ── Waiting ───────────────────────────────────────────────────────────
 
+  /// Playwright: `frame.waitForLoadState(state?, options?: { timeout? })`.
+  #[napi(
+    ts_args_type = "state?: 'load' | 'domcontentloaded' | 'networkidle', options?: { timeout?: number, signal?: AbortSignal }"
+  )]
+  pub async fn wait_for_load_state(
+    &self,
+    state: Option<String>,
+    options: Option<crate::types::WaitForLoadStateOptions>,
+  ) -> Result<()> {
+    self
+      .inner
+      .wait_for_load_state(state.as_deref())
+      .bag(options)?
+      .await
+      .into_napi()
+  }
+
+  /// Playwright: `frame.waitForURL(url, options?: { timeout?, waitUntil? })`.
+  #[napi(
+    js_name = "waitForURL",
+    ts_args_type = "url: string | RegExp, options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+  )]
+  pub async fn wait_for_url(
+    &self,
+    url: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::WaitForUrlOptions>,
+  ) -> Result<()> {
+    let matcher = crate::types::string_or_regex_to_rust(url)?;
+    self.inner.wait_for_url(matcher).bag(options)?.await.into_napi()
+  }
+
+  /// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,
+  /// waitUntil? }): Promise<Response | null>`.
+  #[napi(
+    ts_args_type = "options?: { timeout?: number, signal?: AbortSignal, url?: string | RegExp, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }",
+    ts_return_type = "Promise<Response | null>"
+  )]
+  pub async fn wait_for_navigation(
+    &self,
+    options: Option<crate::types::WaitForNavigationOptions>,
+  ) -> Result<Option<crate::network::Response>> {
+    let resp = self.inner.wait_for_navigation().bag(options)?.await.into_napi()?;
+    let page = self.inner.page_arc().clone();
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
+  }
+
+  /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?: {
+  /// polling?, timeout? }): Promise<JSHandle>`.
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { polling?: number | 'raf', timeout?: number, signal?: AbortSignal }"
+  )]
+  pub async fn wait_for_function(
+    &self,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+    mut options: Option<crate::types::WaitForFunctionOptions>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let serialized = crate::page::build_serialized_argument(arg)?;
+    let signal = crate::abort::take(&mut options);
+    let opts = options
+      .map(ferridriver::options::WaitForFunctionOptions::try_from)
+      .transpose()?;
+    let handle = crate::abort::run(
+      signal,
+      self
+        .inner
+        .wait_for_function(&page_function.source, serialized, page_function.is_function, opts),
+    )
+    .await?;
+    Ok(crate::js_handle::JSHandle::wrap(handle))
+  }
+
+  /// Playwright: `frame.waitForTimeout(timeout): Promise<void>`.
   #[napi]
-  pub async fn wait_for_load_state(&self) -> Result<()> {
-    self.inner.wait_for_load_state().await.into_napi()
+  pub async fn wait_for_timeout(&self, timeout: f64) {
+    self.inner.wait_for_timeout(crate::types::f64_to_u64(timeout)).await;
+  }
+
+  // ── Handles ───────────────────────────────────────────────────────────
+
+  /// Playwright: `frame.$(selector, options?: { strict?: boolean }):
+  /// Promise<ElementHandle | null>`.
+  #[napi(js_name = "$")]
+  pub async fn dollar(
+    &self,
+    selector: String,
+    options: Option<crate::types::QuerySelectorOptions>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    let handle = self
+      .inner
+      .query_selector(&selector, options.and_then(|o| o.strict))
+      .await
+      .into_napi()?;
+    Ok(handle.map(crate::element_handle::ElementHandle::wrap))
+  }
+
+  /// Playwright: `frame.$$(selector): Promise<ElementHandle[]>`.
+  #[napi(js_name = "$$")]
+  pub async fn dollar_dollar(&self, selector: String) -> Result<Vec<crate::element_handle::ElementHandle>> {
+    let handles = self.inner.query_selector_all(&selector).await.into_napi()?;
+    Ok(
+      handles
+        .into_iter()
+        .map(crate::element_handle::ElementHandle::wrap)
+        .collect(),
+    )
+  }
+
+  /// Playwright: `frame.frameElement(): Promise<ElementHandle>`.
+  #[napi]
+  pub async fn frame_element(&self) -> Result<crate::element_handle::ElementHandle> {
+    let handle = self.inner.frame_element().await.into_napi()?;
+    Ok(crate::element_handle::ElementHandle::wrap(handle))
   }
 
   /// Playwright: `frame.waitForSelector(selector, options?)`. Returns the
@@ -247,32 +360,42 @@ impl Frame {
 
   // ── Additional content methods ───────────────────────────────────────
 
-  #[napi]
-  pub async fn set_content(&self, html: String) -> Result<()> {
-    self.inner.set_content(&html).await.into_napi()
+  /// Playwright: `frame.setContent(html, options?: { timeout?, waitUntil? })`.
+  #[napi(
+    ts_args_type = "html: string, options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+  )]
+  pub async fn set_content(&self, html: String, options: Option<crate::types::SetContentOptions>) -> Result<()> {
+    self.inner.set_content(&html).bag(options)?.await.into_napi()
   }
 
-  #[napi]
+  /// Playwright: `frame.addScriptTag(options?: { content?, path?, type?,
+  /// url? }): Promise<ElementHandle>`.
+  #[napi(ts_args_type = "options?: { content?: string, path?: string, type?: string, url?: string }")]
   pub async fn add_script_tag(
     &self,
-    url: Option<String>,
-    content: Option<String>,
-    script_type: Option<String>,
-  ) -> Result<()> {
-    self
+    options: Option<crate::types::AddScriptTagOptions>,
+  ) -> Result<crate::element_handle::ElementHandle> {
+    let handle = self
       .inner
-      .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
+      .add_script_tag(options.unwrap_or_default().into())
       .await
-      .into_napi()
+      .into_napi()?;
+    Ok(crate::element_handle::ElementHandle::wrap(handle))
   }
 
-  #[napi]
-  pub async fn add_style_tag(&self, url: Option<String>, content: Option<String>) -> Result<()> {
-    self
+  /// Playwright: `frame.addStyleTag(options?: { content?, path?, url? }):
+  /// Promise<ElementHandle>`.
+  #[napi(ts_args_type = "options?: { content?: string, path?: string, url?: string }")]
+  pub async fn add_style_tag(
+    &self,
+    options: Option<crate::types::AddStyleTagOptions>,
+  ) -> Result<crate::element_handle::ElementHandle> {
+    let handle = self
       .inner
-      .add_style_tag(url.as_deref(), content.as_deref())
+      .add_style_tag(options.unwrap_or_default().into())
       .await
-      .into_napi()
+      .into_napi()?;
+    Ok(crate::element_handle::ElementHandle::wrap(handle))
   }
 
   /// Whether this frame has been detached from the page.

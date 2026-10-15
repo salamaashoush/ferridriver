@@ -464,15 +464,27 @@ impl Page {
   /// does not re-resolve on each action — callers `dispose()` it when
   /// done.
   #[napi]
-  pub async fn query_selector(&self, selector: String) -> Result<Option<crate::element_handle::ElementHandle>> {
-    let inner = self.inner.query_selector(&selector).await.into_napi()?;
+  pub async fn query_selector(
+    &self,
+    selector: String,
+    options: Option<crate::types::QuerySelectorOptions>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    let inner = self
+      .inner
+      .query_selector(&selector, options.and_then(|o| o.strict))
+      .await
+      .into_napi()?;
     Ok(inner.map(crate::element_handle::ElementHandle::wrap))
   }
 
-  /// Alias for [`Self::query_selector`] matching Playwright's `$` shortcut.
+  /// Playwright: `page.$(selector, options?: { strict?: boolean })`.
   #[napi(js_name = "$")]
-  pub async fn dollar(&self, selector: String) -> Result<Option<crate::element_handle::ElementHandle>> {
-    self.query_selector(selector).await
+  pub async fn dollar(
+    &self,
+    selector: String,
+    options: Option<crate::types::QuerySelectorOptions>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    self.query_selector(selector, options).await
   }
 
   /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
@@ -1256,9 +1268,17 @@ impl Page {
       .map_err(crate::error::to_napi)
   }
 
-  #[napi]
-  pub async fn set_content(&self, html: String) -> Result<()> {
-    self.inner.set_content(&html).await.map_err(crate::error::to_napi)
+  /// Playwright: `page.setContent(html, options?: { timeout?, waitUntil? })`.
+  #[napi(
+    ts_args_type = "html: string, options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+  )]
+  pub async fn set_content(&self, html: String, options: Option<crate::types::SetContentOptions>) -> Result<()> {
+    self
+      .inner
+      .set_content(&html)
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1459,13 +1479,23 @@ impl Page {
     Ok(crate::js_handle::JSHandle::wrap(handle))
   }
 
-  #[napi]
-  pub async fn wait_for_navigation(&self, timeout_ms: Option<f64>) -> Result<()> {
-    self
+  /// Playwright: `page.waitForNavigation(options?: { timeout?, url?,
+  /// waitUntil? }): Promise<Response | null>`.
+  #[napi(
+    ts_args_type = "options?: { timeout?: number, signal?: AbortSignal, url?: string | RegExp, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }",
+    ts_return_type = "Promise<Response | null>"
+  )]
+  pub async fn wait_for_navigation(
+    &self,
+    options: Option<crate::types::WaitForNavigationOptions>,
+  ) -> Result<Option<crate::network::Response>> {
+    let resp = self
       .inner
-      .wait_for_navigation(timeout_ms.map(crate::types::f64_to_u64))
+      .wait_for_navigation()
+      .bag(options)?
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
   // ── Accessibility ───────────────────────────────────────────────────────
@@ -2120,27 +2150,34 @@ impl Page {
     self.inner.stop_screencast().await.map_err(crate::error::to_napi)
   }
 
-  #[napi]
+  /// Playwright: `page.addScriptTag(options?: { content?, path?, type?,
+  /// url? }): Promise<ElementHandle>`.
+  #[napi(ts_args_type = "options?: { content?: string, path?: string, type?: string, url?: string }")]
   pub async fn add_script_tag(
     &self,
-    url: Option<String>,
-    content: Option<String>,
-    script_type: Option<String>,
-  ) -> Result<()> {
-    self
+    options: Option<crate::types::AddScriptTagOptions>,
+  ) -> Result<crate::element_handle::ElementHandle> {
+    let handle = self
       .inner
-      .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
+      .add_script_tag(options.unwrap_or_default().into())
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    Ok(crate::element_handle::ElementHandle::wrap(handle))
   }
 
-  #[napi]
-  pub async fn add_style_tag(&self, url: Option<String>, content: Option<String>) -> Result<()> {
-    self
+  /// Playwright: `page.addStyleTag(options?: { content?, path?, url? }):
+  /// Promise<ElementHandle>`.
+  #[napi(ts_args_type = "options?: { content?: string, path?: string, url?: string }")]
+  pub async fn add_style_tag(
+    &self,
+    options: Option<crate::types::AddStyleTagOptions>,
+  ) -> Result<crate::element_handle::ElementHandle> {
+    let handle = self
       .inner
-      .add_style_tag(url.as_deref(), content.as_deref())
+      .add_style_tag(options.unwrap_or_default().into())
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    Ok(crate::element_handle::ElementHandle::wrap(handle))
   }
 
   #[napi]

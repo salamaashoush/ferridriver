@@ -18,6 +18,7 @@
 use ferridriver::Frame;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
+use rquickjs::function::Opt;
 
 use crate::bindings::convert::FerriResultCtxExt;
 use crate::bindings::convert::{extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs};
@@ -234,18 +235,262 @@ impl FrameJs {
       .await
   }
 
-  /// Playwright: `frame.waitForLoadState(state?, options?)`. ferridriver
-  /// core's `Frame::wait_for_load_state` takes no args (defaults to
-  /// `load`); thin delegator.
-  #[qjs(rename = "waitForLoadState")]
-  pub async fn wait_for_load_state(
+  /// Playwright: `frame.goto(url, options?: { referer?, timeout?,
+  /// waitUntil? }): Promise<Response | null>`.
+  #[qjs(rename = "goto")]
+  pub async fn goto<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    url: String,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
+    call_site
+      .scope(async move {
+        let opts = crate::bindings::page::parse_goto_options(&ctx, options)?;
+        let response = self.inner.goto(&url).maybe_options(opts).await.into_js_with(&ctx)?;
+        Ok(response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.page_arc().clone())))
+      })
+      .await
+      .map(crate::bindings::convert::Null)
+  }
+
+  /// Playwright: `frame.setContent(html, options?: { timeout?, waitUntil? })`.
+  #[qjs(rename = "setContent")]
+  pub async fn set_content<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    html: String,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let opts: Option<ferridriver::options::SetContentOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        self
+          .inner
+          .set_content(&html)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// Playwright: `frame.addScriptTag(options?: { content?, path?, type?,
+  /// url? }): Promise<ElementHandle>`.
+  #[qjs(rename = "addScriptTag")]
+  pub async fn add_script_tag<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
+    call_site
+      .scope(async move {
+        let opts: Option<ferridriver::options::AddScriptTagOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        let handle = self
+          .inner
+          .add_script_tag(opts.unwrap_or_default())
+          .await
+          .into_js_with(&ctx)?;
+        Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
+      })
+      .await
+  }
+
+  /// Playwright: `frame.addStyleTag(options?: { content?, path?, url? }):
+  /// Promise<ElementHandle>`.
+  #[qjs(rename = "addStyleTag")]
+  pub async fn add_style_tag<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
+    call_site
+      .scope(async move {
+        let opts: Option<ferridriver::options::AddStyleTagOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        let handle = self
+          .inner
+          .add_style_tag(opts.unwrap_or_default())
+          .await
+          .into_js_with(&ctx)?;
+        Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
+      })
+      .await
+  }
+
+  /// Playwright: `frame.$(selector, options?: { strict?: boolean }):
+  /// Promise<ElementHandle | null>`.
+  #[qjs(rename = "$")]
+  pub async fn dollar<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
+    call_site
+      .scope(async move {
+        let strict = crate::bindings::page::opt_strict(&options)?;
+        let handle = self.inner.query_selector(&selector, strict).await.into_js_with(&ctx)?;
+        Ok(handle.map(crate::bindings::element_handle::ElementHandleJs::new))
+      })
+      .await
+      .map(crate::bindings::convert::Null)
+  }
+
+  /// Playwright: `frame.$$(selector): Promise<ElementHandle[]>`.
+  #[qjs(rename = "$$")]
+  pub async fn dollar_dollar(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
+    selector: String,
+  ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
+    call_site
+      .scope(async move {
+        let handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
+        Ok(
+          handles
+            .into_iter()
+            .map(crate::bindings::element_handle::ElementHandleJs::new)
+            .collect(),
+        )
+      })
+      .await
+  }
+
+  /// Playwright: `frame.frameElement(): Promise<ElementHandle>`.
+  #[qjs(rename = "frameElement")]
+  pub async fn frame_element(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
+    call_site
+      .scope(async move {
+        let handle = self.inner.frame_element().await.into_js_with(&ctx)?;
+        Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
+      })
+      .await
+  }
+
+  /// Playwright: `frame.waitForLoadState(state?, options?: { timeout? })`.
+  #[qjs(rename = "waitForLoadState")]
+  pub async fn wait_for_load_state<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    state: Opt<Option<String>>,
+    options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     call_site
-      .scope(async move { self.inner.wait_for_load_state().await.into_js_with(&ctx) })
+      .scope(async move {
+        let opts: Option<ferridriver::options::WaitForLoadStateOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        self
+          .inner
+          .wait_for_load_state(state.0.flatten().as_deref())
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
+  }
+
+  /// Playwright: `frame.waitForURL(url: string | RegExp, options?: {
+  /// timeout?, waitUntil? })`.
+  #[qjs(rename = "waitForURL")]
+  pub async fn wait_for_url<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let matcher = crate::bindings::page::url_value_to_matcher(&ctx, url)?;
+        let opts: Option<ferridriver::options::WaitForUrlOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        self
+          .inner
+          .wait_for_url(matcher)
+          .maybe_options(opts)
+          .await
+          .into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,
+  /// waitUntil? }): Promise<Response | null>`.
+  #[qjs(rename = "waitForNavigation")]
+  pub async fn wait_for_navigation<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
+    // Built before the first await, so that the navigation a sibling call
+    // starts in the same tick is one this hears.
+    let opts = crate::bindings::page::parse_wait_for_navigation_options(&ctx, &options);
+    call_site
+      .scope(async move {
+        let response = self
+          .inner
+          .wait_for_navigation()
+          .options(opts?)
+          .await
+          .into_js_with(&ctx)?;
+        Ok(response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.page_arc().clone())))
+      })
+      .await
+      .map(crate::bindings::convert::Null)
+  }
+
+  /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?: {
+  /// polling?, timeout? }): Promise<JSHandle>`.
+  #[qjs(rename = "waitForFunction")]
+  pub async fn wait_for_function<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: Opt<rquickjs::Value<'js>>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+    call_site
+      .scope(async move {
+        let opts: Option<ferridriver::options::WaitForFunctionOptions> =
+          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        let (source, is_function) = extract_page_function(&ctx, page_function)?;
+        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+        let handle = self
+          .inner
+          .wait_for_function(&source, serialized, is_function, opts)
+          .await
+          .into_js_with(&ctx)?;
+        Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
+      })
+      .await
+  }
+
+  /// Playwright: `frame.waitForTimeout(timeout): Promise<void>`.
+  #[qjs(rename = "waitForTimeout")]
+  pub async fn wait_for_timeout(&self, call_site: crate::bindings::CallSite, timeout: f64) {
+    call_site
+      .scope(async move {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ms = if timeout < 0.0 { 0 } else { timeout as u64 };
+        self.inner.wait_for_timeout(ms).await;
+      })
+      .await;
   }
 
   /// Playwright: `frame.waitForSelector(selector, options?)`

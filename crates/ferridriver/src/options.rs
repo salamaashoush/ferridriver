@@ -477,6 +477,51 @@ pub struct WaitForUrlOptions {
   pub wait_until: Option<LoadState>,
 }
 
+/// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,
+/// waitUntil? })`.
+#[derive(Clone, Default)]
+pub struct WaitForNavigationOptions {
+  pub timeout: Option<u64>,
+  /// Only a navigation to a URL this matches ends the wait.
+  pub url: Option<crate::url_matcher::UrlMatcher>,
+  pub wait_until: Option<LoadState>,
+}
+
+/// Playwright: `frame.setContent(html, options?: { timeout?, waitUntil? })`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetContentOptions {
+  pub timeout: Option<u64>,
+  pub wait_until: Option<LoadState>,
+}
+
+/// Playwright: `frame.addScriptTag(options?: { content?, path?, type?, url? })`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AddScriptTagOptions {
+  /// Raw JavaScript for an inline script.
+  pub content: Option<String>,
+  /// A file whose content becomes an inline script.
+  pub path: Option<std::path::PathBuf>,
+  /// The script's `type`, `module` for an ES module.
+  #[serde(rename = "type")]
+  pub script_type: Option<String>,
+  /// The `src` of an external script.
+  pub url: Option<String>,
+}
+
+/// Playwright: `frame.addStyleTag(options?: { content?, path?, url? })`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AddStyleTagOptions {
+  /// Raw CSS for an inline stylesheet.
+  pub content: Option<String>,
+  /// A file whose content becomes an inline stylesheet.
+  pub path: Option<std::path::PathBuf>,
+  /// The `href` of an external stylesheet.
+  pub url: Option<String>,
+}
+
 /// Playwright: `page.waitForLoadState(state?, options?: { timeout? })`.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]

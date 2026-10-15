@@ -132,6 +132,41 @@ pub(crate) fn opt_timeout_ms(options: &Opt<rquickjs::Value<'_>>) -> rquickjs::Re
   Ok(field.as_number().map(|n| if n < 0.0 { 0 } else { n as u64 }))
 }
 
+/// `waitForNavigation`'s `{ timeout?, url?, waitUntil? }`, whose `url` is
+/// a `string | RegExp` and so cannot come through serde.
+pub(crate) fn parse_wait_for_navigation_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  options: &Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::WaitForNavigationOptions> {
+  let url = match options.0.as_ref().and_then(rquickjs::Value::as_object) {
+    Some(bag) => {
+      let url: rquickjs::Value<'js> = bag.get("url")?;
+      if url.is_undefined() || url.is_null() {
+        None
+      } else {
+        Some(url_value_to_matcher(ctx, url)?)
+      }
+    },
+    None => None,
+  };
+  Ok(ferridriver::options::WaitForNavigationOptions {
+    timeout: opt_timeout_ms(options)?,
+    url,
+    wait_until: opt_str_field(options, "waitUntil")?
+      .as_deref()
+      .map(ferridriver::options::LoadState::from),
+  })
+}
+
+/// The `strict` of `$(selector, { strict? })`.
+pub(crate) fn opt_strict(options: &Opt<rquickjs::Value<'_>>) -> rquickjs::Result<Option<bool>> {
+  let Some(bag) = options.0.as_ref().and_then(rquickjs::Value::as_object) else {
+    return Ok(None);
+  };
+  let strict: rquickjs::Value<'_> = bag.get("strict")?;
+  Ok(strict.as_bool())
+}
+
 pub(crate) fn parse_unroute_behavior(
   ctx: &rquickjs::Ctx<'_>,
   behavior: &str,

@@ -995,6 +995,20 @@ export function mergeExpects<List extends unknown[]>(...expects: List): Expect<M
 
 // ── Browser surface (QuickJS bindings over the Rust core) ────────────
 
+export type LoadState = 'load' | 'domcontentloaded' | 'networkidle' | 'commit';
+
+export interface SetContentOptions extends TimeoutOption {
+  /** When the content counts as set. Defaults to `load`. */
+  waitUntil?: LoadState;
+}
+
+export interface WaitForNavigationOptions extends TimeoutOption {
+  /** Only a navigation to a URL this matches ends the wait. */
+  url?: string | RegExp;
+  /** How far the new document has to get. Defaults to `load`. */
+  waitUntil?: LoadState;
+}
+
 export interface GotoOptions {
   timeout?: number;
   signal?: AbortSignal;
@@ -1861,10 +1875,13 @@ export interface Frame {
   url(): string;
   isMainFrame(): boolean;
   isDetached(): boolean;
-  waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   goto(url: string, options?: GotoOptions): Promise<Response | null>;
   content(options?: { includeShadow?: boolean }): Promise<string>;
+  setContent(html: string, options?: SetContentOptions): Promise<void>;
   title(): Promise<string>;
+  addScriptTag(options?: { url?: string; path?: string; content?: string; type?: string }): Promise<ElementHandle>;
+  addStyleTag(options?: { url?: string; path?: string; content?: string }): Promise<ElementHandle>;
+
   locator(selectorOrLocator: string | Locator, options?: LocatorFilterOptions): Locator;
   getByRole(role: string, options?: GetByRoleOptions): Locator;
   getByText(text: string | RegExp, options?: GetByTextOptions): Locator;
@@ -1875,10 +1892,60 @@ export interface Frame {
   getByTestId(testId: string | RegExp): Locator;
   frameLocator(selector?: string): FrameLocator;
   page(): Page;
-  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
   parentFrame(): Frame | null;
   childFrames(): Frame[];
+  /** The `<iframe>` or `<frame>` in the parent frame that holds this one. */
+  frameElement(): Promise<ElementHandle>;
+
+  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
+  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
+  $(selector: string, options?: { strict?: boolean }): Promise<ElementHandle | null>;
+  $$(selector: string): Promise<ElementHandle[]>;
+  $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+
+  waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
+  waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
+  waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', options?: TimeoutOption): Promise<void>;
+  waitForURL(url: string | RegExp, options?: TimeoutOption & { waitUntil?: LoadState }): Promise<void>;
+  waitForNavigation(options?: WaitForNavigationOptions): Promise<Response | null>;
+  waitForTimeout(timeout: number): Promise<void>;
+
+  click(selector: string, options?: ClickOptions): Promise<void>;
+  dblclick(selector: string, options?: ClickOptions): Promise<void>;
+  hover(selector: string, options?: ClickOptions): Promise<void>;
+  tap(selector: string, options?: ClickOptions): Promise<void>;
+  focus(selector: string): Promise<void>;
+  fill(selector: string, value: string, options?: FillOptions): Promise<void>;
+  type(selector: string, text: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  press(selector: string, key: string, options?: TimeoutOption & { delay?: number }): Promise<void>;
+  check(selector: string, options?: ClickOptions): Promise<void>;
+  uncheck(selector: string, options?: ClickOptions): Promise<void>;
+  setChecked(selector: string, checked: boolean, options?: ClickOptions): Promise<void>;
+  selectOption(
+    selector: string,
+    values: string | string[] | SelectOptionValues | SelectOptionValues[] | null,
+    options?: TimeoutOption & { force?: boolean }
+  ): Promise<string[]>;
+  setInputFiles(
+    selector: string,
+    files: string | string[] | { name: string; mimeType: string; buffer: Uint8Array | Buffer } | Array<{ name: string; mimeType: string; buffer: Uint8Array | Buffer }>,
+    options?: TimeoutOption
+  ): Promise<void>;
+  dragAndDrop(source: string, target: string): Promise<void>;
+  dispatchEvent(selector: string, type: string, eventInit?: Record<string, unknown>, options?: TimeoutOption): Promise<void>;
+
+  textContent(selector: string): Promise<string | null>;
+  innerText(selector: string): Promise<string>;
+  innerHTML(selector: string): Promise<string>;
+  inputValue(selector: string): Promise<string>;
+  getAttribute(selector: string, name: string): Promise<string | null>;
+  isVisible(selector: string): Promise<boolean>;
+  isHidden(selector: string): Promise<boolean>;
+  isEnabled(selector: string): Promise<boolean>;
+  isDisabled(selector: string): Promise<boolean>;
+  isChecked(selector: string): Promise<boolean>;
+  isEditable(selector: string): Promise<boolean>;
 }
 
 export interface WebSocket {
@@ -1991,7 +2058,7 @@ export interface Page {
   url(): string;
   title(): Promise<string>;
   content(options?: { includeShadow?: boolean }): Promise<string>;
-  setContent(html: string, options?: GotoOptions): Promise<void>;
+  setContent(html: string, options?: SetContentOptions): Promise<void>;
   close(options?: { runBeforeUnload?: boolean }): Promise<void>;
   isClosed(): boolean;
   bringToFront(): Promise<void>;
@@ -2071,11 +2138,11 @@ export interface Page {
   clearConsoleMessages(): void;
   pageErrors(options?: { filter?: 'all' | 'since-navigation' }): Error[];
   clearPageErrors(): void;
-  $(selector: string): Promise<ElementHandle | null>;
+  $(selector: string, options?: { strict?: boolean }): Promise<ElementHandle | null>;
   $$(selector: string): Promise<ElementHandle[]>;
   // querySelector/querySelectorAll are the NAPI-mirrored long names for
   // $/$$ (ferridriver extension).
-  querySelector(selector: string): Promise<ElementHandle | null>;
+  querySelector(selector: string, options?: { strict?: boolean }): Promise<ElementHandle | null>;
   querySelectorAll(selector: string): Promise<ElementHandle[]>;
   $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
@@ -2089,6 +2156,7 @@ export interface Page {
   waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
   waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', options?: TimeoutOption): Promise<void>;
   waitForURL(url: string | RegExp | ((url: URL) => boolean), options?: TimeoutOption & { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }): Promise<void>;
+  waitForNavigation(options?: WaitForNavigationOptions): Promise<Response | null>;
   waitForTimeout(timeout: number): Promise<void>;
   waitForEvent(event: PageEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
   waitForRequest(urlOrPredicate: string | RegExp | ((request: Request) => boolean), options?: TimeoutOption): Promise<Request>;

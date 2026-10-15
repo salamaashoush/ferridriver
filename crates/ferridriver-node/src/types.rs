@@ -1442,6 +1442,113 @@ impl From<WaitForUrlOptions> for ferridriver::options::WaitForUrlOptions {
   }
 }
 
+/// Options for `frame.waitForNavigation({ timeout?, url?, waitUntil? })`.
+#[napi(object, object_to_js = false)]
+#[derive(Default)]
+pub struct WaitForNavigationOptions {
+  /// Maximum wait time in milliseconds.
+  pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
+  /// Only a navigation to a URL this matches ends the wait.
+  #[napi(ts_type = "string | RegExp")]
+  pub url: Option<napi::Either<String, JsRegExpLike>>,
+  /// Lifecycle state to await once the navigation commits: "load",
+  /// "domcontentloaded", "networkidle", "commit".
+  pub wait_until: Option<String>,
+}
+
+impl TryFrom<WaitForNavigationOptions> for ferridriver::options::WaitForNavigationOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: WaitForNavigationOptions) -> napi::Result<Self> {
+    Ok(Self {
+      timeout: o.timeout.map(f64_to_u64),
+      url: o.url.map(string_or_regex_to_rust).transpose()?,
+      wait_until: o.wait_until.as_deref().map(ferridriver::options::LoadState::from),
+    })
+  }
+}
+
+/// Options for `frame.setContent(html, { timeout?, waitUntil? })`.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct SetContentOptions {
+  /// Maximum time for the document to reach `waitUntil`, in milliseconds.
+  pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
+  /// When the content counts as set: "load", "domcontentloaded",
+  /// "networkidle", "commit".
+  pub wait_until: Option<String>,
+}
+
+impl From<SetContentOptions> for ferridriver::options::SetContentOptions {
+  fn from(o: SetContentOptions) -> Self {
+    Self {
+      timeout: o.timeout.map(f64_to_u64),
+      wait_until: o.wait_until.as_deref().map(ferridriver::options::LoadState::from),
+    }
+  }
+}
+
+/// Options for `frame.addScriptTag({ content?, path?, type?, url? })`.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct AddScriptTagOptions {
+  /// Raw JavaScript for an inline script.
+  pub content: Option<String>,
+  /// A file whose content becomes an inline script.
+  pub path: Option<String>,
+  /// The script's `type`, `module` for an ES module.
+  #[napi(js_name = "type")]
+  pub script_type: Option<String>,
+  /// The `src` of an external script.
+  pub url: Option<String>,
+}
+
+impl From<AddScriptTagOptions> for ferridriver::options::AddScriptTagOptions {
+  fn from(o: AddScriptTagOptions) -> Self {
+    Self {
+      content: o.content,
+      path: o.path.map(std::path::PathBuf::from),
+      script_type: o.script_type,
+      url: o.url,
+    }
+  }
+}
+
+/// Options for `frame.addStyleTag({ content?, path?, url? })`.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct AddStyleTagOptions {
+  /// Raw CSS for an inline stylesheet.
+  pub content: Option<String>,
+  /// A file whose content becomes an inline stylesheet.
+  pub path: Option<String>,
+  /// The `href` of an external stylesheet.
+  pub url: Option<String>,
+}
+
+impl From<AddStyleTagOptions> for ferridriver::options::AddStyleTagOptions {
+  fn from(o: AddStyleTagOptions) -> Self {
+    Self {
+      content: o.content,
+      path: o.path.map(std::path::PathBuf::from),
+      url: o.url,
+    }
+  }
+}
+
+/// Options for `frame.$(selector, { strict? })`.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct QuerySelectorOptions {
+  /// Whether more than one match is an error. The context's
+  /// `strictSelectors` decides when this is left out.
+  pub strict: Option<bool>,
+}
+
 /// Options for `page.waitForLoadState(state?, { timeout? })`.
 #[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
@@ -2192,11 +2299,13 @@ crate::abort::signalled!(
   PressOptions,
   ScreenshotOptions,
   SelectOptionOptions,
+  SetContentOptions,
   SetInputFilesOptions,
   TapOptions,
   TypeOptions,
   WaitForFunctionOptions,
   WaitForLoadStateOptions,
+  WaitForNavigationOptions,
   WaitForUrlOptions,
   WaitOptions,
 );

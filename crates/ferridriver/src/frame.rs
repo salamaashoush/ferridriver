@@ -615,33 +615,289 @@ impl Frame {
 
   // ── Navigation (frame-scoped) ────────────────────────────────────────
 
-  /// Navigate this frame to a URL.
+  /// Playwright: `frame.goto(url, options?: { referer?, timeout?,
+  /// waitUntil? }): Promise<Response | null>`
+  /// (`packages/playwright-core/src/client/frame.ts`).
+  ///
+  /// A child frame is navigated by assigning its location, then waited on
+  /// like any other navigation of that frame.
   ///
   /// # Errors
   ///
-  /// Returns an error if navigation fails.
-  pub async fn goto(&self, url: &str) -> Result<Option<crate::network::Response>> {
+  /// Returns an error if the navigation fails or does not reach
+  /// `waitUntil` in time, and [`crate::error::FerriError::Unsupported`]
+  /// for `referer` on a child frame.
+  #[track_caller]
+  pub fn goto(
+    &self,
+    url: &str,
+  ) -> crate::action::Action<'static, crate::options::GotoOptions, Option<crate::network::Response>> {
+    let frame = self.clone();
+    let url = url.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        frame
+          .page
+          .traced_as(
+            "Frame",
+            "goto",
+            serde_json::json!({ "url": url }),
+            frame.goto_untraced(&url, opts),
+          )
+          .await
+      })
+    })
+  }
+
+  async fn goto_untraced(
+    &self,
+    url: &str,
+    opts: crate::options::GotoOptions,
+  ) -> Result<Option<crate::network::Response>> {
+    if self.is_main_frame() {
+      return self.page.goto_impl(url, Some(opts)).await;
+    }
+    if opts.referer.is_some() {
+      return Err(crate::error::FerriError::unsupported(
+        "A child frame is navigated by assigning its location, which cannot carry a referer",
+      ));
+    }
+    let resolved = self.page.resolve_with_base_url(url).await;
+    let target = serde_json::to_string(&resolved)?;
+    // Listening starts before the assignment, which can commit a
+    // same-document navigation before it returns.
+    let events = self.page.events().subscribe();
     self
-      .page
-      .traced_as(
-        "Frame",
-        "goto",
-        serde_json::json!({ "url": url }),
-        self.goto_untraced(url),
+      .backend_eval_expr(&format!("void (window.location.href = {target})"))
+      .await?;
+    self
+      .navigated(
+        events,
+        crate::options::WaitForNavigationOptions {
+          timeout: opts.timeout,
+          url: None,
+          wait_until: opts.wait_until,
+        },
       )
       .await
   }
 
-  async fn goto_untraced(&self, url: &str) -> Result<Option<crate::network::Response>> {
-    if self.is_main_frame() {
-      self.page.goto_impl(url, None).await
-    } else {
-      // For child frames, set location via JS
-      self
-        .backend_eval_expr(&format!("window.location.href = '{}'", url.replace('\'', "\\'")))
-        .await?;
-      Ok(None)
+  /// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,
+  /// waitUntil? }): Promise<Response | null>`. The next navigation of
+  /// this frame, to a URL `url` matches when given, once it has reached
+  /// `waitUntil`. The response is the new document's, and `None` for a
+  /// navigation within the document.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error on timeout, or if the frame is detached or the page
+  /// closes first.
+  #[track_caller]
+  pub fn wait_for_navigation(
+    &self,
+  ) -> crate::action::Action<'static, crate::options::WaitForNavigationOptions, Option<crate::network::Response>> {
+    let frame = self.clone();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        // Before the trace span opens: opening one can take a round trip,
+        // and the navigation this waits for is usually started alongside.
+        let events = frame.page.events().subscribe();
+        frame
+          .page
+          .traced_as(
+            "Frame",
+            "waitForNavigation",
+            serde_json::json!({}),
+            frame.navigated(events, opts),
+          )
+          .await
+      })
+    })
+  }
+
+  /// Whether `info` describes this frame. The main frame is the one with
+  /// no parent whatever its id: a backend may issue a new id when a
+  /// navigation moves the page to another process.
+  fn is_described_by(&self, info: &crate::backend::FrameInfo, main: bool) -> bool {
+    info.frame_id == *self.id || (main && info.parent_frame_id.is_none())
+  }
+
+  async fn navigated(
+    &self,
+    mut events: crate::events::EventSubscription<crate::events::PageEvent>,
+    opts: crate::options::WaitForNavigationOptions,
+  ) -> Result<Option<crate::network::Response>> {
+    use crate::events::PageEvent;
+    let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let main = self.is_main_frame();
+    let wanted = |url: &str| opts.url.as_ref().is_none_or(|matcher| matcher.matches(url));
+    let mut document: Option<crate::network::Response> = None;
+    let response = loop {
+      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      let event = match tokio::time::timeout(remaining, events.recv()).await {
+        Ok(Some(event)) => event,
+        Ok(None) => return Err(crate::error::FerriError::target_closed(None)),
+        Err(_) => return Err(crate::error::FerriError::timeout("waiting for navigation", timeout_ms)),
+      };
+      match event {
+        PageEvent::Response(response)
+          if response.request().is_navigation_request()
+            && response
+              .frame_id()
+              .is_some_and(|id| id == &*self.id || (main && id == &*self.page.main_frame().id)) =>
+        {
+          document = Some(response);
+        },
+        PageEvent::FrameNavigated(info) if self.is_described_by(&info, main) => {
+          if wanted(&info.url) {
+            break match document.take() {
+              Some(response) => Some(response),
+              None => self.late_document_response(&mut events, main).await,
+            };
+          }
+          document = None;
+        },
+        PageEvent::FrameNavigatedWithinDocument(info) if self.is_described_by(&info, main) && wanted(&info.url) => {
+          break None;
+        },
+        PageEvent::FrameDetached { frame_id } if frame_id == *self.id => {
+          return Err(crate::error::FerriError::backend("Navigating frame was detached!"));
+        },
+        PageEvent::Close => return Err(crate::error::FerriError::target_closed(None)),
+        _ => {},
+      }
+    };
+    let state = match opts.wait_until.unwrap_or_default() {
+      crate::options::LoadState::Commit => return Ok(response),
+      state => state.as_str(),
+    };
+    let remaining = u64::try_from(
+      deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    self
+      .wait_for_load_state_impl(
+        Some(state),
+        crate::options::WaitForLoadStateOptions {
+          timeout: Some(remaining),
+        },
+      )
+      .await?;
+    Ok(response)
+  }
+
+  /// The response of a document that has committed before its response
+  /// event came: the two reach us on separate consumers. A document that
+  /// had no response at all (`about:blank`, a `data:` URL) costs the grace.
+  async fn late_document_response(
+    &self,
+    events: &mut crate::events::EventSubscription<crate::events::PageEvent>,
+    main: bool,
+  ) -> Option<crate::network::Response> {
+    let deadline = tokio::time::Instant::now() + crate::network::NAV_REQUEST_GRACE;
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+      if let crate::events::PageEvent::Response(response) = event
+        && response.request().is_navigation_request()
+        && response
+          .frame_id()
+          .is_some_and(|id| id == &*self.id || (main && id == &*self.page.main_frame().id))
+      {
+        return Some(response);
+      }
     }
+    None
+  }
+
+  /// Playwright: `frame.waitForURL(url: string | RegExp | URLPattern |
+  /// ((url: URL) => boolean), options?: { timeout?, waitUntil? })`. Once
+  /// this frame's URL matches, `waitUntil` (default `load`) is awaited in
+  /// what is left of the same timeout; `commit` returns on the match alone.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the wait times out.
+  #[track_caller]
+  pub fn wait_for_url(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+  ) -> crate::action::Action<'static, crate::options::WaitForUrlOptions, ()> {
+    let frame = self.clone();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        frame
+          .page
+          .traced_as(
+            "Frame",
+            "waitForURL",
+            serde_json::json!({ "url": matcher.describe() }),
+            frame.wait_for_url_impl(&matcher, opts),
+          )
+          .await
+      })
+    })
+  }
+
+  /// Implementation of [`Self::wait_for_url`]. The URL is tracked
+  /// locally (no wire cost to read), so the loop parks on the page
+  /// event stream and re-checks on each event, with a coarse fallback
+  /// tick for anything the stream misses.
+  pub(crate) async fn wait_for_url_impl(
+    &self,
+    matcher: &crate::url_matcher::UrlMatcher,
+    opts: crate::options::WaitForUrlOptions,
+  ) -> Result<()> {
+    let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut events = self.page.events().subscribe();
+    loop {
+      if matcher.matches(&self.url()) {
+        break;
+      }
+      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      if remaining.is_zero() {
+        return Err(crate::error::FerriError::timeout(
+          format!("waiting for URL matching {:?}", matcher.identifier()),
+          timeout_ms,
+        ));
+      }
+      let tick = remaining.min(std::time::Duration::from_millis(250));
+      tokio::select! {
+        ev = events.recv() => {
+          if ev.is_none() {
+            // Emitter dropped (page closing) — keep ticking until the
+            // deadline instead of spinning on a closed channel.
+            tokio::time::sleep(tick).await;
+          }
+        },
+        () = tokio::time::sleep(tick) => {},
+      }
+    }
+    let state = match opts.wait_until.unwrap_or_default() {
+      crate::options::LoadState::Commit => return Ok(()),
+      state => state.as_str(),
+    };
+    let remaining = u64::try_from(
+      deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
+    self
+      .wait_for_load_state_impl(
+        Some(state),
+        crate::options::WaitForLoadStateOptions {
+          timeout: Some(remaining),
+        },
+      )
+      .await
+  }
+
+  /// Playwright: `frame.waitForTimeout(timeout): Promise<void>`.
+  pub async fn wait_for_timeout(&self, timeout_ms: u64) {
+    self.page.wait_for_timeout(timeout_ms).await;
   }
 
   // ── Waiting ──────────────────────────────────────────────────────────
@@ -691,6 +947,97 @@ impl Frame {
     } else {
       Ok(None)
     }
+  }
+
+  // ── Handles ──────────────────────────────────────────────────────────
+
+  /// Playwright: `frame.$(selector, options?: { strict?: boolean }):
+  /// Promise<ElementHandle | null>`. The first element in this frame the
+  /// selector matches right now, or `None`. Without `strict`, the
+  /// context's `strictSelectors` decides whether a second match is an
+  /// error.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the selector does not parse, matches more than
+  /// one element under strict mode, or the query fails.
+  pub async fn query_selector(
+    &self,
+    selector: &str,
+    strict: Option<bool>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "$",
+        serde_json::json!({ "selector": selector }),
+        self.query_selector_untraced(selector, strict),
+      )
+      .await
+  }
+
+  pub(crate) async fn query_selector_untraced(
+    &self,
+    selector: &str,
+    strict: Option<bool>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    // Parsed here so that a selector that cannot be parsed is an error and
+    // not, like one that matches nothing, an absent element.
+    crate::selectors::parse(selector)?;
+    let locator = match strict {
+      Some(strict) => self.locator(selector).strict(strict),
+      None => self.selector_locator(selector),
+    };
+    match locator.element_handle().await {
+      Ok(handle) => Ok(Some(handle)),
+      Err(crate::error::FerriError::InvalidSelector { reason, .. }) if reason == "no element found" => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
+  /// Playwright: `frame.$$(selector): Promise<ElementHandle[]>`. Every
+  /// element in this frame the selector matches, in document order.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the selector does not parse or the query fails.
+  pub async fn query_selector_all(&self, selector: &str) -> Result<Vec<crate::element_handle::ElementHandle>> {
+    self
+      .page
+      .traced_as(
+        "Frame",
+        "$$",
+        serde_json::json!({ "selector": selector }),
+        self.locator(selector).element_handles(),
+      )
+      .await
+  }
+
+  /// Playwright: `frame.frameElement(): Promise<ElementHandle>`. The
+  /// `<iframe>` or `<frame>` in the parent frame that holds this one.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error for the main frame, which no element holds, and for
+  /// a frame whose element has left its parent's document.
+  pub async fn frame_element(&self) -> Result<crate::element_handle::ElementHandle> {
+    let detached = || crate::error::FerriError::backend("Frame has been detached.");
+    let parent = self.parent_frame().ok_or_else(detached)?;
+    let mut owner = None;
+    for candidate in parent.locator("iframe, frame").element_handles().await? {
+      let holds_this = owner.is_none()
+        && candidate
+          .content_frame()
+          .await?
+          .is_some_and(|frame| frame.id == self.id);
+      if holds_this {
+        owner = Some(candidate);
+      } else {
+        let _ = candidate.dispose().await;
+      }
+    }
+    owner.ok_or_else(detached)
   }
 
   /// Show an element highlight for `selector` in this frame, beside any
@@ -748,127 +1095,339 @@ impl Frame {
     &self.id
   }
 
-  /// Set the HTML content of this frame.
+  /// Playwright: `frame.setContent(html, options?: { timeout?,
+  /// waitUntil? }): Promise<void>`. The document is rewritten with
+  /// `document.open()` and `document.write()`, so its scripts run, and the
+  /// call returns once it has reached `waitUntil` (default `load`).
   ///
   /// # Errors
   ///
-  /// Returns an error if JS evaluation fails.
-  pub async fn set_content(&self, html: &str) -> Result<()> {
-    self
-      .page
-      .traced_as("Frame", "setContent", serde_json::json!({ "html": html }), async {
-        let escaped = crate::steps::js_escape(html);
-        self
-          .backend_eval_expr(&format!("document.documentElement.innerHTML = '{escaped}'"))
-          .await?;
-        Ok(())
+  /// Returns an error if the content cannot be written or the document
+  /// does not reach `waitUntil` in time.
+  #[track_caller]
+  pub fn set_content(&self, html: &str) -> crate::action::Action<'static, crate::options::SetContentOptions, ()> {
+    let frame = self.clone();
+    let html = html.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        frame
+          .page
+          .traced_as(
+            "Frame",
+            "setContent",
+            serde_json::json!({ "html": html }),
+            frame.set_content_impl(&html, opts),
+          )
+          .await
       })
-      .await
+    })
   }
 
-  /// Add a `<script>` tag to this frame.
+  pub(crate) async fn set_content_impl(&self, html: &str, opts: crate::options::SetContentOptions) -> Result<()> {
+    let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let wait_until = opts.wait_until.unwrap_or_default();
+    let state = if self.is_main_frame() {
+      self.page.inner.set_content(html).await?;
+      match wait_until {
+        crate::options::LoadState::Commit => None,
+        state => Some(state.as_str()),
+      }
+    } else {
+      // Chromium reports `complete` for a document rewritten this way while
+      // its images are still loading, though its `load` event still waits
+      // for them. A listener added before `document.open()` is removed by
+      // it, and with nothing to load the event fires inside
+      // `document.close()`, so the listener goes on between the two. The
+      // event leaves a mark that is read back.
+      let load = matches!(
+        wait_until,
+        crate::options::LoadState::Load | crate::options::LoadState::NetworkIdle
+      );
+      self
+        .evaluate_untraced(
+          "({ html, mark }) => { \
+             delete window[mark]; \
+             document.open(); document.write(html); \
+             window.addEventListener('load', () => { window[mark] = true; }, { once: true }); \
+             document.close(); \
+           }",
+          crate::protocol::argument_from_serde(&serde_json::json!({ "html": html, "mark": SET_CONTENT_MARK }))?,
+          Some(true),
+        )
+        .await?;
+      if load {
+        loop {
+          // Read in the world the mark was set in.
+          let loaded = self
+            .evaluate_untraced(
+              "mark => { const loaded = window[mark] === true; if (loaded) delete window[mark]; return loaded; }",
+              crate::protocol::argument_from_serde(SET_CONTENT_MARK)?,
+              Some(true),
+            )
+            .await?;
+          if matches!(loaded, crate::protocol::SerializedValue::Bool(true)) {
+            break;
+          }
+          if tokio::time::Instant::now() >= deadline {
+            return Err(crate::error::FerriError::timeout("setting frame content", timeout_ms));
+          }
+          tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+      }
+      (wait_until == crate::options::LoadState::NetworkIdle).then_some("networkidle")
+    };
+    if let Some(state) = state {
+      let remaining = u64::try_from(
+        deadline
+          .saturating_duration_since(tokio::time::Instant::now())
+          .as_millis(),
+      )
+      .unwrap_or(u64::MAX);
+      self
+        .wait_for_load_state_impl(
+          Some(state),
+          crate::options::WaitForLoadStateOptions {
+            timeout: Some(remaining),
+          },
+        )
+        .await?;
+    }
+    // The new document's subframes are attached by now. The listener
+    // can miss the ones of a page that never navigated, whose main frame
+    // no event has introduced, so the tree is read back.
+    if let Ok(infos) = self.page.inner.get_frame_tree().await {
+      self.page.reseed_frames(infos);
+    }
+    Ok(())
+  }
+
+  /// Playwright: `frame.addScriptTag(options?: { content?, path?, type?,
+  /// url? }): Promise<ElementHandle>`. Adds a `<script>` to this frame's
+  /// `<head>` and returns it once the script has loaded or run.
   ///
   /// # Errors
   ///
-  /// Returns an error if script injection fails.
+  /// Returns an error if none of `url`, `path` and `content` is given,
+  /// `path` cannot be read, or the script fails to load.
   pub async fn add_script_tag(
     &self,
-    url: Option<&str>,
-    content: Option<&str>,
-    script_type: Option<&str>,
-  ) -> Result<()> {
+    options: crate::options::AddScriptTagOptions,
+  ) -> Result<crate::element_handle::ElementHandle> {
     self
       .page
       .traced_as(
         "Frame",
         "addScriptTag",
-        serde_json::json!({ "url": url }),
-        self.add_script_tag_untraced(url, content, script_type),
+        serde_json::json!({ "url": options.url }),
+        self.add_script_tag_untraced(options),
       )
       .await
   }
 
   async fn add_script_tag_untraced(
     &self,
-    url: Option<&str>,
-    content: Option<&str>,
-    script_type: Option<&str>,
-  ) -> Result<()> {
-    let t = script_type.unwrap_or("text/javascript");
-    if let Some(url) = url {
-      self.backend_eval_expr(&format!(
-                "(function(){{return new Promise(function(r,j){{var s=document.createElement('script');\
-                 s.type='{}';s.src='{}';s.onload=r;s.onerror=function(){{j(new Error('Failed'))}};document.head.appendChild(s)}})}})();",
-                crate::steps::js_escape(t), crate::steps::js_escape(url)
-            )).await?;
-    } else if let Some(content) = content {
-      self.backend_eval_expr(&format!(
-                "(function(){{var s=document.createElement('script');s.type='{}';s.text='{}';document.head.appendChild(s)}})()",
-                crate::steps::js_escape(t), crate::steps::js_escape(content)
-            )).await?;
-    }
-    Ok(())
+    options: crate::options::AddScriptTagOptions,
+  ) -> Result<crate::element_handle::ElementHandle> {
+    const ADD_URL: &str = "async params => {        const script = document.createElement('script');        script.src = params.url;        if (params.type) script.type = params.type;        const loaded = new Promise((resolve, reject) => {          script.onload = resolve;          script.onerror = e => reject(typeof e === 'string' ? new Error(e) : new Error(`Failed to load script at ${script.src}`));        });        document.head.appendChild(script);        await loaded;        return script;      }";
+    const ADD_CONTENT: &str = "params => {        const script = document.createElement('script');        script.type = params.type || 'text/javascript';        script.text = params.content;        let error = null;        script.onerror = e => error = e;        document.head.appendChild(script);        if (error) throw error;        return script;      }";
+    let script_type = options.script_type.unwrap_or_default();
+    let (source, params) = if let Some(url) = options.url {
+      (ADD_URL, serde_json::json!({ "url": url, "type": script_type }))
+    } else {
+      let content = match (options.path, options.content) {
+        (Some(path), _) => {
+          let content = tokio::fs::read_to_string(&path).await?;
+          format!(
+            "{content}\n//# sourceURL={}",
+            path.display().to_string().replace('\n', "")
+          )
+        },
+        (None, Some(content)) => content,
+        (None, None) => return Err(missing_tag_source()),
+      };
+      (
+        ADD_CONTENT,
+        serde_json::json!({ "content": content, "type": script_type }),
+      )
+    };
+    self.add_tag(source, &params).await
   }
 
-  /// Add a `<style>` tag or `<link>` stylesheet to this frame.
+  /// Playwright: `frame.addStyleTag(options?: { content?, path?, url? }):
+  /// Promise<ElementHandle>`. Adds a `<link rel="stylesheet">` for `url`,
+  /// or a `<style>` otherwise, to this frame's `<head>` and returns it
+  /// once the stylesheet has loaded.
   ///
   /// # Errors
   ///
-  /// Returns an error if style injection fails.
-  pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
+  /// Returns an error if none of `url`, `path` and `content` is given,
+  /// `path` cannot be read, or the stylesheet fails to load.
+  pub async fn add_style_tag(
+    &self,
+    options: crate::options::AddStyleTagOptions,
+  ) -> Result<crate::element_handle::ElementHandle> {
     self
       .page
       .traced_as(
         "Frame",
         "addStyleTag",
-        serde_json::json!({ "url": url }),
-        self.add_style_tag_untraced(url, content),
+        serde_json::json!({ "url": options.url }),
+        self.add_style_tag_untraced(options),
       )
       .await
   }
 
-  async fn add_style_tag_untraced(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
-    if let Some(url) = url {
-      self.backend_eval_expr(&format!(
-                "(function(){{return new Promise(function(r,j){{var l=document.createElement('link');\
-                 l.rel='stylesheet';l.href='{}';l.onload=r;l.onerror=function(){{j(new Error('Failed'))}};document.head.appendChild(l)}})}})();",
-                crate::steps::js_escape(url)
-            )).await?;
-    } else if let Some(content) = content {
-      self
-        .backend_eval_expr(&format!(
-          "(function(){{var s=document.createElement('style');s.textContent='{}';document.head.appendChild(s)}})()",
-          crate::steps::js_escape(content)
-        ))
-        .await?;
-    }
-    Ok(())
+  async fn add_style_tag_untraced(
+    &self,
+    options: crate::options::AddStyleTagOptions,
+  ) -> Result<crate::element_handle::ElementHandle> {
+    const ADD_URL: &str = "async params => {        const link = document.createElement('link');        link.rel = 'stylesheet';        link.href = params.url;        const loaded = new Promise((resolve, reject) => {          link.onload = resolve;          link.onerror = () => reject(new Error(`Failed to load stylesheet at ${link.href}`));        });        document.head.appendChild(link);        await loaded;        return link;      }";
+    const ADD_CONTENT: &str = "async params => {        const style = document.createElement('style');        style.type = 'text/css';        style.appendChild(document.createTextNode(params.content));        const loaded = new Promise((resolve, reject) => {          style.onload = resolve;          style.onerror = () => reject(new Error('Failed to load the stylesheet'));        });        document.head.appendChild(style);        await loaded;        return style;      }";
+    let (source, params) = if let Some(url) = options.url {
+      (ADD_URL, serde_json::json!({ "url": url }))
+    } else {
+      let content = match (options.path, options.content) {
+        (Some(path), _) => {
+          let content = tokio::fs::read_to_string(&path).await?;
+          format!(
+            "{content}/*# sourceURL={}*/",
+            path.display().to_string().replace('\n', "")
+          )
+        },
+        (None, Some(content)) => content,
+        (None, None) => return Err(missing_tag_source()),
+      };
+      (ADD_CONTENT, serde_json::json!({ "content": content }))
+    };
+    self.add_tag(source, &params).await
   }
 
-  /// Wait for the frame to reach a specific load state.
+  /// Run `source`, which adds an element and returns it, and hand that
+  /// element back.
+  async fn add_tag(&self, source: &str, params: &serde_json::Value) -> Result<crate::element_handle::ElementHandle> {
+    let handle = self
+      .evaluate_handle_untraced(source, crate::protocol::argument_from_serde(params)?, Some(true))
+      .await?;
+    handle
+      .as_element()
+      .ok_or_else(|| crate::error::FerriError::evaluation("the added tag did not come back as an element"))
+  }
+
+  /// Playwright: `frame.waitForLoadState(state?: 'load' | 'domcontentloaded'
+  /// | 'networkidle', options?: { timeout? }): Promise<void>`
+  /// (`packages/playwright-core/src/client/frame.ts`). The state is this
+  /// frame's document's own, so a child frame that is still loading holds
+  /// the wait while its parent has long finished.
   ///
   /// # Errors
   ///
-  /// Returns an error if the frame does not reach load state within the timeout.
-  pub async fn wait_for_load_state(&self) -> Result<()> {
-    if self.is_main_frame() {
-      self.page.wait_for_load_state(None).await
-    } else {
-      // For iframes, check document.readyState via JS
-      let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-      loop {
-        if tokio::time::Instant::now() >= deadline {
-          return Err(crate::error::FerriError::timeout(
-            "waiting for frame load state",
-            30_000,
-          ));
-        }
-        if let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await
-          && v.as_str() == Some("complete")
-        {
-          return Ok(());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  /// Returns an error if the wait times out before the load state is reached.
+  #[track_caller]
+  pub fn wait_for_load_state(
+    &self,
+    state: Option<&str>,
+  ) -> crate::action::Action<'static, crate::options::WaitForLoadStateOptions, ()> {
+    let frame = self.clone();
+    let state = state.map(str::to_string);
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        frame
+          .page
+          .traced_as(
+            "Frame",
+            "waitForLoadState",
+            serde_json::json!({ "state": state.clone().unwrap_or_else(|| "load".to_string()) }),
+            frame.wait_for_load_state_impl(state.as_deref(), opts),
+          )
+          .await
+      })
+    })
+  }
+
+  /// Implementation of [`Self::wait_for_load_state`]. One in-page
+  /// promise per attempt instead of a protocol-eval poll loop: the page
+  /// resolves the promise when the state is reached, so the wire
+  /// carries a single round trip in the common case. An attempt dies
+  /// with its document on cross-document navigation — the loop re-arms
+  /// in the new document. Each attempt is also capped so a reply lost
+  /// to a target swap (`WebKit`) re-arms instead of hanging forever.
+  pub(crate) async fn wait_for_load_state_impl(
+    &self,
+    state: Option<&str>,
+    opts: crate::options::WaitForLoadStateOptions,
+  ) -> Result<()> {
+    const JS_WAIT_LOAD: &str = "() => document.readyState === 'complete' \
+       ? true \
+       : new Promise(function(resolve) { window.addEventListener('load', function() { resolve(true); }, { once: true }); })";
+    const JS_WAIT_DOMCONTENTLOADED: &str = "() => (document.readyState === 'interactive' || document.readyState === 'complete') \
+       ? true \
+       : new Promise(function(resolve) { document.addEventListener('DOMContentLoaded', function() { resolve(true); }, { once: true }); })";
+    // Same signal the old Rust-side poll used (resource timing entries,
+    // 500ms quiet window, 100ms sampling) — but sampled in-page so the
+    // whole wait is one round trip.
+    const JS_WAIT_NETWORKIDLE: &str = "() => new Promise(function(resolve) { \
+       var idleSince = performance.now(); \
+       function pending() { \
+         if (window.__fd_inflight > 0) return true; \
+         var rs = performance.getEntriesByType('resource'); \
+         var now = performance.now(); \
+         for (var i = 0; i < rs.length; i++) { \
+           if (rs[i].responseEnd === 0 || now - rs[i].responseEnd < 100) return true; \
+         } \
+         return false; \
+       } \
+       (function check() { \
+         var now = performance.now(); \
+         if (pending()) idleSince = now; \
+         if (now - idleSince >= 500) return resolve(true); \
+         setTimeout(check, 100); \
+       })(); \
+     })";
+
+    let state = state.unwrap_or("load");
+    let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_timeout());
+
+    // The state check precedes the deadline, matching the old poll loop
+    // and Playwright's local lifecycle bookkeeping: an already-reached
+    // state passes regardless of how small the timeout is. Without this,
+    // the promise attempt's own round trip would eat a tiny budget and
+    // report a false timeout on slower transports.
+    if state != "networkidle"
+      && let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await
+    {
+      let s = v.as_str().unwrap_or("loading");
+      let reached = match state {
+        "domcontentloaded" => s == "interactive" || s == "complete",
+        _ => s == "complete",
+      };
+      if reached {
+        return Ok(());
+      }
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+    let (js, timeout_label) = match state {
+      "domcontentloaded" => (JS_WAIT_DOMCONTENTLOADED, "waiting for domcontentloaded"),
+      "networkidle" => (JS_WAIT_NETWORKIDLE, "waiting for networkidle"),
+      _ => (JS_WAIT_LOAD, "waiting for load state"),
+    };
+
+    loop {
+      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+      if remaining.is_zero() {
+        return Err(crate::error::FerriError::timeout(timeout_label, timeout_ms));
+      }
+      let attempt_cap = remaining.min(std::time::Duration::from_secs(5));
+      match tokio::time::timeout(attempt_cap, self.eval::<bool>(js)).await {
+        Ok(Ok(true)) => return Ok(()),
+        Ok(Ok(false) | Err(_)) => {
+          // Transient evaluate failure (document destroyed mid-wait);
+          // brief pause, then re-arm in whatever document is live now.
+          tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        },
+        Err(_) => {}, // attempt cap hit — re-arm
       }
     }
   }
@@ -1352,4 +1911,14 @@ impl std::fmt::Debug for Frame {
       .field("main", &main)
       .finish_non_exhaustive()
   }
+}
+
+/// The window property a child frame's `load` sets after `setContent`.
+const SET_CONTENT_MARK: &str = "__fdSetContentLoaded";
+
+fn missing_tag_source() -> crate::error::FerriError {
+  crate::error::FerriError::invalid_argument(
+    "options",
+    "Provide an object with a `url`, `path` or `content` property",
+  )
 }
