@@ -4076,8 +4076,9 @@ impl BidiNetworkTracker {
     // lifecycle wait completes. BiDi flags a navigation request via
     // the `navigation` field on `network.beforeRequestSent`; the
     // slot therefore tracks each redirect hop (same request id,
-    // reused across the chain).
-    if new_request.is_navigation_request() {
+    // reused across the chain). A child frame's document is a
+    // navigation request of its own browsing context.
+    if new_request.is_navigation_request() && new_request.frame_id() == Some(&*self.context_id) {
       self.nav_request_slot.set(new_request.clone());
     }
 

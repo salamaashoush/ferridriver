@@ -690,18 +690,7 @@ fn handle_download_event(
       // `pageProxyId` inside `params` (browser-session routing) —
       // so the pending `goto` is failed from here. Mirrors
       // `wkPage._onProvisionalLoadFailed`.
-      let Some(page_proxy_id) = env.params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
-        return;
-      };
-      let err = env
-        .params
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("provisional load failed")
-        .to_string();
-      if let Some(page) = find_page(pages, page_proxy_id) {
-        page.lifecycle.mark_provisional_failed(err);
-      }
+      handle_provisional_load_failed(&env.params, pages);
     },
     Some("Playwright.downloadFilenameSuggested") => {
       let uuid = env.params.get("uuid").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -743,6 +732,24 @@ fn handle_download_event(
       }
     },
     _ => {},
+  }
+}
+
+fn handle_provisional_load_failed(params: &serde_json::Value, pages: &Arc<Mutex<Vec<WebKitPage>>>) {
+  let Some(page_proxy_id) = params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
+    return;
+  };
+  let err = params
+    .get("error")
+    .and_then(serde_json::Value::as_str)
+    .unwrap_or("provisional load failed")
+    .to_string();
+  let loader_id = params
+    .get("loaderId")
+    .and_then(serde_json::Value::as_str)
+    .map(str::to_string);
+  if let Some(page) = find_page(pages, page_proxy_id) {
+    page.lifecycle.mark_provisional_failed(loader_id, err);
   }
 }
 

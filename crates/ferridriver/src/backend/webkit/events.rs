@@ -553,6 +553,9 @@ fn handle_main_frame_commit(ctx: &TargetListenerCtx, params: &Value) {
     return;
   }
   ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
+  if let Some(loader_id) = params.pointer("/frame/loaderId").and_then(Value::as_str) {
+    ctx.nav_slot.commit_loader(loader_id.to_string());
+  }
   ctx.engine_injected.document_replaced();
   *ctx
     .global_object_id
@@ -770,7 +773,10 @@ async fn handle_request_will_be_sent(
     crate::state::NETWORK_LOG_CAP,
   );
   if is_navigation_request {
-    nav_slot.set(req.clone());
+    match params.get("loaderId").and_then(Value::as_str) {
+      Some(loader_id) => nav_slot.set_for_loader(req.clone(), loader_id.to_string()),
+      None => nav_slot.set(req.clone()),
+    }
   }
   emitter.emit(crate::events::PageEvent::Request(req));
 }

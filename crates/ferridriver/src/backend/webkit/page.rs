@@ -360,6 +360,15 @@ struct FrameEngineContext {
   engine_injected: bool,
 }
 
+/// A `Playwright.provisionalLoadFailed`, with the loader of the
+/// navigation that failed: starting a navigation cancels the one still in
+/// flight, and that cancellation is not the new navigation's failure.
+#[derive(Clone)]
+pub(crate) struct ProvisionalFailure {
+  pub loader_id: Option<String>,
+  pub error_text: String,
+}
+
 /// Latch + notify for navigation lifecycle events fed by the
 /// target-session listener.
 #[derive(Default)]
@@ -375,7 +384,7 @@ pub(crate) struct LifecycleSignals {
   /// treat it as its own failure without a request-id match — the
   /// failing request lives on the provisional target session whose
   /// events never reach the committed-target listener.
-  pub provisional_failure: std::sync::Mutex<Option<String>>,
+  pub provisional_failure: std::sync::Mutex<Vec<ProvisionalFailure>>,
   pub notify: tokio::sync::Notify,
 }
 
@@ -393,29 +402,35 @@ impl LifecycleSignals {
       .failed_request_id
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    *self
-      .provisional_failure
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-  }
-
-  /// Record a `Playwright.provisionalLoadFailed` for the pending
-  /// main-frame navigation (mirrors `wkPage._onProvisionalLoadFailed`).
-  pub fn mark_provisional_failed(&self, error_text: String) {
-    *self
-      .provisional_failure
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error_text);
-    self.notify.notify_waiters();
-  }
-
-  /// The pending navigation's provisional-load failure, if any.
-  pub fn provisional_failure(&self) -> Option<String> {
     self
       .provisional_failure
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone()
+      .clear();
+  }
+
+  /// Record a `Playwright.provisionalLoadFailed` for the pending
+  /// main-frame navigation (mirrors `wkPage._onProvisionalLoadFailed`).
+  pub fn mark_provisional_failed(&self, loader_id: Option<String>, error_text: String) {
+    self
+      .provisional_failure
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(ProvisionalFailure { loader_id, error_text });
+    self.notify.notify_waiters();
+  }
+
+  /// The provisional-load failure of the navigation under `loader_id`, or
+  /// of any navigation when the waiter does not know its loader. A failure
+  /// that names no loader counts for every waiter.
+  pub fn provisional_failure(&self, loader_id: Option<&str>) -> Option<String> {
+    self
+      .provisional_failure
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .iter()
+      .find(|failure| loader_id.is_none() || failure.loader_id.is_none() || failure.loader_id.as_deref() == loader_id)
+      .map(|failure| failure.error_text.clone())
   }
 
   pub fn mark(&self, kind: NavLifecycle) {
@@ -1128,13 +1143,20 @@ impl WebKitPage {
       return Err(FerriError::backend(format!("webkit navigate: {err}")));
     }
     let grace = if parsed.loader_id.is_some() {
-      self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
+      self
+        .wait_for_lifecycle(lifecycle, timeout_ms, parsed.loader_id.as_deref())
+        .await?;
       crate::network::NAV_REQUEST_GRACE
     } else {
       // No loaderId: a same-document jump, which requested nothing.
       std::time::Duration::ZERO
     };
-    Ok(self.await_nav_response(grace).await)
+    Ok(
+      self
+        .nav_request_slot
+        .final_response_for(parsed.loader_id.as_deref(), grace)
+        .await,
+    )
   }
 
   /// Resolve the main-document `Response` captured by the network
@@ -1152,7 +1174,7 @@ impl WebKitPage {
   /// Uses [`LifecycleSignals`] fed by the target listener so the wait
   /// survives cross-process target swaps (listener re-subscribes to
   /// the new target on `Target.didCommitProvisionalTarget`).
-  async fn wait_for_lifecycle(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<()> {
+  async fn wait_for_lifecycle(&self, lifecycle: NavLifecycle, timeout_ms: u64, loader_id: Option<&str>) -> Result<()> {
     let signals = Arc::clone(&self.lifecycle);
     let nav_slot = self.nav_request_slot.clone();
     let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
@@ -1161,11 +1183,11 @@ impl WebKitPage {
         if signals.seen(lifecycle) {
           return Ok(());
         }
-        if let Some(err) = signals.provisional_failure() {
+        if let Some(err) = signals.provisional_failure(loader_id) {
           return Err(FerriError::backend(format!("webkit navigate: {err}")));
         }
         if let Some((event_request_id, err)) = signals.failure()
-          && let Some(req) = nav_slot.get()
+          && let Some(req) = nav_slot.get_for(loader_id)
           && event_request_id == req.id()
         {
           return Err(FerriError::backend(format!("webkit navigate: {err}")));
@@ -1188,7 +1210,7 @@ impl WebKitPage {
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
     self.lifecycle.reset();
-    self.wait_for_lifecycle(NavLifecycle::Load, 30_000).await
+    self.wait_for_lifecycle(NavLifecycle::Load, 30_000, None).await
   }
 
   /// Force a GC pass in the page's JS engine. Mirrors Playwright's
@@ -1213,7 +1235,7 @@ impl WebKitPage {
       .send("Page.reload", json!({}))
       .await
       .map_err(conn_err)?;
-    self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
+    self.wait_for_lifecycle(lifecycle, timeout_ms, None).await?;
     Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
   }
 
@@ -1239,7 +1261,7 @@ impl WebKitPage {
       }
       return Err(conn_err(e));
     }
-    self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
+    self.wait_for_lifecycle(lifecycle, timeout_ms, None).await?;
     Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
   }
 

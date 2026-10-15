@@ -645,13 +645,19 @@ mod tests {
     for event in [
       serde_json::json!({
         "sessionId": "session", "method": "Network.requestWillBeSent",
-        "params": {"requestId": "document", "loaderId": "document", "type": "Document",
+        "params": {"requestId": "document", "loaderId": "document", "type": "Document", "frameId": "page",
           "request": {"url": "http://example.com/", "method": "GET", "headers": {}}}
       }),
       serde_json::json!({
         "sessionId": "session", "method": "Network.responseReceived",
         "params": {"requestId": "document", "response": {
           "url": "http://example.com/", "status": 200, "statusText": "OK", "headers": {}}}
+      }),
+      // An iframe's document: a navigation request too, but not the page's.
+      serde_json::json!({
+        "sessionId": "session", "method": "Network.requestWillBeSent",
+        "params": {"requestId": "frame", "loaderId": "frame", "type": "Document", "frameId": "child",
+          "request": {"url": "http://example.com/frame", "method": "GET", "headers": {}}}
       }),
     ] {
       dispatcher.dispatch_message(&serde_json::to_vec(&event)?);
@@ -664,7 +670,8 @@ mod tests {
     listener.abort();
     let response = response?.ok_or("initial navigation was lost before the listener task started")?;
     assert_eq!(response.status(), 200);
-    assert_eq!(log.read().await.len(), 1);
+    assert_eq!(response.url(), "http://example.com/");
+    assert_eq!(log.read().await.len(), 2);
     Ok(())
   }
 }

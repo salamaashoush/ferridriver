@@ -602,6 +602,9 @@ pub struct RequestInit {
 /// no request at all (same-document, back/forward cache) is not held up.
 pub const NAV_REQUEST_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// A navigation request and the document loader it belongs to.
+type LoaderRequest = (Option<String>, Request);
+
 /// Shared slot for the most recent main-document navigation `Request`.
 ///
 /// Filled by backend network listeners whenever a request with
@@ -615,7 +618,13 @@ pub const NAV_REQUEST_GRACE: std::time::Duration = std::time::Duration::from_mil
 /// "no response" per Playwright's `Response | null` contract.
 #[derive(Clone, Default)]
 pub struct NavRequestSlot {
-  inner: Arc<std::sync::Mutex<Option<Request>>>,
+  /// Every navigation request since the last clear, oldest first, with
+  /// the loader it belongs to where the backend reports one.
+  inner: Arc<std::sync::Mutex<Vec<LoaderRequest>>>,
+  /// The loader the main frame last committed, for a waiter that did not
+  /// learn its own: a child frame's document request comes after the
+  /// page's and is a navigation request too.
+  committed: Arc<std::sync::Mutex<Option<String>>>,
   filled: Arc<tokio::sync::Notify>,
 }
 
@@ -626,15 +635,50 @@ impl NavRequestSlot {
   }
 
   pub fn set(&self, request: Request) {
+    self.push(None, request);
+  }
+
+  /// [`Self::set`] for a request whose document loader is known. Starting
+  /// a navigation cancels the one in flight, whose request can still be
+  /// reported after the slot was cleared for the new one; the loader is
+  /// what tells them apart.
+  pub fn set_for_loader(&self, request: Request, loader_id: String) {
+    self.push(Some(loader_id), request);
+  }
+
+  fn push(&self, loader_id: Option<String>, request: Request) {
     if let Ok(mut guard) = self.inner.lock() {
-      *guard = Some(request);
+      guard.push((loader_id, request));
+    }
+    self.filled.notify_waiters();
+  }
+
+  /// Record the loader of a main-frame commit.
+  pub fn commit_loader(&self, loader_id: String) {
+    if let Ok(mut guard) = self.committed.lock() {
+      *guard = Some(loader_id);
     }
     self.filled.notify_waiters();
   }
 
   #[must_use]
   pub fn get(&self) -> Option<Request> {
-    self.inner.lock().ok().and_then(|g| g.clone())
+    self.get_for(None)
+  }
+
+  /// The latest request of the navigation under `loader_id`; without one,
+  /// of the loader the main frame committed, or the latest of any before a
+  /// commit. A request reported without a loader matches every loader.
+  #[must_use]
+  pub fn get_for(&self, loader_id: Option<&str>) -> Option<Request> {
+    let committed = self.committed.lock().ok().and_then(|guard| guard.clone());
+    let loader_id = loader_id.or(committed.as_deref());
+    let guard = self.inner.lock().ok()?;
+    guard
+      .iter()
+      .rev()
+      .find(|(loader, _)| loader_id.is_none() || loader.is_none() || loader.as_deref() == loader_id)
+      .map(|(_, request)| request.clone())
   }
 
   /// The navigation request, waiting up to `timeout` for one to land.
@@ -648,29 +692,45 @@ impl NavRequestSlot {
   /// same-document jump, a back/forward-cache restore) costs the wait
   /// and then answers `None` as before.
   pub async fn wait(&self, timeout: std::time::Duration) -> Option<Request> {
-    if let Some(request) = self.get() {
+    self.wait_for(None, timeout).await
+  }
+
+  async fn wait_for(&self, loader_id: Option<&str>, timeout: std::time::Duration) -> Option<Request> {
+    if let Some(request) = self.get_for(loader_id) {
       return Some(request);
     }
-    let notified = self.filled.notified();
-    tokio::pin!(notified);
-    // Arm before the second look: a `set` racing between the two would
-    // otherwise notify nobody and leave this waiting out the timeout.
-    notified.as_mut().enable();
-    if let Some(request) = self.get() {
-      return Some(request);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+      let notified = self.filled.notified();
+      tokio::pin!(notified);
+      // Arm before the second look: a `set` racing between the two would
+      // otherwise notify nobody and leave this waiting out the timeout.
+      notified.as_mut().enable();
+      if let Some(request) = self.get_for(loader_id) {
+        return Some(request);
+      }
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return self.get_for(loader_id);
+      }
     }
-    let _ = tokio::time::timeout(timeout, notified).await;
-    self.get()
   }
 
   pub fn clear(&self) {
     if let Ok(mut guard) = self.inner.lock() {
+      guard.clear();
+    }
+    if let Ok(mut guard) = self.committed.lock() {
       *guard = None;
     }
   }
 
   pub async fn final_response(&self, grace: std::time::Duration) -> Option<Response> {
-    let mut request = self.wait(grace).await?;
+    self.final_response_for(None, grace).await
+  }
+
+  /// [`Self::final_response`] of the navigation under `loader_id`.
+  pub async fn final_response_for(&self, loader_id: Option<&str>, grace: std::time::Duration) -> Option<Response> {
+    let mut request = self.wait_for(loader_id, grace).await?;
     loop {
       let changed = self.filled.notified();
       tokio::pin!(changed);
@@ -685,7 +745,7 @@ impl NavRequestSlot {
       // Navigation results and network events have separate consumers; the
       // final redirect hop can still be queued when the lifecycle resolves.
       tokio::time::timeout(grace, changed).await.ok()?;
-      request = self.get()?;
+      request = self.get_for(loader_id)?;
     }
   }
 }
@@ -1276,6 +1336,43 @@ mod tests {
     final_request.set_response(&response(final_request.clone(), 200)).await;
     slot.set(final_request);
     assert_eq!(waiting.await.expect("final response").status(), 200);
+  }
+
+  #[test]
+  fn a_navigation_takes_its_own_loaders_request() {
+    let request = |url: &str| {
+      Request::new(RequestInit {
+        id: url.into(),
+        url: url.into(),
+        method: "GET".into(),
+        resource_type: "Document".into(),
+        is_navigation_request: true,
+        post_data: None,
+        headers: Headers::default(),
+        frame_id: None,
+        page_guid: None,
+        redirected_from: None,
+        timing: None,
+        raw_headers_fn: None,
+      })
+    };
+    let slot = NavRequestSlot::new();
+    slot.set_for_loader(request("http://example.test/page"), "page".into());
+    // The cancelled navigation's request, reported after the new one.
+    slot.set_for_loader(request("http://example.test/cancelled"), "cancelled".into());
+    assert_eq!(slot.get_for(Some("page")).unwrap().url(), "http://example.test/page");
+    assert_eq!(slot.get().unwrap().url(), "http://example.test/cancelled");
+
+    // A child frame's document after the page's, then the page commits.
+    slot.set_for_loader(request("http://example.test/frame"), "frame".into());
+    slot.commit_loader("page".into());
+    assert_eq!(slot.get().unwrap().url(), "http://example.test/page");
+    assert!(slot.get_for(Some("missing")).is_none());
+
+    // A request with no loader stands for any.
+    slot.clear();
+    slot.set(request("http://example.test/any"));
+    assert_eq!(slot.get_for(Some("page")).unwrap().url(), "http://example.test/any");
   }
 
   #[tokio::test]

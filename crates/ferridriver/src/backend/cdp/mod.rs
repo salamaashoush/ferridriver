@@ -7806,8 +7806,10 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
     // request as navigation by setting `loaderId == requestId`; the
     // slot therefore tracks each redirect hop (same requestId, reused
     // across the chain) and naturally ends up pointing at the final
-    // request in the chain when redirects settle.
-    if new_request.is_navigation_request() {
+    // request in the chain when redirects settle. A child frame's
+    // document is a navigation request too, and loads after the page's
+    // own; a page target's main frame has the target's id.
+    if new_request.is_navigation_request() && new_request.frame_id() == Some(&*self.target_id) {
       self.nav_request_slot.set(new_request.clone());
     }
 
