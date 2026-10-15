@@ -797,11 +797,41 @@ pub fn parse_dispatch_event_options<'js>(
   parse_opt_bag(ctx, value)
 }
 
+/// Refuse a file the realm's `read` grant does not cover. These bindings
+/// are a trusted extension of the realm, so every one that opens a file a
+/// script named makes the check the standard library's `fs` makes.
+pub(crate) fn readable(ctx: &Ctx<'_>, path: &std::path::Path) -> rquickjs::Result<()> {
+  ferrijs_std::permissions::check_read(ctx, path)
+}
+
+/// [`readable`] for a file or directory a binding writes to.
+pub(crate) fn writable(ctx: &Ctx<'_>, path: &std::path::Path) -> rquickjs::Result<()> {
+  ferrijs_std::permissions::check_write(ctx, path)
+}
+
+/// The files and directories a context's options read and write.
+pub(crate) fn check_context_paths(
+  ctx: &Ctx<'_>,
+  options: &ferridriver::options::BrowserContextOptions,
+) -> rquickjs::Result<()> {
+  if let Some(video) = &options.record_video {
+    writable(ctx, &video.dir)?;
+  }
+  if let Some(har) = &options.record_har {
+    writable(ctx, &har.path)?;
+  }
+  if let Some(ferridriver::options::StorageStateInput::Path(path)) = &options.storage_state {
+    readable(ctx, path)?;
+  }
+  Ok(())
+}
+
 /// Parse the polymorphic `files` arg for `setInputFiles`:
 /// `string | string[] | FilePayload | FilePayload[]`.
 pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<ferridriver::options::InputFiles> {
   if value.is_string() {
     let s: String = value.get()?;
+    readable(ctx, std::path::Path::new(&s))?;
     return Ok(ferridriver::options::InputFiles::Paths(vec![s.into()]));
   }
   if let Some(arr) = value.as_array() {
@@ -821,6 +851,7 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
           || Err(type_error(ctx, "setInputFiles: array elements must be strings")),
           |s| s.to_string(),
         )?;
+        readable(ctx, std::path::Path::new(&s))?;
         paths.push(std::path::PathBuf::from(s));
       }
       return Ok(ferridriver::options::InputFiles::Paths(paths));
@@ -1074,6 +1105,7 @@ pub fn init_script_source_from_js<'js>(
     if let Ok(content) = obj.get::<_, String>("content") {
       ferridriver::options::InitScriptSource::Content(content)
     } else if let Ok(path) = obj.get::<_, String>("path") {
+      readable(ctx, std::path::Path::new(&path))?;
       ferridriver::options::InitScriptSource::Path(path.into())
     } else {
       return Err(type_error(

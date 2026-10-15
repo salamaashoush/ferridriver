@@ -66,6 +66,7 @@ impl DownloadJs {
   /// Playwright: `download.saveAs(path): Promise<void>`.
   #[qjs(rename = "saveAs")]
   pub async fn save_as(&self, ctx: rquickjs::Ctx<'_>, path: String) -> rquickjs::Result<()> {
+    crate::bindings::convert::writable(&ctx, std::path::Path::new(&path))?;
     self
       .inner
       .save_as(&std::path::PathBuf::from(path))

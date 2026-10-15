@@ -802,10 +802,11 @@ impl AndroidDeviceJs {
       args: Vec<String>,
     }
     let (launch, mut context) = match options.0 {
-      Some(value) if !value.is_undefined() && !value.is_null() => (
-        serde_from_js::<Launch>(&ctx, value.clone())?,
-        serde_from_js::<crate::bindings::browser::JsBrowserContextOptions>(&ctx, value)?.into_core(),
-      ),
+      Some(value) if !value.is_undefined() && !value.is_null() => (serde_from_js::<Launch>(&ctx, value.clone())?, {
+        let options = serde_from_js::<crate::bindings::browser::JsBrowserContextOptions>(&ctx, value)?.into_core();
+        crate::bindings::convert::check_context_paths(&ctx, &options)?;
+        options
+      }),
       _ => (
         Launch::default(),
         ferridriver::options::BrowserContextOptions::default(),

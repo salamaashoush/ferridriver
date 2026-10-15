@@ -143,6 +143,9 @@ impl BrowserTypeJs {
         (launch, context)
       },
     };
+    let profile = std::path::Path::new(&user_data_dir);
+    crate::bindings::convert::readable(&ctx, profile)?;
+    crate::bindings::convert::writable(&ctx, profile)?;
     let core = LaunchPersistentContextOptions { launch, context };
     let ctx_ref = resources(&ctx)?
       .launch_persistent_context(self.inner, std::path::Path::new(&user_data_dir), core)
@@ -223,6 +226,12 @@ struct JsConnectOverCdpOptions {
 
 fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<LaunchOptions> {
   let parsed: JsLaunchOptions = serde_from_js(ctx, value)?;
+  for read in parsed.executable_path.iter().chain(parsed.extensions.iter().flatten()) {
+    crate::bindings::convert::readable(ctx, std::path::Path::new(read))?;
+  }
+  for written in parsed.downloads_path.iter().chain(&parsed.traces_dir) {
+    crate::bindings::convert::writable(ctx, std::path::Path::new(written))?;
+  }
   Ok(LaunchOptions {
     headless: parsed.headless,
     executable_path: parsed.executable_path,
@@ -279,7 +288,9 @@ fn parse_context_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
   // launch-options keys overlap (e.g. `headless`) but serde ignores
   // unknown fields per the `BrowserJs` parser.
   let parsed: super::browser::JsBrowserContextOptions = serde_from_js(ctx, value)?;
-  Ok(parsed.into_core())
+  let options = parsed.into_core();
+  crate::bindings::convert::check_context_paths(ctx, &options)?;
+  Ok(options)
 }
 
 fn chromium_factory<'js>(ctx: Ctx<'js>, opts: Opt<Value<'js>>) -> rquickjs::Result<Class<'js, BrowserTypeJs>> {

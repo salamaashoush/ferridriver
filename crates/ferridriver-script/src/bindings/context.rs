@@ -201,6 +201,9 @@ impl BrowserContextJs {
         let core_opts = match options.0 {
           Some(v) if !v.is_undefined() && !v.is_null() => {
             let parsed: JsStorageStateOptions = serde_from_js(&ctx, v)?;
+            if let Some(path) = &parsed.path {
+              crate::bindings::convert::writable(&ctx, std::path::Path::new(path))?;
+            }
             Some(ferridriver::options::StorageStateOptions {
               path: parsed.path.map(std::path::PathBuf::from),
               indexed_db: parsed.indexed_db,
@@ -510,6 +513,7 @@ impl BrowserContextJs {
     options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = crate::bindings::page::parse_har_options(&ctx, &options)?;
+    crate::bindings::page::check_har_paths(&ctx, &har, &opts)?;
     self
       .inner
       .route_from_har(std::path::Path::new(&har))
@@ -770,6 +774,7 @@ impl BrowserContextJs {
       height: f64,
     }
     let parsed: JsRecordVideoOptions = serde_from_js(&ctx, options)?;
+    crate::bindings::convert::writable(&ctx, std::path::Path::new(&parsed.dir))?;
     let opts = ferridriver::options::RecordVideoOptions {
       dir: std::path::PathBuf::from(parsed.dir),
       size: parsed.size.map(|s| ferridriver::options::VideoSize {

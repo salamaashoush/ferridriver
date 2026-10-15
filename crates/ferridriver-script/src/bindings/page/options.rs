@@ -204,6 +204,20 @@ pub(crate) fn parse_route_times(
 /// Parse the `{ url?, notFound?, update?, updateContent?, updateMode? }`
 /// options bag for `routeFromHAR`. Shared by `page.routeFromHAR` and
 /// `context.routeFromHAR`. `url` accepts a glob string or `RegExp`.
+/// `routeFromHAR` reads the archive, and with `update` writes it.
+pub(crate) fn check_har_paths(
+  ctx: &rquickjs::Ctx<'_>,
+  har: &str,
+  options: &ferridriver::har::RouteFromHarOptions,
+) -> rquickjs::Result<()> {
+  let path = std::path::Path::new(har);
+  if options.update {
+    crate::bindings::convert::writable(ctx, path)
+  } else {
+    crate::bindings::convert::readable(ctx, path)
+  }
+}
+
 pub(crate) fn parse_har_options<'js>(
   ctx: &rquickjs::Ctx<'js>,
   options: &rquickjs::function::Opt<rquickjs::Value<'js>>,
@@ -358,6 +372,9 @@ pub(crate) fn parse_screenshot_options<'js>(
         None => Vec::new(),
       };
       let js: JsScreenshotOptions = serde_from_js(ctx, v)?;
+      if let Some(path) = &js.path {
+        crate::bindings::convert::writable(ctx, std::path::Path::new(path))?;
+      }
       Ok(ferridriver::options::ScreenshotOptions {
         animations: js.animations.as_deref().map(ferridriver::options::AnimationsMode::from),
         caret: js.caret.as_deref().map(ferridriver::options::CaretMode::from),

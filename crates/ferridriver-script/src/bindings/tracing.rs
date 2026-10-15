@@ -35,7 +35,11 @@ impl TracingJs {
   /// policy is `attach` for `.zip`, `embed` otherwise.
   #[qjs(rename = "startHar")]
   pub async fn start_har<'js>(&self, ctx: Ctx<'js>, path: String, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    crate::bindings::convert::writable(&ctx, std::path::Path::new(&path))?;
     let opts = parse_start_har_options(&ctx, options)?;
+    if let Some(dir) = &opts.resources_dir {
+      crate::bindings::convert::writable(&ctx, dir)?;
+    }
     self.ctx.tracing().start_har(path, opts).await.into_js_with(&ctx)
   }
 
@@ -78,14 +82,14 @@ impl TracingJs {
   /// Playwright: `tracing.stopChunk(options?: { path? })`.
   #[qjs(rename = "stopChunk")]
   pub async fn stop_chunk<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let opts = parse_tracing_stop_options(&options)?;
+    let opts = parse_tracing_stop_options(&ctx, &options)?;
     self.ctx.tracing().stop_chunk(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.stop(options?: { path? })`.
   #[qjs(rename = "stop")]
   pub async fn stop<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let opts = parse_tracing_stop_options(&options)?;
+    let opts = parse_tracing_stop_options(&ctx, &options)?;
     self.ctx.tracing().stop(opts).await.into_js_with(&ctx)
   }
 }
@@ -147,7 +151,10 @@ fn parse_group_location(options: &Opt<Value<'_>>) -> rquickjs::Result<Option<fer
   }))
 }
 
-fn parse_tracing_stop_options(options: &Opt<Value<'_>>) -> rquickjs::Result<ferridriver::trace::TracingStopOptions> {
+fn parse_tracing_stop_options(
+  ctx: &Ctx<'_>,
+  options: &Opt<Value<'_>>,
+) -> rquickjs::Result<ferridriver::trace::TracingStopOptions> {
   let mut out = ferridriver::trace::TracingStopOptions::default();
   let Some(obj) = options
     .0
@@ -158,6 +165,9 @@ fn parse_tracing_stop_options(options: &Opt<Value<'_>>) -> rquickjs::Result<ferr
     return Ok(out);
   };
   out.path = obj.get::<_, Option<String>>("path")?.map(std::path::PathBuf::from);
+  if let Some(path) = &out.path {
+    crate::bindings::convert::writable(ctx, path)?;
+  }
   Ok(out)
 }
 

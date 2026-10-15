@@ -40,6 +40,7 @@ impl VideoJs {
   /// Playwright: `video.saveAs(path: string): Promise<void>`.
   #[qjs(rename = "saveAs")]
   pub async fn save_as(&self, ctx: rquickjs::Ctx<'_>, path: String) -> rquickjs::Result<()> {
+    crate::bindings::convert::writable(&ctx, std::path::Path::new(&path))?;
     self.inner.save_as(path).await.into_js_with(&ctx)
   }
 

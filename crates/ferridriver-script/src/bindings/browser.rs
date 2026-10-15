@@ -51,6 +51,7 @@ impl BrowserJs {
         let har_filter = record_har_url_filter(&ctx, &v)?;
         let parsed: JsBrowserContextOptions = serde_from_js(&ctx, v)?;
         let mut core = parsed.into_core();
+        crate::bindings::convert::check_context_paths(&ctx, &core)?;
         if let Some(har) = core.record_har.as_mut() {
           har.url_filter = har_filter;
         }

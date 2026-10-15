@@ -1505,7 +1505,10 @@ fn make_selectors_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
           bag.get::<_, Option<String>>("path")?,
         ) {
           (Some(content), _) => ferridriver::selectors::SelectorScript::Source(content),
-          (None, Some(path)) => ferridriver::selectors::SelectorScript::Path(std::path::PathBuf::from(path)),
+          (None, Some(path)) => {
+            crate::bindings::convert::readable(&ctx, std::path::Path::new(&path))?;
+            ferridriver::selectors::SelectorScript::Path(std::path::PathBuf::from(path))
+          },
           (None, None) => {
             return Err(throw_script_error(
               &ctx,
@@ -2007,6 +2010,7 @@ fn parse_attach_args<'js>(ctx: &Ctx<'js>, args: &[Value<'js>]) -> rquickjs::Resu
     .ok()
     .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()));
   if let Ok(path) = opts.get::<_, String>("path") {
+    crate::bindings::convert::readable(ctx, std::path::Path::new(&path))?;
     let content_type = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
     return Ok((name, content_type, AttachSource::Path(path)));
   }

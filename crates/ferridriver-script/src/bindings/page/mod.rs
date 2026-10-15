@@ -1555,6 +1555,9 @@ impl PageJs {
       .scope(async move {
         let opts: Option<ferridriver::options::AddScriptTagOptions> =
           crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        if let Some(path) = opts.as_ref().and_then(|o| o.path.as_deref()) {
+          crate::bindings::convert::readable(&ctx, path)?;
+        }
         let handle = self
           .inner
           .add_script_tag(opts.unwrap_or_default())
@@ -1578,6 +1581,9 @@ impl PageJs {
       .scope(async move {
         let opts: Option<ferridriver::options::AddStyleTagOptions> =
           crate::bindings::convert::parse_opt_bag(&ctx, options)?;
+        if let Some(path) = opts.as_ref().and_then(|o| o.path.as_deref()) {
+          crate::bindings::convert::readable(&ctx, path)?;
+        }
         let handle = self
           .inner
           .add_style_tag(opts.unwrap_or_default())
@@ -2478,6 +2484,7 @@ impl PageJs {
     call_site
       .scope(async move {
         let opts = parse_har_options(&ctx, &options)?;
+        check_har_paths(&ctx, &har, &opts)?;
         self
           .inner
           .route_from_har(std::path::Path::new(&har))
