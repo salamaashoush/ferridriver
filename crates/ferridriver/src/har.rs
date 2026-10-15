@@ -170,7 +170,7 @@ pub fn route_handler_from_file(path: &std::path::Path, not_found: HarNotFound) -
     match hit {
       Some(rec) => route.fulfill(rec.response.clone()),
       None => match not_found {
-        HarNotFound::Abort => route.abort("failed"),
+        HarNotFound::Abort => route.abort(None),
         HarNotFound::Fallback => route.fallback(crate::route::ContinueOverrides::default()),
       },
     }

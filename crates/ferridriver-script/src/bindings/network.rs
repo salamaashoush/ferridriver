@@ -900,14 +900,14 @@ impl RouteJs {
 
   /// Mirrors Playwright `route.abort(errorCode?)`.
   #[qjs(rename = "abort")]
-  pub fn abort(&self, ctx: Ctx<'_>, error_code: Option<String>) -> rquickjs::Result<()> {
+  pub fn abort(&self, ctx: Ctx<'_>, error_code: rquickjs::function::Opt<String>) -> rquickjs::Result<()> {
     let route = self
       .inner
       .lock()
       .ok()
       .and_then(|mut g| g.take())
       .ok_or_else(|| throw_named(&ctx, "Error", "Route already handled"))?;
-    route.abort(&error_code.unwrap_or_else(|| "blockedbyclient".to_string()));
+    route.abort(error_code.0.as_deref());
     Ok(())
   }
 }

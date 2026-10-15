@@ -255,15 +255,15 @@ impl Route {
     Ok(())
   }
 
-  /// Abort the request.
+  /// Playwright: `route.abort(errorCode?)`.
   #[napi]
-  pub fn abort(&mut self, reason: Option<String>) -> Result<()> {
+  pub fn abort(&mut self, error_code: Option<String>) -> Result<()> {
     let inner = self
       .lock()?
       .take()
       .ok_or_else(|| napi::Error::from_reason("Route already handled"))?;
 
-    inner.abort(&reason.unwrap_or_else(|| "blockedbyclient".into()));
+    inner.abort(error_code.as_deref());
     Ok(())
   }
 }

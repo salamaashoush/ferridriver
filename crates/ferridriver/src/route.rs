@@ -13,7 +13,7 @@
 //!
 //! page.route(UrlMatcher::glob("**/api/*")?, Arc::new(|route: Route| {
 //!     if route.request().url.contains("block-me") {
-//!         route.abort("blockedbyclient");
+//!         route.abort(Some("blockedbyclient"));
 //!     } else {
 //!         route.fulfill(FulfillResponse {
 //!             status: 200,
@@ -348,10 +348,11 @@ impl Route {
     }
   }
 
-  /// Abort the request with an error reason.
-  pub fn abort(mut self, reason: &str) {
+  /// Playwright: `route.abort(errorCode?: string)`, `'failed'` when
+  /// no code is given.
+  pub fn abort(mut self, error_code: Option<&str>) {
     if let Some(tx) = self.action_tx.take() {
-      let _ = tx.send(RouteAction::Abort(reason.to_string()));
+      let _ = tx.send(RouteAction::Abort(error_code.unwrap_or("failed").to_string()));
     }
   }
 

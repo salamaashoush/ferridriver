@@ -3829,7 +3829,7 @@ impl Page {
   ///
   /// // Block image loading
   /// page.route(UrlMatcher::glob("**/*.{png,jpg,gif}")?, Arc::new(|route: Route| {
-  ///     route.abort("blockedbyclient");
+  ///     route.abort(Some("blockedbyclient"));
   /// }), None).await?;
   /// ```
   ///

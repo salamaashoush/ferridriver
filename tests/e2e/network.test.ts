@@ -59,6 +59,17 @@ describe('network', () => {
     expect([browserName, known]).toEqual([browserName, true]);
   });
 
+  test('route_abort_without_a_code_fails_the_request', async ({ page }) => {
+    // Playwright's page-route.spec.ts "should be abortable": the code is
+    // optional and defaults to 'failed'.
+    await page.goto('/fx/landed');
+    await page.route('**/api/aborted', route => route.abort());
+    const failed = page.waitForEvent('requestfailed', { timeout: 10000 });
+    const outcome = await page.evaluate("fetch('/fx/api/aborted').then(() => 'ok', () => 'blocked')");
+    expect(outcome).toBe('blocked');
+    expect(((await failed) as Request).url()).toContain('/api/aborted');
+  });
+
   test('route_disposable', async ({ page }) => {
     // `page.route(url, handler)` returns a Disposable whose dispose()
     // reverses the registration; a second dispose() is an idempotent

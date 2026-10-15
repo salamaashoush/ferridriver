@@ -169,7 +169,7 @@ async fn block_requests(world: &mut BrowserWorld, pattern: String) {
     .route(
       matcher,
       Arc::new(|route| {
-        route.abort("BlockedByClient");
+        route.abort(Some("BlockedByClient"));
       }),
       None,
     )
