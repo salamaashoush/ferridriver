@@ -3804,7 +3804,7 @@ impl Page {
   ) -> Result<crate::disposable::Disposable> {
     self
       .inner
-      .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, times))
+      .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, times).with_client(self.http_client()))
       .await?;
     let inner = self.inner.clone();
     Ok(crate::disposable::Disposable::new(move || async move {

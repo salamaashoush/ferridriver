@@ -790,6 +790,53 @@ impl RouteJs {
     Ok(())
   }
 
+  /// Playwright: `route.fetch(options?: { headers?, maxRedirects?,
+  /// maxRetries?, method?, postData?, timeout?, url? }): Promise<APIResponse>`.
+  /// The request goes out under the realm's network policy, like the
+  /// realm's own `request`.
+  #[qjs(rename = "fetch")]
+  pub async fn fetch<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    options: rquickjs::function::Opt<Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::http_client::HttpResponseJs> {
+    let guard = crate::bindings::net_policy::guard(crate::bindings::net_policy::realm_policy(&ctx));
+    let mut fetch = ferridriver::route::RouteFetchOptions::default();
+    if let Some(bag) = options
+      .0
+      .as_ref()
+      .filter(|v| !v.is_undefined() && !v.is_null())
+      .and_then(Value::as_object)
+    {
+      fetch.url = bag.get("url")?;
+      fetch.method = bag.get("method")?;
+      fetch.headers = bag
+        .get::<_, Option<JsHeadersMap>>("headers")?
+        .map(|headers| headers_to_pairs(Some(headers)));
+      let post_data: Value<'js> = bag.get("postData")?;
+      if !post_data.is_undefined() && !post_data.is_null() {
+        fetch.post_data = Some(fulfill_body_bytes(&ctx, post_data)?);
+      }
+      fetch.max_redirects = bag.get("maxRedirects")?;
+      fetch.max_retries = bag.get("maxRetries")?;
+      fetch.timeout = bag
+        .get::<_, Option<f64>>("timeout")?
+        .map(crate::bindings::convert::ms_f64_to_u64);
+    }
+    let (request, client) = {
+      let route = self
+        .inner
+        .lock()
+        .map_err(|_| throw_named(&ctx, "Error", "route lock poisoned"))?;
+      let route = route
+        .as_ref()
+        .ok_or_else(|| throw_named(&ctx, "Error", "Route already handled"))?;
+      (route.request().clone(), route.fetch_client().into_js_with(&ctx)?)
+    };
+    let response = request.fetch(&client, fetch, Some(guard)).await.into_js_with(&ctx)?;
+    Ok(crate::bindings::http_client::HttpResponseJs::new(response))
+  }
+
   /// Mirrors Playwright `route.continue(options?)`. `postData` takes a
   /// string or any byte source, like `fulfill`'s `body`.
   #[qjs(rename = "continue")]

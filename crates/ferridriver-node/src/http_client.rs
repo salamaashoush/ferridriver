@@ -128,22 +128,6 @@ impl FetchOptions {
   }
 }
 
-/// Strip the headers that describe the connection rather than the
-/// request: the client recomputes them. `content-length` in particular
-/// MUST go — a replay whose body the capture did not carry would
-/// otherwise announce a length the server then waits forever to receive.
-fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
-  headers
-    .into_iter()
-    .filter(|(name, _)| {
-      !matches!(
-        name.to_ascii_lowercase().as_str(),
-        "content-length" | "host" | "connection" | "transfer-encoding"
-      )
-    })
-    .collect()
-}
-
 /// Layer explicit `options` over a `Request`-derived base: anything the
 /// caller set wins, the rest falls through to the request's own values.
 /// Mirrors the QuickJS binding's `merge_over`.
@@ -433,7 +417,7 @@ impl HttpClient {
         req.url(),
         Some(ferridriver::http_client::RequestOptions {
           method: Some(req.method()),
-          headers: Some(replayable_headers(req.inner.headers().into_iter().collect())),
+          headers: Some(ferridriver::http_client::replayable_headers(req.inner.headers().into_iter().collect())),
           data: req.inner.post_data_buffer(),
           ..Default::default()
         }),

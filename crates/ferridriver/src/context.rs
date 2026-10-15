@@ -2015,7 +2015,8 @@ impl ContextRef {
     let params = serde_json::json!({ "url": matcher.describe() });
     self
       .traced("route", params, async {
-        let registration = crate::route::RegisteredRoute::context_scoped(matcher.clone(), handler, times);
+        let registration = crate::route::RegisteredRoute::context_scoped(matcher.clone(), handler, times)
+          .with_client(Some(self.http_client()));
         self.install_context_route(registration).await?;
         let ctx = self.clone();
         Ok(crate::disposable::Disposable::new(move || async move {

@@ -1798,6 +1798,16 @@ export interface FrameLocator {
 
 export interface Route {
   request(): Request;
+  /** Sends the intercepted request, with these overrides, through the context's request client. */
+  fetch(options?: {
+    url?: string;
+    method?: string;
+    headers?: Record<string, string>;
+    postData?: string | Uint8Array | Buffer;
+    maxRedirects?: number;
+    maxRetries?: number;
+    timeout?: number;
+  }): Promise<APIResponse>;
   fulfill(options?: {
     status?: number;
     headers?: Record<string, string>;

@@ -29,18 +29,54 @@ impl Route {
   }
 }
 
-/// Options for `route.continue_()`.
+/// Options for `route.continue(options?)` and `route.fallback(options?)`.
 #[napi(object)]
-#[derive(Debug, Clone, Default)]
 pub struct ContinueOptions {
   /// Override request URL.
   pub url: Option<String>,
   /// Override HTTP method.
   pub method: Option<String>,
-  /// Override request headers as `[[key, value], ...]`.
-  pub headers: Option<Vec<Vec<String>>>,
+  /// Override request headers.
+  pub headers: Option<std::collections::HashMap<String, String>>,
   /// Override POST body.
-  pub post_data: Option<String>,
+  pub post_data: Option<Either<String, Buffer>>,
+}
+
+impl ContinueOptions {
+  fn into_core(self) -> ferridriver::route::ContinueOverrides {
+    ferridriver::route::ContinueOverrides {
+      url: self.url,
+      method: self.method,
+      headers: self.headers.map(|headers| headers.into_iter().collect()),
+      post_data: self.post_data.map(body_bytes),
+    }
+  }
+}
+
+fn body_bytes(body: Either<String, Buffer>) -> Vec<u8> {
+  match body {
+    Either::A(text) => text.into_bytes(),
+    Either::B(bytes) => bytes.to_vec(),
+  }
+}
+
+/// Options for `route.fetch(options?)`.
+#[napi(object)]
+pub struct RouteFetchOptions {
+  /// Override request URL.
+  pub url: Option<String>,
+  /// Override HTTP method.
+  pub method: Option<String>,
+  /// Override request headers.
+  pub headers: Option<std::collections::HashMap<String, String>>,
+  /// Override POST body.
+  pub post_data: Option<Either<String, Buffer>>,
+  /// Redirects to follow; 0 follows none. 20 when unset.
+  pub max_redirects: Option<u32>,
+  /// Retries on a reset connection.
+  pub max_retries: Option<u32>,
+  /// Milliseconds for the whole request; 0 waits forever.
+  pub timeout: Option<f64>,
 }
 
 #[napi]
@@ -159,6 +195,36 @@ impl Route {
     })
   }
 
+  /// Playwright: `route.fetch(options?): Promise<APIResponse>`.
+  #[napi(ts_return_type = "Promise<HttpResponse>")]
+  pub async fn fetch(&self, options: Option<RouteFetchOptions>) -> Result<crate::http_client::HttpResponse> {
+    let mut fetch = ferridriver::route::RouteFetchOptions::default();
+    if let Some(options) = options {
+      fetch.url = options.url;
+      fetch.method = options.method;
+      fetch.headers = options.headers.map(|headers| headers.into_iter().collect());
+      fetch.post_data = options.post_data.map(body_bytes);
+      fetch.max_redirects = options.max_redirects;
+      fetch.max_retries = options.max_retries;
+      fetch.timeout = options.timeout.map(crate::types::f64_to_u64);
+    }
+    let (request, client) = {
+      let route = self.lock()?;
+      let route = route
+        .as_ref()
+        .ok_or_else(|| napi::Error::from_reason("Route already handled"))?;
+      (
+        route.request().clone(),
+        route.fetch_client().map_err(crate::error::to_napi)?,
+      )
+    };
+    let inner = request
+      .fetch(&client, fetch, None)
+      .await
+      .map_err(crate::error::to_napi)?;
+    Ok(crate::http_client::HttpResponse { inner })
+  }
+
   /// Continue the request, optionally with modifications.
   #[napi(js_name = "continue")]
   pub fn continue_route(&mut self, options: Option<ContinueOptions>) -> Result<()> {
@@ -167,23 +233,7 @@ impl Route {
       .take()
       .ok_or_else(|| napi::Error::from_reason("Route already handled"))?;
 
-    let opts = options.unwrap_or_default();
-    inner.continue_route(ferridriver::route::ContinueOverrides {
-      url: opts.url,
-      method: opts.method,
-      headers: opts.headers.as_ref().map(|h| {
-        h.iter()
-          .filter_map(|pair| {
-            if pair.len() == 2 {
-              Some((pair[0].clone(), pair[1].clone()))
-            } else {
-              None
-            }
-          })
-          .collect()
-      }),
-      post_data: opts.post_data.map(String::into_bytes),
-    });
+    inner.continue_route(options.map(ContinueOptions::into_core).unwrap_or_default());
     Ok(())
   }
 
@@ -201,23 +251,7 @@ impl Route {
       .take()
       .ok_or_else(|| napi::Error::from_reason("Route already handled"))?;
 
-    let opts = options.unwrap_or_default();
-    inner.fallback(ferridriver::route::ContinueOverrides {
-      url: opts.url,
-      method: opts.method,
-      headers: opts.headers.as_ref().map(|h| {
-        h.iter()
-          .filter_map(|pair| {
-            if pair.len() == 2 {
-              Some((pair[0].clone(), pair[1].clone()))
-            } else {
-              None
-            }
-          })
-          .collect()
-      }),
-      post_data: opts.post_data.map(String::into_bytes),
-    });
+    inner.fallback(options.map(ContinueOptions::into_core).unwrap_or_default());
     Ok(())
   }
 

@@ -180,6 +180,63 @@ pub struct InterceptedRequest {
   pub resource_type: String,
 }
 
+/// Playwright: `route.fetch(options?: { headers?, maxRedirects?,
+/// maxRetries?, method?, postData?, timeout?, url? })`. Each field, when
+/// set, replaces what the intercepted request carries.
+#[derive(Debug, Clone, Default)]
+pub struct RouteFetchOptions {
+  pub url: Option<String>,
+  pub method: Option<String>,
+  pub headers: Option<Vec<(String, String)>>,
+  pub post_data: Option<Vec<u8>>,
+  /// Redirects to follow; 0 follows none. 20 when unset.
+  pub max_redirects: Option<u32>,
+  /// Retries on a reset connection.
+  pub max_retries: Option<u32>,
+  /// Milliseconds for the whole request; 0 waits forever.
+  pub timeout: Option<u64>,
+}
+
+impl InterceptedRequest {
+  /// Send this request, with `options` layered over it, through
+  /// `client`, which for a route is its context's request client: its
+  /// cookies and defaults apply, as Playwright's `_innerFetch` applies
+  /// them. `net_guard` is the caller's network policy, if it has one.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or the policy refuses it.
+  pub async fn fetch(
+    &self,
+    client: &crate::http_client::HttpClient,
+    options: RouteFetchOptions,
+    net_guard: Option<crate::http_client::NetGuard>,
+  ) -> crate::error::Result<crate::http_client::HttpResponse> {
+    let headers = options.headers.unwrap_or_else(|| {
+      self
+        .headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+    });
+    let request = crate::http_client::RequestOptions {
+      method: Some(options.method.unwrap_or_else(|| self.method.clone())),
+      headers: Some(crate::http_client::replayable_headers(headers)),
+      data: options
+        .post_data
+        .or_else(|| self.post_data.clone().map(String::into_bytes)),
+      max_redirects: options.max_redirects,
+      max_retries: options.max_retries,
+      timeout: options.timeout.map(std::time::Duration::from_millis),
+      net_guard,
+      ..Default::default()
+    };
+    client
+      .fetch(options.url.as_deref().unwrap_or(&self.url), Some(request))
+      .await
+  }
+}
+
 /// A paused network request. The handler must call exactly one of
 /// `fulfill()`, `continue_route()`, or `abort()` to resume the request.
 ///
@@ -188,6 +245,7 @@ pub struct InterceptedRequest {
 pub struct Route {
   request: InterceptedRequest,
   action_tx: Option<tokio::sync::oneshot::Sender<RouteAction>>,
+  client: Option<crate::http_client::HttpClient>,
 }
 
 impl Route {
@@ -198,7 +256,38 @@ impl Route {
     Self {
       request,
       action_tx: Some(action_tx),
+      client: None,
     }
+  }
+
+  /// Playwright: `route.fetch(options?): Promise<APIResponse>`. Sends the
+  /// intercepted request, with `options` layered over it, through the
+  /// registering context's request client and answers the response,
+  /// which `fulfill` can then serve as is or changed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the route came from no context, or the request
+  /// fails or the policy refuses it.
+  pub async fn fetch(
+    &self,
+    options: RouteFetchOptions,
+    net_guard: Option<crate::http_client::NetGuard>,
+  ) -> crate::error::Result<crate::http_client::HttpResponse> {
+    let client = self.fetch_client()?;
+    self.request.fetch(&client, options, net_guard).await
+  }
+
+  /// The client [`Self::fetch`] sends through, for a caller that cannot
+  /// hold the route across the request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the route came from no context.
+  pub fn fetch_client(&self) -> crate::error::Result<crate::http_client::HttpClient> {
+    self.client.clone().ok_or_else(|| {
+      crate::error::FerriError::unsupported("route.fetch needs the browser context the route was registered in")
+    })
   }
 
   /// The intercepted request.
@@ -331,6 +420,9 @@ pub struct RegisteredRoute {
   pub remaining: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
   /// Whether this registration is page- or context-scoped.
   pub scope: RouteScope,
+  /// The request client of the registering page's context, which
+  /// `route.fetch()` sends through.
+  pub client: Option<crate::http_client::HttpClient>,
 }
 
 /// Stable identity of a route handler closure. `route`'s caller keeps
@@ -368,7 +460,16 @@ impl RegisteredRoute {
       handler,
       remaining: times.map(|t| std::sync::Arc::new(std::sync::atomic::AtomicU32::new(t))),
       scope,
+      client: None,
     }
+  }
+
+  /// The request client `route.fetch()` uses for requests this route
+  /// intercepts.
+  #[must_use]
+  pub fn with_client(mut self, client: Option<crate::http_client::HttpClient>) -> Self {
+    self.client = client;
+    self
   }
 
   /// Whether this route may still fire (unlimited, or counter > 0).
@@ -415,6 +516,7 @@ fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usiz
   };
   let idx = pick(RouteScope::Page, routes).or_else(|| pick(RouteScope::Context, routes))?;
   let handler = std::sync::Arc::clone(&routes[idx].handler);
+  let client = routes[idx].client.clone();
   let id = routes[idx].handler_id();
   let budget = routes[idx].remaining.clone();
   let exhausted = routes[idx].remaining.as_ref().is_some_and(|c| {
@@ -428,6 +530,7 @@ fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usiz
   let removed = exhausted.then(|| routes.remove(idx));
   Some(PickedRoute {
     handler,
+    client,
     id,
     index: idx,
     budget,
@@ -440,6 +543,7 @@ fn take_next_handler(routes: &mut Vec<RegisteredRoute>, url: &str, tried: &[usiz
 /// reports the request as unmatched.
 struct PickedRoute {
   handler: RouteHandler,
+  client: Option<crate::http_client::HttpClient>,
   id: usize,
   /// Original position in the route list, for reinstating a route that
   /// was pruned on (what turned out to be a phantom) exhaustion.
@@ -514,7 +618,8 @@ pub async fn run_route_chain(
     };
     tried.push(picked.id);
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let route = Route::new(request.clone(), tx);
+    let mut route = Route::new(request.clone(), tx);
+    route.client = picked.client.clone();
     (picked.handler)(route);
     let action = rx.await.unwrap_or(RouteAction::Continue(ContinueOverrides::default()));
     match action {

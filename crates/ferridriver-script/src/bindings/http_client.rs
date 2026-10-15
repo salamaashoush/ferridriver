@@ -372,28 +372,10 @@ impl HttpClientJs {
 fn request_defaults(req: &crate::bindings::network::RequestJs) -> RequestOptions {
   RequestOptions {
     method: Some(req.method()),
-    headers: Some(replayable_headers(req.header_pairs())),
+    headers: Some(ferridriver::http_client::replayable_headers(req.header_pairs())),
     data: req.post_data_bytes(),
     ..Default::default()
   }
-}
-
-/// Strip the headers that describe the connection rather than the
-/// request: the client recomputes them.
-///
-/// `content-length` in particular MUST go — a replay whose body the
-/// capture did not carry would otherwise announce a length the server
-/// then waits forever to receive.
-fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
-  headers
-    .into_iter()
-    .filter(|(name, _)| {
-      !matches!(
-        name.to_ascii_lowercase().as_str(),
-        "content-length" | "host" | "connection" | "transfer-encoding"
-      )
-    })
-    .collect()
 }
 
 // ── HttpResponseJs ────────────────────────────────────────────────────────────

@@ -118,6 +118,24 @@ pub struct RequestOptions {
   pub net_guard: Option<NetGuard>,
 }
 
+/// The headers of a captured request that may be sent again: those that
+/// describe the connection rather than the request go, since the client
+/// recomputes them. `content-length` in particular must: a replay whose
+/// body the capture did not carry would otherwise announce a length the
+/// server then waits forever to receive.
+#[must_use]
+pub fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+  headers
+    .into_iter()
+    .filter(|(name, _)| {
+      !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-length" | "host" | "connection" | "transfer-encoding"
+      )
+    })
+    .collect()
+}
+
 /// A request assembled by the WHATWG `fetch` layer, for
 /// [`HttpClient::fetch_whatwg`].
 ///
