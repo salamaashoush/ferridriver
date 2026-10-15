@@ -1062,135 +1062,225 @@ impl PageJs {
 
   /// Text content of the first element matching `selector` (or `null`).
   #[qjs(rename = "textContent")]
-  pub async fn text_content(
+  pub async fn text_content<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
-      .scope(async move { self.inner.text_content(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .text_content(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   /// `innerText` of the first element matching `selector`.
   #[qjs(rename = "innerText")]
-  pub async fn inner_text(
+  pub async fn inner_text<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
     call_site
-      .scope(async move { self.inner.inner_text(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .inner_text(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// `innerHTML` of the first element matching `selector`.
   #[qjs(rename = "innerHTML")]
-  pub async fn inner_html(
+  pub async fn inner_html<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
     call_site
-      .scope(async move { self.inner.inner_html(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .inner_html(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// Current input value of the first element matching `selector`.
   #[qjs(rename = "inputValue")]
-  pub async fn input_value(
+  pub async fn input_value<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
     call_site
-      .scope(async move { self.inner.input_value(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .input_value(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// Get attribute `name` on the first element matching `selector`
   /// (or `null` if the attribute is absent).
   #[qjs(rename = "getAttribute")]
-  pub async fn get_attribute(
+  pub async fn get_attribute<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
     name: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
-      .scope(async move { self.inner.get_attribute(&selector, &name).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .get_attribute(&selector, &name)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   /// Whether the first element matching `selector` is visible.
   #[qjs(rename = "isVisible")]
-  pub async fn is_visible(
+  pub async fn is_visible<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_visible(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .is_visible(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// Whether the first element matching `selector` is hidden.
   #[qjs(rename = "isHidden")]
-  pub async fn is_hidden(
+  pub async fn is_hidden<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_hidden(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .is_hidden(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// Whether the first element matching `selector` is enabled.
   #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled(
+  pub async fn is_enabled<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_enabled(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .is_enabled(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// Whether the first element matching `selector` is disabled.
   #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled(
+  pub async fn is_disabled<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_disabled(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .is_disabled(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
   /// Whether the first checkbox matching `selector` is checked.
   #[qjs(rename = "isChecked")]
-  pub async fn is_checked(
+  pub async fn is_checked<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_checked(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .is_checked(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 
@@ -1639,14 +1729,23 @@ impl PageJs {
 
   /// `page.isEditable(selector)`. Whether the element is editable.
   #[qjs(rename = "isEditable")]
-  pub async fn is_editable(
+  pub async fn is_editable<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_editable(&selector).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::selector_read_options(&options)?;
+        self
+          .inner
+          .is_editable(&selector)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
   }
 

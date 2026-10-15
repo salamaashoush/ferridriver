@@ -1464,7 +1464,7 @@ impl WebKitPage {
     self
       .evaluate_to_element(&sel_js, None)
       .await
-      .map_err(|_| FerriError::invalid_selector(selector, "no element found"))
+      .map_err(|_| FerriError::element_not_found(selector))
   }
 
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {

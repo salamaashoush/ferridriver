@@ -1053,47 +1053,63 @@ impl LocatorJs {
   }
 
   #[qjs(rename = "textContent")]
-  pub async fn text_content(
+  pub async fn text_content<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
-      .scope(async move { self.inner.text_content().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.text_content().options(options).await.into_js_with(&ctx)
+      })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "innerText")]
-  pub async fn inner_text(
+  pub async fn inner_text<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
     call_site
-      .scope(async move { self.inner.inner_text().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.inner_text().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "innerHTML")]
-  pub async fn inner_html(
+  pub async fn inner_html<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
     call_site
-      .scope(async move { self.inner.inner_html().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.inner_html().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "inputValue")]
-  pub async fn input_value(
+  pub async fn input_value<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<String> {
     call_site
-      .scope(async move { self.inner.input_value().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.input_value().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
@@ -1137,81 +1153,114 @@ impl LocatorJs {
   }
 
   #[qjs(rename = "getAttribute")]
-  pub async fn get_attribute(
+  pub async fn get_attribute<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     name: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     call_site
-      .scope(async move { self.inner.get_attribute(&name).await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self
+          .inner
+          .get_attribute(&name)
+          .options(options)
+          .await
+          .into_js_with(&ctx)
+      })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   #[qjs(rename = "isVisible")]
-  pub async fn is_visible(
+  pub async fn is_visible<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_visible().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.is_visible().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "isHidden")]
-  pub async fn is_hidden(
+  pub async fn is_hidden<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_hidden().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.is_hidden().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled(
+  pub async fn is_enabled<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_enabled().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.is_enabled().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled(
+  pub async fn is_disabled<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_disabled().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.is_disabled().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "isChecked")]
-  pub async fn is_checked(
+  pub async fn is_checked<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_checked().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.is_checked().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 
   #[qjs(rename = "isEditable")]
-  pub async fn is_editable(
+  pub async fn is_editable<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<bool> {
     call_site
-      .scope(async move { self.inner.is_editable().await.into_js_with(&ctx) })
+      .scope(async move {
+        let options = crate::bindings::page::options::timeout_options(&options)?;
+        self.inner.is_editable().options(options).await.into_js_with(&ctx)
+      })
       .await
   }
 

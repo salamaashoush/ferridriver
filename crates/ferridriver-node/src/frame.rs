@@ -635,57 +635,91 @@ impl Frame {
   }
 
   #[napi]
-  pub async fn text_content(&self, selector: String) -> Result<Option<String>> {
-    self.inner.text_content(&selector).await.into_napi()
+  pub async fn text_content(
+    &self,
+    selector: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<Option<String>> {
+    self.inner.text_content(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn inner_text(&self, selector: String) -> Result<String> {
-    self.inner.inner_text(&selector).await.into_napi()
+  pub async fn inner_text(
+    &self,
+    selector: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<String> {
+    self.inner.inner_text(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi(js_name = "innerHTML")]
-  pub async fn inner_html(&self, selector: String) -> Result<String> {
-    self.inner.inner_html(&selector).await.into_napi()
+  pub async fn inner_html(
+    &self,
+    selector: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<String> {
+    self.inner.inner_html(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn get_attribute(&self, selector: String, name: String) -> Result<Option<String>> {
-    self.inner.get_attribute(&selector, &name).await.into_napi()
+  pub async fn get_attribute(
+    &self,
+    selector: String,
+    name: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<Option<String>> {
+    self
+      .inner
+      .get_attribute(&selector, &name)
+      .bag(options)?
+      .await
+      .into_napi()
   }
 
   #[napi]
-  pub async fn input_value(&self, selector: String) -> Result<String> {
-    self.inner.input_value(&selector).await.into_napi()
+  pub async fn input_value(
+    &self,
+    selector: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<String> {
+    self.inner.input_value(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn is_visible(&self, selector: String) -> Result<bool> {
-    self.inner.is_visible(&selector).await.into_napi()
+  pub async fn is_visible(&self, selector: String, options: Option<crate::types::SelectorReadOptions>) -> Result<bool> {
+    self.inner.is_visible(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn is_hidden(&self, selector: String) -> Result<bool> {
-    self.inner.is_hidden(&selector).await.into_napi()
+  pub async fn is_hidden(&self, selector: String, options: Option<crate::types::SelectorReadOptions>) -> Result<bool> {
+    self.inner.is_hidden(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn is_enabled(&self, selector: String) -> Result<bool> {
-    self.inner.is_enabled(&selector).await.into_napi()
+  pub async fn is_enabled(&self, selector: String, options: Option<crate::types::SelectorReadOptions>) -> Result<bool> {
+    self.inner.is_enabled(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn is_disabled(&self, selector: String) -> Result<bool> {
-    self.inner.is_disabled(&selector).await.into_napi()
+  pub async fn is_disabled(
+    &self,
+    selector: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<bool> {
+    self.inner.is_disabled(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn is_editable(&self, selector: String) -> Result<bool> {
-    self.inner.is_editable(&selector).await.into_napi()
+  pub async fn is_checked(&self, selector: String, options: Option<crate::types::SelectorReadOptions>) -> Result<bool> {
+    self.inner.is_checked(&selector).bag(options)?.await.into_napi()
   }
 
   #[napi]
-  pub async fn is_checked(&self, selector: String) -> Result<bool> {
-    self.inner.is_checked(&selector).await.into_napi()
+  pub async fn is_editable(
+    &self,
+    selector: String,
+    options: Option<crate::types::SelectorReadOptions>,
+  ) -> Result<bool> {
+    self.inner.is_editable(&selector).bag(options)?.await.into_napi()
   }
 }

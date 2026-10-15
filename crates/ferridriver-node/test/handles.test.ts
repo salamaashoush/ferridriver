@@ -262,7 +262,7 @@ for (const backend of BACKENDS) {
       );
       const eh = await page.querySelector("a#link");
       expect(eh).not.toBeNull();
-      expect(await eh!.innerHtml()).toContain("<b>world</b>");
+      expect(await eh!.innerHTML()).toContain("<b>world</b>");
       expect(await eh!.innerText()).toBe("hello world");
       expect(await eh!.textContent()).toBe("hello world");
       expect(await eh!.getAttribute("href")).toBe("/x");

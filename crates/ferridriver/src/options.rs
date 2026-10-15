@@ -535,6 +535,25 @@ pub struct EvaluateOptions {
   pub timeout: Option<u64>,
 }
 
+/// Playwright's `TimeoutOptions`, the bag of `locator.textContent`,
+/// `getAttribute`, `isChecked` and the other reads.
+#[derive(Debug, Clone, Default)]
+pub struct TimeoutOptions {
+  /// How long to wait for the element (ms); `0` waits without limit.
+  /// `None` is the page's default.
+  pub timeout: Option<u64>,
+}
+
+/// The bag of `page.textContent(selector, options?)` and the other
+/// selector reads: Playwright's `FrameTextContentOptions & TimeoutOptions`.
+#[derive(Debug, Clone, Default)]
+pub struct SelectorReadOptions {
+  /// More than one match is an error. Unset, the context's
+  /// `strictSelectors` decides.
+  pub strict: Option<bool>,
+  pub timeout: Option<u64>,
+}
+
 /// Rendering mode for `locator.ariaSnapshot` / `page.ariaSnapshot`.
 /// Mirrors Playwright's `mode?: 'ai' | 'default'`
 /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`).

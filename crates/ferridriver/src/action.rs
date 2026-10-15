@@ -268,6 +268,15 @@ action_options!(crate::options::EvaluateOptions {
   ms timeout: u64,
 });
 
+action_options!(crate::options::TimeoutOptions {
+  ms timeout: u64,
+});
+
+action_options!(crate::options::SelectorReadOptions {
+  opt strict: bool,
+  ms timeout: u64,
+});
+
 action_options!(crate::options::WaitOptions {
   opt state: crate::options::WaitState,
   opt strict: bool,

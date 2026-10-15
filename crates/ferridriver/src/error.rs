@@ -59,6 +59,11 @@ pub enum FerriError {
   #[error("invalid selector {selector:?}: {reason}")]
   InvalidSelector { selector: String, reason: String },
 
+  /// The selector is valid and matched nothing, which a later attempt
+  /// may change: a waiting operation retries it, unlike [`Self::InvalidSelector`].
+  #[error("no element found for selector {selector:?}")]
+  ElementNotFound { selector: String },
+
   /// Caller is not connected to any browser target.
   #[error("not connected")]
   NotConnected,
@@ -240,6 +245,14 @@ impl FerriError {
     Self::InvalidSelector {
       selector: selector.into(),
       reason: reason.into(),
+    }
+  }
+
+  /// Builder for [`FerriError::ElementNotFound`].
+  #[must_use]
+  pub fn element_not_found(selector: impl Into<String>) -> Self {
+    Self::ElementNotFound {
+      selector: selector.into(),
     }
   }
 

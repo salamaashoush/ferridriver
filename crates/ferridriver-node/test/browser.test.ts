@@ -207,7 +207,7 @@ for (const backend of BACKENDS) {
     });
 
     it("gets innerHTML", async () => {
-      const html = await page.innerHtml("h1");
+      const html = await page.innerHTML("h1");
       expect(html).toBe("Test Page");
     });
 

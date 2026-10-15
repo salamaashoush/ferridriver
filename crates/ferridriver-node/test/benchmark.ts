@@ -80,7 +80,7 @@ const ops: { name: string; reset?: boolean; fd: (p: any) => Promise<void>; pw: (
   { name: "title()", fd: p => p.title(), pw: p => p.title() },
   { name: "content()", fd: p => p.content(), pw: p => p.content() },
   { name: "innerText('h1')", fd: p => p.innerText("h1"), pw: p => p.innerText("h1") },
-  { name: "innerHTML('ul')", fd: p => p.innerHtml("ul"), pw: p => p.innerHTML("ul") },
+  { name: "innerHTML('ul')", fd: p => p.innerHTML("ul"), pw: p => p.innerHTML("ul") },
   // JS evaluation
   { name: "evaluate('1+1')", fd: p => p.evaluate("1+1"), pw: p => p.evaluate("1+1") },
   { name: "evaluate (50 elems)", fd: p => p.evaluate("Array.from(document.querySelectorAll('li')).map(e=>e.textContent)"), pw: p => p.evaluate("Array.from(document.querySelectorAll('li')).map(e=>e.textContent)") },

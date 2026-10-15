@@ -491,63 +491,117 @@ impl Locator {
   }
 
   #[napi]
-  pub async fn text_content(&self) -> Result<Option<String>> {
-    self.inner.text_content().await.map_err(crate::error::to_napi)
+  pub async fn text_content(&self, options: Option<crate::types::TimeoutOptions>) -> Result<Option<String>> {
+    self
+      .inner
+      .text_content()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn inner_text(&self) -> Result<String> {
-    self.inner.inner_text().await.map_err(crate::error::to_napi)
-  }
-
-  #[napi]
-  pub async fn inner_html(&self) -> Result<String> {
-    self.inner.inner_html().await.map_err(crate::error::to_napi)
+  pub async fn inner_text(&self, options: Option<crate::types::TimeoutOptions>) -> Result<String> {
+    self
+      .inner
+      .inner_text()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "innerHTML")]
-  pub async fn inner_html_alias(&self) -> Result<String> {
-    self.inner.inner_html().await.map_err(crate::error::to_napi)
+  pub async fn inner_html(&self, options: Option<crate::types::TimeoutOptions>) -> Result<String> {
+    self
+      .inner
+      .inner_html()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn get_attribute(&self, name: String) -> Result<Option<String>> {
-    self.inner.get_attribute(&name).await.map_err(crate::error::to_napi)
+  pub async fn get_attribute(
+    &self,
+    name: String,
+    options: Option<crate::types::TimeoutOptions>,
+  ) -> Result<Option<String>> {
+    self
+      .inner
+      .get_attribute(&name)
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn input_value(&self) -> Result<String> {
-    self.inner.input_value().await.map_err(crate::error::to_napi)
+  pub async fn input_value(&self, options: Option<crate::types::TimeoutOptions>) -> Result<String> {
+    self
+      .inner
+      .input_value()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn is_visible(&self) -> Result<bool> {
-    self.inner.is_visible().await.map_err(crate::error::to_napi)
+  pub async fn is_visible(&self, options: Option<crate::types::TimeoutOptions>) -> Result<bool> {
+    self
+      .inner
+      .is_visible()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn is_hidden(&self) -> Result<bool> {
-    self.inner.is_hidden().await.map_err(crate::error::to_napi)
+  pub async fn is_hidden(&self, options: Option<crate::types::TimeoutOptions>) -> Result<bool> {
+    self
+      .inner
+      .is_hidden()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn is_enabled(&self) -> Result<bool> {
-    self.inner.is_enabled().await.map_err(crate::error::to_napi)
+  pub async fn is_enabled(&self, options: Option<crate::types::TimeoutOptions>) -> Result<bool> {
+    self
+      .inner
+      .is_enabled()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn is_disabled(&self) -> Result<bool> {
-    self.inner.is_disabled().await.map_err(crate::error::to_napi)
+  pub async fn is_disabled(&self, options: Option<crate::types::TimeoutOptions>) -> Result<bool> {
+    self
+      .inner
+      .is_disabled()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn is_checked(&self) -> Result<bool> {
-    self.inner.is_checked().await.map_err(crate::error::to_napi)
+  pub async fn is_checked(&self, options: Option<crate::types::TimeoutOptions>) -> Result<bool> {
+    self
+      .inner
+      .is_checked()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
-  pub async fn is_editable(&self) -> Result<bool> {
-    self.inner.is_editable().await.map_err(crate::error::to_napi)
+  pub async fn is_editable(&self, options: Option<crate::types::TimeoutOptions>) -> Result<bool> {
+    self
+      .inner
+      .is_editable()
+      .bag(options)?
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]

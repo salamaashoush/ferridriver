@@ -798,6 +798,14 @@ if (!(window.__fd instanceof Object)) {
       const el = injected.retarget(node, 'follow-label');
       return el ? getCheckedWithoutMixed(el) : 'error';
     },
+    // Playwright's `frames.ts::inputValue`: a label reads the control it
+    // owns, and anything else is an error rather than `undefined`.
+    inputValue: (node: Node) => {
+      const el = injected.retarget(node, 'follow-label');
+      if (!el || (el.nodeName !== 'INPUT' && el.nodeName !== 'TEXTAREA' && el.nodeName !== 'SELECT'))
+        throw new Error('Node is not an <input>, <textarea> or <select> element');
+      return (el as HTMLInputElement).value;
+    },
     getReadonly,
 
     // Playwright's aria snapshot (locator/page scoped). `node` is the

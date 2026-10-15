@@ -1042,6 +1042,11 @@ export interface TimeoutOption {
   signal?: AbortSignal;
 }
 
+export interface SelectorReadOptions extends TimeoutOption {
+  // More than one match throws; unset, the context's strictSelectors decides.
+  strict?: boolean;
+}
+
 export interface EvaluateOptions {
   /** Pass functions inside `arg` to the page, which calls back into them. */
   exposeFunctions?: boolean;
@@ -1952,17 +1957,17 @@ export interface Frame {
   dragAndDrop(source: string, target: string): Promise<void>;
   dispatchEvent(selector: string, type: string, eventInit?: Record<string, unknown>, options?: TimeoutOption): Promise<void>;
 
-  textContent(selector: string): Promise<string | null>;
-  innerText(selector: string): Promise<string>;
-  innerHTML(selector: string): Promise<string>;
-  inputValue(selector: string): Promise<string>;
-  getAttribute(selector: string, name: string): Promise<string | null>;
-  isVisible(selector: string): Promise<boolean>;
-  isHidden(selector: string): Promise<boolean>;
-  isEnabled(selector: string): Promise<boolean>;
-  isDisabled(selector: string): Promise<boolean>;
-  isChecked(selector: string): Promise<boolean>;
-  isEditable(selector: string): Promise<boolean>;
+  textContent(selector: string, options?: SelectorReadOptions): Promise<string | null>;
+  innerText(selector: string, options?: SelectorReadOptions): Promise<string>;
+  innerHTML(selector: string, options?: SelectorReadOptions): Promise<string>;
+  inputValue(selector: string, options?: SelectorReadOptions): Promise<string>;
+  getAttribute(selector: string, name: string, options?: SelectorReadOptions): Promise<string | null>;
+  isVisible(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isHidden(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isEnabled(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isDisabled(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isChecked(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isEditable(selector: string, options?: SelectorReadOptions): Promise<boolean>;
 }
 
 export interface WebSocket {
@@ -2148,17 +2153,17 @@ export interface Page {
   clickAt(x: number, y: number): Promise<void>;
   moveMouseSmooth(fromX: number, fromY: number, toX: number, toY: number, steps: number): Promise<void>;
 
-  textContent(selector: string, options?: TimeoutOption): Promise<string | null>;
-  innerText(selector: string, options?: TimeoutOption): Promise<string>;
-  innerHTML(selector: string, options?: TimeoutOption): Promise<string>;
-  inputValue(selector: string, options?: TimeoutOption): Promise<string>;
-  getAttribute(selector: string, name: string, options?: TimeoutOption): Promise<string | null>;
-  isVisible(selector: string, options?: TimeoutOption): Promise<boolean>;
-  isHidden(selector: string, options?: TimeoutOption): Promise<boolean>;
-  isEnabled(selector: string, options?: TimeoutOption): Promise<boolean>;
-  isDisabled(selector: string, options?: TimeoutOption): Promise<boolean>;
-  isChecked(selector: string, options?: TimeoutOption): Promise<boolean>;
-  isEditable(selector: string, options?: TimeoutOption): Promise<boolean>;
+  textContent(selector: string, options?: SelectorReadOptions): Promise<string | null>;
+  innerText(selector: string, options?: SelectorReadOptions): Promise<string>;
+  innerHTML(selector: string, options?: SelectorReadOptions): Promise<string>;
+  inputValue(selector: string, options?: SelectorReadOptions): Promise<string>;
+  getAttribute(selector: string, name: string, options?: SelectorReadOptions): Promise<string | null>;
+  isVisible(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isHidden(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isEnabled(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isDisabled(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isChecked(selector: string, options?: SelectorReadOptions): Promise<boolean>;
+  isEditable(selector: string, options?: SelectorReadOptions): Promise<boolean>;
 
   evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
   evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;

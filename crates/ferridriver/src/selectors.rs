@@ -798,7 +798,7 @@ pub async fn query_one(page: &AnyPage, selector: &str, strict: bool, frame_id: O
   if strict {
     let matches = query_all(page, selector, frame_id).await?;
     if matches.is_empty() {
-      return Err(FerriError::invalid_selector(selector, "no element found"));
+      return Err(FerriError::element_not_found(selector));
     }
     if matches.len() > 1 {
       cleanup_tags(page).await;
@@ -823,7 +823,7 @@ pub async fn query_one(page: &AnyPage, selector: &str, strict: bool, frame_id: O
   page
     .evaluate_to_element(&js, frame_id)
     .await
-    .map_err(|_| FerriError::invalid_selector(selector, "no element found"))
+    .map_err(|_| FerriError::element_not_found(selector))
 }
 
 /// Query a single element using pre-built JS (avoids re-parsing the selector).
@@ -853,7 +853,7 @@ pub async fn query_one_prebuilt(
     if msg.contains("strict mode violation") {
       err
     } else {
-      FerriError::invalid_selector(selector_display, "no element found")
+      FerriError::element_not_found(selector_display)
     }
   })
 }
@@ -913,7 +913,7 @@ fn decode_resolve_one(raw: Option<serde_json::Value>, selector: &str) -> Result<
       usize::try_from(count).unwrap_or(usize::MAX),
     ));
   }
-  Err(FerriError::invalid_selector(selector, "no element found"))
+  Err(FerriError::element_not_found(selector))
 }
 
 /// Resolve `selector` to a single element in `frame_id`'s execution
@@ -1232,18 +1232,40 @@ mod tests {
     let json = build_parts_json(&parsed);
     assert!(json.contains(r#""capture":true"#), "{json}");
   }
+
+  #[test]
+  fn a_read_tells_no_match_from_a_null_value_and_a_thrown_read() {
+    let decode = |value: serde_json::Value| decode_read_result(Some(value), "#x");
+    assert_eq!(decode(serde_json::json!({ MISSING_KEY: 1 })).unwrap(), None);
+    assert_eq!(
+      decode(serde_json::json!({ VALUE_KEY: null })).unwrap(),
+      Some(serde_json::Value::Null)
+    );
+    assert_eq!(
+      decode(serde_json::json!("text")).unwrap(),
+      Some(serde_json::json!("text"))
+    );
+    assert!(
+      decode(serde_json::json!({ STRICT_KEY: 2 }))
+        .unwrap_err()
+        .is_strict_mode_violation()
+    );
+    assert!(matches!(
+      decode(serde_json::json!({ ERROR_KEY: "Not a checkbox or radio button" })).unwrap_err(),
+      FerriError::Evaluation(message) if message.contains("Not a checkbox")
+    ));
+  }
 }
 
 /// Build the one-round-trip read expression a Locator uses for
 /// `textContent`, `getAttribute`, `isChecked` and the rest.
 ///
-/// The result is always a JSON string, or JS `null` when nothing
-/// matched. A string because a strict-mode breach has to come back as
-/// DATA: these run through a plain `evaluate`, where a thrown message
-/// degrades to `Uncaught` and the match count is lost, and the retry
-/// loop would then treat a settled breach as "not ready yet" and spin
-/// until the timeout. `null` for no-match because that IS "not ready
-/// yet", and the loop already knows to retry it.
+/// Every outcome other than the value comes back as DATA: a strict-mode
+/// breach, no match, and an exception the read threw. These run through
+/// a plain `evaluate`, where a thrown message degrades to `Uncaught`, so
+/// the waiting loop could not tell a settled failure (more elements, or
+/// an element the read rejects) from "not ready yet" and would spin
+/// until the timeout.
 ///
 /// `selAll` rather than `selOne`: the engine materialises every match
 /// either way (`selOne` calls the same `executeSelector` and takes the
@@ -1255,15 +1277,19 @@ pub fn build_read_js(parts_json: &str, strict: bool, js_body: &str, fd: &str) ->
   // slower per read, because the envelope serialised the value and the
   // backend then serialised that again.
   if !strict {
-    return format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
+    return format!(
+      "(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return {{{MISSING_KEY}: 1}}; \
+       try {{ {js_body} }} catch (e) {{ return {{{ERROR_KEY}: String(e && e.message || e)}}; }} }})()"
+    );
   }
   format!(
     "(function() {{ \
        var __a = {fd}.selAll({parts_json}); \
        if (__a.length > 1) return {{{STRICT_KEY}: __a.length}}; \
-       if (!__a.length) return null; \
+       if (!__a.length) return {{{MISSING_KEY}: 1}}; \
        var el = __a[0]; \
-       return {{{VALUE_KEY}: (function() {{ {js_body} }})()}}; \
+       try {{ return {{{VALUE_KEY}: (function() {{ {js_body} }})()}}; }} \
+       catch (e) {{ return {{{ERROR_KEY}: String(e && e.message || e)}}; }} \
      }})()"
   )
 }
@@ -1273,17 +1299,29 @@ pub fn build_read_js(parts_json: &str, strict: bool, js_body: &str, fd: &str) ->
 /// mistaken for one of the value's own fields.
 const STRICT_KEY: &str = "__fdStrict";
 const VALUE_KEY: &str = "__fdValue";
+/// What the read answers when nothing matched, which a read of a `null`
+/// property must not be mistaken for.
+const MISSING_KEY: &str = "__fdMissing";
+const ERROR_KEY: &str = "__fdError";
 
-/// Decode what [`build_read_js`] returned.
+/// Decode what [`build_read_js`] returned: `None` when no element
+/// matched, the value the read produced (which may be `null`) otherwise.
 ///
 /// # Errors
 ///
 /// [`FerriError::StrictModeViolation`] when the selector matched more
-/// than one element and the locator was strict.
+/// than one element and the locator was strict, and
+/// [`FerriError::Evaluation`] with the message the read threw.
 pub fn decode_read_result(raw: Option<serde_json::Value>, selector: &str) -> Result<Option<serde_json::Value>> {
   let Some(value) = raw.as_ref() else {
-    return Ok(raw);
+    return Ok(None);
   };
+  if value.get(MISSING_KEY).is_some() {
+    return Ok(None);
+  }
+  if let Some(message) = value.get(ERROR_KEY).and_then(serde_json::Value::as_str) {
+    return Err(FerriError::evaluation(message));
+  }
   if let Some(count) = value.get(STRICT_KEY).and_then(serde_json::Value::as_u64) {
     return Err(FerriError::strict(
       selector,
@@ -1292,8 +1330,7 @@ pub fn decode_read_result(raw: Option<serde_json::Value>, selector: &str) -> Res
   }
   match value.get(VALUE_KEY) {
     Some(inner) => Ok(Some(inner.clone())),
-    // A non-strict read is unwrapped, and `null` (nothing matched) keeps
-    // the old contract either way: the caller's retry loop decides.
+    // A non-strict read crosses unwrapped.
     None => Ok(raw),
   }
 }

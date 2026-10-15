@@ -167,6 +167,26 @@ pub(crate) fn opt_strict(options: &Opt<rquickjs::Value<'_>>) -> rquickjs::Result
   Ok(strict.as_bool())
 }
 
+/// Playwright's `TimeoutOptions` of `locator.textContent` and the other reads.
+pub(crate) fn timeout_options(
+  options: &Opt<rquickjs::Value<'_>>,
+) -> rquickjs::Result<ferridriver::options::TimeoutOptions> {
+  Ok(ferridriver::options::TimeoutOptions {
+    timeout: opt_timeout_ms(options)?,
+  })
+}
+
+/// `{ strict?, timeout? }` of `page.textContent(selector, options?)` and
+/// the other selector reads.
+pub(crate) fn selector_read_options(
+  options: &Opt<rquickjs::Value<'_>>,
+) -> rquickjs::Result<ferridriver::options::SelectorReadOptions> {
+  Ok(ferridriver::options::SelectorReadOptions {
+    strict: opt_strict(options)?,
+    timeout: opt_timeout_ms(options)?,
+  })
+}
+
 pub(crate) fn parse_unroute_behavior(
   ctx: &rquickjs::Ctx<'_>,
   behavior: &str,

@@ -205,4 +205,20 @@ describe('playwright compat: frames', () => {
     const inner = page.frameLocator('#late').locator('#inner');
     expect(await inner.textContent()).toBe('from the frame');
   });
+
+  test('an action and an assertion wait for a late iframe too', async ({ page }) => {
+    await page.goto('/fx/iframe');
+    await page.evaluate(`
+      setTimeout(() => {
+        const f = document.createElement('iframe');
+        f.id = 'later';
+        f.srcdoc = '<button id="go" onclick="this.textContent = \\'clicked\\'">go</button>';
+        document.body.appendChild(f);
+      }, 400);
+      null
+    `);
+    const button = page.frameLocator('#later').locator('#go');
+    await button.click();
+    await expect(button).toHaveText('clicked');
+  });
 });

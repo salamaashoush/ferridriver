@@ -991,7 +991,7 @@ impl Frame {
     };
     match locator.element_handle().await {
       Ok(handle) => Ok(Some(handle)),
-      Err(crate::error::FerriError::InvalidSelector { reason, .. }) if reason == "no element found" => Ok(None),
+      Err(crate::error::FerriError::ElementNotFound { .. }) => Ok(None),
       Err(error) => Err(error),
     }
   }
@@ -1792,105 +1792,194 @@ impl Frame {
 
   // -- Content / attribute reads ----------------------------------------
 
-  /// Get the text content of the element matched by `selector`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element is not found.
-  pub async fn text_content(&self, selector: &str) -> Result<Option<String>> {
-    self.selector_locator(selector).text_content().await
+  /// The locator a selector read runs through: strict when the call or
+  /// the context's `strictSelectors` says so.
+  fn read_locator(&self, selector: &str, strict: Option<bool>) -> Locator {
+    self
+      .locator(selector)
+      .strict(strict.unwrap_or_else(|| self.page.strict_selectors()))
   }
 
-  /// Get `innerText` of the element matched by `selector`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element is not found.
-  pub async fn inner_text(&self, selector: &str) -> Result<String> {
-    self.selector_locator(selector).inner_text().await
+  #[track_caller]
+  fn selector_read<T: Send + 'static>(
+    &self,
+    selector: &str,
+    read: impl FnOnce(Locator, Option<u64>) -> crate::action::ActionFuture<'static, T> + Send + 'static,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, T> {
+    let frame = self.clone();
+    let selector = selector.to_string();
+    crate::action::Action::new(move |opts: crate::options::SelectorReadOptions| {
+      read(frame.read_locator(&selector, opts.strict), opts.timeout)
+    })
   }
 
-  /// Get `innerHTML` of the element matched by `selector`.
+  /// Playwright: `frame.textContent(selector, options?: { strict?, timeout? }):
+  /// Promise<string | null>`. Waits for the element.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn inner_html(&self, selector: &str) -> Result<String> {
-    self.selector_locator(selector).inner_html().await
+  /// [`crate::error::FerriError::Timeout`] if nothing matches in time.
+  #[track_caller]
+  pub fn text_content(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, Option<String>> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.text_content_impl(timeout).await })
+    })
   }
 
-  /// Get an attribute on the element matched by `selector`.
+  /// Playwright: `frame.innerText(selector, options?): Promise<string>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn get_attribute(&self, selector: &str, name: &str) -> Result<Option<String>> {
-    self.selector_locator(selector).get_attribute(name).await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn inner_text(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, String> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.inner_text_impl(timeout).await })
+    })
   }
 
-  /// Get `value` from a form control matched by `selector`.
+  /// Playwright: `frame.innerHTML(selector, options?): Promise<string>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn input_value(&self, selector: &str) -> Result<String> {
-    self.selector_locator(selector).input_value().await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn inner_html(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, String> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.inner_html_impl(timeout).await })
+    })
+  }
+
+  /// Playwright: `frame.getAttribute(selector, name, options?):
+  /// Promise<string | null>`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn get_attribute(
+    &self,
+    selector: &str,
+    name: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, Option<String>> {
+    let name = name.to_string();
+    self.selector_read(selector, move |locator, timeout| {
+      Box::pin(async move { locator.get_attribute_impl(&name, timeout).await })
+    })
+  }
+
+  /// Playwright: `frame.inputValue(selector, options?): Promise<string>`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn input_value(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, String> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.input_value_impl(timeout).await })
+    })
   }
 
   // -- State checks ------------------------------------------------------
 
-  /// True if the element matched by `selector` is visible.
+  /// Playwright: `frame.isVisible(selector, options?): Promise<boolean>`.
+  /// Does not wait: `timeout` is accepted and ignored, as Playwright does.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn is_visible(&self, selector: &str) -> Result<bool> {
-    self.selector_locator(selector).is_visible().await
+  /// A strict-mode violation, or a failed evaluation.
+  #[track_caller]
+  pub fn is_visible(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.selector_read(selector, |locator, _| {
+      Box::pin(async move { locator.is_visible_impl().await })
+    })
   }
 
-  /// True if the element matched by `selector` is hidden.
+  /// Playwright: `frame.isHidden(selector, options?): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn is_hidden(&self, selector: &str) -> Result<bool> {
-    self.selector_locator(selector).is_hidden().await
+  /// As [`Self::is_visible`].
+  #[track_caller]
+  pub fn is_hidden(&self, selector: &str) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.selector_read(selector, |locator, _| {
+      Box::pin(async move { locator.is_visible_impl().await.map(|v| !v) })
+    })
   }
 
-  /// True if the element matched by `selector` is enabled.
+  /// Playwright: `frame.isEnabled(selector, options?): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn is_enabled(&self, selector: &str) -> Result<bool> {
-    self.selector_locator(selector).is_enabled().await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn is_enabled(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.is_enabled_impl(timeout).await })
+    })
   }
 
-  /// True if the element matched by `selector` is disabled.
+  /// Playwright: `frame.isDisabled(selector, options?): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn is_disabled(&self, selector: &str) -> Result<bool> {
-    self.selector_locator(selector).is_disabled().await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn is_disabled(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.is_disabled_impl(timeout).await })
+    })
   }
 
-  /// True if the element matched by `selector` is editable.
+  /// Playwright: `frame.isEditable(selector, options?): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn is_editable(&self, selector: &str) -> Result<bool> {
-    self.selector_locator(selector).is_editable().await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn is_editable(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.is_editable_impl(timeout).await })
+    })
   }
 
-  /// True if a checkbox/radio matched by `selector` is checked.
+  /// Playwright: `frame.isChecked(selector, options?): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found.
-  pub async fn is_checked(&self, selector: &str) -> Result<bool> {
-    self.selector_locator(selector).is_checked().await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn is_checked(
+    &self,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.selector_read(selector, |locator, timeout| {
+      Box::pin(async move { locator.is_checked_impl(timeout).await })
+    })
   }
 }
 

@@ -1090,7 +1090,7 @@ impl BidiPage {
     self
       .evaluate_to_element(&sel_js, None)
       .await
-      .map_err(|_| FerriError::invalid_selector(selector, "no element found"))
+      .map_err(|_| FerriError::element_not_found(selector))
   }
 
   /// `BiDi`: a "frame" is a browsing context. When `frame_id` is `Some`

@@ -1549,6 +1549,44 @@ pub struct QuerySelectorOptions {
   pub strict: Option<bool>,
 }
 
+/// Playwright's `TimeoutOptions`: the bag of `locator.textContent` and
+/// the other reads.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct TimeoutOptions {
+  pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
+}
+
+impl From<TimeoutOptions> for ferridriver::options::TimeoutOptions {
+  fn from(o: TimeoutOptions) -> Self {
+    Self {
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// The bag of `page.textContent(selector, options?)` and the other
+/// selector reads: `StrictOptions & TimeoutOptions`.
+#[napi(object, object_to_js = false)]
+#[derive(Debug, Clone, Default)]
+pub struct SelectorReadOptions {
+  pub strict: Option<bool>,
+  pub timeout: Option<f64>,
+  #[napi(ts_type = "AbortSignal")]
+  pub signal: Option<crate::abort::Signal>,
+}
+
+impl From<SelectorReadOptions> for ferridriver::options::SelectorReadOptions {
+  fn from(o: SelectorReadOptions) -> Self {
+    Self {
+      strict: o.strict,
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
 /// Options for `page.waitForLoadState(state?, { timeout? })`.
 #[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
@@ -2299,9 +2337,11 @@ crate::abort::signalled!(
   PressOptions,
   ScreenshotOptions,
   SelectOptionOptions,
+  SelectorReadOptions,
   SetContentOptions,
   SetInputFilesOptions,
   TapOptions,
+  TimeoutOptions,
   TypeOptions,
   WaitForFunctionOptions,
   WaitForLoadStateOptions,

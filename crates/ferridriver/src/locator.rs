@@ -1347,37 +1347,66 @@ impl Locator {
 
   // ── Content & state ───────────────────────────────────────────────────────
 
-  /// Return the `textContent` of the element, or `None` if not found.
+  /// Playwright: `locator.textContent(options?: TimeoutOptions):
+  /// Promise<string | null>`. Waits for the element.
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn text_content(&self) -> Result<Option<String>> {
-    self.eval_prop("textContent").await
+  /// [`crate::error::FerriError::Timeout`] if nothing matches in time,
+  /// and a strict-mode violation when more than one element does.
+  #[track_caller]
+  pub fn text_content(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, Option<String>> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.text_content_impl(opts.timeout).await })
+    })
   }
 
-  /// Return the `innerText` of the element.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn inner_text(&self) -> Result<String> {
-    self
-      .eval_prop("innerText")
-      .await
-      .map(std::option::Option::unwrap_or_default)
+  pub(crate) async fn text_content_impl(&self, timeout: Option<u64>) -> Result<Option<String>> {
+    let value = self.read("textContent", "return el.textContent;", timeout).await?;
+    Ok(value.as_str().map(str::to_string))
   }
 
-  /// Return the `innerHTML` of the element.
+  /// Playwright: `locator.innerText(options?: TimeoutOptions): Promise<string>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn inner_html(&self) -> Result<String> {
+  /// As [`Self::text_content`], and an error when the element is not an
+  /// HTML element.
+  #[track_caller]
+  pub fn inner_text(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, String> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.inner_text_impl(opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn inner_text_impl(&self, timeout: Option<u64>) -> Result<String> {
     self
-      .eval_prop("innerHTML")
+      .read_string(
+        "innerText",
+        "if (el.namespaceURI !== 'http://www.w3.org/1999/xhtml') throw new Error('Node is not an HTMLElement'); \
+         return el.innerText;",
+        timeout,
+      )
       .await
-      .map(std::option::Option::unwrap_or_default)
+  }
+
+  /// Playwright: `locator.innerHTML(options?: TimeoutOptions): Promise<string>`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn inner_html(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, String> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.inner_html_impl(opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn inner_html_impl(&self, timeout: Option<u64>) -> Result<String> {
+    self.read_string("innerHTML", "return el.innerHTML;", timeout).await
   }
 
   /// Playwright: `locator.ariaSnapshot(options?: TimeoutOptions &
@@ -1466,121 +1495,152 @@ impl Locator {
     })
   }
 
-  /// Get the value of an attribute on the element.
-  ///
-  /// Returns the raw attribute string exactly as
-  /// `Element.getAttribute(name)` reports it (HTML attributes are always
-  /// `string | null` per DOM spec — there is no native numeric/boolean
-  /// attribute type). Playwright parity: Playwright's `getAttribute`
-  /// returns `Promise<string | null>`; the previous implementation
-  /// leaked the JSON-stringified form of non-string JS values (e.g.
-  /// `"42"` vs `42`) — that path was unreachable with a well-behaved
-  /// browser, but we now explicitly rule it out.
+  /// Playwright: `locator.getAttribute(name: string, options?:
+  /// TimeoutOptions): Promise<string | null>`. Waits for the element;
+  /// `None` is an element without the attribute.
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn get_attribute(&self, name: &str) -> Result<Option<String>> {
-    let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
-    let val = self
-      .eval_on_element(&format!("return el.getAttribute('{escaped}');"))
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn get_attribute(
+    &self,
+    name: &str,
+  ) -> crate::action::Action<'static, crate::options::TimeoutOptions, Option<String>> {
+    let locator = self.clone();
+    let name = name.to_string();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.get_attribute_impl(&name, opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn get_attribute_impl(&self, name: &str, timeout: Option<u64>) -> Result<Option<String>> {
+    let name = serde_json::to_string(name)?;
+    let value = self
+      .read("getAttribute", &format!("return el.getAttribute({name});"), timeout)
       .await?;
-    Ok(val.and_then(|v| match v {
-      serde_json::Value::String(s) => Some(s),
-      // Per the DOM spec `Element.getAttribute` only ever returns
-      // `string | null`. Anything else coming back from the eval
-      // indicates a browser bug or an unexpected injected script —
-      // surface as `None` rather than silently JSON-stringifying.
-      _ => None,
-    }))
+    Ok(value.as_str().map(str::to_string))
   }
 
-  /// Return the `value` property of an input or textarea element.
+  /// Playwright: `locator.inputValue(options?: TimeoutOptions):
+  /// Promise<string>`. A `<label>` reads the control it owns.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn input_value(&self) -> Result<String> {
+  /// As [`Self::text_content`], and an error when the element is not an
+  /// `<input>`, `<textarea>` or `<select>`.
+  #[track_caller]
+  pub fn input_value(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, String> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.input_value_impl(opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn input_value_impl(&self, timeout: Option<u64>) -> Result<String> {
     self
-      .eval_prop("value")
+      .read_string("inputValue", "return window.__fd.inputValue(el);", timeout)
       .await
-      .map(std::option::Option::unwrap_or_default)
   }
 
-  /// Check whether the element is visible (not `display:none`, `visibility:hidden`,
-  /// or `opacity:0`). Returns `false` if the element does not exist.
+  /// Playwright: `locator.isVisible(options?: TimeoutOptions): Promise<boolean>`.
+  /// A non-empty box with visible style, inside visible iframes. Does not
+  /// wait: no match is `false`, and Playwright ignores the `timeout`.
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn is_visible(&self) -> Result<bool> {
-    // Playwright's `elementState(el, 'visible')`: a non-empty box with
-    // visible style, inside iframes that are visible themselves. Not
-    // found is `false`, without waiting.
+  /// A strict-mode violation, or a failed evaluation.
+  #[track_caller]
+  pub fn is_visible(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, bool> {
+    let locator = self.clone();
+    crate::action::Action::new(move |_| Box::pin(async move { locator.is_visible_impl().await }))
+  }
+
+  pub(crate) async fn is_visible_impl(&self) -> Result<bool> {
     let val = self
       .eval_on_element("return window.__fd.elementState(el, 'visible') === true;")
       .await?;
-    // eval_on_element returns null if element not found -> false (Playwright behavior)
     Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
   }
 
-  /// Check whether the element is hidden (inverse of `is_visible`).
+  /// Playwright: `locator.isHidden(options?: TimeoutOptions): Promise<boolean>`,
+  /// the inverse of [`Self::is_visible`].
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn is_hidden(&self) -> Result<bool> {
-    self.is_visible().await.map(|v| !v)
+  /// As [`Self::is_visible`].
+  #[track_caller]
+  pub fn is_hidden(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, bool> {
+    let locator = self.clone();
+    crate::action::Action::new(move |_| Box::pin(async move { locator.is_visible_impl().await.map(|v| !v) }))
   }
 
-  /// Check whether the element is enabled (i.e. not `disabled`).
+  /// Playwright: `locator.isEnabled(options?: TimeoutOptions): Promise<boolean>`.
+  /// Waits for the element.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_enabled(&self) -> Result<bool> {
-    self
-      .eval_bool("function() { return window.__fd.elementState(this, 'enabled') === true; }")
-      .await
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn is_enabled(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, bool> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.is_enabled_impl(opts.timeout).await })
+    })
   }
 
-  /// Check whether the element is disabled.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_disabled(&self) -> Result<bool> {
-    self
-      .eval_bool("function() { return window.__fd.elementState(this, 'disabled') === true; }")
-      .await
+  pub(crate) async fn is_enabled_impl(&self, timeout: Option<u64>) -> Result<bool> {
+    self.read_state("isEnabled", "enabled", timeout).await
   }
 
-  /// Check whether a checkbox or radio button is checked.
+  /// Playwright: `locator.isDisabled(options?: TimeoutOptions): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_checked(&self) -> Result<bool> {
+  /// As [`Self::text_content`].
+  #[track_caller]
+  pub fn is_disabled(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, bool> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.is_disabled_impl(opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn is_disabled_impl(&self, timeout: Option<u64>) -> Result<bool> {
+    self.read_state("isDisabled", "disabled", timeout).await
+  }
+
+  /// Playwright: `locator.isChecked(options?: TimeoutOptions): Promise<boolean>`.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::text_content`], and an error when the element is not a
+  /// checkbox or radio button.
+  #[track_caller]
+  pub fn is_checked(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, bool> {
     // `this.checked` alone only sees `input[type=checkbox|radio]`.
     // Playwright reads the state through `getCheckedWithoutMixed` after
     // a `follow-label` retarget, so `aria-checked` roles (switch,
     // menuitemcheckbox, treeitem, …) and labels wrapping their control
     // report correctly (`injectedScript.ts::elementState`). A
     // non-checkable element is an error there, not `false`.
-    let (rframe, _) = self.resolved().await?;
-    let fd = rframe.page_arc().inner().injected_script().await?;
-    let raw = self
-      .retry_eval_on_element(&format!("return JSON.stringify({fd}.getChecked(el));"))
-      .await?
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_default();
-    match serde_json::from_str::<serde_json::Value>(&raw) {
-      Ok(serde_json::Value::Bool(b)) => Ok(b),
-      _ => Err(crate::FerriError::protocol(
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.is_checked_impl(opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn is_checked_impl(&self, timeout: Option<u64>) -> Result<bool> {
+    let value = self
+      .read(
         "isChecked",
-        "Not a checkbox or radio button",
-      )),
-    }
+        "var c = window.__fd.getChecked(el); \
+         if (typeof c !== 'boolean') throw new Error('Not a checkbox or radio button'); \
+         return c;",
+        timeout,
+      )
+      .await?;
+    Ok(value.as_bool().unwrap_or(false))
   }
 
   /// Playwright's `to.match.aria`: match a YAML aria template against
@@ -1892,15 +1952,22 @@ impl Locator {
 
   // ── Editable check ───────────────────────────────────────────────────────
 
-  /// Check whether the element is editable (not disabled and not read-only).
+  /// Playwright: `locator.isEditable(options?: TimeoutOptions): Promise<boolean>`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_editable(&self) -> Result<bool> {
-    self
-      .eval_bool("function() { return window.__fd.elementState(this, 'editable') === true; }")
-      .await
+  /// As [`Self::text_content`], and an error when the element is not an
+  /// `<input>`, `<textarea>`, `<select>` or editable element.
+  #[track_caller]
+  pub fn is_editable(&self) -> crate::action::Action<'static, crate::options::TimeoutOptions, bool> {
+    let locator = self.clone();
+    crate::action::Action::new(move |opts: crate::options::TimeoutOptions| {
+      Box::pin(async move { locator.is_editable_impl(opts.timeout).await })
+    })
+  }
+
+  pub(crate) async fn is_editable_impl(&self, timeout: Option<u64>) -> Result<bool> {
+    self.read_state("isEditable", "editable", timeout).await
   }
 
   // ── Blur ────────────────────────────────────────────────────────────────
@@ -2583,9 +2650,9 @@ impl Locator {
   /// Backoff schedule matching Playwright's retryWithProgressAndTimeouts.
   pub(crate) const RETRY_BACKOFFS_MS: &'static [u64] = &[0, 0, 20, 50, 100, 100, 500];
 
-  /// Resolve element + run JS callback in ONE CDP call, with retry.
-  /// Used by: innerText, textContent, innerHTML, getAttribute, inputValue, isVisible, etc.
-  /// Matches Playwright's `_callOnElementOnceMatches`.
+  /// Resolve element + run JS callback in ONE CDP call, with a short
+  /// retry and no timeout: `toMatchAriaSnapshot` polls it, and its
+  /// poller owns the deadline. The public reads wait through [`Self::read`].
   async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
     for (i, &delay_ms) in Self::RETRY_BACKOFFS_MS.iter().enumerate() {
       if delay_ms > 0 {
@@ -2663,22 +2730,106 @@ impl Locator {
     }
   }
 
-  async fn eval_prop(&self, prop: &str) -> Result<Option<String>> {
-    let val = self
-      .retry_eval_on_element(&format!("var v = el.{prop}; return v == null ? null : String(v);"))
+  async fn read_state(&self, op: &'static str, state: &str, timeout: Option<u64>) -> Result<bool> {
+    let value = self
+      .read(
+        op,
+        &format!("return window.__fd.elementState(el, '{state}') === true;"),
+        timeout,
+      )
       .await?;
-    Ok(val.and_then(|v| match v {
-      serde_json::Value::String(s) => Some(s),
-      serde_json::Value::Null => None,
-      other => Some(other.to_string()),
-    }))
+    Ok(value.as_bool().unwrap_or(false))
   }
 
-  async fn eval_bool(&self, func: &str) -> Result<bool> {
-    let val = self
-      .retry_eval_on_element(&format!("return !!({func}).call(el);"))
-      .await?;
-    Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
+  async fn read_string(&self, op: &'static str, js_body: &str, timeout: Option<u64>) -> Result<String> {
+    let value = self.read(op, js_body, timeout).await?;
+    Ok(match value {
+      serde_json::Value::String(s) => s,
+      serde_json::Value::Null => String::new(),
+      other => other.to_string(),
+    })
+  }
+
+  /// Playwright's `_waitForFunctionOnSelector`: run `js_body` on the
+  /// first match, waiting for one to appear until `timeout` (the page's
+  /// default when `None`, without limit when `0`).
+  async fn read(&self, op: &'static str, js_body: &str, timeout: Option<u64>) -> Result<serde_json::Value> {
+    let page = self.frame.page_arc();
+    page
+      .traced_as(
+        "Locator",
+        op,
+        serde_json::json!({ "selector": self.selector }),
+        self.read_untraced(op, js_body, timeout),
+      )
+      .await
+  }
+
+  async fn read_untraced(&self, op: &'static str, js_body: &str, timeout: Option<u64>) -> Result<serde_json::Value> {
+    let timeout = timeout.unwrap_or_else(|| self.frame.page_arc().default_timeout());
+    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    // `retryWithProgressAndBackoff` drops the long waits from the
+    // schedule when the timeout is short, so it still gets a few tries.
+    let backoffs: Vec<u64> = Self::RETRY_BACKOFFS_MS
+      .iter()
+      .copied()
+      .filter(|&ms| timeout == 0 || ms <= timeout / 5)
+      .collect();
+    let call_log = || {
+      vec![format!(
+        "waiting for {}",
+        crate::locator_generator::as_locator(&self.selector)
+      )]
+    };
+    let mut attempt = 0usize;
+    loop {
+      let delay = backoffs[attempt.min(backoffs.len() - 1)];
+      attempt += 1;
+      if delay > 0 {
+        let left = deadline.map_or(delay, |deadline| {
+          u64::try_from(
+            deadline
+              .saturating_duration_since(tokio::time::Instant::now())
+              .as_millis(),
+          )
+          .unwrap_or(delay)
+        });
+        crate::abort::sleep(std::time::Duration::from_millis(delay.min(left))).await;
+      }
+      if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+        return Err(crate::error::FerriError::timeout(op, timeout).with_call_log(call_log()));
+      }
+      let evaluated: Result<(Option<serde_json::Value>, String)> = async {
+        let (frame, selector) = self.resolved().await?;
+        let parts_json = selectors::build_parts_json(&selectors::parse(&selector)?);
+        let inner = frame.page_arc().inner();
+        inner.ensure_engine_injected().await?;
+        let js = selectors::build_read_js(&parts_json, self.strict, js_body, "window.__fd");
+        let raw = if frame.is_main_frame() {
+          inner.evaluate(&js).await
+        } else {
+          inner.evaluate_in_frame(&js, frame.id()).await
+        }?;
+        Ok((raw, selector))
+      }
+      .await;
+      match evaluated {
+        // What the page answered is settled: a value, a breach of strict
+        // mode, or an element the read rejects. Only no match waits.
+        Ok((raw, selector)) => {
+          if let Some(value) = selectors::decode_read_result(raw, &selector)? {
+            return Ok(value);
+          }
+        },
+        Err(
+          e @ (crate::error::FerriError::InvalidSelector { .. }
+          | crate::error::FerriError::TargetClosed { .. }
+          | crate::error::FerriError::Aborted { .. }),
+        ) => return Err(e),
+        // A frame between documents, or one not attached yet.
+        Err(_) => {},
+      }
+    }
   }
 
   /// Legacy: non-retrying eval for callers that handle retry themselves.

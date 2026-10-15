@@ -129,7 +129,7 @@ impl ElementHandle {
   // ── Content reads (Phase E) ──────────────────────────────────────────
 
   /// Playwright: `elementHandle.innerHTML(): Promise<string>`.
-  #[napi]
+  #[napi(js_name = "innerHTML")]
   pub async fn inner_html(&self) -> Result<String> {
     self.inner.inner_html().await.into_napi()
   }

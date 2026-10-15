@@ -1953,8 +1953,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn text_content(self: &Arc<Self>, selector: &str) -> Result<Option<String>> {
-    self.main_frame().text_content(selector).await
+  #[track_caller]
+  pub fn text_content(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, Option<String>> {
+    self.main_frame().text_content(selector)
   }
 
   /// Get the inner text of an element matching the selector.
@@ -1962,8 +1966,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn inner_text(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.main_frame().inner_text(selector).await
+  #[track_caller]
+  pub fn inner_text(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, String> {
+    self.main_frame().inner_text(selector)
   }
 
   /// Get the inner HTML of an element matching the selector.
@@ -1971,8 +1979,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn inner_html(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.main_frame().inner_html(selector).await
+  #[track_caller]
+  pub fn inner_html(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, String> {
+    self.main_frame().inner_html(selector)
   }
 
   /// Get an attribute value from an element matching the selector.
@@ -1980,8 +1992,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn get_attribute(self: &Arc<Self>, selector: &str, name: &str) -> Result<Option<String>> {
-    self.main_frame().get_attribute(selector, name).await
+  #[track_caller]
+  pub fn get_attribute(
+    self: &Arc<Self>,
+    selector: &str,
+    name: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, Option<String>> {
+    self.main_frame().get_attribute(selector, name)
   }
 
   /// Get the input value of a form element matching the selector.
@@ -1989,8 +2006,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn input_value(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.main_frame().input_value(selector).await
+  #[track_caller]
+  pub fn input_value(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, String> {
+    self.main_frame().input_value(selector)
   }
 
   // ── State checks (delegate to mainFrame) ────────────────────────────
@@ -2000,8 +2021,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_visible(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.main_frame().is_visible(selector).await
+  #[track_caller]
+  pub fn is_visible(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.main_frame().is_visible(selector)
   }
 
   /// Check if an element matching the selector is hidden.
@@ -2009,8 +2034,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_hidden(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.main_frame().is_hidden(selector).await
+  #[track_caller]
+  pub fn is_hidden(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.main_frame().is_hidden(selector)
   }
 
   /// Check if an element matching the selector is enabled.
@@ -2018,8 +2047,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_enabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.main_frame().is_enabled(selector).await
+  #[track_caller]
+  pub fn is_enabled(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.main_frame().is_enabled(selector)
   }
 
   /// Check if an element matching the selector is disabled.
@@ -2027,8 +2060,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_disabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.main_frame().is_disabled(selector).await
+  #[track_caller]
+  pub fn is_disabled(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.main_frame().is_disabled(selector)
   }
 
   /// Check if a checkbox or radio button matching the selector is checked.
@@ -2036,8 +2073,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.main_frame().is_checked(selector).await
+  #[track_caller]
+  pub fn is_checked(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.main_frame().is_checked(selector)
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────
@@ -3003,8 +3044,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_editable(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_editable().await
+  #[track_caller]
+  pub fn is_editable(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> crate::action::Action<'static, crate::options::SelectorReadOptions, bool> {
+    self.main_frame().is_editable(selector)
   }
 
   // ── Waiting (additional) ────────────────────────────────────────────────
@@ -5137,16 +5182,6 @@ impl Touchscreen<'_> {
   }
 }
 
-/// Pattern-match the backend's "selector did not match any element"
-/// error String so [`Page::query_selector`] can surface `Ok(None)` for
-/// the missing-element case. Each backend uses a different message:
-///
-/// * CDP (`crates/ferridriver/src/backend/cdp/mod.rs`): `"'{selector}' not found"`
-/// * `WebKit` (`crates/ferridriver/src/backend/webkit/mod.rs`): `"'{selector}' not found"`
-/// * `BiDi` (`crates/ferridriver/src/backend/bidi/page.rs`): `"No element found for selector: {selector}"`
-///
-/// Other backend errors (protocol detach, target closed, invalid
-/// selector) bubble up unmodified.
 /// JS global backing a [`crate::options::WebStorageKind`]:
 /// `localStorage` / `sessionStorage`.
 fn web_storage_global(kind: crate::options::WebStorageKind) -> &'static str {
