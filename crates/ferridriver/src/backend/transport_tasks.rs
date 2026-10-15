@@ -22,6 +22,15 @@ impl TransportTasks {
     self.shutdown.send_replace(true);
   }
 
+  /// Resolves once the connection has ended: closed by us, or the
+  /// browser went away and the reader saw the end of the stream.
+  pub(crate) fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    let mut ended = self.shutdown.subscribe();
+    Box::pin(async move {
+      let _ = ended.wait_for(|ended| *ended).await;
+    })
+  }
+
   pub(crate) async fn close(&self) -> Result<()> {
     self.start_close();
     let mut tasks = self.tasks.lock().await;

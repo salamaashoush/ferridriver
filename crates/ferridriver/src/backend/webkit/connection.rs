@@ -133,6 +133,11 @@ impl Connection {
     conn
   }
 
+  /// Resolves once the inspector pipe has ended.
+  pub(crate) fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    self.tasks.closed()
+  }
+
   pub(crate) fn start_close(&self) {
     self.drain_all();
     self.tasks.start_close();

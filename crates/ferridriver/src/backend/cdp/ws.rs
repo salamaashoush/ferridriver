@@ -150,6 +150,10 @@ impl super::transport::CdpTransport for WsTransport {
     self.dispatcher.is_disconnected()
   }
 
+  fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    self.tasks.closed()
+  }
+
   #[tracing::instrument(skip(self, session_id, params), fields(method))]
   async fn send_command(
     &self,

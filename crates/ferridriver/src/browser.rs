@@ -58,11 +58,12 @@ pub struct Browser {
   /// Shared handle to [`BrowserState::connected`] so `is_connected()`
   /// stays sync like Playwright's `browser.isConnected(): boolean`.
   connected: Arc<std::sync::atomic::AtomicBool>,
-  /// Browser-level event emitter. Today fires only `'context'` when
-  /// [`Self::new_context`] creates a context
-  /// (`browser.on('context', ...)`). Cheap to clone (Arc-shared) so
-  /// every `Browser::clone` observes the same listeners.
+  /// Browser-level event emitter (`'context'`, `'disconnected'`).
+  /// Cheap to clone (Arc-shared) so every `Browser::clone` observes the
+  /// same listeners.
   events: crate::events::BrowserEventEmitter,
+  /// Set once the connection ended; `disconnected` fires on that edge.
+  disconnected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One entry in [`Browser::context_names`].
@@ -116,6 +117,7 @@ impl Browser {
       connected,
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
+      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
   }
 
@@ -134,6 +136,11 @@ impl Browser {
   /// subsequent ensure.
   #[must_use]
   pub fn from_state(state: BrowserState) -> Self {
+    let closed = state.default_browser().map(crate::backend::AnyBrowser::closed);
+    Self::from_state_unwatched(state).watch_connection(closed)
+  }
+
+  fn from_state_unwatched(state: BrowserState) -> Self {
     let version: Arc<str> = state
       .default_browser()
       .map(crate::backend::AnyBrowser::version)
@@ -167,9 +174,10 @@ impl Browser {
     let version = backend.version();
     let isolated_contexts = backend.supports_isolated_contexts();
     let backend_kind = backend.kind();
+    let closed = backend.closed();
     let default_context = format!("{instance}:default");
     let default_is_live = state.context(&default_context).is_ok();
-    let mut browser = Self::from_state(state);
+    let mut browser = Self::from_state_unwatched(state);
     browser.version = Arc::from(version);
     browser.backend_kind = backend_kind;
     browser.isolated_contexts = isolated_contexts;
@@ -178,7 +186,7 @@ impl Browser {
       name: default_context,
       listed: default_is_live,
     }]));
-    Ok(browser)
+    Ok(browser.watch_connection(Some(closed)))
   }
 
   pub(crate) async fn from_ready_state(state: Arc<RwLock<BrowserState>>, instance: &str) -> Result<Self> {
@@ -187,7 +195,8 @@ impl Browser {
     let backend = guard
       .instance_browser(instance)
       .ok_or_else(|| crate::FerriError::target_closed(None))?;
-    Ok(Self {
+    let closed = backend.closed();
+    let browser = Self {
       state: Arc::clone(&state),
       version: Arc::from(backend.version()),
       backend_kind: backend.kind(),
@@ -199,7 +208,66 @@ impl Browser {
       context_names: default_context_registry(),
       connected: Arc::clone(&guard.connected),
       events: crate::events::BrowserEventEmitter::new(),
-    })
+      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    drop(guard);
+    Ok(browser.watch_connection(Some(closed)))
+  }
+
+  /// Follow the browser connection: when it ends, by `close()` or
+  /// because the browser went away, report it once as `disconnected`.
+  fn watch_connection(self, closed: Option<futures::future::BoxFuture<'static, ()>>) -> Self {
+    if let (Some(closed), Ok(runtime)) = (closed, tokio::runtime::Handle::try_current()) {
+      let browser = self.clone();
+      runtime.spawn(async move {
+        closed.await;
+        browser.did_disconnect().await;
+      });
+    }
+    self
+  }
+
+  /// The browser went away on its own: its contexts close, then
+  /// `disconnected` fires, once (Playwright's `Browser._didClose`).
+  async fn did_disconnect(&self) {
+    if self.disconnected.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      return;
+    }
+    let contexts = self.live_contexts().await;
+    self.announce_disconnect(contexts);
+  }
+
+  /// The contexts as their own emitters, which removing a context from
+  /// the state forgets: resolve them before the browser shuts down.
+  /// Awaited rather than the sync constructor's fallback, which hands
+  /// back an emitter nobody listens on while the state is locked.
+  async fn live_contexts(&self) -> Vec<ContextRef> {
+    let names: Vec<String> = self
+      .context_names
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .iter()
+      .filter(|entry| entry.listed)
+      .map(|entry| entry.name.clone())
+      .collect();
+    let mut contexts = Vec::with_capacity(names.len());
+    for name in names {
+      contexts.push(
+        ContextRef::new_async(self.state.clone(), name)
+          .await
+          .with_browser(self.clone()),
+      );
+    }
+    contexts
+  }
+
+  fn announce_disconnect(&self, contexts: Vec<ContextRef>) {
+    for context in contexts {
+      context.did_close();
+    }
+    self
+      .events
+      .emit(crate::events::BrowserEvent::Disconnected(self.clone()));
   }
 
   /// Wrap an existing shared state as a Browser handle.
@@ -252,6 +320,7 @@ impl Browser {
       connected,
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
+      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
   }
 
@@ -693,15 +762,16 @@ impl Browser {
   }
 
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
-    let contexts = self.contexts();
+    let contexts = self.live_contexts().await;
+    let first_close = !self.disconnected.swap(true, std::sync::atomic::Ordering::SeqCst);
     let mut state = self.state.write().await;
     if let Some(reason) = opts.and_then(|o| o.reason) {
       state.set_close_reason(reason);
     }
     let result = state.shutdown().await;
     drop(state);
-    for context in contexts {
-      context.did_close();
+    if first_close {
+      self.announce_disconnect(contexts);
     }
     result
   }
@@ -757,6 +827,7 @@ impl Browser {
   #[must_use]
   pub fn is_connected(&self) -> bool {
     self.connected.load(std::sync::atomic::Ordering::Relaxed)
+      && !self.disconnected.load(std::sync::atomic::Ordering::SeqCst)
   }
 
   /// Attach a raw CDP session to the browser target. Playwright:

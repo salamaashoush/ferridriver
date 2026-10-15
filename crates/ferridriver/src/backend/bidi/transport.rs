@@ -388,6 +388,11 @@ impl BidiTransport {
     })
   }
 
+  /// Resolves once the connection to the browser has ended.
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    self.tasks.closed()
+  }
+
   /// Subscribe to `BiDi` events. Returns a broadcast receiver.
   /// Receivers filter by event method at the receive site.
   pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {

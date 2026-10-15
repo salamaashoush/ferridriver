@@ -773,6 +773,19 @@ impl AnyBrowser {
     }
   }
 
+  /// Resolves once the connection to the browser has ended, by our
+  /// close or because the browser went away. A `WebDriver` session is
+  /// plain HTTP with no stream to end, so only its own close settles it.
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    match self {
+      Self::CdpPipe(b) => b.closed(),
+      Self::CdpWs(b) => b.closed(),
+      Self::WebKit(b) => b.closed(),
+      Self::Bidi(b) => b.closed(),
+      Self::WebDriver(_) => Box::pin(std::future::pending()),
+    }
+  }
+
   pub async fn new_context(&self, options: Option<&crate::options::BrowserContextOptions>) -> Result<String> {
     let proxy = options.and_then(|o| o.proxy.as_ref());
     match self {

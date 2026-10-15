@@ -23,6 +23,10 @@ impl CdpTransport for Wire {
     self.dispatcher.is_disconnected()
   }
 
+  fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(std::future::pending())
+  }
+
   fn send_command(
     &self,
     _session_id: Option<&str>,

@@ -25,7 +25,7 @@ pub struct Browser {
 struct BrowserListenerReg {
   event: String,
   id: u64,
-  fn_ref: napi::bindgen_prelude::FunctionRef<BrowserContextArg, ()>,
+  fn_ref: napi::bindgen_prelude::FunctionRef<BrowserEventArg, ()>,
 }
 
 impl Browser {
@@ -42,7 +42,7 @@ impl Browser {
   fn register_listener(
     &self,
     event: &str,
-    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
     once: bool,
     front: bool,
   ) -> Result<()> {
@@ -67,21 +67,36 @@ impl Browser {
   }
 }
 
-/// Cross-thread dispatch arg for `browser.on('context')` — carries the
-/// live [`ferridriver::ContextRef`] across the tokio→napi boundary; the
-/// `ToNapiValue` conversion (run on the JS thread) wraps it into the
-/// [`crate::context::BrowserContext`] class instance.
-pub struct BrowserContextArg(ferridriver::ContextRef);
+/// Cross-thread dispatch arg for `browser.on(...)` — carries the core
+/// value across the tokio→napi boundary; the `ToNapiValue` conversion
+/// (run on the JS thread) wraps it into its class instance.
+pub enum BrowserEventArg {
+  Context(ferridriver::ContextRef),
+  Browser(ferridriver::Browser),
+}
 
-impl napi::bindgen_prelude::ToNapiValue for BrowserContextArg {
+impl BrowserEventArg {
+  fn from_event(event: ferridriver::events::BrowserEvent) -> Self {
+    match event {
+      ferridriver::events::BrowserEvent::Context(context) => Self::Context(context),
+      ferridriver::events::BrowserEvent::Disconnected(browser) => Self::Browser(browser),
+    }
+  }
+}
+
+impl napi::bindgen_prelude::ToNapiValue for BrowserEventArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
-    let wrapper = crate::context::BrowserContext::wrap(val.0);
-    unsafe { crate::context::BrowserContext::to_napi_value(env, wrapper) }
+    match val {
+      BrowserEventArg::Context(context) => unsafe {
+        crate::context::BrowserContext::to_napi_value(env, crate::context::BrowserContext::wrap(context))
+      },
+      BrowserEventArg::Browser(browser) => unsafe { Browser::to_napi_value(env, Browser::wrap(browser)) },
+    }
   }
 }
 
 fn build_browser_event_callback(
-  listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+  listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
 ) -> Result<ferridriver::events::BrowserEventCallback> {
   let tsfn = listener
     .build_threadsafe_function()
@@ -89,13 +104,11 @@ fn build_browser_event_callback(
     .weak::<true>()
     .max_queue_size::<0>()
     .build()?;
-  Ok(std::sync::Arc::new(move |ev| match ev {
-    ferridriver::events::BrowserEvent::Context(ctx) => {
-      tsfn.call(
-        BrowserContextArg(ctx),
-        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-      );
-    },
+  Ok(std::sync::Arc::new(move |ev| {
+    tsfn.call(
+      BrowserEventArg::from_event(ev),
+      napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+    );
   }))
 }
 
@@ -195,19 +208,18 @@ impl Browser {
     crate::context::BrowserContext::wrap(self.inner.default_context())
   }
 
-  /// Register a browser-level event listener. Supports `'context'` —
-  /// fired when a new context is created via [`Self::new_context`].
-  /// Playwright: `browser.on('context', (context: BrowserContext) => …)`,
-  /// which returns the browser so registrations chain.
+  /// Register a browser-level event listener. Playwright:
+  /// `browser.on(event, listener)`, which returns the browser so
+  /// registrations chain.
   #[napi(
-    ts_args_type = "event: 'context', listener: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   pub fn on<'env>(
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self.register_listener(&event, listener, false, false)?;
     Ok(this.object)
@@ -215,28 +227,28 @@ impl Browser {
 
   /// Node's `addListener`, an alias of [`Self::on`].
   #[napi(
-    ts_args_type = "event: 'context', listener: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   pub fn add_listener<'env>(
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self.on(this, event, listener)
   }
 
   /// One-shot variant of [`Self::on`].
   #[napi(
-    ts_args_type = "event: 'context', listener: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   pub fn once<'env>(
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self.register_listener(&event, listener, true, false)?;
     Ok(this.object)
@@ -244,14 +256,14 @@ impl Browser {
 
   /// Node's `prependListener`.
   #[napi(
-    ts_args_type = "event: 'context', listener: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_listener<'env>(
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self.register_listener(&event, listener, false, true)?;
     Ok(this.object)
@@ -259,14 +271,14 @@ impl Browser {
 
   /// Node's `prependOnceListener`.
   #[napi(
-    ts_args_type = "event: 'context', listener: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_once_listener<'env>(
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>,
+    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self.register_listener(&event, listener, true, true)?;
     Ok(this.object)
@@ -276,7 +288,7 @@ impl Browser {
   /// `off(event, listener)`; `off(event)` alone drops every listener for
   /// that event.
   #[napi(
-    ts_args_type = "event: 'context', listener?: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -285,7 +297,7 @@ impl Browser {
     env: &napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: Option<napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>>,
+    listener: Option<napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     let mut regs = self
       .listener_regs
@@ -316,7 +328,7 @@ impl Browser {
 
   /// Node's `removeListener`, an alias of [`Self::off`].
   #[napi(
-    ts_args_type = "event: 'context', listener?: (context: BrowserContext) => void",
+    ts_args_type = "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -325,7 +337,7 @@ impl Browser {
     env: &napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
-    listener: Option<napi::bindgen_prelude::Function<'_, BrowserContextArg, ()>>,
+    listener: Option<napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
     self.off(env, this, event, listener)
   }
@@ -390,17 +402,15 @@ impl Browser {
   }
 
   /// Wait for a browser-level event. Playwright:
-  /// `browser.waitForEvent(event, options?)`. Supports `'context'`.
+  /// `browser.waitForEvent(event, options?)`.
   #[napi(
-    ts_args_type = "event: 'context', timeoutMs?: number",
-    ts_return_type = "Promise<BrowserContext>"
+    ts_args_type = "event: 'context' | 'disconnected', timeoutMs?: number",
+    ts_return_type = "Promise<BrowserContext | Browser>"
   )]
-  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<crate::context::BrowserContext> {
+  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<BrowserEventArg> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
     let ev = self.inner.wait_for_event(&event, timeout).await.into_napi()?;
-    match ev {
-      ferridriver::events::BrowserEvent::Context(ctx) => Ok(crate::context::BrowserContext::wrap(ctx)),
-    }
+    Ok(BrowserEventArg::from_event(ev))
   }
 
   /// Close the browser. Accepts Playwright's `{ reason? }` options shape;

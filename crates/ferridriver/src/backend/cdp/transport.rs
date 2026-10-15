@@ -226,6 +226,9 @@ pub trait CdpTransport: Send + Sync + 'static {
   /// Whether the browser connection has ended (EOF on the pipe/socket).
   fn is_disconnected(&self) -> bool;
 
+  /// Resolves once the browser connection has ended.
+  fn closed(&self) -> futures::future::BoxFuture<'static, ()>;
+
   fn send_command(
     &self,
     session_id: Option<&str>,

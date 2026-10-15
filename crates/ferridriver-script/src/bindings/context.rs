@@ -1285,7 +1285,7 @@ enum ContextEventMsg {
   Event {
     id: u64,
     remove_after: bool,
-    event: ferridriver::events::ContextEvent,
+    event: Box<ferridriver::events::ContextEvent>,
   },
   Drain(tokio::sync::oneshot::Sender<()>),
 }
@@ -1329,7 +1329,7 @@ fn ensure_context_event_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<Context
       }) else {
         continue;
       };
-      let Ok(arg) = context_event_to_js(&pump_ctx, event) else {
+      let Ok(arg) = context_event_to_js(&pump_ctx, *event) else {
         continue;
       };
       let _: rquickjs::Result<Value<'_>> = f.call_bracketed(&pump_ctx, (arg,));
@@ -1407,7 +1407,7 @@ impl BrowserContextJs {
       let msg = ContextEventMsg::Event {
         id,
         remove_after: once,
-        event: ev,
+        event: Box::new(ev),
       };
       if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
         tracing::warn!(

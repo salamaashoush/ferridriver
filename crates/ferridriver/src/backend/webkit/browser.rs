@@ -98,6 +98,11 @@ struct ParkedProxy {
 }
 
 impl WebKitBrowser {
+  /// Resolves once the connection to the browser has ended.
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    self.inner.conn.closed()
+  }
+
   /// Spawn a Playwright `WebKit` child and complete `Playwright.enable`.
   pub async fn launch(config: &LaunchConfig) -> std::result::Result<Self, BrowserError> {
     let SpawnedBrowser {

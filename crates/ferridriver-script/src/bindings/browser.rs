@@ -284,13 +284,7 @@ impl BrowserJs {
   ) -> rquickjs::Result<Value<'js>> {
     let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?.unwrap_or(30000);
     let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
-    match ev {
-      ferridriver::events::BrowserEvent::Context(ctx_ref) => {
-        let wrapper = BrowserContextJs::new(Arc::new(ctx_ref));
-        let instance = Class::instance(ctx.clone(), wrapper)?;
-        rquickjs::IntoJs::into_js(instance, &ctx)
-      },
-    }
+    browser_event_to_js(&ctx, ev)
   }
 
   /// Playwright: `browser.contexts()`. Returns the list of contexts as
@@ -730,15 +724,27 @@ fn ensure_browser_event_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<Browser
       }) else {
         continue;
       };
-      let ferridriver::events::BrowserEvent::Context(context) = event;
-      let Ok(instance) = Class::instance(pump_ctx.clone(), BrowserContextJs::new(Arc::new(context))) else {
+      let Ok(arg) = browser_event_to_js(&pump_ctx, event) else {
         continue;
       };
-      let _: rquickjs::Result<Value<'_>> = f.call_bracketed(&pump_ctx, (instance,));
+      let _: rquickjs::Result<Value<'_>> = f.call_bracketed(&pump_ctx, (arg,));
     }
   });
   let _ = ctx.store_userdata(BrowserEventPumpUd(tx.clone()));
   tx
+}
+
+/// The class instance a browser event hands its listener.
+fn browser_event_to_js<'js>(ctx: &Ctx<'js>, event: ferridriver::events::BrowserEvent) -> rquickjs::Result<Value<'js>> {
+  match event {
+    ferridriver::events::BrowserEvent::Context(context) => rquickjs::IntoJs::into_js(
+      Class::instance(ctx.clone(), BrowserContextJs::new(Arc::new(context)))?,
+      ctx,
+    ),
+    ferridriver::events::BrowserEvent::Disconnected(browser) => {
+      rquickjs::IntoJs::into_js(Class::instance(ctx.clone(), BrowserJs::new(Arc::new(browser)))?, ctx)
+    },
+  }
 }
 
 impl BrowserJs {

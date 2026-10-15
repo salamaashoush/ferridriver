@@ -38,6 +38,11 @@ pub struct BidiBrowser {
 }
 
 impl BidiBrowser {
+  /// Resolves once the connection to the browser has ended.
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    self.session.transport.closed()
+  }
+
   /// Real browser version reported in the `BiDi` session capabilities at
   /// `session.new` time. Format is `"{browserName}/{browserVersion}"` to
   /// match the CDP `Browser.getVersion().product` shape (e.g.

@@ -2467,7 +2467,7 @@ pub(crate) fn spawn_popup_pump(
       // behind each other's context configuration).
       tokio::spawn(async move {
         let backend_page = popup.page.clone();
-        if let Err(e) = register_popup(state, &instance, popup).await {
+        if let Err(e) = Box::pin(register_popup(state, &instance, popup)).await {
           tracing::debug!("popup registration failed: {e}");
           // Never leave a CDP popup parked on waitForDebuggerOnStart.
           let _ = backend_page.resume_popup().await;

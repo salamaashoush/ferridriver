@@ -194,6 +194,11 @@ impl<T: CdpTransport> CdpBrowser<T> {
     !self.transport.is_disconnected()
   }
 
+  /// Resolves once the connection to the browser has ended.
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    self.transport.closed()
+  }
+
   /// Product version string captured at handshake.
   #[must_use]
   pub fn version(&self) -> &str {

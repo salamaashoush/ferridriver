@@ -1027,21 +1027,24 @@ pub type ContextEventEmitter = Emitter<ContextEvent>;
 
 // ── Browser-level event system ─────────────────────────────────────────
 
-/// Events emitted by a `Browser`. Mirrors the subset of Playwright's
-/// `BrowserEventMap` that ferridriver supports — `'context'`, fired when
-/// a new browser context is created (`browser.on('context', ...)`,
-/// added in Playwright 1.60).
+/// Events emitted by a `Browser`: Playwright's `BrowserEventMap`.
 #[derive(Clone)]
 pub enum BrowserEvent {
   /// A new browser context was created on this browser. Carries the
   /// live [`crate::context::ContextRef`]. Mirrors
   /// `browser.on('context', (context: BrowserContext) => ...)`.
   Context(crate::context::ContextRef),
+  /// The connection to the browser ended: closed, crashed, or the
+  /// remote end went away. `browser.on('disconnected', (browser: Browser) => ...)`.
+  Disconnected(crate::browser::Browser),
 }
 
 impl EmitterEvent for BrowserEvent {
   fn matches_name(name: &str, event: &Self) -> bool {
-    matches!((name, event), ("context", BrowserEvent::Context(_)))
+    matches!(
+      (name, event),
+      ("context", BrowserEvent::Context(_)) | ("disconnected", BrowserEvent::Disconnected(_))
+    )
   }
 }
 
