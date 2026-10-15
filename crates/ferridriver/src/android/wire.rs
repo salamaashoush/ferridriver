@@ -410,15 +410,18 @@ mod tests {
 
   #[tokio::test]
   async fn a_missing_server_says_where_it_looked() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // Bound and never listening: a connection is refused, and no other
+    // test can take the port meanwhile, as one could once it was freed.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = socket.local_addr().unwrap().port();
     let adb = AdbServer {
       host: "127.0.0.1".into(),
       port,
     };
     let error = adb.devices().await.unwrap_err().to_string();
     assert!(error.contains(&format!("no ADB server at 127.0.0.1:{port}")), "{error}");
+    drop(socket);
   }
 
   #[tokio::test]
