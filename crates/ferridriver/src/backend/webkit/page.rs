@@ -387,6 +387,11 @@ pub(crate) struct LifecycleSignals {
   /// failing request lives on the provisional target session whose
   /// events never reach the committed-target listener.
   pub provisional_failure: std::sync::Mutex<Vec<ProvisionalFailure>>,
+  /// The loader of the main-frame document committed since the last
+  /// reset. `Page.loadEventFired` names no document, so a navigation
+  /// only trusts `load` once its own loader has committed: the previous
+  /// document's late load would otherwise finish it early.
+  pub committed_loader: std::sync::Mutex<Option<String>>,
   pub notify: tokio::sync::Notify,
 }
 
@@ -409,6 +414,36 @@ impl LifecycleSignals {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clear();
+    *self
+      .committed_loader
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  }
+
+  /// A new main-frame document committed: what fired for the previous
+  /// one no longer counts (Playwright's `frameCommittedNewDocumentNavigation`
+  /// clears the frame's lifecycle events).
+  pub fn commit_document(&self, loader_id: Option<String>) {
+    self.domcontentloaded.store(false, Ordering::SeqCst);
+    self.load.store(false, Ordering::SeqCst);
+    *self
+      .committed_loader
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = loader_id;
+    self.mark(NavLifecycle::Commit);
+  }
+
+  /// Whether the document of the navigation under `loader_id` has
+  /// committed; any commit counts for a waiter that does not know its loader.
+  pub fn committed(&self, loader_id: Option<&str>) -> bool {
+    let committed = self
+      .committed_loader
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match loader_id {
+      Some(loader_id) => committed.as_deref() == Some(loader_id),
+      None => true,
+    }
   }
 
   /// Record a `Playwright.provisionalLoadFailed` for the pending
@@ -1184,7 +1219,7 @@ impl WebKitPage {
     let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
       loop {
         let notified = signals.notify.notified();
-        if signals.seen(lifecycle) {
+        if signals.seen(lifecycle) && signals.committed(loader_id) {
           return Ok(());
         }
         if let Some(err) = signals.provisional_failure(loader_id) {
@@ -2997,7 +3032,33 @@ fn parse_eval_response(resp: &Value, return_by_value: bool) -> Result<crate::js_
 
 #[cfg(test)]
 mod tests {
-  use super::{DESKTOP_ORIENTATION_SHIM, EngineLatch, SAFARI_SURFACE_SHIM, WebKitPage, navigator_platform_for};
+  use super::{
+    DESKTOP_ORIENTATION_SHIM, EngineLatch, LifecycleSignals, NavLifecycle, SAFARI_SURFACE_SHIM, WebKitPage,
+    navigator_platform_for,
+  };
+
+  #[test]
+  fn the_previous_document_loading_late_does_not_finish_a_navigation() {
+    let signals = LifecycleSignals::default();
+    signals.reset();
+    signals.mark(NavLifecycle::Load);
+    assert!(
+      !signals.committed(Some("next")),
+      "the old document's load arrived first"
+    );
+
+    signals.commit_document(Some("next".into()));
+    assert!(signals.committed(Some("next")));
+    assert!(
+      !signals.seen(NavLifecycle::Load),
+      "a commit clears what the old document fired"
+    );
+    assert!(signals.seen(NavLifecycle::Commit));
+
+    signals.mark(NavLifecycle::Load);
+    assert!(signals.seen(NavLifecycle::Load) && signals.committed(Some("next")));
+    assert!(signals.committed(None));
+  }
 
   #[test]
   fn an_injection_into_a_replaced_document_does_not_count() {

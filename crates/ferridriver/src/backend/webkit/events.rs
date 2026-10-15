@@ -557,9 +557,13 @@ fn handle_main_frame_commit(ctx: &TargetListenerCtx, params: &Value) {
   if params.get("frame").and_then(|f| f.get("parentId")).is_some() {
     return;
   }
-  ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
-  if let Some(loader_id) = params.pointer("/frame/loaderId").and_then(Value::as_str) {
-    ctx.nav_slot.commit_loader(loader_id.to_string());
+  let loader_id = params
+    .pointer("/frame/loaderId")
+    .and_then(Value::as_str)
+    .map(str::to_string);
+  ctx.lifecycle.commit_document(loader_id.clone());
+  if let Some(loader_id) = loader_id {
+    ctx.nav_slot.commit_loader(loader_id);
   }
   ctx.engine_injected.document_replaced();
   *ctx
