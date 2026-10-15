@@ -93,9 +93,25 @@ pub(crate) struct ObservedBuffers {
   errors: Buffer<WebError>,
   evaluate_callbacks: Vec<String>,
   retired_callbacks: Vec<String>,
+  workers: Vec<crate::worker::Worker>,
 }
 
 impl ObservedBuffers {
+  pub(crate) fn push_worker(&mut self, worker: crate::worker::Worker) {
+    self.workers.retain(|known| !known.is_closed());
+    self.workers.push(worker);
+  }
+
+  /// The workers that are still running, in the order they started.
+  pub(crate) fn workers(&self) -> Vec<crate::worker::Worker> {
+    self
+      .workers
+      .iter()
+      .filter(|worker| !worker.is_closed())
+      .cloned()
+      .collect()
+  }
+
   pub(crate) fn push_console(&mut self, msg: ConsoleMessage) {
     self.console.push(msg);
   }

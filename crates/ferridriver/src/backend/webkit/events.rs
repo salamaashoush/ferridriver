@@ -198,6 +198,7 @@ pub fn attach_listeners(
     frame_contexts,
     frame_cache,
     websockets,
+    workers: page.workers.clone(),
     console_log: Arc::clone(&page.console_log),
     network_log: Arc::clone(&page.network_log),
     lifecycle: Arc::clone(&page.lifecycle),
@@ -292,6 +293,9 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
   let _ = new_target.send("Runtime.enable", json!({})).await;
   let _ = new_target.send("Network.enable", json!({})).await;
   let _ = new_target.send("Console.enable", json!({})).await;
+  // The workers belonged to the document the old target held.
+  super::worker::terminated(None, &page.workers);
+  let _ = new_target.send("Worker.enable", json!({})).await;
   // Re-apply extra HTTP headers on the new target — WebKit drops them on
   // the session swap, so a `setExtraHTTPHeaders` issued before this
   // navigation would otherwise not reach the request (mirrors
@@ -437,6 +441,7 @@ struct TargetListenerCtx {
   frame_contexts: FrameContexts,
   frame_cache: FrameCache,
   websockets: WebSockets,
+  workers: super::worker::Workers,
   /// Sinks for captured events. Swapped in by
   /// [`super::page::WebKitPage::attach_listeners`]; the listener
   /// reads the current pointer on each event so post-attach calls land
@@ -647,6 +652,11 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
     },
     Some("Page.navigatedWithinDocument") => {
       handle_frame_navigated_within(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+    },
+    Some("Worker.workerCreated") => super::worker::created(&env.params, &ctx.target(), &ctx.workers, &ctx.emitter),
+    Some("Worker.dispatchMessageFromWorker") => super::worker::dispatched(&env.params, &ctx.workers),
+    Some("Worker.workerTerminated") => {
+      super::worker::terminated(env.params.get("workerId").and_then(Value::as_str), &ctx.workers);
     },
     Some("Network.webSocketCreated") => handle_websocket_created(&env.params, &ctx.websockets, &ctx.emitter).await,
     Some("Network.webSocketFrameSent") => handle_websocket_frame(&env.params, &ctx.websockets, true).await,

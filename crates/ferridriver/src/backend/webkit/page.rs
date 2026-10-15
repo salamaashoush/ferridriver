@@ -324,6 +324,8 @@ pub struct WebKitPage {
   /// `webSocketFrameSent` / `webSocketFrameReceived`, and removes the
   /// entry on `webSocketClosed`.
   pub(crate) websockets: Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, crate::network::WebSocket>>>,
+  /// Dedicated workers of the current target, by `workerId`.
+  pub(crate) workers: super::worker::Workers,
   pub events: EventEmitter,
   pub dialog_manager: crate::dialog::DialogManager,
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
@@ -523,6 +525,7 @@ impl WebKitPage {
       target.send("Runtime.enable", json!({})).await?;
       target.send("Network.enable", json!({})).await?;
       target.send("Console.enable", json!({})).await?;
+      target.send("Worker.enable", json!({})).await?;
       // Dialog domain lives on the page-proxy session (per wkPage.ts);
       // without `Dialog.enable` the `javascriptDialogOpening` event
       // never fires and `window.alert` would wedge the page.
@@ -610,6 +613,7 @@ impl WebKitPage {
         frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         main_frame_id_cache,
         websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+        workers: Arc::default(),
         events: EventEmitter::new(),
         dialog_manager: crate::dialog::DialogManager::new(),
         file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
@@ -2797,6 +2801,7 @@ impl WebKitPage {
     let conn = self.proxy.connection_handle();
     conn.close_route(Some(&self.proxy_id), Some(&self.target_id()));
     conn.close_route(Some(&self.proxy_id), None);
+    super::worker::terminated(None, &self.workers);
     self.events.emit(crate::events::PageEvent::Close);
   }
 

@@ -3242,6 +3242,17 @@ impl Page {
     });
   }
 
+  /// Playwright: `page.workers(): Worker[]`. The dedicated workers the
+  /// page has running, in the order they started. Classic `WebDriver`
+  /// reports none.
+  #[must_use]
+  pub fn workers(&self) -> Vec<crate::worker::Worker> {
+    match self.inner.observed().lock() {
+      Ok(g) => g.workers(),
+      Err(poisoned) => poisoned.into_inner().workers(),
+    }
+  }
+
   /// Console messages retained for this page (cap 200, like
   /// Playwright). Playwright: `page.consoleMessages(options?: { filter?:
   /// 'all' | 'since-navigation' }): Promise<ConsoleMessage[]>` — the
@@ -5216,6 +5227,11 @@ pub(crate) fn page_state_observer(
       PageEvent::PageError(err) => {
         if let Ok(mut o) = observed.lock() {
           o.push_error(err.clone());
+        }
+      },
+      PageEvent::Worker(worker) => {
+        if let Ok(mut o) = observed.lock() {
+          o.push_worker(worker.clone());
         }
       },
       _ => {},

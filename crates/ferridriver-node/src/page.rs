@@ -41,7 +41,7 @@ pub(crate) fn build_evaluate_argument(
 /// deliver the `Page` itself; `pageerror` a native `Error`; everything
 /// else its lifecycle class. Shared by `page.on` / `page.once`
 /// (threadsafe-function dispatch) and `page.waitForEvent`.
-pub type PageWaitForEventResult = napi::bindgen_prelude::Either10<
+pub type PageWaitForEventResult = napi::bindgen_prelude::Either11<
   crate::network::Request,
   crate::network::Response,
   crate::network::WebSocket,
@@ -52,36 +52,38 @@ pub type PageWaitForEventResult = napi::bindgen_prelude::Either10<
   crate::web_error::JsErrorValue,
   crate::identity::FrameObject,
   crate::identity::PageObject,
+  crate::identity::WorkerObject,
 >;
 
 /// Lift a core [`PageEvent`] into the live-object union listeners
 /// receive. Mirrors Playwright's listener argument per event type.
 fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEvent) -> PageWaitForEventResult {
   use ferridriver::events::PageEvent;
-  use napi::bindgen_prelude::Either10;
+  use napi::bindgen_prelude::Either11;
   match ev {
     PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-      Either10::A(crate::network::Request::from_core_with_page(r, page.clone()))
+      Either11::A(crate::network::Request::from_core_with_page(r, page.clone()))
     },
-    PageEvent::Response(r) => Either10::B(crate::network::Response::from_core_with_page(r, page.clone())),
-    PageEvent::WebSocket(ws) => Either10::C(crate::network::WebSocket::from_core(ws)),
-    PageEvent::Dialog(d) | PageEvent::DialogClosed(d) => Either10::D(crate::identity::DialogObject(d)),
-    PageEvent::FileChooser(fc) => Either10::E(crate::file_chooser::FileChooser::from_core(fc)),
-    PageEvent::Download(d) => Either10::F(crate::download::Download::from_core(d)),
-    PageEvent::Console(msg) => Either10::G(crate::console_message::ConsoleMessage::from_core(msg)),
+    PageEvent::Response(r) => Either11::B(crate::network::Response::from_core_with_page(r, page.clone())),
+    PageEvent::WebSocket(ws) => Either11::C(crate::network::WebSocket::from_core(ws)),
+    PageEvent::Dialog(d) | PageEvent::DialogClosed(d) => Either11::D(crate::identity::DialogObject(d)),
+    PageEvent::FileChooser(fc) => Either11::E(crate::file_chooser::FileChooser::from_core(fc)),
+    PageEvent::Download(d) => Either11::F(crate::download::Download::from_core(d)),
+    PageEvent::Console(msg) => Either11::G(crate::console_message::ConsoleMessage::from_core(msg)),
     // Playwright's `'pageerror'` listener receives a native JS `Error`;
     // `JsErrorValue::to_napi_value` constructs one on the JS thread.
-    PageEvent::PageError(err) => Either10::H(crate::web_error::JsErrorValue::from_details(err.error())),
+    PageEvent::PageError(err) => Either11::H(crate::web_error::JsErrorValue::from_details(err.error())),
     PageEvent::FrameAttached(info)
     | PageEvent::FrameNavigated(info)
     | PageEvent::FrameNavigatedWithinDocument(info) => {
-      Either10::I(crate::identity::FrameObject(page.frame_for_id(&info.frame_id)))
+      Either11::I(crate::identity::FrameObject(page.frame_for_id(&info.frame_id)))
     },
-    PageEvent::FrameDetached { frame_id } => Either10::I(crate::identity::FrameObject(page.frame_for_id(&frame_id))),
+    PageEvent::FrameDetached { frame_id } => Either11::I(crate::identity::FrameObject(page.frame_for_id(&frame_id))),
     PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
-      Either10::J(crate::identity::PageObject(page.clone()))
+      Either11::J(crate::identity::PageObject(page.clone()))
     },
-    PageEvent::Popup(popup) => Either10::J(crate::identity::PageObject(popup)),
+    PageEvent::Popup(popup) => Either11::J(crate::identity::PageObject(popup)),
+    PageEvent::Worker(worker) => Either11::K(crate::identity::WorkerObject(worker)),
   }
 }
 
@@ -956,17 +958,17 @@ impl Page {
         match event_lc.as_str() {
           "dialog" => {
             let d = page.wait_for_dialog(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either10::D(crate::identity::DialogObject(d)))
+            Ok(napi::bindgen_prelude::Either11::D(crate::identity::DialogObject(d)))
           },
           "filechooser" => {
             let fc = page.wait_for_file_chooser(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either10::E(
+            Ok(napi::bindgen_prelude::Either11::E(
               crate::file_chooser::FileChooser::from_core(fc),
             ))
           },
           _ => {
             let d = page.wait_for_download(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either10::F(
+            Ok(napi::bindgen_prelude::Either11::F(
               crate::download::Download::from_core(d),
             ))
           },
@@ -1807,6 +1809,17 @@ impl Page {
   #[napi(js_name = "requestGC")]
   pub async fn request_gc(&self) -> Result<()> {
     self.inner.request_gc().await.map_err(crate::error::to_napi)
+  }
+
+  /// Playwright: `page.workers(): Worker[]`.
+  #[napi(ts_return_type = "Worker[]")]
+  pub fn workers(&self) -> Vec<crate::identity::WorkerObject> {
+    self
+      .inner
+      .workers()
+      .into_iter()
+      .map(crate::identity::WorkerObject)
+      .collect()
   }
 
   /// Playwright: `page.consoleMessages(options?: { filter?: 'all' |

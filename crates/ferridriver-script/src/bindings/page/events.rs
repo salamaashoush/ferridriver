@@ -73,6 +73,7 @@ pub(crate) fn page_event_to_js<'js>(
       crate::bindings::identity::page_object(ctx, page.clone())?.into_js(ctx)
     },
     PageEvent::Popup(popup) => crate::bindings::identity::page_object(ctx, popup)?.into_js(ctx),
+    PageEvent::Worker(worker) => crate::bindings::identity::worker_object(ctx, worker)?.into_js(ctx),
   }
 }
 

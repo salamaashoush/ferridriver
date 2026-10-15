@@ -493,6 +493,37 @@ impl BidiPage {
     self.start_route_listener();
   }
 
+  /// Announce the dedicated workers this page's realms start, and close
+  /// them with their realms or the page.
+  fn spawn_worker_listener(&self) {
+    let mut tap = self.session.transport.tap_events();
+    let session = self.session.clone();
+    let context = self.context_id.clone();
+    let emitter = self.events.clone();
+    let task = tokio::spawn(async move {
+      let mut realms = super::worker::WorkerRealms::new(session.clone(), &context);
+      if let Ok(reply) = session
+        .transport
+        .send_command("script.getRealms", json!({ "context": &*context }))
+        .await
+      {
+        realms.seed(&reply);
+      }
+      while let Some(event) = tap.recv().await {
+        if let Some(worker) = realms.observe(&event.method, &event.params) {
+          emitter.emit(PageEvent::Worker(worker));
+        }
+        if event.method == "browsingContext.contextDestroyed"
+          && event.params.get("context").and_then(|v| v.as_str()) == Some(&*context)
+        {
+          break;
+        }
+      }
+      realms.close_all();
+    });
+    self.track_listener(task.abort_handle());
+  }
+
   fn track_listener(&self, handle: tokio::task::AbortHandle) {
     if let Ok(mut guard) = self.listener_tasks.lock() {
       guard.push(handle);
@@ -2161,6 +2192,7 @@ impl BidiPage {
       });
     }
 
+    self.spawn_worker_listener();
     let mut rx = self.session.transport.tap_events();
     *self
       .event_barrier

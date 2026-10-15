@@ -97,6 +97,9 @@ pub enum PageEvent {
   /// link does. Playwright's `page.on('popup', (page: Page) => ...)`,
   /// fired once the popup is set up, after the context's `page` event.
   Popup(Arc<crate::page::Page>),
+  /// The page started a dedicated web worker. Playwright
+  /// `page.on('worker')`.
+  Worker(crate::worker::Worker),
 }
 
 impl PageEvent {
@@ -155,6 +158,7 @@ impl PageEvent {
         "suggestedFilename": d.suggested_filename(),
       }),
       PageEvent::Popup(page) => serde_json::json!({ "url": page.url() }),
+      PageEvent::Worker(worker) => serde_json::json!({ "url": worker.url() }),
       PageEvent::Load => serde_json::json!({ "type": "load" }),
       PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
       PageEvent::Close => serde_json::json!({ "type": "close" }),
@@ -311,6 +315,7 @@ pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("pageerror", PageEvent::PageError(_))
       | ("download", PageEvent::Download(_))
       | ("popup", PageEvent::Popup(_))
+      | ("worker", PageEvent::Worker(_))
   )
 }
 

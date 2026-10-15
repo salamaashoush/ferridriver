@@ -22,6 +22,7 @@ use crate::android::{AndroidDevice, AndroidWebView};
 use crate::dialog::Dialog;
 use crate::frame::Frame;
 use crate::page::Page;
+use crate::worker::Worker;
 
 /// Closed dialogs kept so a late `dialogclosed` hands over the same
 /// object the `dialog` event did.
@@ -69,6 +70,7 @@ thread_local! {
   static PAGES: RefCell<Cache<Arc<ferridriver::Page>, Page>> = const { RefCell::new(Cache::new()) };
   static FRAMES: RefCell<Cache<ferridriver::Frame, Frame>> = const { RefCell::new(Cache::new()) };
   static DIALOGS: RefCell<Cache<ferridriver::dialog::Dialog, Dialog>> = const { RefCell::new(Cache::new()) };
+  static WORKERS: RefCell<Cache<ferridriver::worker::Worker, Worker>> = const { RefCell::new(Cache::new()) };
   static ANDROID_DEVICES: RefCell<Cache<ferridriver::android::AndroidDevice, AndroidDevice>> =
     const { RefCell::new(Cache::new()) };
   static ANDROID_WEB_VIEWS: RefCell<Cache<ferridriver::android::AndroidWebView, AndroidWebView>> =
@@ -251,6 +253,40 @@ impl TypeName for PageObject {
 impl TypeName for FrameObject {
   fn type_name() -> &'static str {
     "Frame"
+  }
+
+  fn value_type() -> ValueType {
+    ValueType::Object
+  }
+}
+
+/// A worker on its way to JS: the same object for its `worker` event,
+/// every `page.workers()` and its `close` wait.
+pub struct WorkerObject(pub ferridriver::worker::Worker);
+
+impl ToNapiValue for WorkerObject {
+  unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
+    let js_env = Env::from_raw(env);
+    let found = WORKERS.with(|workers| workers.borrow().find(js_env, |w| w.is_same(&val.0)))?;
+    let reference = match found {
+      Some(reference) => reference,
+      None => {
+        let reference = Worker::from_core(val.0.clone()).into_reference(js_env)?;
+        WORKERS.with(|workers| {
+          let mut workers = workers.borrow_mut();
+          workers.retain(|worker| !worker.is_closed());
+          workers.insert(js_env, val.0, &reference)
+        })?;
+        reference
+      },
+    };
+    unsafe { Reference::to_napi_value(env, reference) }
+  }
+}
+
+impl TypeName for WorkerObject {
+  fn type_name() -> &'static str {
+    "Worker"
   }
 
   fn value_type() -> ValueType {

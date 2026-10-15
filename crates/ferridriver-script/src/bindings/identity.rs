@@ -19,6 +19,10 @@ struct Wrappers {
   pages: Vec<(Arc<Page>, Persistent<Class<'static, PageJs>>)>,
   frames: Vec<(Frame, Persistent<Class<'static, FrameJs>>)>,
   dialogs: Vec<(ferridriver::dialog::Dialog, Persistent<Class<'static, DialogJs>>)>,
+  workers: Vec<(
+    ferridriver::worker::Worker,
+    Persistent<Class<'static, crate::bindings::worker::WorkerJs>>,
+  )>,
   android_devices: Vec<(
     ferridriver::android::AndroidDevice,
     Persistent<Class<'static, AndroidDeviceJs>>,
@@ -30,6 +34,7 @@ impl Wrappers {
   /// still hold but no binding will hand out again.
   fn prune(&mut self) {
     self.pages.retain(|(page, _)| !page.is_closed());
+    self.workers.retain(|(worker, _)| !worker.is_closed());
     self.android_devices.retain(|(device, _)| !device.is_closed());
     self
       .frames
@@ -162,6 +167,30 @@ pub(crate) fn dialog_object<'js>(
   with_wrappers(ctx, |w| {
     w.prune();
     w.dialogs.push((dialog, saved));
+  });
+  Ok(object)
+}
+
+/// The worker's object, the same one for its `worker` event, every
+/// `page.workers()` and its `close` wait.
+pub(crate) fn worker_object<'js>(
+  ctx: &Ctx<'js>,
+  worker: ferridriver::worker::Worker,
+) -> rquickjs::Result<Class<'js, crate::bindings::worker::WorkerJs>> {
+  let known = with_wrappers(ctx, |w| {
+    w.workers
+      .iter()
+      .find(|(known, _)| known.is_same(&worker))
+      .map(|(_, object)| object.clone())
+  });
+  if let Some(object) = known {
+    return object.restore(ctx);
+  }
+  let object = Class::instance(ctx.clone(), crate::bindings::worker::WorkerJs::new(worker.clone()))?;
+  let saved = Persistent::save(ctx, object.clone());
+  with_wrappers(ctx, |w| {
+    w.prune();
+    w.workers.push((worker, saved));
   });
   Ok(object)
 }

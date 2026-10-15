@@ -63,6 +63,7 @@ pub mod web_error;
 pub mod web_mcp;
 pub mod web_socket_route;
 pub mod web_storage;
+pub mod worker;
 
 pub use android::{AndroidDeviceJs, AndroidJs, install_android};
 pub use artifacts::ArtifactsJs;
@@ -103,6 +104,7 @@ pub use test::{
 pub use test_debug::{PendingAction, TestDebugControl};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
+pub use worker::WorkerJs;
 
 use rquickjs::{Ctx, class::Class};
 use std::sync::Arc;
@@ -137,6 +139,7 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<RouteJs>::define(&g)?;
   Class::<WebSocketJs>::define(&g)?;
   Class::<DialogJs>::define(&g)?;
+  Class::<WorkerJs>::define(&g)?;
   Class::<FileChooserJs>::define(&g)?;
   Class::<DownloadJs>::define(&g)?;
   Class::<DisposableJs>::define(&g)?;

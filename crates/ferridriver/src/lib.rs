@@ -117,3 +117,4 @@ pub mod video;
 // ── BDD steps (use crate-internal APIs) ──
 #[macro_use]
 pub mod steps;
+pub mod worker;

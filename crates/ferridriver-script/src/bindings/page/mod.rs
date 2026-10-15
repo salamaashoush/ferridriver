@@ -1467,6 +1467,20 @@ impl PageJs {
       .await
   }
 
+  /// Playwright: `page.workers(): Worker[]`.
+  #[qjs(rename = "workers")]
+  pub fn workers<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Vec<rquickjs::class::Class<'js, crate::bindings::worker::WorkerJs>>> {
+    self
+      .inner
+      .workers()
+      .into_iter()
+      .map(|worker| crate::bindings::identity::worker_object(&ctx, worker))
+      .collect()
+  }
+
   /// `page.consoleMessages(options?)`. Returns the retained console
   /// history as `ConsoleMessage` instances. Accepts `{ filter?: 'all' |
   /// 'since-navigation' }`, defaulting to `since-navigation`.

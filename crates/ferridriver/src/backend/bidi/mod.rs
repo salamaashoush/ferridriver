@@ -23,7 +23,9 @@ mod session_tests;
 pub(crate) mod transport;
 pub mod types;
 mod webdriver;
+pub(crate) mod worker;
 
 pub use browser::BidiBrowser;
 pub use element::BidiElement;
 pub use page::BidiPage;
+pub use worker::BidiWorker;

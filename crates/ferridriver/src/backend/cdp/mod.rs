@@ -65,6 +65,49 @@ impl CdpWrap for ws::WsTransport {
   }
 }
 
+/// A dedicated worker's own session, auto-attached under its page's.
+pub struct CdpWorker<T: CdpTransport> {
+  transport: Arc<T>,
+  session_id: Arc<str>,
+}
+
+impl<T: CdpTransport> Clone for CdpWorker<T> {
+  fn clone(&self) -> Self {
+    Self {
+      transport: Arc::clone(&self.transport),
+      session_id: Arc::clone(&self.session_id),
+    }
+  }
+}
+
+impl<T: CdpTransport + 'static> crate::worker::WorkerSession for CdpWorker<T> {
+  fn evaluate<'a>(&'a self, expression: &'a str) -> futures::future::BoxFuture<'a, Result<serde_json::Value>> {
+    Box::pin(self.evaluate_expression(expression))
+  }
+}
+
+impl<T: CdpTransport> CdpWorker<T> {
+  async fn evaluate_expression(&self, expression: &str) -> Result<serde_json::Value> {
+    let response = self
+      .transport
+      .send_command(
+        Some(&self.session_id),
+        "Runtime.evaluate",
+        &serde_json::json!({ "expression": expression, "awaitPromise": true, "returnByValue": true }),
+      )
+      .await?;
+    if let Some(exception) = response.get("exceptionDetails") {
+      return Err(FerriError::evaluation(cdp_get_exception_message(exception)));
+    }
+    Ok(
+      response
+        .pointer("/result/value")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null),
+    )
+  }
+}
+
 // ---- CdpBrowser<T> --------------------------------------------------------
 
 pub struct CdpBrowser<T: CdpTransport> {
@@ -5813,6 +5856,7 @@ impl<T: CdpWrap> CdpPage<T> {
     ));
     tasks.extend(self.spawn_renderer_tracker());
     tasks.push(self.spawn_target_gone_listener());
+    tasks.push(self.spawn_worker_listener());
 
     if let Ok(mut guard) = self.listener_tasks.lock() {
       guard.extend(tasks);
@@ -5945,6 +5989,50 @@ impl<T: CdpWrap> CdpPage<T> {
   ///
   /// These are browser-level events (no `sessionId` filter), so the tap is
   /// unfiltered and matched on `targetId` instead.
+  /// Dedicated workers auto-attach under the page's session. The
+  /// browser-wide attach listener resumes them; this one announces each
+  /// as a [`crate::worker::Worker`] and closes it when its session goes.
+  fn spawn_worker_listener(&self) -> tokio::task::AbortHandle {
+    let transport = self.transport.clone();
+    let emitter = self.events.clone();
+    let mut rx = self.transport.tap_event_methods(
+      &["Target.attachedToTarget", "Target.detachedFromTarget"],
+      self.session_id.as_deref(),
+    );
+    tokio::spawn(async move {
+      let mut workers: rustc_hash::FxHashMap<String, crate::worker::Worker> = rustc_hash::FxHashMap::default();
+      while let Some(event) = rx.recv().await {
+        let params = &event["params"];
+        let Some(session) = params["sessionId"].as_str() else {
+          continue;
+        };
+        if event["method"] == "Target.detachedFromTarget" {
+          if let Some(worker) = workers.remove(session) {
+            worker.did_close();
+          }
+          continue;
+        }
+        if params["targetInfo"]["type"] != "worker" {
+          continue;
+        }
+        let worker = crate::worker::Worker::new(
+          session.to_string(),
+          params["targetInfo"]["url"].as_str().unwrap_or_default().to_string(),
+          Arc::new(CdpWorker {
+            transport: Arc::clone(&transport),
+            session_id: Arc::from(session),
+          }),
+        );
+        workers.insert(session.to_string(), worker.clone());
+        emitter.emit(crate::events::PageEvent::Worker(worker));
+      }
+      for worker in workers.into_values() {
+        worker.did_close();
+      }
+    })
+    .abort_handle()
+  }
+
   fn spawn_target_gone_listener(&self) -> tokio::task::AbortHandle {
     let page = self.clone();
     let mut rx = self

@@ -2027,6 +2027,14 @@ export interface CDPSession {
   detach(): Promise<void>;
 }
 
+/** A dedicated web worker a page started. */
+export interface Worker {
+  url(): string;
+  /** Runs in the worker's global scope; `arg` crosses by value. */
+  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  waitForEvent(event: 'close', optionsOrTimeout?: number | { timeout?: number }): Promise<Worker>;
+}
+
 export type PageEvent =
   | 'close'
   | 'console'
@@ -2134,6 +2142,7 @@ export interface Page {
   pause(): Promise<void>;
   requestGC(): Promise<void>;
   snapshotForAI(options?: { depth?: number; track?: string }): Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>;
+  workers(): Worker[];
   consoleMessages(options?: { filter?: 'all' | 'since-navigation' }): ConsoleMessage[];
   clearConsoleMessages(): void;
   pageErrors(options?: { filter?: 'all' | 'since-navigation' }): Error[];

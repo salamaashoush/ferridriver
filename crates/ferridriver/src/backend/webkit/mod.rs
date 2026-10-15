@@ -14,6 +14,7 @@ pub(crate) mod owner;
 pub mod page;
 pub mod protocol;
 pub mod transport;
+pub(crate) mod worker;
 
 pub use browser::{BrowserError, WebKitBrowser};
 pub use connection::{Connection, ConnectionError, Session};
@@ -21,3 +22,4 @@ pub use element::WebKitElement;
 pub use launcher::{LaunchConfig, LaunchError, locate_binary};
 pub use page::WebKitPage;
 pub use transport::{Transport, TransportError};
+pub use worker::WebKitWorker;
