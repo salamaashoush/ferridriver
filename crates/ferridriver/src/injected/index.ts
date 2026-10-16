@@ -332,27 +332,6 @@ function clickGuard(el: Element): string {
 }
 
 /**
- * Combined click pre-flight check. Replaces FOUR sequential
- * `Runtime.callFunctionOn` round-trips (clickGuard + isActionable +
- * scrollIntoView + resolveClickPoint) with a single call:
- *
- * 1. `clickGuard` — reject `<select>` / file inputs page-side so the
- *    Rust action helper can dispatch a typed error.
- * 2. `isActionable` — returns `actionable: true` only when the
- *    element is connected, visible, and not aria-disabled.
- * 3. `scrollIntoViewIfNeeded` — non-standard Chromium primitive;
- *    falls back to W3C `scrollIntoView({block:'center'})` on
- *    Firefox/BiDi.
- * 4. Iframe-chain accumulated bounding-box → click point.
- *
- * Returns a flat object so the host can branch on `guard`/`reason`
- * without further parsing. `point` is `null` when the element is
- * not actionable (caller short-circuits on guard / reason before
- * touching point). Mirrors Playwright's `evaluateInUtility` pattern
- * in `dom.ts::_performPointerAction` which similarly batches these
- * checks into one CDP RTT.
- */
-/**
  * Run Playwright's full actionability gate via the vendored
  * `injected.checkElementStates` (`'stable'` = async rAF bounding-box
  * sampling). Returns `undefined` when every requested state passes,
@@ -385,24 +364,34 @@ async function awaitStates(el: Element, states: ElementState[]): Promise<string 
   return undefined;
 }
 
+/**
+ * Combined click pre-flight check, one round-trip instead of three
+ * (Playwright's `evaluateInUtility` batching in
+ * `dom.ts::_performPointerAction`):
+ *
+ * 1. `awaitStates` — the requested actionability states.
+ * 2. Scroll into view.
+ * 3. Iframe-chain accumulated bounding-box → click point.
+ *
+ * `point` is `null` when the element is not actionable; the host
+ * branches on `reason`. Like Playwright, any element may be clicked:
+ * a `<select>` takes focus and a file input opens its chooser.
+ */
 async function clickPrep(
   el: Element,
   position: { x: number; y: number } | null,
   states: ElementState[],
   scrollAlign?: ScrollIntoViewOptions | null | false,
 ): Promise<{
-  guard: string;
   actionable: boolean;
   reason?: string;
   point: { x: number; y: number } | null;
 }> {
-  const guard = clickGuard(el);
-  if (guard) return { guard, actionable: false, point: null };
   // Full actionability (visible / enabled / stable as requested) before
   // resolving the click point — mirrors Playwright's `_performPointerAction`
   // order (states gate first, then scroll + clickable point).
   const reason = await awaitStates(el, states);
-  if (reason) return { guard: '', actionable: false, reason, point: null };
+  if (reason) return { actionable: false, reason, point: null };
   // Scroll into view. On a retry the host passes an explicit alignment
   // (Playwright `_retryPointerAction` cycles undefined/end/center/start to
   // escape position:sticky overlays); otherwise use the precise non-standard
@@ -450,7 +439,7 @@ async function clickPrep(
       // No client rect intersects the viewport (Playwright `_clickablePoint`
       // returns `error:notinviewport`). The host retries with the next scroll
       // alignment to bring it on-screen.
-      return { guard: '', actionable: false, reason: 'inviewport', point: null };
+      return { actionable: false, reason: 'inviewport', point: null };
     }
     x = (Math.max(best.left, 0) + Math.min(best.right, vw)) / 2;
     y = (Math.max(best.top, 0) + Math.min(best.bottom, vh)) / 2;
@@ -462,7 +451,7 @@ async function clickPrep(
     y += fr.y;
     win = win.parent;
   }
-  return { guard: '', actionable: true, point: { x, y } };
+  return { actionable: true, point: { x, y } };
 }
 
 // ── Actions (delegates to Playwright where possible) ──

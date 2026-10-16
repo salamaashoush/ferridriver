@@ -155,6 +155,18 @@ describe('dialogs and files', () => {
     await dialog.accept();
   });
 
+  test('clicking_a_file_input_opens_its_chooser', async ({ page }) => {
+    // Playwright's page-filechooser.spec.ts "should emit event via click":
+    // the input itself is clicked, not a button that calls input.click().
+    await page.setContent('<input type=file multiple><select><option>a</option></select>');
+    const chooserPromise = page.waitForEvent('filechooser', { timeout: 10000 });
+    await page.click('input');
+    const chooser = (await chooserPromise) as FileChooser;
+    expect(chooser.isMultiple()).toBe(true);
+    await page.click('select');
+    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('SELECT');
+  });
+
   test('file_chooser_single_string_path', async ({ page }) => {
     // waitForEvent('filechooser') returns a live FileChooser;
     // isMultiple() is false for a plain input; setFiles(path) uploads

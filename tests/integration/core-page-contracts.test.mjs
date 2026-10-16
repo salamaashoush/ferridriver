@@ -128,7 +128,8 @@ test('core page screenshots, focus, selection, filters, and viewport changes', a
   await visit(page, "<select id='s'><option value='a'>Apple</option><option value='b'>Banana</option></select>");
   await page.locator('#s').selectOption({ label: 'Banana' });
   assert.ok((await page.locator('#s').inputValue()).includes('b'));
-  await assert.rejects(() => page.locator('#s').click());
+  await page.locator('#s').click();
+  assert.equal(await page.evaluate("document.activeElement?.id||''"), 's');
   await visit(page, '<div><p>Keep</p></div><div><p>Remove</p></div>');
   assert.equal(await page.locator('css=div').filter({ hasText: 'Keep' }).count(), 1);
   assert.equal(await page.locator('css=div').filter({ hasText: /^keep$/i }).count(), 1);

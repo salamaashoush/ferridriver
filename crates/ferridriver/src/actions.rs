@@ -236,20 +236,14 @@ pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> std::res
 
 // ─── Click Pre-flight (combined) ────────────────────────────────────────────
 
-/// Outcome of [`click_prep`] — the merged
-/// `clickGuard` + `isActionable` + `scrollIntoView` + `clickPoint`
-/// pre-flight that replaces 4 sequential CDP RTTs with one
-/// `Runtime.callFunctionOn`. Mirrors Playwright's
-/// `evaluateInUtility` pattern in
-/// `/tmp/playwright/packages/playwright-core/src/server/dom.ts`.
+/// Outcome of [`click_prep`] — the merged `isActionable` +
+/// `scrollIntoView` + `clickPoint` pre-flight in one
+/// `Runtime.callFunctionOn`. Mirrors Playwright's `evaluateInUtility`
+/// pattern in `/tmp/playwright/packages/playwright-core/src/server/dom.ts`.
 #[derive(Debug)]
 pub enum ClickPrep {
   /// Element is actionable; cursor target is `(x, y)`.
   Ready { x: f64, y: f64 },
-  /// Element is `<select>` — caller should redispatch via select-option helper.
-  IsSelect,
-  /// Element is `<input type=file>` — caller should redispatch via file-chooser path.
-  IsFileInput,
   /// Element exists but is not currently actionable. Carries the
   /// reason marker (`notvisible` / `notconnected` / `disabled`),
   /// formatted as a Playwright-style `error:not<state>` string so
@@ -258,9 +252,8 @@ pub enum ClickPrep {
 }
 
 /// Combined pre-click pre-flight. ONE `Runtime.callFunctionOn`
-/// returning `{guard, actionable, reason, point}`. Replaces 4
-/// separate calls (`clickGuard`, `isActionable`, `scrollIntoView`,
-/// `getBoundingClientRect`) — saves 3 CDP RTTs per click. Caller
+/// returning `{actionable, reason, point}`. Replaces 3 separate calls
+/// (`isActionable`, `scrollIntoView`, `getBoundingClientRect`). Caller
 /// branches on the [`ClickPrep`] variant. The injected helper
 /// (`__fd.clickPrep`) lives in
 /// `crates/ferridriver/src/injected/index.ts::clickPrep`.
@@ -270,7 +263,7 @@ pub enum ClickPrep {
 /// Returns an error only on protocol-level failure (the engine is
 /// not injected, the element handle is no longer connected, JSON
 /// parse failure on the response). Element-state failures
-/// (not-visible, disabled, file/select) are encoded as
+/// (not-visible, disabled) are encoded as
 /// [`ClickPrep`] variants, not errors.
 pub async fn click_prep(
   element: &AnyElement,
@@ -303,12 +296,6 @@ pub async fn click_prep(
   }
   let parsed: serde_json::Value =
     serde_json::from_str(&raw).map_err(|e| FerriError::Backend(format!("click_prep: parse: {e}")))?;
-  let guard = parsed.get("guard").and_then(|v| v.as_str()).unwrap_or("");
-  match guard {
-    "select" => return Ok(ClickPrep::IsSelect),
-    "file" => return Ok(ClickPrep::IsFileInput),
-    _ => {},
-  }
   let actionable = parsed
     .get("actionable")
     .and_then(serde_json::Value::as_bool)
@@ -906,7 +893,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       _ => Some("{block:'start',inline:'start'}"),
     };
 
-    // Single combined pre-flight: `clickGuard` + actionability (visible /
+    // Single combined pre-flight: actionability (visible /
     // enabled / stable) + `scrollIntoView` + viewport-intersected
     // `clickPoint` in ONE callFunctionOn.
     let (x, y) = if opts.is_force() {
@@ -914,8 +901,6 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     } else {
       match click_prep(element, page, opts.position, scroll_align).await? {
         ClickPrep::Ready { x, y } => (x, y),
-        ClickPrep::IsSelect => return Err(FerriError::Backend(ClickGuardError::IsSelect.to_string())),
-        ClickPrep::IsFileInput => return Err(FerriError::Backend(ClickGuardError::IsFileInput.to_string())),
         ClickPrep::NotActionable { reason } => {
           // `notconnected` => the element is gone; surface it so the
           // locator re-resolves. Transient failures (notinviewport while a
