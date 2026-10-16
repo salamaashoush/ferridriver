@@ -66,6 +66,25 @@ describe('websocket', () => {
     expect(got).toBe('mocked:hi');
   });
 
+  test('route_web_socket_after_the_page_loaded', async ({ page }) => {
+    // Playwright installs the mock into the documents already loaded,
+    // not only into later ones; the route here comes after goto.
+    await page.goto('/fx/landed');
+    await page.routeWebSocket('ws://ferri.invalid/late', (ws) => {
+      ws.onMessage((m) => ws.send('late:' + m));
+    });
+    const got = await page.evaluate(
+      (u: string) =>
+        new Promise((resolve) => {
+          const ws = new WebSocket(u);
+          ws.onopen = () => ws.send('hi');
+          ws.onmessage = (e) => resolve(e.data);
+        }),
+      'ws://ferri.invalid/late',
+    );
+    expect(got).toBe('late:hi');
+  });
+
   test('context_route_web_socket', async ({ page, context }) => {
     // Same echo handler registered at the context level — the
     // context-level fan-out reaches the same WS mock + pump.

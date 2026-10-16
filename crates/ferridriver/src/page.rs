@@ -4217,6 +4217,30 @@ impl Page {
       .await
   }
 
+  /// `safeNonStallingEvaluateInAllFrames`: run `expression` in every
+  /// frame's main world; a frame that cannot run it (it is navigating,
+  /// or gone) is skipped.
+  pub(crate) async fn evaluate_in_all_frames(&self, expression: &str) {
+    let main = self.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id);
+    let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
+    let inner = &self.inner;
+    let runs = ids.iter().map(|id| {
+      let is_main = main.as_deref() == Some(&**id);
+      async move {
+        let _ = if is_main {
+          inner.evaluate(expression).await
+        } else {
+          inner.evaluate_in_frame(expression, id).await
+        };
+      }
+    });
+    if ids.is_empty() {
+      let _ = inner.evaluate(expression).await;
+    } else {
+      futures::future::join_all(runs).await;
+    }
+  }
+
   /// Install a WebSocket route at the given scope. `Page` scope routes
   /// are matched before `Context` scope routes at socket creation
   /// (Playwright's page-dispatcher-before-context-dispatcher order);
@@ -4238,6 +4262,9 @@ impl Page {
         .await?;
       let source = crate::options::evaluation_script(wsr::mock_init_script(), None)?;
       self.inner.add_init_script(&source).await?;
+      // The documents already loaded get the mock too, as Playwright's
+      // `WebSocketRouteDispatcher.install` does.
+      self.evaluate_in_all_frames(&source).await;
     }
     Ok(())
   }

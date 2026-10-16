@@ -3,8 +3,6 @@
 //! out which rect to capture. Each backend only takes the capture
 //! ([`crate::backend::AnyPage::take_screenshot`]).
 
-use std::sync::Arc;
-
 use crate::backend::{AnyElement, AnyPage, BackgroundColor, ImageFormat, ScreenshotCapture, ScreenshotScale};
 use crate::error::{FerriError, Result};
 use crate::locator::Locator;
@@ -390,7 +388,7 @@ async fn capture(
     })
     .await;
   if masked {
-    evaluate_in_all_frames(page, HIDE_HIGHLIGHTS_JS).await;
+    page.evaluate_in_all_frames(HIDE_HIGHLIGHTS_JS).await;
   }
   if set_background {
     let restored = page.inner.set_background_color(None).await;
@@ -406,7 +404,7 @@ async fn mask_elements(page: &Page, request: &Request<'_>) -> Result<bool> {
   if request.mask.is_empty() {
     return Ok(false);
   }
-  evaluate_in_all_frames(page, HIDE_HIGHLIGHTS_JS).await;
+  page.evaluate_in_all_frames(HIDE_HIGHLIGHTS_JS).await;
   let color = request.mask_color.unwrap_or("#F0F");
   let arg = crate::protocol::argument_from_serde(&color)?;
   for locator in request.mask {
@@ -418,7 +416,7 @@ async fn mask_elements(page: &Page, request: &Request<'_>) -> Result<bool> {
       )
       .await;
     if let Err(e) = applied {
-      evaluate_in_all_frames(page, HIDE_HIGHLIGHTS_JS).await;
+      page.evaluate_in_all_frames(HIDE_HIGHLIGHTS_JS).await;
       return Err(e);
     }
   }
@@ -433,36 +431,15 @@ async fn prepare(page: &Page, request: &Request<'_>) {
   let disable_animations = request.animations == Some(AnimationsMode::Disabled);
   let sync_animations = page.inner.should_toggle_style_sheet_to_sync_animations();
   let expression = format!("({PREPARE_FN})({style}, {hide_caret}, {disable_animations}, {sync_animations})");
-  evaluate_in_all_frames(page, &expression).await;
-  evaluate_in_all_frames(page, "document.fonts.ready.then(() => true)").await;
+  page.evaluate_in_all_frames(&expression).await;
+  page
+    .evaluate_in_all_frames("document.fonts.ready.then(() => true)")
+    .await;
 }
 
 /// `_restorePageAfterScreenshot`.
 async fn restore(page: &Page) {
-  evaluate_in_all_frames(page, RESTORE_JS).await;
-}
-
-/// `safeNonStallingEvaluateInAllFrames`: a frame that cannot run it (it
-/// is navigating, or gone) is skipped.
-async fn evaluate_in_all_frames(page: &Page, expression: &str) {
-  let main = page.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id);
-  let ids: Vec<Arc<str>> = page.with_frame_cache(|c| c.live_ids().collect());
-  let inner = &page.inner;
-  let runs = ids.iter().map(|id| {
-    let is_main = main.as_deref() == Some(&**id);
-    async move {
-      let _ = if is_main {
-        inner.evaluate(expression).await
-      } else {
-        inner.evaluate_in_frame(expression, id).await
-      };
-    }
-  });
-  if ids.is_empty() {
-    let _ = inner.evaluate(expression).await;
-  } else {
-    futures::future::join_all(runs).await;
-  }
+  page.evaluate_in_all_frames(RESTORE_JS).await;
 }
 
 /// `_originalViewportSize`: the emulated viewport, else the window's.
