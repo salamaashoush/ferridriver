@@ -160,6 +160,7 @@ impl BrowserTypeJs {
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct JsLaunchOptions {
+  chromium_sandbox: Option<bool>,
   firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
   headless: Option<bool>,
   executable_path: Option<String>,
@@ -251,7 +252,7 @@ fn parse_launch_options<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Res
     handle_sighup: None,
     handle_sigint: None,
     handle_sigterm: None,
-    chromium_sandbox: None,
+    chromium_sandbox: parsed.chromium_sandbox,
     firefox_user_prefs: parsed.firefox_user_prefs,
     proxy: parsed.proxy.map(|p| ferridriver::options::ProxyConfig {
       server: p.server,

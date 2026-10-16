@@ -56,6 +56,26 @@ test.describe('workers', () => {
     expect(after).not.toContain(UNSUPPORTED);
   });
 
+  test('close listeners hear the worker, once each, until removed', async ({ page }) => {
+    await page.goto(`${ORIGIN}/empty.html`);
+    const [worker] = await Promise.all([
+      page.waitForEvent('worker') as Promise<Worker>,
+      page.evaluate(start('self.onmessage = () => {};')),
+    ]);
+    const heard: string[] = [];
+    const removed = () => heard.push('removed');
+    worker.on('close', closed => heard.push(closed === worker ? 'same worker' : 'another worker'));
+    worker.once('close', () => heard.push('once'));
+    worker.on('close', removed);
+    worker.off('close', removed);
+    await Promise.all([
+      worker.waitForEvent('close'),
+      page.evaluate(() => (window as any).__worker.terminate()),
+    ]);
+    await expect.poll(() => heard.length).toBe(2);
+    expect(heard).toEqual(['same worker', 'once']);
+  });
+
   test('workers close when the page navigates away', async ({ page }) => {
     await page.goto(`${ORIGIN}/empty.html`);
     const [worker] = await Promise.all([

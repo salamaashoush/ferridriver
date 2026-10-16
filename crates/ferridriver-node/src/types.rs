@@ -1773,6 +1773,8 @@ pub struct LaunchOptions {
   /// `--proxy`, and Firefox takes the WebDriver `proxy` capability -- it has no
   /// proxy switch at all.
   pub proxy: Option<crate::context::NapiProxyConfig>,
+  /// Keep Chromium's sandbox; it is turned off unless this is `true`.
+  pub chromium_sandbox: Option<bool>,
   /// Firefox preferences (`about:config`) the launched browser starts with.
   #[napi(ts_type = "{ [key: string]: string | number | boolean }")]
   pub firefox_user_prefs: Option<std::collections::HashMap<String, serde_json::Value>>,

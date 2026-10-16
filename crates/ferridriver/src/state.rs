@@ -314,6 +314,8 @@ pub struct BrowserState {
   connection_headers: Option<rustc_hash::FxHashMap<String, String>>,
   launch_env: rustc_hash::FxHashMap<String, String>,
   firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
+  /// `launch({ chromiumSandbox })`: Chromium keeps its sandbox only when `true`.
+  chromium_sandbox: Option<bool>,
   /// Base Chrome flags applied to ALL instances.
   pub extra_args: Vec<String>,
   /// The switch list `launch({ ignoreDefaultArgs })` asked to drop. A
@@ -546,6 +548,7 @@ impl BrowserState {
       connection_headers: plan.connection_headers,
       launch_env: plan.env.unwrap_or_default(),
       firefox_user_prefs: plan.firefox_user_prefs,
+      chromium_sandbox: plan.chromium_sandbox,
       extra_args: plan.args,
       base_ignore_default_args: plan.ignore_default_args,
       proxy: plan.proxy,
@@ -908,6 +911,7 @@ impl BrowserState {
       connection_headers: self.connection_headers.clone(),
       launch_env: self.launch_env.clone(),
       firefox_user_prefs: self.firefox_user_prefs.clone(),
+      chromium_sandbox: self.chromium_sandbox,
       headless: self.headless,
       chromium_path: self.chromium_path.clone(),
       user_data_dir: self.user_data_dir.clone(),
@@ -1299,6 +1303,7 @@ struct LaunchSpec {
   connection_headers: Option<rustc_hash::FxHashMap<String, String>>,
   launch_env: rustc_hash::FxHashMap<String, String>,
   firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
+  chromium_sandbox: Option<bool>,
   headless: bool,
   chromium_path: String,
   user_data_dir: Option<String>,
@@ -1316,6 +1321,7 @@ struct LaunchSpec {
 #[derive(Debug)]
 struct EffectiveLaunch {
   firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
+  chromium_sandbox: Option<bool>,
   backend_kind: BackendKind,
   browser_kind: crate::options::BrowserKind,
   launch_timeout: Option<u64>,
@@ -1424,6 +1430,7 @@ impl LaunchSpec {
     env.extend(overrides.env);
     let effective = EffectiveLaunch {
       firefox_user_prefs: self.firefox_user_prefs.clone(),
+      chromium_sandbox: self.chromium_sandbox,
       backend_kind: selection.backend,
       browser_kind,
       launch_timeout: self.launch_timeout,
@@ -1469,7 +1476,12 @@ impl LaunchSpec {
         use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
         let mut args = eff.args.clone();
         args.extend(proxy_flags);
-        let flags = chrome_flags_with(eff.headless, &args, eff.ignore_default_args.as_ref());
+        let flags = chrome_flags_with(
+          eff.headless,
+          &args,
+          eff.ignore_default_args.as_ref(),
+          eff.chromium_sandbox == Some(true),
+        );
         let browser = match &eff.user_data_dir {
           Some(dir) => {
             CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
@@ -1488,7 +1500,12 @@ impl LaunchSpec {
         use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
         let mut args = eff.args.clone();
         args.extend(proxy_flags);
-        let flags = chrome_flags_with(eff.headless, &args, eff.ignore_default_args.as_ref());
+        let flags = chrome_flags_with(
+          eff.headless,
+          &args,
+          eff.ignore_default_args.as_ref(),
+          eff.chromium_sandbox == Some(true),
+        );
         let browser = match &eff.user_data_dir {
           Some(dir) => {
             Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
@@ -2737,7 +2754,7 @@ fn chrome_default_user_data_dirs(channel: &str) -> Result<Vec<std::path::PathBuf
 /// Build Chrome flags matching Playwright's launch sequence exactly.
 /// Order: chromiumSwitches → headless flags → sandbox → user args.
 pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
-  chrome_flags_with(headless, extra_args, None)
+  chrome_flags_with(headless, extra_args, None, false)
 }
 
 /// [`chrome_flags`] with Playwright's `ignoreDefaultArgs`.
@@ -2752,6 +2769,7 @@ pub fn chrome_flags_with(
   headless: bool,
   extra_args: &[String],
   ignore: Option<&crate::options::IgnoreDefaultArgs>,
+  sandbox: bool,
 ) -> Vec<String> {
   use crate::options::IgnoreDefaultArgs;
 
@@ -2824,7 +2842,7 @@ pub fn chrome_flags_with(
   }
 
   // 4. Sandbox control (Playwright disables by default unless chromiumSandbox=true)
-  if !drop_all && !is_dropped("--no-sandbox") {
+  if !sandbox && !drop_all && !is_dropped("--no-sandbox") {
     flags.push("--no-sandbox".into());
   }
 
@@ -4034,7 +4052,7 @@ mod tests {
     assert_eq!(eff.env.get("APP_ENV").map(String::as_str), Some("staging"));
 
     // `ignoreDefaultArgs` must actually drop the switch.
-    let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref());
+    let flags = chrome_flags_with(eff.headless, &eff.args, eff.ignore_default_args.as_ref(), false);
     assert!(!flags.iter().any(|f| f == "--no-sandbox"), "dropped: {flags:?}");
     assert!(flags.iter().any(|f| f == "--instance-flag"), "user args survive");
   }
@@ -4054,18 +4072,44 @@ mod tests {
   }
 
   #[test]
+  fn chromium_sandbox_true_keeps_the_sandbox() {
+    assert!(
+      chrome_flags_with(true, &[], None, false)
+        .iter()
+        .any(|f| f == "--no-sandbox")
+    );
+    assert!(
+      !chrome_flags_with(true, &[], None, true)
+        .iter()
+        .any(|f| f == "--no-sandbox")
+    );
+    assert!(
+      chrome_flags_with(true, &["--no-sandbox".to_string()], None, true)
+        .iter()
+        .any(|f| f == "--no-sandbox"),
+      "an explicit argument still wins"
+    );
+  }
+
+  #[test]
   fn ignore_default_args_all_drops_every_builtin() {
     let flags = chrome_flags_with(
       false,
       &["--keep-me".to_string()],
       Some(&crate::options::IgnoreDefaultArgs::All),
+      false,
     );
     assert_eq!(flags, vec!["--keep-me"]);
   }
 
   #[test]
   fn loading_an_extension_keeps_headless_defaults_and_removes_only_extension_blocker() {
-    let flags = chrome_flags_with(true, &["--load-extension=/tmp/example-extension".to_string()], None);
+    let flags = chrome_flags_with(
+      true,
+      &["--load-extension=/tmp/example-extension".to_string()],
+      None,
+      false,
+    );
     assert!(
       flags
         .iter()
@@ -4086,6 +4130,7 @@ mod tests {
       true,
       &["--keep-me".to_string()],
       Some(&crate::options::IgnoreDefaultArgs::All),
+      false,
     );
     assert_eq!(flags, vec!["--keep-me"], "got: {flags:?}");
   }
@@ -4098,6 +4143,7 @@ mod tests {
       Some(&crate::options::IgnoreDefaultArgs::Some(vec![
         "--hide-scrollbars".to_string(),
       ])),
+      false,
     );
     assert!(!flags.iter().any(|f| f == "--hide-scrollbars"), "got: {flags:?}");
     assert!(flags.iter().any(|f| f == "--headless"), "the rest survive");
@@ -4239,6 +4285,7 @@ mod tests {
       Some(&crate::options::IgnoreDefaultArgs::Some(vec![
         "--disable-features".to_string(),
       ])),
+      false,
     );
     assert!(
       !flags.iter().any(|f| f.starts_with("--disable-features")),

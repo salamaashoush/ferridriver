@@ -414,7 +414,7 @@ fn ensure_socket_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<SocketPumpMsg>
   let pump_ctx = ctx.clone();
   ctx.spawn(async move {
     while let Some((id, event, socket)) = rx.recv().await {
-      let Ok(Some(saved)) = crate::bindings::page::with_page_callbacks(&pump_ctx, |r| r.get_socket_listener(id)) else {
+      let Ok(Some(saved)) = crate::bindings::page::with_page_callbacks(&pump_ctx, |r| r.get_object_listener(id)) else {
         continue;
       };
       let Ok(f) = saved.restore(&pump_ctx) else { continue };
@@ -479,7 +479,7 @@ impl WebSocketJs {
   ) -> rquickjs::Result<()> {
     let id = crate::bindings::page::with_page_callbacks(ctx, crate::bindings::page::PageCallbacks::next_route_id)?;
     let saved = crate::bindings::page::SavedCallback::save(ctx, handler);
-    crate::bindings::page::with_page_callbacks(ctx, |r| r.insert_socket_listener(id, saved))?;
+    crate::bindings::page::with_page_callbacks(ctx, |r| r.insert_object_listener(id, saved))?;
     let pump = ensure_socket_pump(ctx);
     let socket = self.inner.clone();
     let callback: Arc<dyn Fn(WebSocketEvent) + Send + Sync> = Arc::new(move |event| {
@@ -564,13 +564,13 @@ impl WebSocketJs {
         let hit = name == event
           && match &handler.0 {
             None => true,
-            Some(handler) => crate::bindings::page::with_page_callbacks(&ctx, |r| r.get_socket_listener(id))?
+            Some(handler) => crate::bindings::page::with_page_callbacks(&ctx, |r| r.get_object_listener(id))?
               .map(|saved| saved.restore(&ctx))
               .transpose()?
               .is_some_and(|stored| stored.as_value() == handler.as_value()),
           };
         if hit {
-          crate::bindings::page::with_page_callbacks(&ctx, |r| r.remove_socket_listener(id))?;
+          crate::bindings::page::with_page_callbacks(&ctx, |r| r.remove_object_listener(id))?;
           socket.inner.events().off(core);
         } else {
           kept.push((id, name, core));

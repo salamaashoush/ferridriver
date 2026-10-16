@@ -2086,6 +2086,11 @@ export interface Worker {
   /** Runs in the worker's global scope; `arg` crosses by value. */
   evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
   waitForEvent(event: 'close', optionsOrTimeout?: number | { timeout?: number }): Promise<Worker>;
+  on(event: 'close', listener: (worker: Worker) => void): this;
+  addListener(event: 'close', listener: (worker: Worker) => void): this;
+  once(event: 'close', listener: (worker: Worker) => void): this;
+  off(event: 'close', listener?: (worker: Worker) => void): this;
+  removeListener(event: 'close', listener?: (worker: Worker) => void): this;
 }
 
 export type BrowserContextEvent =
@@ -2508,6 +2513,8 @@ export interface Video {
 
 /** Every knob `chromium().launch()` reads. */
 export interface LaunchOptions {
+  /** Keep Chromium's sandbox; it is turned off unless this is `true`. */
+  chromiumSandbox?: boolean;
   firefoxUserPrefs?: { [key: string]: string | number | boolean };
   headless?: boolean;
   executablePath?: string;

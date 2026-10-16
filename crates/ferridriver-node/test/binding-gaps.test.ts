@@ -53,4 +53,15 @@ describe("launch options", () => {
       await browser.close();
     }
   });
+
+  it("chromiumSandbox keeps the sandbox", async () => {
+    const browser = await chromium().launch({ chromiumSandbox: true });
+    try {
+      const session = await browser.newBrowserCDPSession();
+      const line = (await session.send("Browser.getBrowserCommandLine")) as { arguments: string[] };
+      expect(line.arguments).not.toContain("--no-sandbox");
+    } finally {
+      await browser.close();
+    }
+  });
 });

@@ -106,9 +106,9 @@ pub(crate) struct PageCallbacks {
   /// and carrying the event name so `off(event, fn)` can match by JS
   /// function identity. Restored by the CDP event pump.
   cdp_listeners: rustc_hash::FxHashMap<u64, (String, SavedCallback)>,
-  /// `webSocket.on/once` JS listeners, keyed by a registry-global id.
-  /// Restored by the socket event pump.
-  socket_listeners: rustc_hash::FxHashMap<u64, SavedCallback>,
+  /// `on/once` JS listeners of the small emitters (`WebSocket`,
+  /// `Worker`), keyed by a registry-global id. Restored by their pumps.
+  object_listeners: rustc_hash::FxHashMap<u64, SavedCallback>,
 }
 
 /// Identity of the object a route was registered through, so
@@ -242,16 +242,16 @@ impl PageCallbacks {
       .collect()
   }
 
-  pub(crate) fn insert_socket_listener(&mut self, id: u64, cb: SavedCallback) {
-    self.socket_listeners.insert(id, cb);
+  pub(crate) fn insert_object_listener(&mut self, id: u64, cb: SavedCallback) {
+    self.object_listeners.insert(id, cb);
   }
 
-  pub(crate) fn get_socket_listener(&self, id: u64) -> Option<SavedCallback> {
-    self.socket_listeners.get(&id).cloned()
+  pub(crate) fn get_object_listener(&self, id: u64) -> Option<SavedCallback> {
+    self.object_listeners.get(&id).cloned()
   }
 
-  pub(crate) fn remove_socket_listener(&mut self, id: u64) {
-    self.socket_listeners.remove(&id);
+  pub(crate) fn remove_object_listener(&mut self, id: u64) {
+    self.object_listeners.remove(&id);
   }
 
   pub(crate) fn get_route_pred(&self, id: u64) -> Option<SavedCallback> {

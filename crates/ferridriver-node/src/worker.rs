@@ -1,7 +1,7 @@
 //! NAPI binding for [`ferridriver::worker::Worker`]. Playwright
 //! `class Worker` (`packages/playwright-core/src/client/worker.ts`).
 
-use napi::Result;
+use napi::{Env, Result};
 use napi_derive::napi;
 
 use crate::error::IntoNapi;
@@ -10,11 +10,61 @@ use crate::error::IntoNapi;
 #[napi]
 pub struct Worker {
   pub(crate) inner: ferridriver::worker::Worker,
+  /// `on` / `once` registrations, so `off(event, listener)` finds the
+  /// core listener from JS function identity.
+  listener_regs: std::sync::Arc<std::sync::Mutex<Vec<WorkerListenerReg>>>,
+}
+
+struct WorkerListenerReg {
+  event: String,
+  id: u64,
+  fn_ref: napi::bindgen_prelude::FunctionRef<crate::identity::WorkerObject, ()>,
 }
 
 impl Worker {
   pub(crate) fn from_core(inner: ferridriver::worker::Worker) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      listener_regs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+    }
+  }
+
+  fn register_listener(
+    &self,
+    event: &str,
+    listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
+    once: bool,
+  ) -> Result<()> {
+    let fn_ref = listener.create_ref()?;
+    let tsfn = listener
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let callback: std::sync::Arc<dyn Fn(ferridriver::worker::WorkerEvent) + Send + Sync> =
+      std::sync::Arc::new(move |event| {
+        let ferridriver::worker::WorkerEvent::Close(worker) = event;
+        tsfn.call(
+          crate::identity::WorkerObject(worker),
+          napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+        );
+      });
+    let id = if once {
+      self.inner.events().once(event, callback)
+    } else {
+      self.inner.events().on(event, callback)
+    };
+    self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(WorkerListenerReg {
+        event: event.to_string(),
+        id: id.0,
+        fn_ref,
+      });
+    Ok(())
   }
 }
 
@@ -31,6 +81,102 @@ impl Worker {
   #[napi]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
+  }
+
+  /// Playwright: `worker.on('close', listener)`; returns the worker so
+  /// registrations chain.
+  #[napi(
+    ts_args_type = "event: 'close', listener: (worker: Worker) => void",
+    ts_return_type = "this"
+  )]
+  pub fn on<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, listener, false)?;
+    Ok(this.object)
+  }
+
+  /// Node's `addListener`, an alias of [`Self::on`].
+  #[napi(
+    ts_args_type = "event: 'close', listener: (worker: Worker) => void",
+    ts_return_type = "this"
+  )]
+  pub fn add_listener<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.on(this, event, listener)
+  }
+
+  /// One-shot [`Self::on`].
+  #[napi(
+    ts_args_type = "event: 'close', listener: (worker: Worker) => void",
+    ts_return_type = "this"
+  )]
+  pub fn once<'env>(
+    &self,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.register_listener(&event, listener, true)?;
+    Ok(this.object)
+  }
+
+  /// Remove `listener` from `event`, or every listener of `event`.
+  #[napi(
+    ts_args_type = "event: 'close', listener?: (worker: Worker) => void",
+    ts_return_type = "this"
+  )]
+  pub fn off<'env>(
+    &self,
+    env: Env,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: Option<napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    let mut regs = self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(listener) = listener else {
+      self.inner.events().remove_listeners_named(&event);
+      regs.retain(|r| r.event != event);
+      return Ok(this.object);
+    };
+    let wanted = listener.create_ref()?;
+    let mut i = 0;
+    while i < regs.len() {
+      let hit =
+        regs[i].event == event && env.strict_equals(wanted.borrow_back(&env)?, regs[i].fn_ref.borrow_back(&env)?)?;
+      if hit {
+        let reg = regs.remove(i);
+        self.inner.events().off(ferridriver::events::ListenerId(reg.id));
+      } else {
+        i += 1;
+      }
+    }
+    Ok(this.object)
+  }
+
+  /// Node's `removeListener`, an alias of [`Self::off`].
+  #[napi(
+    ts_args_type = "event: 'close', listener?: (worker: Worker) => void",
+    ts_return_type = "this"
+  )]
+  pub fn remove_listener<'env>(
+    &self,
+    env: Env,
+    this: napi::bindgen_prelude::This<'env>,
+    event: String,
+    listener: Option<napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>>,
+  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+    self.off(env, this, event, listener)
   }
 
   /// Playwright: `worker.evaluate(pageFunction, arg?): Promise<R>`.

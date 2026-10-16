@@ -116,4 +116,20 @@ describe('browser type', () => {
       await launched.close();
     }
   });
+
+  test('chromium_sandbox_true_keeps_the_sandbox', async () => {
+    runOnceAcrossProjects();
+    const switches = async (options: { chromiumSandbox?: boolean }) => {
+      const browser = await chromium().launch({ headless: true, ...options });
+      try {
+        const protocol = await browser.newBrowserCDPSession();
+        const line = await protocol.send('Browser.getBrowserCommandLine') as { arguments: string[] };
+        return line.arguments;
+      } finally {
+        await browser.close();
+      }
+    };
+    expect(await switches({})).toContain('--no-sandbox');
+    expect(await switches({ chromiumSandbox: true })).not.toContain('--no-sandbox');
+  });
 });
