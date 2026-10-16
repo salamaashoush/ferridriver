@@ -511,22 +511,66 @@ impl Response {
 #[napi]
 pub struct WebSocket {
   pub(crate) inner: CoreWebSocket,
+  /// `on` / `once` registrations, so `off(event, listener)` finds the
+  /// core listener from JS function identity.
+  listener_regs: Arc<std::sync::Mutex<Vec<WebSocketListenerReg>>>,
+}
+
+struct WebSocketListenerReg {
+  event: String,
+  id: u64,
+  fn_ref: FunctionRef<WebSocketEventArg, ()>,
 }
 
 impl WebSocket {
   pub(crate) fn from_core(inner: CoreWebSocket) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      listener_regs: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }
   }
 }
 
-/// Synthetic outcome shape returned by `WebSocket.waitForEvent` for a
-/// generic event subscription — JS can pattern-match on `type`.
+/// Playwright's `{ payload: string | Buffer }` for `'framesent'` and
+/// `'framereceived'`.
 #[napi(object)]
-pub struct WebSocketEventDescriptor {
-  pub event: String,
-  #[napi(ts_type = "string | Buffer | null")]
-  pub payload: Option<serde_json::Value>,
-  pub error: Option<String>,
+pub struct WebSocketFrame {
+  #[napi(ts_type = "string | Buffer")]
+  pub payload: Either<String, Buffer>,
+}
+
+/// What a WebSocket listener receives: the frame, the error text, or
+/// the socket itself on `'close'` (Playwright's `WebSocketEventMap`).
+pub enum WebSocketEventArg {
+  Frame(WebSocketPayload),
+  Error(String),
+  Close(CoreWebSocket),
+}
+
+impl WebSocketEventArg {
+  fn from_event(event: WebSocketEvent, socket: &CoreWebSocket) -> Self {
+    match event {
+      WebSocketEvent::FrameSent(payload) | WebSocketEvent::FrameReceived(payload) => Self::Frame(payload),
+      WebSocketEvent::Error(message) => Self::Error(message),
+      WebSocketEvent::Close => Self::Close(socket.clone()),
+    }
+  }
+}
+
+impl ToNapiValue for WebSocketEventArg {
+  unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> Result<napi::sys::napi_value> {
+    match val {
+      WebSocketEventArg::Frame(payload) => {
+        let payload = match payload {
+          WebSocketPayload::Text(text) => Either::A(text),
+          WebSocketPayload::Binary(bytes) => Either::B(Buffer::from(bytes)),
+        };
+        unsafe { WebSocketFrame::to_napi_value(env, WebSocketFrame { payload }) }
+      },
+      WebSocketEventArg::Error(message) => unsafe { String::to_napi_value(env, message) },
+      WebSocketEventArg::Close(socket) => unsafe { WebSocket::to_napi_value(env, WebSocket::from_core(socket)) },
+    }
+  }
 }
 
 #[napi]
@@ -543,73 +587,218 @@ impl WebSocket {
     self.inner.is_closed()
   }
 
-  /// Mirrors Playwright `webSocket.waitForEvent(event, options?)`.
-  /// Resolves with the next matching event payload; rejects on timeout.
-  #[napi(ts_return_type = "Promise<{ event: string; payload: string | Buffer | null; error: string | null }>")]
-  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<WebSocketEventDescriptor> {
-    let timeout = std::time::Duration::from_millis(crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0)));
-    let mut rx = self.inner.subscribe();
-    let event_lc = event.to_ascii_lowercase();
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      if remaining.is_zero() {
-        return Err(napi::Error::from_reason(format!(
-          "Timeout {}ms exceeded while waiting for WebSocket event {event:?}",
-          timeout.as_millis()
-        )));
-      }
-      match tokio::time::timeout(remaining, rx.recv()).await {
-        Ok(Ok(ev)) => {
-          if let Some(out) = match_event(&event_lc, &ev) {
-            return Ok(out);
-          }
-        },
-        Ok(Err(_)) => {
-          return Err(napi::Error::from_reason("WebSocket channel closed"));
-        },
-        Err(_) => {
-          return Err(napi::Error::from_reason(format!(
-            "Timeout {}ms exceeded while waiting for WebSocket event {event:?}",
-            timeout.as_millis()
-          )));
-        },
+  /// Playwright: `webSocket.on(event, listener)`; returns the socket so
+  /// registrations chain.
+  #[napi(
+    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
+    ts_return_type = "this"
+  )]
+  pub fn on<'env>(
+    &self,
+    this: This<'env>,
+    event: String,
+    listener: Function<'_, WebSocketEventArg, ()>,
+  ) -> Result<Object<'env>> {
+    self.register_listener(&event, listener, false)?;
+    Ok(this.object)
+  }
+
+  /// Node's `addListener`, an alias of [`Self::on`].
+  #[napi(
+    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
+    ts_return_type = "this"
+  )]
+  pub fn add_listener<'env>(
+    &self,
+    this: This<'env>,
+    event: String,
+    listener: Function<'_, WebSocketEventArg, ()>,
+  ) -> Result<Object<'env>> {
+    self.on(this, event, listener)
+  }
+
+  /// One-shot [`Self::on`].
+  #[napi(
+    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener: (data: { payload: string | Buffer } | string | WebSocket) => void",
+    ts_return_type = "this"
+  )]
+  pub fn once<'env>(
+    &self,
+    this: This<'env>,
+    event: String,
+    listener: Function<'_, WebSocketEventArg, ()>,
+  ) -> Result<Object<'env>> {
+    self.register_listener(&event, listener, true)?;
+    Ok(this.object)
+  }
+
+  /// Remove `listener` from `event`, or every listener of `event`.
+  #[napi(
+    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (data: { payload: string | Buffer } | string | WebSocket) => void",
+    ts_return_type = "this"
+  )]
+  pub fn off<'env>(
+    &self,
+    env: Env,
+    this: This<'env>,
+    event: String,
+    listener: Option<Function<'_, WebSocketEventArg, ()>>,
+  ) -> Result<Object<'env>> {
+    let mut regs = self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(listener) = listener else {
+      self.inner.events().remove_listeners_named(&event);
+      regs.retain(|r| r.event != event);
+      return Ok(this.object);
+    };
+    let wanted = listener.create_ref()?;
+    let mut i = 0;
+    while i < regs.len() {
+      let hit =
+        regs[i].event == event && env.strict_equals(wanted.borrow_back(&env)?, regs[i].fn_ref.borrow_back(&env)?)?;
+      if hit {
+        let reg = regs.remove(i);
+        self.inner.events().off(ferridriver::events::ListenerId(reg.id));
+      } else {
+        i += 1;
       }
     }
+    Ok(this.object)
+  }
+
+  /// Node's `removeListener`, an alias of [`Self::off`].
+  #[napi(
+    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (data: { payload: string | Buffer } | string | WebSocket) => void",
+    ts_return_type = "this"
+  )]
+  pub fn remove_listener<'env>(
+    &self,
+    env: Env,
+    this: This<'env>,
+    event: String,
+    listener: Option<Function<'_, WebSocketEventArg, ()>>,
+  ) -> Result<Object<'env>> {
+    self.off(env, this, event, listener)
+  }
+
+  /// Playwright `webSocket.waitForEvent(event, optionsOrPredicate?)`:
+  /// the next `event` the predicate accepts, in the shape a listener
+  /// gets. Waiting for anything but `'close'` fails once the socket closes.
+  #[napi(
+    ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', optionsOrPredicate?: number | ((data: { payload: string | Buffer } | string | WebSocket) => boolean | Promise<boolean>) | { predicate?: (data: { payload: string | Buffer } | string | WebSocket) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }",
+    ts_return_type = "Promise<{ payload: string | Buffer } | string | WebSocket>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn wait_for_event(
+    &self,
+    env: &Env,
+    event: String,
+    options_or_predicate: Option<Either3<f64, Function<'_, WebSocketEventArg, crate::page::PredReturn>, Object<'_>>>,
+  ) -> Result<AsyncBlock<WebSocketEventArg>> {
+    let mut timeout_ms: Option<f64> = None;
+    let mut predicate = None;
+    let mut signal = None;
+    match options_or_predicate {
+      None => {},
+      Some(Either3::A(timeout)) => timeout_ms = Some(timeout),
+      Some(Either3::B(f)) => {
+        predicate = Some(
+          f.build_threadsafe_function::<WebSocketEventArg>()
+            .callee_handled::<false>()
+            .weak::<false>()
+            .max_queue_size::<0>()
+            .build()?,
+        );
+      },
+      Some(Either3::C(bag)) => {
+        timeout_ms = bag.get::<f64>("timeout")?;
+        signal = crate::abort::take(&mut Some(bag.get::<crate::abort::Signal>("signal")?));
+        if let Some(f) = bag.get::<Function<'_, WebSocketEventArg, crate::page::PredReturn>>("predicate")? {
+          predicate = Some(
+            f.build_threadsafe_function::<WebSocketEventArg>()
+              .callee_handled::<false>()
+              .weak::<false>()
+              .max_queue_size::<0>()
+              .build()?,
+          );
+        }
+      },
+    }
+    let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
+    let socket = self.inner.clone();
+    let mut events = self.inner.subscribe();
+    AsyncBlockBuilder::new(crate::abort::race(signal, async move {
+      use ferridriver::events::EmitterEvent;
+      if event != "close" && socket.is_closed() {
+        return Err(napi::Error::from_reason("Socket closed"));
+      }
+      let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+      loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let next = if timeout == 0 {
+          Ok(events.recv().await)
+        } else {
+          tokio::time::timeout(remaining, events.recv()).await
+        };
+        let Ok(Some(ev)) = next else {
+          return Err(napi::Error::from_reason(format!(
+            "Timeout {timeout}ms exceeded while waiting for event \"{event}\""
+          )));
+        };
+        if !WebSocketEvent::matches_name(&event, &ev) {
+          if matches!(ev, WebSocketEvent::Close) {
+            return Err(napi::Error::from_reason("Socket closed"));
+          }
+          continue;
+        }
+        let Some(predicate) = &predicate else {
+          return Ok(WebSocketEventArg::from_event(ev, &socket));
+        };
+        let accepted = predicate
+          .call_async(WebSocketEventArg::from_event(ev.clone(), &socket))
+          .await
+          .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        if crate::page::resolve_pred(accepted).await {
+          return Ok(WebSocketEventArg::from_event(ev, &socket));
+        }
+      }
+    }))
+    .build(env)
   }
 }
 
-fn match_event(name: &str, ev: &WebSocketEvent) -> Option<WebSocketEventDescriptor> {
-  match (name, ev) {
-    ("framesent", WebSocketEvent::FrameSent(p)) => Some(WebSocketEventDescriptor {
-      event: "framesent".into(),
-      payload: Some(payload_to_json(p)),
-      error: None,
-    }),
-    ("framereceived", WebSocketEvent::FrameReceived(p)) => Some(WebSocketEventDescriptor {
-      event: "framereceived".into(),
-      payload: Some(payload_to_json(p)),
-      error: None,
-    }),
-    ("socketerror", WebSocketEvent::Error(msg)) => Some(WebSocketEventDescriptor {
-      event: "socketerror".into(),
-      payload: None,
-      error: Some(msg.clone()),
-    }),
-    ("close", WebSocketEvent::Close) => Some(WebSocketEventDescriptor {
-      event: "close".into(),
-      payload: None,
-      error: None,
-    }),
-    _ => None,
-  }
-}
-
-fn payload_to_json(p: &WebSocketPayload) -> serde_json::Value {
-  match p {
-    WebSocketPayload::Text(s) => serde_json::Value::String(s.clone()),
-    WebSocketPayload::Binary(b) => {
-      serde_json::Value::String(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
-    },
+impl WebSocket {
+  fn register_listener(&self, event: &str, listener: Function<'_, WebSocketEventArg, ()>, once: bool) -> Result<()> {
+    let fn_ref = listener.create_ref()?;
+    let tsfn = listener
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let socket = self.inner.clone();
+    let callback: Arc<dyn Fn(WebSocketEvent) + Send + Sync> = Arc::new(move |ev| {
+      tsfn.call(
+        WebSocketEventArg::from_event(ev, &socket),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+      );
+    });
+    let id = if once {
+      self.inner.events().once(event, callback)
+    } else {
+      self.inner.events().on(event, callback)
+    };
+    self
+      .listener_regs
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(WebSocketListenerReg {
+        event: event.to_string(),
+        id: id.0,
+        fn_ref,
+      });
+    Ok(())
   }
 }

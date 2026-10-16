@@ -1075,12 +1075,51 @@ pub enum WebSocketPayload {
   Binary(Vec<u8>),
 }
 
+/// The payload of a `Network.webSocketFrameSent` / `...Received` event
+/// (CDP and `WebKit` share the shape). Like Playwright, a frame with no
+/// payload data or an opcode other than text (1) or binary (2) is not
+/// reported: those are control frames, the close handshake among them.
+pub(crate) fn websocket_frame_payload(params: &serde_json::Value) -> Option<WebSocketPayload> {
+  use base64::Engine as _;
+  let response = params.get("response")?;
+  let data = response.get("payloadData").and_then(serde_json::Value::as_str)?;
+  if data.is_empty() {
+    return None;
+  }
+  match response.get("opcode").and_then(serde_json::Value::as_u64) {
+    Some(1) => Some(WebSocketPayload::Text(data.to_string())),
+    Some(2) => Some(WebSocketPayload::Binary(
+      base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap_or_else(|_| data.as_bytes().to_vec()),
+    )),
+    _ => None,
+  }
+}
+
+/// Playwright's `WebSocketEventMap`.
 #[derive(Debug, Clone)]
 pub enum WebSocketEvent {
+  /// `'framesent'`
   FrameSent(WebSocketPayload),
+  /// `'framereceived'`
   FrameReceived(WebSocketPayload),
+  /// `'socketerror'`
   Error(String),
+  /// `'close'`
   Close,
+}
+
+impl crate::events::EmitterEvent for WebSocketEvent {
+  fn matches_name(name: &str, event: &Self) -> bool {
+    matches!(
+      (name, event),
+      ("framesent", WebSocketEvent::FrameSent(_))
+        | ("framereceived", WebSocketEvent::FrameReceived(_))
+        | ("socketerror", WebSocketEvent::Error(_))
+        | ("close", WebSocketEvent::Close)
+    )
+  }
 }
 
 #[derive(Clone)]
@@ -1100,18 +1139,17 @@ impl std::fmt::Debug for WebSocket {
 pub(crate) struct WebSocketState {
   url: String,
   closed: std::sync::atomic::AtomicBool,
-  events: tokio::sync::broadcast::Sender<WebSocketEvent>,
+  events: crate::events::Emitter<WebSocketEvent>,
 }
 
 impl WebSocket {
   #[must_use]
   pub fn new(url: String) -> Self {
-    let (tx, _rx) = tokio::sync::broadcast::channel(256);
     Self {
       inner: Arc::new(WebSocketState {
         url,
         closed: std::sync::atomic::AtomicBool::new(false),
-        events: tx,
+        events: crate::events::Emitter::new(),
       }),
     }
   }
@@ -1126,28 +1164,34 @@ impl WebSocket {
     self.inner.closed.load(std::sync::atomic::Ordering::Acquire)
   }
 
-  /// Subscribe to frame / error / close events. Receivers see only
-  /// events emitted after subscribing — listeners must subscribe before
-  /// the activity they care about.
+  /// The socket's event emitter (`webSocket.on('framereceived', ...)`).
+  /// Lossless: every frame reaches every listener in order.
   #[must_use]
-  pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<WebSocketEvent> {
+  pub fn events(&self) -> &crate::events::Emitter<WebSocketEvent> {
+    &self.inner.events
+  }
+
+  /// Subscribe to frame / error / close events. Subscribers see only
+  /// events emitted after subscribing.
+  #[must_use]
+  pub fn subscribe(&self) -> crate::events::EventSubscription<WebSocketEvent> {
     self.inner.events.subscribe()
   }
 
   // -- Internal mutators ---------------------------------------------------
 
   pub fn emit_frame_sent(&self, payload: WebSocketPayload) {
-    let _ = self.inner.events.send(WebSocketEvent::FrameSent(payload));
+    self.inner.events.emit(WebSocketEvent::FrameSent(payload));
   }
   pub fn emit_frame_received(&self, payload: WebSocketPayload) {
-    let _ = self.inner.events.send(WebSocketEvent::FrameReceived(payload));
+    self.inner.events.emit(WebSocketEvent::FrameReceived(payload));
   }
   pub fn emit_error(&self, message: String) {
-    let _ = self.inner.events.send(WebSocketEvent::Error(message));
+    self.inner.events.emit(WebSocketEvent::Error(message));
   }
   pub fn emit_close(&self) {
     self.inner.closed.store(true, std::sync::atomic::Ordering::Release);
-    let _ = self.inner.events.send(WebSocketEvent::Close);
+    self.inner.events.emit(WebSocketEvent::Close);
   }
 }
 
@@ -1304,6 +1348,22 @@ fn hex_digit(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn only_text_and_binary_frames_with_data_are_reported() {
+    let frame = |opcode: u64, data: &str| serde_json::json!({ "response": { "opcode": opcode, "payloadData": data } });
+    assert!(matches!(websocket_frame_payload(&frame(1, "hi")), Some(WebSocketPayload::Text(t)) if t == "hi"));
+    assert!(matches!(
+      websocket_frame_payload(&frame(2, "AQL/")),
+      Some(WebSocketPayload::Binary(b)) if b == [1, 2, 255]
+    ));
+    assert!(websocket_frame_payload(&frame(1, "")).is_none(), "no payload");
+    assert!(
+      websocket_frame_payload(&frame(8, "\u{3}\u{e8}")).is_none(),
+      "the close handshake"
+    );
+    assert!(websocket_frame_payload(&frame(9, "ping")).is_none());
+  }
 
   #[tokio::test]
   async fn navigation_waits_for_redirect_hops_queued_after_the_lifecycle_result() {

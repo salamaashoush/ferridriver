@@ -13,7 +13,7 @@ use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::context::DialogEvent;
 use crate::network::{
   BodyFn, Headers, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit, SecurityDetails,
-  WebSocket, WebSocketPayload,
+  WebSocket,
 };
 
 /// Parse the JSON array produced by `window.__fd.accessibilityTree(depth)`
@@ -1150,7 +1150,9 @@ async fn handle_websocket_frame(params: &Value, websockets: &WebSockets, sent: b
   let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
     return;
   };
-  let payload = parse_websocket_frame(params);
+  let Some(payload) = crate::network::websocket_frame_payload(params) else {
+    return;
+  };
   let map = websockets.lock().await;
   if let Some(ws) = map.get(request_id) {
     if sent {
@@ -1181,28 +1183,6 @@ async fn handle_websocket_closed(params: &Value, websockets: &WebSockets) {
   };
   if let Some(ws) = websockets.lock().await.remove(request_id) {
     ws.emit_close();
-  }
-}
-
-/// Decode `WebSocketFrame` payload — opcode 2 = binary (base64).
-fn parse_websocket_frame(params: &Value) -> WebSocketPayload {
-  use base64::Engine as _;
-  let response = params.get("response");
-  let opcode = response
-    .and_then(|r| r.get("opcode"))
-    .and_then(Value::as_u64)
-    .unwrap_or(1);
-  let payload_data = response
-    .and_then(|r| r.get("payloadData"))
-    .and_then(Value::as_str)
-    .unwrap_or("");
-  if opcode == 2 {
-    let bytes = base64::engine::general_purpose::STANDARD
-      .decode(payload_data)
-      .unwrap_or_else(|_| payload_data.as_bytes().to_vec());
-    WebSocketPayload::Binary(bytes)
-  } else {
-    WebSocketPayload::Text(payload_data.to_string())
   }
 }
 

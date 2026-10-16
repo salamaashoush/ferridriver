@@ -1970,15 +1970,39 @@ export interface Frame {
   isEditable(selector: string, options?: SelectorReadOptions): Promise<boolean>;
 }
 
+export interface WebSocketFrame {
+  /** Text frames are strings; binary frames are their bytes. */
+  payload: string | Uint8Array;
+}
+
 export interface WebSocket {
   url(): string;
   isClosed(): boolean;
+  on(event: 'framesent' | 'framereceived', listener: (frame: WebSocketFrame) => void): this;
+  on(event: 'socketerror', listener: (error: string) => void): this;
+  on(event: 'close', listener: (webSocket: WebSocket) => void): this;
+  addListener(event: 'framesent' | 'framereceived', listener: (frame: WebSocketFrame) => void): this;
+  addListener(event: 'socketerror', listener: (error: string) => void): this;
+  addListener(event: 'close', listener: (webSocket: WebSocket) => void): this;
+  once(event: 'framesent' | 'framereceived', listener: (frame: WebSocketFrame) => void): this;
+  once(event: 'socketerror', listener: (error: string) => void): this;
+  once(event: 'close', listener: (webSocket: WebSocket) => void): this;
+  off(event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (arg: never) => void): this;
+  removeListener(event: 'framesent' | 'framereceived' | 'socketerror' | 'close', listener?: (arg: never) => void): this;
   // Accepts a bare timeout number (ferridriver extension mirroring
-  // page.waitForEvent) or Playwright's { timeout } bag.
+  // page.waitForEvent), a predicate, or Playwright's bag.
   waitForEvent(
-    event: 'framesent' | 'framereceived' | 'socketerror' | 'close',
-    optionsOrTimeout?: number | { timeout?: number; signal?: AbortSignal },
-  ): Promise<{ event: string; payload: string | null; error: string | null }>;
+    event: 'framesent' | 'framereceived',
+    optionsOrPredicate?: number | ((frame: WebSocketFrame) => boolean | Promise<boolean>) | { predicate?: (frame: WebSocketFrame) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal },
+  ): Promise<WebSocketFrame>;
+  waitForEvent(
+    event: 'socketerror',
+    optionsOrPredicate?: number | ((error: string) => boolean | Promise<boolean>) | { predicate?: (error: string) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal },
+  ): Promise<string>;
+  waitForEvent(
+    event: 'close',
+    optionsOrPredicate?: number | ((webSocket: WebSocket) => boolean | Promise<boolean>) | { predicate?: (webSocket: WebSocket) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal },
+  ): Promise<WebSocket>;
 }
 
 export interface WebSocketRoute {

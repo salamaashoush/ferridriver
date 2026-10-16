@@ -388,17 +388,115 @@ impl ResponseJs {
 
 // ── WebSocketJs ──────────────────────────────────────────────────────────────
 
+/// Bound on the socket-listener pump, like the page-event pump: a frame
+/// storm beyond it drops the newest event with a warning.
+const SOCKET_PUMP_CAPACITY: usize = 1024;
+
+type SocketPumpMsg = (u64, WebSocketEvent, CoreWebSocket);
+
+struct SocketEventPumpUd(tokio::sync::mpsc::Sender<SocketPumpMsg>);
+
+// SAFETY: holds only a `'static` channel sender, so re-stating the unused
+// `'js` lifetime is sound — identical rationale to `WsEventPumpUd`.
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for SocketEventPumpUd {
+  type Changed<'to> = SocketEventPumpUd;
+}
+
+/// Get (or lazily start) this context's socket-listener pump. Listeners
+/// run on the interpreter thread, never on the backend thread that
+/// emitted the frame.
+fn ensure_socket_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<SocketPumpMsg> {
+  if let Some(ud) = ctx.userdata::<SocketEventPumpUd>() {
+    return ud.0.clone();
+  }
+  let (tx, mut rx) = tokio::sync::mpsc::channel::<SocketPumpMsg>(SOCKET_PUMP_CAPACITY);
+  let pump_ctx = ctx.clone();
+  ctx.spawn(async move {
+    while let Some((id, event, socket)) = rx.recv().await {
+      let Ok(Some(saved)) = crate::bindings::page::with_page_callbacks(&pump_ctx, |r| r.get_socket_listener(id)) else {
+        continue;
+      };
+      let Ok(f) = saved.restore(&pump_ctx) else { continue };
+      let Ok(arg) = socket_event_to_js(&pump_ctx, event, socket) else {
+        continue;
+      };
+      let _: rquickjs::Result<Value<'_>> = f.call((arg,));
+    }
+  });
+  let _ = ctx.store_userdata(SocketEventPumpUd(tx.clone()));
+  tx
+}
+
+/// What a listener receives: `{ payload }` for a frame (a string, or the
+/// bytes of a binary frame), the error text, or the socket on `close`.
+fn socket_event_to_js<'js>(
+  ctx: &Ctx<'js>,
+  event: WebSocketEvent,
+  socket: CoreWebSocket,
+) -> rquickjs::Result<Value<'js>> {
+  use rquickjs::IntoJs;
+  match event {
+    WebSocketEvent::FrameSent(payload) | WebSocketEvent::FrameReceived(payload) => {
+      let frame = rquickjs::Object::new(ctx.clone())?;
+      match payload {
+        WebSocketPayload::Text(text) => frame.set("payload", text)?,
+        WebSocketPayload::Binary(bytes) => frame.set("payload", rquickjs::TypedArray::new(ctx.clone(), bytes)?)?,
+      }
+      Ok(frame.into_value())
+    },
+    WebSocketEvent::Error(message) => message.into_js(ctx),
+    WebSocketEvent::Close => rquickjs::class::Class::instance(ctx.clone(), WebSocketJs::new(socket))?.into_js(ctx),
+  }
+}
+
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "WebSocket")]
 pub struct WebSocketJs {
   #[qjs(skip_trace)]
   inner: CoreWebSocket,
+  /// `(registry id, event, core listener)` for each listener registered
+  /// through this wrapper, so `off(event, fn)` can release it.
+  #[qjs(skip_trace)]
+  listeners: std::cell::RefCell<Vec<(u64, String, ferridriver::events::ListenerId)>>,
 }
 
 impl WebSocketJs {
   #[must_use]
   pub fn new(inner: CoreWebSocket) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      listeners: std::cell::RefCell::new(Vec::new()),
+    }
+  }
+
+  fn register<'js>(
+    &self,
+    ctx: &Ctx<'js>,
+    event: String,
+    handler: rquickjs::Function<'js>,
+    once: bool,
+  ) -> rquickjs::Result<()> {
+    let id = crate::bindings::page::with_page_callbacks(ctx, crate::bindings::page::PageCallbacks::next_route_id)?;
+    let saved = crate::bindings::page::SavedCallback::save(ctx, handler);
+    crate::bindings::page::with_page_callbacks(ctx, |r| r.insert_socket_listener(id, saved))?;
+    let pump = ensure_socket_pump(ctx);
+    let socket = self.inner.clone();
+    let callback: Arc<dyn Fn(WebSocketEvent) + Send + Sync> = Arc::new(move |event| {
+      if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = pump.try_send((id, event, socket.clone())) {
+        tracing::warn!(
+          capacity = SOCKET_PUMP_CAPACITY,
+          "WebSocket listener pump full; dropping an event"
+        );
+      }
+    });
+    let core = if once {
+      self.inner.events().once(&event, callback)
+    } else {
+      self.inner.events().on(&event, callback)
+    };
+    self.listeners.borrow_mut().push((id, event, core));
+    Ok(())
   }
 }
 
@@ -414,10 +512,89 @@ impl WebSocketJs {
     self.inner.is_closed()
   }
 
-  /// Mirrors Playwright `webSocket.waitForEvent(event, options?)`.
-  /// Accepts a bare timeout number (the same ferridriver extension as
-  /// `page.waitForEvent`) or the `{ timeout }` bag. Resolves with
-  /// `{ event, payload, error }`.
+  /// Playwright: `webSocket.on(event, listener)`.
+  #[qjs(rename = "on")]
+  pub fn on<'js>(
+    this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
+    this.0.borrow().register(&ctx, event, handler, false)?;
+    Ok(this.0)
+  }
+
+  /// Node's `addListener`, an alias of `on`.
+  #[qjs(rename = "addListener")]
+  pub fn add_listener<'js>(
+    this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
+    Self::on(this, ctx, event, handler)
+  }
+
+  /// One-shot `on`.
+  #[qjs(rename = "once")]
+  pub fn once<'js>(
+    this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
+    this.0.borrow().register(&ctx, event, handler, true)?;
+    Ok(this.0)
+  }
+
+  /// Remove `handler` from `event`, or every listener of `event`
+  /// registered through this socket.
+  #[qjs(rename = "off")]
+  pub fn off<'js>(
+    this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    handler: rquickjs::function::Opt<rquickjs::Function<'js>>,
+  ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
+    {
+      let socket = this.0.borrow();
+      let mut listeners = socket.listeners.borrow_mut();
+      let mut kept = Vec::with_capacity(listeners.len());
+      for (id, name, core) in listeners.drain(..) {
+        let hit = name == event
+          && match &handler.0 {
+            None => true,
+            Some(handler) => crate::bindings::page::with_page_callbacks(&ctx, |r| r.get_socket_listener(id))?
+              .map(|saved| saved.restore(&ctx))
+              .transpose()?
+              .is_some_and(|stored| stored.as_value() == handler.as_value()),
+          };
+        if hit {
+          crate::bindings::page::with_page_callbacks(&ctx, |r| r.remove_socket_listener(id))?;
+          socket.inner.events().off(core);
+        } else {
+          kept.push((id, name, core));
+        }
+      }
+      *listeners = kept;
+    }
+    Ok(this.0)
+  }
+
+  /// Node's `removeListener`, an alias of `off`.
+  #[qjs(rename = "removeListener")]
+  pub fn remove_listener<'js>(
+    this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    ctx: Ctx<'js>,
+    event: String,
+    handler: rquickjs::function::Opt<rquickjs::Function<'js>>,
+  ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
+    Self::off(this, ctx, event, handler)
+  }
+
+  /// Playwright `webSocket.waitForEvent(event, optionsOrPredicate?)`:
+  /// the next `event` the predicate accepts, in the shape a listener
+  /// gets. Waiting for anything but `close` fails once the socket closes.
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,
@@ -425,93 +602,55 @@ impl WebSocketJs {
     event: String,
     options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
-    let timeout_ms = match options.0 {
-      Some(v) if v.is_number() => v.as_number(),
-      Some(v) if v.is_object() => {
-        #[derive(serde::Deserialize, Default)]
-        #[serde(rename_all = "camelCase", default)]
-        struct JsWaitTimeout {
-          timeout: Option<f64>,
-        }
-        let parsed: JsWaitTimeout = crate::bindings::convert::serde_from_js(&ctx, v)?;
-        parsed.timeout
-      },
-      _ => None,
-    };
-    let timeout = std::time::Duration::from_millis(timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64));
-    let mut rx = self.inner.subscribe();
-    let event_lc = event.to_ascii_lowercase();
-    let deadline = tokio::time::Instant::now() + timeout;
+    use ferridriver::events::EmitterEvent;
+    let mut timeout_ms: Option<f64> = None;
+    let mut predicate: Option<rquickjs::Function<'js>> = None;
+    if let Some(value) = options.0 {
+      if let Some(n) = value.as_number() {
+        timeout_ms = Some(n);
+      } else if let Some(f) = value.as_function() {
+        predicate = Some(f.clone());
+      } else if let Some(bag) = value.as_object() {
+        let timeout: Value<'js> = bag.get("timeout")?;
+        timeout_ms = timeout.as_number();
+        let found: Value<'js> = bag.get("predicate")?;
+        predicate = found.as_function().cloned();
+      }
+    }
+    let timeout = timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64);
+    let mut events = self.inner.subscribe();
+    if event != "close" && self.inner.is_closed() {
+      return Err(throw_named(&ctx, "Error", "Socket closed"));
+    }
+    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
     loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      if remaining.is_zero() {
-        return Err(crate::bindings::convert::throw_named(
+      let next = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, events.recv()).await.ok(),
+        None => Some(events.recv().await),
+      };
+      let Some(Some(ev)) = next else {
+        return Err(throw_named(
           &ctx,
           "TimeoutError",
-          format!(
-            "Timeout {}ms exceeded while waiting for WebSocket event {event:?}",
-            timeout.as_millis()
-          ),
+          format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
         ));
+      };
+      if !WebSocketEvent::matches_name(&event, &ev) {
+        if matches!(ev, WebSocketEvent::Close) {
+          return Err(throw_named(&ctx, "Error", "Socket closed"));
+        }
+        continue;
       }
-      match tokio::time::timeout(remaining, rx.recv()).await {
-        Ok(Ok(ev)) => {
-          if let Some(v) = ws_event_to_js(&ctx, &event_lc, &ev)? {
-            return Ok(v);
-          }
-        },
-        // A burst overran the broadcast buffer: skip the missed events
-        // and keep waiting — treating Lagged as fatal would silently
-        // turn an event storm into a bogus "channel closed" failure.
-        Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
-        Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-          return Err(crate::bindings::convert::throw_named(
-            &ctx,
-            "Error",
-            "WebSocket channel closed",
-          ));
-        },
-        Err(_) => {
-          return Err(crate::bindings::convert::throw_named(
-            &ctx,
-            "TimeoutError",
-            format!(
-              "Timeout {}ms exceeded while waiting for WebSocket event {event:?}",
-              timeout.as_millis()
-            ),
-          ));
-        },
+      let arg = socket_event_to_js(&ctx, ev.clone(), self.inner.clone())?;
+      let accepted = match &predicate {
+        None => true,
+        Some(predicate) => crate::bindings::page::call_predicate_truthy(predicate, arg.clone(), &ctx).await?,
+      };
+      if accepted {
+        return Ok(arg);
       }
     }
   }
-}
-
-/// Build the `{ event, payload, error }` JS object for a matched
-/// WebSocket event directly — no serde_json::Value middle allocation.
-fn ws_event_to_js<'js>(ctx: &Ctx<'js>, name: &str, ev: &WebSocketEvent) -> rquickjs::Result<Option<Value<'js>>> {
-  let make = |event: &str, payload: Value<'js>, error: Value<'js>| -> rquickjs::Result<Value<'js>> {
-    let o = rquickjs::Object::new(ctx.clone())?;
-    o.set("event", event)?;
-    o.set("payload", payload)?;
-    o.set("error", error)?;
-    Ok(o.into_value())
-  };
-  let null = || Value::new_null(ctx.clone());
-  let js_str =
-    |s: &str| -> rquickjs::Result<Value<'js>> { Ok(rquickjs::String::from_str(ctx.clone(), s)?.into_value()) };
-  let payload = |p: &WebSocketPayload| -> rquickjs::Result<Value<'js>> {
-    match p {
-      WebSocketPayload::Text(s) => js_str(s),
-      WebSocketPayload::Binary(b) => js_str(&base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b)),
-    }
-  };
-  Ok(match (name, ev) {
-    ("framesent", WebSocketEvent::FrameSent(p)) => Some(make("framesent", payload(p)?, null())?),
-    ("framereceived", WebSocketEvent::FrameReceived(p)) => Some(make("framereceived", payload(p)?, null())?),
-    ("socketerror", WebSocketEvent::Error(msg)) => Some(make("socketerror", null(), js_str(msg)?)?),
-    ("close", WebSocketEvent::Close) => Some(make("close", null(), null())?),
-    _ => None,
-  })
 }
 
 // ── RouteJs ──────────────────────────────────────────────────────────────────

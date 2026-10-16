@@ -30,7 +30,7 @@ use super::{
 use crate::error::{FerriError, Result};
 use crate::network::{
   self, BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, RequestInit, RequestSizes, RequestTiming, Response,
-  ResponseInit, SecurityDetails, WebSocket, WebSocketPayload,
+  ResponseInit, SecurityDetails, WebSocket,
 };
 use rustc_hash::FxHashMap;
 use std::time::Duration;
@@ -8053,7 +8053,9 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    let payload = parse_websocket_frame(params);
+    let Some(payload) = crate::network::websocket_frame_payload(params) else {
+      return;
+    };
     if let Some(ws) = self.websockets.lock().await.get(request_id) {
       ws.emit_frame_sent(payload);
     }
@@ -8063,7 +8065,9 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    let payload = parse_websocket_frame(params);
+    let Some(payload) = crate::network::websocket_frame_payload(params) else {
+      return;
+    };
     if let Some(ws) = self.websockets.lock().await.get(request_id) {
       ws.emit_frame_received(payload);
     }
@@ -8277,26 +8281,6 @@ fn parse_timing(value: &serde_json::Value) -> RequestTiming {
     request_start: f("sendStart", -1.0),
     response_start: f("receiveHeadersStart", -1.0),
     response_end: f("receiveHeadersEnd", -1.0),
-  }
-}
-
-fn parse_websocket_frame(params: &serde_json::Value) -> WebSocketPayload {
-  let response = params.get("response");
-  let opcode = response
-    .and_then(|r| r.get("opcode"))
-    .and_then(serde_json::Value::as_u64)
-    .unwrap_or(1);
-  let payload = response
-    .and_then(|r| r.get("payloadData"))
-    .and_then(|v| v.as_str())
-    .unwrap_or("");
-  if opcode == 2 {
-    let bytes = base64::engine::general_purpose::STANDARD
-      .decode(payload)
-      .unwrap_or_else(|_| payload.as_bytes().to_vec());
-    WebSocketPayload::Binary(bytes)
-  } else {
-    WebSocketPayload::Text(payload.to_string())
   }
 }
 

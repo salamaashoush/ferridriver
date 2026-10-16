@@ -262,8 +262,7 @@ for (const backend of BACKENDS) {
       await page.evaluate(
         "window.__opened.then(() => window.__ws.send('hello-ws')); null"
       );
-      const frame = (await recvPromise) as { event: string; payload: string | null };
-      expect(frame.event).toBe("framereceived");
+      const frame = (await recvPromise) as { payload: string | Buffer };
       expect(frame.payload).toBe("hello-ws");
     });
 
