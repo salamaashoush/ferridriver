@@ -243,6 +243,9 @@ pub fn attach_listeners(
               if let Some(gone) = env.params.get("targetId").and_then(Value::as_str) {
                 page.proxy_session().connection_handle().close_route(None, Some(gone));
               }
+              if live_target_crashed(&env.params, &page.target_id()) {
+                page.events.emit(crate::events::PageEvent::Crash);
+              }
             },
             Some("Target.didCommitProvisionalTarget") => {
               if let Some(new_rx) =
@@ -258,6 +261,14 @@ pub fn attach_listeners(
       }
     }
   });
+}
+
+/// Whether a `Target.targetDestroyed` reports the page's own target
+/// crashing (`wkPage._onTargetDestroyed`); a provisional or replaced
+/// target going away is ordinary navigation.
+fn live_target_crashed(params: &Value, live_target: &str) -> bool {
+  params.get("crashed").and_then(Value::as_bool) == Some(true)
+    && params.get("targetId").and_then(Value::as_str) == Some(live_target)
 }
 
 /// Handle `Target.targetCreated` with `isProvisional: true` — open a
@@ -1650,5 +1661,17 @@ mod tests {
     let v6 = super::parse_remote_address("::1:443").unwrap();
     assert_eq!((v6.ip_address.as_str(), v6.port), ("[::1]", 443));
     assert!(super::parse_remote_address("no-port").is_none());
+  }
+
+  #[test]
+  fn only_the_live_target_crashing_is_a_crash() {
+    let crashed = serde_json::json!({ "targetId": "page-2", "crashed": true });
+    assert!(super::live_target_crashed(&crashed, "page-2"));
+    assert!(!super::live_target_crashed(&crashed, "page-3"), "a replaced target");
+    let swapped = serde_json::json!({ "targetId": "page-2" });
+    assert!(
+      !super::live_target_crashed(&swapped, "page-2"),
+      "a process swap destroys without crashing"
+    );
   }
 }

@@ -1558,6 +1558,26 @@ impl PageJs {
   }
 
   /// Playwright: `page.workers(): Worker[]`.
+  /// Playwright: `page.requests(): Promise<Request[]>`; the array is
+  /// already at hand, so it is returned as `consoleMessages` returns its own.
+  #[qjs(rename = "requests")]
+  pub fn requests<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Vec<rquickjs::class::Class<'js, crate::bindings::network::RequestJs>>> {
+    self
+      .inner
+      .requests()
+      .into_iter()
+      .map(|request| {
+        rquickjs::class::Class::instance(
+          ctx.clone(),
+          crate::bindings::network::RequestJs::new_with_page(request, self.inner.clone()),
+        )
+      })
+      .collect()
+  }
+
   #[qjs(rename = "workers")]
   pub fn workers<'js>(
     &self,

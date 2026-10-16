@@ -79,7 +79,7 @@ fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEv
       Either11::I(crate::identity::FrameObject(page.frame_for_id(&info.frame_id)))
     },
     PageEvent::FrameDetached { frame_id } => Either11::I(crate::identity::FrameObject(page.frame_for_id(&frame_id))),
-    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
+    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close | PageEvent::Crash => {
       Either11::J(crate::identity::PageObject(page.clone()))
     },
     PageEvent::Popup(popup) => Either11::J(crate::identity::PageObject(popup)),
@@ -696,7 +696,7 @@ impl Page {
   /// events, the `Page` itself for `'load'` / `'domcontentloaded'` /
   /// `'close'`, and a native JS `Error` for `'pageerror'`.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   pub fn on<'env>(
@@ -711,7 +711,7 @@ impl Page {
 
   /// Node's `addListener`, an alias of [`Page::on`].
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   pub fn add_listener<'env>(
@@ -726,7 +726,7 @@ impl Page {
   /// Register a one-time event listener. Auto-removed after first match.
   /// Same live listener argument as [`Page::on`].
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   pub fn once<'env>(
@@ -742,7 +742,7 @@ impl Page {
   /// Node's `prependListener`: runs before the listeners already
   /// attached to the same event.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_listener<'env>(
@@ -757,7 +757,7 @@ impl Page {
 
   /// Node's `prependOnceListener`.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   pub fn prepend_once_listener<'env>(
@@ -774,7 +774,7 @@ impl Page {
   /// (function identity, `===`). `off(event)` alone drops every
   /// listener for that event.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   // napi-rs only injects `Env` as `&Env`, hence the pass-by-ref allow
@@ -816,7 +816,7 @@ impl Page {
 
   /// Node's `removeListener`, an alias of [`Page::off`].
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => void",
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -896,8 +896,8 @@ impl Page {
   /// The predicate receives that live object and the wait resolves on
   /// the first event for which it returns truthy.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror' | 'popup', optionsOrPredicate?: number | ((data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>) | { predicate?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }",
-    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Error | Frame | Page>"
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', optionsOrPredicate?: number | ((data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>) | { predicate?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }",
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Error | Frame | Page | Worker>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_event(
@@ -1891,6 +1891,18 @@ impl Page {
     self.inner.request_gc().await.map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `page.requests(): Promise<Request[]>`.
+  #[napi]
+  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to expose the declared JS Promise.
+  pub async fn requests(&self) -> Vec<crate::network::Request> {
+    self
+      .inner
+      .requests()
+      .into_iter()
+      .map(|request| crate::network::Request::from_core_with_page(request, self.inner.clone()))
+      .collect()
+  }
+
   /// Playwright: `page.workers(): Worker[]`.
   #[napi(ts_return_type = "Worker[]")]
   pub fn workers(&self) -> Vec<crate::identity::WorkerObject> {
@@ -2273,7 +2285,7 @@ impl Page {
     Ok(crate::element_handle::ElementHandle::wrap(handle))
   }
 
-  #[napi]
+  #[napi(js_name = "setExtraHTTPHeaders")]
   pub async fn set_extra_http_headers(&self, headers: std::collections::HashMap<String, String>) -> Result<()> {
     let mut fx = rustc_hash::FxHashMap::default();
     for (k, v) in headers {

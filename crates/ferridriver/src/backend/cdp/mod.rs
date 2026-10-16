@@ -451,7 +451,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // It is kept only because dropping it buys nothing: measured at
     // 0.35ms of a ~42ms page, inside the run-to-run spread. The
     // bootstrap batch is dominated by a fixed ~67ms wait for the new
-    // target's renderer, after which all ten responses land inside
+    // target's renderer, after which all eleven responses land inside
     // 15ms — so command count is not what this costs.
     let lifecycle_params = serde_json::json!({"enabled": true});
     let autoattach_params = serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true});
@@ -462,7 +462,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // suppresses `Page.screencastFrame` delivery entirely — a
     // screencast started afterwards records zero frames.
     let focus_params = serde_json::json!({"enabled": true});
-    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = tokio::join!(
+    // `Inspector.enable` is what makes Chromium report a renderer crash
+    // (`Inspector.targetCrashed`, `page.on('crash')`).
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep),
       transport.send_command(session_id, "Runtime.enable", ep),
       transport.send_command(session_id, "Network.enable", ep),
@@ -470,6 +472,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       transport.send_command(session_id, "Page.setLifecycleEventsEnabled", &lifecycle_params),
       transport.send_command(session_id, "Target.setAutoAttach", &autoattach_params),
       transport.send_command(session_id, "Emulation.setFocusEmulationEnabled", &focus_params),
+      transport.send_command(session_id, "Inspector.enable", ep),
       vp_fut,
       inject_fut,
       unpause_fut,
@@ -484,6 +487,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r8?;
     r9?;
     r10?;
+    r11?;
     Ok(None)
   }
 
@@ -5861,6 +5865,7 @@ impl<T: CdpWrap> CdpPage<T> {
     ));
     tasks.extend(self.spawn_renderer_tracker());
     tasks.push(self.spawn_target_gone_listener());
+    tasks.push(self.spawn_crash_listener());
     tasks.push(self.spawn_worker_listener());
 
     if let Ok(mut guard) = self.listener_tasks.lock() {
@@ -6033,6 +6038,21 @@ impl<T: CdpWrap> CdpPage<T> {
       }
       for worker in workers.into_values() {
         worker.did_close();
+      }
+    })
+    .abort_handle()
+  }
+
+  /// `Inspector.targetCrashed` is `page.on('crash')` (Playwright's
+  /// `crPage._onTargetCrashed`).
+  fn spawn_crash_listener(&self) -> tokio::task::AbortHandle {
+    let events = self.events.clone();
+    let mut rx = self
+      .transport
+      .tap_event_methods(&["Inspector.targetCrashed"], self.session_id.as_deref());
+    tokio::spawn(async move {
+      while rx.recv().await.is_some() {
+        events.emit(crate::events::PageEvent::Crash);
       }
     })
     .abort_handle()

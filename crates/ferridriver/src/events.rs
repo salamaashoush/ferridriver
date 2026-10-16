@@ -81,6 +81,9 @@ pub enum PageEvent {
   DomContentLoaded,
   /// Page was closed.
   Close,
+  /// The page's renderer crashed. `page.on('crash', (page: Page) => ...)`.
+  /// The page stays open; whatever it was doing fails.
+  Crash,
   /// Uncaught exception or unhandled rejection in page. Carries a live
   /// [`WebError`] with `{ name, message, stack }` matching JS `Error`
   /// shape plus a weak back-reference to the owning page. Observed via
@@ -162,6 +165,7 @@ impl PageEvent {
       PageEvent::Load => serde_json::json!({ "type": "load" }),
       PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
       PageEvent::Close => serde_json::json!({ "type": "close" }),
+      PageEvent::Crash => serde_json::json!({ "type": "crash" }),
       PageEvent::PageError(err) => {
         let d = err.error();
         serde_json::json!({
@@ -312,6 +316,7 @@ pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("load", PageEvent::Load)
       | ("domcontentloaded", PageEvent::DomContentLoaded)
       | ("close", PageEvent::Close)
+      | ("crash", PageEvent::Crash)
       | ("pageerror", PageEvent::PageError(_))
       | ("download", PageEvent::Download(_))
       | ("popup", PageEvent::Popup(_))

@@ -65,7 +65,7 @@ impl BrowserType {
 
   /// Playwright `browserType.connectOverCDP(endpointURL, options?) -> Promise<Browser>`.
   /// Chromium-only.
-  #[napi]
+  #[napi(js_name = "connectOverCDP")]
   pub async fn connect_over_cdp(
     &self,
     endpoint_url: String,

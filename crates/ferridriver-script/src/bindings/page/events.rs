@@ -69,7 +69,7 @@ pub(crate) fn page_event_to_js<'js>(
     PageEvent::FrameDetached { frame_id } => {
       crate::bindings::identity::frame_object(ctx, page.frame_for_id(&frame_id))?.into_js(ctx)
     },
-    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close => {
+    PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close | PageEvent::Crash => {
       crate::bindings::identity::page_object(ctx, page.clone())?.into_js(ctx)
     },
     PageEvent::Popup(popup) => crate::bindings::identity::page_object(ctx, popup)?.into_js(ctx),

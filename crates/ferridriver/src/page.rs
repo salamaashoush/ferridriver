@@ -3298,6 +3298,16 @@ impl Page {
     }
   }
 
+  /// Playwright: `page.requests(): Promise<Request[]>`. The last 100
+  /// requests the page issued, oldest first; navigation does not reset it.
+  #[must_use]
+  pub fn requests(&self) -> Vec<crate::network::Request> {
+    match self.inner.observed().lock() {
+      Ok(g) => g.requests(),
+      Err(poisoned) => poisoned.into_inner().requests(),
+    }
+  }
+
   /// Console messages retained for this page (cap 200, like
   /// Playwright). Playwright: `page.consoleMessages(options?: { filter?:
   /// 'all' | 'since-navigation' }): Promise<ConsoleMessage[]>` — the
@@ -5267,6 +5277,11 @@ pub(crate) fn page_state_observer(
       PageEvent::Worker(worker) => {
         if let Ok(mut o) = observed.lock() {
           o.push_worker(worker.clone());
+        }
+      },
+      PageEvent::Request(request) => {
+        if let Ok(mut o) = observed.lock() {
+          o.push_request(request.clone());
         }
       },
       _ => {},

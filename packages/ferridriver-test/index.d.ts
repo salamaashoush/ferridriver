@@ -2190,6 +2190,8 @@ export interface Page {
   requestGC(): Promise<void>;
   snapshotForAI(options?: { depth?: number; track?: string }): Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>;
   workers(): Worker[];
+  /** The last 100 requests the page issued, oldest first. */
+  requests(): Promise<Request[]>;
   consoleMessages(options?: { filter?: 'all' | 'since-navigation' }): ConsoleMessage[];
   clearConsoleMessages(): void;
   pageErrors(options?: { filter?: 'all' | 'since-navigation' }): Error[];

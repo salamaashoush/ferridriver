@@ -280,7 +280,7 @@ impl BrowserContext {
     self.inner.set_geolocation(geo).await.into_napi()
   }
 
-  #[napi]
+  #[napi(js_name = "setExtraHTTPHeaders")]
   pub async fn set_extra_http_headers(&self, headers: HashMap<String, String>) -> Result<()> {
     let mut fx = rustc_hash::FxHashMap::default();
     for (k, v) in headers {

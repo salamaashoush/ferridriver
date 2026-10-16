@@ -1,5 +1,6 @@
-//! Per-page console / page-error retention backing
-//! `page.consoleMessages()` / `page.pageErrors()` (Playwright parity).
+//! Per-page console / page-error / request retention backing
+//! `page.consoleMessages()` / `page.pageErrors()` / `page.requests()`
+//! (Playwright parity).
 //!
 //! Buffers live on the backend page (like the frame cache) so every
 //! `crate::Page` wrapper minted over the same backend page sees one
@@ -13,6 +14,9 @@ use crate::web_error::WebError;
 /// Retention cap per buffer, matching Playwright's `ensureArrayLimit`
 /// guard against unbounded growth on chatty pages.
 const MAX_ENTRIES: usize = 200;
+
+/// Playwright keeps the last 100 requests (`Page.addNetworkRequest`).
+const MAX_REQUESTS: usize = 100;
 
 /// Filter for [`crate::Page::console_messages`] / [`crate::Page::page_errors`].
 /// Playwright: `{ filter?: 'all' | 'since-navigation' }`, defaulting to
@@ -94,9 +98,22 @@ pub(crate) struct ObservedBuffers {
   evaluate_callbacks: Vec<String>,
   retired_callbacks: Vec<String>,
   workers: Vec<crate::worker::Worker>,
+  requests: std::collections::VecDeque<crate::network::Request>,
 }
 
 impl ObservedBuffers {
+  pub(crate) fn push_request(&mut self, request: crate::network::Request) {
+    if self.requests.len() == MAX_REQUESTS {
+      self.requests.pop_front();
+    }
+    self.requests.push_back(request);
+  }
+
+  /// The last requests the page issued, oldest first, across navigations.
+  pub(crate) fn requests(&self) -> Vec<crate::network::Request> {
+    self.requests.iter().cloned().collect()
+  }
+
   pub(crate) fn push_worker(&mut self, worker: crate::worker::Worker) {
     self.workers.retain(|known| !known.is_closed());
     self.workers.push(worker);
