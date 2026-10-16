@@ -60,6 +60,7 @@ pub mod options;
 pub mod page;
 pub mod page_tools;
 pub mod pause;
+pub(crate) mod permissions;
 pub mod protocol;
 pub mod response;
 pub(crate) mod snapshotter;

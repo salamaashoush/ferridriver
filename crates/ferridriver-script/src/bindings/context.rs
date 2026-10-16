@@ -255,21 +255,25 @@ impl BrowserContextJs {
 
   // ── Permissions ───────────────────────────────────────────────────────────
 
-  /// Grant a set of permissions (e.g. `['geolocation', 'notifications']`),
-  /// optionally scoped to `origin`.
+  /// Playwright: `browserContext.grantPermissions(permissions, options?:
+  /// { origin? })`.
   #[qjs(rename = "grantPermissions")]
-  pub async fn grant_permissions(
+  pub async fn grant_permissions<'js>(
     &self,
     call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
+    ctx: rquickjs::Ctx<'js>,
     permissions: Vec<String>,
-    origin: Opt<String>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
+    let origin = match options.0.as_ref().and_then(Value::as_object) {
+      Some(bag) => bag.get::<_, Option<String>>("origin")?,
+      None => None,
+    };
     call_site
       .scope(async move {
         self
           .inner
-          .grant_permissions(&permissions, origin.0.as_deref())
+          .grant_permissions(&permissions, origin.as_deref())
           .await
           .into_js_with(&ctx)
       })

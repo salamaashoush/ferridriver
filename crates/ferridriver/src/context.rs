@@ -1311,26 +1311,43 @@ impl ContextRef {
     Ok(())
   }
 
-  /// Grant permissions in this context. Stores the list on the
-  /// options bag and re-applies to every open page — matches
-  /// Playwright's `browserContext.grantPermissions` semantics where
-  /// the grant persists for future pages too.
-  ///
-  /// The `origin` parameter is currently ignored at the backend
-  /// level (CDP `Browser.grantPermissions` accepts an `origin` but
-  /// we don't thread it through the options bag yet — the
-  /// bag-stored list grants for every origin).
+  /// Playwright: `browserContext.grantPermissions(permissions, options?:
+  /// { origin? })`. Adds to what the origin (or, without one, every
+  /// origin) was already granted, for open pages and future ones.
   ///
   /// # Errors
   ///
-  /// Returns an error if the re-application fails on any page.
-  pub async fn grant_permissions(&self, permissions: &[String], _origin: Option<&str>) -> Result<()> {
-    let perms = permissions.to_vec();
+  /// An unparseable origin, a permission the engine does not know, or a
+  /// failure applying the grant to an open page.
+  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<()> {
+    let origin = origin.map(crate::permissions::origin_of).transpose()?;
+    let added = permissions.to_vec();
+    let params = serde_json::json!({ "permissions": permissions, "origin": origin });
     self
       .traced(
         "grantPermissions",
-        serde_json::json!({ "permissions": permissions }),
-        self.mutate_options(|o| o.permissions = Some(perms)),
+        params,
+        self.mutate_options(move |o| {
+          let granted = match origin {
+            None => o.permissions.get_or_insert_with(Vec::new),
+            Some(origin) => {
+              let index = o
+                .origin_permissions
+                .iter()
+                .position(|(known, _)| *known == origin)
+                .unwrap_or_else(|| {
+                  o.origin_permissions.push((origin, Vec::new()));
+                  o.origin_permissions.len() - 1
+                });
+              &mut o.origin_permissions[index].1
+            },
+          };
+          for permission in added {
+            if !granted.contains(&permission) {
+              granted.push(permission);
+            }
+          }
+        }),
       )
       .await
   }
@@ -1349,7 +1366,12 @@ impl ContextRef {
         for page in &pages {
           page.inner().reset_permissions().await?;
         }
-        self.mutate_options(|o| o.permissions = None).await
+        self
+          .mutate_options(|o| {
+            o.permissions = None;
+            o.origin_permissions.clear();
+          })
+          .await
       })
       .await
   }

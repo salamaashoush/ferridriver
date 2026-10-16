@@ -1902,6 +1902,7 @@ impl WebKitPage {
     // care about document timing. No reload needed.
     self.apply_runtime_overrides(opts).await?;
     self.apply_proxy_session_overrides(opts).await;
+    grant_permissions(&self.proxy, opts).await?;
     self.apply_browser_session_overrides(opts).await?;
     self.apply_target_session_overrides(opts).await;
     Ok(())
@@ -1998,15 +1999,7 @@ impl WebKitPage {
         .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
         .await;
     }
-    if let Some(perms) = opts.permissions.as_ref() {
-      let _ = self
-        .proxy
-        .send(
-          "Emulation.grantPermissions",
-          json!({ "origin": "*", "permissions": perms }),
-        )
-        .await;
-    }
+
     if let Some(creds) = opts.http_credentials.as_ref() {
       let _ = self.set_http_credentials(Some(creds.clone())).await;
     }
@@ -2892,14 +2885,30 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
       .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
       .await;
   }
-  if let Some(perms) = opts.permissions.as_ref() {
-    let _ = proxy
+  // A permission the engine does not know is reported by
+  // `apply_context_options`; a page being set up keeps going.
+  let _ = grant_permissions(proxy, opts).await;
+}
+
+/// `Emulation.grantPermissions` for every origin with grants, `*` for
+/// the context-wide ones (`wkPage.ts::_grantPermissions`).
+async fn grant_permissions(proxy: &Session, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+  let everywhere = opts.permissions.iter().map(|permissions| ("*", permissions));
+  let by_origin = opts
+    .origin_permissions
+    .iter()
+    .map(|(origin, permissions)| (origin.as_str(), permissions));
+  for (origin, permissions) in everywhere.chain(by_origin) {
+    let permissions = crate::permissions::webkit(permissions)?;
+    proxy
       .send(
         "Emulation.grantPermissions",
-        json!({ "origin": "*", "permissions": perms }),
+        json!({ "origin": origin, "permissions": permissions }),
       )
-      .await;
+      .await
+      .map_err(conn_err)?;
   }
+  Ok(())
 }
 
 /// Wait for the first non-provisional `Target.targetCreated` of type

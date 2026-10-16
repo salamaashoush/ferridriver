@@ -1723,19 +1723,25 @@ impl BidiPage {
       *slot = Some(c);
     }
 
-    let perms_fut: OptionFuture<_> = opts
-      .permissions
-      .as_ref()
-      .map(|p| async move {
-        if let Ok(mut state) = self.permissions.lock() {
-          state.global.clone_from(p);
+    let perms_fut: OptionFuture<_> = (opts.permissions.is_some() || !opts.origin_permissions.is_empty())
+      .then_some(async move {
+        if let Some(p) = &opts.permissions {
+          if let Ok(mut state) = self.permissions.lock() {
+            state.global = crate::permissions::bidi(p);
+          }
+          // Grant for the current document's origin right away —
+          // `grant_permissions` can arrive after the page already
+          // navigated. Future navigations re-grant from the event
+          // listener (`browsingContext.navigationStarted`).
+          let url = self.url().await.ok().flatten().unwrap_or_default();
+          self.grant_global_permissions_for_url(&url).await?;
         }
-        // Grant for the current document's origin right away —
-        // `grant_permissions` can arrive after the page already
-        // navigated. Future navigations re-grant from the event
-        // listener (`browsingContext.navigationStarted`).
-        let url = self.url().await.ok().flatten().unwrap_or_default();
-        self.grant_global_permissions_for_url(&url).await
+        for (origin, permissions) in &opts.origin_permissions {
+          self
+            .grant_permissions_for_origin(origin, crate::permissions::bidi(permissions))
+            .await?;
+        }
+        Ok(())
       })
       .into();
     let viewport_fut: OptionFuture<_> = opts
@@ -2098,14 +2104,26 @@ impl BidiPage {
     let Some(origin) = permissions_origin(url) else {
       return Ok(());
     };
+    let global = match self.permissions.lock() {
+      Ok(state) => state.global.clone(),
+      Err(_) => Vec::new(),
+    };
+    self.grant_permissions_for_origin(&origin, global).await
+  }
+
+  /// Grant `permissions` for `origin`, skipping what it already has
+  /// (`bidiBrowser.ts::doGrantPermissions`).
+  async fn grant_permissions_for_origin(&self, origin: &str, permissions: Vec<String>) -> Result<()> {
+    if origin == "null" {
+      return Ok(());
+    }
+    let origin = origin.to_string();
     let missing: Vec<String> = match self.permissions.lock() {
       Ok(state) => {
         let already = state.granted.get(&origin);
-        state
-          .global
-          .iter()
+        permissions
+          .into_iter()
           .filter(|p| !already.is_some_and(|g| g.contains(p)))
-          .cloned()
           .collect()
       },
       Err(_) => Vec::new(),

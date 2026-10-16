@@ -2922,6 +2922,9 @@ pub struct BrowserContextOptions {
   pub locale: Option<String>,
   pub offline: Option<bool>,
   pub permissions: Option<Vec<String>>,
+  /// Grants made with `browserContext.grantPermissions(permissions, { origin })`,
+  /// by origin; `permissions` above holds the ones for every origin.
+  pub origin_permissions: Vec<(String, Vec<String>)>,
   pub proxy: Option<ProxyConfig>,
   pub record_har: Option<RecordHarOptions>,
   pub record_video: Option<RecordVideoOptions>,

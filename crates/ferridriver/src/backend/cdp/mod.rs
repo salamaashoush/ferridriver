@@ -5324,23 +5324,15 @@ impl<T: CdpWrap> CdpPage<T> {
           .await
       })
       .into();
-    let perms_fut: OptionFuture<_> = opts
-      .permissions
-      .as_ref()
-      .map(|p| async move {
-        // `Browser.grantPermissions` must ship with `browserContextId`
-        // so the grant applies to THIS context, and must be sent at
-        // the browser level (no sessionId) — matches
-        // `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::doGrantPermissions`.
-        let mut params = serde_json::json!({"permissions": p});
-        if let Some(ref ctx_id) = self.browser_context_id {
-          params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
+    let perms_fut: OptionFuture<_> = (opts.permissions.is_some() || !opts.origin_permissions.is_empty())
+      .then_some(async move {
+        if let Some(permissions) = &opts.permissions {
+          self.grant_permissions(None, permissions).await?;
         }
-        self
-          .transport
-          .send_command(None, "Browser.grantPermissions", &params)
-          .await
-          .map(|_| ())
+        for (origin, permissions) in &opts.origin_permissions {
+          self.grant_permissions(Some(origin), permissions).await?;
+        }
+        Ok(())
       })
       .into();
     let offline_fut: OptionFuture<_> = opts
@@ -5546,6 +5538,31 @@ impl<T: CdpWrap> CdpPage<T> {
     let params = serde_json::json!({"features": features, "media": media});
     self.configure("Emulation.setEmulatedMedia", params).await?;
     Ok(())
+  }
+
+  /// `Browser.grantPermissions` for `origin` (every origin when `None`),
+  /// at the browser level and scoped to this page's context — matches
+  /// `crBrowser.ts::doGrantPermissions`, including its retry with the
+  /// older local-network names.
+  async fn grant_permissions(&self, origin: Option<&str>, permissions: &[String]) -> Result<()> {
+    let send = |legacy: bool| async move {
+      let mut params = serde_json::json!({ "permissions": crate::permissions::chromium(permissions, legacy)? });
+      if let Some(origin) = origin {
+        params["origin"] = serde_json::json!(origin);
+      }
+      if let Some(ref ctx_id) = self.browser_context_id {
+        params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
+      }
+      self
+        .transport
+        .send_command(None, "Browser.grantPermissions", &params)
+        .await
+        .map(|_| ())
+    };
+    match send(false).await {
+      Err(error) if !error.to_string().contains("Unknown permission") => send(true).await.map_err(|_| error),
+      result => result,
+    }
   }
 
   /// Reset permissions granted via the options-bag / context-level

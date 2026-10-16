@@ -1549,6 +1549,15 @@ pub struct QuerySelectorOptions {
   pub strict: Option<bool>,
 }
 
+/// `browserContext.grantPermissions(permissions, options?)`'s bag.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct GrantPermissionsOptions {
+  /// Grant only for this origin (`https://example.com`); every origin
+  /// when left out.
+  pub origin: Option<String>,
+}
+
 /// Playwright's `TimeoutOptions`: the bag of `locator.textContent` and
 /// the other reads.
 #[napi(object, object_to_js = false)]

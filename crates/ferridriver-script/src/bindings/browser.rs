@@ -616,6 +616,7 @@ impl JsBrowserContextOptions {
       locale: self.locale,
       offline: self.offline,
       permissions: self.permissions,
+      origin_permissions: Vec::new(),
       proxy,
       record_har: self.record_har.map(|h| fo::RecordHarOptions {
         path: std::path::PathBuf::from(h.path),

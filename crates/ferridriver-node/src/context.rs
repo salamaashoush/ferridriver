@@ -252,8 +252,14 @@ impl BrowserContext {
 
   // ── Permissions ──
 
+  /// Playwright: `browserContext.grantPermissions(permissions, options?: { origin? })`.
   #[napi]
-  pub async fn grant_permissions(&self, permissions: Vec<String>, origin: Option<String>) -> Result<()> {
+  pub async fn grant_permissions(
+    &self,
+    permissions: Vec<String>,
+    options: Option<crate::types::GrantPermissionsOptions>,
+  ) -> Result<()> {
+    let origin = options.and_then(|options| options.origin);
     self
       .inner
       .grant_permissions(&permissions, origin.as_deref())
@@ -1302,6 +1308,7 @@ impl NapiBrowserContextOptions {
       locale: self.locale,
       offline: self.offline,
       permissions: self.permissions,
+      origin_permissions: Vec::new(),
       proxy,
       record_har: self.record_har.map(|h| fo::RecordHarOptions {
         path: std::path::PathBuf::from(h.path),
