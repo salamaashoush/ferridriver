@@ -60,6 +60,7 @@ mod clock;
 mod codegen;
 mod console_message;
 mod context;
+mod coverage;
 mod credentials;
 mod devices;
 mod dialog;

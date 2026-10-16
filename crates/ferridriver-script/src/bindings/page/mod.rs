@@ -1787,6 +1787,12 @@ impl PageJs {
 
   /// `page.context()`. Returns the `BrowserContext` this page belongs to.
   #[qjs(rename = "context")]
+  /// Playwright: `page.coverage`. Chromium only.
+  #[qjs(get, rename = "coverage")]
+  pub fn coverage(&self) -> crate::bindings::coverage::CoverageJs {
+    crate::bindings::coverage::CoverageJs::new(self.inner.coverage())
+  }
+
   /// `page.clock` — the owning context's fake-time controller
   /// (Playwright: `page.clock` IS `context.clock`).
   #[qjs(get, rename = "clock")]

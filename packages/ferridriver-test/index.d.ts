@@ -2072,6 +2072,30 @@ export interface Clock {
   resume(): Promise<void>;
 }
 
+export interface JSCoverageEntry {
+  url: string;
+  scriptId: string;
+  source?: string;
+  functions: Array<{
+    functionName: string;
+    isBlockCoverage: boolean;
+    ranges: Array<{ count: number; startOffset: number; endOffset: number }>;
+  }>;
+}
+
+export interface CSSCoverageEntry {
+  url: string;
+  text?: string;
+  ranges: Array<{ start: number; end: number }>;
+}
+
+export interface Coverage {
+  startJSCoverage(options?: { resetOnNavigation?: boolean; reportAnonymousScripts?: boolean }): Promise<void>;
+  stopJSCoverage(): Promise<JSCoverageEntry[]>;
+  startCSSCoverage(options?: { resetOnNavigation?: boolean }): Promise<void>;
+  stopCSSCoverage(): Promise<CSSCoverageEntry[]>;
+}
+
 export interface CDPSession {
   send(method: string, params?: Record<string, unknown>): Promise<unknown>;
   on(event: string, handler: (params: unknown) => void): void;
@@ -2266,6 +2290,8 @@ export interface Page {
   startTracing(categories?: string[]): Promise<void>;
   stopTracing(): Promise<Array<Record<string, unknown>>>;
   metrics(): Promise<Array<{ name: string; value: number }>>;
+  /** Playwright's `page.coverage`: JavaScript and CSS coverage, Chromium only. */
+  readonly coverage: Coverage;
   /** Chromium precise JavaScript coverage from the DevTools Profiler domain. */
   startJSCoverage(options?: { callCount?: boolean; detailed?: boolean; allowTriggeredUpdates?: boolean }): Promise<Record<string, unknown>>;
   takeJSCoverage(): Promise<{ result: Array<Record<string, unknown>>; timestamp: number }>;

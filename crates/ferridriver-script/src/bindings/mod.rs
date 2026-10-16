@@ -30,6 +30,7 @@ pub mod clock;
 pub mod console_message;
 pub mod context;
 pub mod convert;
+pub mod coverage;
 pub mod credentials;
 pub mod define_config;
 pub mod dialog;

@@ -259,6 +259,12 @@ impl Page {
 
 #[napi]
 impl Page {
+  /// Playwright: `page.coverage`. Chromium only.
+  #[napi(getter)]
+  pub fn coverage(&self) -> crate::coverage::Coverage {
+    crate::coverage::Coverage::wrap(self.inner.coverage())
+  }
+
   #[napi(getter)]
   pub fn webmcp(&self) -> crate::web_mcp::WebMcp {
     crate::web_mcp::WebMcp::wrap(self.inner.webmcp())

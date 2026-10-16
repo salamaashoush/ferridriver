@@ -82,6 +82,8 @@ struct SessionInner {
   listeners: std::sync::Mutex<ListenerRegistry>,
   next_listener_id: AtomicU64,
   pump_started: AtomicBool,
+  /// Requests that the pump run every event already queued, then answer.
+  flushes: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
   /// Captured at attach time (always inside the driver's tokio
   /// runtime) so listener registration can spawn the event pump from
   /// ANY thread — NAPI `session.on(...)` runs on the Node main thread,
@@ -129,6 +131,7 @@ impl CdpSession {
         listeners: std::sync::Mutex::new(ListenerRegistry::default()),
         next_listener_id: AtomicU64::new(1),
         pump_started: AtomicBool::new(false),
+        flushes: std::sync::OnceLock::new(),
         runtime: tokio::runtime::Handle::current(),
       }),
     })
@@ -243,6 +246,19 @@ impl CdpSession {
     id
   }
 
+  /// Wait until every event that reached this session before the call
+  /// has been handed to its listeners. A command's reply arrives after
+  /// the events sent ahead of it, so after awaiting one this sees them all.
+  pub async fn flush(&self) {
+    let Some(flushes) = self.inner.flushes.get() else {
+      return;
+    };
+    let (done, drained) = tokio::sync::oneshot::channel();
+    if flushes.send(done).is_ok() {
+      let _ = drained.await;
+    }
+  }
+
   /// Spawn the event pump on first listener registration: drains the
   /// lossless session tap and dispatches to registered callbacks.
   fn ensure_pump(&self) {
@@ -250,41 +266,61 @@ impl CdpSession {
       return;
     }
     let mut rx = self.inner.transport.tap_all(&self.inner.session_id);
+    let (flush_tx, mut flushes) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
+    let _ = self.inner.flushes.set(flush_tx);
     let inner = Arc::downgrade(&self.inner);
     self.inner.runtime.spawn(async move {
-      while let Some(event) = rx.recv().await {
-        let Some(inner) = inner.upgrade() else { break };
-        let Some(method) = event.get("method").and_then(serde_json::Value::as_str) else {
-          continue;
-        };
-        let params = event.get("params").cloned().unwrap_or(serde_json::Value::Null);
-        let (method_cbs, wildcard_cbs) = {
-          let mut registry = inner
-            .listeners
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-          let method_cbs: Vec<CdpEventCallback> = registry
-            .by_method
-            .get(method)
-            .map(|ls| ls.iter().map(|l| Arc::clone(&l.callback)).collect())
-            .unwrap_or_default();
-          if let Some(listeners) = registry.by_method.get_mut(method) {
-            listeners.retain(|l| !l.once);
-          }
-          let wildcard_cbs: Vec<CdpEventCallback> = registry.wildcard.iter().map(|l| Arc::clone(&l.callback)).collect();
-          registry.wildcard.retain(|l| !l.once);
-          (method_cbs, wildcard_cbs)
-        };
-        // Method listeners get `params`; wildcard listeners get the
-        // `{ method, params }` envelope (Playwright's `'event'`).
-        for cb in method_cbs {
-          cb(params.clone());
-        }
-        for cb in wildcard_cbs {
-          cb(serde_json::json!({ "method": method, "params": params.clone() }));
+      loop {
+        tokio::select! {
+          biased;
+          Some(done) = flushes.recv() => {
+            while let Ok(event) = rx.try_recv() {
+              let Some(inner) = inner.upgrade() else { return };
+              dispatch(&inner, &event);
+            }
+            let _ = done.send(());
+          },
+          event = rx.recv() => {
+            let Some(event) = event else { break };
+            let Some(inner) = inner.upgrade() else { break };
+            dispatch(&inner, &event);
+          },
         }
       }
     });
+  }
+}
+
+/// Hand one session event to the listeners registered for it: method
+/// listeners get `params`, wildcard listeners the `{ method, params }`
+/// envelope (Playwright's `'event'`).
+fn dispatch(inner: &SessionInner, event: &serde_json::Value) {
+  let Some(method) = event.get("method").and_then(serde_json::Value::as_str) else {
+    return;
+  };
+  let params = event.get("params").cloned().unwrap_or(serde_json::Value::Null);
+  let (method_cbs, wildcard_cbs) = {
+    let mut registry = inner
+      .listeners
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let method_cbs: Vec<CdpEventCallback> = registry
+      .by_method
+      .get(method)
+      .map(|ls| ls.iter().map(|l| Arc::clone(&l.callback)).collect())
+      .unwrap_or_default();
+    if let Some(listeners) = registry.by_method.get_mut(method) {
+      listeners.retain(|l| !l.once);
+    }
+    let wildcard_cbs: Vec<CdpEventCallback> = registry.wildcard.iter().map(|l| Arc::clone(&l.callback)).collect();
+    registry.wildcard.retain(|l| !l.once);
+    (method_cbs, wildcard_cbs)
+  };
+  for cb in method_cbs {
+    cb(params.clone());
+  }
+  for cb in wildcard_cbs {
+    cb(serde_json::json!({ "method": method, "params": params.clone() }));
   }
 }
 

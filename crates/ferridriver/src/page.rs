@@ -111,6 +111,8 @@ pub struct Page {
   /// `page.opener(): Promise<null | Page>`, which resolves `null` once
   /// the opener has closed.
   opener: std::sync::OnceLock<std::sync::Weak<Page>>,
+  /// `page.coverage`'s runs, one of each kind at a time.
+  coverage_state: AsyncMutex<crate::coverage::CoverageState>,
 }
 
 fn aria_snapshot_params(opts: &crate::options::AriaSnapshotOptions) -> serde_json::Value {
@@ -156,6 +158,7 @@ impl Page {
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
       opener: std::sync::OnceLock::new(),
+      coverage_state: AsyncMutex::new(crate::coverage::CoverageState::default()),
     });
     // Wire the backend's weak back-reference before the frame cache
     // starts seeding — the file-chooser listener (spawned in
@@ -189,6 +192,7 @@ impl Page {
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
       opener: std::sync::OnceLock::new(),
+      coverage_state: AsyncMutex::new(crate::coverage::CoverageState::default()),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache();
@@ -2212,7 +2216,7 @@ impl Page {
   /// `page.screenshot(options?: PageScreenshotOptions)` per
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
   ///
-  /// [`crate::screenshotter`] does the capture; this writes `path` and
+  /// The `screenshotter` module does the capture; this writes `path` and
   /// bounds the whole of it by `timeout`.
   ///
   /// # Errors
@@ -3285,6 +3289,16 @@ impl Page {
         let _ = inner_for_task.enable_download_behavior().await;
       }
     });
+  }
+
+  /// Playwright: `page.coverage`. Chromium only, as in Playwright.
+  #[must_use]
+  pub fn coverage(self: &Arc<Self>) -> crate::coverage::Coverage {
+    crate::coverage::Coverage::new(Arc::clone(self))
+  }
+
+  pub(crate) fn coverage_state(&self) -> &AsyncMutex<crate::coverage::CoverageState> {
+    &self.coverage_state
   }
 
   /// Playwright: `page.workers(): Worker[]`. The dedicated workers the
