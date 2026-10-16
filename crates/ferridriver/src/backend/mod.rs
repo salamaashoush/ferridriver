@@ -250,7 +250,7 @@ impl CompiledCookieFilter {
 /// One engine-level capture, as `screenshotter.ts::_screenshot` hands it
 /// to a page delegate's `takeScreenshot`. Everything above the engine —
 /// option validation, page preparation, masks, the background override
-/// and the rect arithmetic — happens in [`crate::screenshotter`].
+/// and the rect arithmetic — happens in the `screenshotter` module.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenshotCapture {
   pub format: ImageFormat,

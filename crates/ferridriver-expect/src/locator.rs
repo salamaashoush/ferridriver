@@ -7,7 +7,7 @@
 //!
 //! Each matcher is Playwright's `matchers.ts` entry: it names the
 //! expression the page's engine judges and how a failure prints. The
-//! judging and the retrying are in [`crate::web`].
+//! judging and the retrying are in the `web` module.
 
 use std::borrow::Borrow;
 
