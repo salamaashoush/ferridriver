@@ -190,6 +190,24 @@ fn fx_build(status: u16, content_type: &str, body: Vec<u8>, extra: &[(&str, Stri
     .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+/// A `text/event-stream` that sends a tick every 100ms and never ends, so
+/// its response never finishes loading.
+fn fx_event_stream() -> Response<Body> {
+  let ticks = futures::stream::unfold(0u64, |n| async move {
+    if n > 0 {
+      tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let event = format!("data: tick {n}\n\n");
+    Some((Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(event)), n + 1))
+  });
+  Response::builder()
+    .status(200)
+    .header("content-type", "text/event-stream")
+    .header("cache-control", "no-cache")
+    .body(Body::from_stream(ticks))
+    .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
 fn fx_text(body: &str) -> Response<Body> {
   fx_build(200, "text/plain", body.as_bytes().to_vec(), &[])
 }
@@ -554,6 +572,11 @@ async fn handle_fx(
       }
     },
     "landed" => fx_text("landed"),
+    "event-stream" => fx_event_stream(),
+    "event-stream-page" => fx_html(
+      "<!doctype html><h1>waiting</h1><script>new EventSource('/fx/event-stream').onmessage = (e) => \
+       { document.querySelector('h1').textContent = e.data; };</script>",
+    ),
     "slow" => fx_slow(query.as_deref()).await,
     "api/users" => fx_json(&serde_json::json!({"users": ["alice", "bob"]})),
     "api/posts" => fx_json(&serde_json::json!({"posts": ["first"]})),

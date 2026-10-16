@@ -15,7 +15,7 @@ interface HarFile {
   log: {
     entries: Array<{
       request: { url: string; cookies: HarCookie[] };
-      response: { status: number; httpVersion: string; cookies: HarCookie[] };
+      response: { status: number; httpVersion: string; cookies: HarCookie[]; content: { size: number } };
       pageref?: string;
       timings: Record<string, number>;
     }>;
@@ -97,5 +97,41 @@ describe('tracing har', () => {
     expect(har.log.pages?.length).toBe(1);
     const pageId = har.log.pages![0].id;
     expect(har.log.entries.every((e) => e.pageref === pageId)).toBe(true);
+  });
+
+  test('a response still arriving is recorded without waiting for its end', async ({ page, context }) => {
+    // An event stream never finishes loading. Its entry is written as far
+    // as it got, as Playwright's harTracer does, instead of holding the
+    // export open until the test times out.
+    const harPath = test.info().outputPath('streaming.har');
+    await context.tracing.startHar(harPath);
+    await page.goto('/fx/event-stream-page');
+    await expect(page.locator('h1')).toHaveText(/tick/);
+    await context.tracing.stopHar();
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as HarFile;
+    const stream = har.log.entries.find((e) => e.request.url.endsWith('/fx/event-stream'));
+    expect(stream?.response.status).toBe(200);
+    expect(stream?.response.content.size).toBe(-1);
+  });
+
+  test('a request still waiting for its response is recorded', async ({ page, context, baseURL }) => {
+    const key = `har-held-${Date.now()}-${Math.random()}`;
+    const harPath = test.info().outputPath('held.har');
+    await context.tracing.startHar(harPath);
+    await page.goto(`/fx/control/page/${key}`, { waitUntil: 'domcontentloaded' });
+    await page.request.get(`${baseURL}/fx/control/held/${key}`);
+    await context.tracing.stopHar();
+    await page.request.get(`${baseURL}/fx/control/release/${key}`);
+    const har = JSON.parse(await fs.promises.readFile(harPath, 'utf8')) as HarFile;
+    expect(har.log.entries.some((e) => e.request.url.endsWith(`/fx/control/hold/${key}`))).toBe(true);
+  });
+
+  test('a trace stops while an event stream is open', async ({ page, context }) => {
+    const tracePath = test.info().outputPath('streaming.zip');
+    await context.tracing.start({ snapshots: true });
+    await page.goto('/fx/event-stream-page');
+    await expect(page.locator('h1')).toHaveText(/tick/);
+    await context.tracing.stop({ path: tracePath });
+    expect((await fs.promises.stat(tracePath)).size).toBeGreaterThan(0);
   });
 });

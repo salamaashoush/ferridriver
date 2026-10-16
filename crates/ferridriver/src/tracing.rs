@@ -650,9 +650,15 @@ async fn build_response(
   recorder: &HarRecorder,
   attachments: &mut Vec<(String, Vec<u8>)>,
 ) -> (HarResponseOut, ServerMeta) {
-  let Some(resp) = req.response().await.ok().flatten() else {
+  // A request still waiting for its response, or a response still
+  // arriving (an event stream never ends), is recorded as far as it got.
+  // Waiting would hold the export open for good; Playwright's harTracer
+  // likewise reads the body and server details only once a request
+  // finishes.
+  let Some(resp) = req.existing_response().await else {
     return (HarResponseOut::empty(), ServerMeta::default());
   };
+  let finished = resp.is_finished().await;
   // Prefer the raw (extra-info) headers: CDP strips `Set-Cookie` from the
   // `responseReceived` headers, so response cookies live only here.
   // Playwright reads these via `internalRawResponseHeaders`.
@@ -668,7 +674,17 @@ async fn build_response(
     .iter()
     .find(|h| h.name.eq_ignore_ascii_case("content-type"))
     .map_or_else(|| "x-unknown".to_string(), |h| h.value.clone());
-  let content = build_content(&resp, &mime_type, recorder.content, attachments).await;
+  let content = if finished {
+    build_content(&resp, &mime_type, recorder.content, attachments).await
+  } else {
+    HarContentOut {
+      size: -1,
+      mime_type: mime_type.clone(),
+      text: None,
+      encoding: None,
+      file: None,
+    }
+  };
   // Response cookies: parse each Set-Cookie header (harTracer.ts:640).
   let cookies = resp_headers
     .iter()
@@ -676,28 +692,30 @@ async fn build_response(
     .filter_map(|h| har_parse_cookie(&h.value))
     .collect();
   let mut meta = ServerMeta::default();
-  if let Some(addr) = resp.server_addr().await {
-    meta.server_ip_address = Some(addr.ip_address);
-    meta.server_port = Some(addr.port);
+  if finished {
+    if let Some(addr) = resp.server_addr().await {
+      meta.server_ip_address = Some(addr.ip_address);
+      meta.server_port = Some(addr.port);
+    }
+    // Only attach when the backend reported at least one field — an
+    // all-empty details object (WebKit reports one for plain http) would
+    // serialize to `{}`, which Playwright never emits.
+    meta.security_details = resp.security_details().await.and_then(|d| {
+      let out = HarSecurityDetailsOut {
+        protocol: d.protocol,
+        subject_name: d.subject_name,
+        issuer: d.issuer,
+        valid_from: d.valid_from,
+        valid_to: d.valid_to,
+      };
+      let empty = out.protocol.is_none()
+        && out.subject_name.is_none()
+        && out.issuer.is_none()
+        && out.valid_from.is_none()
+        && out.valid_to.is_none();
+      (!empty).then_some(out)
+    });
   }
-  // Only attach when the backend reported at least one field — an
-  // all-empty details object (WebKit reports one for plain http) would
-  // serialize to `{}`, which Playwright never emits.
-  meta.security_details = resp.security_details().await.and_then(|d| {
-    let out = HarSecurityDetailsOut {
-      protocol: d.protocol,
-      subject_name: d.subject_name,
-      issuer: d.issuer,
-      valid_from: d.valid_from,
-      valid_to: d.valid_to,
-    };
-    let empty = out.protocol.is_none()
-      && out.subject_name.is_none()
-      && out.issuer.is_none()
-      && out.valid_from.is_none()
-      && out.valid_to.is_none();
-    (!empty).then_some(out)
-  });
   // Playwright uses the backend-reported protocol (`h2`, `http/1.1`),
   // falling back to the HAR default when absent.
   let http_version = resp.http_version().await.unwrap_or_else(|| "HTTP/1.1".to_string());

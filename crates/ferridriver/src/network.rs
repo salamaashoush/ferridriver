@@ -959,6 +959,11 @@ impl Response {
     }
   }
 
+  /// Whether the body finished loading or failed, without waiting.
+  pub(crate) async fn is_finished(&self) -> bool {
+    self.inner.state.read().await.finished.is_some()
+  }
+
   /// Response body bytes. Cached after first call.
   ///
   /// # Errors
