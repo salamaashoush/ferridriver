@@ -259,13 +259,18 @@ fn find_java() -> Option<PathBuf> {
 mod tests {
   use super::*;
 
+  /// Fixed rather than `image_package()`, which refuses hosts with no
+  /// emulator build (arm64 Linux); installing packages does not depend on
+  /// the host.
+  const IMAGE: &str = "system-images;android-34;google_apis;x86_64";
+
   #[tokio::test]
   async fn zero_exit_without_installed_packages_is_an_error() {
     let directory = tempfile::tempdir().unwrap();
     let sdk = fake_sdk(directory.path()).unwrap();
     let options = AndroidOptions::default();
-    let image = options.image_package().unwrap();
-    let error = install_packages(&sdk, &options, &image).await.unwrap_err();
+    let image = IMAGE;
+    let error = install_packages(&sdk, &options, image).await.unwrap_err();
     assert!(error.to_string().contains("not installed"));
     assert!(!sdk.root.join("accepted").exists());
   }
@@ -278,13 +283,11 @@ mod tests {
       accept_licenses: true,
       ..Default::default()
     };
-    let image = options.image_package().unwrap();
-    install_packages(&sdk, &options, &image).await.unwrap();
+    let image = IMAGE;
+    install_packages(&sdk, &options, image).await.unwrap();
     assert!(sdk.root.join("accepted").is_file());
     assert!(sdk.root.join(image.replace(';', "/")).join("package.xml").is_file());
-    install_packages(&sdk, &AndroidOptions::default(), &image)
-      .await
-      .unwrap();
+    install_packages(&sdk, &AndroidOptions::default(), image).await.unwrap();
     assert_eq!(std::fs::read_to_string(sdk.root.join("calls")).unwrap(), "call\n");
   }
 

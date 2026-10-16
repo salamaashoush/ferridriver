@@ -3,7 +3,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use ferridriver::install::BrowserInstaller;
+use ferridriver::install::{BrowserInstaller, DependencyGroup};
 
 /// Print the per-method CDP RTT stats table to stderr.
 ///
@@ -25,14 +25,27 @@ pub async fn install_chromium() -> Result<String> {
   installer.install_chromium(|_| {}).await.map_err(crate::error::to_napi)
 }
 
-/// Install system dependencies required for Chromium (Linux only).
-/// This is equivalent to `ferridriver install --with-deps`.
+/// Install the system packages `browsers` need (Linux only), like
+/// `npx playwright install-deps`: every browser when none are named.
 /// Requires root/sudo on Linux. No-op on macOS/Windows.
-#[napi]
-pub async fn install_system_deps() -> Result<()> {
-  let installer = BrowserInstaller::new();
-  installer
-    .install_system_deps(|_| {})
+#[napi(ts_args_type = "browsers?: Array<'chromium' | 'chromium-headless-shell' | 'firefox' | 'webkit'>")]
+pub async fn install_system_deps(browsers: Option<Vec<String>>) -> Result<()> {
+  let groups = match browsers {
+    None => vec![
+      DependencyGroup::Chromium,
+      DependencyGroup::Firefox,
+      DependencyGroup::WebKit,
+    ],
+    Some(names) => names
+      .iter()
+      .map(|name| {
+        DependencyGroup::of_target(name)
+          .ok_or_else(|| Error::new(Status::InvalidArg, format!("no system dependencies for {name:?}")))
+      })
+      .collect::<Result<_>>()?,
+  };
+  BrowserInstaller::new()
+    .install_system_deps(&groups, |_| {})
     .await
     .map_err(crate::error::to_napi)
 }
@@ -43,7 +56,7 @@ pub async fn install_system_deps() -> Result<()> {
 pub async fn install_chromium_with_deps() -> Result<String> {
   let installer = BrowserInstaller::new();
   installer
-    .install_system_deps(|_| {})
+    .install_system_deps(&[DependencyGroup::Chromium], |_| {})
     .await
     .map_err(crate::error::to_napi)?;
   installer.install_chromium(|_| {}).await.map_err(crate::error::to_napi)

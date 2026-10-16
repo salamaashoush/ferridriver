@@ -8,7 +8,7 @@
 
 use std::sync::Mutex;
 
-use ferridriver::install::{BrowserInstaller, CacheFamily, InstallProgress};
+use ferridriver::install::{BrowserInstaller, CacheFamily, DependencyGroup, InstallProgress};
 
 use crate::cli;
 use crate::ui;
@@ -43,7 +43,8 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
 
   if args.with_deps {
     let phase = Phase::new("system dependencies");
-    installer.install_system_deps(phase.callback()).await?;
+    let groups: Vec<DependencyGroup> = browsers.iter().filter_map(|b| DependencyGroup::of_target(b)).collect();
+    installer.install_system_deps(&groups, phase.callback()).await?;
     phase.finish();
   }
 

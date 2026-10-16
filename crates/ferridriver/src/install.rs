@@ -9,17 +9,19 @@
 //! # Usage
 //!
 //! ```ignore
-//! use ferridriver::install::{BrowserInstaller, InstallProgress};
+//! use ferridriver::install::{BrowserInstaller, DependencyGroup, InstallProgress};
 //!
 //! let installer = BrowserInstaller::new();
 //! let path = installer.install_chromium(|p| { /* handle progress */ }).await?;
 //!
 //! // Install system deps on Linux (requires sudo)
-//! installer.install_system_deps(|p| { /* handle progress */ }).await?;
+//! installer.install_system_deps(&[DependencyGroup::Chromium], |p| { /* handle progress */ }).await?;
 //! ```
 
 mod android;
 mod ios;
+#[cfg(any(target_os = "linux", test))]
+mod linux;
 
 use std::path::{Path, PathBuf};
 
@@ -222,6 +224,29 @@ impl CacheFamily {
       return None;
     }
     name.strip_prefix(self.prefix()).filter(|version| !version.is_empty())
+  }
+}
+
+/// What a browser needs from the system on Linux. `Tools` is the virtual
+/// display and fonts every browser uses, and is always installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyGroup {
+  Tools,
+  Chromium,
+  Firefox,
+  WebKit,
+}
+
+impl DependencyGroup {
+  /// The group `ferridriver install <target>` needs, if it needs one.
+  #[must_use]
+  pub fn of_target(target: &str) -> Option<Self> {
+    Some(match target {
+      "chromium" | "chromium-headless-shell" => Self::Chromium,
+      "firefox" => Self::Firefox,
+      "webkit" => Self::WebKit,
+      _ => return None,
+    })
   }
 }
 
@@ -615,40 +640,44 @@ impl BrowserInstaller {
     Ok(())
   }
 
-  /// Install system-level dependencies required to run Chromium on Linux.
+  /// Install the system packages `browsers` need on Linux, plus the
+  /// virtual display and fonts every browser uses.
   ///
-  /// Detects the Linux distribution from `/etc/os-release` and installs
-  /// the appropriate packages via `apt-get`. Requires root/sudo.
-  ///
-  /// This is equivalent to `npx playwright install-deps chromium`.
-  /// On macOS and Windows this is a no-op (no system deps needed).
+  /// Detects the distribution from `/etc/os-release` and installs with
+  /// `apt-get` or `pacman`, through `sudo` unless already root. The same as
+  /// `npx playwright install-deps <browsers>`. Other platforms need nothing.
   ///
   /// # Errors
   ///
-  /// Returns an error if the Linux distribution is unsupported or `apt-get`/`pacman` fails.
+  /// Returns an error if there is no package list for this distribution or
+  /// the package manager fails.
   #[cfg(target_os = "linux")]
-  pub async fn install_system_deps<F>(&self, progress: F) -> Result<()>
+  pub async fn install_system_deps<F>(&self, browsers: &[DependencyGroup], progress: F) -> Result<()>
   where
     F: Fn(InstallProgress),
   {
-    let distro = detect_linux_distro();
-    let (pkg_manager, packages) = system_packages_for_distro(&distro);
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let platform = linux::host_platform(&os_release, std::env::consts::ARCH);
+    let mut groups = vec![DependencyGroup::Tools];
+    groups.extend_from_slice(browsers);
+    let (manager, packages) = linux::packages(&platform, &groups)?;
 
-    if packages.is_empty() {
-      return Err(FerriError::unsupported(format!(
-        "Linux distribution {distro}: cannot determine required packages"
-      )));
-    }
+    progress(InstallProgress::InstallingDeps {
+      distro: platform.clone(),
+    });
 
-    progress(InstallProgress::InstallingDeps { distro: distro.clone() });
-
-    // Build the install command based on the package manager
-    let commands = match pkg_manager {
-      PackageManager::Apt => format!(
-        "apt-get update && apt-get install -y --no-install-recommends {}",
-        packages.join(" ")
+    let (tool, commands) = match manager {
+      linux::PackageManager::Apt => (
+        "apt-get",
+        format!(
+          "apt-get update && apt-get install -y --no-install-recommends {}",
+          packages.join(" ")
+        ),
       ),
-      PackageManager::Pacman => format!("pacman -Sy --noconfirm --needed {}", packages.join(" ")),
+      linux::PackageManager::Pacman => (
+        "pacman",
+        format!("pacman -Sy --noconfirm --needed {}", packages.join(" ")),
+      ),
     };
 
     // Determine if we need sudo (getuid is always safe, just FFI-marked unsafe).
@@ -672,10 +701,6 @@ impl BrowserInstaller {
       .await?;
 
     if !status.success() {
-      let tool = match pkg_manager {
-        PackageManager::Apt => "apt-get",
-        PackageManager::Pacman => "pacman",
-      };
       return Err(backend_err(format!(
         "{tool} exited with code: {}",
         status.code().unwrap_or(-1)
@@ -688,11 +713,15 @@ impl BrowserInstaller {
 
   /// No system dependencies are required on this platform.
   #[cfg(not(target_os = "linux"))]
-  pub fn install_system_deps<F>(&self, progress: F) -> impl std::future::Future<Output = Result<()>>
+  pub fn install_system_deps<F>(
+    &self,
+    browsers: &[DependencyGroup],
+    progress: F,
+  ) -> impl std::future::Future<Output = Result<()>>
   where
     F: Fn(InstallProgress),
   {
-    futures::FutureExt::map(std::future::ready((self, progress)), |_| Ok(()))
+    futures::FutureExt::map(std::future::ready((self, browsers, progress)), |_| Ok(()))
   }
 
   /// Return the path to an installed chromium, or `None` if not installed.
@@ -1273,28 +1302,11 @@ fn webkit_archive_for_host() -> Result<String> {
   let archive = match (os, arch) {
     #[cfg(target_os = "linux")]
     ("linux", _) => {
-      let distro = detect_linux_distro();
-      // Map distro tag → PW WebKit archive. Arch and any unknown distro
-      // ride the ubuntu-24.04 build (same call Playwright makes).
-      if distro.starts_with("ubuntu20.04") {
-        if arch == "aarch64" {
-          "webkit-ubuntu-20.04-arm64.zip"
-        } else {
-          "webkit-ubuntu-20.04.zip"
-        }
-      } else if distro.starts_with("ubuntu22.04") || distro.starts_with("debian11") {
-        if arch == "aarch64" {
-          "webkit-ubuntu-22.04-arm64.zip"
-        } else {
-          "webkit-ubuntu-22.04.zip"
-        }
-      } else if distro.starts_with("debian12") {
-        "webkit-debian-12.zip"
-      } else if arch == "aarch64" {
-        "webkit-ubuntu-24.04-arm64.zip"
-      } else {
-        "webkit-ubuntu-24.04.zip"
-      }
+      let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+      let platform = linux::host_platform(&os_release, arch);
+      return linux::webkit_archive(&platform)
+        .map(str::to_string)
+        .ok_or_else(|| FerriError::unsupported(format!("no Playwright WebKit build for {platform}")));
     },
     #[cfg(not(target_os = "linux"))]
     ("linux", "aarch64") => "webkit-ubuntu-24.04-arm64.zip",
@@ -1317,8 +1329,8 @@ fn current_platform() -> String {
   let arch = std::env::consts::ARCH;
 
   match (os, arch) {
-    // CfT doesn't have arm64 linux yet, use linux64 for both
-    ("linux", "x86_64" | "aarch64") => "linux64".to_string(),
+    ("linux", "x86_64") => "linux64".to_string(),
+    ("linux", "aarch64") => "linux-arm64".to_string(),
     ("macos", "x86_64") => "mac-x64".to_string(),
     ("macos", "aarch64") => "mac-arm64".to_string(),
     ("windows", "x86_64") => "win64".to_string(),
@@ -1330,6 +1342,7 @@ fn current_platform() -> String {
 fn chrome_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
   match platform {
     "linux64" => install_dir.join("chrome-linux64/chrome"),
+    "linux-arm64" => install_dir.join("chrome-linux-arm64/chrome"),
     "mac-x64" => {
       install_dir.join("chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
     },
@@ -1345,6 +1358,7 @@ fn chrome_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
 fn headless_shell_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
   match platform {
     "linux64" => install_dir.join("chrome-headless-shell-linux64/chrome-headless-shell"),
+    "linux-arm64" => install_dir.join("chrome-headless-shell-linux-arm64/chrome-headless-shell"),
     "mac-x64" => install_dir.join("chrome-headless-shell-mac-x64/chrome-headless-shell"),
     "mac-arm64" => install_dir.join("chrome-headless-shell-mac-arm64/chrome-headless-shell"),
     "win64" => install_dir.join("chrome-headless-shell-win64/chrome-headless-shell.exe"),
@@ -1352,448 +1366,6 @@ fn headless_shell_executable_path(install_dir: &Path, platform: &str) -> PathBuf
     _ => install_dir.join("chrome-headless-shell"),
   }
 }
-
-// ---------------------------------------------------------------------------
-// Linux distro detection (ported from Playwright's hostPlatform.ts)
-// ---------------------------------------------------------------------------
-
-/// Detect Linux distribution from /etc/os-release.
-/// Returns a Playwright-compatible platform string like "ubuntu24.04-x64".
-#[cfg(target_os = "linux")]
-fn detect_linux_distro() -> String {
-  let arch_suffix = match std::env::consts::ARCH {
-    "aarch64" => "-arm64",
-    _ => "-x64",
-  };
-
-  let (id, version) = read_os_release().unwrap_or_default();
-
-  match id.as_str() {
-    "ubuntu" | "pop" | "neon" | "tuxedo" => {
-      let major: u32 = version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(24);
-      if major < 22 {
-        format!("ubuntu20.04{arch_suffix}")
-      } else if major < 24 {
-        format!("ubuntu22.04{arch_suffix}")
-      } else {
-        format!("ubuntu24.04{arch_suffix}")
-      }
-    },
-    "linuxmint" => {
-      let major: u32 = version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(22);
-      if major <= 20 {
-        format!("ubuntu20.04{arch_suffix}")
-      } else if major == 21 {
-        format!("ubuntu22.04{arch_suffix}")
-      } else {
-        format!("ubuntu24.04{arch_suffix}")
-      }
-    },
-    "debian" | "raspbian" => match version.as_str() {
-      "11" => format!("debian11{arch_suffix}"),
-      "12" => format!("debian12{arch_suffix}"),
-      _ => format!("debian13{arch_suffix}"),
-    },
-    // Arch Linux and derivatives
-    "arch" | "manjaro" | "endeavouros" | "garuda" | "artix" | "cachyos" => {
-      format!("arch{arch_suffix}")
-    },
-    // Default to ubuntu24.04 for unknown distros (same as Playwright)
-    _ => format!("ubuntu24.04{arch_suffix}"),
-  }
-}
-
-/// Read `/etc/os-release` and return (ID, `VERSION_ID`).
-#[cfg(target_os = "linux")]
-fn read_os_release() -> Option<(String, String)> {
-  let content = std::fs::read_to_string("/etc/os-release").ok()?;
-  let mut id = String::new();
-  let mut version = String::new();
-  for line in content.lines() {
-    if let Some(val) = line.strip_prefix("ID=") {
-      id = val.trim_matches('"').to_lowercase();
-    } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
-      version = val.trim_matches('"').to_string();
-    }
-  }
-  Some((id, version))
-}
-
-// ---------------------------------------------------------------------------
-// System dependency lists (ported from Playwright's nativeDeps.ts + Arch)
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-enum PackageManager {
-  Apt,
-  Pacman,
-}
-
-/// Return the package manager and deduplicated list of packages needed
-/// to run **both Chromium and Playwright `WebKit`** on the given distro.
-///
-/// These lists are Docker-verified against Chrome for Testing and the
-/// Playwright `WebKit` bundle on bare Ubuntu 24.04. Only packages whose
-/// shared libraries the respective binary actually links against are
-/// included, plus fonts for text rendering and headed mode X11 libs.
-///
-/// `ferridriver install --with-deps` calls into this once and apt-gets
-/// the merged union, so users do not need to track which packages go
-/// with which browser.
-#[cfg(target_os = "linux")]
-fn system_packages_for_distro(distro: &str) -> (PackageManager, Vec<&'static str>) {
-  if distro.starts_with("arch") {
-    let mut pkgs = arch_chromium_packages();
-    pkgs.extend(arch_webkit_packages());
-    pkgs.sort_unstable();
-    pkgs.dedup();
-    return (PackageManager::Pacman, pkgs);
-  }
-
-  let mut merged: Vec<&'static str> = apt_chromium_packages(distro)
-    .iter()
-    .copied()
-    .chain(apt_webkit_packages(distro).iter().copied())
-    .collect();
-  merged.sort_unstable();
-  merged.dedup();
-  (PackageManager::Apt, merged)
-}
-
-/// Chrome for Testing runtime deps (verified via ldd on bare Ubuntu
-/// 24.04 Docker). These are the actual shared libraries Chrome links
-/// against at the binary level. X11 composite/damage/fixes/randr ARE
-/// required even for headless (linked, not dlopen'd).
-#[cfg(target_os = "linux")]
-fn apt_chromium_packages(distro: &str) -> &'static [&'static str] {
-  match distro {
-    d if d.starts_with("ubuntu20.04") => &[
-      "libasound2",
-      "libatk-bridge2.0-0",
-      "libatk1.0-0",
-      "libatspi2.0-0",
-      "libcairo2",
-      "libcups2",
-      "libdbus-1-3",
-      "libdrm2",
-      "libgbm1",
-      "libglib2.0-0",
-      "libnspr4",
-      "libnss3",
-      "libpango-1.0-0",
-      "libxcb1",
-      "libxcomposite1",
-      "libxdamage1",
-      "libxfixes3",
-      "libxrandr2",
-      "libxkbcommon0",
-      "fonts-liberation",
-      "libx11-6",
-      "libxext6",
-      "libwayland-client0",
-      "fonts-noto-color-emoji",
-    ],
-    d if d.starts_with("ubuntu22.04") | d.starts_with("debian11") | d.starts_with("debian12") => &[
-      "libasound2",
-      "libatk-bridge2.0-0",
-      "libatk1.0-0",
-      "libatspi2.0-0",
-      "libcairo2",
-      "libcups2",
-      "libdbus-1-3",
-      "libdrm2",
-      "libgbm1",
-      "libglib2.0-0",
-      "libnspr4",
-      "libnss3",
-      "libpango-1.0-0",
-      "libxcb1",
-      "libxcomposite1",
-      "libxdamage1",
-      "libxfixes3",
-      "libxrandr2",
-      "libxkbcommon0",
-      "fonts-liberation",
-      "libx11-6",
-      "libxext6",
-      "libwayland-client0",
-      "fonts-noto-color-emoji",
-    ],
-    // ubuntu24.04, debian13, and fallback (t64 ABI transition packages)
-    _ => &[
-      "libasound2t64",
-      "libatk-bridge2.0-0t64",
-      "libatk1.0-0t64",
-      "libatspi2.0-0t64",
-      "libcairo2",
-      "libcups2t64",
-      "libdbus-1-3",
-      "libdrm2",
-      "libgbm1",
-      "libglib2.0-0t64",
-      "libnspr4",
-      "libnss3",
-      "libpango-1.0-0",
-      "libxcb1",
-      "libxcomposite1",
-      "libxdamage1",
-      "libxfixes3",
-      "libxrandr2",
-      "libxkbcommon0",
-      "fonts-liberation",
-      "libx11-6",
-      "libxext6",
-      "libwayland-client0",
-      "fonts-noto-color-emoji",
-    ],
-  }
-}
-
-/// Playwright `WebKit` runtime deps mirrored verbatim from
-/// `microsoft/playwright/packages/playwright-core/src/server/registry/nativeDeps.ts`.
-/// `pw_run.sh` exits silently with "transport closed" when any of
-/// these is missing — symptoms are hard to attribute without trace
-/// logs, so the merged install removes the foot-gun.
-#[cfg(target_os = "linux")]
-#[allow(clippy::too_many_lines)] // Three flat package tables — splitting hurts readability.
-fn apt_webkit_packages(distro: &str) -> &'static [&'static str] {
-  match distro {
-    d if d.starts_with("ubuntu20.04") => &[
-      "libenchant-2-2",
-      "libflite1",
-      "libx264-155",
-      "libatk-bridge2.0-0",
-      "libatk1.0-0",
-      "libcairo2",
-      "libegl1",
-      "libenchant1c2a",
-      "libepoxy0",
-      "libevdev2",
-      "libfontconfig1",
-      "libfreetype6",
-      "libgdk-pixbuf2.0-0",
-      "libgl1",
-      "libgles2",
-      "libglib2.0-0",
-      "libgtk-3-0",
-      "libgudev-1.0-0",
-      "libharfbuzz-icu0",
-      "libharfbuzz0b",
-      "libhyphen0",
-      "libicu66",
-      "libjpeg-turbo8",
-      "libnghttp2-14",
-      "libnotify4",
-      "libopengl0",
-      "libopenjp2-7",
-      "libopus0",
-      "libpango-1.0-0",
-      "libpng16-16",
-      "libsecret-1-0",
-      "libvpx6",
-      "libwayland-client0",
-      "libwayland-egl1",
-      "libwayland-server0",
-      "libwebp6",
-      "libwebpdemux2",
-      "libwoff1",
-      "libx11-6",
-      "libxcomposite1",
-      "libxdamage1",
-      "libxkbcommon0",
-      "libxml2",
-      "libxslt1.1",
-      "libatomic1",
-      "libevent-2.1-7",
-    ],
-    d if d.starts_with("ubuntu22.04") | d.starts_with("debian11") | d.starts_with("debian12") => &[
-      "libsoup-3.0-0",
-      "libenchant-2-2",
-      "gstreamer1.0-libav",
-      "gstreamer1.0-plugins-bad",
-      "gstreamer1.0-plugins-base",
-      "gstreamer1.0-plugins-good",
-      "libicu70",
-      "libatk-bridge2.0-0",
-      "libatk1.0-0",
-      "libcairo2",
-      "libdbus-1-3",
-      "libdrm2",
-      "libegl1",
-      "libepoxy0",
-      "libevdev2",
-      "libffi7",
-      "libfontconfig1",
-      "libfreetype6",
-      "libgbm1",
-      "libgdk-pixbuf-2.0-0",
-      "libgles2",
-      "libglib2.0-0",
-      "libglx0",
-      "libgstreamer-gl1.0-0",
-      "libgstreamer-plugins-base1.0-0",
-      "libgstreamer1.0-0",
-      "libgtk-4-1",
-      "libgudev-1.0-0",
-      "libharfbuzz-icu0",
-      "libharfbuzz0b",
-      "libhyphen0",
-      "libjpeg-turbo8",
-      "liblcms2-2",
-      "libmanette-0.2-0",
-      "libnotify4",
-      "libopengl0",
-      "libopenjp2-7",
-      "libopus0",
-      "libpango-1.0-0",
-      "libpng16-16",
-      "libproxy1v5",
-      "libsecret-1-0",
-      "libwayland-client0",
-      "libwayland-egl1",
-      "libwayland-server0",
-      "libwebpdemux2",
-      "libwoff1",
-      "libx11-6",
-      "libxcomposite1",
-      "libxdamage1",
-      "libxkbcommon0",
-      "libxml2",
-      "libxslt1.1",
-      "libx264-163",
-      "libatomic1",
-      "libevent-2.1-7",
-      "libavif13",
-    ],
-    // ubuntu24.04, debian13, and fallback (noble / trixie t64 ABI).
-    _ => &[
-      "gstreamer1.0-libav",
-      "gstreamer1.0-plugins-bad",
-      "gstreamer1.0-plugins-base",
-      "gstreamer1.0-plugins-good",
-      "libicu74",
-      "libatomic1",
-      "libatk-bridge2.0-0t64",
-      "libatk1.0-0t64",
-      "libcairo-gobject2",
-      "libcairo2",
-      "libdbus-1-3",
-      "libdrm2",
-      "libenchant-2-2",
-      "libepoxy0",
-      "libevent-2.1-7t64",
-      "libflite1",
-      "libfontconfig1",
-      "libfreetype6",
-      "libgbm1",
-      "libgdk-pixbuf-2.0-0",
-      "libgles2",
-      "libglib2.0-0t64",
-      "libgstreamer-gl1.0-0",
-      "libgstreamer-plugins-bad1.0-0",
-      "libgstreamer-plugins-base1.0-0",
-      "libgstreamer1.0-0",
-      "libgtk-4-1",
-      "libharfbuzz-icu0",
-      "libharfbuzz0b",
-      "libhyphen0",
-      "libjpeg-turbo8",
-      "liblcms2-2",
-      "libmanette-0.2-0",
-      "libopus0",
-      "libpango-1.0-0",
-      "libpangocairo-1.0-0",
-      "libpng16-16t64",
-      "libsecret-1-0",
-      "libvpx9",
-      "libwayland-client0",
-      "libwayland-egl1",
-      "libwayland-server0",
-      "libwebp7",
-      "libwebpdemux2",
-      "libwoff1",
-      "libx11-6",
-      "libxkbcommon0",
-      "libxml2",
-      "libxslt1.1",
-      "libx264-164",
-      "libavif16",
-    ],
-  }
-}
-
-/// Arch Linux (and derivatives) packages for Chromium.
-/// Uses pacman package names. Verified against the same shared library
-/// requirements as the apt packages above.
-#[cfg(target_os = "linux")]
-fn arch_chromium_packages() -> Vec<&'static str> {
-  vec![
-    // Core runtime (matches ldd requirements)
-    "alsa-lib",     // libasound.so.2
-    "at-spi2-core", // libatk-bridge, libatk, libatspi
-    "cairo",        // libcairo.so.2
-    "libcups",      // libcups.so.2
-    "dbus",         // libdbus-1.so.3
-    "libdrm",       // libdrm.so.2
-    "mesa",         // libgbm.so.1
-    "glib2",        // libglib, libgio, libgobject
-    "nspr",         // libnspr4.so
-    "nss",          // libnss3.so
-    "pango",        // libpango-1.0.so.0
-    // X11 (required by Chrome binary even in headless)
-    "libxcb",        // libxcb.so.1
-    "libxcomposite", // libXcomposite.so.1
-    "libxdamage",    // libXdamage.so.1
-    "libxfixes",     // libXfixes.so.3
-    "libxrandr",     // libXrandr.so.2
-    "libxkbcommon",  // libxkbcommon.so.0
-    // Headed mode
-    "libx11",  // libX11.so.6
-    "libxext", // libXext.so.6
-    "wayland", // libwayland-client.so.0
-    // Fonts
-    "ttf-liberation",   // basic web fonts
-    "noto-fonts-emoji", // emoji rendering
-    "fontconfig",       // font discovery
-    "freetype2",        // font rendering
-  ]
-}
-
-/// Arch Linux (and derivatives) packages for Playwright `WebKit`.
-/// Mirrors the runtime libs the bundled `pw_run.sh` loads.
-#[cfg(target_os = "linux")]
-fn arch_webkit_packages() -> Vec<&'static str> {
-  vec![
-    // Core WebKit runtime
-    "woff2",        // libwoff2common, libwoff2dec
-    "libvpx",       // libvpx.so
-    "opus",         // libopus.so
-    "libwebp",      // libwebp, libwebpdemux
-    "harfbuzz-icu", // libharfbuzz-icu.so
-    "enchant",      // libenchant-2.so
-    "hyphen",       // libhyphen.so
-    "libsecret",    // libsecret-1.so
-    "libnotify",    // libnotify.so
-    "mesa",         // libgles, libegl (already pulled by chromium)
-    "libxslt",      // libxslt.so
-    "libevent",     // libevent.so
-    "libgudev",     // libgudev-1.0.so
-    "libsoup3",     // libsoup-3.0.so
-    "libavif",      // libavif.so
-    // GStreamer (audio/video pipelines used by WebKit)
-    "gst-plugins-base",
-    "gst-plugins-base-libs",
-    "gst-plugins-good",
-    "gst-plugins-bad",
-    "gst-libav",
-    // GTK4 (PW WebKit links against minibrowser-gtk's GTK4 stack)
-    "gtk4",
-  ]
-}
-
-// ---------------------------------------------------------------------------
-// Zip extraction
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Firefox platform helpers
