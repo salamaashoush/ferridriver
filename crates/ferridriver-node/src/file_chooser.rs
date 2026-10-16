@@ -24,6 +24,12 @@ impl FileChooser {
 
 #[napi]
 impl FileChooser {
+  /// Playwright: `fileChooser.page(): Page`.
+  #[napi(ts_return_type = "Page")]
+  pub fn page(&self) -> crate::identity::PageObject {
+    crate::identity::PageObject(std::sync::Arc::clone(self.inner.page()))
+  }
+
   /// Playwright: `fileChooser.element(): ElementHandle`.
   #[napi]
   pub fn element(&self) -> crate::element_handle::ElementHandle {

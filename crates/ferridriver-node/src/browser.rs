@@ -440,6 +440,12 @@ impl Browser {
     self.inner.version().to_string()
   }
 
+  /// Playwright: `browser.browserType(): BrowserType`.
+  #[napi]
+  pub fn browser_type(&self) -> crate::browser_type::BrowserType {
+    crate::browser_type::BrowserType::wrap(self.inner.browser_type())
+  }
+
   /// Whether the browser is connected. Sync — mirrors Playwright's
   /// `browser.isConnected(): boolean`.
   #[napi]

@@ -198,7 +198,7 @@ fn lower_launch_options(opts: LaunchOptions) -> core_opts::LaunchOptions {
     handle_sigint: None,
     handle_sigterm: None,
     chromium_sandbox: None,
-    firefox_user_prefs: None,
+    firefox_user_prefs: opts.firefox_user_prefs.map(|prefs| prefs.into_iter().collect()),
     proxy: opts.proxy.map(|p| core_opts::ProxyConfig {
       server: p.server,
       bypass: p.bypass,

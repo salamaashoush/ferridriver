@@ -64,6 +64,8 @@ pub struct Browser {
   events: crate::events::BrowserEventEmitter,
   /// Set once the connection ended; `disconnected` fires on that edge.
   disconnected: Arc<std::sync::atomic::AtomicBool>,
+  /// What `browser.browserType()` answers.
+  factory: crate::browser_type::BrowserType,
 }
 
 /// One entry in [`Browser::context_names`].
@@ -118,6 +120,7 @@ impl Browser {
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      factory: crate::browser_type::BrowserType::for_backend(backend_kind),
     }
   }
 
@@ -180,6 +183,7 @@ impl Browser {
     let mut browser = Self::from_state_unwatched(state);
     browser.version = Arc::from(version);
     browser.backend_kind = backend_kind;
+    browser.factory = crate::browser_type::BrowserType::for_backend(backend_kind);
     browser.isolated_contexts = isolated_contexts;
     browser.instance = Arc::from(instance);
     browser.context_names = Arc::new(std::sync::Mutex::new(vec![ContextEntry {
@@ -189,7 +193,11 @@ impl Browser {
     Ok(browser.watch_connection(Some(closed)))
   }
 
-  pub(crate) async fn from_ready_state(state: Arc<RwLock<BrowserState>>, instance: &str) -> Result<Self> {
+  pub(crate) async fn from_ready_state(
+    state: Arc<RwLock<BrowserState>>,
+    instance: &str,
+    browser_type: crate::browser_type::BrowserType,
+  ) -> Result<Self> {
     let guard = state.read().await;
     guard.ensure_not_disposed()?;
     let backend = guard
@@ -209,6 +217,7 @@ impl Browser {
       connected: Arc::clone(&guard.connected),
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      factory: browser_type,
     };
     drop(guard);
     Ok(browser.watch_connection(Some(closed)))
@@ -321,6 +330,7 @@ impl Browser {
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      factory: crate::browser_type::BrowserType::for_backend(backend_kind),
     }
   }
 
@@ -820,6 +830,12 @@ impl Browser {
   #[must_use]
   pub fn version(&self) -> &str {
     &self.version
+  }
+
+  /// Playwright: `browser.browserType(): BrowserType`.
+  #[must_use]
+  pub fn browser_type(&self) -> crate::browser_type::BrowserType {
+    self.factory
   }
 
   /// Whether the browser is connected. Sync — mirrors Playwright's

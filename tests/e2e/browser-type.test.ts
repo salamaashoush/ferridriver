@@ -104,4 +104,16 @@ describe('browser type', () => {
       await b.close();
     }
   });
+
+  test('browser_browser_type_names_its_engine', async ({ browser, browserName }) => {
+    // The fixture's browser came from the runner's own launch, so the
+    // type is read off its protocol; one launched here keeps its factory.
+    expect(browser.browserType().name()).toBe(browserName);
+    const launched = await chromium({ transport: 'ws' }).launch({ headless: true });
+    try {
+      expect(launched.browserType().name()).toBe('chromium');
+    } finally {
+      await launched.close();
+    }
+  });
 });

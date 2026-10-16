@@ -2075,6 +2075,8 @@ export interface Clock {
 export interface CDPSession {
   send(method: string, params?: Record<string, unknown>): Promise<unknown>;
   on(event: string, handler: (params: unknown) => void): void;
+  once(event: string, handler: (params: unknown) => void): void;
+  off(event: string, handler: (params: unknown) => void): void;
   detach(): Promise<void>;
 }
 
@@ -2532,7 +2534,7 @@ export interface BrowserType {
   executablePath(): string | null;
   launch(options?: LaunchOptions): Promise<Browser>;
   connect(wsEndpoint: string, options?: ConnectOptions): Promise<Browser>;
-  connectOverCDP(endpoint: string): Promise<Browser>;
+  connectOverCDP(endpointURL: string, options?: { headers?: Record<string, string>; slowMo?: number; timeout?: number }): Promise<Browser>;
   launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & LaunchOptions): Promise<BrowserContext>;
 }
 
@@ -2567,6 +2569,9 @@ export interface BrowserContextOptions {
   colorScheme?: 'light' | 'dark' | 'no-preference';
   reducedMotion?: 'reduce' | 'no-preference';
   forcedColors?: 'active' | 'none';
+  contrast?: 'more' | 'no-preference';
+  /** Record a video of every page into `dir`, scaled to `size`. */
+  recordVideo?: { dir: string; size?: { width: number; height: number } };
   isMobile?: boolean;
   hasTouch?: boolean;
   deviceScaleFactor?: number;
@@ -2609,7 +2614,7 @@ export interface Browser {
   newPage(options?: BrowserContextOptions): Promise<Page>;
   contexts(): BrowserContext[];
   version(): Promise<string>;
-  browserType(): unknown;
+  browserType(): BrowserType;
   isConnected(): boolean;
   close(): Promise<void>;
   newBrowserCDPSession(): Promise<CDPSession>;

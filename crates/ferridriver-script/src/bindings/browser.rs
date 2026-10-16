@@ -79,6 +79,12 @@ impl BrowserJs {
     self.inner.version().to_string()
   }
 
+  /// Playwright: `browser.browserType(): BrowserType`.
+  #[qjs(rename = "browserType")]
+  pub fn browser_type(&self) -> crate::bindings::browser_type::BrowserTypeJs {
+    crate::bindings::browser_type::BrowserTypeJs::new(self.inner.browser_type())
+  }
+
   /// Playwright: `browser.isConnected(): boolean` (sync).
   #[qjs(rename = "isConnected")]
   pub fn is_connected(&self) -> bool {

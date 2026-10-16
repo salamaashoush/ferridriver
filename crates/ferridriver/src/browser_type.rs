@@ -123,6 +123,18 @@ impl BrowserType {
     }
   }
 
+  /// The type a browser reached some other way (a test runner's own
+  /// launch) answers `browser.browserType()` with, from its protocol.
+  pub(crate) fn for_backend(backend: BackendKind) -> Self {
+    let kind = match backend {
+      BackendKind::CdpPipe | BackendKind::CdpWs => BrowserKind::Chromium,
+      BackendKind::Bidi => BrowserKind::Firefox,
+      BackendKind::WebKit => BrowserKind::WebKit,
+      BackendKind::WebDriver => BrowserKind::Safari,
+    };
+    Self::with_backend(kind, backend)
+  }
+
   /// Playwright `BrowserType.name()` — `"chromium"` / `"firefox"` /
   /// `"webkit"`.
   #[must_use]
@@ -175,7 +187,7 @@ impl BrowserType {
     let state = BrowserState::with_plan(ConnectMode::Launch, plan)
       .start_owned(resources)?
       .await?;
-    Browser::from_ready_state(state, "default").await
+    Browser::from_ready_state(state, "default", self).await
   }
 
   /// Playwright: `browserType.connect(wsEndpoint, options?) -> Browser`.
@@ -233,7 +245,7 @@ impl BrowserType {
         timeout: options.timeout,
       };
       let state = BrowserState::with_plan(mode, plan).start_owned(resources)?.await?;
-      return Browser::from_ready_state(state, "default").await;
+      return Browser::from_ready_state(state, "default", self).await;
     }
     if matches!(self.kind, BrowserKind::Firefox | BrowserKind::Safari) {
       let plan = LaunchPlan {
@@ -247,7 +259,7 @@ impl BrowserType {
       let state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan)
         .start_owned(resources)?
         .await?;
-      return Browser::from_ready_state(state, "default").await;
+      return Browser::from_ready_state(state, "default", self).await;
     }
     let cdp_opts = ConnectOverCdpOptions {
       headers: options.headers,
@@ -294,7 +306,7 @@ impl BrowserType {
     let state = BrowserState::with_plan(ConnectMode::ConnectUrl(endpoint_url.to_string()), plan)
       .start_owned(resources)?
       .await?;
-    Browser::from_ready_state(state, "default").await
+    Browser::from_ready_state(state, "default", self).await
   }
 
   /// The default context of a Chromium reached over CDP, as the thing its
@@ -315,7 +327,12 @@ impl BrowserType {
     let mut state = BrowserState::with_plan(ConnectMode::ConnectUrl(endpoint_url.to_string()), plan);
     state.persistent_context = true;
     let state = state.start_owned(None)?.await?;
-    let browser = Browser::from_ready_state(state, "default").await?;
+    let browser = Browser::from_ready_state(
+      state,
+      "default",
+      Self::with_backend(BrowserKind::Chromium, BackendKind::CdpWs),
+    )
+    .await?;
     let default_ctx = browser.default_context();
     let composite = default_ctx.key.to_composite();
     if let Some(remote) = remote_downloads {
@@ -366,7 +383,7 @@ impl BrowserType {
     let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
     state.persistent_context = true;
     let state = state.start_owned(resources)?.await?;
-    let browser = Browser::from_ready_state(state, "default").await?;
+    let browser = Browser::from_ready_state(state, "default", *self).await?;
     let default_ctx = browser.default_context();
     // Persist the options bag against the composite key for the
     // default context so subsequent `new_page()` calls in the

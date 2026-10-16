@@ -65,6 +65,13 @@ impl WebSocketRoute {
     self.inner.url().to_string()
   }
 
+  /// Playwright: `webSocketRoute.protocols(): string[]`, the subprotocols
+  /// the page asked for.
+  #[napi]
+  pub fn protocols(&self) -> Vec<String> {
+    self.inner.protocols().to_vec()
+  }
+
   /// Playwright: `webSocketRoute.send(message)`. Sends to the page.
   #[napi(ts_args_type = "message: string | Buffer")]
   pub async fn send(&self, message: Either<String, Buffer>) {
