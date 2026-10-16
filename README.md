@@ -345,7 +345,7 @@ ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
 `run_script` (action) · `ferridriver_extensions` (introspection).
 
 `run_script` runs sandboxed JavaScript against the live session with full
-`Page` / `Locator` / `BrowserContext` / `HttpClient` bindings. One script
+`Page` / `Locator` / `BrowserContext` / `APIRequestContext` bindings. One script
 can navigate, fill forms, click, assert, and make HTTP calls in a single
 LLM turn:
 

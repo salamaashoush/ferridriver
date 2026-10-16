@@ -6,8 +6,8 @@ use napi::Result;
 use napi::bindgen_prelude::PromiseRaw;
 use napi_derive::napi;
 
-/// Options for creating an `HttpClient`.
-#[napi(object)]
+/// Playwright's `request.newContext(options?)` bag.
+#[napi(object, js_name = "NewContextOptions")]
 #[derive(Debug, Clone, Default)]
 pub struct HttpClientOptions {
   /// Base URL prepended to relative paths.
@@ -16,9 +16,9 @@ pub struct HttpClientOptions {
   // mis-spelled key binds to nothing and is silently ignored.
   #[napi(js_name = "baseURL")]
   pub base_url: Option<String>,
-  /// Default headers as `[[key, value], ...]`.
+  /// Headers every request sends.
   #[napi(js_name = "extraHTTPHeaders")]
-  pub extra_http_headers: Option<Vec<Vec<String>>>,
+  pub extra_http_headers: Option<std::collections::HashMap<String, String>>,
   /// Default timeout in milliseconds.
   pub timeout: Option<f64>,
   /// Ignore HTTPS certificate errors.
@@ -29,6 +29,21 @@ pub struct HttpClientOptions {
     ts_type = "{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' } | Array<{ username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' }>"
   )]
   pub http_credentials: Option<crate::context::NapiHttpCredentialsInput>,
+  /// `user-agent` every request sends unless it names its own.
+  pub user_agent: Option<String>,
+  /// Throw on a 4xx or 5xx answer unless the request says otherwise.
+  pub fail_on_status_code: Option<bool>,
+  /// Redirects a request follows unless it says otherwise.
+  pub max_redirects: Option<u32>,
+  /// A `storageState` file path or object: its cookies seed the context.
+  #[napi(ts_type = "string | { cookies?: any[]; origins?: any[] }")]
+  pub storage_state: Option<serde_json::Value>,
+  /// Not supported yet for API contexts; refused rather than ignored.
+  #[napi(ts_type = "{ server: string; bypass?: string; username?: string; password?: string }")]
+  pub proxy: Option<serde_json::Value>,
+  /// Not supported yet for API contexts; refused rather than ignored.
+  #[napi(ts_type = "Array<Record<string, unknown>>")]
+  pub client_certificates: Option<serde_json::Value>,
 }
 
 /// Per-request options. Mirrors Playwright's `APIRequestContext`
@@ -161,7 +176,7 @@ fn merge_over(
 }
 
 /// API response from an HTTP request.
-#[napi]
+#[napi(js_name = "APIResponse")]
 pub struct HttpResponse {
   pub(crate) inner: ferridriver::http_client::HttpResponse,
 }
@@ -306,8 +321,9 @@ impl HttpResponse {
   }
 }
 
-/// A general HTTP client backing `fetch` and the `request` API.
-#[napi]
+/// Playwright's `APIRequestContext`: the HTTP client behind `request`
+/// and `page.request`.
+#[napi(js_name = "APIRequestContext")]
 pub struct HttpClient {
   inner: ferridriver::http_client::HttpClient,
 }
@@ -318,39 +334,58 @@ impl HttpClient {
   }
 }
 
+/// Playwright: `request.newContext(options?): Promise<APIRequestContext>`,
+/// `request` being the module's `APIRequest`.
+#[napi(namespace = "request", ts_return_type = "Promise<APIRequestContext>")]
+pub async fn new_context(options: Option<HttpClientOptions>) -> Result<HttpClient> {
+  let opts = options.unwrap_or_default();
+  if opts.proxy.is_some() {
+    return Err(crate::error::to_napi(ferridriver::error::FerriError::unsupported(
+      "proxy is not supported for request.newContext yet",
+    )));
+  }
+  if opts.client_certificates.is_some() {
+    return Err(crate::error::to_napi(ferridriver::error::FerriError::unsupported(
+      "clientCertificates is not supported for request.newContext yet",
+    )));
+  }
+  let storage = opts
+    .storage_state
+    .map(|input| {
+      let value = crate::context::resolve_storage_state_input(input).map_err(napi::Error::from_reason)?;
+      serde_json::from_value::<ferridriver::options::StorageState>(value)
+        .map_err(|e| napi::Error::from_reason(format!("storageState: {e}")))
+    })
+    .transpose()?;
+  let core_opts = ferridriver::http_client::HttpClientOptions {
+    base_url: opts.base_url,
+    extra_http_headers: opts.extra_http_headers.unwrap_or_default().into_iter().collect(),
+    timeout: opts
+      .timeout
+      .map(|t| std::time::Duration::from_millis(crate::types::f64_to_u64(t))),
+    ignore_https_errors: opts.ignore_https_errors.unwrap_or(false),
+    http_credentials: opts
+      .http_credentials
+      .and_then(crate::context::http_credentials_list)
+      .unwrap_or_default(),
+    user_agent: opts.user_agent,
+    fail_on_status_code: opts.fail_on_status_code,
+    max_redirects: opts.max_redirects,
+  };
+  let mut client = ferridriver::http_client::HttpClient::new(core_opts);
+  if let Some(state) = storage {
+    client = client.with_storage_state(state).into_napi()?;
+  }
+  Ok(HttpClient::wrap(client))
+}
+
 #[napi]
 impl HttpClient {
-  /// Create a new HTTP client.
-  #[napi(factory)]
-  pub fn create(options: Option<HttpClientOptions>) -> Result<Self> {
-    let opts = options.unwrap_or_default();
-    let core_opts = ferridriver::http_client::HttpClientOptions {
-      base_url: opts.base_url,
-      extra_http_headers: opts
-        .extra_http_headers
-        .as_ref()
-        .map(|h| {
-          h.iter()
-            .filter_map(|pair| {
-              if pair.len() == 2 {
-                Some((pair[0].clone(), pair[1].clone()))
-              } else {
-                None
-              }
-            })
-            .collect()
-        })
-        .unwrap_or_default(),
-      timeout: opts.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
-      ignore_https_errors: opts.ignore_https_errors.unwrap_or(false),
-      http_credentials: opts
-        .http_credentials
-        .and_then(crate::context::http_credentials_list)
-        .unwrap_or_default(),
-    };
-    Ok(Self {
-      inner: ferridriver::http_client::HttpClient::new(core_opts),
-    })
+  /// Playwright: `apiRequestContext.storageState(options?)`.
+  #[napi]
+  pub async fn storage_state(&self) -> Result<crate::context::NapiStorageState> {
+    let state = self.inner.storage_state().await.into_napi()?;
+    crate::context::NapiStorageState::try_from(state)
   }
 
   /// Send a GET request.
@@ -466,5 +501,21 @@ impl HttpClient {
   pub async fn clear_cookies(&self, options: Option<crate::types::ClearCookieOptions>) -> Result<()> {
     let filter: ferridriver::backend::ClearCookieOptions = options.map(Into::into).unwrap_or_default();
     self.inner.clear_cookies(&filter).await.into_napi()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn options_it_cannot_honour_are_refused() {
+    let proxy = HttpClientOptions {
+      proxy: Some(serde_json::json!({ "server": "http://proxy.example.com" })),
+      ..HttpClientOptions::default()
+    };
+    let refused = new_context(Some(proxy)).await.err().map(|e| e.reason);
+    assert!(refused.is_some_and(|reason| reason.contains("proxy is not supported")));
+    assert!(new_context(None).await.is_ok());
   }
 }

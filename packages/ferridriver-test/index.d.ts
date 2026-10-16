@@ -2709,7 +2709,27 @@ export interface APIRequestOptions {
   maxRetries?: number;
 }
 
+/** Playwright's `request.newContext(options?)` bag. */
+export interface APIRequestNewContextOptions {
+  baseURL?: string;
+  extraHTTPHeaders?: Record<string, string>;
+  httpCredentials?: HttpCredentials | HttpCredentials[];
+  ignoreHTTPSErrors?: boolean;
+  timeout?: number;
+  userAgent?: string;
+  failOnStatusCode?: boolean;
+  maxRedirects?: number;
+  /** A file path or an object; its cookies seed the new context. */
+  storageState?: string | StorageState;
+}
+
 export interface APIRequestContext {
+  /**
+   * Playwright's `request.newContext(options?)`: a standalone context
+   * with its own cookies, under the same network policy as this one.
+   */
+  newContext(options?: APIRequestNewContextOptions): Promise<APIRequestContext>;
+  storageState(): Promise<StorageState>;
   get(url: string, options?: APIRequestOptions): Promise<APIResponse>;
   post(url: string, options?: APIRequestOptions): Promise<APIResponse>;
   put(url: string, options?: APIRequestOptions): Promise<APIResponse>;

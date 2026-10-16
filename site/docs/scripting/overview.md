@@ -12,7 +12,7 @@ it to four first-class surfaces. All four share one bundler
 | **Standalone scripts** | `ferridriver run script.ts`        | Playwright-style scripts with `chromium()` / `firefox()` / `webkit()` globals |
 
 All four reach the same Rust core (`Page`, `BrowserContext`, `Locator`,
-`HttpClient`). The JS layer is a thin binding — the hot path
+`APIRequestContext`). The JS layer is a thin binding — the hot path
 (actionability checks, polling, network) stays in Rust.
 
 ## Pipeline (compile once, run many)

@@ -81,12 +81,13 @@ The `webkit` backend needs the Playwright WebKit binary
 
 ## Public API surface
 
-Classes exported from `index.d.ts`: `Browser`, `BrowserContext`,
-`BrowserType`, `Codegen`, `ConsoleMessage`, `Dialog`, `Disposable`,
-`Download`, `ElementHandle`, `FileChooser`, `Frame`, `FrameLocator`,
-`HttpClient`, `HttpResponse`, `JsHandle`, `Keyboard`, `Locator`, `Mouse`,
+Classes exported from `index.d.ts`: `APIRequestContext`, `APIResponse`,
+`Browser`, `BrowserContext`, `BrowserType`, `Codegen`, `ConsoleMessage`,
+`Dialog`, `Disposable`, `Download`, `ElementHandle`, `FileChooser`,
+`Frame`, `FrameLocator`, `JsHandle`, `Keyboard`, `Locator`, `Mouse`,
 `Page`, `Request`, `Response`, `Route`, `Touchscreen`, `Video`,
-`WebError`, `WebSocket`.
+`WebError`, `WebSocket`. `request.newContext(options)` makes a
+standalone `APIRequestContext`.
 
 Factory functions: `chromium(options?)`, `firefox()`, `webkit()` — each
 returns a `BrowserType`.

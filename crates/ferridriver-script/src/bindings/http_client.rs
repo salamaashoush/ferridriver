@@ -130,7 +130,7 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
 // ── HttpClientJs ──────────────────────────────────────────────────────
 
 #[derive(JsLifetime, Trace)]
-#[rquickjs::class(rename = "HttpClient")]
+#[rquickjs::class(rename = "APIRequestContext")]
 pub struct HttpClientJs {
   #[qjs(skip_trace)]
   inner: Arc<HttpClient>,
@@ -246,8 +246,103 @@ fn with_guard(opts: Option<RequestOptions>, g: NetGuard) -> RequestOptions {
   o
 }
 
+/// Playwright's `request.newContext(options?)` bag.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsNewContextOptions {
+  #[serde(rename = "baseURL")]
+  base_url: Option<String>,
+  #[serde(rename = "extraHTTPHeaders")]
+  extra_http_headers: Option<rustc_hash::FxHashMap<String, String>>,
+  http_credentials: Option<crate::bindings::browser::JsHttpCredentialsInput>,
+  #[serde(rename = "ignoreHTTPSErrors")]
+  ignore_https_errors: Option<bool>,
+  timeout: Option<f64>,
+  user_agent: Option<String>,
+  fail_on_status_code: Option<bool>,
+  max_redirects: Option<u32>,
+  storage_state: Option<serde_json::Value>,
+  proxy: Option<serde_json::Value>,
+  client_certificates: Option<serde_json::Value>,
+}
+
+/// The body of `request.newContext`: options to a standalone context
+/// carrying `attenuation`, the network policy of the context it came from.
+fn new_api_context<'js>(
+  ctx: &Ctx<'js>,
+  options: Opt<Value<'js>>,
+  attenuation: Option<Arc<ferrijs::Permissions>>,
+) -> rquickjs::Result<HttpClientJs> {
+  let options: JsNewContextOptions = match options.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(ctx, v)?,
+    _ => JsNewContextOptions::default(),
+  };
+  if options.proxy.is_some() {
+    return Err(type_error(ctx, "proxy is not supported for request.newContext yet"));
+  }
+  if options.client_certificates.is_some() {
+    return Err(type_error(
+      ctx,
+      "clientCertificates is not supported for request.newContext yet",
+    ));
+  }
+  let storage = match options.storage_state {
+    None => None,
+    Some(serde_json::Value::String(path)) => {
+      let path = std::path::PathBuf::from(path);
+      crate::bindings::convert::readable(ctx, &path)?;
+      let text = std::fs::read_to_string(&path)
+        .map_err(|e| type_error(ctx, format!("storageState: read {}: {e}", path.display())))?;
+      Some(serde_json::from_str(&text).map_err(|e| type_error(ctx, format!("storageState: {e}")))?)
+    },
+    Some(inline) => Some(serde_json::from_value(inline).map_err(|e| type_error(ctx, format!("storageState: {e}")))?),
+  };
+  let core = ferridriver::http_client::HttpClientOptions {
+    base_url: options.base_url,
+    extra_http_headers: options.extra_http_headers.unwrap_or_default().into_iter().collect(),
+    timeout: options
+      .timeout
+      .map(|ms| std::time::Duration::from_millis(crate::bindings::convert::ms_f64_to_u64(ms))),
+    ignore_https_errors: options.ignore_https_errors.unwrap_or(false),
+    http_credentials: options
+      .http_credentials
+      .and_then(crate::bindings::browser::JsHttpCredentialsInput::into_core)
+      .unwrap_or_default(),
+    user_agent: options.user_agent,
+    fail_on_status_code: options.fail_on_status_code,
+    max_redirects: options.max_redirects,
+  };
+  let mut client = HttpClient::new(core);
+  if let Some(state) = storage {
+    client = client.with_storage_state(state).into_js_with(ctx)?;
+  }
+  Ok(HttpClientJs {
+    inner: Arc::new(client),
+    attenuation,
+  })
+}
+
 #[rquickjs::methods]
 impl HttpClientJs {
+  /// Playwright: `request.newContext(options?): Promise<APIRequestContext>`.
+  /// A context made here answers to the same network policy as this one.
+  #[qjs(rename = "newContext")]
+  pub fn new_context<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    options: Opt<Value<'js>>,
+  ) -> Promised<impl std::future::Future<Output = rquickjs::Result<HttpClientJs>> + 'js> {
+    let attenuation = self.attenuation.clone();
+    Promised(async move { new_api_context(&ctx, options, attenuation) })
+  }
+
+  /// Playwright: `apiRequestContext.storageState()`.
+  #[qjs(rename = "storageState")]
+  pub async fn storage_state<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let state = self.inner.storage_state().await.into_js_with(&ctx)?;
+    crate::bindings::convert::serde_to_js(&ctx, &state)
+  }
+
   #[qjs(rename = "get")]
   pub fn get<'js>(
     &self,
@@ -390,7 +485,7 @@ fn settled<T>(value: rquickjs::Result<T>) -> Settled<T> {
 }
 
 #[derive(JsLifetime, Trace)]
-#[rquickjs::class(rename = "HttpResponse")]
+#[rquickjs::class(rename = "APIResponse")]
 pub struct HttpResponseJs {
   #[qjs(skip_trace)]
   inner: HttpResponse,

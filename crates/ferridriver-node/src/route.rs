@@ -155,7 +155,7 @@ impl Route {
   }
 
   #[napi(
-    ts_args_type = "options?: { response?: HttpResponse; status?: number; headers?: Record<string, string>; contentType?: string; body?: string | Buffer; json?: any; path?: string }",
+    ts_args_type = "options?: { response?: APIResponse; status?: number; headers?: Record<string, string>; contentType?: string; body?: string | Buffer; json?: any; path?: string }",
     ts_return_type = "Promise<void>"
   )]
   pub fn fulfill<'env>(&mut self, env: &'env Env, options: Option<Object<'env>>) -> Result<PromiseRaw<'env, ()>> {
@@ -196,7 +196,7 @@ impl Route {
   }
 
   /// Playwright: `route.fetch(options?): Promise<APIResponse>`.
-  #[napi(ts_return_type = "Promise<HttpResponse>")]
+  #[napi(ts_return_type = "Promise<APIResponse>")]
   pub async fn fetch(&self, options: Option<RouteFetchOptions>) -> Result<crate::http_client::HttpResponse> {
     let mut fetch = ferridriver::route::RouteFetchOptions::default();
     if let Some(options) = options {

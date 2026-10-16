@@ -130,7 +130,7 @@ The handler receives one object:
 | `args`     | the caller's argument         | For a promoted tool, the MCP `arguments` object. |
 | `page`     | `Page \| undefined`           | The live browser page for the session. |
 | `context`  | `BrowserContext \| undefined` | The session's browser context. |
-| `request`  | `HttpClient \| undefined`     | HTTP client. Net-restricted if `allow.net` is non-empty. |
+| `request`  | `APIRequestContext \| undefined`     | HTTP client. Net-restricted if `allow.net` is non-empty. |
 | `commands` | `PluginCommands`              | `.run(name, vars?)` — runs a declared command. |
 
 Return any JSON-serialisable value; it becomes the tool result.

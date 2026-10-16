@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import * as http from "node:http";
-import { type Browser, HttpClient, type Page } from "../index.js";
+import { type Browser, type Page, request } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 
 // Spawn an HTTP Basic-auth server: `user:pass` → 200 AUTHED, otherwise
@@ -284,11 +284,11 @@ for (const backend of BACKENDS) {
     it("a standalone request client takes httpCredentials, one or a list", async () => {
       const srv = await startBasicAuthServer();
       try {
-        const none = HttpClient.create();
+        const none = await request.newContext();
         expect((await none.get(srv.url)).status()).toBe(401);
-        const one = HttpClient.create({ httpCredentials: { username: "user", password: "pass" } });
+        const one = await request.newContext({ httpCredentials: { username: "user", password: "pass" } });
         expect((await one.get(srv.url)).status()).toBe(200);
-        const many = HttpClient.create({
+        const many = await request.newContext({
           httpCredentials: [
             { username: "nobody", password: "nothing", origin: "http://elsewhere.example.com" },
             { username: "user", password: "pass", send: "always" },

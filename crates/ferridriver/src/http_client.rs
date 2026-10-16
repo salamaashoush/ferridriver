@@ -48,6 +48,12 @@ pub struct HttpClientOptions {
   /// Playwright `httpCredentials`: what answers a Basic challenge, the
   /// first entry bound to no origin or to the request's.
   pub http_credentials: Vec<HttpCredentials>,
+  /// `userAgent` every request sends unless it names its own.
+  pub user_agent: Option<String>,
+  /// Fail a request answered 4xx or 5xx unless the request says otherwise.
+  pub fail_on_status_code: Option<bool>,
+  /// Redirects a request follows unless it says otherwise.
+  pub max_redirects: Option<u32>,
 }
 
 /// The credentials a context-bound client answers challenges with, read
@@ -580,6 +586,12 @@ pub struct HttpClient {
   /// The context a bound client reads and writes cookies through.
   context: Option<crate::context::ContextRef>,
   credentials: CredentialSource,
+  user_agent: Option<String>,
+  fail_on_status_code: Option<bool>,
+  max_redirects: Option<u32>,
+  /// The `origins` of the `storageState` a standalone client was made
+  /// with, handed back by [`Self::storage_state`].
+  origins: Vec<crate::options::OriginState>,
 }
 
 /// Playwright's `rewriteCookies` (`server/network.ts`): a cookie given
@@ -644,6 +656,11 @@ fn stored_cookie(cookie: crate::backend::CookieData) -> crate::error::Result<cra
   Ok(cookie)
 }
 
+/// `failOnStatusCode`: Playwright throws on anything but 2xx and 3xx.
+fn fails_status(status: u16) -> bool {
+  !(200..400).contains(&status)
+}
+
 /// Playwright's `filterCookies`: the cookies a request to any of `urls`
 /// would carry, or all of them without a URL.
 ///
@@ -685,7 +702,48 @@ impl HttpClient {
       bridge: None,
       context: None,
       credentials: CredentialSource::Fixed(options.http_credentials),
+      user_agent: options.user_agent,
+      fail_on_status_code: options.fail_on_status_code,
+      max_redirects: options.max_redirects,
+      origins: Vec::new(),
     }
+  }
+
+  /// Seed a standalone client from Playwright's `storageState`: its
+  /// cookies fill the jar, its origins come back from [`Self::storage_state`].
+  ///
+  /// # Errors
+  ///
+  /// A cookie with neither a `url` nor a `domain`/`path` pair.
+  pub fn with_storage_state(mut self, state: crate::options::StorageState) -> crate::error::Result<Self> {
+    if let Some(jar) = self.pool.jar() {
+      let cookies = state
+        .cookies
+        .into_iter()
+        .map(stored_cookie)
+        .collect::<crate::error::Result<Vec<_>>>()?;
+      jar.add(cookies);
+    }
+    self.origins = state.origins;
+    Ok(self)
+  }
+
+  /// Playwright: `apiRequestContext.storageState()`. The context's own
+  /// for a bound client; this client's cookies and the origins it was
+  /// made with otherwise.
+  ///
+  /// # Errors
+  ///
+  /// The bound context's state cannot be read.
+  pub async fn storage_state(&self) -> crate::error::Result<crate::options::StorageState> {
+    if let Some(context) = &self.context {
+      return context.storage_state_impl(None).await;
+    }
+    Ok(crate::options::StorageState {
+      cookies: self.pool.jar().map(|jar| jar.all()).unwrap_or_default(),
+      origins: self.origins.clone(),
+      credentials: None,
+    })
   }
 
   /// Create a client bound to a browser context (Playwright's
@@ -704,6 +762,10 @@ impl HttpClient {
       bridge: Some(bridge),
       context: None,
       credentials: CredentialSource::Fixed(Vec::new()),
+      user_agent: None,
+      fail_on_status_code: None,
+      max_redirects: None,
+      origins: Vec::new(),
     }
   }
 
@@ -829,7 +891,7 @@ impl HttpClient {
       (
         self.base_url.clone(),
         Vec::new(),
-        None,
+        self.user_agent.clone(),
         self.default_ignore_https,
         false,
       )
@@ -848,10 +910,10 @@ impl HttpClient {
   /// caller's own.
   fn base_headers(defaults: &ResolvedDefaults) -> fetch::Headers {
     let mut headers = fetch::Headers::new();
+    if let Some(ua) = &defaults.user_agent {
+      headers.set("user-agent", ua.clone());
+    }
     if defaults.ctx_style {
-      if let Some(ua) = &defaults.user_agent {
-        headers.set("user-agent", ua.clone());
-      }
       headers.set("accept", "*/*");
     }
     for (name, value) in &defaults.extra_headers {
@@ -988,7 +1050,7 @@ impl HttpClient {
       body,
       redirect: opts.redirect,
       credentials: opts.credentials.unwrap_or_default(),
-      max_redirects: opts.max_redirects,
+      max_redirects: opts.max_redirects.or(self.max_redirects),
       max_retries: opts.max_retries.unwrap_or(0),
       timeout: opts.timeout.unwrap_or(self.default_timeout),
       ignore_https_errors: opts.ignore_https_errors.unwrap_or(ignore_default),
@@ -1061,7 +1123,7 @@ impl HttpClient {
     let request = self.build_request(url, &opts).await?;
     let response = self.send_answering_challenge(request).await?;
     let http = HttpResponse::buffer(response).await?;
-    if opts.fail_on_status_code.unwrap_or(false) && !http.ok() {
+    if opts.fail_on_status_code.or(self.fail_on_status_code).unwrap_or(false) && fails_status(http.status()) {
       return Err(crate::error::FerriError::Backend(format!(
         "{} {} failed: {} {}",
         opts.method.as_deref().unwrap_or("GET"),
@@ -1089,7 +1151,7 @@ impl HttpClient {
     let opts = options.unwrap_or_default();
     let request = self.build_request(url, &opts).await?;
     let response = self.send_answering_challenge(request).await?;
-    if opts.fail_on_status_code.unwrap_or(false) && !response.ok() {
+    if opts.fail_on_status_code.or(self.fail_on_status_code).unwrap_or(false) && fails_status(response.status) {
       return Err(crate::error::FerriError::Backend(format!(
         "{} {} failed: {} {}",
         opts.method.as_deref().unwrap_or("GET"),
@@ -1600,6 +1662,15 @@ mod context_bound_tests {
       origin: origin.map(str::to_string),
       send,
     }
+  }
+
+  #[test]
+  fn fail_on_status_code_lets_redirects_through() {
+    assert!(!fails_status(200));
+    assert!(!fails_status(302), "3xx is not a failure in Playwright");
+    assert!(fails_status(404));
+    assert!(fails_status(500));
+    assert!(fails_status(101));
   }
 
   fn client_with(http_credentials: Vec<HttpCredentials>) -> HttpClient {

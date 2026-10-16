@@ -35,7 +35,7 @@ features:
     link: /bdd/overview
   - title: MCP server in the box
     icon: 🤖
-    details: Scripting-focused MCP server with 10 tools. run_script runs sandboxed JavaScript against the live session with full Page / Context / HttpClient bindings. Multi-step automation in one LLM turn.
+    details: Scripting-focused MCP server with 10 tools. run_script runs sandboxed JavaScript against the live session with full Page / Context / APIRequestContext bindings. Multi-step automation in one LLM turn.
     link: /mcp/overview
   - title: One binary
     icon: 📥

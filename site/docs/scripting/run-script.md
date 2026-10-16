@@ -79,7 +79,7 @@ catching protocol exceptions.
 | `page`    | Playwright-shaped `Page` — `goto`, `click`, `fill`, `hover`, `press`, `type`, `check`, `uncheck`, `selectOption`, `locator`, `getByRole` / `getByText` / `getByLabel` / `getByPlaceholder` / `getByAltText` / `getByTestId`, `waitForSelector`, `textContent`, `innerText`, `innerHTML`, `inputValue`, `getAttribute`, visibility / state predicates, `evaluate`, `title`, `url`, `content`, `setContent`, `markdown`, `screenshot`, `reload`, `goBack`, `goForward`, `close`, `isClosed` |
 | `Locator` | Returned from `page.locator` / `page.getBy*`. Full set of action and query methods |
 | `context` | `BrowserContext` — `cookies`, `addCookies`, `clearCookies`, `deleteCookie`, `grantPermissions`, `clearPermissions`, `setGeolocation`, `setOffline`, `setExtraHTTPHeaders`, `addInitScript`, `name`, `close` |
-| `request` | `HttpClient` — `get` / `post` / `put` / `delete` / `patch` / `head` / `fetch`. Returns `HttpResponse` (`status`, `ok`, `url`, `text`, `json`, `headersArray`, `header`) |
+| `request` | `APIRequestContext` — `get` / `post` / `put` / `delete` / `patch` / `head` / `fetch`. Returns `APIResponse` (`status`, `ok`, `url`, `text`, `json`, `headersArray`, `header`) |
 | `browser` | Browser handle for multi-page operations |
 | `args`    | Positional arguments bound to the script. Access via `args[0]`, `args[1]`. **Use this for any caller-controlled data** — bound values are safe from source-level injection |
 | `vars`    | Session-scoped string store: `get` / `set` / `has` / `delete` / `keys`. Persists across `run_script` calls in the same session |

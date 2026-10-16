@@ -1448,7 +1448,7 @@ fn build_context_event_callback(
 /// Resolve a `setStorageState` argument into the inline state JSON. A JSON
 /// string is treated as a path to a state file written by `storageState({
 /// path })`; any other value is the inline `{ cookies, origins }` object.
-fn resolve_storage_state_input(input: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+pub(crate) fn resolve_storage_state_input(input: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
   match input {
     serde_json::Value::String(path) => {
       let text = std::fs::read_to_string(&path).map_err(|e| format!("setStorageState: read {path}: {e}"))?;

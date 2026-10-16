@@ -5,7 +5,7 @@
 // and dispose() return promises.
 
 import { describe, it, expect } from "bun:test";
-import { HttpClient } from "../index.js";
+import { request } from "../index.js";
 
 describe("apiResponse headers", () => {
   it("headers() lowercases and joins, headersArray() stays verbatim", async () => {
@@ -22,7 +22,7 @@ describe("apiResponse headers", () => {
       },
     });
     try {
-      const client = HttpClient.create();
+      const client = await request.newContext();
       const resp = await client.get(`http://127.0.0.1:${server.port}/h`);
 
       expect(resp.headers()["set-cookie"]).toBe("a=1\nb=2");
@@ -43,7 +43,7 @@ describe("apiResponse headers", () => {
   it("dispose() releases the body and keeps the metadata", async () => {
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("payload") });
     try {
-      const client = HttpClient.create();
+      const client = await request.newContext();
       const resp = await client.get(`http://127.0.0.1:${server.port}/d`);
       expect(await resp.text()).toBe("payload");
 
@@ -63,7 +63,7 @@ describe("apiResponse.serverAddr", () => {
   it("reports the resolved peer address", async () => {
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
     try {
-      const client = HttpClient.create();
+      const client = await request.newContext();
       const resp = await client.get(`http://127.0.0.1:${server.port}/api`);
       expect(resp.status()).toBe(200);
       const addr = await resp.serverAddr();
@@ -80,7 +80,7 @@ describe("apiResponse.timing and securityDetails", () => {
   it("reports lookup and connect for a new connection, and neither for a reused one", async () => {
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
     try {
-      const client = HttpClient.create();
+      const client = await request.newContext();
       const before = Date.now();
       const first = await client.get(`http://localhost:${server.port}/t`);
       const t = first.timing();
@@ -121,7 +121,7 @@ describe("request context cookies", () => {
     const origin = `http://127.0.0.1:${server.port}`;
     const blank = { domain: "", path: "", secure: false, httpOnly: false };
     try {
-      const client = HttpClient.create();
+      const client = await request.newContext();
       await client.addCookies([{ ...blank, name: "token", value: "one", url: `${origin}/app/page` }]);
       await client.get(`${origin}/set`);
       const names = async (urls?: string | string[]) => (await client.cookies(urls)).map((c) => c.name).sort();

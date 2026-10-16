@@ -165,7 +165,7 @@ carrying fixtures and helpers:
 | `this.page`           | `Page`          | Live browser page (Playwright-shaped). |
 | `this.context`        | `BrowserContext`| Cookies, permissions, init scripts, geolocation. |
 | `this.browser`        | `Browser`       | Multi-page operations. |
-| `this.request`        | `HttpClient`    | Runner-side HTTP. Net-restricted if `allow.net` is set. |
+| `this.request`        | `APIRequestContext` | Runner-side HTTP. Net-restricted if `allow.net` is set. |
 | `this.parameters`     | `Record<string, any>` | `--world-parameters` JSON. |
 | `this.attach(content, mediaType?)` | function | Attach bytes / strings to the test report (screenshots, logs). |
 | `this.log(message)`   | function        | Free-text log line attached to the report. |
