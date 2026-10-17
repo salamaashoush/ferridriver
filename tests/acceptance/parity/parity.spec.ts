@@ -81,6 +81,11 @@ describe('parity acceptance', () => {
     expect(declared.split(specDir).length).toBe(2);
 
     await page.setContent('<div style="width:40px;height:40px;background:#123456"></div>');
+    // The baseline is written at the declared path first: a missing one
+    // fails the run, as in Playwright, and baselines are not committed. A
+    // template that resolved anywhere else leaves toHaveScreenshot without
+    // a baseline, and it fails.
+    await page.locator('div').screenshot({ path: declared, scale: 'css', animations: 'disabled', caret: 'hide' });
     await expect(page.locator('div')).toHaveScreenshot('shot.png');
     expect(fs.existsSync(declared)).toBe(true);
   });
