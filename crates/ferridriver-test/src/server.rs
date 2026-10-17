@@ -255,8 +255,20 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
     return;
   }
 
-  let timeout = std::time::Duration::from_millis(g.timeout);
-  if tokio::time::timeout(timeout, child.wait()).await.is_ok() {
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(g.timeout);
+  // The shell can die of the signal at once while the server it started
+  // is still running its shutdown handler, so the whole group is waited
+  // for, not only the shell.
+  let exited = tokio::time::timeout_at(deadline, async {
+    let _ = child.wait().await;
+    #[cfg(unix)]
+    while group_alive(pid) {
+      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+  })
+  .await
+  .is_ok();
+  if exited {
     tracing::info!(name = %name, "[{name}] Process exited gracefully");
   } else {
     tracing::warn!(
@@ -274,6 +286,17 @@ fn parse_signal(name: &str) -> libc::c_int {
     "SIGKILL" => libc::SIGKILL,
     _ => libc::SIGTERM,
   }
+}
+
+/// Whether any process is left in the group `pid` led.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn group_alive(pid: u32) -> bool {
+  #[allow(clippy::cast_possible_wrap)]
+  let pid_i = pid as libc::pid_t;
+  // SAFETY: signal 0 only checks for existence and permission; nothing is
+  // delivered.
+  unsafe { libc::kill(-pid_i, 0) == 0 }
 }
 
 /// Signal the process group `pid` leads.
@@ -444,6 +467,35 @@ mod command_tests {
   }
 
   #[tokio::test]
+  async fn a_graceful_stop_waits_for_the_server_not_its_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port().unwrap();
+    std::fs::write(
+      dir.path().join("server.py"),
+      "import http.server, signal, sys, time\n\
+       def stop(*_):\n    time.sleep(0.5)\n    open('marker', 'w').write('done')\n    sys.exit(0)\n\
+       signal.signal(signal.SIGTERM, stop)\n\
+       http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)\
+       .serve_forever()\n",
+    )
+    .unwrap();
+    let config = WebServerConfig {
+      graceful_shutdown: Some(GracefulShutdown {
+        signal: "SIGTERM".into(),
+        timeout: 5_000,
+      }),
+      ..serving(format!("python3 server.py {port}; true"), port, dir.path())
+    };
+    let manager = WebServerManager::start(&[config]).await.unwrap();
+    manager.stop().await;
+    assert_eq!(
+      std::fs::read_to_string(dir.path().join("marker")).ok().as_deref(),
+      Some("done"),
+      "stop returned before the server finished shutting down"
+    );
+  }
+
+  #[tokio::test]
   async fn stopping_takes_the_servers_children_too() {
     for graceful in [
       None,
@@ -454,8 +506,9 @@ mod command_tests {
     ] {
       let dir = tempfile::tempdir().unwrap();
       let port = free_port().unwrap();
-      // The shell stays as the parent, so the server is its child.
-      let command = format!("python3 -m http.server {port} --bind 127.0.0.1 & wait");
+      // The trailing `true` keeps the shell from exec'ing the server, so
+      // the server is the shell's child, not ours.
+      let command = format!("python3 -m http.server {port} --bind 127.0.0.1; true");
       let config = WebServerConfig {
         graceful_shutdown: graceful.clone(),
         ..serving(command, port, dir.path())
