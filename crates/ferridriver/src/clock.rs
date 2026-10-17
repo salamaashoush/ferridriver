@@ -231,12 +231,15 @@ fn is_navigation_churn(err: &FerriError) -> bool {
   msg.contains("context") || msg.contains("destroyed") || msg.contains("detached") || msg.contains("navigat")
 }
 
+/// Whole milliseconds, as `Date.now()` gives the upstream server. The
+/// injected clock advances by the difference between two log entries on
+/// replay, so a fractional stamp would leave `Date.now()` fractional in
+/// the next document.
 fn now_epoch_ms() -> f64 {
   let now = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default();
-  // f64 keeps millisecond precision for dates well past year 275760.
-  now.as_secs_f64() * 1000.0
+  (now.as_secs_f64() * 1000.0).floor()
 }
 
 /// `server/clock.ts::parseTicks` — number passes through (ms); a string
