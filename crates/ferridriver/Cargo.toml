@@ -41,7 +41,7 @@ dashmap = { workspace = true }
 parking_lot = "0.12"
 memchr = "2"
 thiserror = { workspace = true }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 sha1 = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 webp = { version = "0.3", default-features = false }

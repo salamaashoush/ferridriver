@@ -48,7 +48,11 @@ impl TraceSource {
       Self::Zip(path) => {
         let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(zip.file_names().map(ToString::to_string).collect())
+        zip
+          .file_names()
+          .map(|name| name.map(std::borrow::Cow::into_owned))
+          .collect::<Result<_, _>>()
+          .map_err(|e| format!("{}: {e}", path.display()))
       },
       Self::Dir(dir) => {
         let mut names = Vec::new();

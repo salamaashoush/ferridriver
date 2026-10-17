@@ -1512,6 +1512,28 @@ fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<()> {
 /// instrumentation target it runs in.
 pub(crate) const ANDROID_DRIVER_APKS: [&str; 2] = ["android-driver.apk", "android-driver-target.apk"];
 
+/// Whether a symlink at `link` (relative to the archive root) pointing at
+/// `target` resolves inside the archive.
+fn link_stays_inside(link: &Path, target: &Path) -> bool {
+  use std::path::Component;
+  if target.is_absolute() {
+    return false;
+  }
+  let mut depth: usize = link.parent().map_or(0, |parent| parent.components().count());
+  for component in target.components() {
+    match component {
+      Component::Normal(_) => depth += 1,
+      Component::CurDir => {},
+      Component::ParentDir => match depth.checked_sub(1) {
+        Some(up) => depth = up,
+        None => return false,
+      },
+      Component::RootDir | Component::Prefix(_) => return false,
+    }
+  }
+  true
+}
+
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
   let file = std::fs::File::open(zip_path)?;
   let mut archive = zip::ZipArchive::new(file).map_err(|e| backend_err(format!("failed to read zip archive: {e}")))?;
@@ -1521,8 +1543,11 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
       .by_index(i)
       .map_err(|e| backend_err(format!("failed to read zip entry {i}: {e}")))?;
 
-    let name = entry.name().to_string();
-    let out_path = dest.join(&name);
+    // An entry named `/etc/x` or `../x` would land outside `dest`.
+    let relative = entry
+      .enclosed_name()
+      .ok_or_else(|| backend_err(format!("zip entry {i} has a path outside the archive")))?;
+    let out_path = dest.join(&relative);
 
     if entry.is_dir() {
       std::fs::create_dir_all(&out_path)?;
@@ -1545,6 +1570,12 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
         if mode & 0o170_000 == 0o120_000 {
           let mut target = String::new();
           entry.read_to_string(&mut target)?;
+          if !link_stays_inside(&relative, Path::new(&target)) {
+            return Err(backend_err(format!(
+              "zip entry {} links outside the archive: {target}",
+              relative.display()
+            )));
+          }
           // Replace any pre-existing entry — zip ordering is not stable.
           let _ = std::fs::remove_file(&out_path);
           std::os::unix::fs::symlink(&target, &out_path)?;
@@ -1552,7 +1583,9 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
         }
         let mut out_file = std::fs::File::create(&out_path)?;
         std::io::copy(&mut entry, &mut out_file)?;
-        let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+        // Permission bits only: setuid, setgid and sticky from an archive
+        // are never wanted on a browser build.
+        let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode & 0o777));
         continue;
       }
     }
@@ -1689,5 +1722,82 @@ mod removal_tests {
     assert_eq!(removed, Vec::new());
     assert!(elsewhere.path().join("keep.txt").exists());
     assert!(root.path().join("firefox-100.0").exists());
+  }
+}
+
+#[cfg(test)]
+mod extraction_tests {
+  use std::path::Path;
+
+  use super::{extract_zip, link_stays_inside};
+
+  fn write_zip(path: &Path, build: impl FnOnce(&mut zip::ZipWriter<std::fs::File>)) {
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    build(&mut writer);
+    writer.finish().unwrap();
+  }
+
+  fn stored() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+  }
+
+  #[test]
+  fn symlinks_must_resolve_inside_the_archive() {
+    assert!(link_stays_inside(Path::new("lib/libfoo.so"), Path::new("libfoo.so.4")));
+    assert!(link_stays_inside(
+      Path::new("lib/x/libfoo.so"),
+      Path::new("../libfoo.so.4")
+    ));
+    assert!(!link_stays_inside(
+      Path::new("lib/libfoo.so"),
+      Path::new("../../etc/passwd")
+    ));
+    assert!(!link_stays_inside(Path::new("libfoo.so"), Path::new("/etc/passwd")));
+  }
+
+  #[test]
+  fn extraction_refuses_entries_outside_the_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("evil.zip");
+    write_zip(&archive, |zip| {
+      zip.start_file("../escaped", stored()).unwrap();
+      std::io::Write::write_all(zip, b"x").unwrap();
+    });
+    let dest = root.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    assert!(extract_zip(&archive, &dest).is_err());
+    assert!(!root.path().join("escaped").exists());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn extraction_keeps_inner_links_and_drops_privileged_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("build.zip");
+    write_zip(&archive, |zip| {
+      zip
+        .start_file("lib/libfoo.so.4", stored().unix_permissions(0o4755))
+        .unwrap();
+      std::io::Write::write_all(zip, b"elf").unwrap();
+      zip.add_symlink("lib/libfoo.so", "libfoo.so.4", stored()).unwrap();
+    });
+    let dest = root.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    extract_zip(&archive, &dest).unwrap();
+    let mode = std::fs::metadata(dest.join("lib/libfoo.so.4"))
+      .unwrap()
+      .permissions()
+      .mode();
+    assert_eq!(mode & 0o7777, 0o755, "setuid survived: {mode:o}");
+    assert_eq!(std::fs::read(dest.join("lib/libfoo.so")).unwrap(), b"elf");
+
+    let escaping = root.path().join("escaping.zip");
+    write_zip(&escaping, |zip| {
+      zip.add_symlink("lib/libfoo.so", "../../outside", stored()).unwrap();
+    });
+    let dest = root.path().join("out2");
+    std::fs::create_dir_all(&dest).unwrap();
+    assert!(extract_zip(&escaping, &dest).is_err());
   }
 }

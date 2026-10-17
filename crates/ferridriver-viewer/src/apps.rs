@@ -114,7 +114,9 @@ fn unpack(archive: &'static [u8]) -> rustc_hash::FxHashMap<String, Bytes> {
     if entry.is_dir() {
       continue;
     }
-    let name = entry.name().trim_start_matches("./").to_string();
+    let Ok(name) = entry.name().map(|name| name.trim_start_matches("./").to_string()) else {
+      continue;
+    };
     let mut bytes = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or_default());
     if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
       assets.insert(name, Bytes::from(bytes));

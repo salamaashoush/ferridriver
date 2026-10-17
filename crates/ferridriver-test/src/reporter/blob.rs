@@ -949,7 +949,11 @@ pub fn read_blob(path: &std::path::Path) -> Result<Vec<ReporterEvent>, String> {
   let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("zip read {}: {e}", path.display()))?;
 
   let mut resources: FxHashMap<String, Vec<u8>> = FxHashMap::default();
-  let names: Vec<String> = zip.file_names().map(ToString::to_string).collect();
+  let names: Vec<String> = zip
+    .file_names()
+    .map(|name| name.map(std::borrow::Cow::into_owned))
+    .collect::<Result<_, _>>()
+    .map_err(|e| format!("zip read {}: {e}", path.display()))?;
   for name in names {
     if !name.starts_with("resources/") {
       continue;

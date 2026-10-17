@@ -211,7 +211,10 @@ fn load_zip_entries(path: &std::path::Path) -> Result<Vec<Recorded>> {
     let mut entry = archive
       .by_index(i)
       .map_err(|e| FerriError::backend(format!("read HAR zip {}: {e}", path.display())))?;
-    let name = entry.name().to_string();
+    let name = entry
+      .name()
+      .map_err(|e| FerriError::backend(format!("read HAR zip {}: {e}", path.display())))?
+      .into_owned();
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut entry, &mut bytes)
       .map_err(|e| FerriError::backend(format!("read HAR zip entry {name}: {e}")))?;

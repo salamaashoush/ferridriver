@@ -2596,7 +2596,7 @@ mod tests {
     let file = std::fs::File::open(&path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
     let names: Vec<String> = (0..archive.len())
-      .map(|i| archive.by_index(i).unwrap().name().to_string())
+      .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
       .collect();
     assert!(names.contains(&"trace.trace".to_string()));
     assert!(names.contains(&"trace.network".to_string()));
