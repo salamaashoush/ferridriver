@@ -364,6 +364,12 @@ impl BidiSession {
     command.env("MOZ_CRASHREPORTER_DISABLE", "1");
     if let Some(app_data) = &profile_dir.app_data {
       command.env("MOZ_APP_DATA", app_data.path());
+      // On Linux Firefox's startup cache and fontconfig's font cache go
+      // under XDG_CACHE_HOME (`~/.cache` by default), which MOZ_APP_DATA
+      // does not move.
+      if cfg!(target_os = "linux") && !env.contains_key("XDG_CACHE_HOME") {
+        command.env("XDG_CACHE_HOME", app_data.path().join("cache"));
+      }
     }
     command
       .stdin(std::process::Stdio::null())
