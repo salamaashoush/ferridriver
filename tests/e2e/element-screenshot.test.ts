@@ -24,12 +24,13 @@ async function withPage(browser: Browser, body: (page: Page) => Promise<void>, d
 const reset = '<style>html,body{margin:0;padding:0;background:#fff}</style>';
 
 describe('element screenshot', () => {
-  test('captures the element at its css size, or at device pixels by default', async ({ browser, browserName }) => {
+  test('captures the element at its css size, or at device pixels by default', async ({ browser }) => {
     await withPage(browser, async page => {
       await page.setContent(`${reset}<div id="box" style="margin:10px;width:40px;height:30px;background:#f00"></div>`);
       // `browsingContext.captureScreenshot` has no scale parameter, and
-      // Playwright's BiDi backend ignores the option the same way.
-      const cssSize = browserName === 'firefox' ? [80, 60] : [40, 30];
+      // Playwright's BiDi backend ignores the option; ferridriver
+      // resamples the Firefox capture to CSS pixels instead.
+      const cssSize = [40, 30];
       const css = decodePng(await page.locator('#box').screenshot({ scale: 'css' }));
       expect([css.width, css.height]).toEqual(cssSize);
       expect(css.pixel(20, 15)).toEqual(RED);

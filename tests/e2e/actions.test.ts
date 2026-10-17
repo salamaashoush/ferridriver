@@ -752,7 +752,7 @@ describe('actions', () => {
     expect(sum(plain)).toBe(sum(empty));
   });
 
-  test('script_screenshot_scale', async ({ page, browser, browserName }) => {
+  test('script_screenshot_scale', async ({ page, browser }) => {
     // `scale: 'css'` means one image pixel per CSS pixel even on a
     // 2x context. CDP carries the factor on the capture CLIP, so a
     // viewport shot -- which sends no clip of its own -- dropped the
@@ -769,14 +769,10 @@ describe('actions', () => {
       const css = await p.screenshot({ type: 'png', scale: 'css' });
 
       expect(width(device)).toBe(400);
-      if (browserName === 'firefox') {
-        // `browsingContext.captureScreenshot` has no scale parameter and
-        // Playwright's BiDi backend drops the argument the same way
-        // (`bidi/bidiPage.ts::takeScreenshot`).
-        expect(width(css)).toBe(400);
-      } else {
-        expect(width(css)).toBe(200);
-      }
+      // `browsingContext.captureScreenshot` has no scale parameter, and
+      // Playwright's BiDi backend drops the option; ferridriver resamples
+      // the Firefox capture instead, so every engine agrees.
+      expect(width(css)).toBe(200);
     } finally {
       await context.close();
     }

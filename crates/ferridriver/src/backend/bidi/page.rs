@@ -17,7 +17,7 @@ use super::session::BidiSession;
 use super::types::EvaluateResult;
 use crate::backend::{
   AnyElement, AxNodeData, AxProperty, BackgroundColor, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle,
-  ScreenshotCapture,
+  ScreenshotCapture, ScreenshotScale,
 };
 use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::error::{FerriError, Result};
@@ -199,6 +199,34 @@ fn build_bidi_stack(text: &str, stack: Option<&serde_json::Value>) -> String {
     }
   }
   out
+}
+
+/// Resample a device-pixel capture of `rect` to its CSS size.
+fn to_css_pixels(bytes: Vec<u8>, rect: &crate::options::ClipRect, capture: &ScreenshotCapture) -> Result<Vec<u8>> {
+  let image = image::load_from_memory(&bytes).map_err(|error| FerriError::backend(error.to_string()))?;
+  let size = |value: f64| {
+    u32::try_from(f64_to_u64_saturating(value.round()))
+      .unwrap_or(u32::MAX)
+      .max(1)
+  };
+  let (width, height) = (size(rect.width), size(rect.height));
+  if image.width() == width && image.height() == height {
+    return Ok(bytes);
+  }
+  let image = image.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+  let mut output = std::io::Cursor::new(Vec::new());
+  match capture.format {
+    ImageFormat::Jpeg => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, capture.quality.unwrap_or(80))
+      .encode_image(&image.to_rgb8())
+      .map_err(|error| FerriError::backend(error.to_string()))?,
+    ImageFormat::Png | ImageFormat::Webp => image
+      .write_to(&mut output, image::ImageFormat::Png)
+      .map_err(|error| FerriError::backend(error.to_string()))?,
+  }
+  if capture.format == ImageFormat::Webp {
+    return crate::backend::encode_webp_from_png(output.get_ref(), capture.quality);
+  }
+  Ok(output.into_inner())
 }
 
 fn f64_to_u64_saturating(n: f64) -> u64 {
@@ -1212,8 +1240,9 @@ impl BidiPage {
   }
 
   /// `bidiPage.ts::takeScreenshot`. `browsingContext.captureScreenshot`
-  /// always captures at the device pixel ratio, so `scale` has no effect,
-  /// as upstream.
+  /// always captures at the device pixel ratio, and upstream lets `scale`
+  /// go unhonoured there; `css` is met here by resampling the capture to
+  /// the rect's CSS size, as the `WebDriver` backend does.
   pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     let (rect, origin) = match (capture.document_rect, capture.viewport_rect) {
       // Firefox clips a document-origin capture to the root element's
@@ -1270,9 +1299,13 @@ impl BidiPage {
       .get("data")
       .and_then(|v| v.as_str())
       .ok_or_else(|| FerriError::backend("Screenshot: missing data"))?;
-    base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::STANDARD
       .decode(data)
-      .map_err(|e| FerriError::Backend(format!("Screenshot base64 decode: {e}")))
+      .map_err(|e| FerriError::Backend(format!("Screenshot base64 decode: {e}")))?;
+    if capture.scale == ScreenshotScale::Css {
+      return to_css_pixels(bytes, &rect, &capture);
+    }
+    Ok(bytes)
   }
 
   // ── Accessibility ───────────────────────────────────────────────────────
