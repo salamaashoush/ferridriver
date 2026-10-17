@@ -40,6 +40,28 @@ describe('toHaveScreenshot capture options', () => {
     await expect(page).toHaveScreenshot('masked.png', { mask: ['#box'], animations: 'disabled' });
   });
 
+  test('defaults to css scale and stopped animations, as Playwright does', async ({ browser }, testInfo) => {
+    const context = await browser.newContext({ deviceScaleFactor: 2 });
+    try {
+      const page = await context.newPage();
+      // steps(1, start) jumps to blue the moment the animation runs, so a
+      // capture that let it run differs from the red it starts at.
+      await page.setContent(
+        '<style>body{margin:0}@keyframes shift{to{background:#0000ff}}' +
+          '#box{width:40px;height:40px;background:#ff0000;animation:shift 1s steps(1, start) infinite}</style>' +
+          '<div id="box"></div>',
+      );
+      const baseline = testInfo.snapshotPath('defaults.png', { kind: 'screenshot' });
+      await page.locator('#box').screenshot({ path: baseline, scale: 'css', animations: 'disabled' });
+      expect(u32(await fs.promises.readFile(baseline), 16)).toBe(40);
+      // A device-scale capture is 80px wide and a running animation is
+      // blue; either fails the comparison.
+      await expect(page.locator('#box')).toHaveScreenshot('defaults.png');
+    } finally {
+      await context.close();
+    }
+  });
+
   test('fullPage captures past the viewport', async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 400, height: 300 });
     await page.setContent('<style>body{margin:0}</style><div style="height:1200px;background:#334455"></div>');

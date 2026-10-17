@@ -247,9 +247,13 @@ async fn capture_target(
     }
   }
 
+  // The matcher's own defaults differ from `screenshot()`'s:
+  // `animations ?? 'disabled'` and `scale ?? 'css'`
+  // (`matchers/toMatchSnapshot.ts`), so a baseline does not depend on the
+  // moment an animation was caught or on the device pixel ratio.
   let animations = match options.animations.as_deref() {
-    Some("disabled") => Some(AnimationsMode::Disabled),
     Some("allow") => Some(AnimationsMode::Allow),
+    Some("disabled") | None => Some(AnimationsMode::Disabled),
     _ => None,
   };
   // Playwright's default is `hide`; only an explicit `initial` keeps the
@@ -260,8 +264,8 @@ async fn capture_target(
     _ => None,
   };
   let scale = match options.scale.as_deref() {
-    Some("css") => Some(ScreenshotScale::Css),
     Some("device") => Some(ScreenshotScale::Device),
+    Some("css") | None => Some(ScreenshotScale::Css),
     _ => None,
   };
 
