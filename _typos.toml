@@ -5,6 +5,7 @@ extend-exclude = [
   # Playwright-ported injected scripts (contain intentional non-standard identifiers)
   "crates/ferridriver/src/injected/injectedScript.ts",
   "crates/ferridriver/src/injected/webSocketMock.ts",
+  "crates/ferridriver/src/injected/roleUtils.ts",
   "crates/ferridriver/src/injected/isomorphic/",
   # Diffs against upstream Appium; their hunk headers cut upstream code mid-word
   "crates/ferridriver/src/install/*.patch",
@@ -43,6 +44,8 @@ clonable = "clonable"
 unparseable = "unparseable"
 # "UDID" is Apple's unique device identifier, named so by simctl and Appium
 udid = "udid"
+# COSE is CBOR Object Signing and Encryption, the key format WebAuthn uses
+cose = "cose"
 
 [default.extend-identifiers]
 # Intentional misspelling in Playwright-ported code
@@ -58,4 +61,5 @@ extend-ignore-re = [
   '''["'](?:entrys|testIdAttribut|netwrok|apiLevl)["']''',
   '"(?:más|mas) informacion"',
   '--disable-fre',
+  'hel\\?"lo',
 ]
