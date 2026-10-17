@@ -951,11 +951,25 @@ async fn take_page_snapshot(context: Option<Arc<ferridriver::ContextRef>>) -> Op
 
 /// Write `error-context.md` for an attempt that recorded errors, and the
 /// attachment that points at it.
+/// Rewrite a finished trace without the run's `[secrets]`, so the zip that
+/// leaves this machine does not carry them. A failure keeps the trace as
+/// recorded rather than losing it, and says so.
+fn redact_trace(secrets: &[(String, String)], path: &std::path::Path) {
+  let redactor = ferridriver_trace::redact::Redactor::new(secrets.iter().cloned());
+  if redactor.is_empty() {
+    return;
+  }
+  if let Err(e) = ferridriver_trace::redact::rewrite_zip(path, path, &redactor, Default::default()) {
+    tracing::warn!(target: "ferridriver::worker", "redacting secrets from the trace failed: {e}");
+  }
+}
+
 fn write_error_context(
   test_info: &TestInfo,
   attempt: u32,
   errors: &[&TestFailure],
   page_snapshot: Option<&str>,
+  redactor: &ferridriver_trace::redact::Redactor,
 ) -> Option<Attachment> {
   if errors.is_empty() || errors.iter().any(|e| e.message.contains("__FERRIDRIVER_SKIP__:")) {
     return None;
@@ -973,7 +987,7 @@ fn write_error_context(
   })?;
   let _ = std::fs::create_dir_all(&test_info.output_dir);
   let path = test_info.output_dir.join(format!("error-context-attempt{attempt}.md"));
-  if let Err(e) = std::fs::write(&path, content) {
+  if let Err(e) = std::fs::write(&path, redactor.redact(&content).as_bytes()) {
     tracing::warn!(target: "ferridriver::worker", "error context write failed: {e}");
     return None;
   }
@@ -2007,15 +2021,15 @@ impl Worker {
       None
     };
     let video = async {
-      match (video_handle, page_for_artifacts.as_ref()) {
-        (Some(VideoHandle::Eager(handle)), Some(page)) => match handle.stop(page).await {
+      match video_handle {
+        Some(VideoHandle::Eager(handle)) => match handle.stop().await {
           Ok(path) => Some(path),
           Err(e) => {
             tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
             None
           },
         },
-        (Some(VideoHandle::Buffered(handle)), Some(page)) => {
+        Some(VideoHandle::Buffered(handle)) => {
           if test_failed {
             let ext = ferridriver::video::video_extension();
             let video_path =
@@ -2023,7 +2037,7 @@ impl Worker {
                 .output_dir
                 .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
             let _ = std::fs::create_dir_all(&test_info.output_dir);
-            match handle.encode(page, video_path).await {
+            match handle.encode(video_path).await {
               Ok(path) => Some(path),
               Err(e) => {
                 tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
@@ -2031,11 +2045,11 @@ impl Worker {
               },
             }
           } else {
-            handle.discard(page).await;
+            handle.discard().await;
             None
           }
         },
-        _ => None,
+        None => None,
       }
     };
     let video_path = after_hooks_step(
@@ -2145,7 +2159,12 @@ impl Worker {
           ))
           .await
           {
-            Some(Ok(())) => path,
+            Some(Ok(())) => {
+              if let Some(path) = &path {
+                redact_trace(&self.config.secrets, path);
+              }
+              path
+            },
             Some(Err(e)) => {
               tracing::warn!(target: "ferridriver::worker", "trace stop failed: {e}");
               None
@@ -2312,6 +2331,7 @@ impl Worker {
       attempt,
       raw_error.iter().chain(&soft_errors).collect::<Vec<_>>().as_slice(),
       page_snapshot.as_deref(),
+      &ferridriver_trace::redact::Redactor::new(self.config.secrets.iter().cloned()),
     );
     let (raw_status, raw_error) = if !soft_errors.is_empty() && raw_status == TestStatus::Passed {
       let msg = soft_errors

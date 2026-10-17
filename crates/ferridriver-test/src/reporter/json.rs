@@ -406,7 +406,11 @@ impl Reporter for JsonReporter {
   }
 
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
-    let json = serde_json::to_string_pretty(&self.serialize())?;
+    let mut report = serde_json::to_value(self.serialize())?;
+    if let Some(config) = self.config.as_deref() {
+      ferridriver_trace::redact::Redactor::new(config.secrets.iter().cloned()).redact_json(&mut report);
+    }
+    let json = serde_json::to_string_pretty(&report)?;
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }

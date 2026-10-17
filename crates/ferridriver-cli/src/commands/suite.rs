@@ -73,8 +73,10 @@ pub async fn resolve(
     let setup = script_setup::resolve(&config, &std::env::current_dir()?, &[]).await?;
     ferridriver_script::debug_session::install(mode, setup.into_session_script(), overrides);
   }
-  let test_config = ferridriver_test::config::resolve_config_from(config.test, overrides)
+  let secrets = config.secrets.resolve()?;
+  let mut test_config = ferridriver_test::config::resolve_config_from(config.test, overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+  test_config.secrets = secrets;
   bootstrap::install_module_aliases(&test_config, &[])?;
   bootstrap::install_js_reporters(&test_config, caps).await?;
   Ok(test_config)

@@ -24,6 +24,7 @@ ferridriver-config = { workspace = true }
 ferridriver-expect = { workspace = true }
 ferridriver-test-macros = { workspace = true }
 ferridriver-viewer = { workspace = true }
+ferridriver-trace = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

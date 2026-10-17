@@ -673,6 +673,12 @@ pub struct TestConfig {
   /// Set it when `workers` leaves cores idle; leave it at `0` otherwise.
   #[serde(default)]
   pub context_prewarm: u32,
+  /// `[secrets]`, resolved to `(name, value)` pairs by the CLI. Each value
+  /// is replaced by `<secret>NAME</secret>` in the traces, the JSON report
+  /// and the error context the run writes. Never read from or written to
+  /// the `[test]` table.
+  #[serde(skip)]
+  pub secrets: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1567,6 +1573,7 @@ impl Default for TestConfig {
       has_bdd: false,
       module_aliases: BTreeMap::new(),
       context_prewarm: 0,
+      secrets: Vec::new(),
     }
   }
 }
