@@ -436,8 +436,36 @@ mod command_tests {
   use super::WebServerManager;
   use crate::config::{GracefulShutdown, WebServerConfig};
 
+  /// A bare HTTP responder. `http.server` is avoided on purpose: its bind
+  /// does a reverse lookup of the host, which can stall past the readiness
+  /// timeout on macOS runners. SIGTERM takes half a second and leaves a
+  /// marker, so a stop that returns early is visible.
+  const SERVER: &str = "import signal, socket, sys, time
+def stop(*_):
+    time.sleep(0.5)
+    open('marker', 'w').write('done')
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', int(sys.argv[1])))
+s.listen(16)
+while True:
+    c, _ = s.accept()
+    c.recv(65536)
+    c.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok')
+    c.close()
+";
+
   fn free_port() -> std::io::Result<u16> {
     Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+  }
+
+  /// A temp dir holding `server.py`, and a free port for it.
+  fn workspace() -> std::io::Result<(tempfile::TempDir, u16)> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("server.py"), SERVER)?;
+    Ok((dir, free_port()?))
   }
 
   fn serving(command: String, port: u16, cwd: &std::path::Path) -> WebServerConfig {
@@ -450,40 +478,35 @@ mod command_tests {
     }
   }
 
+  fn sigterm() -> Option<GracefulShutdown> {
+    Some(GracefulShutdown {
+      signal: "SIGTERM".into(),
+      timeout: 5_000,
+    })
+  }
+
   async fn answers(port: u16) -> bool {
     tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
   }
 
   #[tokio::test]
   async fn every_part_of_a_compound_command_runs() {
-    let dir = tempfile::tempdir().unwrap();
-    let port = free_port().unwrap();
-    let command = format!("printf built > marker && python3 -m http.server {port} --bind 127.0.0.1");
+    let (dir, port) = workspace().unwrap();
+    let command = format!("printf built > built && python3 server.py {port}");
     let manager = WebServerManager::start(&[serving(command, port, dir.path())])
       .await
       .unwrap();
-    assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "built");
+    assert_eq!(std::fs::read_to_string(dir.path().join("built")).unwrap(), "built");
     manager.stop().await;
   }
 
   #[tokio::test]
   async fn a_graceful_stop_waits_for_the_server_not_its_shell() {
-    let dir = tempfile::tempdir().unwrap();
-    let port = free_port().unwrap();
-    std::fs::write(
-      dir.path().join("server.py"),
-      "import http.server, signal, sys, time\n\
-       def stop(*_):\n    time.sleep(0.5)\n    open('marker', 'w').write('done')\n    sys.exit(0)\n\
-       signal.signal(signal.SIGTERM, stop)\n\
-       http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), http.server.SimpleHTTPRequestHandler)\
-       .serve_forever()\n",
-    )
-    .unwrap();
+    let (dir, port) = workspace().unwrap();
+    // The trailing `true` keeps the shell from exec'ing the server, so the
+    // shell dies of the signal while the server is still shutting down.
     let config = WebServerConfig {
-      graceful_shutdown: Some(GracefulShutdown {
-        signal: "SIGTERM".into(),
-        timeout: 5_000,
-      }),
+      graceful_shutdown: sigterm(),
       ..serving(format!("python3 server.py {port}; true"), port, dir.path())
     };
     let manager = WebServerManager::start(&[config]).await.unwrap();
@@ -497,21 +520,12 @@ mod command_tests {
 
   #[tokio::test]
   async fn stopping_takes_the_servers_children_too() {
-    for graceful in [
-      None,
-      Some(GracefulShutdown {
-        signal: "SIGTERM".into(),
-        timeout: 5_000,
-      }),
-    ] {
-      let dir = tempfile::tempdir().unwrap();
-      let port = free_port().unwrap();
-      // The trailing `true` keeps the shell from exec'ing the server, so
-      // the server is the shell's child, not ours.
-      let command = format!("python3 -m http.server {port} --bind 127.0.0.1; true");
+    for graceful in [None, sigterm()] {
+      let (dir, port) = workspace().unwrap();
+      // The server is the shell's child, not ours.
       let config = WebServerConfig {
         graceful_shutdown: graceful.clone(),
-        ..serving(command, port, dir.path())
+        ..serving(format!("python3 server.py {port}; true"), port, dir.path())
       };
       let manager = WebServerManager::start(&[config]).await.unwrap();
       assert!(answers(port).await);
