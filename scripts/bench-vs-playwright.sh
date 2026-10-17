@@ -105,13 +105,16 @@ echo
 
 ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 
+# --no-inherit: the workspace sits under the repo, whose own
+# ferridriver.toml would otherwise layer in its four backend projects and
+# run every spec once per project.
 # One discarded warmup per side: bytecode cache, npm resolution, DNS.
-"$FD_BIN" test -c "$WORK/ferridriver.toml" >/dev/null 2>&1 || { echo "ferridriver warmup failed" >&2; exit 1; }
+"$FD_BIN" test --no-inherit -c "$WORK/ferridriver.toml" >/dev/null 2>&1 || { echo "ferridriver warmup failed" >&2; exit 1; }
 (cd "$WORK/pw" && npx playwright test >/dev/null 2>&1) || { echo "playwright warmup failed" >&2; exit 1; }
 
 fd_times=(); pw_times=()
 for _ in $(seq 1 "$RUNS"); do
-  t0=$(ms); "$FD_BIN" test -c "$WORK/ferridriver.toml" >/dev/null 2>&1 || { echo "ferridriver run failed" >&2; exit 1; }; t1=$(ms)
+  t0=$(ms); "$FD_BIN" test --no-inherit -c "$WORK/ferridriver.toml" >/dev/null 2>&1 || { echo "ferridriver run failed" >&2; exit 1; }; t1=$(ms)
   fd_times+=($((t1 - t0)))
   t0=$(ms); (cd "$WORK/pw" && npx playwright test >/dev/null 2>&1) || { echo "playwright run failed" >&2; exit 1; }; t1=$(ms)
   pw_times+=($((t1 - t0)))

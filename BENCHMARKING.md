@@ -192,6 +192,31 @@ Absent those, the honest summary is: faster on most synchronous
 content/locator/evaluate operations (~2-3x in local runs), at parity on
 screenshots, and slower on network navigation. Ship that, not a round number.
 
+## Whole-suite A/B, 2026-10-17 (macOS 27, M5 Max 18-core, 48GB)
+
+`scripts/bench-vs-playwright.sh`, ferridriver `2c813d61` `release-fast` on
+cdp-pipe vs Playwright 1.64.1, both driving Playwright's
+`chromium_headless_shell-1248`, workers=4, `fullyParallel` on both sides,
+n=5 interleaved runs after a warmup, `contextPrewarm` at its default (0).
+A different machine from the August runs, so compare ratios, not times.
+
+| workload | ferridriver | Playwright | ratio (median) |
+|---|---|---|---|
+| F. 96 tests, no fixtures | 23ms | 634ms | **27.6x** |
+| E. 96 tests, `{ page }`, empty body | 906ms | 1523ms | **1.68x** |
+| D. 96 hermetic DOM tests | 1411ms | 2259ms | **1.60x** |
+
+Every sample sat within 1% of its median. On workload D the whole
+process tree (runner, workers and browsers, RSS summed every 100ms)
+peaked at ~1.1GB against ~2.6GB, and used 6.0s of CPU against 10.6s,
+three runs each.
+
+The August reading holds: the runner itself is an order of magnitude
+faster, and a browser-bound suite is 1.6x to 1.7x, set by renderer
+spawn and first layout that both sides pay. The script now passes
+`--no-inherit`; without it config layering pulled the repository's four
+backend projects into the bench workspace and ran each spec four times.
+
 ## Whole-suite A/B, 2026-08-08 (macOS, M3 Pro 12-core, 36GB)
 
 `scripts/bench-vs-playwright.sh`, ferridriver 0.5.0 `release-fast` on
