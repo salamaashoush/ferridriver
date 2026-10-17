@@ -73,6 +73,7 @@ pub struct Metrics {
 #[serde(rename_all = "camelCase")]
 pub struct RequestSummary {
   pub url: String,
+  pub method: String,
   pub status: i64,
   pub mime_type: String,
   pub protocol: String,
@@ -80,6 +81,28 @@ pub struct RequestSummary {
   pub duration_ms: f64,
   pub server_response_ms: f64,
   pub render_blocking: bool,
+  /// When the request started, from the first request of the load.
+  pub start_ms: f64,
+  pub phases: RequestPhases,
+}
+
+/// Where a request's time went, in milliseconds, as `DevTools` splits it.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestPhases {
+  #[serde(rename = "queueingMs")]
+  pub queueing: f64,
+  #[serde(rename = "dnsMs")]
+  pub dns: f64,
+  /// TCP and TLS together, as `DevTools`' "Initial connection".
+  #[serde(rename = "connectMs")]
+  pub connect: f64,
+  #[serde(rename = "sslMs")]
+  pub ssl: f64,
+  #[serde(rename = "waitingMs")]
+  pub waiting: f64,
+  #[serde(rename = "downloadMs")]
+  pub download: f64,
 }
 
 /// Analyse a trace read from disk, or as Chrome's `DevTools` saves it.
@@ -178,7 +201,8 @@ pub fn analyze(events: &[event::TraceEvent<'_>]) -> Report {
   insights.push(insights::modern_http::run(&requests, lantern));
   insights.push(insights::third_parties::run(&requests, &meta.main_frame_url));
 
-  let mut summaries: Vec<RequestSummary> = requests.iter().map(summarize).collect();
+  let origin = requests.iter().map(|r| r.start_time).min().unwrap_or_default();
+  let mut summaries: Vec<RequestSummary> = requests.iter().map(|r| summarize(r, origin)).collect();
   summaries.sort_by(|a, b| b.duration_ms.total_cmp(&a.duration_ms));
 
   Report {
@@ -203,9 +227,11 @@ pub fn analyze(events: &[event::TraceEvent<'_>]) -> Report {
   }
 }
 
-fn summarize(r: &NetworkRequest) -> RequestSummary {
+fn summarize(r: &NetworkRequest, origin: event::Micro) -> RequestSummary {
+  let ms = crate::units::micros_to_ms;
   RequestSummary {
     url: r.url.clone(),
+    method: r.method.clone(),
     status: r.status_code,
     mime_type: r.mime_type.clone(),
     protocol: r.protocol.clone(),
@@ -213,5 +239,14 @@ fn summarize(r: &NetworkRequest) -> RequestSummary {
     duration_ms: crate::units::micros_to_ms(r.end_time - r.start_time),
     server_response_ms: crate::units::micros_to_ms(r.timing.server_response_time),
     render_blocking: matches!(r.render_blocking.as_str(), "blocking" | "in_body_parser_blocking"),
+    start_ms: ms(r.start_time - origin),
+    phases: RequestPhases {
+      queueing: ms(r.timing.queueing),
+      dns: ms(r.timing.dns_lookup),
+      connect: ms(r.timing.initial_connection),
+      ssl: ms(r.timing.ssl),
+      waiting: ms(r.timing.server_response_time),
+      download: ms(r.timing.download),
+    },
   }
 }
