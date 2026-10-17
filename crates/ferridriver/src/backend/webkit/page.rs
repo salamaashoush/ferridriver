@@ -330,6 +330,7 @@ pub struct WebKitPage {
   pub dialog_manager: crate::dialog::DialogManager,
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
   pub download_manager: crate::download::DownloadManager,
+  pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
   pub page_backref: crate::backend::PageBackref,
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   pub(crate) frame_listener_started: Arc<AtomicBool>,
@@ -653,6 +654,7 @@ impl WebKitPage {
         dialog_manager: crate::dialog::DialogManager::new(),
         file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
         download_manager: crate::download::DownloadManager::new(),
+        screencast_hub: crate::backend::screencast::ScreencastHub::default(),
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
         frame_listener_started: Arc::new(AtomicBool::new(false)),
@@ -2313,8 +2315,16 @@ impl WebKitPage {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>> {
-    use base64::Engine as _;
+  ) -> Result<crate::backend::screencast::RawScreencast> {
+    fn frame_of(env: &Envelope) -> Option<(Vec<u8>, f64)> {
+      if env.method.as_deref() != Some("Screencast.screencastFrame") {
+        return None;
+      }
+      let data = env.params.get("data").and_then(Value::as_str).unwrap_or("");
+      let ts = env.params.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0);
+      let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+      Some((bytes, ts))
+    }
     // Subscribe BEFORE startScreencast so we don't drop frames that
     // fire between the call returning and the listener spawning.
     let mut events = self.proxy.events();
@@ -2332,22 +2342,32 @@ impl WebKitPage {
       .await
       .map_err(conn_err)?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, f64)>();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-      while let Some(env) = events.recv().await {
-        if env.method.as_deref() != Some("Screencast.screencastFrame") {
-          continue;
-        }
-        let data = env.params.get("data").and_then(Value::as_str).unwrap_or("");
-        let ts = env.params.get("timestamp").and_then(Value::as_f64).unwrap_or(0.0);
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-          continue;
+      loop {
+        let env = tokio::select! {
+          biased;
+          env = events.recv() => match env {
+            Some(env) => env,
+            None => break,
+          },
+          _ = &mut shutdown_rx => {
+            while let Ok(env) = events.try_recv() {
+              if let Some(frame) = frame_of(&env) {
+                let _ = tx.send(frame);
+              }
+            }
+            break;
+          },
         };
-        if tx.send((bytes, ts)).is_err() {
+        if let Some(frame) = frame_of(&env)
+          && tx.send(frame).is_err()
+        {
           break;
         }
       }
     });
-    Ok(rx)
+    Ok((rx, shutdown_tx))
   }
 
   pub async fn stop_screencast(&self) -> Result<()> {

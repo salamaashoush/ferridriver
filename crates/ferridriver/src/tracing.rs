@@ -338,7 +338,7 @@ impl Tracing {
     let composite = self.ctx.composite();
     let recorder = crate::trace::take_recorder(&composite)
       .ok_or_else(|| FerriError::backend("Must start tracing before stopping".to_string()))?;
-    recorder.stop_screencasts();
+    recorder.stop_screencasts().await;
     if let Some(path) = options.path {
       let network = self.trace_network_entries(&recorder).await;
       export_blocking(recorder, path, network).await?;
@@ -412,6 +412,12 @@ impl Tracing {
             recorder.monotonic_ms()
           };
           obj.insert("_monotonicTime".to_string(), serde_json::json!(monotonic));
+          // Playwright's HAR extension for a request that never got a
+          // response; without it a blocked or refused request reads as an
+          // unexplained status 0.
+          if let Some(failure) = req.failure() {
+            obj.insert("_failureText".to_string(), serde_json::json!(failure));
+          }
           if let Some(frame_id) = req.frame_id() {
             obj.insert("_frameref".to_string(), serde_json::json!(frame_id));
             if let Some(page_ref) = frame_to_page.get(frame_id) {

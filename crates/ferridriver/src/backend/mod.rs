@@ -15,6 +15,7 @@ pub mod cdp;
 pub(crate) mod json_scan;
 pub mod process;
 pub mod reaper;
+pub(crate) mod screencast;
 mod transport_tasks;
 pub mod webdriver;
 pub mod webkit;
@@ -1649,39 +1650,48 @@ impl AnyPage {
 
   // ── Screencast (video recording) ──
 
-  pub async fn start_screencast(
+  /// The page's shared screencast. Every consumer subscribes here rather
+  /// than starting the backend stream itself (see [`screencast`]).
+  pub(crate) fn screencast_hub(&self) -> Result<&screencast::ScreencastHub> {
+    match self {
+      AnyPage::CdpPipe(p) => Ok(&p.screencast_hub),
+      AnyPage::CdpWs(p) => Ok(&p.screencast_hub),
+      AnyPage::WebKit(p) => Ok(&p.screencast_hub),
+      AnyPage::Bidi(p) => Ok(&p.screencast_hub),
+      AnyPage::WebDriver(_) => Err(FerriError::unsupported(
+        "Classic WebDriver does not expose a screencast stream",
+      )),
+    }
+  }
+
+  pub(crate) async fn subscribe_screencast(
     &self,
-    quality: u8,
-    max_width: u32,
-    max_height: u32,
+    params: screencast::ScreencastParams,
   ) -> Result<(
-    tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
-    tokio::sync::oneshot::Sender<()>,
+    screencast::ScreencastSubscription,
+    tokio::sync::mpsc::UnboundedReceiver<screencast::ScreencastFrame>,
   )> {
+    self.screencast_hub()?.subscribe(self, params).await
+  }
+
+  async fn start_screencast_stream(&self, params: screencast::ScreencastParams) -> Result<screencast::RawScreencast> {
+    let screencast::ScreencastParams {
+      quality,
+      max_width,
+      max_height,
+    } = params;
     match self {
       AnyPage::WebDriver(_) => Err(FerriError::unsupported(
         "Classic WebDriver does not expose a screencast stream",
       )),
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::CdpWs(p) => p.start_screencast(quality, max_width, max_height).await,
-      AnyPage::WebKit(p) => {
-        let rx = p.start_screencast(quality, max_width, max_height).await?;
-        let (tx, _rx_shutdown) = tokio::sync::oneshot::channel();
-        Ok((rx, tx))
-      },
-      AnyPage::Bidi(p) => {
-        // BiDi backend does not yet expose a cooperative shutdown
-        // channel; synthesise one so the unified return shape holds.
-        // The signal is dropped (recorder doesn't use it for BiDi);
-        // BiDi's own teardown drives the pump via `stop_screencast`.
-        let rx = p.start_screencast(quality, max_width, max_height).await?;
-        let (tx, _rx_shutdown) = tokio::sync::oneshot::channel();
-        Ok((rx, tx))
-      },
+      AnyPage::WebKit(p) => p.start_screencast(quality, max_width, max_height).await,
+      AnyPage::Bidi(p) => p.start_screencast(quality, max_width, max_height).await,
     }
   }
 
-  pub async fn stop_screencast(&self) -> Result<()> {
+  async fn stop_screencast_stream(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.stop_screencast().await,
       AnyPage::CdpWs(p) => p.stop_screencast().await,
@@ -2298,6 +2308,23 @@ pub(crate) fn binding_settle_js(seq: u64, outcome: &std::result::Result<String, 
       "globalThis.__fd_bc.reject({seq}, {})",
       serde_json::to_string(message).unwrap_or_else(|_| "''".into())
     ),
+  }
+}
+
+impl screencast::ScreencastSource for AnyPage {
+  fn start_stream(
+    &self,
+    params: screencast::ScreencastParams,
+  ) -> impl std::future::Future<Output = Result<screencast::RawScreencast>> + Send {
+    self.start_screencast_stream(params)
+  }
+
+  fn stop_stream(&self) -> impl std::future::Future<Output = Result<()>> + Send {
+    self.stop_screencast_stream()
+  }
+
+  fn is_closed(&self) -> bool {
+    AnyPage::is_closed(self)
   }
 }
 

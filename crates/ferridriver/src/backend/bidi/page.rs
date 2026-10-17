@@ -292,6 +292,7 @@ pub struct BidiPage {
   /// on `browsingContext.downloadWillBegin` and flips terminal state
   /// on `browsingContext.downloadEnd` — Firefox's native `BiDi` events.
   pub download_manager: crate::download::DownloadManager,
+  pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
   /// Per-page temp directory Firefox is configured to write downloads
   /// into (via `browser.setDownloadBehavior({ downloadBehavior: { type:
   /// 'allowed', destinationFolder }, userContexts })`). Held as
@@ -493,6 +494,7 @@ impl BidiPage {
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       download_manager: crate::download::DownloadManager::new(),
+      screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       downloads_dir,
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
@@ -2936,7 +2938,7 @@ impl BidiPage {
       .map_err(|e| FerriError::Backend(format!("PDF base64 decode: {e}")))
   }
 
-  // ── Screencast (not supported) ──────────────────────────────────────────
+  // ── Screencast ──────────────────────────────────────────────────────────
 
   /// Start screencast via repeated screenshots + event-driven captures.
   /// `BiDi` has no native screencast API. We combine polling at ~15 fps with
@@ -2947,8 +2949,9 @@ impl BidiPage {
     quality: u8,
     _max_width: u32,
     _max_height: u32,
-  ) -> impl std::future::Future<Output = Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>>> {
+  ) -> impl std::future::Future<Output = Result<crate::backend::screencast::RawScreencast>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let session = self.session.clone();
     let ctx_id = self.context_id.clone();
     let closed = self.closed.clone();
@@ -2976,6 +2979,7 @@ impl BidiPage {
         }
       }
     });
+    let nav_tap_abort = nav_tap.abort_handle();
     self.track_listener(nav_tap.abort_handle());
 
     tokio::spawn(async move {
@@ -2987,7 +2991,12 @@ impl BidiPage {
       });
 
       loop {
-        if closed.load(Ordering::Relaxed) {
+        if closed.load(Ordering::Relaxed)
+          || !matches!(
+            shutdown_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+          )
+        {
           break;
         }
         let frame_start = tokio::time::Instant::now();
@@ -3021,12 +3030,14 @@ impl BidiPage {
           tokio::select! {
             () = tokio::time::sleep(remaining) => {},
             () = event_notify.notified() => {},
+            _ = &mut shutdown_rx => break,
           }
         }
       }
+      nav_tap_abort.abort();
     });
 
-    std::future::ready(Ok(rx))
+    std::future::ready(Ok((rx, shutdown_tx)))
   }
 
   pub fn stop_screencast(&self) -> impl std::future::Future<Output = Result<()>> {

@@ -2709,7 +2709,7 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
     while !page_for_task.is_closed() {
       tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    match handle.stop(&page_for_task).await {
+    match handle.stop().await {
       Ok(path) => sink.finish_ok(path),
       Err(e) => sink.finish_err(crate::FerriError::backend(format!("stop recording: {e}"))),
     }

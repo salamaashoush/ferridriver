@@ -834,6 +834,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
+      screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(downloads_dir),
@@ -984,6 +985,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
+      screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
@@ -1176,6 +1178,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
+      screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
@@ -2056,6 +2059,7 @@ pub struct CdpPage<T: CdpTransport> {
   /// watch. Mirrors
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::_onDownloadWillBegin`.
   pub download_manager: crate::download::DownloadManager,
+  pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
   /// Idempotency latch for `Browser.setDownloadBehavior`. Lazy
   /// enabling: the CDP command fires once, the first time a user
   /// shows interest in downloads (`page.on('download', ...)`,
@@ -2335,6 +2339,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       file_chooser_manager: self.file_chooser_manager.clone(),
       file_chooser_intercept_enabled: self.file_chooser_intercept_enabled.clone(),
       download_manager: self.download_manager.clone(),
+      screencast_hub: self.screencast_hub.clone(),
       download_behavior_enabled: self.download_behavior_enabled.clone(),
       accept_downloads: self.accept_downloads.clone(),
       downloads_dir: self.downloads_dir.clone(),

@@ -4709,8 +4709,11 @@ impl Page {
 
   // ── Screencast (video recording) ──
 
-  /// Start CDP screencast. Returns a channel of `(jpeg_bytes, timestamp_secs)` pairs.
-  /// Timestamp is Chrome's `metadata.timestamp` from the screencastFrame event.
+  /// Start streaming screencast frames. Returns a channel of
+  /// `(jpeg_bytes, timestamp_secs)` pairs; the timestamp is the
+  /// backend's own (Chrome's `metadata.timestamp` on CDP). The stream is
+  /// shared with any trace or video recording on this page, and a second
+  /// call replaces the first.
   ///
   /// # Errors
   ///
@@ -4720,20 +4723,28 @@ impl Page {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<(
-    tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
-    tokio::sync::oneshot::Sender<()>,
-  )> {
-    self.inner.start_screencast(quality, max_width, max_height).await
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>> {
+    let params = crate::backend::screencast::ScreencastParams::new(quality, max_width, max_height);
+    let mut frames = self.inner.screencast_hub()?.start_user(&self.inner, params).await?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+      while let Some(frame) = frames.recv().await {
+        if tx.send((frame.data, frame.timestamp)).is_err() {
+          break;
+        }
+      }
+    });
+    Ok(rx)
   }
 
-  /// Stop CDP screencast.
+  /// Stop the screencast started by [`Self::start_screencast`].
   ///
   /// # Errors
   ///
-  /// Returns an error if screencast cannot be stopped on the backend.
+  /// Returns an error if the backend has no screencast.
   pub async fn stop_screencast(&self) -> Result<()> {
-    self.inner.stop_screencast().await
+    self.inner.screencast_hub()?.stop_user(&self.inner).await;
+    Ok(())
   }
 }
 

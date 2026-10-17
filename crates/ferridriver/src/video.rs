@@ -1,13 +1,19 @@
-//! Video recording via CDP screencast + in-process ffmpeg encoding.
+//! Video recording via the page's shared screencast + ffmpeg encoding.
 //!
 //! Architecture: encoding runs on a blocking thread CONCURRENTLY with the test,
-//! driven by a bounded channel from the CDP screencast pump. No subprocess spawning.
+//! driven by a bounded channel from a pump subscribed to the page's
+//! screencast hub (shared with the trace film strip, so both can record).
 //!
 //! **Eager** (`start_recording`): encoder thread runs during the test.
 //! **Deferred** (`start_buffered_recording`): buffers frames, encodes only if needed.
 //!
-//! Shutdown is natural: `stop_screencast` -> pump sees channel close -> encoder drains
-//! remaining frames -> finishes. No abort, no hang.
+//! The video's timeline is wall time: t=0 is the moment recording started
+//! and the last frame is held until the moment it stopped, so a position
+//! in the video maps linearly onto time in the test.
+//!
+//! Shutdown is natural: unsubscribing delivers the frames the screencast
+//! already emitted, the pump sees the channel close and hands the stop
+//! time to the encoder, which drains and finishes. No abort, no hang.
 //!
 //! # Playwright-facing `Video` handle (§2.14)
 //!
@@ -27,29 +33,47 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::Page;
+use crate::backend::screencast::{ScreencastFrame, ScreencastParams, ScreencastSubscription};
 use crate::error::FerriError;
+use crate::ffmpeg::EncoderInput;
 
 const FPS: u32 = 25;
 
 pub use crate::ffmpeg::{video_content_type, video_extension};
 
+/// Seconds from the recording's start to when `frame` reached us. A frame
+/// replayed from before the start (the page's current picture) lands at 0.
+fn seconds_since(started: Instant, frame: &ScreencastFrame) -> f64 {
+  frame.received_at.saturating_duration_since(started).as_secs_f64()
+}
+
+async fn subscribe(
+  page: &Page,
+  width: u32,
+  height: u32,
+  quality: u8,
+) -> crate::error::Result<(ScreencastSubscription, mpsc::UnboundedReceiver<ScreencastFrame>)> {
+  page
+    .inner()
+    .subscribe_screencast(ScreencastParams::new(quality, width, height))
+    .await
+}
+
 // ── Eager recording: encode concurrently with the test ──
 
 pub struct VideoRecordingHandle {
-  /// Pump task: CDP screencast -> channel.
-  pump_task: tokio::task::JoinHandle<()>,
+  subscription: ScreencastSubscription,
+  started: Instant,
+  /// Pump task: screencast -> encoder channel. Returns the channel so
+  /// `stop` can send the stop time after the last frame.
+  pump_task: tokio::task::JoinHandle<mpsc::Sender<EncoderInput>>,
   /// Encoder task: channel -> ffmpeg encode (blocking thread).
   encoder_task: tokio::task::JoinHandle<crate::error::Result<()>>,
-  /// Cooperative shutdown signal to the CDP screencast listener.
-  /// Sending `()` causes the listener to drain any buffered
-  /// `screencastFrame` events, forward them through the pump, then
-  /// drop the sender so the encoder sees end-of-stream. No sleep,
-  /// no abort, no lost frames.
-  shutdown_tx: tokio::sync::oneshot::Sender<()>,
   output_path: PathBuf,
 }
 
@@ -57,7 +81,7 @@ pub struct VideoRecordingHandle {
 ///
 /// # Errors
 ///
-/// Returns an error if the CDP screencast cannot be started.
+/// Returns an error if the page's screencast cannot be started.
 pub async fn start_recording(
   page: &Page,
   output_path: PathBuf,
@@ -67,87 +91,73 @@ pub async fn start_recording(
 ) -> crate::error::Result<VideoRecordingHandle> {
   let w = width & !1;
   let h = height & !1;
+  let started = Instant::now();
 
-  // Bounded channel: CDP pump -> encoder. Backpressure prevents unbounded buffering.
-  let (frame_tx, frame_rx) = mpsc::channel::<(Vec<u8>, f64)>(64);
+  // Bounded channel: pump -> encoder. Backpressure prevents unbounded buffering.
+  let (frame_tx, frame_rx) = mpsc::channel::<EncoderInput>(64);
+  let (subscription, mut frames) = subscribe(page, w, h, quality).await?;
 
-  // Start CDP screencast. `shutdown_tx` drives cooperative teardown
-  // of the listener; we hold onto it until `stop()` is called.
-  let (cdp_rx, shutdown_tx) = page.start_screencast(quality, w, h).await?;
-
-  // Pump task: forwards CDP frames (with Chrome timestamps) to encoder channel.
   let pump_task = tokio::spawn(async move {
-    let mut rx = cdp_rx;
-    while let Some((jpeg, ts)) = rx.recv().await {
-      if frame_tx.send((jpeg, ts)).await.is_err() {
+    while let Some(frame) = frames.recv().await {
+      let at = seconds_since(started, &frame);
+      if frame_tx
+        .send(EncoderInput::Frame { jpeg: frame.data, at })
+        .await
+        .is_err()
+      {
         break; // Encoder dropped, stop pumping.
       }
     }
-    // frame_tx dropped here -> encoder sees channel close -> drains and finishes.
+    frame_tx
   });
 
-  // Encoder runs on blocking thread, driven by channel.
   let path = output_path.clone();
   let encoder_task = tokio::task::spawn_blocking(move || crate::ffmpeg::encode_stream(frame_rx, &path, w, h, FPS));
 
   Ok(VideoRecordingHandle {
+    subscription,
+    started,
     pump_task,
     encoder_task,
-    shutdown_tx,
     output_path,
   })
 }
 
 impl VideoRecordingHandle {
-  /// Stop recording: stop screencast, wait for encoder to finish.
+  /// Stop recording and wait for the encoder to finish. The video ends
+  /// now, however long ago the page last changed.
   ///
   /// # Errors
   ///
   /// Returns an error if the encoder fails or the join handle panics.
-  pub async fn stop(self, page: &Page) -> crate::error::Result<PathBuf> {
-    // 1. Tell Chrome to stop emitting `Page.screencastFrame`. The
-    //    recording task only runs `stop()` after `page.is_closed()`
-    //    returns true, so the target is already gone here on most
-    //    callers — the send_command would either error fast or, on
-    //    cdp-raw, sit on the response-waiting oneshot until the per-
-    //    command 30s transport timeout. Skip the round-trip when the
-    //    page is already closed; the shutdown_tx + pump tear-down
-    //    below makes the stop deterministic regardless.
-    if !page.is_closed() {
-      let _ = page.stop_screencast().await;
-    }
-
-    // 2. Signal the listener to drain any events already buffered in
-    //    its broadcast subscription (frames Chrome shipped just
-    //    before the stop took effect). When the listener finishes
-    //    draining, it drops the channel sender.
-    let _ = self.shutdown_tx.send(());
-
-    // 3. The pump's `rx.recv()` returns `None` once the listener
-    //    drops its sender. Await the pump rather than aborting -- no
-    //    frames lost, no arbitrary sleeps.
-    let _ = self.pump_task.await;
-
-    // 4. Pump exit drops `frame_tx`, encoder drains the bounded
-    //    channel and finishes.
+  pub async fn stop(self) -> crate::error::Result<PathBuf> {
+    let end = self.started.elapsed().as_secs_f64();
+    self.subscription.stop().await;
+    let frame_tx = self
+      .pump_task
+      .await
+      .map_err(|e| FerriError::Backend(format!("video pump join: {e}")))?;
+    let _ = frame_tx.send(EncoderInput::End { at: end }).await;
+    drop(frame_tx);
     self
       .encoder_task
       .await
       .map_err(|e| FerriError::Backend(format!("encoder join: {e}")))??;
 
+    tracing::debug!(target: "ferridriver::video", "recorded {end:.3}s into {}", self.output_path.display());
     Ok(self.output_path)
   }
 }
 
 // ── Deferred (buffered) recording: zero encoding cost for passing tests ──
 
-/// A timestamped JPEG frame: `(jpeg_bytes, timestamp_secs)`.
-type FrameBuffer = Arc<Mutex<Vec<(Vec<u8>, f64)>>>;
+/// Buffered `(jpeg_bytes, seconds_since_start)` frames.
+type FrameBuffer = Vec<(Vec<u8>, f64)>;
 
 pub struct BufferedRecordingHandle {
-  frames: FrameBuffer,
-  pump_task: tokio::task::JoinHandle<()>,
-  shutdown_tx: tokio::sync::oneshot::Sender<()>,
+  subscription: ScreencastSubscription,
+  started: Instant,
+  pump_task: tokio::task::JoinHandle<FrameBuffer>,
   width: u32,
   height: u32,
 }
@@ -156,7 +166,7 @@ pub struct BufferedRecordingHandle {
 ///
 /// # Errors
 ///
-/// Returns an error if the CDP screencast cannot be started.
+/// Returns an error if the page's screencast cannot be started.
 pub async fn start_buffered_recording(
   page: &Page,
   width: u32,
@@ -165,22 +175,22 @@ pub async fn start_buffered_recording(
 ) -> crate::error::Result<BufferedRecordingHandle> {
   let w = width & !1;
   let h = height & !1;
+  let started = Instant::now();
+  let (subscription, mut frames) = subscribe(page, w, h, quality).await?;
 
-  let (cdp_rx, shutdown_tx) = page.start_screencast(quality, w, h).await?;
-  let frames: FrameBuffer = Arc::new(Mutex::new(Vec::with_capacity(64)));
-
-  let frames_clone = Arc::clone(&frames);
   let pump_task = tokio::spawn(async move {
-    let mut rx = cdp_rx;
-    while let Some((jpeg, ts)) = rx.recv().await {
-      frames_clone.lock().await.push((jpeg, ts));
+    let mut buffer = FrameBuffer::with_capacity(64);
+    while let Some(frame) = frames.recv().await {
+      let at = seconds_since(started, &frame);
+      buffer.push((frame.data, at));
     }
+    buffer
   });
 
   Ok(BufferedRecordingHandle {
-    frames,
+    subscription,
+    started,
     pump_task,
-    shutdown_tx,
     width: w,
     height: h,
   })
@@ -192,23 +202,21 @@ impl BufferedRecordingHandle {
   /// # Errors
   ///
   /// Returns an error if no frames were captured, encoding fails, or the join handle panics.
-  pub async fn encode(self, page: &Page, output_path: PathBuf) -> crate::error::Result<PathBuf> {
-    let _ = page.stop_screencast().await;
-    let _ = self.shutdown_tx.send(());
-    let _ = self.pump_task.await;
-
-    let frames = self.frames.lock().await;
+  pub async fn encode(self, output_path: PathBuf) -> crate::error::Result<PathBuf> {
+    let end = self.started.elapsed().as_secs_f64();
+    self.subscription.stop().await;
+    let frames = self
+      .pump_task
+      .await
+      .map_err(|e| FerriError::backend(format!("video pump join: {e}")))?;
     if frames.is_empty() {
       return Err(FerriError::backend("no frames captured"));
     }
 
     let w = self.width;
     let h = self.height;
-    let frames_owned: Vec<(Vec<u8>, f64)> = frames.clone();
-    drop(frames);
-
     let path = output_path.clone();
-    tokio::task::spawn_blocking(move || crate::ffmpeg::encode_frames(&frames_owned, &path, w, h, FPS))
+    tokio::task::spawn_blocking(move || crate::ffmpeg::encode_frames(frames, end, &path, w, h, FPS))
       .await
       .map_err(|e| FerriError::backend(format!("encode join: {e}")))??;
 
@@ -216,9 +224,8 @@ impl BufferedRecordingHandle {
   }
 
   /// Stop capturing and discard frames. Zero encoding cost.
-  pub async fn discard(self, page: &Page) {
-    let _ = page.stop_screencast().await;
-    let _ = self.shutdown_tx.send(());
+  pub async fn discard(self) {
+    self.subscription.stop().await;
     let _ = self.pump_task.await;
   }
 }

@@ -3507,12 +3507,9 @@ impl PageJs {
     with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
     let inner = self.inner.clone();
     Ok(rquickjs::promise::Promised::from(async move {
-      // `start_screencast` returns `(rx, shutdown_tx)`. The QuickJS
-      // binding doesn't expose a stop hook here; the shutdown signal is
-      // dropped (which Chrome's stop-screencast path will subsequently
-      // see via teardown), and we forward frames until `stopScreencast`
-      // clears the callback or the channel closes.
-      let (mut rx, _shutdown) = inner
+      // Frames flow until `stopScreencast` clears the callback or the
+      // channel closes.
+      let mut rx = inner
         .start_screencast(quality, max_width, max_height)
         .await
         .into_js_with(&ctx)?;

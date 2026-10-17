@@ -477,8 +477,8 @@ pub struct TraceRecorder {
   /// like any other in the trace — the stack is what makes everything
   /// recorded until `groupEnd()` a child of it.
   group_stack: std::sync::Mutex<Vec<String>>,
-  /// Shutdown senders for per-page screencast pumps.
-  screencast_stops: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+  /// Each filmed page's screencast subscription, ended by `stop`.
+  screencasts: std::sync::Mutex<Vec<crate::backend::screencast::ScreencastSubscription>>,
   /// Browser name recorded in `context-options`.
   browser_name: String,
   /// Context-creation options recorded in `context-options.options`
@@ -535,7 +535,7 @@ impl TraceRecorder {
       next_call_id: AtomicU64::new(1),
       current_parent: std::sync::Mutex::new(None),
       group_stack: std::sync::Mutex::new(Vec::new()),
-      screencast_stops: std::sync::Mutex::new(Vec::new()),
+      screencasts: std::sync::Mutex::new(Vec::new()),
       browser_name,
       context_options,
       spool_version: AtomicU64::new(0),
@@ -741,13 +741,13 @@ impl TraceRecorder {
     self.spool_version.load(Ordering::Relaxed)
   }
 
-  /// Track a screencast pump's shutdown sender so `stop` can end it.
-  pub fn track_screencast_stop(&self, tx: tokio::sync::oneshot::Sender<()>) {
+  /// Track a page's screencast subscription so `stop` can end it.
+  pub(crate) fn track_screencast(&self, subscription: crate::backend::screencast::ScreencastSubscription) {
     self
-      .screencast_stops
+      .screencasts
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(tx);
+      .push(subscription);
   }
 
   /// Reset chunk-local state (`tracing.startChunk` — network sha1s
@@ -790,15 +790,15 @@ impl TraceRecorder {
   }
 
   /// Stop screencast pumps (idempotent).
-  pub fn stop_screencasts(&self) {
-    let stops: Vec<_> = std::mem::take(
+  pub async fn stop_screencasts(&self) {
+    let subscriptions: Vec<_> = std::mem::take(
       &mut *self
-        .screencast_stops
+        .screencasts
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    for tx in stops {
-      let _ = tx.send(());
+    for subscription in subscriptions {
+      subscription.stop().await;
     }
   }
 
@@ -1293,18 +1293,18 @@ pub(crate) fn trace_page_id(page: &crate::backend::AnyPage) -> String {
   format!("page@{}", Arc::as_ptr(page.frame_cache()).cast::<()>() as usize)
 }
 
-/// Start a screencast on `page` and pump JPEG frames into the trace's
-/// film strip. Failure to start (backend without screencast, video
-/// recording already holding the stream) degrades to a trace without
-/// frames for that page.
+/// Subscribe to `page`'s screencast and pump JPEG frames into the trace's
+/// film strip. Failure to start (backend without screencast) degrades to
+/// a trace without frames for that page.
 pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &crate::backend::AnyPage) {
   // A just-failed main-frame navigation leaves the CDP session
   // transiently "Not attached to an active page"; the state self-heals
   // within milliseconds, so retry briefly instead of silently
   // recording a frameless trace.
+  let params = crate::backend::screencast::ScreencastParams::new(70, 800, 600);
   let mut attempt = 0;
-  let (mut rx, stop_tx) = loop {
-    match page.start_screencast(70, 800, 600).await {
+  let (subscription, mut rx) = loop {
+    match page.subscribe_screencast(params).await {
       Ok(started) => break started,
       Err(e) if attempt < 5 => {
         attempt += 1;
@@ -1317,12 +1317,13 @@ pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &
       },
     }
   };
-  recorder.track_screencast_stop(stop_tx);
+  recorder.track_screencast(subscription);
   let page_id = trace_page_id(page);
   let recorder = Arc::clone(recorder);
   tokio::spawn(async move {
     let mut last_ts = f64::NEG_INFINITY;
-    while let Some((jpeg, _backend_ts)) = rx.recv().await {
+    while let Some(frame) = rx.recv().await {
+      let jpeg = frame.data;
       let timestamp = recorder.monotonic_ms();
       if timestamp - last_ts < MIN_FRAME_GAP_MS && !recorder.screencast_burst_active(timestamp) {
         continue;

@@ -162,8 +162,15 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
     );
   }
 
-  // Video filter for exact dimensions
-  args.extend(["-vf".into(), format!("pad={w}:{h}:0:0:gray,crop={w}:{h}:0:0")]);
+  // A screencast shared with another consumer can run larger than this
+  // recording asked for, so frames that do not fit are scaled down rather
+  // than cropped.
+  args.extend([
+    "-vf".into(),
+    format!(
+      "scale='min(iw,{w})':'min(ih,{h})':force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:gray,crop={w}:{h}:0:0"
+    ),
+  ]);
 
   // Output file
   args.push(output_path.to_string_lossy().into_owned());
@@ -179,14 +186,16 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
   .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg: {e}")))
 }
 
-/// Encode a 1-second white video at the requested `width x height` with no
-/// piped input. Used as the fallback when the screencast produced zero
-/// frames so the output file still exists, has the right dimensions,
-/// and matches Playwright's `_stop` whitespace-frame behaviour.
-fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<()> {
+/// Encode a white video of `duration` seconds at the requested
+/// `width x height` with no piped input. Used as the fallback when the
+/// screencast produced zero frames so the output file still exists, has
+/// the right dimensions, and matches Playwright's `_stop` whitespace-frame
+/// behaviour.
+fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32, duration: f64) -> Result<()> {
   let ffmpeg = find_ffmpeg()?;
   let w = width & !1;
   let h = height & !1;
+  let duration = duration.max(1.0 / f64::from(fps));
   let mut args: Vec<String> = vec![
     "-loglevel".into(),
     "error".into(),
@@ -194,7 +203,7 @@ fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
     "-f".into(),
     "lavfi".into(),
     "-i".into(),
-    format!("color=c=white:s={w}x{h}:d=1:r={fps}"),
+    format!("color=c=white:s={w}x{h}:d={duration:.3}:r={fps}"),
     "-an".into(),
   ];
   if detect_encoder() == "vpx" {
@@ -240,76 +249,68 @@ fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
   Ok(())
 }
 
-/// Channel-driven encoding: pipe JPEG frames to ffmpeg subprocess as they arrive.
-/// Runs on a blocking thread concurrently with the test.
-///
-/// # Errors
-///
-/// Returns an error if ffmpeg cannot be spawned or exits with an error.
-pub fn encode_stream(
-  mut rx: tokio::sync::mpsc::Receiver<(Vec<u8>, f64)>,
-  output_path: &Path,
-  width: u32,
-  height: u32,
-  fps: u32,
-) -> Result<()> {
-  // Wait for the first frame before spawning the image2pipe encoder.
-  // If the channel closes empty (short recording on a page that never
-  // produced a compositor frame, e.g. data: URL closed immediately
-  // after navigation), ffmpeg's image2pipe input would exit with
-  // "Output file does not contain any stream". Playwright handles
-  // this in `videoRecorder.ts::_stop` by writing a synthesised
-  // white frame before closing stdin; we do the equivalent through
-  // ffmpeg's `lavfi color=` source which produces a 1-second
-  // constant-colour clip at the requested dimensions -- no extra
-  // dependency, no fake bitmap.
-  let Some(first_frame) = rx.blocking_recv() else {
-    return encode_blank(output_path, width, height, fps);
-  };
+/// What the recorder feeds the encoder: frames stamped with seconds since
+/// the recording started, then the time the recording stopped.
+pub(crate) enum EncoderInput {
+  Frame { jpeg: Vec<u8>, at: f64 },
+  End { at: f64 },
+}
 
-  let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
-  let mut stdin = child
-    .stdin
-    .take()
-    .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
+/// Maps timestamped frames onto a constant-rate timeline that starts at
+/// the recording's start and ends at its stop, so the encoded video's
+/// time is wall time. Each output slot holds the newest frame received
+/// by then; the first frame also fills the slots before it arrived and
+/// the last one fills the slots up to the stop (an idle page sends no
+/// frames).
+struct FramePacer {
+  fps: f64,
+  pending: Option<(Vec<u8>, i64)>,
+}
 
-  let mut first_ts: Option<f64> = None;
-  let mut last_frame: Option<Vec<u8>> = None;
-  let mut last_frame_number: i64 = -1;
+impl FramePacer {
+  fn new(fps: u32) -> Self {
+    Self {
+      fps: f64::from(fps),
+      pending: None,
+    }
+  }
 
-  // Re-enter the same processing loop with the first frame already in hand.
-  let mut next = Some(first_frame);
-  while let Some((jpeg_bytes, ts)) = next.take().or_else(|| rx.blocking_recv()) {
-    let first = *first_ts.get_or_insert(ts);
-    let frame_number = f64_to_i64(((ts - first) * f64::from(fps)).floor());
+  fn slot(&self, at: f64) -> i64 {
+    f64_to_i64((at * self.fps).floor()).max(0)
+  }
 
-    // Gap fill: repeat last frame to maintain framerate
-    if let Some(ref prev) = last_frame {
-      for _ in (last_frame_number + 1)..frame_number {
-        if stdin.write_all(prev).is_err() {
-          break;
+  fn push(
+    &mut self,
+    jpeg: Vec<u8>,
+    at: f64,
+    write: &mut impl FnMut(&[u8]) -> std::io::Result<()>,
+  ) -> std::io::Result<()> {
+    let slot = self.slot(at);
+    self.pending = Some(match self.pending.take() {
+      None => (jpeg, 0),
+      Some((prev, prev_slot)) if slot > prev_slot => {
+        for _ in prev_slot..slot {
+          write(&prev)?;
         }
-      }
-    }
-
-    if stdin.write_all(&jpeg_bytes).is_err() {
-      break;
-    }
-    last_frame = Some(jpeg_bytes);
-    last_frame_number = frame_number;
+        (jpeg, slot)
+      },
+      Some((_, prev_slot)) => (jpeg, prev_slot),
+    });
+    Ok(())
   }
 
-  // Trailing pad: 1 second of last frame for convenience
-  if let Some(ref frame) = last_frame {
-    for _ in 0..fps {
-      if stdin.write_all(frame).is_err() {
-        break;
+  fn finish(self, end: f64, write: &mut impl FnMut(&[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
+    if let Some((last, last_slot)) = self.pending {
+      let total = f64_to_i64((end * self.fps).round()).max(last_slot + 1);
+      for _ in last_slot..total {
+        write(&last)?;
       }
     }
+    Ok(())
   }
+}
 
-  // Close stdin to signal EOF, then wait for ffmpeg to finish
-  drop(stdin);
+fn finish_ffmpeg(child: Child) -> Result<()> {
   let output = child
     .wait_with_output()
     .map_err(|e| FerriError::backend(format!("ffmpeg wait: {e}")))?;
@@ -323,61 +324,144 @@ pub fn encode_stream(
   Ok(())
 }
 
-/// Batch encode: pipe all frames at once (for deferred/buffered recording).
+/// Channel-driven encoding: pipe JPEG frames to ffmpeg subprocess as they arrive.
+/// Runs on a blocking thread concurrently with the test.
 ///
 /// # Errors
 ///
 /// Returns an error if ffmpeg cannot be spawned or exits with an error.
-pub fn encode_frames(frames: &[(Vec<u8>, f64)], output_path: &Path, width: u32, height: u32, fps: u32) -> Result<()> {
+pub(crate) fn encode_stream(
+  mut rx: tokio::sync::mpsc::Receiver<EncoderInput>,
+  output_path: &Path,
+  width: u32,
+  height: u32,
+  fps: u32,
+) -> Result<()> {
+  // Wait for the first frame before spawning the image2pipe encoder.
+  // If no frame ever arrives (short recording on a page that never
+  // produced a compositor frame, e.g. data: URL closed immediately
+  // after navigation), ffmpeg's image2pipe input would exit with
+  // "Output file does not contain any stream". Playwright handles
+  // this in `videoRecorder.ts::_stop` by writing a synthesised
+  // white frame before closing stdin; we do the equivalent through
+  // ffmpeg's `lavfi color=` source at the requested dimensions -- no
+  // extra dependency, no fake bitmap.
+  let (first, first_at) = match rx.blocking_recv() {
+    Some(EncoderInput::Frame { jpeg, at }) => (jpeg, at),
+    Some(EncoderInput::End { at }) => return encode_blank(output_path, width, height, fps, at),
+    None => return encode_blank(output_path, width, height, fps, 1.0),
+  };
+
   let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
   let mut stdin = child
     .stdin
     .take()
     .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
+  let mut write = |frame: &[u8]| stdin.write_all(frame);
 
-  let mut first_ts: Option<f64> = None;
-  let mut last_frame: Option<&[u8]> = None;
-  let mut last_frame_number: i64 = -1;
-
-  for (jpeg_bytes, ts) in frames {
-    let first = *first_ts.get_or_insert(*ts);
-    let frame_number = f64_to_i64(((ts - first) * f64::from(fps)).floor());
-
-    // Gap fill
-    if let Some(prev) = last_frame {
-      for _ in (last_frame_number + 1)..frame_number {
-        if stdin.write_all(prev).is_err() {
-          break;
-        }
-      }
+  let mut pacer = FramePacer::new(fps);
+  let mut end = None;
+  let mut written = pacer.push(first, first_at, &mut write);
+  while written.is_ok() {
+    match rx.blocking_recv() {
+      Some(EncoderInput::Frame { jpeg, at }) => written = pacer.push(jpeg, at, &mut write),
+      Some(EncoderInput::End { at }) => {
+        end = Some(at);
+        break;
+      },
+      None => break,
     }
-
-    if stdin.write_all(jpeg_bytes).is_err() {
-      break;
-    }
-    last_frame = Some(jpeg_bytes);
-    last_frame_number = frame_number;
+  }
+  if written.is_ok() {
+    // Without a stop time the recording was abandoned; close on the last frame.
+    let _ = pacer.finish(end.unwrap_or(0.0), &mut write);
   }
 
-  // Trailing pad
-  if let Some(frame) = last_frame {
-    for _ in 0..fps {
-      if stdin.write_all(frame).is_err() {
-        break;
-      }
-    }
+  // Close stdin to signal EOF, then wait for ffmpeg to finish
+  drop(stdin);
+  finish_ffmpeg(child)
+}
+
+/// Batch encode buffered `(jpeg, seconds since start)` frames into a video
+/// that ends `end` seconds after the start.
+///
+/// # Errors
+///
+/// Returns an error if ffmpeg cannot be spawned or exits with an error.
+pub(crate) fn encode_frames(
+  frames: Vec<(Vec<u8>, f64)>,
+  end: f64,
+  output_path: &Path,
+  width: u32,
+  height: u32,
+  fps: u32,
+) -> Result<()> {
+  let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
+  let mut stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
+  let mut write = |frame: &[u8]| stdin.write_all(frame);
+
+  let mut pacer = FramePacer::new(fps);
+  let written = frames
+    .into_iter()
+    .try_for_each(|(jpeg, at)| pacer.push(jpeg, at, &mut write));
+  if written.is_ok() {
+    let _ = pacer.finish(end, &mut write);
   }
 
   drop(stdin);
-  let output = child
-    .wait_with_output()
-    .map_err(|e| FerriError::backend(format!("ffmpeg wait: {e}")))?;
-  if !output.status.success() {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(FerriError::backend(format!(
-      "ffmpeg exited with {}: {stderr}",
-      output.status
-    )));
+  finish_ffmpeg(child)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::FramePacer;
+
+  fn pace(frames: &[(u8, f64)], end: f64) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut write = |frame: &[u8]| {
+      out.push(frame[0]);
+      Ok(())
+    };
+    let mut pacer = FramePacer::new(25);
+    for &(id, at) in frames {
+      pacer.push(vec![id], at, &mut write).unwrap();
+    }
+    pacer.finish(end, &mut write).unwrap();
+    out
   }
-  Ok(())
+
+  #[test]
+  fn the_video_spans_the_recording_wall_time() {
+    // One frame early on, then 5 s of an unchanged page.
+    let out = pace(&[(1, 0.1), (2, 0.5)], 5.72);
+    assert_eq!(out.len(), 143, "5.72 s at 25 fps");
+    assert!(out[..12].iter().all(|&f| f == 1));
+    assert!(out[12..].iter().all(|&f| f == 2));
+  }
+
+  #[test]
+  fn the_first_frame_covers_the_time_before_it_arrived() {
+    let out = pace(&[(1, 0.4)], 1.0);
+    assert_eq!(out, vec![1; 25]);
+  }
+
+  #[test]
+  fn frames_sharing_a_slot_keep_the_newest() {
+    // 60 fps input must not stretch a 25 fps timeline.
+    let frames: Vec<(u8, f64)> = (0..60u8).map(|i| (i, f64::from(i) / 60.0)).collect();
+    let out = pace(&frames, 1.0);
+    assert_eq!(out.len(), 25);
+    assert_eq!(out[0], 2, "slot 0 shows the newest frame received in it");
+    assert_eq!(out[24], 59);
+  }
+
+  #[test]
+  fn a_stop_before_the_last_frame_still_shows_it_once() {
+    let out = pace(&[(1, 0.0), (2, 1.0)], 0.9);
+    assert_eq!(out.len(), 26);
+    assert_eq!(out[25], 2);
+  }
 }

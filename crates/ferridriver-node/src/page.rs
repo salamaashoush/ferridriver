@@ -2231,10 +2231,7 @@ impl Page {
       .build()?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      // `start_screencast` returns `(rx, shutdown_tx)`. NAPI binding
-      // doesn't surface a stop hook here; drop `shutdown_tx` (which
-      // Chrome's stop-screencast path drives separately via Page).
-      let (mut rx, _shutdown) = inner
+      let mut rx = inner
         .start_screencast(q, max_width, max_height)
         .await
         .map_err(crate::error::to_napi)?;
