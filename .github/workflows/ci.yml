@@ -261,6 +261,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install system deps
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
