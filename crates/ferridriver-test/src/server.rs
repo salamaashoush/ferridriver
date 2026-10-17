@@ -212,10 +212,22 @@ async fn start_server(config: &crate::config::WebServerConfig) -> ferridriver::e
   })))
 }
 
+/// Kill the command and everything it started. On Unix the shell leads its
+/// own process group, so a dev server's children (`bun` then `vite`, `npm`
+/// then `node`) go with it rather than outliving the run, as in
+/// Playwright's processLauncher.
+async fn kill_tree(child: &mut tokio::process::Child) {
+  #[cfg(unix)]
+  if let Some(pid) = child.id() {
+    send_signal_to_group(pid, libc::SIGKILL);
+  }
+  let _ = child.kill().await;
+}
+
 async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Option<&crate::config::GracefulShutdown>) {
   let Some(g) = graceful else {
     tracing::info!(name = %name, "[{name}] Hard-killing child process");
-    let _ = child.kill().await;
+    kill_tree(child).await;
     return;
   };
 
@@ -232,8 +244,10 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
     g.signal,
     g.timeout
   );
+  // SIGINT is meant for a whole process group, and SIGTERM goes the same
+  // way for consistency, as Playwright's webServer does.
   #[cfg(unix)]
-  send_signal(pid, signum);
+  send_signal_to_group(pid, signum);
   #[cfg(not(unix))]
   {
     let _ = (pid, signum);
@@ -250,7 +264,7 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
       "[{name}] Process did not exit within {}ms — escalating to SIGKILL",
       g.timeout
     );
-    let _ = child.kill().await;
+    kill_tree(child).await;
   }
 }
 
@@ -262,19 +276,20 @@ fn parse_signal(name: &str) -> libc::c_int {
   }
 }
 
+/// Signal the process group `pid` leads.
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn send_signal(pid: u32, signum: libc::c_int) {
+fn send_signal_to_group(pid: u32, signum: libc::c_int) {
   // Cast is safe: child PIDs from `tokio::process::Child::id()` fit in
   // i32 on every Unix we target.
   #[allow(clippy::cast_possible_wrap)]
   let pid_i = pid as libc::pid_t;
   // SAFETY: `kill` is async-signal-safe. The PID came from
-  // `Child::id()` for a process we own, so the call has no effect on
-  // any process we don't own even if the PID has been reused by the
-  // time the signal lands (we'd just no-op via EPERM).
+  // `Child::id()` for a process we spawned as its group leader, so the
+  // negative PID names that group; a group that no longer exists, or one
+  // we do not own, makes the call a no-op (ESRCH or EPERM).
   unsafe {
-    libc::kill(pid_i, signum);
+    libc::kill(-pid_i, signum);
   }
 }
 
@@ -288,13 +303,13 @@ fn spawn_command(
     c.args(["/C", command]);
     c
   } else {
-    // `exec` replaces the sh process with the user's command so signals
-    // sent to the child PID land on the real process (e.g. node) rather
-    // than dying in the sh wrapper. Without it, SIGTERM kills sh and
-    // leaves node orphaned with no chance to run its trap handler — the
-    // graceful_shutdown contract becomes a silent SIGKILL.
+    // A plain `sh -c`, so `build && start` runs both halves. Signals reach
+    // the real server because the shell leads a process group and the
+    // group is what gets signalled.
     let mut c = tokio::process::Command::new("sh");
-    c.args(["-c", &format!("exec {command}")]);
+    c.args(["-c", command]);
+    #[cfg(unix)]
+    c.process_group(0);
     c
   };
   cmd.current_dir(cwd);
@@ -391,4 +406,71 @@ async fn wait_for_url(
 
 fn readiness_timeout(url: &str, timeout_ms: u64, name: &str) -> ferridriver::FerriError {
   ferridriver::FerriError::timeout(format!("[{name}] webServer {url}"), timeout_ms)
+}
+
+#[cfg(all(test, unix))]
+mod command_tests {
+  use super::WebServerManager;
+  use crate::config::{GracefulShutdown, WebServerConfig};
+
+  fn free_port() -> std::io::Result<u16> {
+    Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+  }
+
+  fn serving(command: String, port: u16, cwd: &std::path::Path) -> WebServerConfig {
+    WebServerConfig {
+      command: Some(command),
+      url: Some(format!("http://127.0.0.1:{port}/")),
+      cwd: Some(cwd.display().to_string()),
+      timeout: 30_000,
+      ..WebServerConfig::default()
+    }
+  }
+
+  async fn answers(port: u16) -> bool {
+    tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
+  }
+
+  #[tokio::test]
+  async fn every_part_of_a_compound_command_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port().unwrap();
+    let command = format!("printf built > marker && python3 -m http.server {port} --bind 127.0.0.1");
+    let manager = WebServerManager::start(&[serving(command, port, dir.path())])
+      .await
+      .unwrap();
+    assert_eq!(std::fs::read_to_string(dir.path().join("marker")).unwrap(), "built");
+    manager.stop().await;
+  }
+
+  #[tokio::test]
+  async fn stopping_takes_the_servers_children_too() {
+    for graceful in [
+      None,
+      Some(GracefulShutdown {
+        signal: "SIGTERM".into(),
+        timeout: 5_000,
+      }),
+    ] {
+      let dir = tempfile::tempdir().unwrap();
+      let port = free_port().unwrap();
+      // The shell stays as the parent, so the server is its child.
+      let command = format!("python3 -m http.server {port} --bind 127.0.0.1 & wait");
+      let config = WebServerConfig {
+        graceful_shutdown: graceful.clone(),
+        ..serving(command, port, dir.path())
+      };
+      let manager = WebServerManager::start(&[config]).await.unwrap();
+      assert!(answers(port).await);
+      manager.stop().await;
+      let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+      while answers(port).await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      }
+      assert!(
+        !answers(port).await,
+        "the server outlived stop (graceful: {graceful:?})"
+      );
+    }
+  }
 }
