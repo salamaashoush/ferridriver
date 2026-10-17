@@ -52,7 +52,7 @@ pub mod heap;
 pub mod js_handle;
 pub mod locator;
 pub mod locator_builder;
-pub mod locator_generator;
+pub use ferridriver_trace::locator_generator;
 pub mod locator_handler;
 pub mod network;
 pub mod observed;

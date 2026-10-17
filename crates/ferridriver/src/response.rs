@@ -206,16 +206,16 @@ impl PageState {
 
 /// Values that must not reach the caller verbatim.
 ///
-/// A convenience, not a security boundary: it replaces known strings on the
-/// way out. A value the operator never declared, or one the page reshapes
-/// (base64, a substring, a re-encoding) still passes through — the caller is
-/// responsible for what it does with tool output either way.
-///
-/// Entries are ordered longest-value-first so that when one secret contains
-/// another, the longer one is replaced before its substring can be.
+/// A convenience, not a security boundary: it replaces known strings, and
+/// their percent-encoded and base64 forms, on the way out. A value the
+/// operator never declared, or one the page reshapes some other way, still
+/// passes through; the caller is responsible for what it does with tool
+/// output either way. The replacing itself is
+/// [`ferridriver_trace::redact::Redactor`], the one `ferridriver test` uses
+/// on traces.
 #[derive(Debug, Clone, Default)]
 pub struct Secrets {
-  entries: Vec<(String, String)>,
+  redactor: std::sync::Arc<ferridriver_trace::redact::Redactor>,
 }
 
 impl Secrets {
@@ -223,74 +223,33 @@ impl Secrets {
   /// credential would otherwise match the empty string everywhere.
   #[must_use]
   pub fn new(pairs: impl IntoIterator<Item = (String, String)>) -> Self {
-    let mut entries: Vec<(String, String)> = pairs.into_iter().filter(|(_, value)| !value.is_empty()).collect();
-    entries.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-    Self { entries }
+    Self {
+      redactor: std::sync::Arc::new(ferridriver_trace::redact::Redactor::new(pairs)),
+    }
   }
 
   #[must_use]
   pub fn is_empty(&self) -> bool {
-    self.entries.is_empty()
+    self.redactor.is_empty()
   }
 
   /// The declared name of an exactly-matching secret value.
   #[must_use]
   pub fn name_for(&self, value: &str) -> Option<&str> {
-    self
-      .entries
-      .iter()
-      .find(|(_, secret)| secret == value)
-      .map(|(name, _)| name.as_str())
+    self.redactor.name_for(value)
   }
 
   /// Replace every occurrence of a secret value with `<secret>NAME</secret>`.
   #[must_use]
   pub fn redact<'a>(&self, text: &'a str) -> Cow<'a, str> {
-    if self.entries.is_empty() {
-      return Cow::Borrowed(text);
-    }
-    let mut out = Cow::Borrowed(text);
-    for (name, value) in &self.entries {
-      if out.contains(value.as_str()) {
-        out = Cow::Owned(out.replace(value.as_str(), &format!("<secret>{name}</secret>")));
-      }
-    }
-    out
+    self.redactor.redact(text)
   }
 
-  /// [`Self::redact`] over every string in a JSON document, keys included —
+  /// [`Self::redact`] over every string in a JSON document, keys included:
   /// a credential used as an object key leaks exactly as readily as one used
   /// as a value.
   pub fn redact_json(&self, value: &mut serde_json::Value) {
-    if self.entries.is_empty() {
-      return;
-    }
-    match value {
-      serde_json::Value::String(s) => {
-        if let Cow::Owned(redacted) = self.redact(s) {
-          *s = redacted;
-        }
-      },
-      serde_json::Value::Array(items) => {
-        for item in items {
-          self.redact_json(item);
-        }
-      },
-      serde_json::Value::Object(map) => {
-        let needs_key_rewrite = map.keys().any(|k| matches!(self.redact(k), Cow::Owned(_)));
-        if needs_key_rewrite {
-          let rewritten: serde_json::Map<String, serde_json::Value> = std::mem::take(map)
-            .into_iter()
-            .map(|(k, v)| (self.redact(&k).into_owned(), v))
-            .collect();
-          *map = rewritten;
-        }
-        for item in map.values_mut() {
-          self.redact_json(item);
-        }
-      },
-      _ => {},
-    }
+    self.redactor.redact_json(value);
   }
 
   /// The expression that reads this secret from the environment at runtime,

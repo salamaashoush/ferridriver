@@ -14,6 +14,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 /// Where a trace's entries are read from.
 pub enum TraceSource {
   /// A `trace.zip` archive.
@@ -114,7 +116,8 @@ impl TraceSource {
 
 /// One call recorded in the trace: a browser action, an expect, or a test
 /// step, assembled from its `before` / `input` / `after` lines.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Action {
   pub call_id: String,
   pub parent_id: Option<String>,
@@ -141,6 +144,14 @@ impl Action {
     self.end_time.map(|end| (end - self.start_time).max(0.0))
   }
 
+  /// The target as the script wrote it (`getByRole('button', { name: 'Go' })`),
+  /// for actions that took a selector.
+  #[must_use]
+  pub fn locator(&self) -> Option<String> {
+    let selector = self.params.get("selector")?.as_str()?;
+    Some(crate::locator_generator::as_locator(selector))
+  }
+
   /// What the viewer shows as the action's name.
   #[must_use]
   pub fn display_title(&self) -> &str {
@@ -152,13 +163,15 @@ impl Action {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionError {
   pub name: String,
   pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Attachment {
   pub name: String,
   pub content_type: String,
@@ -168,7 +181,8 @@ pub struct Attachment {
   pub path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StackFrame {
   pub file: String,
   pub line: u32,
@@ -182,17 +196,21 @@ impl std::fmt::Display for StackFrame {
 }
 
 /// A console message recorded from the page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConsoleMessage {
   pub time: f64,
   pub message_type: String,
   pub text: String,
+  pub page_id: Option<String>,
   pub url: String,
   pub line_number: u32,
+  pub column_number: u32,
 }
 
 /// A page lifecycle event (`page`, `dialog`, `download`, `pageError`, …).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PageEvent {
   pub time: f64,
   pub method: String,
@@ -200,20 +218,39 @@ pub struct PageEvent {
 }
 
 /// A test-level failure written into the trace by the runner.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TraceError {
   pub message: String,
   pub stack: Vec<StackFrame>,
 }
 
-/// One request from the `.network` stream.
-#[derive(Debug, Clone)]
+/// One request from the `.network` stream: a HAR entry, with the
+/// trace-clock start time Playwright adds to it.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NetworkEntry {
   pub method: String,
   pub url: String,
+  /// 0 when no response arrived.
   pub status: u32,
   pub mime_type: String,
+  /// Sum of the known phases, in milliseconds.
   pub duration_ms: f64,
+  /// When the request started, on the same clock as action times.
+  pub start_time: Option<f64>,
+  pub timings: NetworkTimings,
+  /// Decoded body size, when the body was read.
+  pub size: Option<u64>,
+  pub protocol: Option<String>,
+  pub server_ip: Option<String>,
+  pub page_id: Option<String>,
+  /// Why the request failed, when it did not get a response.
+  pub failure: Option<String>,
+  pub request_headers: Vec<Header>,
+  pub response_headers: Vec<Header>,
+  /// Entry name of the response body inside the trace (`resources/<sha1>`).
+  pub body: Option<String>,
 }
 
 impl NetworkEntry {
@@ -224,8 +261,42 @@ impl NetworkEntry {
   }
 }
 
+/// HAR phase timings in milliseconds; `None` where the browser reported none
+/// (`-1`), which is every phase on Firefox and `WebKit`.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkTimings {
+  pub dns: Option<f64>,
+  pub connect: Option<f64>,
+  pub ssl: Option<f64>,
+  pub send: Option<f64>,
+  pub wait: Option<f64>,
+  pub receive: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Header {
+  pub name: String,
+  pub value: String,
+}
+
+/// One film-strip frame: a JPEG of the page at `timestamp` on the action
+/// clock.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreencastFrame {
+  pub page_id: String,
+  /// Entry name inside the trace (`resources/<pageId>-<epochMs>.jpeg`).
+  pub entry: String,
+  pub width: u32,
+  pub height: u32,
+  pub timestamp: f64,
+}
+
 /// Everything one browser context contributed to the trace.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextEntry {
   /// The `<prefix>` its streams were named after.
   pub prefix: String,
@@ -245,13 +316,14 @@ pub struct ContextEntry {
   pub stdout: Vec<String>,
   pub stderr: Vec<String>,
   pub network: Vec<NetworkEntry>,
-  pub screencast_frames: usize,
+  pub screencast_frames: Vec<ScreencastFrame>,
   /// Pages seen in the trace, in first-seen order.
   pub pages: Vec<String>,
 }
 
 /// A whole trace: one entry per recorded context.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TraceModel {
   pub contexts: Vec<ContextEntry>,
   /// Whether the trace carries the sources its stacks point at.
@@ -385,7 +457,13 @@ fn parse_context(prefix: &str, trace: &str) -> ContextEntry {
       }),
       "stdout" => context.stdout.push(string(&event, "text")),
       "stderr" => context.stderr.push(string(&event, "text")),
-      "screencast-frame" => context.screencast_frames += 1,
+      "screencast-frame" => context.screencast_frames.push(ScreencastFrame {
+        page_id: string(&event, "pageId"),
+        entry: format!("resources/{}", string(&event, "sha1")),
+        width: integer(&event, "width"),
+        height: integer(&event, "height"),
+        timestamp: number(&event, "timestamp"),
+      }),
       _ => {},
     }
   }
@@ -462,9 +540,13 @@ fn parse_console(event: &serde_json::Value) -> ConsoleMessage {
     time: number(event, "time"),
     message_type: string(event, "messageType"),
     text: string(event, "text"),
+    page_id: opt_string(event, "pageId"),
     url: location.map(|location| string(location, "url")).unwrap_or_default(),
     line_number: location
       .map(|location| integer(location, "lineNumber"))
+      .unwrap_or_default(),
+    column_number: location
+      .map(|location| integer(location, "columnNumber"))
       .unwrap_or_default(),
   }
 }
@@ -502,18 +584,64 @@ fn parse_network(network: &str) -> Vec<NetworkEntry> {
     };
     let request = snapshot.get("request");
     let response = snapshot.get("response");
+    let content = response.and_then(|r| r.get("content"));
+    let timings = snapshot.get("timings");
+    let phase = |key: &str| {
+      timings
+        .and_then(|t| t.get(key))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| *value >= 0.0)
+    };
     entries.push(NetworkEntry {
       method: request.map(|r| string(r, "method")).unwrap_or_default(),
       url: request.map(|r| string(r, "url")).unwrap_or_default(),
       status: response.map(|r| integer(r, "status")).unwrap_or_default(),
-      mime_type: response
-        .and_then(|r| r.get("content"))
-        .map(|c| string(c, "mimeType"))
-        .unwrap_or_default(),
-      duration_ms: number(snapshot, "time"),
+      mime_type: content.map(|c| string(c, "mimeType")).unwrap_or_default(),
+      duration_ms: number(snapshot, "time").max(0.0),
+      start_time: snapshot.get("_monotonicTime").and_then(serde_json::Value::as_f64),
+      timings: NetworkTimings {
+        dns: phase("dns"),
+        connect: phase("connect"),
+        ssl: phase("ssl"),
+        send: phase("send"),
+        wait: phase("wait"),
+        receive: phase("receive"),
+      },
+      size: content
+        .and_then(|c| c.get("size"))
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|size| u64::try_from(size).ok()),
+      protocol: response
+        .and_then(|r| opt_string(r, "httpVersion"))
+        .filter(|v| !v.is_empty()),
+      server_ip: opt_string(snapshot, "serverIPAddress")
+        .map(|ip| ip.trim_matches(['[', ']']).to_string())
+        .filter(|ip| !ip.is_empty()),
+      page_id: opt_string(snapshot, "pageref"),
+      failure: opt_string(snapshot, "_failureText").or_else(|| response.and_then(|r| opt_string(r, "_failureText"))),
+      request_headers: request.map(|r| headers(r.get("headers"))).unwrap_or_default(),
+      response_headers: response.map(|r| headers(r.get("headers"))).unwrap_or_default(),
+      body: content
+        .and_then(|c| opt_string(c, "_sha1"))
+        .map(|sha1| format!("resources/{sha1}")),
     });
   }
   entries
+}
+
+fn headers(value: Option<&serde_json::Value>) -> Vec<Header> {
+  value
+    .and_then(serde_json::Value::as_array)
+    .map(|headers| {
+      headers
+        .iter()
+        .map(|header| Header {
+          name: string(header, "name"),
+          value: string(header, "value"),
+        })
+        .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn parse_stack(value: Option<&serde_json::Value>) -> Vec<StackFrame> {
@@ -615,7 +743,9 @@ mod tests {
     assert_eq!(context.browser_name, "chromium");
     assert_eq!(context.title.as_deref(), Some("smoke"));
     assert_eq!(context.pages, vec!["page@1"]);
-    assert_eq!(context.screencast_frames, 1);
+    assert_eq!(context.screencast_frames.len(), 1);
+    assert_eq!(context.screencast_frames[0].entry, "resources/page@1-1.jpeg");
+    assert!((context.screencast_frames[0].timestamp - 20.0).abs() < f64::EPSILON);
     assert_eq!(context.console.len(), 1);
     assert_eq!(context.stdout, vec!["hello"]);
     assert_eq!(context.errors.len(), 1);
@@ -655,6 +785,50 @@ mod tests {
     assert_eq!(failures.len(), 2);
     assert!(failures[0].starts_with("locator.click: Timeout"));
     assert!(failures[1].starts_with("expect("));
+  }
+
+  #[test]
+  fn network_entries_keep_phases_headers_and_start() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("trace.trace"), TRACE).expect("write trace");
+    std::fs::write(
+      dir.path().join("trace.network"),
+      concat!(
+        r#"{"type":"resource-snapshot","snapshot":{"time":40,"_monotonicTime":25.5,"pageref":"page@1","serverIPAddress":"[2606::1]","timings":{"dns":2,"connect":10,"ssl":8,"send":0,"wait":15,"receive":-1},"request":{"method":"GET","url":"https://a/","headers":[{"name":"accept","value":"*/*"}]},"response":{"status":200,"httpVersion":"h2","headers":[{"name":"content-type","value":"text/html"}],"content":{"size":1349,"mimeType":"text/html","_sha1":"b0f.html"}}}}"#,
+        "\n",
+        r#"{"type":"resource-snapshot","snapshot":{"time":0,"_failureText":"net::ERR_BLOCKED_BY_CLIENT","request":{"method":"POST","url":"https://b/"},"response":{"status":0,"content":{"size":-1,"mimeType":"x-unknown"}}}}"#,
+        "\n",
+      ),
+    )
+    .expect("write network");
+    let model = TraceModel::load(&TraceSource::Dir(dir.path().to_path_buf())).expect("model");
+    let [ok, blocked] = &model.contexts[0].network[..] else {
+      panic!("two entries")
+    };
+    assert_eq!(ok.start_time, Some(25.5));
+    assert_eq!(ok.timings.dns, Some(2.0));
+    assert_eq!(ok.timings.receive, None);
+    assert_eq!(ok.size, Some(1349));
+    assert_eq!(ok.protocol.as_deref(), Some("h2"));
+    assert_eq!(ok.server_ip.as_deref(), Some("2606::1"));
+    assert_eq!(ok.page_id.as_deref(), Some("page@1"));
+    assert_eq!(ok.request_headers[0].name, "accept");
+    assert_eq!(ok.body.as_deref(), Some("resources/b0f.html"));
+    assert!(blocked.failed());
+    assert_eq!(blocked.size, None);
+    assert_eq!(blocked.failure.as_deref(), Some("net::ERR_BLOCKED_BY_CLIENT"));
+  }
+
+  #[test]
+  fn an_action_names_its_target_as_a_locator() {
+    let action = Action {
+      params: serde_json::json!({ "selector": "internal:role=button[name=\"Login\"i]" }),
+      ..Action::default()
+    };
+    assert_eq!(
+      action.locator().as_deref(),
+      Some("getByRole('button', { name: 'Login' })")
+    );
   }
 
   #[test]

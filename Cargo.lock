@@ -1670,6 +1670,7 @@ dependencies = [
  "dashmap",
  "dirs 7.0.0",
  "ferridriver-heap",
+ "ferridriver-trace",
  "ferrijs-fetch",
  "ferrijs-permissions",
  "flate2",
@@ -2023,6 +2024,7 @@ dependencies = [
  "ferridriver-config",
  "ferridriver-expect",
  "ferridriver-test-macros",
+ "ferridriver-trace",
  "ferridriver-viewer",
  "flate2",
  "futures",
@@ -2083,11 +2085,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferridriver-trace"
+version = "0.5.0"
+dependencies = [
+ "base64 0.23.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
 name = "ferridriver-viewer"
 version = "0.5.0"
 dependencies = [
  "axum",
+ "bytes",
  "ferridriver",
+ "ferridriver-trace",
  "mime_guess",
  "rustc-hash",
  "serde",

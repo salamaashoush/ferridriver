@@ -18,6 +18,7 @@ default-members = [
   "crates/ferridriver-perf",
   "crates/ferridriver-heap",
   "crates/ferridriver-viewer",
+  "crates/ferridriver-trace",
   "examples/bdd-example",
 ]
 
@@ -64,6 +65,7 @@ ferridriver-config = { path = "crates/ferridriver-config", version = "0.5.0" }
 ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.5.0" }
 ferridriver-session = { path = "crates/ferridriver-session", version = "0.5.0" }
 ferridriver-viewer = { path = "crates/ferridriver-viewer", version = "0.5.0" }
+ferridriver-trace = { path = "crates/ferridriver-trace", version = "0.5.0" }
 # The JavaScript runtime this project's scripting is built on. To develop
 # the two together, point these back at `../ferrijs/crates/*` with a
 # `[patch.crates-io]` section rather than editing the versions here.

@@ -5,9 +5,13 @@
 //! unpacked into memory on first use, so a binary that never opens a viewer
 //! pays nothing but the bytes in its `.rodata`.
 
-use axum::body::{Body, Bytes};
+#[cfg(feature = "server")]
+use axum::body::Body;
+#[cfg(feature = "server")]
 use axum::http::{StatusCode, header};
+#[cfg(feature = "server")]
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 
 /// Playwright release the embedded apps were built from. The wire protocols
 /// implemented against them (trace format, test server, recorder) are pinned
@@ -60,26 +64,39 @@ impl App {
   }
 
   /// Serve one file as an HTTP response, 404 when the app has no such entry.
+  #[cfg(feature = "server")]
   #[must_use]
   pub fn response(self, path: &str) -> Response {
-    let path = normalize(path);
     let Some(bytes) = self.asset(path) else {
       return StatusCode::NOT_FOUND.into_response();
     };
-    // Content-Type is load-bearing, not cosmetic: a browser refuses to
-    // register a service worker that does not arrive as JavaScript, and the
-    // trace viewer is a service worker with a UI attached.
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
-    let cache = if is_immutable(path) {
-      "public, max-age=31536000, immutable"
-    } else {
-      "no-cache"
-    };
     Response::builder()
-      .header(header::CONTENT_TYPE, mime.as_ref())
-      .header(header::CACHE_CONTROL, cache)
+      .header(header::CONTENT_TYPE, content_type(path))
+      .header(header::CACHE_CONTROL, cache_control(path))
       .body(Body::from(bytes))
       .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+  }
+}
+
+/// The `Content-Type` an asset must be served with. Load-bearing, not
+/// cosmetic: a browser refuses to register a service worker that does not
+/// arrive as JavaScript, and the trace viewer is a service worker with a UI
+/// attached.
+#[must_use]
+pub fn content_type(path: &str) -> String {
+  mime_guess::from_path(normalize(path))
+    .first_or_octet_stream()
+    .to_string()
+}
+
+/// The `Cache-Control` an asset must be served with: hashed assets forever,
+/// entry points and the service worker revalidated.
+#[must_use]
+pub fn cache_control(path: &str) -> &'static str {
+  if is_immutable(normalize(path)) {
+    "public, max-age=31536000, immutable"
+  } else {
+    "no-cache"
   }
 }
 
@@ -157,11 +174,9 @@ mod tests {
 
   #[test]
   fn javascript_content_type_and_revalidated_worker() {
-    let response = App::TraceViewer.response("sw.bundle.js");
-    let headers = response.headers();
-    let mime = headers[header::CONTENT_TYPE].to_str().expect("content type");
+    let mime = content_type("sw.bundle.js");
     assert!(mime.contains("javascript"), "service worker served as {mime}");
-    assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(cache_control("sw.bundle.js"), "no-cache");
   }
 
   #[test]
@@ -176,14 +191,22 @@ mod tests {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
       })
       .expect("hashed asset");
-    let response = App::TraceViewer.response(&name);
+    assert!(cache_control(&name).contains("immutable"));
+  }
+
+  #[cfg(feature = "server")]
+  #[test]
+  fn served_responses_carry_those_headers() {
+    let response = App::TraceViewer.response("sw.bundle.js");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
     assert!(
-      response.headers()[header::CACHE_CONTROL]
+      response.headers()[header::CONTENT_TYPE]
         .to_str()
-        .is_ok_and(|v| v.contains("immutable"))
+        .is_ok_and(|mime| mime.contains("javascript"))
     );
   }
 
+  #[cfg(feature = "server")]
   #[test]
   fn unknown_entry_is_not_found() {
     assert_eq!(App::TraceViewer.response("nope.js").status(), StatusCode::NOT_FOUND);

@@ -143,12 +143,9 @@ fn render_heading(out: &mut String, context: &ContextEntry, options: &DumpOption
   if let Some(duration) = context_duration_ms(context) {
     facts.push(format_ms(duration));
   }
-  if context.screencast_frames > 0 {
-    facts.push(format!(
-      "{} frame{}",
-      context.screencast_frames,
-      plural(context.screencast_frames)
-    ));
+  let frames = context.screencast_frames.len();
+  if frames > 0 {
+    facts.push(format!("{frames} frame{}", plural(frames)));
   }
   let _ = writeln!(out, "{}", paint(&facts.join(" · "), DIM));
 }
@@ -364,7 +361,7 @@ pub fn to_json(model: &TraceModel) -> serde_json::Value {
         "recorderVersion": context.recorder_version,
         "wallTime": context.wall_time,
         "pages": context.pages,
-        "screencastFrames": context.screencast_frames,
+        "screencastFrames": context.screencast_frames.len(),
         "actions": context.actions.iter().map(action_json).collect::<Vec<_>>(),
         "console": context.console.iter().map(|message| serde_json::json!({
           "time": message.time,
@@ -558,6 +555,7 @@ mod tests {
           text: "boom".into(),
           url: "http://app.local".into(),
           line_number: 1,
+          ..ConsoleMessage::default()
         }],
         network: vec![
           NetworkEntry {
@@ -566,6 +564,7 @@ mod tests {
             status: 200,
             mime_type: "text/javascript".into(),
             duration_ms: 12.0,
+            ..NetworkEntry::default()
           },
           NetworkEntry {
             method: "POST".into(),
@@ -573,6 +572,7 @@ mod tests {
             status: 500,
             mime_type: "application/json".into(),
             duration_ms: 3.0,
+            ..NetworkEntry::default()
           },
         ],
         pages: vec!["page@1".into()],

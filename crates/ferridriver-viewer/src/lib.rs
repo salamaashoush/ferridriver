@@ -19,29 +19,38 @@
 
 pub mod apps;
 pub mod dump;
+#[cfg(feature = "server")]
 pub mod files;
-pub mod model;
+pub use ferridriver_trace::model;
 
+#[cfg(feature = "server")]
 use std::sync::Arc;
 
+#[cfg(feature = "server")]
 use axum::Router;
+#[cfg(feature = "server")]
 use axum::extract::{Request, State};
+#[cfg(feature = "server")]
 use axum::response::Response;
+#[cfg(feature = "server")]
 use axum::routing::get;
 
 pub use apps::{App, PLAYWRIGHT_VERSION};
+#[cfg(feature = "server")]
 pub use files::{FileRoots, TRACES_DIR_MARKER};
 
 /// Path prefix Playwright's apps are served under. Baked into the vendored
 /// bundles' asset URLs and service-worker scope, so it is not configurable.
 pub const TRACE_PREFIX: &str = "/trace";
 
+#[cfg(feature = "server")]
 struct ViewerState {
   app: App,
   roots: FileRoots,
 }
 
 /// Routes serving `app` under `/trace`, reading traces from `roots`.
+#[cfg(feature = "server")]
 pub fn router(app: App, roots: FileRoots) -> Router {
   let state = Arc::new(ViewerState { app, roots });
   Router::new()
@@ -52,10 +61,12 @@ pub fn router(app: App, roots: FileRoots) -> Router {
     .with_state(state)
 }
 
+#[cfg(feature = "server")]
 async fn index(State(state): State<Arc<ViewerState>>) -> Response {
   state.app.response("index.html")
 }
 
+#[cfg(feature = "server")]
 async fn asset(State(state): State<Arc<ViewerState>>, request: Request) -> Response {
   let path = request
     .uri()
@@ -66,6 +77,7 @@ async fn asset(State(state): State<Arc<ViewerState>>, request: Request) -> Respo
   state.app.response(&path)
 }
 
+#[cfg(feature = "server")]
 async fn file(State(state): State<Arc<ViewerState>>, request: Request) -> Response {
   files::serve(&state.roots, request).await
 }
@@ -75,6 +87,7 @@ async fn file(State(state): State<Arc<ViewerState>>, request: Request) -> Respon
 /// `web_app` is the app's entry point: `index.html` for the trace viewer,
 /// `uiMode.html` for UI mode (`traceViewer.ts::installRootRedirect`).
 #[must_use]
+#[cfg(feature = "server")]
 pub fn app_url(base: &str, web_app: &str, params: &[(&str, String)]) -> String {
   let mut url = format!("{}{TRACE_PREFIX}/{web_app}", base.trim_end_matches('/'));
   for (index, (key, value)) in params.iter().enumerate() {
@@ -90,6 +103,7 @@ pub fn app_url(base: &str, web_app: &str, params: &[(&str, String)]) -> String {
 /// `trace` parameter. Remote traces are passed through as-is; local ones
 /// become a `file?path=` reference the [`files`] route answers.
 #[must_use]
+#[cfg(feature = "server")]
 pub fn trace_param(trace: &std::path::Path) -> String {
   files::file_path_url(trace)
 }
@@ -105,6 +119,7 @@ pub fn trace_param(trace: &std::path::Path) -> String {
 ///
 /// Errors when no browser could be launched — the caller should fall
 /// back to printing the URL.
+#[cfg(feature = "server")]
 pub async fn open_app_window(url: &str) -> Result<(), String> {
   let browser = ferridriver::chromium()
     .launch(ferridriver::options::LaunchOptions {
@@ -126,6 +141,7 @@ pub async fn open_app_window(url: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[cfg(feature = "server")]
 mod tests {
   use super::*;
   use axum::body::Body;
