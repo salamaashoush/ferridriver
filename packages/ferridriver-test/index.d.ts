@@ -2646,7 +2646,7 @@ export interface Browser {
   newContext(options?: BrowserContextOptions): Promise<BrowserContext>;
   newPage(options?: BrowserContextOptions): Promise<Page>;
   contexts(): BrowserContext[];
-  version(): Promise<string>;
+  version(): string;
   browserType(): BrowserType;
   isConnected(): boolean;
   close(): Promise<void>;
