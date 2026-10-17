@@ -2000,9 +2000,11 @@ impl WebKitPage {
         .await;
     }
 
-    if let Some(creds) = opts.http_credentials.as_ref() {
-      let _ = self.set_http_credentials(Some(creds.clone())).await;
-    }
+    // Sent for every page, as `wkPage.updateHttpCredentials` does: with no
+    // list at all WebKit leaves a challenge to the embedder, and headless
+    // Linux builds then wait on it forever. An empty list lets automation
+    // answer, so the 401 surfaces.
+    let _ = self.set_http_credentials(opts.http_credentials.clone()).await;
   }
 
   async fn apply_browser_session_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
