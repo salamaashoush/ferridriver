@@ -8,7 +8,7 @@
 // /fx/proxy-log.
 
 import { test, describe, expect } from '@ferridriver/test';
-import type { Browser, BrowserContextOptions } from '@ferridriver/test';
+import type { Browser, BrowserContextOptions, Page, Response } from '@ferridriver/test';
 import { fxProxyLog, fxProxyLogReset, fxProxyUrl } from './helpers/server';
 
 // Firefox/BiDi rejects unsupported context options with a typed error
@@ -270,6 +270,17 @@ describe('context options', () => {
   // `/fx/auth?expect=name:secret` says which credentials it wants.
   const otherOrigin = (baseURL: string) => baseURL.replace('127.0.0.1', 'localhost');
 
+  // Playwright's browsercontext-credentials.spec.ts (`failsOn401`): when no
+  // credentials answer the challenge, full Chromium fails the navigation
+  // with net::ERR_INVALID_AUTH_CREDENTIALS, where the headless shell and
+  // the other engines show the 401.
+  async function expectUnauthorized(page: Page, url: string, browser: Browser, browserName: string) {
+    const failsOn401 = browserName === 'chromium' && !browser.version().startsWith('HeadlessChrome/');
+    const responseOrError = await page.goto(url).catch((error: Error) => error);
+    if (failsOn401) expect((responseOrError as Error).message).toContain('net::ERR_INVALID_AUTH_CREDENTIALS');
+    else expect((responseOrError as Response).status()).toBe(401);
+  }
+
   test('http_credentials_list_answers_each_origin_with_its_own_entry', async ({ browser, baseURL }) => {
     const other = otherOrigin(baseURL!);
     const ctx = await browser.newContext({
@@ -322,14 +333,13 @@ describe('context options', () => {
     }
   });
 
-  test('http_credentials_bound_to_another_origin_are_not_sent', async ({ browser, baseURL }) => {
+  test('http_credentials_bound_to_another_origin_are_not_sent', async ({ browser, browserName, baseURL }) => {
     const ctx = await browser.newContext({
       httpCredentials: [{ username: 'user', password: 'pass', origin: otherOrigin(baseURL!) }],
     });
     try {
       const p = await ctx.newPage();
-      const r = await p.goto(`${baseURL}/fx/auth`);
-      expect(r?.status()).toBe(401);
+      await expectUnauthorized(p, `${baseURL}/fx/auth`, browser, browserName);
     } finally {
       await ctx.close();
     }
@@ -348,12 +358,11 @@ describe('context options', () => {
     }
   });
 
-  test('http_credentials_empty_list_is_no_credentials', async ({ browser, baseURL }) => {
+  test('http_credentials_empty_list_is_no_credentials', async ({ browser, browserName, baseURL }) => {
     const ctx = await browser.newContext({ httpCredentials: [] });
     try {
       const p = await ctx.newPage();
-      const r = await p.goto(`${baseURL}/fx/auth`);
-      expect(r?.status()).toBe(401);
+      await expectUnauthorized(p, `${baseURL}/fx/auth`, browser, browserName);
     } finally {
       await ctx.close();
     }
