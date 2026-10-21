@@ -1,10 +1,10 @@
-//! The TypeScript declarations for ferridriver's test and extension APIs,
-//! embedded so whatever links this crate serves the ones matching the
-//! runtime it was built with.
+//! What an editor needs to know about this ferridriver build without
+//! linking the browser engine: the TypeScript declarations for the test
+//! and extension APIs, and the device registry `use.device` accepts.
 //!
-//! The CLI writes them out for `ferridriver ext check` and editors; a
-//! service that edits scripts in the browser serves them to its editor
-//! without shipping the CLI.
+//! The CLI writes the declarations out for `ferridriver ext check` and
+//! editors; a service that edits scripts and test settings in the browser
+//! serves both to its editor, matching the runtime its runners use.
 
 /// The version the declarations describe.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,6 +20,11 @@ pub const TEST_DTS: &str = include_str!("../../../packages/ferridriver-test/inde
 /// The Node globals (`process`, `Buffer`, ...) scripts may use, referenced
 /// from `TEST_DTS`.
 pub const TEST_NODE_DTS: &str = include_str!("../../../packages/ferridriver-test/node.d.ts");
+
+/// Playwright's device registry as JSON, keyed by device name: the same
+/// file `ferridriver::devices` compiles in, so a name listed here is one
+/// `use.device` resolves.
+pub const DEVICES_JSON: &str = include_str!("../../ferridriver/src/devices/deviceDescriptorsSource.json");
 
 /// One declaration package.
 pub struct TypesPackage {
@@ -45,6 +50,12 @@ pub const PACKAGES: &[TypesPackage] = &[
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn device_registry_is_keyed_by_name() {
+    assert!(DEVICES_JSON.trim_start().starts_with('{'));
+    assert!(DEVICES_JSON.contains("\"iPhone 15\": {"));
+  }
 
   #[test]
   fn test_declarations_reference_their_node_globals() {

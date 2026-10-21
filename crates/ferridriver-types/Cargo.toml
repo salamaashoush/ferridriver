@@ -1,6 +1,6 @@
 [package]
 name = "ferridriver-types"
-description = "The TypeScript declarations for ferridriver's test and extension APIs, matching this build."
+description = "The TypeScript declarations and device registry of a ferridriver build, for editors."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
