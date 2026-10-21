@@ -56,6 +56,27 @@ describe('context options', () => {
     }
   });
 
+  test('context_options_user_agent_with_locale', async ({ browser, baseURL }) => {
+    // A device descriptor plus a locale is the common shape of this pair;
+    // both must survive into the page and onto the wire.
+    const ctx = await browser.newContext({ userAgent: 'FerriUA/1.0 (RuleNine)', locale: 'de-DE' });
+    try {
+      const p = await ctx.newPage();
+      await p.goto(`${baseURL}/fx/echo-headers`);
+      const seen = (await p.evaluate(() => ({
+        agent: navigator.userAgent,
+        language: navigator.language,
+        headers: JSON.parse(document.body.textContent ?? '{}'),
+      }))) as { agent: string; language: string; headers: Record<string, string> };
+      expect(seen.agent).toBe('FerriUA/1.0 (RuleNine)');
+      expect(seen.language.startsWith('de')).toBe(true);
+      expect(seen.headers['user-agent']).toBe('FerriUA/1.0 (RuleNine)');
+      expect(seen.headers['accept-language'].startsWith('de')).toBe(true);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_options_timezone', async ({ browser }) => {
     const ctx = await browser.newContext({ timezoneId: 'America/New_York' });
     try {

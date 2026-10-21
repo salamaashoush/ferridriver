@@ -5203,9 +5203,14 @@ impl<T: CdpWrap> CdpPage<T> {
 
     // Every remaining field is a direct CDP command — inlined below
     // so no `set_*` helper lives on the backend.
+    // `Network.setUserAgentOverride` replaces the whole override, so with
+    // a locale the agent rides in the locale's command below. Two
+    // concurrent overrides leave whichever lands last, and one carrying
+    // only `acceptLanguage` resets the agent to the browser's default.
     let ua_fut: OptionFuture<_> = opts
       .user_agent
       .as_deref()
+      .filter(|_| opts.locale.is_none())
       .map(|ua| async move {
         self
           .configure("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
@@ -5222,7 +5227,7 @@ impl<T: CdpWrap> CdpPage<T> {
         self
           .configure(
             "Network.setUserAgentOverride",
-            serde_json::json!({"userAgent": "", "acceptLanguage": l}),
+            serde_json::json!({"userAgent": opts.user_agent.as_deref().unwrap_or(""), "acceptLanguage": l}),
           )
           .await
       })
