@@ -9,36 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// `@ferridriver/extension` — `defineTool`, the handler context, the
-/// package manifest.
-pub const EXTENSION_DTS: &str = include_str!("../../../../../packages/ferridriver-extension/index.d.ts");
-
-/// `@ferridriver/test` — the browser bindings (`Page`, `BrowserContext`,
-/// `Locator`, ...) the extension declarations build on.
-pub const TEST_DTS: &str = include_str!("../../../../../packages/ferridriver-test/index.d.ts");
-
-/// One embedded declaration package.
-pub struct TypesPackage {
-  pub name: &'static str,
-  pub declaration: &'static str,
-  pub additional: &'static [(&'static str, &'static str)],
-}
-
-pub const PACKAGES: &[TypesPackage] = &[
-  TypesPackage {
-    name: "@ferridriver/extension",
-    declaration: EXTENSION_DTS,
-    additional: &[],
-  },
-  TypesPackage {
-    name: "@ferridriver/test",
-    declaration: TEST_DTS,
-    additional: &[(
-      "node.d.ts",
-      include_str!("../../../../../packages/ferridriver-test/node.d.ts"),
-    )],
-  },
-];
+use ferridriver_types::PACKAGES;
 
 /// Write every package as `<root>/<name>/index.d.ts` plus a minimal
 /// `package.json`, so plain Node resolution (and therefore TypeScript with
@@ -46,7 +17,7 @@ pub const PACKAGES: &[TypesPackage] = &[
 ///
 /// Returns the written declaration paths, keyed by package name.
 pub fn materialize(root: &Path) -> std::io::Result<Vec<(&'static str, PathBuf)>> {
-  let version = env!("CARGO_PKG_VERSION");
+  let version = ferridriver_types::VERSION;
   let mut written = Vec::new();
   for pkg in PACKAGES {
     let dir = root.join(pkg.name);

@@ -47,6 +47,7 @@ ferridriver-bdd-macros   Proc macros: #[given], #[when], #[then], #[step]
 ferridriver-script       ferridriver's realm over the ferrijs runtime: the page/browser bindings, extensions, BDD and test surfaces
 ferridriver-expect       Auto-retrying assertions (Playwright poll schedule); thin shims in bindings
 ferridriver-perf         Chrome trace analysis: Core Web Vitals, 19 DevTools insights, Lantern simulator
+ferridriver-types        TypeScript declarations for @ferridriver/test and /extension, embedded for editors
 ```
 
 The JavaScript runtime itself (QuickJS event loop, the Node and web

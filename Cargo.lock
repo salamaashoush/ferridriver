@@ -1763,6 +1763,7 @@ dependencies = [
  "ferridriver-session",
  "ferridriver-test",
  "ferridriver-testjs",
+ "ferridriver-types",
  "ferridriver-viewer",
  "flate2",
  "futures",
@@ -2094,6 +2095,10 @@ dependencies = [
  "tempfile",
  "zip",
 ]
+
+[[package]]
+name = "ferridriver-types"
+version = "0.5.0"
 
 [[package]]
 name = "ferridriver-viewer"
