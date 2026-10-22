@@ -127,6 +127,19 @@ request client authenticates itself. `socks5` resolves host names on the
 proxy, as `socks5h` does. No launch-level proxy is needed for a context
 proxy on any backend, Chromium included.
 
+Loopback goes through the proxy like any other host, as in Playwright:
+`localhost`, `127.0.0.1` and `::1` mean whatever the proxy reaches by
+those names, which is what a tunnel to another machine's localhost needs.
+To reach this machine's loopback directly, name it in `bypass`
+(`localhost`, `127.0.0.1` or `::1`). On Chromium naming any one of them
+keeps all of loopback off the proxy; on Firefox and WebKit each entry
+covers the host it names. The same holds for a `launch({ proxy })` proxy
+and an instance's `proxy`.
+
+Chromium is told with `<-loopback>` in its bypass list. Firefox launches
+with `network.proxy.allow_hijacking_localhost`, so loopback there also
+follows a system proxy; `firefoxUserPrefs` can turn it off.
+
 Firefox keeps a proxy's credentials browser-wide, keyed by the proxy's
 address: two contexts of one Firefox pointed at the same proxy with
 different credentials both use whichever logged in first. Chromium and

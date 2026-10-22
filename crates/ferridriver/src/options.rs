@@ -2797,6 +2797,36 @@ impl ProxyConfig {
     (!entries.is_empty()).then(|| entries.join(","))
   }
 
+  /// Whether `bypass` names a loopback host, which keeps loopback off the
+  /// proxy. Otherwise loopback goes through the proxy like any other host.
+  #[must_use]
+  pub fn bypasses_loopback(&self) -> bool {
+    const LOOPBACK: [&str; 7] = [
+      "localhost",
+      "127.0.0.1",
+      "::1",
+      "[::]",
+      "[::1]",
+      "<loopback>",
+      "<-loopback>",
+    ];
+    self
+      .bypass
+      .as_deref()
+      .is_some_and(|bypass| bypass.split(',').any(|host| LOOPBACK.contains(&host.trim())))
+  }
+
+  /// `bypass` as Chromium takes it. Chromium bypasses loopback implicitly
+  /// unless the list subtracts it with `<-loopback>`.
+  #[must_use]
+  pub fn chromium_bypass_list(&self) -> Option<String> {
+    let bypass = self.bypass_list();
+    if self.bypasses_loopback() {
+      return bypass;
+    }
+    Some(bypass.map_or_else(|| "<-loopback>".to_string(), |bypass| format!("<-loopback>,{bypass}")))
+  }
+
   /// The URL scheme of `server`, `http` when it names none.
   #[must_use]
   pub fn scheme(&self) -> &str {
@@ -2851,7 +2881,7 @@ impl ProxyConfig {
 
     if backend != crate::backend::BackendKind::WebKit {
       let mut flags = vec![format!("--proxy-server={}", self.chromium_server())];
-      if let Some(bypass) = bypass {
+      if let Some(bypass) = self.chromium_bypass_list() {
         flags.push(format!("--proxy-bypass-list={bypass}"));
       }
       return flags;
@@ -3962,7 +3992,46 @@ mod proxy_lowering_tests {
     };
 
     assert_eq!(no_bypass.launch_flags(BackendKind::WebKit).len(), 1);
-    assert_eq!(no_bypass.launch_flags(BackendKind::CdpWs).len(), 1);
+    assert_eq!(
+      no_bypass.launch_flags(BackendKind::CdpWs),
+      [
+        "--proxy-server=http://127.0.0.1:3052",
+        "--proxy-bypass-list=<-loopback>"
+      ]
+    );
+  }
+
+  #[test]
+  fn chromium_sends_loopback_through_the_proxy_unless_the_bypass_names_it() {
+    let with = |bypass: Option<&str>| ProxyConfig {
+      bypass: bypass.map(ToString::to_string),
+      ..proxy()
+    };
+
+    assert_eq!(with(None).chromium_bypass_list().as_deref(), Some("<-loopback>"));
+    assert_eq!(with(Some(" ")).chromium_bypass_list().as_deref(), Some("<-loopback>"));
+    assert_eq!(
+      with(Some(".example.com")).chromium_bypass_list().as_deref(),
+      Some("<-loopback>,.example.com")
+    );
+    for loopback in [
+      "localhost",
+      "127.0.0.1",
+      "::1",
+      "[::]",
+      "[::1]",
+      "<loopback>",
+      "<-loopback>",
+    ] {
+      let bypass = format!(".example.com, {loopback}");
+      assert!(with(Some(&bypass)).bypasses_loopback(), "{loopback}");
+      assert_eq!(
+        with(Some(&bypass)).chromium_bypass_list(),
+        Some(format!(".example.com,{loopback}")),
+        "{loopback}"
+      );
+    }
+    assert!(!with(Some("localhost.example.com,127.0.0.2")).bypasses_loopback());
   }
 
   #[test]
@@ -3987,7 +4056,10 @@ mod proxy_lowering_tests {
       ..proxy()
     };
     assert_eq!(blank.bypass_list(), None);
-    assert_eq!(blank.launch_flags(BackendKind::CdpPipe).len(), 1);
+    assert_eq!(
+      blank.launch_flags(BackendKind::CdpPipe)[1..],
+      ["--proxy-bypass-list=<-loopback>"]
+    );
   }
 }
 

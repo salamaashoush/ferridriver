@@ -605,6 +605,11 @@ user_pref("network.dns.disablePrefetch", true);
 user_pref("network.http.speculative-parallel-limit", 0);
 user_pref("network.cookie.CHIPS.enabled", false);
 user_pref("browser.pocket.enabled", false);
+// Loopback follows a configured proxy unless its bypass list names it, as on
+// Chromium and WebKit. Firefox otherwise never proxies loopback. Hijacked
+// localhost stays a secure context, as it is when reached directly.
+user_pref("network.proxy.allow_hijacking_localhost", true);
+user_pref("network.proxy.testing_localhost_is_secure_when_hijacked", true);
 
 // ── Security (relaxed for testing) ────────────────────────────────────
 user_pref("browser.safebrowsing.blockedURIs.enabled", false);

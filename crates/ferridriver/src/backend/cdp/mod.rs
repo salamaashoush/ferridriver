@@ -1014,7 +1014,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let mut params = serde_json::json!({"disposeOnDetach": true});
     if let Some(p) = proxy {
       params["proxyServer"] = serde_json::json!(p.chromium_server());
-      if let Some(bypass) = p.bypass_list() {
+      if let Some(bypass) = p.chromium_bypass_list() {
         params["proxyBypassList"] = serde_json::json!(bypass);
       }
     }

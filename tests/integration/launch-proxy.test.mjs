@@ -94,3 +94,38 @@ for (const [backend, browserType] of [
     });
   }
 }
+
+// A launch proxy carries loopback like any other host unless its bypass
+// names it. The key in the query keeps this test's log entries its own.
+for (const [backend, browserType] of [
+  ['cdp-pipe', () => chromium()],
+  ['cdp-raw', () => chromium({ transport: 'ws' })],
+  ['bidi', () => firefox()],
+  ['webkit', () => webkit()],
+]) {
+  for (const bypass of [undefined, 'elsewhere.example.com', '127.0.0.1']) {
+    const proxied = bypass !== '127.0.0.1';
+    test(`${backend}: a launch proxy ${proxied ? 'carries' : 'bypassed for'} loopback${bypass ? ` (bypass ${bypass})` : ''}`, async ({ request }) => {
+      test.skip(proxied && bypass !== undefined && backend === 'webkit' && process.platform === 'darwin', 'macOS WebKit does not proxy loopback when bypass rules are set');
+      await recordingProxy(async ({ baseURL }) => {
+        const endpoints = await (await request.get(`${baseURL}/fx/endpoints`)).json();
+        const browser = await browserType().launch({
+          headless: true,
+          proxy: { server: endpoints.authProxy, bypass, username: endpoints.proxyUser, password: endpoints.proxyPassword },
+        });
+        try {
+          const page = await browser.newPage();
+          const key = crypto.randomUUID();
+          const url = `${baseURL}/fx/landed?loopback=${key}`;
+          const response = await page.goto(url);
+          assert.equal(response?.status(), 200);
+          assert.match(await page.textContent('body'), /landed/);
+          const log = await (await request.get(`${baseURL}/fx/forward-log?key=${key}`)).json();
+          assert.deepEqual(log.lines, proxied ? [`http GET ${url}`] : [], JSON.stringify(log));
+        } finally {
+          await browser.close();
+        }
+      });
+    });
+  }
+}
