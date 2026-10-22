@@ -18,7 +18,7 @@ ferridriver [GLOBAL FLAGS] <SUBCOMMAND> [ARGS]
 | `ferridriver test`   | Wrap `cargo nextest` / `cargo test` for Rust unit and integration tests |
 | `ferridriver run`    | Execute a JavaScript / TypeScript script with Playwright-style bindings |
 | `ferridriver install`| Download browser binaries into the local cache |
-| `ferridriver codegen`| Record interactions in a headed browser; emit a runnable script |
+| `ferridriver codegen`| Record interactions in a headed browser or a live session; emit a script or a spec |
 | `ferridriver trace`  | Read a recorded trace: open it in the viewer, print it, list them |
 | `ferridriver merge-reports` | Fold several shards' `blob` reports into one report |
 
@@ -34,6 +34,28 @@ an injected `page` when one exists — so the MCP `run_script` tool replays it
 on a live session — and otherwise launches its own browser, so the same file
 runs standalone via `ferridriver run rec.ts`. `rust` emits a `#[ferritest]`
 test; `gherkin` emits a `.feature`.
+
+`--target test` writes an `@ferridriver/test` spec instead, for
+`ferridriver test`:
+
+```bash
+ferridriver codegen https://example.com --target test -o login.spec.ts
+```
+
+`--attach <session>` records on a live session rather than a browser of its
+own, headless or headed, whatever drives its page:
+
+```bash
+ferridriver session open dev https://example.com --headed
+ferridriver codegen --attach dev --target test -o login.spec.ts
+```
+
+While it records, type `visible`, `text` or `value` and Enter, then click an
+element, to record an assertion about it (the click does not reach the
+page); `url` and `title` assert the page itself, `pause` and `record` stop
+and resume recording, and `stop` or Ctrl+C ends it. The same recorder is
+available to remote clients over the session wire; see [Named
+sessions](/scripting/named-sessions#watching-driving-and-recording-remotely).
 
 ## Global flags
 

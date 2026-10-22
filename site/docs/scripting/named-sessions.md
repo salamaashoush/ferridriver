@@ -24,11 +24,16 @@ ferridriver session close work
 
 ## Why it is a script, not a verb
 
-The session protocol carries **one** command: run this script. There is no
-`click` verb, no `fill` verb, no `snapshot` verb — because every one of
+Everything you do *to* a session is one command: run this script. There is
+no `click` verb, no `fill` verb, no `snapshot` verb — because every one of
 them would be a worse version of the scripting API you already have, and
 would drift behind it. `session attach` is itself just a script that
 returns `page.snapshotForAI()`.
+
+The few other verbs exist for what a script cannot do well: streaming
+screencast frames out, relaying input in one event at a time, and recording
+what a person does (see [Watching, driving and recording
+remotely](#watching-driving-and-recording-remotely)).
 
 That means everything a local `ferridriver run` can do, a session run can
 do: loops, conditionals, `try`/`catch`, computed values, `expect`
@@ -139,6 +144,16 @@ ferridriver run -s work login.ts     # reuses the session's page
 Both work because the scaffolding defines `page` only when there isn't one,
 and every emitted line drives plain `page`.
 
+`--as-test` wraps the TypeScript as an `@ferridriver/test` spec instead, one
+`test` whose body is what ran, for `ferridriver test` to run. It applies to
+the `--code-out` file and to the `--report` code section, which then holds
+the whole spec, so an agent exploring a session ends with a test it can save:
+
+```bash
+ferridriver run -s work --as-test --code-out login.spec.ts --eval "…"
+ferridriver test login.spec.ts
+```
+
 ## The response contract (`--report`)
 
 A run tells you what it returned. `--report` also tells you what state you are
@@ -234,9 +249,9 @@ where `location` is the line in your `.ts`, mapped back through the bundle's
 source map. `pauseAt` takes any suffix of a path, so `'login.spec.ts:42'` and
 the absolute path both work; drop the `:line` to stop at every call in a file.
 
-Stepping is a script call rather than a protocol verb on purpose: the session
-wire carries exactly one verb, and adding `resume` / `step-over` to it would
-start rebuilding the verb table this design replaced. A binding costs nothing
+Stepping is a script call rather than a protocol verb on purpose: anything a
+script can say goes through `run`, and adding `resume` / `step-over` to the
+wire would start rebuilding the verb table this design replaced. A binding costs nothing
 on the wire and composes with everything else a script can already do.
 
 `--debug=fail` stops at the first failure instead, between the body and the
@@ -373,13 +388,144 @@ await browser.bind("scripted");
 ferridriver run --session scripted --eval "return await page.snapshotForAI()"
 ```
 
+## Watching, driving and recording remotely
+
+A web app can put a session's headless browser in front of a user on
+another machine: show its screen, pass their mouse and keyboard through,
+and record what they do as a test. Three streams make that up, each on a
+connection of its own, since a connection answers its commands in order and
+a stream holds its connection until it ends.
+
+Listen on TCP so the relay can reach the host:
+
+```bash
+FERRIDRIVER_SESSION_TOKEN=… ferridriver session open rec https://example.com --headless --host 0.0.0.0 --port 9300
+```
+
+The wire is the one every session speaks: JSON frames, each ended by a NUL
+byte. A client sends `{"id": 1, "verb": "...", "args": {...}}`; the server
+answers with any number of `{"type": "event", "id": 1, "event": "...", ...}`
+frames and then one `{"type": "response", "id": 1, "ok": true, "text": "..."}`.
+An optional `"context"` field picks a browser context.
+
+**Authenticating.** When the endpoint carries a token
+(`ws://host:9300/?token=…`), the first command on every connection must be
+
+```json
+{"id": 0, "verb": "session.auth", "args": {"token": "…"}}
+```
+
+and any other first command is refused and the connection closed.
+`SessionClient::connect` does this itself from the endpoint string.
+
+**Watching.** `screencast` streams frames until the client hangs up:
+
+```json
+{"id": 1, "verb": "screencast", "args": {"quality": 80, "max_width": 1280, "max_height": 720}}
+```
+
+```json
+{"type": "event", "id": 1, "event": "frame", "data": "<base64 JPEG>", "timestamp_ms": 1730000000500, "viewport_width": 1280, "viewport_height": 720}
+```
+
+The image may be scaled down; `viewport_width` x `viewport_height` is the
+CSS-pixel viewport it depicts, the space input coordinates are in.
+
+**Driving.** `input` dispatches one event through the browser's own input
+protocol (CDP `Input.*` on Chromium), with no script compiled per event:
+
+```json
+{"id": 2, "verb": "input", "args": {"type": "mouse_move", "x": 120, "y": 35}}
+{"id": 3, "verb": "input", "args": {"type": "mouse_down", "x": 120, "y": 35, "button": "left", "click_count": 1}}
+{"id": 4, "verb": "input", "args": {"type": "mouse_up", "x": 120, "y": 35, "button": "left", "click_count": 1}}
+{"id": 5, "verb": "input", "args": {"type": "mouse_wheel", "x": 120, "y": 35, "delta_x": 0, "delta_y": 120}}
+{"id": 6, "verb": "input", "args": {"type": "key_down", "key": "Enter"}}
+{"id": 7, "verb": "input", "args": {"type": "key_up", "key": "Enter"}}
+{"id": 8, "verb": "input", "args": {"type": "insert_text", "text": "hello"}}
+```
+
+`click_count` is the press's place in a run of clicks, so a double click is
+two presses with 1 and then 2. A wheel scrolls whatever is under `(x, y)`.
+
+**Recording.** `recorder.start` records whatever reaches the page, a
+person at a headed window or relayed input alike, and streams each action
+with the statement that reproduces it, until `recorder.stop` or a hang-up:
+
+```json
+{"id": 1, "verb": "recorder.start", "args": {"language": "ts", "target": "test", "title": "signs in", "url": "https://example.com/login"}}
+```
+
+```json
+{"type": "event", "id": 1, "event": "recorded", "action": {"type": "click", "selector": "internal:role=button[name=\"Sign in\"i]", "locator": "getByRole('button', { name: 'Sign in' })"}, "code": "await page.getByRole('button', { name: 'Sign in' }).click();"}
+{"type": "event", "id": 1, "event": "recorder_mode", "mode": "recording"}
+```
+
+Actions are `navigate`, `click`, `dblclick`, `fill`, `press`, `select`,
+`check`, `uncheck`, `upload`, and the assertions `assertVisible`,
+`assertText`, `assertValue`, `assertChecked`, `assertUrl` and `assertTitle`.
+A `recorded` event with `"replaces_previous": true` supersedes the action
+before it (a click that turned into a double click). Locators come from the
+same generator as `page.pickLocator()`, so they prefer role, label and test
+id over CSS.
+
+To record an assertion the way Playwright's toolbar does, switch mode and
+let the user click the element; the click is not passed to the page, and
+the recorder returns to `recording` on its own:
+
+```json
+{"id": 9, "verb": "recorder.mode", "args": {"mode": "assertingText"}}
+```
+
+Modes are `recording`, `none` (paused), `assertingVisibility`,
+`assertingText` and `assertingValue`. The page itself is asserted directly:
+
+```json
+{"id": 10, "verb": "recorder.assert", "args": {"kind": "url"}}
+{"id": 11, "verb": "recorder.assert", "args": {"kind": "title"}}
+```
+
+`recorder.stop` (and the `recorder.start` command it ends) answers with the
+whole recording, `text` holding `{"source": "<the spec>", "actions": [...]}`.
+With `"target": "test"`, the default for TypeScript, `source` is a spec
+`ferridriver test` runs:
+
+```ts
+import { test, expect } from '@ferridriver/test';
+
+test('signs in', async ({ page }) => {
+  await page.goto('https://example.com/login');
+  await page.getByRole('textbox', { name: 'Email' }).fill('user@example.com');
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page).toHaveURL('https://example.com/home');
+});
+```
+
+From a terminal the same recorder is `ferridriver codegen --attach rec
+--target test -o login.spec.ts`; type `visible`, `text` or `value` and
+Enter, then click an element, to record an assertion about it, and `stop`
+or Ctrl+C to finish.
+
+In Rust, `ferridriver::codegen::recorder::Recorder::attach(&page, sink)`
+is the recorder itself, on any page, and `Page::screencast_frames` the frame
+stream; the session verbs are those two plus the page's own mouse and
+keyboard.
+
 ## The trust boundary
 
 A client that reaches a session's socket runs code in the host process.
 The registry directory (`<cache>/ferridriver/sessions`, or
 `FERRIDRIVER_SESSION_DIR`) and the socket inside it are owner-only, and
-that is the whole access boundary — treat `--host`/`--port` TCP binds as an
-explicit decision to widen it, not a default.
+that is the whole access boundary for a Unix socket.
+
+A TCP endpoint (`session open --host/--port`, or `browser.bind(id, { host,
+port })`) has no filesystem to lean on, so it takes a token. Beyond
+loopback one is always required: `FERRIDRIVER_SESSION_TOKEN` (or
+`browser.bind`'s `token` option) when given, otherwise a generated one. The
+endpoint string carries it as `?token=`, so whoever is handed the endpoint
+can connect and nobody else can; `session list` shows it only with
+`--format json`. A loopback endpoint stays open to local processes unless
+you pass a token. Treat a TCP bind as an explicit decision to widen the
+boundary, not a default.
 
 Sessions are keyed to the build that opened them: attaching with a
 different ferridriver version reports a version mismatch rather than

@@ -37,7 +37,7 @@ expect breaking changes between minor versions.
 | `ferridriver`                  | Core: `Browser`, `BrowserContext`, `Page`, `Frame`, `Locator`, `ElementHandle`, network routing, selectors, backends |
 | `ferridriver-config`           | Unified config schema (`ferridriver.{toml,yaml,json}` — `[mcp]`, `[test]`, `[scripting]`, `[extensions]`) |
 | `ferridriver-mcp`              | MCP server library (rmcp-based; stdio + HTTP transports; 10 tools) |
-| `ferridriver-cli`              | CLI binary: `mcp`, `bdd`, `test`, `run`, `install` subcommands |
+| `ferridriver-cli`              | CLI binary: `mcp`, `bdd`, `test`, `run`, `codegen`, `session`, `install` subcommands |
 | `ferridriver-script`           | QuickJS engine — backs `run_script`, JS/TS BDD steps, and JS extensions |
 | `ferridriver-node`             | NAPI-RS binding shipping the browser API to Node.js / Bun |
 | `ferridriver-test`             | Test runner core — parallel workers, fixtures, hooks, retries, reporters, snapshots, traces |
@@ -385,8 +385,9 @@ ferridriver session list
 ferridriver session close work
 ```
 
-The session protocol carries one command — run this script — so there is no
-verb table to drift behind the scripting API. TypeScript and relative
+Everything done to a session is one command — run this script — so there is
+no verb table to drift behind the scripting API; the only other verbs stream
+frames, relay input and record (below). TypeScript and relative
 imports work exactly as they do locally: the client bundles (its working
 directory is the one imports resolve against) and the host compiles and
 runs, so bytecode never crosses between differently-built binaries. Console
@@ -402,7 +403,44 @@ ferridriver run -s work --code-out login.ts --eval "await page.goto('/login'); a
 ferridriver run login.ts
 ```
 
-See [site/docs/scripting/named-sessions.md](./site/docs/scripting/named-sessions.md).
+`--as-test` wraps the same lines as an `@ferridriver/test` spec instead:
+
+```bash
+ferridriver run -s work --as-test --code-out login.spec.ts --eval "await page.goto('/login')"
+ferridriver test login.spec.ts
+```
+
+### Recording, and driving a session from elsewhere
+
+`codegen` records what a person does into a script or a spec, in a headed
+browser of its own or on a live session's page:
+
+```bash
+ferridriver codegen https://example.com --target test -o login.spec.ts
+ferridriver codegen --attach work --target test -o login.spec.ts
+```
+
+While attached, type `visible`, `text` or `value` and click an element to
+record an assertion about it; `url` and `title` assert the page; `stop` ends
+the recording.
+
+A session also lets a client on another machine watch and drive a headless
+browser, as a web app embedding a remote browser does: a `screencast` verb
+streams JPEG frames, an `input` verb dispatches mouse, wheel and keyboard
+events straight to the browser's input protocol, and `recorder.start` /
+`recorder.mode` / `recorder.assert` / `recorder.stop` record the user's
+actions as they happen and end with the spec. Listening beyond loopback
+requires a token, carried in the endpoint string:
+
+```bash
+FERRIDRIVER_SESSION_TOKEN=… ferridriver session open rec --headless --host 0.0.0.0 --port 9300
+```
+
+From Rust, `Recorder::attach(&page, sink)` records any page, headless and
+remote ones included.
+
+See [site/docs/scripting/named-sessions.md](./site/docs/scripting/named-sessions.md)
+for the wire format.
 
 ## Backends
 
