@@ -60,3 +60,37 @@ test('a standalone script routes through its launch proxy without poisoning its 
     await assertRouted(request, baseURL);
   });
 });
+
+// A launch proxy that wants credentials: the fixture server's forwarding
+// proxies resolve `*.test` to loopback and nothing else does, so reaching
+// one of those hosts means the credentials were accepted.
+for (const [backend, browserType] of [
+  ['cdp-pipe', () => chromium()],
+  ['cdp-raw', () => chromium({ transport: 'ws' })],
+  ['bidi', () => firefox()],
+  ['webkit', () => webkit()],
+]) {
+  for (const kind of ['authProxy', 'socksProxy']) {
+    test(`${backend}: a ${kind === 'authProxy' ? 'http' : 'socks5'} launch proxy is sent its credentials`, async ({ request }) => {
+      await recordingProxy(async ({ baseURL }) => {
+        const endpoints = await (await request.get(`${baseURL}/fx/endpoints`)).json();
+        const browser = await browserType().launch({
+          headless: true,
+          proxy: { server: endpoints[kind], username: endpoints.proxyUser, password: endpoints.proxyPassword },
+        });
+        try {
+          const page = await browser.newPage();
+          const key = crypto.randomUUID();
+          const port = new URL(baseURL).port;
+          const response = await page.goto(`http://${key}.proxied.test:${port}/fx/landed`);
+          assert.equal(response?.status(), 200);
+          assert.match(await page.textContent('body'), /landed/);
+          const log = await (await request.get(`${baseURL}/fx/forward-log?key=${key}`)).json();
+          assert.ok(log.hits >= 1, JSON.stringify(log));
+        } finally {
+          await browser.close();
+        }
+      });
+    });
+  }
+}

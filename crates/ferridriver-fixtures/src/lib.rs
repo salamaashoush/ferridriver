@@ -13,7 +13,12 @@
 //!   `/fx/*` routes and the httpbin-shaped `/_api/*` echo;
 //! - the proxy: a minimal HTTP proxy that answers every absolute-form
 //!   request with a canned page and records the request line, exposed
-//!   through `/fx/proxy-info` and `/fx/proxy-log` on the main server.
+//!   through `/fx/proxy-info` and `/fx/proxy-log` on the main server;
+//! - two forwarding proxies wanting credentials, HTTP and SOCKS5
+//!   ([`forward_proxy`]), listed by `/fx/endpoints` and observed through
+//!   `/fx/forward-log`.
+
+pub mod forward_proxy;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -36,12 +41,20 @@ pub struct FixtureServerOptions {
   /// Proxy listener port; `0` binds an ephemeral port (discoverable via
   /// `/fx/proxy-info`).
   pub proxy_port: u16,
+  /// Port of the forwarding HTTP proxy wanting credentials; `0` binds an
+  /// ephemeral one. Fixed for suites that name the proxy in `test.use`.
+  pub auth_proxy_port: u16,
+  /// Port of the SOCKS5 proxy wanting credentials; `0` binds an ephemeral one.
+  pub socks_proxy_port: u16,
   /// Optional directory served for paths outside `/fx/` and `/_api/`.
   pub static_dir: Option<PathBuf>,
 }
 
 struct ServerState {
   proxy: Arc<ProxyState>,
+  forward_log: Arc<forward_proxy::ForwardLog>,
+  auth_proxy_addr: SocketAddr,
+  socks_proxy_addr: SocketAddr,
   reset: Arc<ResetState>,
   reset_addr: SocketAddr,
   tls_addr: SocketAddr,
@@ -69,6 +82,9 @@ struct ProxyState {
 pub struct FixtureServer {
   addr: SocketAddr,
   proxy_addr: SocketAddr,
+  auth_proxy_addr: SocketAddr,
+  socks_proxy_addr: SocketAddr,
+  forward_handles: [tokio::task::JoinHandle<()>; 2],
   reset_addr: SocketAddr,
   tls_addr: SocketAddr,
   handle: tokio::task::JoinHandle<()>,
@@ -101,8 +117,24 @@ impl FixtureServer {
     let tls_addr = tls_listener.local_addr()?;
     let tls_handle = tokio::spawn(run_tls(tls_listener));
 
+    let forward_log = Arc::new(forward_proxy::ForwardLog::default());
+    let auth_proxy_listener = tokio::net::TcpListener::bind(("127.0.0.1", options.auth_proxy_port)).await?;
+    let auth_proxy_addr = auth_proxy_listener.local_addr()?;
+    let socks_proxy_listener = tokio::net::TcpListener::bind(("127.0.0.1", options.socks_proxy_port)).await?;
+    let socks_proxy_addr = socks_proxy_listener.local_addr()?;
+    let forward_handles = [
+      tokio::spawn(forward_proxy::run_http(auth_proxy_listener, Arc::clone(&forward_log))),
+      tokio::spawn(forward_proxy::run_socks5(
+        socks_proxy_listener,
+        Arc::clone(&forward_log),
+      )),
+    ];
+
     let state = Arc::new(ServerState {
       proxy,
+      forward_log,
+      auth_proxy_addr,
+      socks_proxy_addr,
       reset,
       reset_addr,
       tls_addr,
@@ -130,6 +162,9 @@ impl FixtureServer {
     Ok(Self {
       addr,
       proxy_addr,
+      auth_proxy_addr,
+      socks_proxy_addr,
+      forward_handles,
       reset_addr,
       tls_addr,
       handle,
@@ -155,6 +190,18 @@ impl FixtureServer {
     format!("http://{}", self.reset_addr)
   }
 
+  /// The forwarding HTTP proxy wanting [`forward_proxy::PROXY_USER`].
+  #[must_use]
+  pub fn auth_proxy_url(&self) -> String {
+    format!("http://{}", self.auth_proxy_addr)
+  }
+
+  /// The forwarding SOCKS5 proxy wanting [`forward_proxy::PROXY_USER`].
+  #[must_use]
+  pub fn socks_proxy_url(&self) -> String {
+    format!("socks5://{}", self.socks_proxy_addr)
+  }
+
   /// Origin of the HTTPS listener holding a self-signed certificate.
   #[must_use]
   pub fn tls_url(&self) -> String {
@@ -163,7 +210,15 @@ impl FixtureServer {
 
   /// Serve until aborted.
   pub async fn run_forever(self) {
-    let _ = tokio::join!(self.handle, self.proxy_handle, self.reset_handle, self.tls_handle);
+    let [http_proxy, socks_proxy] = self.forward_handles;
+    let _ = tokio::join!(
+      self.handle,
+      self.proxy_handle,
+      self.reset_handle,
+      self.tls_handle,
+      http_proxy,
+      socks_proxy
+    );
   }
 
   pub async fn stop(self) {
@@ -171,6 +226,9 @@ impl FixtureServer {
     self.proxy_handle.abort();
     self.reset_handle.abort();
     self.tls_handle.abort();
+    for handle in &self.forward_handles {
+      handle.abort();
+    }
     let _ = self.handle.await;
     let _ = self.proxy_handle.await;
     let _ = self.reset_handle.await;
@@ -646,15 +704,31 @@ async fn handle_fx(
     "inner" => fx_html("<!doctype html><body>inner</body>"),
     "proxy-info" => fx_json(&serde_json::json!({"url": format!("http://{}", state.proxy.addr)})),
     // Origins of the auxiliary listeners, which bind ephemeral ports.
-    "endpoints" => fx_json(&serde_json::json!({
-      "proxy": format!("http://{}", state.proxy.addr),
-      "reset": format!("http://{}", state.reset_addr),
-      "tls": format!("https://{}", state.tls_addr),
-    })),
+    "endpoints" => fx_endpoints(&state),
+    "forward-log" => fx_forward_log(&state.forward_log, &method, query.as_deref()),
     "reset-arm" => fx_reset_arm(&state.reset, query.as_deref()),
     "proxy-log" => fx_proxy_log(&state.proxy, &method, query.as_deref()),
     _ => fx_page_quality(&path, query.as_deref()).unwrap_or_else(fx_unknown_route),
   }
+}
+
+fn fx_endpoints(state: &ServerState) -> Response<Body> {
+  fx_json(&serde_json::json!({
+    "proxy": format!("http://{}", state.proxy.addr),
+    "reset": format!("http://{}", state.reset_addr),
+    "tls": format!("https://{}", state.tls_addr),
+    "authProxy": format!("http://{}", state.auth_proxy_addr),
+    "socksProxy": format!("socks5://{}", state.socks_proxy_addr),
+    "proxyUser": forward_proxy::PROXY_USER,
+    "proxyPassword": forward_proxy::PROXY_PASSWORD,
+  }))
+}
+
+/// The forwarding proxies' connections naming `key`; DELETE also drops them.
+fn fx_forward_log(log: &forward_proxy::ForwardLog, method: &axum::http::Method, query: Option<&str>) -> Response<Body> {
+  let key = query_values(query, "key").into_iter().next().unwrap_or_default();
+  let lines = log.matching(&key, method == axum::http::Method::DELETE);
+  fx_json(&serde_json::json!({ "hits": lines.len(), "lines": lines }))
 }
 
 fn fx_proxy_log(state: &ProxyState, method: &axum::http::Method, query: Option<&str>) -> Response<Body> {

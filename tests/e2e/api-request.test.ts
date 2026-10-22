@@ -42,8 +42,11 @@ describe('api request', () => {
     const state = await api.storageState();
     expect(state.cookies.map(cookie => cookie.name)).toContain('sid');
     expect(state.origins).toEqual([{ origin: 'https://example.com', localStorage: [{ name: 'k', value: 'v' }] }]);
-    const refused = await request.newContext({ proxy: { server: 'http://proxy.example.com' } } as never)
+    const refused = await request.newContext({ clientCertificates: [] } as never)
       .then(() => 'made', (e: Error) => e.message);
     expect(refused).toContain('not supported');
+    const misnamed = await request.newContext({ proxy: { server: 'ftp://proxy.example.com' } })
+      .then(() => 'made', (e: Error) => e.message);
+    expect(misnamed).toContain('proxy');
   });
 });

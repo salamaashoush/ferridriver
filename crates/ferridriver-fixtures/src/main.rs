@@ -22,12 +22,22 @@ fn parse_args() -> Result<FixtureServerOptions, String> {
           .parse()
           .map_err(|e| format!("--proxy-port: {e}"))?;
       },
+      "--auth-proxy-port" => {
+        options.auth_proxy_port = value("--auth-proxy-port")?
+          .parse()
+          .map_err(|e| format!("--auth-proxy-port: {e}"))?;
+      },
+      "--socks-proxy-port" => {
+        options.socks_proxy_port = value("--socks-proxy-port")?
+          .parse()
+          .map_err(|e| format!("--socks-proxy-port: {e}"))?;
+      },
       "--static" => {
         options.static_dir = Some(PathBuf::from(value("--static")?));
       },
       other => {
         return Err(format!(
-          "unknown argument {other:?} (expected --port, --proxy-port, --static)"
+          "unknown argument {other:?} (expected --port, --proxy-port, --auth-proxy-port, --socks-proxy-port, --static)"
         ));
       },
     }

@@ -23,7 +23,7 @@ headless = true
 # TS e2e suites assert against. Built by `just test` before running.
 [[test.webServer]]
 name = "fixtures"
-command = "target/debug/ferridriver-fixtures --port 47831 --static tests/assets"
+command = "target/debug/ferridriver-fixtures --port 47831 --auth-proxy-port 47832 --socks-proxy-port 47833 --static tests/assets"
 url = "http://127.0.0.1:47831/fx/landed"
 reuseExistingServer = true
 
