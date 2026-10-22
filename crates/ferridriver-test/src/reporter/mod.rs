@@ -14,9 +14,11 @@ pub mod json;
 pub mod junit;
 pub mod line;
 pub mod markdown;
+pub mod merge;
 pub mod perfetto;
 pub mod progress;
 pub mod rerun;
+pub mod stream;
 pub mod tap;
 pub mod teamcity;
 pub mod terminal;
@@ -521,6 +523,7 @@ pub const REPORTER_NAMES: &[&str] = &[
   "junit",
   "html",
   "blob",
+  "stream",
   "github",
   "null",
   "tap",
@@ -537,6 +540,19 @@ pub const REPORTER_NAMES: &[&str] = &[
   "messages",
   "usage",
 ];
+
+/// The `shardIndex` / `shardTotal` options a sharded run gives its blob
+/// and stream reporters (`--shard` fills them in).
+fn shard_option(opts: &std::collections::BTreeMap<String, serde_json::Value>) -> Option<(u32, u32)> {
+  let read = |snake: &str, camel: &str| {
+    opts
+      .get(snake)
+      .or_else(|| opts.get(camel))
+      .and_then(serde_json::Value::as_u64)
+      .and_then(|v| u32::try_from(v).ok())
+  };
+  Some((read("shard_index", "shardIndex")?, read("shard_total", "shardTotal")?))
+}
 
 pub(crate) fn create_reporters(
   names: &[crate::config::ReporterConfig],
@@ -607,23 +623,32 @@ fn build_reporters(
       },
       "blob" => {
         // `path` is the historical option name; `outputFile` is the one
-        // every other file reporter takes.
+        // every other file reporter takes. A shard writes its own file,
+        // so shards collected into one directory do not overwrite each
+        // other.
+        let shard = shard_option(opts);
+        let default_name = shard.map_or_else(
+          || "report.zip".to_string(),
+          |(current, _)| format!("report-{current}.zip"),
+        );
         let path = base::str_option(opts, "path")
           .map(std::path::PathBuf::from)
-          .unwrap_or_else(|| out("report.zip"));
+          .unwrap_or_else(|| out(&default_name));
         let mut reporter = blob::BlobReporter::new(path);
-        if let (Some(current), Some(total)) = (
-          opts
-            .get("shard_index")
-            .or_else(|| opts.get("shardIndex"))
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok()),
-          opts
-            .get("shard_total")
-            .or_else(|| opts.get("shardTotal"))
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok()),
-        ) {
+        if let Some((current, total)) = shard {
+          reporter = reporter.with_shard(current, total);
+        }
+        reporters.push(Box::new(reporter));
+      },
+      "stream" => {
+        let target = std::env::var("FERRIDRIVER_STREAM_OUTPUT_FILE")
+          .ok()
+          .filter(|v| !v.is_empty())
+          .or_else(|| base::str_option(opts, "outputFile"))
+          .or_else(|| base::str_option(opts, "output_file"))
+          .unwrap_or_default();
+        let mut reporter = stream::StreamReporter::new(stream::StreamTarget::parse(&target), output_dir);
+        if let Some((current, total)) = shard_option(opts) {
           reporter = reporter.with_shard(current, total);
         }
         reporters.push(Box::new(reporter));
