@@ -86,7 +86,7 @@ See [MCP overview](/mcp/overview) and [Client setup](/mcp/setup).
 
 ```
 ferridriver bdd [--steps GLOB]... [--tags EXPR] [--workers N]
-                [--reporter SPEC]... [--strict|--no-strict] [--dry-run]
+                [--reporter SPEC]... [--strict|--no-strict] [--dry-run] [--list]
                 [--fail-fast]
                 [--step-timeout MS] [--order defined|random[:SEED]]
                 [--language LANG] [--world-parameters JSON]
@@ -170,22 +170,33 @@ drive).
 ## `ferridriver merge-reports`
 
 ```
-ferridriver merge-reports [INPUTS...] [--reporter NAME]... [--output-dir DIR]
+ferridriver merge-reports [INPUTS...] [--reporter NAME[=TARGET]]... [--output-dir DIR]
 ```
 
-Reads every `blob` zip under `INPUTS` (a directory or the zips
-themselves) and replays the merged event stream through the named
-reporters, producing the report an unsharded run would have produced.
-Exits non-zero when any test in the merged run failed.
+Reads every `blob` zip and `stream` reporter `.jsonl` file under
+`INPUTS` (a directory or the files themselves) and replays the merged
+event stream through the named reporters, producing the report an
+unsharded run would have produced. Attempts of one test from different
+inputs fold into one test. Exits non-zero when any test in the merged
+run failed.
 
 ```bash
-# per shard
-FERRIDRIVER_BLOB_OUTPUT_FILE=blobs/report-$SHARD.zip \
-  ferridriver test --reporter blob --shard $SHARD/$TOTAL
+# per shard: test-results/report-$SHARD.zip
+ferridriver test --reporter blob --shard $SHARD/$TOTAL
 
 # once, after collecting blobs/
-ferridriver merge-reports blobs --reporter html --reporter junit
+ferridriver merge-reports blobs --reporter html --reporter junit=merged.xml
 ```
+
+## Exit status of `test` and `bdd`
+
+| Status | Meaning |
+|---|---|
+| 0 | Every test passed (flaky counts as passed unless `failOnFlakyTests`). |
+| 1 | At least one test failed. |
+| 2 | Usage or configuration error; nothing ran. |
+| 3 | Interrupted by SIGINT or SIGTERM. Tests in flight finish and report; a second signal exits at once. |
+| 4 | Infrastructure failure: a browser did not launch, a worker crashed, or a web server did not start. |
 
 See [Reporters](/test-runner/reporters) for the full reporter list and
 their options.

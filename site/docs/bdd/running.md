@@ -35,7 +35,11 @@ file. Defaults to `steps/**/*.{js,ts}` and
 --reporter NAME           reporter name (repeatable)
 --strict                  treat undefined / pending steps as failures (default)
 --no-strict               report undefined / pending steps without failing
---dry-run                 parse + report scenarios without executing
+--dry-run                 match every step without running it; undefined and
+                          ambiguous steps fail (undefined only pending with
+                          --no-strict); no browser, no web server
+--list                    list scenarios with their undefined / ambiguous
+                          steps; --format json for the listing document
 --fail-fast               stop after first failure
 --step-timeout MS         override per-step timeout
 --order MODE              defined | random | random:SEED

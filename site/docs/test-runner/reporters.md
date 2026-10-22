@@ -46,7 +46,8 @@ reporter = ["list", "html"]
 | `json` | `results.json` | Playwright's `JSONReport` shape. |
 | `junit` | `junit.xml` | JUnit XML with Xray-style `<properties>`. |
 | `html` | `report.html` | Self-contained report: every attempt, artifacts, steps. |
-| `blob` | `report.zip` | The event stream itself — input to `merge-reports`. |
+| `blob` | `report.zip` | The event stream itself — input to `merge-reports`. `report-N.zip` under `--shard N/M`. |
+| `stream` | stdout | The blob's event lines, written and flushed as each event happens (see below). |
 | `github` | annotations | GitHub Actions `::error` / `::warning` / `::notice`, wrapping `list`. |
 | `markdown` | `report.md` | Summary table plus per-failure detail; also appended to `$GITHUB_STEP_SUMMARY`. |
 | `tap` / `tap-flat` | terminal | TAP version 13, nested per file or one flat plan. |
@@ -106,7 +107,22 @@ boolean ones can also be flipped from the environment as
 | Option | Effect |
 |---|---|
 | `path` | Where the zip is written. |
-| `shardIndex`, `shardTotal` | Recorded in the blob header so a merge keeps the run boundary. |
+| `shardIndex`, `shardTotal` | Recorded in the blob header so a merge keeps the run boundary. `--shard` fills both in. |
+
+**`stream`**
+
+| Option | Effect |
+|---|---|
+| `outputFile` | `stdout` (default, also `-`), `stderr`, `fd:N` for a descriptor the parent left open, or a file path. On the command line: `--reporter stream=fd:3`. |
+| `shardIndex`, `shardTotal` | As for `blob`. |
+
+One JSON line per event, in the blob's schema, starting with the same
+`header` line a blob's `events.jsonl` has and flushed per line, so a
+process reading the other end sees each test as it finishes. Bytes a
+test attached inline (a failure screenshot, `attach(name, { body })`)
+are written under `<outputDir>/stream-attachments/` and referenced by
+absolute path. The lines concatenated are a blob event body:
+`merge-reports` reads a `.jsonl` file the way it reads a zip.
 
 **`allure`**
 
@@ -121,13 +137,28 @@ Each shard writes a blob; one merge step turns them into the report the
 unsharded run would have produced.
 
 ```bash
-# on each CI machine
-FERRIDRIVER_BLOB_OUTPUT_FILE=blobs/report-$SHARD.zip \
-  ferridriver test --reporter blob --shard $SHARD/$TOTAL
+# on each CI machine: writes test-results/report-$SHARD.zip
+ferridriver test --reporter blob --shard $SHARD/$TOTAL
 
-# once, after collecting blobs/
+# once, after collecting the zips into blobs/
 ferridriver merge-reports blobs --reporter html --reporter junit
 ```
+
+A serial group (`describe.serial`, `describe.configure({ mode: 'serial' })`,
+a `@serial` feature) always lands whole on one shard, and the assignment
+is computed from paths relative to the config, so every machine agrees on
+it whatever directory it runs from. `--shard-assignment FILE` places
+tests explicitly, for an orchestrator balancing shards by duration: a JSON
+object mapping stable ids (from `--list --format json`) to 1-based shard
+indices. A test it does not name is hashed to a shard; a group follows
+any of its tests, and an assignment that splits a group is an error.
+
+Tests are matched across inputs by stable id. When one test has attempts
+in several inputs (a grid that re-ran it on another machine), they fold
+into one test with every attempt, ordered by start time, and the totals
+are recomputed: a test that failed on one machine and passed on another
+is flaky, not one failure and one pass. JS and TS reporters work in a
+merge as in a run.
 
 The blob is lossless: steps, attachments, annotations, stacks, worker
 indexes and start times all round-trip, so a merged HTML or JUnit report

@@ -321,6 +321,71 @@ global; `this` is the `World` with `page` / `context` / `request` /
 `browser` / `parameters` / `attach` / `log` / `skip`. No `package.json`,
 no `node_modules`.
 
+### Planning a run: listing, selection, streaming
+
+`ferridriver test` and `ferridriver bdd` can hand a run to something that
+plans it elsewhere (a CI matrix, a test grid) and fold the results back.
+
+`--list --format json` prints one document, `{ "schema": 1, "tests":
+[...], "errors": [...] }`, without starting a web server or launching a
+browser. Each test is one record per project and `repeatEach` index:
+
+```json
+{
+  "stableId": "faf9e4ed725dbebe0699-6fd9282311e49be5da68",
+  "project": "chromium",
+  "file": "tests/cart.spec.ts",
+  "line": 7,
+  "column": null,
+  "titlePath": ["tests/cart.spec.ts", "checkout", "payment", "pays"],
+  "tags": ["@smoke"],
+  "annotations": [{ "type": "issue", "description": "https://example.com/issues/7" }],
+  "retries": 2,
+  "timeout": 30000,
+  "groupKey": "[chromium] tests/cart.spec.ts > checkout",
+  "repeatEachIndex": 0
+}
+```
+
+Paths are relative to the config file's directory, so the same suite lists
+the same ids on every machine and from any working directory. `groupKey`
+names the serial group (`describe.serial`, `describe.configure({ mode:
+'serial' })`, a `@serial` feature) that has to run whole on one worker, or
+is `null`. `bdd --list` adds `stepIssues` (undefined and ambiguous steps)
+to a scenario and an entry per step to `errors`, and exits 1 when a run
+would fail on them; `bdd --dry-run` runs the scenarios that way, matching
+every step without executing one.
+
+Selection: `--test-id ID` (repeatable) and `--test-list FILE` (one id per
+line, `#` comments) run exactly those tests, and an id that matches nothing
+is an error; `tests/cart.spec.ts:12` runs the test declared on that line.
+`--shard X/N` keeps serial groups whole, and `--shard-assignment FILE`
+places tests explicitly with a JSON object of stable id to shard index:
+
+```json
+{ "faf9e4ed725dbebe0699-6fd9282311e49be5da68": 2, "faf9e4ed725dbebe0699-672e1fb5742dbe19438e": 1 }
+```
+
+`--reporter stream` writes every event as one line of the blob format,
+flushed as it happens, to stdout, `stream=fd:3`, `stream=stderr` or
+`stream=<path>`; attachments are written under the output directory and
+referenced by path. The first line is a header (the second is abridged):
+
+```json
+{"kind":"header","schema":4,"shard_index":null,"shard_total":null}
+{"kind":"test-finished","outcome":{"test_id":{"file":"tests/cart.spec.ts","root_path":"tests/cart.spec.ts","name":"pays","line":7},"status":"passed","attempt":1}}
+```
+
+`merge-reports` takes blob zips and stream `.jsonl` files alike. A shard's
+blob is `report-<N>.zip` with the shard in its header, and attempts of one
+test from different inputs fold into one test, so a test that failed on
+one machine and passed when re-run on another is reported flaky.
+
+Exit status: `0` passed, `1` tests failed, `2` usage or configuration
+error, `3` interrupted by SIGINT or SIGTERM (tests in flight finish and
+report first), `4` infrastructure failure (a browser that did not launch,
+a worker that crashed, a web server that did not start).
+
 ## MCP server
 
 Scripting-focused MCP server for AI agent browser automation. Works with
