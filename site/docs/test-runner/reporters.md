@@ -224,6 +224,20 @@ has so far; a `TestResult` whose `status` is `undefined` until the
 attempt ends, and whose `steps` fill in as `onStepBegin` fires; and
 `attachments` whose `body` is a `Buffer`.
 
+Steps arrive as they happen and nest as Playwright nests them: a
+`test.step` is category `test.step`; every assertion is an `expect` step
+(`Expect "toHaveTitle"`, with the locator as its `subtitle`); every
+browser call is a `pw:api` step titled from Playwright's protocol
+metadata (`Navigate`, `Click` with subtitle `getByRole('heading')`).
+Calls Playwright keeps out of the report stay out here too: getters such
+as `page.title()`, configuration such as `context.addCookies()`, and the
+looks an assertion takes at the page while it retries. The built-in
+`list` and `line` reporters receive all of them and, as upstream, show
+neither browser calls nor assertions.
+
+A reporter runs in the runner process, so its `console.log` and
+`process.stdout.write` reach the terminal.
+
 ### Deciding whether the run printed anything
 
 `printsToStdio()` says whether the reporter writes to the terminal. If

@@ -2054,6 +2054,7 @@ dependencies = [
  "tracing",
  "tracing-chrome",
  "tracing-subscriber",
+ "url",
  "zip",
 ]
 

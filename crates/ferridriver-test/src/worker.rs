@@ -1115,7 +1115,7 @@ impl Worker {
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
-      steps: Arc::new(Mutex::new(Vec::new())),
+      steps: Arc::default(),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: Arc::new(Mutex::new(Vec::new())),
@@ -1139,7 +1139,7 @@ impl Worker {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      open_steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      open_steps: Arc::default(),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     })
   }
@@ -1647,7 +1647,7 @@ impl Worker {
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
-      steps: Arc::new(Mutex::new(Vec::new())),
+      steps: Arc::default(),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: Arc::new(Mutex::new(Vec::new())),
@@ -1678,7 +1678,7 @@ impl Worker {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::clone(&trace_composite),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      open_steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      open_steps: Arc::default(),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     });
     let trace_spec = self.config.trace.should_record(attempt, false).then(|| TraceSpec {
@@ -1724,6 +1724,8 @@ impl Worker {
     // the one it interrupted, on whichever browser it ran.
     ferridriver::trace::track_pending_calls();
     let call_owner: Arc<str> = Arc::from(test_info.call_owner());
+    // The same identity reports each of those calls as a `pw:api` step.
+    let _api_steps = crate::api_steps::observe(&test_info);
     let mut timed_out_while: Option<&'static str> = None;
     if before_each_err.is_none() {
       let setup = ferridriver::pause::run_within_updates_from(budget, modifiers.timeout_updates.subscribe(), async {
@@ -2373,8 +2375,16 @@ impl Worker {
       _ => (raw_status, raw_error),
     };
 
+    // A browser call a timeout cut short never reports its own end.
+    test_info.close_open_steps("step never completed (test aborted)");
     // Collect tracked test steps and attachments.
-    let steps = crate::model::nest_steps(test_info.steps.lock().await.clone());
+    let steps = crate::model::nest_steps(
+      test_info
+        .steps
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone(),
+    );
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
 

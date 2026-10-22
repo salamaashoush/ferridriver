@@ -2451,6 +2451,7 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // `ExpectJs` instances JS can call methods on.
   Class::<ExpectJs>::define(&ctx.globals())?;
   Class::<ExpectPollJs>::define(&ctx.globals())?;
+  install_matcher_steps(ctx)?;
 
   let root = create_expect(ctx, &ferridriver_expect::ExpectMeta::default(), 0)?;
   ctx.globals().set("expect", root)?;
@@ -3199,7 +3200,10 @@ fn install_user_matchers<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs
             -> rquickjs::Result<Value<'js>> { call_user_matcher(&ctx, &this.0, &bound, table, args.0) },
     )?;
     f.set_name(&name)?;
-    obj.set(name, f)?;
+    // A custom matcher runs the test's own code, so what it calls nests
+    // under its step.
+    let stepped: Value<'js> = matcher_step_wrapper(ctx)?.call((name.as_str(), f, true))?;
+    obj.set(name, stepped)?;
   }
   Ok(())
 }
@@ -3484,14 +3488,17 @@ fn install_poll_settled_refusal<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> r
 /// passes, and on timeout throws the last failure with its call log. The
 /// matchers `ExpectPollJs` implements itself stay native; the proxy adds
 /// the rest.
-const GENERIC_POLL_MATCHERS: &str = r"(target, expect) => new Proxy(target, {
+///
+/// The poll is one step; the matcher it runs on each value is not a step
+/// of its own, so it is called through the unwrapped matcher.
+const GENERIC_POLL_MATCHERS: &str = r"(target, expect, step) => new Proxy(target, {
   get(t, prop) {
     if (typeof prop !== 'string' || prop in t) {
       const value = Reflect.get(t, prop, t);
       return typeof value === 'function' ? value.bind(t) : value;
     }
     if (!prop.startsWith('to')) return undefined;
-    return async (...args) => {
+    const poll = step(prop, async (...args) => {
       const { generator, timeout, intervals, isNot } = t._pollInfo();
       const deadline = timeout ? Date.now() + timeout : Infinity;
       let index = 0;
@@ -3500,7 +3507,8 @@ const GENERIC_POLL_MATCHERS: &str = r"(target, expect) => new Proxy(target, {
         const value = await generator();
         try {
           const subject = isNot ? expect(value).not : expect(value);
-          await subject[prop](...args);
+          const matcher = subject[prop];
+          await (matcher._rawMatcher ?? matcher).apply(subject, args);
           return;
         } catch (error) {
           last = error;
@@ -3516,14 +3524,15 @@ const GENERIC_POLL_MATCHERS: &str = r"(target, expect) => new Proxy(target, {
         throw last;
       }
       throw new Error(note);
-    };
+    }, true);
+    return (...args) => poll.apply(t, args);
   },
 })";
 
 fn with_generic_poll_matchers<'js>(ctx: &Ctx<'js>, instance: Value<'js>) -> rquickjs::Result<Value<'js>> {
   let wrap: Function<'js> = ctx.eval(GENERIC_POLL_MATCHERS)?;
   let expect: Value<'js> = ctx.globals().get("expect")?;
-  wrap.call((instance, expect))
+  wrap.call((instance, expect, matcher_step_wrapper(ctx)?))
 }
 
 fn install_poll_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::Result<()> {
@@ -3584,4 +3593,199 @@ fn mask_selectors<'js>(obj: &rquickjs::Object<'js>) -> rquickjs::Result<Option<V
     }
   }
   Ok(Some(out))
+}
+
+// ── Matchers as steps ────────────────────────────────────────────────
+//
+// Playwright's `createMatchers` wraps every matcher, built-in and custom,
+// in `callMatcherAsStep` (`matchers/expect.ts`): an `expect` step opens
+// when the matcher is called and closes when it settles. The wrapper here
+// is that, installed once over each matcher class's prototype; what the
+// step is called and where it belongs are `ferridriver_test`'s rules.
+
+/// Where the wrapper is kept, so a custom matcher installed per assertion
+/// is wrapped the same way. Hidden, and not starting with `to`.
+const MATCHER_STEP: &str = "_matcherStep";
+
+/// `step(name, raw, nests)` returns `raw` run as a step. The raw matcher
+/// stays reachable as `_rawMatcher`, for a caller whose matcher call is
+/// part of a step already (`expect.poll` re-running it on each value).
+const MATCHER_STEPS: &str = r"(begin, end) => {
+  const message = error => (error !== null && typeof error === 'object' && 'message' in error)
+    ? String(error.message) : String(error);
+  return (name, raw, nests) => {
+    const stepped = function (...args) {
+      const step = begin(this, name, nests, args[0]);
+      if (step === undefined) return raw.apply(this, args);
+      let result;
+      try {
+        result = raw.apply(this, args);
+      } catch (error) {
+        end(step, message(error));
+        throw error;
+      }
+      if (result !== null && typeof result === 'object' && typeof result.then === 'function') {
+        return result.then(
+          value => { end(step); return value; },
+          error => { end(step, message(error)); throw error; });
+      }
+      end(step);
+      return result;
+    };
+    Object.defineProperty(stepped, 'name', { value: name });
+    Object.defineProperty(stepped, '_rawMatcher', { value: raw });
+    return stepped;
+  };
+}";
+
+/// Soft failures recorded before each open soft step, by step id: a soft
+/// assertion that fails returns normally, and the step learns it failed
+/// from the failure it left behind.
+#[derive(Default)]
+struct SoftBaselines(std::cell::RefCell<rustc_hash::FxHashMap<String, usize>>);
+
+// SAFETY: holds only `'static` data.
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for SoftBaselines {
+  type Changed<'to> = SoftBaselines;
+}
+
+fn install_matcher_steps<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+  // Once per realm: wrapping a prototype twice would report every
+  // assertion twice.
+  if let Some(proto) = Class::<ExpectJs>::prototype(ctx)?
+    && proto.contains_key(MATCHER_STEP)?
+  {
+    return Ok(());
+  }
+  let _ = ctx.store_userdata(SoftBaselines::default());
+  let begin = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, this: Value<'js>, name: String, nests: bool, expected: Opt<Value<'js>>| {
+      begin_matcher_step(&ctx, &this, name, nests, expected.0)
+    },
+  )?;
+  let end = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, step_id: String, error: Opt<Option<String>>| {
+      end_matcher_step(&ctx, &step_id, error.0.flatten());
+    },
+  )?;
+  let factory: Function<'js> = ctx.eval(MATCHER_STEPS)?;
+  let step: Function<'js> = factory.call((begin, end))?;
+  let object_global: Object<'js> = ctx.globals().get("Object")?;
+  let own_names: Function<'js> = object_global.get("getOwnPropertyNames")?;
+  for (proto, polled) in [
+    (Class::<ExpectJs>::prototype(ctx)?, false),
+    (Class::<ExpectPollJs>::prototype(ctx)?, true),
+  ] {
+    let Some(proto) = proto else { continue };
+    let names: Vec<String> = own_names.call((proto.clone(),))?;
+    for name in names.into_iter().filter(|n| n.starts_with("to")) {
+      let raw: Value<'js> = proto.get(name.as_str())?;
+      if !raw.is_function() {
+        continue;
+      }
+      // What runs inside `toPass` and `expect.poll` is the test's own code.
+      let nests = polled || name == "toPass";
+      let stepped: Value<'js> = step.call((name.as_str(), raw, nests))?;
+      proto.set(name.as_str(), stepped)?;
+    }
+    if !polled {
+      define_hidden(ctx, &proto, MATCHER_STEP, step.clone().into_value())?;
+    }
+  }
+  Ok(())
+}
+
+/// The `step(name, raw, nests)` wrapper [`install_matcher_steps`] built.
+fn matcher_step_wrapper<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  let proto = Class::<ExpectJs>::prototype(ctx)?
+    .ok_or_else(|| type_error(ctx, "expect: the Expect class has no prototype in this context"))?;
+  proto.get(MATCHER_STEP)
+}
+
+/// Open the step for a matcher call on `this`. `None` outside a test, so
+/// a script's assertions cost one call and report nothing.
+fn begin_matcher_step<'js>(
+  ctx: &Ctx<'js>,
+  this: &Value<'js>,
+  matcher: String,
+  nests: bool,
+  expected: Option<Value<'js>>,
+) -> Option<String> {
+  let bridge = crate::bindings::test::optional_bridge(ctx)?;
+  // Playwright reports `JSON.parse(JSON.stringify(args[0]))`: a RegExp
+  // reads as `{}`, a value JSON cannot hold as nothing at all.
+  let expected = expected
+    .and_then(|value| {
+      ctx.json_stringify(value).unwrap_or_else(|_| {
+        // A cyclic value throws; the assertion itself is not affected.
+        let _ = ctx.catch();
+        None
+      })
+    })
+    .and_then(|json| json.to_string().ok())
+    .and_then(|json| serde_json::from_str(&json).ok());
+  let mut step = ferridriver_test::expect::ExpectStep {
+    matcher,
+    expected,
+    ..Default::default()
+  };
+  if let Ok(class) = Class::<ExpectJs>::from_value(this) {
+    let assertion = class.borrow();
+    step.is_not = assertion.is_not;
+    step.is_soft = assertion.is_soft;
+    step.message.clone_from(&assertion.message);
+    if let SubjectKind::Locator(locator) = &assertion.subject.kind {
+      step.selector = Some(locator.selector().to_string());
+    }
+  } else if let Ok(class) = Class::<ExpectPollJs>::from_value(this) {
+    let assertion = class.borrow();
+    step.is_poll = true;
+    step.is_not = assertion.is_not;
+    step.message.clone_from(&assertion.message);
+  } else {
+    return None;
+  }
+  let mut spec = step.spec();
+  spec.frames = crate::bindings::call_site::capture_frames(ctx)
+    .into_iter()
+    .take(1)
+    .map(|(_, line, column)| ferridriver_test::step::StepFrame::Host { line, column })
+    .collect();
+  let step_id = bridge.open_step_now(spec, nests)?;
+  if step.is_soft
+    && let Some(baselines) = ctx.userdata::<SoftBaselines>()
+  {
+    baselines.0.borrow_mut().insert(step_id.clone(), bridge.errors().len());
+  }
+  Some(step_id)
+}
+
+fn end_matcher_step(ctx: &Ctx<'_>, step_id: &str, error: Option<String>) {
+  let Some(bridge) = crate::bindings::test::optional_bridge(ctx) else {
+    return;
+  };
+  let baseline = ctx
+    .userdata::<SoftBaselines>()
+    .and_then(|baselines| baselines.0.borrow_mut().remove(step_id));
+  let error = error.or_else(|| {
+    let errors = bridge.errors();
+    baseline.filter(|before| errors.len() > *before)?;
+    errors.last().cloned()
+  });
+  let status = if error.is_some() {
+    ferridriver_test::model::StepStatus::Failed
+  } else {
+    ferridriver_test::model::StepStatus::Passed
+  };
+  bridge.close_step_now(
+    step_id,
+    ferridriver_test::step::StepOutcome {
+      status,
+      error,
+      annotations: Vec::new(),
+    },
+  );
 }

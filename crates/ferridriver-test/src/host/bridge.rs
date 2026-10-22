@@ -84,10 +84,7 @@ impl InfoBridge {
     }
     // Close any step left open by a mid-step failure so reporters and
     // the trace never see a dangling span.
-    self
-      .test_info
-      .close_open_steps("step never completed (test aborted)")
-      .await;
+    self.test_info.close_open_steps("step never completed (test aborted)");
   }
 
   fn remap_location(&self, location: Option<(u32, u32)>) -> Option<StepLocation> {
@@ -112,10 +109,10 @@ impl InfoBridge {
   }
 }
 
-/// The host's step driver: resolve the host's own coordinates back to
-/// authored source, then let the runner apply every rule.
-impl crate::step::StepDriver for InfoBridge {
-  fn begin_step(&self, mut spec: crate::step::StepSpec) -> crate::step::StepFuture<'_, crate::step::StepStarted> {
+impl InfoBridge {
+  /// Resolve the host's own coordinates back to authored source, and an
+  /// explicit location to the path reporters show.
+  fn resolve_spec(&self, mut spec: crate::step::StepSpec) -> crate::step::StepSpec {
     spec.frames = spec
       .frames
       .into_iter()
@@ -129,7 +126,15 @@ impl crate::step::StepDriver for InfoBridge {
     if let Some(location) = spec.options.location.as_mut() {
       location.file = self.relative(&location.file);
     }
-    crate::step::StepDriver::begin_step(&*self.test_info, spec)
+    spec
+  }
+}
+
+/// The host's step driver: resolve the host's own coordinates back to
+/// authored source, then let the runner apply every rule.
+impl crate::step::StepDriver for InfoBridge {
+  fn begin_step(&self, spec: crate::step::StepSpec) -> crate::step::StepFuture<'_, crate::step::StepStarted> {
+    crate::step::StepDriver::begin_step(&*self.test_info, self.resolve_spec(spec))
   }
 
   fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {
@@ -236,6 +241,14 @@ impl TestHostBridge for InfoBridge {
 
   fn call_owner(&self) -> Option<String> {
     Some(self.test_info.call_owner())
+  }
+
+  fn open_step_now(&self, spec: crate::step::StepSpec, nests: bool) -> Option<String> {
+    Some(self.test_info.open_step_now(self.resolve_spec(spec), nests).step_id)
+  }
+
+  fn close_step_now(&self, step_id: &str, outcome: crate::step::StepOutcome) {
+    self.test_info.close_step_now(step_id, outcome);
   }
 
   fn match_value_snapshot(

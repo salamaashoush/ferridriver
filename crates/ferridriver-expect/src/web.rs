@@ -149,7 +149,7 @@ impl<'a> WebAssert<'a> {
         .page()
         .begin_expect_trace(self.method, self.trace_params())
         .await;
-      let result = self.poll().await;
+      let result = ferridriver::trace::within_assertion(self.poll()).await;
       if let Some(span) = span {
         self
           .receiver

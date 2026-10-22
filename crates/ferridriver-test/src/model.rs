@@ -466,8 +466,9 @@ pub struct TestInfo {
   pub ignore_snapshots: bool,
   /// Collected attachments.
   pub attachments: Arc<Mutex<Vec<Attachment>>>,
-  /// Collected test steps.
-  pub steps: Arc<Mutex<Vec<TestStep>>>,
+  /// Collected test steps. A plain mutex: a browser call opens and
+  /// closes its step from an action observer, which cannot await.
+  pub steps: Arc<std::sync::Mutex<Vec<TestStep>>>,
   /// Soft assertion errors (collected, not thrown).
   pub soft_errors: Arc<std::sync::Mutex<Vec<TestFailure>>>,
   /// Set when the attempt failed in a way a retry cannot fix
@@ -526,10 +527,9 @@ pub struct TestInfo {
   /// step_id -> trace call id, so child steps nest under their parent
   /// in the trace viewer's action tree.
   pub trace_step_calls: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>>,
-  /// Steps opened through [`crate::step::StepDriver`] and not yet
-  /// ended, outermost first — where a nested `test.step` finds its
+  /// Steps opened and not yet ended — where a nested step finds its
   /// parent, its title path and the box it inherits.
-  pub open_steps: Arc<Mutex<Vec<OpenStep>>>,
+  pub open_steps: Arc<std::sync::Mutex<OpenSteps>>,
   /// What the test itself printed. A spec's `console.log` belongs to the
   /// test that ran it, not to the process — reporters, the HTML report
   /// and the UI's terminal all read it back off the outcome. A plain
@@ -607,7 +607,7 @@ impl TestInfo {
       update_snapshots: crate::config::UpdateSnapshotsMode::default(),
       ignore_snapshots: false,
       attachments: Arc::new(Mutex::new(Vec::new())),
-      steps: Arc::new(Mutex::new(Vec::new())),
+      steps: Arc::default(),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: Arc::new(Mutex::new(Vec::new())),
@@ -627,7 +627,7 @@ impl TestInfo {
       annotations: Arc::new(Mutex::new(Vec::new())),
       trace_composite: Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      open_steps: Arc::new(Mutex::new(Vec::new())),
+      open_steps: Arc::default(),
       output: Arc::new(std::sync::Mutex::new(TestOutput::default())),
     }
   }
@@ -760,8 +760,7 @@ impl TestInfo {
 
   /// Record a test step.
   pub async fn push_step(&self, step: TestStep) {
-    let mut steps = self.steps.lock().await;
-    steps.push(step);
+    lock(&self.steps).push(step);
   }
 
   /// Get elapsed time since test start.
@@ -787,7 +786,7 @@ impl TestInfo {
     category: StepCategory,
     location: Option<StepLocation>,
   ) -> impl std::future::Future<Output = StepHandle> {
-    std::future::ready(self.open_step(title, category, None, location, StepDetails::default()))
+    std::future::ready(self.open_handle_step(title, category, None, location))
   }
 
   /// Begin a nested step (child of a parent step).
@@ -797,7 +796,7 @@ impl TestInfo {
     category: StepCategory,
     parent_step_id: &str,
   ) -> impl std::future::Future<Output = StepHandle> {
-    std::future::ready(self.open_step(title, category, Some(parent_step_id), None, StepDetails::default()))
+    std::future::ready(self.open_handle_step(title, category, Some(parent_step_id), None))
   }
 
   /// [`Self::begin_child_step`] with the child's own source location.
@@ -808,7 +807,24 @@ impl TestInfo {
     parent_step_id: &str,
     location: Option<StepLocation>,
   ) -> impl std::future::Future<Output = StepHandle> {
-    std::future::ready(self.open_step(title, category, Some(parent_step_id), location, StepDetails::default()))
+    std::future::ready(self.open_handle_step(title, category, Some(parent_step_id), location))
+  }
+
+  /// A step its opener holds and ends itself (a hook, a BDD step). While
+  /// it is open, steps opened through [`Self::open_step_now`] with no
+  /// scoped step inside it belong to it — Playwright's
+  /// `_findLastPredefinedStep`.
+  fn open_handle_step(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+    parent_step_id: Option<&str>,
+    location: Option<StepLocation>,
+  ) -> StepHandle {
+    let mut handle = self.open_step(title, category, parent_step_id, location, StepDetails::default());
+    lock(&self.open_steps).held.push((handle.step_id.clone(), handle.start));
+    handle.held_in = Some(Arc::clone(&self.open_steps));
+    handle
   }
 
   /// The one place a live step is opened: allocates the id, streams
@@ -841,14 +857,18 @@ impl TestInfo {
       )));
     }
 
-    let trace_span = self.open_step_span(
-      &step_id,
-      &title,
-      &category,
-      parent_step_id,
-      Duration::ZERO,
-      location.as_ref(),
-    );
+    let trace_span = if details.untraced {
+      None
+    } else {
+      self.open_step_span(
+        &step_id,
+        &title,
+        &category,
+        parent_step_id,
+        Duration::ZERO,
+        location.as_ref(),
+      )
+    };
     let trace_prev_parent = match trace_span.as_ref() {
       Some(span) => TraceParentGuard::RestoreTo(span.make_current_parent()),
       None => TraceParentGuard::NotCurrent,
@@ -869,6 +889,7 @@ impl TestInfo {
       annotations: Vec::new(),
       event_bus: self.event_bus.clone(),
       steps: Arc::clone(&self.steps),
+      held_in: None,
       trace_span,
       trace_prev_parent,
     }
@@ -920,7 +941,7 @@ impl TestInfo {
       span.finish_message(error.clone());
     }
 
-    self.steps.lock().await.push(TestStep {
+    lock(&self.steps).push(TestStep {
       step_id,
       title,
       category,
@@ -1063,74 +1084,124 @@ pub struct OpenStep {
   boxed_stack: Vec<StepLocation>,
 }
 
+/// The steps of a test that are open right now.
+#[derive(Default)]
+pub struct OpenSteps {
+  /// Steps that run a body (`test.step`, a fixture, `toPass`), outermost
+  /// first. A step opened while one is open nests under the innermost.
+  scoped: Vec<OpenStep>,
+  /// Steps that run no code of the test's own (a browser call, a built-in
+  /// matcher), so nothing can nest under them. Kept off the stack: two
+  /// of them in flight at once (`Promise.all`) are siblings, and a stack
+  /// would nest the second under the first.
+  leaves: rustc_hash::FxHashMap<String, StepHandle>,
+  /// Steps their opener holds a [`StepHandle`] to, by id and start, in
+  /// the order they opened.
+  held: Vec<(String, Instant)>,
+}
+
+impl OpenSteps {
+  /// Where a step opened now belongs: the innermost open step that runs
+  /// a body, or the latest held one if that opened after it.
+  fn parent(&self) -> Option<String> {
+    let scoped = self.scoped.last().map(|s| (&s.handle.step_id, s.handle.start));
+    let held = self.held.last().map(|(id, start)| (id, *start));
+    match (scoped, held) {
+      (Some(scoped), Some(held)) if held.1 > scoped.1 => Some(held.0.clone()),
+      (Some(scoped), _) => Some(scoped.0.clone()),
+      (None, held) => held.map(|(id, _)| id.clone()),
+    }
+  }
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl TestInfo {
+  /// Open a step now. `nests` says whether steps opened while it is open
+  /// belong under it: true for one that runs a body, false for a leaf
+  /// (see [`OpenSteps::leaves`]). A leaf is not mirrored into the trace,
+  /// which records the browser call or the assertion itself.
+  ///
+  /// The one place a step's parent, location and title path are decided,
+  /// for every host and for the runner's own action observer.
+  pub fn open_step_now(&self, spec: crate::step::StepSpec, nests: bool) -> crate::step::StepStarted {
+    let frames: Vec<StepLocation> = spec
+      .frames
+      .iter()
+      .filter_map(|f| match f {
+        // Host coordinates only reach here unresolved when the host
+        // has no source map for them; they name nothing on disk.
+        crate::step::StepFrame::Host { .. } => None,
+        crate::step::StepFrame::Source(loc) => Some(loc.clone()),
+      })
+      .collect();
+    let mut open = lock(&self.open_steps);
+    let parent_boxed = open.scoped.last().map(|s| s.boxed_stack.clone()).unwrap_or_default();
+    let (location, boxed_stack) = crate::step::resolve_location(&spec.options, &frames, &parent_boxed);
+
+    let mut title_path = self.title_path.clone();
+    title_path.extend(open.scoped.iter().map(|s| s.title.clone()));
+    title_path.push(spec.title.clone());
+
+    let parent = open.parent();
+    let mut handle = self.open_step(
+      spec.title.clone(),
+      spec.category,
+      parent.as_deref(),
+      location.clone(),
+      StepDetails {
+        subtitle: spec.options.subtitle.clone(),
+        params: spec.options.params.clone(),
+        untraced: !nests,
+      },
+    );
+    handle.metadata.clone_from(&spec.metadata);
+    let started = crate::step::StepStarted {
+      step_id: handle.step_id.clone(),
+      location,
+      boxed_stack: boxed_stack.clone(),
+      title_path,
+    };
+    if nests {
+      open.scoped.push(OpenStep {
+        handle,
+        title: spec.title,
+        boxed_stack,
+      });
+    } else {
+      open.leaves.insert(started.step_id.clone(), handle);
+    }
+    started
+  }
+
+  /// Close a step [`Self::open_step_now`] opened. Closing one that is
+  /// not open (already closed by [`Self::close_open_steps`]) does nothing.
+  pub fn close_step_now(&self, step_id: &str, outcome: crate::step::StepOutcome) {
+    let handle = {
+      let mut open = lock(&self.open_steps);
+      match open.scoped.iter().position(|s| s.handle.step_id == step_id) {
+        Some(at) => Some(open.scoped.remove(at).handle),
+        None => open.leaves.remove(step_id),
+      }
+    };
+    let Some(mut handle) = handle else { return };
+    handle.annotations = outcome.annotations;
+    handle.finish_with_status(outcome.status, outcome.error);
+  }
+}
+
 /// The runner is the step driver: `#[ferritest]` Rust tests reach it
 /// directly, and both JS hosts reach it through the bridge, so one set
 /// of rules decides every step's id, parent, location and title path.
 impl crate::step::StepDriver for TestInfo {
   fn begin_step(&self, spec: crate::step::StepSpec) -> crate::step::StepFuture<'_, crate::step::StepStarted> {
-    Box::pin(async move {
-      let frames: Vec<StepLocation> = spec
-        .frames
-        .iter()
-        .filter_map(|f| match f {
-          // Host coordinates only reach here unresolved when the host
-          // has no source map for them; they name nothing on disk.
-          crate::step::StepFrame::Host { .. } => None,
-          crate::step::StepFrame::Source(loc) => Some(loc.clone()),
-        })
-        .collect();
-      let mut open = self.open_steps.lock().await;
-      let parent_boxed = open.last().map(|s| s.boxed_stack.clone()).unwrap_or_default();
-      let (location, boxed_stack) = crate::step::resolve_location(&spec.options, &frames, &parent_boxed);
-
-      let mut title_path = self.title_path.clone();
-      title_path.extend(open.iter().map(|s| s.title.clone()));
-      title_path.push(spec.title.clone());
-
-      let parent = open.last().map(|s| s.handle.step_id.clone());
-      let mut handle = self.open_step(
-        spec.title.clone(),
-        spec.category,
-        parent.as_deref(),
-        location.clone(),
-        StepDetails {
-          subtitle: spec.options.subtitle.clone(),
-          params: spec.options.params.clone(),
-        },
-      );
-      handle.metadata.clone_from(&spec.metadata);
-      let started = crate::step::StepStarted {
-        step_id: handle.step_id.clone(),
-        location,
-        boxed_stack: boxed_stack.clone(),
-        title_path,
-      };
-      open.push(OpenStep {
-        handle,
-        title: spec.title,
-        boxed_stack,
-      });
-      started
-    })
+    Box::pin(async move { self.open_step_now(spec, true) })
   }
 
   fn end_step(&self, step_id: String, outcome: crate::step::StepOutcome) -> crate::step::StepFuture<'_, ()> {
-    Box::pin(async move {
-      let open = {
-        let mut open = self.open_steps.lock().await;
-        open
-          .iter()
-          .position(|s| s.handle.step_id == step_id)
-          .map(|at| open.remove(at))
-      };
-      let Some(mut open) = open else { return };
-      open.handle.annotations = outcome.annotations;
-      match outcome.status {
-        StepStatus::Skipped => open.handle.skip(outcome.error).await,
-        StepStatus::Pending => open.handle.pending(outcome.error).await,
-        StepStatus::Passed | StepStatus::Failed => open.handle.end(outcome.error).await,
-      }
-    })
+    Box::pin(async move { self.close_step_now(&step_id, outcome) })
   }
 }
 
@@ -1236,11 +1307,24 @@ impl TestInfo {
   }
 
   /// Close every step still open, so a body that failed mid-step leaves
-  /// no dangling reporter event or trace span behind.
-  pub async fn close_open_steps(&self, reason: &str) {
-    let open: Vec<OpenStep> = self.open_steps.lock().await.drain(..).collect();
-    for step in open.into_iter().rev() {
-      step.handle.end(Some(reason.to_string())).await;
+  /// no dangling reporter event or trace span behind. Leaves go first: a
+  /// browser call cut short by a timeout never reports its own end, and
+  /// it ended before the step it ran in.
+  pub fn close_open_steps(&self, reason: &str) {
+    let (scoped, leaves) = {
+      let mut open = lock(&self.open_steps);
+      let scoped = std::mem::take(&mut open.scoped);
+      let mut leaves: Vec<StepHandle> = open.leaves.drain().map(|(_, handle)| handle).collect();
+      leaves.sort_by_key(|handle| handle.start);
+      (scoped, leaves)
+    };
+    for handle in leaves {
+      handle.finish_with_status(StepStatus::Failed, Some(reason.to_string()));
+    }
+    for step in scoped.into_iter().rev() {
+      step
+        .handle
+        .finish_with_status(StepStatus::Failed, Some(reason.to_string()));
     }
   }
 }
@@ -1275,6 +1359,8 @@ enum TraceParentGuard {
 struct StepDetails {
   subtitle: Option<String>,
   params: Option<serde_json::Value>,
+  /// Keep the step out of the trace.
+  untraced: bool,
 }
 
 /// Handle to an in-progress step. Must be completed via `end()`.
@@ -1304,7 +1390,10 @@ pub struct StepHandle {
   /// Annotations recorded into [`TestStep::annotations`].
   pub annotations: Vec<TestAnnotation>,
   event_bus: Option<EventBus>,
-  steps: Arc<Mutex<Vec<TestStep>>>,
+  steps: Arc<std::sync::Mutex<Vec<TestStep>>>,
+  /// The open-step registry that lists this step until it ends, for a
+  /// step its opener holds.
+  held_in: Option<Arc<std::sync::Mutex<OpenSteps>>>,
   /// Mirrored trace action, open while the step runs.
   trace_span: Option<ferridriver::trace::ActionSpan>,
   /// How to restore the recorder's enclosing parent when this step's
@@ -1320,21 +1409,24 @@ impl StepHandle {
     } else {
       StepStatus::Passed
     };
-    self.finish_with_status(status, error).await;
+    self.finish_with_status(status, error);
   }
 
   /// Complete this step as skipped.
   pub async fn skip(self, reason: Option<String>) {
-    self.finish_with_status(StepStatus::Skipped, reason).await;
+    self.finish_with_status(StepStatus::Skipped, reason);
   }
 
   /// Complete this step as pending (not yet implemented).
   pub async fn pending(self, reason: Option<String>) {
-    self.finish_with_status(StepStatus::Pending, reason).await;
+    self.finish_with_status(StepStatus::Pending, reason);
   }
 
-  async fn finish_with_status(self, status: StepStatus, error: Option<String>) {
+  fn finish_with_status(self, status: StepStatus, error: Option<String>) {
     let duration = self.start.elapsed();
+    if let Some(registry) = &self.held_in {
+      lock(registry).held.retain(|(id, _)| *id != self.step_id);
+    }
     if let Some(span) = self.trace_span {
       match self.trace_prev_parent {
         TraceParentGuard::RestoreTo(previous) => span.finish_message_restoring(error.clone(), previous),
@@ -1374,7 +1466,7 @@ impl StepHandle {
       metadata: self.metadata,
       steps: Vec::new(),
     };
-    self.steps.lock().await.push(step);
+    lock(&self.steps).push(step);
   }
 }
 

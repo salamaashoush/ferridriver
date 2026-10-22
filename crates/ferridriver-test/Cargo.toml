@@ -34,6 +34,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
+url = "2"
 
 async-channel = "2"
 dashmap = { workspace = true }

@@ -1520,6 +1520,23 @@ fn action_in_progress() -> bool {
 }
 
 tokio::task_local! {
+  /// Set while an assertion looks at the page.
+  static IN_ASSERTION: ();
+}
+
+/// Run `fut` as the body of an assertion. The calls it makes to look at
+/// the page are recorded in the trace as before, but no observer is told
+/// about them: whoever watches the action stream sees the assertion as
+/// one action, as Playwright's `Frame.expect` is one call.
+pub fn within_assertion<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
+  IN_ASSERTION.scope((), fut)
+}
+
+fn assertion_in_progress() -> bool {
+  IN_ASSERTION.try_with(|()| ()).is_ok()
+}
+
+tokio::task_local! {
   /// Origin of the API call the current future is performing.
   ///
   /// The host scopes this at the language boundary, where the caller's
@@ -1789,11 +1806,19 @@ static ACTION_OBSERVER: std::sync::RwLock<Option<Arc<dyn ActionObserver>>> = std
 /// attached clients) needs each client to see ITS actions and no one else's.
 /// Actions already carry the composite they belong to, so scoping is a lookup
 /// rather than any new plumbing through the call sites.
-static SESSION_ACTION_OBSERVERS: std::sync::RwLock<Option<rustc_hash::FxHashMap<String, Arc<dyn ActionObserver>>>> =
-  std::sync::RwLock::new(None);
+static SESSION_ACTION_OBSERVERS: ObserverMap = std::sync::RwLock::new(None);
 
-/// True when a global or any session observer exists. Keeps the unobserved
-/// hot path at one relaxed load rather than two lock acquisitions.
+/// Per-owner observers, keyed by the identity calls are filed under
+/// ([`CallOrigin::script`]).
+///
+/// A test runner reports each test's browser calls as steps of that test,
+/// whichever context or browser the test drove — a test may open contexts
+/// of its own. Its calls already carry the identity of the test that made
+/// them, so that is the key, not the session.
+static OWNER_ACTION_OBSERVERS: ObserverMap = std::sync::RwLock::new(None);
+
+/// True when a global, session or owner observer exists. Keeps the
+/// unobserved hot path at one relaxed load rather than lock acquisitions.
 static ACTION_OBSERVER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install the process-wide action observer, replacing any previous one.
@@ -1834,30 +1859,81 @@ pub struct SessionObserverGuard {
 
 impl Drop for SessionObserverGuard {
   fn drop(&mut self) {
-    let mut guard = SESSION_ACTION_OBSERVERS
-      .write()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(map) = guard.as_mut() {
-      map.remove(&self.composite);
-      if map.is_empty() {
-        *guard = None;
-        // Only clear the fast-path flag when no global observer remains
-        // either, or a `run --trace` in the same process would go silent.
-        let global_present = ACTION_OBSERVER
-          .read()
-          .unwrap_or_else(std::sync::PoisonError::into_inner)
-          .is_some();
-        if !global_present {
-          ACTION_OBSERVER_INSTALLED.store(false, Ordering::Release);
-        }
-      }
-    }
+    unregister_observer(&SESSION_ACTION_OBSERVERS, &self.composite);
   }
 }
 
-fn action_observer(composite: Option<&str>) -> Option<Arc<dyn ActionObserver>> {
-  if !ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire) {
+/// Observe only the actions issued by `owner` (the identity a host files
+/// its calls under, [`CallOrigin::script`]), until the returned guard
+/// drops. Wins over a session or global observer for those actions.
+#[must_use]
+pub fn observe_owner_actions(owner: &str, observer: Arc<dyn ActionObserver>) -> OwnerObserverGuard {
+  {
+    let mut guard = OWNER_ACTION_OBSERVERS
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard
+      .get_or_insert_with(rustc_hash::FxHashMap::default)
+      .insert(owner.to_string(), observer);
+  }
+  ACTION_OBSERVER_INSTALLED.store(true, Ordering::Release);
+  OwnerObserverGuard {
+    owner: owner.to_string(),
+  }
+}
+
+/// Removes its owner's action observer on drop.
+pub struct OwnerObserverGuard {
+  owner: String,
+}
+
+impl Drop for OwnerObserverGuard {
+  fn drop(&mut self) {
+    unregister_observer(&OWNER_ACTION_OBSERVERS, &self.owner);
+  }
+}
+
+type ObserverMap = std::sync::RwLock<Option<rustc_hash::FxHashMap<String, Arc<dyn ActionObserver>>>>;
+
+fn unregister_observer(registry: &ObserverMap, key: &str) {
+  let mut guard = registry.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+  let Some(map) = guard.as_mut() else { return };
+  map.remove(key);
+  if !map.is_empty() {
+    return;
+  }
+  *guard = None;
+  drop(guard);
+  // Only clear the fast-path flag when no other observer remains, or a
+  // `run --trace` in the same process would go silent.
+  let global_present = ACTION_OBSERVER
+    .read()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .is_some();
+  let others_present = [&SESSION_ACTION_OBSERVERS, &OWNER_ACTION_OBSERVERS]
+    .into_iter()
+    .any(|other| {
+      other
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+    });
+  if !global_present && !others_present {
+    ACTION_OBSERVER_INSTALLED.store(false, Ordering::Release);
+  }
+}
+
+fn action_observer(composite: Option<&str>, owner: Option<&str>) -> Option<Arc<dyn ActionObserver>> {
+  if !ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire) || assertion_in_progress() {
     return None;
+  }
+  if let Some(owner) = owner {
+    let scoped = OWNER_ACTION_OBSERVERS
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(observer) = scoped.as_ref().and_then(|map| map.get(owner)) {
+      return Some(Arc::clone(observer));
+    }
   }
   if let Some(composite) = composite {
     let scoped = SESSION_ACTION_OBSERVERS
@@ -2104,15 +2180,13 @@ pub(crate) fn begin_action(
     return None;
   }
   let recorder = composite.and_then(recorder_for);
-  let observer = action_observer(composite);
   let gate = action_gate();
-  let watched = recorder.is_some() || observer.is_some() || gate.is_some();
-  // Neither recording, observing, gating nor tracking: the common case,
-  // and the only cost is the map probe plus three relaxed atomic loads.
-  if !watched && !PENDING_TRACKING.load(Ordering::Acquire) {
+  if recorder.is_none() && gate.is_none() && !observed_or_tracked() {
     return None;
   }
   let origin = current_call_origin();
+  let observer = action_observer(composite, origin.script.as_deref());
+  let watched = recorder.is_some() || observer.is_some() || gate.is_some();
   // Tracking alone opens a span only for a call someone owns.
   let tracked = PENDING_TRACKING.load(Ordering::Acquire) && origin.script.is_some();
   if !watched && !tracked {
@@ -2214,6 +2288,13 @@ pub(crate) fn begin_action(
     attachments: Vec::new(),
     pending,
   })
+}
+
+/// Whether an observer or call tracking could want an action. With no
+/// recorder and no gate either — the common case — an action costs the
+/// map probe plus these relaxed atomic loads.
+fn observed_or_tracked() -> bool {
+  ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire) || PENDING_TRACKING.load(Ordering::Acquire)
 }
 
 /// Hold the action at the gate, if one is installed, before it runs.
@@ -2466,6 +2547,51 @@ mod tests {
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     ACTION_OBSERVER_INSTALLED.store(false, Ordering::Release);
     assert!(builder().location.is_none(), "unwatched runs capture nothing");
+  }
+
+  #[test]
+  fn owner_observers_see_their_owners_calls_on_any_session() {
+    let _switches = PROCESS_SWITCHES
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+    let call = |owner: &str, class: &'static str, method: &'static str, composite: &'static str| {
+      runtime.block_on(with_call_owner(Arc::from(owner), async move {
+        drop(begin_action(
+          Some(composite),
+          class,
+          method,
+          None,
+          serde_json::json!({}),
+        ));
+      }));
+    };
+
+    let session = recording("session");
+    let mine = recording("mine");
+    let session_guard = observe_session_actions("s:o", session.clone());
+    let owner_guard = observe_owner_actions("test A", mine.clone());
+
+    call("test A", "Page", "goto", "s:o");
+    call("test A", "Locator", "click", "s:other");
+    call("test B", "Page", "reload", "s:o");
+    assert_eq!(
+      seen(&mine),
+      vec!["mine:page.goto".to_string(), "mine:locator.click".to_string()],
+      "an owner's calls reach its observer whichever session they ran on"
+    );
+    assert_eq!(seen(&session), vec!["session:page.reload".to_string()]);
+
+    drop(owner_guard);
+    call("test A", "Page", "close", "s:o");
+    assert_eq!(seen(&mine).len(), 2, "a dropped guard stops observing");
+    assert_eq!(seen(&session).len(), 2, "the session observer takes the call back");
+
+    drop(session_guard);
+    assert!(
+      !ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire),
+      "the last guard clears the fast path"
+    );
   }
 
   #[test]

@@ -28,6 +28,14 @@ impl TuiReporter {
     let _ = self.tx.send(msg);
   }
 
+  /// A BDD run also shows its fixture steps; browser calls and
+  /// assertions stay out of the live view either way, as they do in
+  /// Playwright's `list` and `line`.
+  fn shows(&self, category: &crate::model::StepCategory) -> bool {
+    use crate::model::StepCategory;
+    category.is_visible() || (self.has_bdd && !matches!(category, StepCategory::PwApi | StepCategory::Expect))
+  }
+
   /// Format a test name for display. BDD tests (identified by suite starting
   /// with a feature path) get "Scenario: " prefix.
   fn display_name(&self, test_id: &crate::model::TestId) -> String {
@@ -63,7 +71,7 @@ impl crate::reporter::Reporter for TuiReporter {
         self.send(TuiMessage::TestStarted { name });
       },
 
-      ReporterEvent::StepStarted(step) if step.category.is_visible() || self.has_bdd => {
+      ReporterEvent::StepStarted(step) if self.shows(&step.category) => {
         let test_name = self.display_name(&step.test_id);
         self.send(TuiMessage::StepUpdate {
           test_name,
@@ -74,7 +82,7 @@ impl crate::reporter::Reporter for TuiReporter {
       },
       ReporterEvent::StepStarted(_) => {},
 
-      ReporterEvent::StepFinished(step) if step.category.is_visible() || self.has_bdd => {
+      ReporterEvent::StepFinished(step) if self.shows(&step.category) => {
         let test_name = self.display_name(&step.test_id);
         let status = if step.error.is_some() {
           EntryStatus::Failed

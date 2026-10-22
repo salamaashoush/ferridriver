@@ -91,6 +91,7 @@
 pub type Result<T> = std::result::Result<T, model::TestFailure>;
 
 // -- Core modules --
+pub mod api_steps;
 pub mod artifacts;
 pub mod comparator;
 pub mod config;

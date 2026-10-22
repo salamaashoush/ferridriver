@@ -75,6 +75,16 @@ pub trait TestHostBridge: crate::step::StepDriver {
   fn call_owner(&self) -> Option<String> {
     None
   }
+  /// Open a step now, from a host call that cannot await — an `expect`
+  /// matcher, which may be synchronous. `nests` when what runs inside it
+  /// is the test's own code (`toPass`, `expect.poll`, a custom matcher),
+  /// so the steps it opens belong under it. `None` when the host has no
+  /// test to report into.
+  fn open_step_now(&self, _spec: crate::step::StepSpec, _nests: bool) -> Option<String> {
+    None
+  }
+  /// Close a step [`Self::open_step_now`] opened.
+  fn close_step_now(&self, _step_id: &str, _outcome: crate::step::StepOutcome) {}
   /// `expect(value).toMatchSnapshot(name?, options?)` — synchronous, as
   /// upstream: a `string` or a `Buffer` against its baseline, under the
   /// run's update mode. `Err(message)` = assertion failed.

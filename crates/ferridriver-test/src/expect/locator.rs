@@ -90,7 +90,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       update_snapshots: crate::snapshot::env_update_mode(),
       ignore_snapshots: false,
       attachments: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
-      steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      steps: std::sync::Arc::default(),
       soft_errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
       errors: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -110,7 +110,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       annotations: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       trace_composite: std::sync::Arc::new(std::sync::Mutex::new(None)),
       trace_step_calls: std::sync::Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-      open_steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      open_steps: std::sync::Arc::default(),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     };
     crate::snapshot::settle_outside_host(crate::snapshot::match_value_snapshot(

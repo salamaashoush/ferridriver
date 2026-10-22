@@ -651,6 +651,25 @@ where
   F: FnMut() -> Fut,
   Fut: std::future::Future<Output = Result<Vec<u8>, TestFailure>>,
 {
+  // The captures are the assertion's, not steps of their own.
+  Box::pin(ferridriver::trace::within_assertion(compare_screenshots(
+    paths, options, mode, is_not, timeout, capture,
+  )))
+  .await
+}
+
+async fn compare_screenshots<F, Fut>(
+  paths: &ScreenshotFiles,
+  options: &crate::expect::ScreenshotMatcherOptions,
+  mode: crate::config::UpdateSnapshotsMode,
+  is_not: bool,
+  timeout: std::time::Duration,
+  capture: F,
+) -> Result<Option<String>, TestFailure>
+where
+  F: FnMut() -> Fut,
+  Fut: std::future::Future<Output = Result<Vec<u8>, TestFailure>>,
+{
   use crate::config::UpdateSnapshotsMode;
   if options.ignore {
     return Ok(None);

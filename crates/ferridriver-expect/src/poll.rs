@@ -199,7 +199,7 @@ where
     Some(page) => page.begin_expect_trace(ctx.method, params).await,
     None => None,
   };
-  let result = poll_until(timeout, ctx, check).await;
+  let result = ferridriver::trace::within_assertion(poll_until(timeout, ctx, check)).await;
   if let Some(span) = span
     && let Some(page) = page
   {

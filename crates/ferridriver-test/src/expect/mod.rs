@@ -136,3 +136,149 @@ pub struct ScreenshotClip {
   pub width: f64,
   pub height: f64,
 }
+
+/// One assertion as the step it is reported as — Playwright's
+/// `callMatcherAsStep` (`matchers/expect.ts`), which opens an `expect`
+/// step for every matcher call, value matchers included.
+#[derive(Debug, Clone, Default)]
+pub struct ExpectStep {
+  pub matcher: String,
+  pub is_not: bool,
+  pub is_soft: bool,
+  pub is_poll: bool,
+  /// `expect(subject, message)`: replaces the whole title.
+  pub message: Option<String>,
+  /// The subject's selector, when it is a locator.
+  pub selector: Option<String>,
+  /// The matcher's first argument, as JSON.
+  pub expected: Option<serde_json::Value>,
+}
+
+impl ExpectStep {
+  /// `Expect "not toBe"`, or the custom message.
+  #[must_use]
+  pub fn title(&self) -> String {
+    if let Some(message) = self.message.as_deref().filter(|m| !m.is_empty()) {
+      return message.to_string();
+    }
+    let mut title = String::new();
+    for (on, prefix) in [(self.is_poll, "poll "), (self.is_soft, "soft "), (self.is_not, "not ")] {
+      if on {
+        title.push_str(prefix);
+      }
+    }
+    title.push_str(&self.matcher);
+    if self.matcher == "toHaveScreenshot"
+      && let Some(name) = self.expected.as_ref().and_then(screenshot_step_name)
+    {
+      title.push_str(&format!("({name})"));
+    }
+    // `escapeWithQuotes(title, '"')` is exactly a JSON string literal.
+    format!("Expect {}", serde_json::Value::String(title))
+  }
+
+  /// The step spec a host opens for this assertion.
+  #[must_use]
+  pub fn spec(&self) -> crate::step::StepSpec {
+    let locator = self
+      .selector
+      .as_deref()
+      .map(ferridriver::locator_generator::as_locator_description);
+    let mut params = serde_json::Map::new();
+    if let Some(locator) = &locator {
+      params.insert("locator".to_string(), serde_json::Value::String(locator.clone()));
+    }
+    if let Some(expected) = self.expected.clone().filter(truthy) {
+      params.insert("expected".to_string(), expected);
+    }
+    let mut spec = crate::step::StepSpec::new(self.title()).with_options(crate::step::StepOptions {
+      subtitle: locator,
+      params: (!params.is_empty()).then_some(serde_json::Value::Object(params)),
+      ..crate::step::StepOptions::default()
+    });
+    spec.category = crate::model::StepCategory::Expect;
+    spec
+  }
+}
+
+/// `if (args[0]) params.expected = args[0]`.
+fn truthy(value: &serde_json::Value) -> bool {
+  match value {
+    serde_json::Value::Null => false,
+    serde_json::Value::Bool(b) => *b,
+    serde_json::Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
+    serde_json::Value::String(s) => !s.is_empty(),
+    serde_json::Value::Array(_) | serde_json::Value::Object(_) => true,
+  }
+}
+
+/// `toHaveScreenshotStepTitle`: the snapshot name, given directly or as
+/// `{ name }`, its segments joined with the path separator.
+fn screenshot_step_name(first: &serde_json::Value) -> Option<String> {
+  let name = match first {
+    serde_json::Value::Object(options) => options.get("name")?,
+    other => other,
+  };
+  let name = match name {
+    serde_json::Value::String(s) => s.clone(),
+    serde_json::Value::Array(parts) => parts
+      .iter()
+      .filter_map(serde_json::Value::as_str)
+      .collect::<Vec<_>>()
+      .join(std::path::MAIN_SEPARATOR_STR),
+    _ => return None,
+  };
+  (!name.is_empty()).then_some(name)
+}
+
+#[cfg(test)]
+mod expect_step_tests {
+  use serde_json::json;
+
+  use super::ExpectStep;
+
+  fn step(matcher: &str) -> ExpectStep {
+    ExpectStep {
+      matcher: matcher.to_string(),
+      ..ExpectStep::default()
+    }
+  }
+
+  #[test]
+  fn titles_carry_the_modifiers_in_playwright_order() {
+    assert_eq!(step("toHaveTitle").title(), r#"Expect "toHaveTitle""#);
+    let all = ExpectStep {
+      is_not: true,
+      is_soft: true,
+      is_poll: true,
+      ..step("toBe")
+    };
+    assert_eq!(all.title(), r#"Expect "poll soft not toBe""#);
+    let custom = ExpectStep {
+      message: Some("the cart total".into()),
+      ..step("toBe")
+    };
+    assert_eq!(custom.title(), "the cart total");
+    let shot = ExpectStep {
+      expected: Some(json!(["home", "hero.png"])),
+      ..step("toHaveScreenshot")
+    };
+    assert_eq!(
+      shot.title(),
+      format!("Expect \"toHaveScreenshot(home{}hero.png)\"", std::path::MAIN_SEPARATOR)
+    );
+  }
+
+  #[test]
+  fn a_locator_subject_is_the_subtitle_and_a_falsy_expectation_is_not_a_param() {
+    let spec = ExpectStep {
+      selector: Some("internal:role=heading".into()),
+      expected: Some(json!(0)),
+      ..step("toHaveCount")
+    }
+    .spec();
+    assert_eq!(spec.category, crate::model::StepCategory::Expect);
+    assert_eq!(spec.options.subtitle.as_deref(), Some("getByRole('heading')"));
+    assert_eq!(spec.options.params, Some(json!({ "locator": "getByRole('heading')" })));
+  }
+}

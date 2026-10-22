@@ -73,3 +73,59 @@ test('a reporter module prints to the terminal like any Playwright reporter', as
   assert.match(result.stdout, /^reporter stdout write$/m);
   assert.match(result.stderr, /^reporter console\.error$/m);
 });
+
+test('a reporter module receives browser calls and assertions as live nested steps', async () => {
+  const cwd = await workspace({
+    'specs/steps.test.ts': `import { test, expect } from '@ferridriver/test';
+      test('home page loads', async ({ page }) => {
+        await test.step('open the site', async () => {
+          await page.goto('data:text/html,<title>Example</title><h1>hi</h1>');
+        });
+        await expect(page).toHaveTitle(/Example/);
+        expect(await page.title()).not.toBe('Other');
+        await Promise.all([page.getByRole('heading').click(), page.getByRole('heading').hover()]);
+        await expect(async () => { await page.getByRole('heading').click(); }).toPass();
+        await expect.soft(page.getByRole('heading')).toHaveText('nope', { timeout: 100 });
+      });`,
+    'reporters/steps.ts': `export default class Steps {
+      onStepBegin(test, result, step) {
+        process.stdout.write('BEGIN ' + JSON.stringify([step.category, step.title, step.subtitle ?? null,
+          step.parent ? step.parent.title : null, step.location ? step.location.line : null]) + '\\n');
+      }
+      onStepEnd(test, result, step) {
+        console.log('END ' + JSON.stringify([step.category, step.title, step.error ? step.error.message.split('\\n')[0] : null]));
+      }
+    }`,
+    'ferridriver.toml': `[test]
+      testMatch = ["specs/*.test.ts"]
+      workers = 1
+      reporter = [{ name = "./reporters/steps.ts" }]
+      [test.browser]
+      browser = "chromium"
+      backend = "cdp-pipe"
+      headless = true
+    `,
+  });
+  const result = await run(['test', '--no-inherit', '--headless'], { cwd });
+  assert.equal(result.code, 1, result.text);
+  const lines = result.stdout.split('\n').filter(line => /^(BEGIN|END) /.test(line))
+    .map(line => [line.slice(0, line.indexOf(' ')), ...JSON.parse(line.slice(line.indexOf(' ') + 1))]);
+  const begins = lines.filter(([kind]) => kind === 'BEGIN').map(([, ...rest]) => rest);
+  assert.deepEqual(begins.map(([category, title, subtitle, parent]) => [category, title, subtitle, parent]), [
+    ['test.step', 'open the site', null, null],
+    ['pw:api', 'Navigate', 'data:', 'open the site'],
+    ['expect', 'Expect "toHaveTitle"', null, null],
+    ['expect', 'Expect "not toBe"', null, null],
+    ['pw:api', 'Click', "getByRole('heading')", null],
+    ['pw:api', 'Hover', "getByRole('heading')", null],
+    ['expect', 'Expect "toPass"', null, null],
+    ['pw:api', 'Click', "getByRole('heading')", 'Expect "toPass"'],
+    ['expect', 'Expect "soft toHaveText"', "getByRole('heading')", null],
+  ], result.stdout);
+  assert.deepEqual(begins.map(step => step[4]), [3, 4, 6, 7, 8, 8, 9, 9, 10], 'each step names the line that made it');
+  const order = lines.map(([kind, category, title]) => `${kind} ${title}`);
+  assert.ok(order.indexOf('END Navigate') < order.indexOf('END open the site'), 'a child ends before its step');
+  assert.ok(order.indexOf('END open the site') < order.indexOf('BEGIN Expect "toHaveTitle"'), 'steps arrive as they happen');
+  const soft = lines.find(([kind, , title]) => kind === 'END' && title === 'Expect "soft toHaveText"');
+  assert.match(soft[3], /toHaveText/, 'a failed soft assertion fails its step');
+});
