@@ -1121,7 +1121,7 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl TestInfo {
   /// Open a step now. `nests` says whether steps opened while it is open
   /// belong under it: true for one that runs a body, false for a leaf
-  /// (see [`OpenSteps::leaves`]). A leaf is not mirrored into the trace,
+  /// (see `OpenSteps::leaves`). A leaf is not mirrored into the trace,
   /// which records the browser call or the assertion itself.
   ///
   /// The one place a step's parent, location and title path are decided,

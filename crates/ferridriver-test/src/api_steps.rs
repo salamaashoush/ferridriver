@@ -11,7 +11,7 @@
 //! ferridriver's calls arrive through core's action observer, named by the
 //! client class and method (`Locator.click`), where Playwright's metadata is
 //! keyed by the protocol call the client method makes (`Frame.click`).
-//! [`metainfo`] is that mapping. An assertion is not reported from here: the
+//! `metainfo` is that mapping. An assertion is not reported from here: the
 //! expect layer opens its own step for every matcher, the ones that never
 //! touch a browser included.
 
