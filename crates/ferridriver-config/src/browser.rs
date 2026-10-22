@@ -99,9 +99,8 @@ pub struct ProxyConfig {
   pub server: String,
   /// Comma-separated hosts that bypass the proxy.
   pub bypass: Option<String>,
-  /// Proxy credentials are NOT a launch flag; Chrome asks for them over
-  /// the wire. Declaring them here is an error rather than a silent
-  /// drop — use the context-level proxy (`[test.browser.use].proxy`).
+  /// Proxy credentials. No browser takes them as a flag: they answer the
+  /// proxy's `407` challenge for every context of the instance.
   pub username: Option<String>,
   pub password: Option<String>,
 }
@@ -195,8 +194,7 @@ pub struct InstanceConfig {
 ///
 /// # Errors
 ///
-/// Returns an error when the proxy declares credentials (not a launch
-/// flag) — surfaced rather than silently dropped.
+/// Returns an error when the instance's browser and backend disagree.
 pub fn instance_overrides_from(
   cfg: &InstanceConfig,
   instance: &str,
@@ -213,7 +211,7 @@ pub fn instance_overrides_from(
   let backend = selection.backend;
   let mut args = cfg.args.clone();
   if let Some(proxy) = &cfg.proxy {
-    args.extend(proxy_args(proxy, backend)?);
+    args.extend(proxy_launch_flags(&proxy.server, proxy.bypass.as_deref(), backend));
   }
   Ok(InstanceOverrides {
     kind: cfg.browser.map(|_| selection.browser),
@@ -232,7 +230,21 @@ pub fn instance_overrides_from(
       .ignore_default_args
       .as_ref()
       .and_then(IgnoreDefaultArgsConfig::lower),
+    launched_proxy: cfg.proxy.as_ref().map(ProxyConfig::to_engine),
   })
+}
+
+impl ProxyConfig {
+  /// The engine's proxy settings, credentials included.
+  #[must_use]
+  pub fn to_engine(&self) -> ferridriver::options::ProxyConfig {
+    ferridriver::options::ProxyConfig {
+      server: self.server.clone(),
+      bypass: self.bypass.clone(),
+      username: self.username.clone(),
+      password: self.password.clone(),
+    }
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,8 +431,7 @@ impl RoutingView<'_> {
   /// Returns an error when the instance name is not substitutable, when
   /// the args command fails (a hard failure means the name is wrong —
   /// almost always a session key with no `:` that landed on `default` —
-  /// and launching anyway puts the caller on an unconfigured browser),
-  /// or when the instance declares proxy credentials.
+  /// and launching anyway puts the caller on an unconfigured browser).
   /// Reject a name no configured instance claims, naming the ones that exist.
   ///
   /// This has to run BEFORE the args command. Feeding an undeclared name to a
@@ -448,7 +459,7 @@ impl RoutingView<'_> {
   /// Returns an error when the instance name is not substitutable, when no
   /// configured instance claims it, when the args command fails or returns a
   /// result carrying no launch settings (launching anyway puts the caller on an
-  /// unconfigured browser), or when the instance declares proxy credentials.
+  /// unconfigured browser).
   pub fn overrides_for(&self, instance: &str) -> Result<InstanceOverrides, String> {
     validate_instance_name(instance)?;
     // Before anything else, and whether or not a command exists: a declared
@@ -582,6 +593,19 @@ impl RoutingView<'_> {
     if let Some(cfg) = cfg
       && let Some(url) = &cfg.connect_url
     {
+      // A WebSocket URL is the browser's own CDP or BiDi endpoint, never a
+      // WebDriver server, so `connectOptions` only adds its headers and
+      // timeout to the handshake.
+      if url.starts_with("ws://") || url.starts_with("wss://") {
+        return Some(match &cfg.connect_options {
+          Some(options) => ConnectMode::ConnectUrlWith {
+            url: url.clone(),
+            headers: options.headers.clone(),
+            timeout: options.timeout,
+          },
+          None => ConnectMode::ConnectUrl(url.clone()),
+        });
+      }
       let inherited_browser = self.browser.or_else(|| self.global.and_then(|global| global.browser));
       let browser = cfg.browser.or(inherited_browser.filter(|_| cfg.backend.is_none()));
       if cfg.connect_options.is_some()
@@ -705,24 +729,6 @@ pub fn proxy_launch_flags(server: &str, bypass: Option<&str>, backend: BackendKi
     password: None,
   }
   .launch_flags(backend)
-}
-
-/// Lower instance proxy settings into launch flags for `backend`.
-///
-/// # Errors
-///
-/// Returns an error when the proxy declares credentials, which are not a
-/// launch flag.
-pub fn proxy_args(proxy: &ProxyConfig, backend: BackendKind) -> Result<Vec<String>, String> {
-  if proxy.username.is_some() || proxy.password.is_some() {
-    return Err(
-      "instance proxy credentials are not launch flags; set them on the context proxy \
-       (`[test.browser.use].proxy`) instead of the instance"
-        .to_string(),
-    );
-  }
-
-  Ok(proxy_launch_flags(&proxy.server, proxy.bypass.as_deref(), backend))
 }
 
 /// Shape a command's output into browser arguments.
@@ -1541,12 +1547,12 @@ mod tests {
       password: None,
     };
 
-    let chromium = proxy_args(&proxy, BackendKind::CdpPipe).expect("chromium flags");
+    let chromium = proxy_launch_flags(&proxy.server, proxy.bypass.as_deref(), BackendKind::CdpPipe);
     assert!(chromium.contains(&"--proxy-server=http://127.0.0.1:3052".to_string()));
 
     // `--proxy-server` is not a WebKit switch: it is accepted and ignored, so
     // lowering it the Chromium way left WebKit talking to the network direct.
-    let webkit = proxy_args(&proxy, BackendKind::WebKit).expect("webkit flags");
+    let webkit = proxy_launch_flags(&proxy.server, proxy.bypass.as_deref(), BackendKind::WebKit);
     assert!(webkit.contains(&"--proxy=http://127.0.0.1:3052".to_string()));
     assert!(!webkit.iter().any(|arg| arg.starts_with("--proxy-server=")));
 
@@ -1576,7 +1582,7 @@ mod tests {
   }
 
   #[test]
-  fn proxy_credentials_are_rejected_not_dropped() {
+  fn proxy_credentials_reach_the_engine_rather_than_being_dropped() {
     let mut instances = std::collections::HashMap::new();
     instances.insert(
       "p".to_string(),
@@ -1584,6 +1590,7 @@ mod tests {
         proxy: Some(ProxyConfig {
           server: "http://p:1".into(),
           username: Some("u".into()),
+          password: Some("secret".into()),
           ..Default::default()
         }),
         ..Default::default()
@@ -1591,8 +1598,19 @@ mod tests {
     );
     let cache = CommandCache::default();
     let v = view(&instances, None, None, &cache);
-    let err = v.overrides_for("p").expect_err("must fail");
-    assert!(err.contains("credentials"), "{err}");
+    let overrides = v
+      .overrides_for("p")
+      .expect("an instance proxy with credentials launches");
+    let proxy = overrides.launched_proxy.expect("the proxy reaches the engine");
+    assert_eq!(
+      proxy.credentials().map(|c| (c.username, c.password)),
+      Some(("u".into(), "secret".into()))
+    );
+    assert!(
+      overrides.args.iter().all(|arg| !arg.contains("secret")),
+      "a credential is never a flag: {:?}",
+      overrides.args
+    );
   }
 
   #[test]
@@ -1733,6 +1751,42 @@ mod tests {
     assert_eq!(timeout, Some(120_000));
     assert_eq!(headers.unwrap()["authorization"], "Bearer contract-token");
     assert_eq!(capabilities.unwrap()["appium:options"]["deviceName"], "example-device");
+  }
+
+  #[test]
+  fn connection_options_on_a_websocket_url_keep_the_browsers_own_protocol() {
+    for (url, backend) in [
+      ("wss://grid.example.com/session/abc", None),
+      ("ws://127.0.0.1:9222/session", Some(BackendChoice::Bidi)),
+    ] {
+      let cfg = InstanceConfig {
+        backend,
+        connect_url: Some(url.into()),
+        connect_options: Some(ferridriver::options::ConnectOptions {
+          headers: Some(
+            [("authorization".to_string(), "Bearer grid-token".to_string())]
+              .into_iter()
+              .collect(),
+          ),
+          timeout: Some(5_000),
+          ..Default::default()
+        }),
+        ..Default::default()
+      };
+      let instances = std::collections::HashMap::from([("grid".into(), cfg)]);
+      let cache = CommandCache::default();
+      let Some(ConnectMode::ConnectUrlWith {
+        url: endpoint,
+        headers,
+        timeout,
+      }) = view(&instances, None, None, &cache).resolve_connect("grid")
+      else {
+        panic!("{url}: a WebSocket endpoint is not a WebDriver server");
+      };
+      assert_eq!(endpoint, url);
+      assert_eq!(headers.unwrap()["authorization"], "Bearer grid-token");
+      assert_eq!(timeout, Some(5_000));
+    }
   }
 
   #[test]

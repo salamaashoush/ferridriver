@@ -531,6 +531,14 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
         ctx_config.extra_http_headers = headers;
       }
     }
+    if let Some(value) = opts.get("proxy") {
+      // A proxy that does not parse must not quietly send the test's
+      // traffic direct: the configured one stays, and the run says why.
+      match serde_json::from_value(value.clone()) {
+        Ok(proxy) => ctx_config.proxy = proxy,
+        Err(error) => tracing::warn!(target: "ferridriver::worker", %error, "test.use({{ proxy }}) ignored"),
+      }
+    }
     if let Some(value) = opts.get("httpCredentials") {
       let entries = value.as_array().map_or(std::slice::from_ref(value), Vec::as_slice);
       let credentials: Vec<_> = entries
@@ -722,6 +730,7 @@ fn build_context_options(
   if !ctx_config.http_credentials.is_empty() {
     opts.http_credentials = Some(core_http_credentials(&ctx_config.http_credentials));
   }
+  opts.proxy = ctx_config.proxy.as_ref().map(crate::config::ProxyConfig::to_engine);
   if ctx_config.service_workers.as_deref() == Some("block") {
     opts.service_workers = Some(ferridriver::options::ServiceWorkerPolicy::Block);
   }
@@ -843,6 +852,7 @@ fn core_http_credentials(
 fn build_worker_request_def(
   base_url: Option<String>,
   http_credentials: Vec<ferridriver::options::HttpCredentials>,
+  proxy: Option<ferridriver::options::ProxyConfig>,
 ) -> FixtureDef {
   FixtureDef {
     name: "request".into(),
@@ -851,11 +861,13 @@ fn build_worker_request_def(
     setup: Arc::new(move |_pool| {
       let base_url = base_url.clone();
       let http_credentials = http_credentials.clone();
+      let proxy = proxy.clone();
       Box::pin(async move {
         Ok(Arc::new(ferridriver::http_client::HttpClient::new(
           ferridriver::http_client::HttpClientOptions {
             base_url,
             http_credentials,
+            proxy,
             ..Default::default()
           },
         )) as Arc<dyn std::any::Any + Send + Sync>)
@@ -1189,6 +1201,13 @@ impl Worker {
       build_worker_request_def(
         self.config.base_url.clone(),
         core_http_credentials(&self.config.browser.use_options.http_credentials),
+        self
+          .config
+          .browser
+          .use_options
+          .proxy
+          .as_ref()
+          .map(crate::config::ProxyConfig::to_engine),
       ),
     );
     let root_fixture_pool = custom_fixture_pool;

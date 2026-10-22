@@ -51,6 +51,8 @@ pub fn apply_shared(
   overrides.browser = browser.browser.map(|kind| kind.name().to_owned());
   overrides.backend = browser.backend_name().map(str::to_string);
   overrides.executable_path.clone_from(&browser.executable_path);
+  // Unset, the config decides: launch, or the instance's own connection.
+  overrides.connect = (browser.connect.is_some() || browser.auto_connect.is_some()).then(|| browser.connect_mode());
   Ok(())
 }
 

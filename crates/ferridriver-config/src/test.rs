@@ -710,6 +710,10 @@ pub struct BrowserConfig {
   /// environment's flags into `args`.
   #[serde(default)]
   pub instance: Option<String>,
+  /// A running browser to connect to instead of launching one, from
+  /// `--connect` / `--auto-connect`. Wins over `instance`'s connection.
+  #[serde(skip)]
+  pub connect: Option<ferridriver::state::ConnectMode>,
   /// Per-instance launch settings, keyed by instance name.
   #[serde(default)]
   pub instances: std::collections::HashMap<String, crate::browser::InstanceConfig>,
@@ -893,6 +897,19 @@ pub struct ProxyConfig {
   pub password: Option<String>,
 }
 
+impl ProxyConfig {
+  /// The engine's proxy settings, credentials included.
+  #[must_use]
+  pub fn to_engine(&self) -> ferridriver::options::ProxyConfig {
+    ferridriver::options::ProxyConfig {
+      server: self.server.clone(),
+      bypass: self.bypass.clone(),
+      username: self.username.clone(),
+      password: self.password.clone(),
+    }
+  }
+}
+
 impl Default for ContextConfig {
   fn default() -> Self {
     Self {
@@ -1038,6 +1055,9 @@ impl BrowserConfig {
   /// # Errors
   /// Rejects incompatible browser and protocol choices.
   pub fn resolve_instance(&self) -> ferridriver::error::Result<Option<ferridriver::state::ConnectMode>> {
+    if let Some(connect) = &self.connect {
+      return Ok(Some(connect.clone()));
+    }
     let Some(instance) = self.instance.as_deref() else {
       return Ok(None);
     };
@@ -1083,6 +1103,7 @@ impl Default for BrowserConfig {
       slow_mo: None,
       use_options: ContextConfig::default(),
       instance: None,
+      connect: None,
       instances: std::collections::HashMap::new(),
       default_instance: None,
       instance_args_command: None,
@@ -1522,6 +1543,9 @@ pub struct CliOverrides {
   pub backend: Option<String>,
   pub channel: Option<String>,
   pub executable_path: Option<String>,
+  /// `--connect` / `--auto-connect`: run against this browser instead of
+  /// launching one.
+  pub connect: Option<ferridriver::state::ConnectMode>,
   pub browser_args: Vec<String>,
   pub base_url: Option<String>,
   pub viewport_width: Option<i64>,

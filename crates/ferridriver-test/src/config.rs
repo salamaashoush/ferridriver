@@ -384,6 +384,9 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if let Some(ref p) = overrides.executable_path {
     config.browser.executable_path = Some(p.clone());
   }
+  if let Some(ref connect) = overrides.connect {
+    config.browser.connect = Some(connect.clone());
+  }
   if !overrides.browser_args.is_empty() {
     config.browser.args.clone_from(&overrides.browser_args);
   }

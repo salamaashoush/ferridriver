@@ -2953,14 +2953,8 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
   let (backend, kind) = (selection.backend, selection.browser);
 
   let mut args = browser_config.args.clone();
-  // Proxy launch args, spelled the way this backend's binary takes them.
-  if let Some(ref proxy) = browser_config.use_options.proxy {
-    args.extend(ferridriver_config::browser::proxy_launch_flags(
-      &proxy.server,
-      proxy.bypass.as_deref(),
-      backend,
-    ));
-  }
+  // `use.proxy` is a per-context option, as Playwright's `proxy` fixture
+  // is (`build_context_options`), not a launch flag.
   // Ignore HTTPS errors launch arg.
   if browser_config.use_options.ignore_https_errors {
     args.push("--ignore-certificate-errors".to_string());
@@ -2986,6 +2980,7 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
     user_data_dir: overrides.user_data_dir,
     env: (!overrides.env.is_empty()).then_some(overrides.env),
     ignore_default_args: overrides.ignore_default_args,
+    slow_mo: browser_config.slow_mo,
     args,
     default_viewport: browser_config
       .viewport

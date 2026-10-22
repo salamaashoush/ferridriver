@@ -226,7 +226,7 @@ impl McpConfig {
   ///
   /// # Errors
   ///
-  /// Returns an error when the section-level proxy declares credentials.
+  /// Returns an error when the section's browser and backend disagree.
   pub fn base_overrides(&self, instance: &str) -> Result<InstanceOverrides, String> {
     let selection = self.browser_selection().map_err(|error| error.to_string())?;
     instance_overrides_from(
@@ -287,8 +287,8 @@ impl McpConfig {
   ///
   /// # Errors
   ///
-  /// Returns an error when the instance name is unusable, its args
-  /// command hard-fails, or a proxy declares credentials. The launch is
+  /// Returns an error when the instance name is unusable or its args
+  /// command hard-fails. The launch is
   /// aborted rather than started against an unconfigured environment.
   pub fn instance_overrides(&self, instance: &str) -> Result<InstanceOverrides, String> {
     let mut merged = self.base_overrides(instance)?;
@@ -312,6 +312,9 @@ impl McpConfig {
     }
     if per_instance.ignore_default_args.is_some() {
       merged.ignore_default_args = per_instance.ignore_default_args;
+    }
+    if per_instance.launched_proxy.is_some() {
+      merged.launched_proxy = per_instance.launched_proxy;
     }
     merged.env.extend(per_instance.env);
     Ok(merged)
