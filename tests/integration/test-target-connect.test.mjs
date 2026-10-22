@@ -86,7 +86,9 @@ test('a passing test fails the run when its owned remote session cannot be delet
       test: { workers: 1, retries: 0, browser: { instance: 'remote' } },
     }));
     const result = await run(['test', '--no-inherit', '--config', join(cwd, 'ferridriver.json'), 'target.test.ts'], { cwd });
-    assert.equal(result.code, 1, result.text);
+    // The test passed; the browser it ran on could not be cleaned up,
+    // which is an infrastructure failure, not a test failure.
+    assert.equal(result.code, 4, result.text);
     assert.match(result.text, /1 passed/);
     assert.match(result.text, /worker cleanup failed.*WebDriver DELETE \/session/);
   } finally { await commands.stop('stdio'); }
