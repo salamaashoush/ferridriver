@@ -33,15 +33,19 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
   let caps = ferridriver_script::ScriptCaps::from_scripting(&scripting)
     .with_extension_policy(extension_policy)
     .with_extension_settings(extension_settings);
-  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(config))
-    .with_script_caps(caps)
-    .with_sidecars(sidecars)
-    .with_test_config(test_config);
-  server.load_extensions(&extensions).await;
+  let config: Arc<dyn ferridriver_mcp::McpServerConfig> = Arc::new(config);
+  let build = || {
+    McpServer::with_options(connect_mode.clone(), backend, headless, Arc::clone(&config))
+      .with_script_caps(caps.clone())
+      .with_sidecars(sidecars.clone())
+      .with_test_config(test_config.clone())
+  };
   match args.transport.transport {
     // stdio IS the protocol channel: nothing but frames may touch stdout,
     // so the startup line goes to stderr or nowhere at all.
     cli::Transport::Stdio => {
+      let mut server = build();
+      server.load_extensions(&extensions).await;
       ui::note(&format!(
         "serving MCP over stdio ({} backend, {})",
         format!("{backend:?}").to_lowercase(),
@@ -50,12 +54,45 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
       Box::pin(ferridriver_mcp::mcp::serve_stdio_with(server)).await
     },
     cli::Transport::Http => {
-      let port = args.transport.port;
+      let options = ferridriver_mcp::mcp::HttpOptions {
+        host: args.transport.host,
+        port: args.transport.port,
+      };
+      // One server, with its own browsers, per token: a client cannot reach
+      // another's pages by guessing its session key.
+      let mut given = args.transport.tokens.clone();
+      if given.is_empty()
+        && let Ok(from_env) = std::env::var("FERRIDRIVER_MCP_TOKEN")
+      {
+        given = from_env
+          .split(',')
+          .map(str::trim)
+          .filter(|token| !token.is_empty())
+          .map(str::to_string)
+          .collect();
+      }
+      let tokens: Vec<Option<String>> = if given.is_empty() {
+        vec![None]
+      } else {
+        given.into_iter().map(Some).collect()
+      };
+      let mut clients = Vec::with_capacity(tokens.len());
+      for token in tokens {
+        let mut server = build();
+        server.load_extensions(&extensions).await;
+        clients.push(ferridriver_mcp::mcp::HttpClient { token, server });
+      }
       ui::note(&format!(
-        "serving MCP on {}",
-        ui::url(&format!("http://127.0.0.1:{port}/mcp"))
+        "serving MCP over HTTP ({} backend, {}){}",
+        format!("{backend:?}").to_lowercase(),
+        if headless { "headless" } else { "headed" },
+        match clients.len() {
+          1 if clients[0].token.is_some() => ", bearer token required".to_string(),
+          1 => String::new(),
+          n => format!(", {n} clients with a token each"),
+        }
       ));
-      Box::pin(ferridriver_mcp::mcp::serve_http_with(server, port)).await
+      Box::pin(ferridriver_mcp::mcp::serve_http_clients(clients, options)).await
     },
   }
 }

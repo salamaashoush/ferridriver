@@ -71,9 +71,9 @@ async fn reclaim_leaked_browsers() {
   }
 }
 
-/// Run `server` until its transport ends or the process is signalled,
-/// then close every browser it launched.
-async fn serve_until_shutdown<S>(server: &McpServer, serve: S) -> anyhow::Result<()>
+/// Run `servers` until the transport ends or the process is signalled,
+/// then close every browser each of them launched.
+async fn serve_until_shutdown<S>(servers: &[McpServer], serve: S) -> anyhow::Result<()>
 where
   S: std::future::Future<Output = anyhow::Result<()>>,
 {
@@ -85,7 +85,8 @@ where
       () = signal => (Ok(()), true),
     }
   };
-  let cleanup = match tokio::time::timeout(SHUTDOWN_TIMEOUT, Box::pin(server.shutdown())).await {
+  let shutdowns = futures_shutdown(servers);
+  let cleanup = match tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdowns).await {
     Ok(Ok(())) => Ok(()),
     Ok(Err(error)) => Err(anyhow::anyhow!("browser shutdown failed: {error}")),
     Err(_) => Err(anyhow::anyhow!("browser shutdown timed out")),
@@ -109,6 +110,22 @@ where
   outcome
 }
 
+/// Shut every server down, all of them even when one fails, reporting the
+/// failures together.
+async fn futures_shutdown(servers: &[McpServer]) -> Result<(), String> {
+  let mut failures = Vec::new();
+  for server in servers {
+    if let Err(error) = Box::pin(server.shutdown()).await {
+      failures.push(error);
+    }
+  }
+  if failures.is_empty() {
+    Ok(())
+  } else {
+    Err(failures.join("; "))
+  }
+}
+
 /// Serve a default `McpServer` over stdio (for Claude Code, CLI clients).
 ///
 /// # Errors
@@ -125,12 +142,21 @@ pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind, headless: bool
 ///
 /// Returns an error if the TCP listener cannot bind to the requested port,
 /// or if the HTTP server encounters a fatal error.
-pub async fn serve_http(mode: ConnectMode, backend: BackendKind, port: u16, headless: bool) -> anyhow::Result<()> {
+pub async fn serve_http(
+  mode: ConnectMode,
+  backend: BackendKind,
+  options: HttpOptions,
+  headless: bool,
+) -> anyhow::Result<()> {
   // One server shared by every HTTP session, like `serve_http_with`.
   // Minting a fresh `McpServer` per session gave each one its own
   // browser state that nothing ever shut down, so a client that
   // reconnected left a browser behind on every session.
-  Box::pin(serve_http_with(McpServer::new_headless(mode, backend, headless), port)).await
+  Box::pin(serve_http_with(
+    McpServer::new_headless(mode, backend, headless),
+    options,
+  ))
+  .await
 }
 
 /// Serve a custom `McpServer` (with config/extensions) over stdio.
@@ -143,51 +169,226 @@ pub async fn serve_stdio_with(server: McpServer) -> anyhow::Result<()> {
   reclaim_leaked_browsers().await;
   let handle = server.clone();
   let svc = Box::pin(server.serve(rmcp::transport::io::stdio())).await?;
-  serve_until_shutdown(&handle, async move {
+  serve_until_shutdown(std::slice::from_ref(&handle), async move {
     svc.waiting().await?;
     Ok(())
   })
   .await
 }
 
-/// Serve a custom `McpServer` (with config/extensions) over HTTP.
+/// Where the HTTP transport listens.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpOptions {
+  /// `127.0.0.1` unless the caller means to serve the network, which needs
+  /// every client to present a token.
+  pub host: std::net::IpAddr,
+  pub port: u16,
+}
+
+impl Default for HttpOptions {
+  fn default() -> Self {
+    Self {
+      host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+      port: 8080,
+    }
+  }
+}
+
+/// A client of the HTTP transport: the bearer token it presents and the
+/// server, with its own browsers, that answers it. Clients holding different
+/// tokens never see each other's browsers; clients sharing one share them,
+/// separated only by session key.
+pub struct HttpClient {
+  pub token: Option<String>,
+  pub server: McpServer,
+}
+
+/// Serve a custom `McpServer` (with config/extensions) over HTTP to every
+/// caller, with no token.
 ///
 /// # Errors
 ///
 /// Returns an error if the TCP listener cannot bind to the requested port,
-/// or if the HTTP server encounters a fatal error.
-pub async fn serve_http_with(server: McpServer, port: u16) -> anyhow::Result<()> {
+/// if `options.host` is not a loopback address (an unauthenticated server
+/// must not be reachable from the network), or if the HTTP server
+/// encounters a fatal error.
+pub async fn serve_http_with(server: McpServer, options: HttpOptions) -> anyhow::Result<()> {
+  Box::pin(serve_http_clients(vec![HttpClient { token: None, server }], options)).await
+}
+
+/// Serve each of `clients` over HTTP at `/mcp`: a request is answered by the
+/// client whose token its `Authorization: Bearer` header carries, and refused
+/// with `401` when it carries none of them.
+///
+/// # Errors
+///
+/// Returns an error when `clients` is empty, two clients share a token, a
+/// client without a token is mixed with others or served on a non-loopback
+/// address, the listener cannot bind, or the HTTP server fails.
+pub async fn serve_http_clients(clients: Vec<HttpClient>, options: HttpOptions) -> anyhow::Result<()> {
   use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
   };
 
+  let tokens: Vec<Option<&str>> = clients.iter().map(|client| client.token.as_deref()).collect();
+  let routes = tenant_routes(&tokens, options.host)?;
   reclaim_leaked_browsers().await;
-  let handle = server.clone();
   let ct = tokio_util::sync::CancellationToken::new();
-  // The 3.0 rename of `stateful_mode`, and it only governs peers older than
-  // 2026-07-28 — SEP-2567 removed sessions, so a peer that negotiates
-  // 2026-07-28 is served statelessly whatever this says. Those older peers
-  // keep their session and standalone GET stream because the server pushes
-  // messages at them: progress during navigate/run_script/run_bdd, and
-  // `tools/list_changed` when an extension reloads.
-  let config = StreamableHttpServerConfig::default()
-    .with_cancellation_token(ct.child_token())
-    .with_legacy_session_mode(true);
+  let mut services = Vec::with_capacity(clients.len());
+  let mut owners = Vec::with_capacity(clients.len());
+  for client in clients {
+    // The 3.0 rename of `stateful_mode`, and it only governs peers older than
+    // 2026-07-28 — SEP-2567 removed sessions, so a peer that negotiates
+    // 2026-07-28 is served statelessly whatever this says. Those older peers
+    // keep their session and standalone GET stream because the server pushes
+    // messages at them: progress during navigate/run_script/run_bdd, and
+    // `tools/list_changed` when an extension reloads.
+    let config = StreamableHttpServerConfig::default()
+      .with_cancellation_token(ct.child_token())
+      .with_legacy_session_mode(true);
+    owners.push(client.server.clone());
+    let server = client.server;
+    services.push(StreamableHttpService::new(
+      move || Ok(server.clone()),
+      Arc::new(LocalSessionManager::default()),
+      config,
+    ));
+  }
+  let services = Arc::new(services);
+  let routes = Arc::new(routes);
 
-  let svc = StreamableHttpService::new(
-    move || Ok(server.clone()),
-    Arc::new(LocalSessionManager::default()),
-    config,
-  );
+  let listener = tokio::net::TcpListener::bind((options.host, options.port)).await?;
+  let addr = listener.local_addr()?;
+  // The bound address, not the requested one: with port 0 this line is how
+  // a supervisor learns where the server is.
+  eprintln!("ferridriver listening on http://{addr}/mcp");
 
-  let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-  eprintln!("ferridriver listening on http://0.0.0.0:{port}/mcp");
+  let handler = move |request: axum::extract::Request| {
+    let services = Arc::clone(&services);
+    let routes = Arc::clone(&routes);
+    async move {
+      use axum::response::IntoResponse as _;
+      use tower_service::Service as _;
+      let presented = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+      let Some(index) = routes.client_for(presented) else {
+        return (
+          axum::http::StatusCode::UNAUTHORIZED,
+          [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+          "a valid bearer token is required",
+        )
+          .into_response();
+      };
+      let mut service = services[index].clone();
+      match service.call(request).await {
+        Ok(response) => response.into_response(),
+        Err(never) => match never {},
+      }
+    }
+  };
 
-  serve_until_shutdown(&handle, async move {
-    axum::serve(listener, axum::Router::new().nest_service("/mcp", svc))
+  serve_until_shutdown(&owners, async move {
+    let app = axum::Router::new()
+      .route("/mcp", axum::routing::any(handler.clone()))
+      .route("/mcp/{*rest}", axum::routing::any(handler));
+    axum::serve(listener, app)
       .with_graceful_shutdown(async move { ct.cancelled_owned().await })
       .await?;
     Ok(())
   })
   .await
+}
+
+/// Which client answers a request, by the SHA-256 of the token it presents.
+struct TenantRoutes {
+  /// `Some` for one client served without a token.
+  open: Option<usize>,
+  by_token: Vec<([u8; 32], usize)>,
+}
+
+impl TenantRoutes {
+  fn client_for(&self, presented: Option<&str>) -> Option<usize> {
+    if let Some(open) = self.open {
+      return Some(open);
+    }
+    let presented = token_digest(presented?);
+    self
+      .by_token
+      .iter()
+      .find_map(|(digest, index)| (*digest == presented).then_some(*index))
+  }
+}
+
+fn token_digest(token: &str) -> [u8; 32] {
+  use sha2::Digest as _;
+  sha2::Sha256::digest(token.as_bytes()).into()
+}
+
+fn tenant_routes(tokens: &[Option<&str>], host: std::net::IpAddr) -> anyhow::Result<TenantRoutes> {
+  if tokens.is_empty() {
+    anyhow::bail!("no MCP server to serve");
+  }
+  if tokens.iter().any(Option::is_none) {
+    if tokens.len() > 1 {
+      anyhow::bail!("every client needs its own token when more than one is served");
+    }
+    if !host.is_loopback() {
+      anyhow::bail!(
+        "refusing to serve MCP on {host} without a token: anyone who can reach it would drive the browser. \
+         Pass --token (or FERRIDRIVER_MCP_TOKEN), or listen on a loopback address"
+      );
+    }
+    return Ok(TenantRoutes {
+      open: Some(0),
+      by_token: Vec::new(),
+    });
+  }
+  let mut by_token: Vec<([u8; 32], usize)> = Vec::with_capacity(tokens.len());
+  for (index, token) in tokens.iter().enumerate() {
+    let token = token.unwrap_or_default();
+    if token.is_empty() {
+      anyhow::bail!("an MCP token cannot be empty");
+    }
+    let digest = token_digest(token);
+    if by_token.iter().any(|(seen, _)| *seen == digest) {
+      anyhow::bail!("two MCP clients were given the same token");
+    }
+    by_token.push((digest, index));
+  }
+  Ok(TenantRoutes { open: None, by_token })
+}
+
+#[cfg(test)]
+mod tenant_tests {
+  use super::tenant_routes;
+
+  const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+  const ANY: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+
+  #[test]
+  fn each_token_reaches_its_own_server_and_nothing_else_gets_in() {
+    let routes = tenant_routes(&[Some("token-a"), Some("token-b")], ANY).unwrap();
+    assert_eq!(routes.client_for(Some("token-a")), Some(0));
+    assert_eq!(routes.client_for(Some("token-b")), Some(1));
+    assert_eq!(routes.client_for(Some("token-c")), None);
+    assert_eq!(routes.client_for(None), None);
+  }
+
+  #[test]
+  fn an_open_server_stays_on_loopback() {
+    let routes = tenant_routes(&[None], LOOPBACK).unwrap();
+    assert_eq!(routes.client_for(None), Some(0));
+    assert!(tenant_routes(&[None], ANY).is_err());
+  }
+
+  #[test]
+  fn tokens_must_be_present_distinct_and_non_empty() {
+    assert!(tenant_routes(&[], LOOPBACK).is_err());
+    assert!(tenant_routes(&[None, Some("token-a")], LOOPBACK).is_err());
+    assert!(tenant_routes(&[Some("same"), Some("same")], LOOPBACK).is_err());
+    assert!(tenant_routes(&[Some("")], LOOPBACK).is_err());
+  }
 }

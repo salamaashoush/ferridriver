@@ -121,6 +121,18 @@ pub struct TransportArgs {
   /// Port for HTTP transport.
   #[arg(long, default_value = "8080", help_heading = "Transport")]
   pub port: u16,
+
+  /// Address the HTTP transport listens on. A non-loopback address needs
+  /// `--token`, since whoever reaches it drives the browser.
+  #[arg(long, default_value = "127.0.0.1", help_heading = "Transport")]
+  pub host: std::net::IpAddr,
+
+  /// Bearer token an HTTP client must send (`Authorization: Bearer
+  /// <token>`). Repeat it to serve several clients: each token gets
+  /// browsers of its own. Read from `FERRIDRIVER_MCP_TOKEN`
+  /// (comma-separated) when not given, which keeps it out of `ps`.
+  #[arg(long = "token", help_heading = "Transport")]
+  pub tokens: Vec<String>,
 }
 
 #[derive(Clone, ValueEnum)]
