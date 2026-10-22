@@ -90,13 +90,13 @@ describe('emulation and storage', () => {
       await expect(context.setCPUThrottling(4)).rejects.toThrow(/needs Chromium/);
       return;
     }
-    const spin = () =>
-      page.evaluate(() => {
+    const spin = async () =>
+      Number(await page.evaluate(() => {
         const start = performance.now();
         let x = 0;
         for (let i = 0; i < 3e7; i++) x += i % 7;
         return [performance.now() - start, x][0];
-      });
+      }));
     const fast = await spin();
     await context.setCPUThrottling(6);
     const slow = await spin();

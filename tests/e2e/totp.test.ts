@@ -1,8 +1,6 @@
-// The RFC 6238 vectors through the script binding, and the two places a
-// test imports `totp` from.
+// The RFC 6238 vectors through the script binding.
 
 import { test, expect, totp } from '@ferridriver/test';
-import { totp as frameworkTotp } from 'ferridriver';
 
 const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
 
@@ -14,7 +12,7 @@ test('totp_matches_the_rfc_vectors', async () => {
 
 test('totp_reads_otpauth_links', async () => {
   const link = `otpauth://totp/Acme:salama@example.com?secret=${SECRET}&digits=8&issuer=Acme`;
-  expect(frameworkTotp(link, { timestamp: 59 })).toBe('94287082');
+  expect(totp(link, { timestamp: 59 })).toBe('94287082');
   expect(totp(SECRET)).toMatch(/^\d{6}$/);
 });
 
