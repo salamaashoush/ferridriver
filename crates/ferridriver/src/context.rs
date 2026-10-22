@@ -1897,6 +1897,12 @@ impl ContextRef {
       if options.offline == Some(true) {
         self.set_offline(false).await?;
       }
+      if options.network_conditions.is_some_and(|c| c.is_throttled()) {
+        self.set_network_conditions(None).await?;
+      }
+      if options.cpu_throttling_rate.is_some_and(|r| r > 1.0) {
+        self.set_cpu_throttling(None).await?;
+      }
       if options.extra_http_headers.is_some_and(|headers| !headers.is_empty()) {
         self.set_extra_http_headers(&rustc_hash::FxHashMap::default()).await?;
       }
@@ -1979,6 +1985,54 @@ impl ContextRef {
         "setOffline",
         serde_json::json!({ "offline": offline }),
         self.mutate_options(|o| o.offline = Some(offline)),
+      )
+      .await
+  }
+
+  /// Throttles the network of every page in the context, open and
+  /// future; `None` lifts it. Not in Playwright. Chromium only.
+  ///
+  /// # Errors
+  ///
+  /// Invalid numbers, a backend that cannot throttle, or a failure
+  /// applying the conditions to an open page.
+  pub async fn set_network_conditions(&self, conditions: Option<crate::options::NetworkConditions>) -> Result<()> {
+    let conditions = conditions.unwrap_or(crate::options::NetworkConditions::NONE);
+    conditions.validate()?;
+    let params = serde_json::json!({
+      "latency": conditions.latency,
+      "downloadThroughput": conditions.download_throughput,
+      "uploadThroughput": conditions.upload_throughput,
+    });
+    self
+      .traced(
+        "setNetworkConditions",
+        params,
+        self.mutate_options(|o| o.network_conditions = Some(conditions)),
+      )
+      .await
+  }
+
+  /// Slows every page's CPU by `rate` (`4.0` is four times slower);
+  /// `None` lifts it. Not in Playwright. Chromium only.
+  ///
+  /// # Errors
+  ///
+  /// A rate below 1, a backend that cannot throttle, or a failure
+  /// applying it to an open page.
+  pub async fn set_cpu_throttling(&self, rate: Option<f64>) -> Result<()> {
+    let rate = rate.unwrap_or(1.0);
+    if !(rate.is_finite() && rate >= 1.0) {
+      return Err(crate::error::FerriError::invalid_argument(
+        "rate",
+        format!("must be a number of at least 1 (1 is no slowdown), got {rate}"),
+      ));
+    }
+    self
+      .traced(
+        "setCPUThrottling",
+        serde_json::json!({ "rate": rate }),
+        self.mutate_options(|o| o.cpu_throttling_rate = Some(rate)),
       )
       .await
   }

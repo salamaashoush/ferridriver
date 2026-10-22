@@ -170,6 +170,8 @@ impl Browser {
     javaScriptEnabled?: boolean;
     locale?: string;
     offline?: boolean;
+    networkConditions?: 'slow-3g' | 'slow-4g' | 'fast-4g' | { latency?: number; downloadThroughput?: number; uploadThroughput?: number };
+    cpuThrottling?: number;
     permissions?: string[];
     proxy?: { server: string; bypass?: string; username?: string; password?: string };
     recordVideo?: { dir: string; size?: { width: number; height: number } };
@@ -192,7 +194,9 @@ impl Browser {
     &self,
     options: Option<crate::context::NapiBrowserContextOptions>,
   ) -> Result<crate::context::BrowserContext> {
-    let core = options.map(crate::context::NapiBrowserContextOptions::into_core);
+    let core = options
+      .map(crate::context::NapiBrowserContextOptions::into_core)
+      .transpose()?;
     // The core builder resolves synchronously (context registration is pure
     // bookkeeping); block_on keeps this method's sync JS shape.
     let ctx = napi::bindgen_prelude::block_on(std::future::IntoFuture::into_future(

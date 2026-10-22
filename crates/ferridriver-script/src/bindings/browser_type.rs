@@ -147,10 +147,10 @@ impl BrowserTypeJs {
     crate::bindings::convert::readable(&ctx, profile)?;
     crate::bindings::convert::writable(&ctx, profile)?;
     let core = LaunchPersistentContextOptions { launch, context };
-    let ctx_ref = resources(&ctx)?
-      .launch_persistent_context(self.inner, std::path::Path::new(&user_data_dir), core)
-      .await
-      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
+    let ctx_ref =
+      Box::pin(resources(&ctx)?.launch_persistent_context(self.inner, std::path::Path::new(&user_data_dir), core))
+        .await
+        .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
     let wrapper = BrowserContextJs::new(Arc::new(ctx_ref));
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)

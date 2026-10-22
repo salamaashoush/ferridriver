@@ -341,6 +341,40 @@ impl BrowserContextJs {
       .await
   }
 
+  /// `browserContext.setNetworkConditions(preset | conditions | null)`.
+  #[qjs(rename = "setNetworkConditions")]
+  pub async fn set_network_conditions<'js>(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: Ctx<'js>,
+    conditions: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move {
+        let conditions = match conditions.0 {
+          Some(v) if !v.is_undefined() && !v.is_null() => {
+            Some(serde_from_js::<ferridriver::options::NetworkConditions>(&ctx, v)?)
+          },
+          _ => None,
+        };
+        self.inner.set_network_conditions(conditions).await.into_js_with(&ctx)
+      })
+      .await
+  }
+
+  /// `browserContext.setCPUThrottling(rate | null)`.
+  #[qjs(rename = "setCPUThrottling")]
+  pub async fn set_cpu_throttling(
+    &self,
+    call_site: crate::bindings::CallSite,
+    ctx: rquickjs::Ctx<'_>,
+    rate: Opt<Option<f64>>,
+  ) -> rquickjs::Result<()> {
+    call_site
+      .scope(async move { self.inner.set_cpu_throttling(rate.0.flatten()).await.into_js_with(&ctx) })
+      .await
+  }
+
   /// Playwright: `browserContext.setHTTPCredentials(httpCredentials:
   /// HttpCredentials | HttpCredentials[] | null)`
   /// (`packages/playwright-core/src/client/browserContext.ts`). `null`,

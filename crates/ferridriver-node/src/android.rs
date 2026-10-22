@@ -933,7 +933,7 @@ impl AndroidDevice {
     options: Option<AndroidLaunchBrowserOptions>,
   ) -> Result<crate::context::BrowserContext> {
     let (pkg, args, mut context) = match options {
-      Some(options) => (options.pkg, options.args, options.context.into_core()),
+      Some(options) => (options.pkg, options.args, options.context.into_core()?),
       None => (None, Vec::new(), ferridriver::options::BrowserContextOptions::default()),
     };
     // A device has one context, so its proxy is the browser's.

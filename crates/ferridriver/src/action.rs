@@ -431,6 +431,8 @@ action_options!(crate::options::BrowserContextOptions {
   opt java_script_enabled: bool,
   opt locale: String,
   opt offline: bool,
+  opt network_conditions: crate::options::NetworkConditions,
+  opt cpu_throttling_rate: f64,
   opt permissions: Vec<String>,
   opt proxy: crate::options::ProxyConfig,
   opt record_har: crate::options::RecordHarOptions,

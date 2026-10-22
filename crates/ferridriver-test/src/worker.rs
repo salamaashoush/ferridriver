@@ -453,6 +453,15 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     if let Some(v) = opts.get("offline").and_then(|v| v.as_bool()) {
       ctx_config.offline = v;
     }
+    if let Some(v) = opts
+      .get("networkConditions")
+      .and_then(|v| serde_json::from_value(v.clone()).ok())
+    {
+      ctx_config.network_conditions = Some(v);
+    }
+    if let Some(v) = opts.get("cpuThrottling").and_then(serde_json::Value::as_f64) {
+      ctx_config.cpu_throttling = Some(v);
+    }
     if let Some(v) = opts.get("javaScriptEnabled").and_then(|v| v.as_bool()) {
       ctx_config.java_script_enabled = v;
     }
@@ -660,6 +669,8 @@ fn build_context_options(
   if ctx_config.offline {
     opts.offline = Some(true);
   }
+  opts.network_conditions = ctx_config.network_conditions;
+  opts.cpu_throttling_rate = ctx_config.cpu_throttling;
   if !ctx_config.permissions.is_empty() {
     opts.permissions = Some(ctx_config.permissions.clone());
   }
@@ -2770,6 +2781,29 @@ mod tests {
       viewport_override: None,
       request_base_url: None,
     }
+  }
+
+  #[test]
+  fn throttling_in_the_use_block_reaches_the_context_options() {
+    let context = used(serde_json::json!({ "networkConditions": "slow-4g", "cpuThrottling": 4 }));
+    let opts = build_context_options(
+      &effective(context, None),
+      std::path::Path::new("."),
+      ferridriver::backend::BackendKind::CdpPipe,
+    );
+    assert_eq!(
+      opts.network_conditions,
+      ferridriver::options::NetworkConditions::preset("slow-4g")
+    );
+    assert_eq!(opts.cpu_throttling_rate, Some(4.0));
+  }
+
+  #[test]
+  fn an_unknown_network_preset_fails_the_config_rather_than_running_unthrottled() {
+    let parsed: Result<ContextConfig, _> =
+      serde_json::from_value(serde_json::json!({ "networkConditions": "dial-up" }));
+    let message = parsed.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(message.contains("unknown network preset"), "{message}");
   }
 
   #[test]

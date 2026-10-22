@@ -2413,6 +2413,131 @@ impl Default for Geolocation {
   }
 }
 
+/// Network throttling: `{ latency?, downloadThroughput?, uploadThroughput? }`
+/// or a preset name. Not in Playwright, which reaches the same CDP command
+/// only through `newCDPSession`; Chromium only.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkConditions {
+  /// Added round-trip latency, in milliseconds.
+  pub latency: f64,
+  /// Bytes per second; `None` leaves the direction unthrottled.
+  pub download_throughput: Option<f64>,
+  pub upload_throughput: Option<f64>,
+}
+
+impl NetworkConditions {
+  /// No added latency and no bandwidth cap: what clearing the
+  /// conditions sends, since the backend has no separate reset.
+  pub const NONE: Self = Self {
+    latency: 0.0,
+    download_throughput: None,
+    upload_throughput: None,
+  };
+
+  /// The presets Chrome's developer tools offer, with their numbers
+  /// (`front_end/core/sdk/NetworkManager.ts`), so a page throttled here
+  /// matches what a developer reproduces there.
+  pub const PRESETS: &[(&str, Self)] = &[
+    (
+      "slow-3g",
+      Self {
+        latency: 2000.0,
+        download_throughput: Some(50_000.0),
+        upload_throughput: Some(50_000.0),
+      },
+    ),
+    (
+      "slow-4g",
+      Self {
+        latency: 562.5,
+        download_throughput: Some(180_000.0),
+        upload_throughput: Some(84_375.0),
+      },
+    ),
+    (
+      "fast-4g",
+      Self {
+        latency: 165.0,
+        download_throughput: Some(1_012_500.0),
+        upload_throughput: Some(168_750.0),
+      },
+    ),
+  ];
+
+  #[must_use]
+  pub fn preset(name: &str) -> Option<Self> {
+    Self::PRESETS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+  }
+
+  #[must_use]
+  pub fn is_throttled(&self) -> bool {
+    *self != Self::NONE
+  }
+
+  /// Checks the numbers the way the browser would otherwise reject them
+  /// one field at a time, or silently accept a negative latency.
+  ///
+  /// # Errors
+  ///
+  /// A negative or non-finite latency or throughput.
+  pub fn validate(&self) -> crate::error::Result<()> {
+    let fields = [
+      ("latency", Some(self.latency)),
+      ("downloadThroughput", self.download_throughput),
+      ("uploadThroughput", self.upload_throughput),
+    ];
+    for (name, value) in fields {
+      if let Some(v) = value
+        && !(v.is_finite() && v >= 0.0)
+      {
+        return Err(crate::error::FerriError::invalid_argument(
+          "networkConditions",
+          format!("{name} must be a non-negative number, got {v}"),
+        ));
+      }
+    }
+    Ok(())
+  }
+}
+
+impl<'de> serde::Deserialize<'de> for NetworkConditions {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Fields {
+      #[serde(default)]
+      latency: f64,
+      download_throughput: Option<f64>,
+      upload_throughput: Option<f64>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+      Preset(String),
+      Fields(Fields),
+    }
+    let conditions = match Raw::deserialize(deserializer)? {
+      Raw::Preset(name) => Self::preset(&name).ok_or_else(|| {
+        let known: Vec<&str> = Self::PRESETS.iter().map(|(n, _)| *n).collect();
+        serde::de::Error::custom(format!(
+          "unknown network preset {name:?}; expected one of {}",
+          known.join(", ")
+        ))
+      })?,
+      // CDP spells "unthrottled" as -1, so a caller copying DevTools
+      // numbers means the same thing by it.
+      Raw::Fields(f) => Self {
+        latency: f.latency,
+        download_throughput: f.download_throughput.filter(|v| (v + 1.0).abs() > f64::EPSILON),
+        upload_throughput: f.upload_throughput.filter(|v| (v + 1.0).abs() > f64::EPSILON),
+      },
+    };
+    conditions.validate().map_err(serde::de::Error::custom)?;
+    Ok(conditions)
+  }
+}
+
 /// HTTP basic/digest credentials: `HTTPCredentials { username, password,
 /// origin?, send? }`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2921,6 +3046,12 @@ pub struct BrowserContextOptions {
   pub java_script_enabled: Option<bool>,
   pub locale: Option<String>,
   pub offline: Option<bool>,
+  /// Clearing stores [`NetworkConditions::NONE`] rather than `None`, so the
+  /// reset reaches pages that were throttled.
+  pub network_conditions: Option<NetworkConditions>,
+  /// Chromium's CPU slowdown factor; `1.0` is unthrottled and is what
+  /// clearing stores, for the same reason.
+  pub cpu_throttling_rate: Option<f64>,
   pub permissions: Option<Vec<String>>,
   /// Grants made with `browserContext.grantPermissions(permissions, { origin })`,
   /// by origin; `permissions` above holds the ones for every origin.

@@ -5345,21 +5345,39 @@ impl<T: CdpWrap> CdpPage<T> {
         Ok(())
       })
       .into();
-    let offline_fut: OptionFuture<_> = opts
-      .offline
-      .map(|o| async move {
+    // One command carries both, so each must be sent with the other's
+    // current value or setting one would undo the other.
+    let network_fut: OptionFuture<_> = (opts.offline.is_some() || opts.network_conditions.is_some())
+      .then(|| {
+        let conditions = opts
+          .network_conditions
+          .unwrap_or(crate::options::NetworkConditions::NONE);
+        let offline = opts.offline.unwrap_or(false);
+        async move {
+          self
+            .configure(
+              "Network.emulateNetworkConditions",
+              serde_json::json!({
+                "offline": offline,
+                "latency": conditions.latency,
+                "downloadThroughput": conditions.download_throughput.unwrap_or(-1.0),
+                "uploadThroughput": conditions.upload_throughput.unwrap_or(-1.0),
+              }),
+            )
+            .await
+        }
+      })
+      .into();
+    let cpu_fut: OptionFuture<_> = opts
+      .cpu_throttling_rate
+      .map(|rate| async move {
         self
-          .configure(
-            "Network.emulateNetworkConditions",
-            serde_json::json!({
-              "offline": o, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1,
-            }),
-          )
+          .configure("Emulation.setCPUThrottlingRate", serde_json::json!({ "rate": rate }))
           .await
       })
       .into();
 
-    let (r_vp, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_med, r_geo, r_perm, r_off) = tokio::join!(
+    let (r_vp, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_med, r_geo, r_perm, r_net, r_cpu) = tokio::join!(
       viewport_fut,
       ua_fut,
       locale_fut,
@@ -5374,7 +5392,8 @@ impl<T: CdpWrap> CdpPage<T> {
       media_fut,
       geo_fut,
       perms_fut,
-      offline_fut,
+      network_fut,
+      cpu_fut,
     );
 
     // Aggregate errors — one failure per field, each labelled.
@@ -5394,7 +5413,8 @@ impl<T: CdpWrap> CdpPage<T> {
       ("media (colorScheme/reducedMotion/forcedColors/contrast)", r_med),
       ("geolocation", r_geo),
       ("permissions", r_perm),
-      ("offline", r_off),
+      ("offline/networkConditions", r_net),
+      ("cpuThrottling", r_cpu),
     ] {
       if let Some(Err(e)) = r {
         errs.push(format!("{label}: {e}"));

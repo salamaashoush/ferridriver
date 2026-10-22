@@ -2472,6 +2472,10 @@ export interface BrowserContext {
   clearPermissions(): Promise<void>;
   setGeolocation(geolocation: { latitude: number; longitude: number; accuracy?: number } | null): Promise<void>;
   setOffline(offline: boolean): Promise<void>;
+  /** ferridriver extension, Chromium only: throttle every page; `null` lifts it. */
+  setNetworkConditions(conditions: NetworkPreset | NetworkConditions | null): Promise<void>;
+  /** ferridriver extension, Chromium only: slow the CPU by `rate` (4 is four times slower); `null` lifts it. */
+  setCPUThrottling(rate: number | null): Promise<void>;
   setExtraHTTPHeaders(headers: Record<string, string>): Promise<void>;
   storageState(options?: { path?: string; indexedDB?: boolean; opfs?: boolean; credentials?: boolean }): Promise<StorageState>;
   addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown, options?: EvaluateOptions): Promise<Disposable>;
@@ -2589,6 +2593,17 @@ export interface HttpCredentials {
   send?: 'always' | 'unauthorized';
 }
 
+/** The throttling presets Chrome DevTools offers, with its numbers. */
+export type NetworkPreset = 'slow-3g' | 'slow-4g' | 'fast-4g';
+
+export interface NetworkConditions {
+  /** Added round-trip latency in milliseconds. */
+  latency?: number;
+  /** Bytes per second; omitted or -1 leaves the direction unthrottled. */
+  downloadThroughput?: number;
+  uploadThroughput?: number;
+}
+
 export interface BrowserContextOptions {
   viewport?: { width: number; height: number } | null;
   userAgent?: string;
@@ -2599,6 +2614,10 @@ export interface BrowserContextOptions {
   extraHTTPHeaders?: Record<string, string>;
   httpCredentials?: HttpCredentials | HttpCredentials[];
   offline?: boolean;
+  /** ferridriver extension, Chromium only. */
+  networkConditions?: NetworkPreset | NetworkConditions;
+  /** ferridriver extension, Chromium only: CPU slowdown factor. */
+  cpuThrottling?: number;
   colorScheme?: 'light' | 'dark' | 'no-preference';
   reducedMotion?: 'reduce' | 'no-preference';
   forcedColors?: 'active' | 'none';

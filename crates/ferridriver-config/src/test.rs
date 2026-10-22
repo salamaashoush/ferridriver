@@ -835,6 +835,11 @@ pub struct ContextConfig {
   #[serde(default, deserialize_with = "one_or_many_credentials")]
   pub http_credentials: Vec<HttpCredentialsConfig>,
   pub ignore_https_errors: bool,
+  /// A preset (`slow-3g`, `slow-4g`, `fast-4g`) or `{ latency,
+  /// downloadThroughput, uploadThroughput }`. Chromium only.
+  pub network_conditions: Option<ferridriver::options::NetworkConditions>,
+  /// CPU slowdown factor, `4` for four times slower. Chromium only.
+  pub cpu_throttling: Option<f64>,
   pub proxy: Option<ProxyConfig>,
   pub service_workers: Option<String>,
   pub storage_state: Option<String>,
@@ -919,6 +924,8 @@ impl Default for ContextConfig {
       extra_http_headers: BTreeMap::new(),
       http_credentials: Vec::new(),
       ignore_https_errors: false,
+      network_conditions: None,
+      cpu_throttling: None,
       proxy: None,
       service_workers: None,
       storage_state: None,
@@ -1865,6 +1872,12 @@ fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   }
   if overlay.geolocation.is_some() {
     base.geolocation.clone_from(&overlay.geolocation);
+  }
+  if overlay.network_conditions.is_some() {
+    base.network_conditions = overlay.network_conditions;
+  }
+  if overlay.cpu_throttling.is_some() {
+    base.cpu_throttling = overlay.cpu_throttling;
   }
   if !overlay.permissions.is_empty() {
     base.permissions.clone_from(&overlay.permissions);

@@ -1553,6 +1553,20 @@ impl AnyPage {
   /// (`setOffline`, `setGeolocation`, etc.) mutate the bag and
   /// re-apply.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+    if !matches!(self, AnyPage::CdpPipe(_) | AnyPage::CdpWs(_)) {
+      let throttled = [
+        (
+          opts.network_conditions.is_some_and(|c| c.is_throttled()),
+          "networkConditions",
+        ),
+        (opts.cpu_throttling_rate.is_some_and(|r| r > 1.0), "cpuThrottling"),
+      ];
+      if let Some((_, name)) = throttled.iter().find(|(asked, _)| *asked) {
+        return Err(FerriError::unsupported(format!(
+          "{name} needs Chromium: only the DevTools protocol can throttle a page"
+        )));
+      }
+    }
     page_dispatch!(self, apply_context_options(opts))
   }
 

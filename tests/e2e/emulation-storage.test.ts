@@ -50,6 +50,61 @@ describe('emulation and storage', () => {
     expect(await page.evaluate('navigator.onLine')).toBe(true);
   });
 
+  test('script_network_conditions', async ({ page, context, browserName }) => {
+    await page.goto('/fx/landed');
+    const fetchMs = () =>
+      page.evaluate(async () => {
+        const start = performance.now();
+        await fetch(`/fx/landed?${Math.random()}`, { cache: 'no-store' });
+        return performance.now() - start;
+      });
+    if (browserName !== 'chromium') {
+      await expect(context.setNetworkConditions({ latency: 500 })).rejects.toThrow(/needs Chromium/);
+      return;
+    }
+    await context.setNetworkConditions({ latency: 500 });
+    expect(await fetchMs()).toBeGreaterThanOrEqual(450);
+    await context.setNetworkConditions(null);
+    expect(await fetchMs()).toBeLessThan(450);
+    await expect(context.setNetworkConditions('dial-up' as never)).rejects.toThrow(/unknown network preset/);
+    await expect(context.setNetworkConditions({ latency: -1 })).rejects.toThrow(/non-negative/);
+  });
+
+  test('script_network_conditions_survive_offline_toggle', async ({ page, context, browserName }) => {
+    test.skip(browserName !== 'chromium', 'throttling is Chromium only');
+    await page.goto('/fx/landed');
+    await context.setNetworkConditions({ latency: 500 });
+    await context.setOffline(true);
+    await context.setOffline(false);
+    const ms = await page.evaluate(async () => {
+      const start = performance.now();
+      await fetch(`/fx/landed?${Math.random()}`, { cache: 'no-store' });
+      return performance.now() - start;
+    });
+    expect(ms).toBeGreaterThanOrEqual(450);
+  });
+
+  test('script_cpu_throttling', async ({ page, context, browserName }) => {
+    await page.goto(dataUrl('<body></body>'));
+    if (browserName !== 'chromium') {
+      await expect(context.setCPUThrottling(4)).rejects.toThrow(/needs Chromium/);
+      return;
+    }
+    const spin = () =>
+      page.evaluate(() => {
+        const start = performance.now();
+        let x = 0;
+        for (let i = 0; i < 3e7; i++) x += i % 7;
+        return [performance.now() - start, x][0];
+      });
+    const fast = await spin();
+    await context.setCPUThrottling(6);
+    const slow = await spin();
+    await context.setCPUThrottling(null);
+    expect(slow).toBeGreaterThan(fast * 2);
+    await expect(context.setCPUThrottling(0.5)).rejects.toThrow(/at least 1/);
+  });
+
   test('script_cookies', async ({ page, context }) => {
     await page.goto('/fx/landed');
     await context.addCookies([

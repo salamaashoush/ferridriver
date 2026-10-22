@@ -300,6 +300,27 @@ impl BrowserContext {
     self.inner.set_offline(offline).await.into_napi()
   }
 
+  /// ferridriver extension, Chromium only: throttle every page; `null`
+  /// lifts it.
+  #[napi(
+    ts_args_type = "conditions: 'slow-3g' | 'slow-4g' | 'fast-4g' | { latency?: number; downloadThroughput?: number; uploadThroughput?: number } | null"
+  )]
+  pub async fn set_network_conditions(&self, conditions: Option<serde_json::Value>) -> Result<()> {
+    let conditions = conditions
+      .filter(|v| !v.is_null())
+      .map(serde_json::from_value::<ferridriver::options::NetworkConditions>)
+      .transpose()
+      .map_err(|e| napi::Error::from_reason(format!("networkConditions: {e}")))?;
+    self.inner.set_network_conditions(conditions).await.into_napi()
+  }
+
+  /// ferridriver extension, Chromium only: CPU slowdown factor; `null`
+  /// lifts it.
+  #[napi(js_name = "setCPUThrottling")]
+  pub async fn set_cpu_throttling(&self, rate: Option<f64>) -> Result<()> {
+    self.inner.set_cpu_throttling(rate).await.into_napi()
+  }
+
   /// Playwright: `browserContext.setHTTPCredentials(httpCredentials:
   /// HttpCredentials | HttpCredentials[] | null)`
   /// (`packages/playwright-core/src/client/browserContext.ts`). `null`,
@@ -1020,6 +1041,11 @@ pub struct NapiBrowserContextOptions {
   pub java_script_enabled: Option<bool>,
   pub locale: Option<String>,
   pub offline: Option<bool>,
+  #[napi(
+    ts_type = "'slow-3g' | 'slow-4g' | 'fast-4g' | { latency?: number; downloadThroughput?: number; uploadThroughput?: number }"
+  )]
+  pub network_conditions: Option<serde_json::Value>,
+  pub cpu_throttling: Option<f64>,
   pub permissions: Option<Vec<String>>,
   pub proxy: Option<NapiProxyConfig>,
   pub record_har: Option<RecordHarOptionsJs>,
@@ -1209,10 +1235,19 @@ impl NapiBrowserContextOptions {
   /// bag. Unknown string values for enum-typed fields fall back to
   /// `None` (same-as-absent), matching Playwright's lenient client-side
   /// parsing.
+  ///
+  /// # Errors
+  ///
+  /// `networkConditions` that is neither a known preset nor valid numbers:
+  /// a monitor that silently runs unthrottled measures the wrong thing.
   #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-  #[must_use]
-  pub fn into_core(self) -> ferridriver::options::BrowserContextOptions {
+  pub fn into_core(self) -> Result<ferridriver::options::BrowserContextOptions> {
     use ferridriver::options as fo;
+    let network_conditions = self
+      .network_conditions
+      .map(serde_json::from_value::<fo::NetworkConditions>)
+      .transpose()
+      .map_err(|e| napi::Error::from_reason(format!("networkConditions: {e}")))?;
     let color_scheme = self
       .color_scheme
       .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
@@ -1282,7 +1317,7 @@ impl NapiBrowserContextOptions {
       serde_json::Value::Null => None,
       inline => Some(fo::StorageStateInput::Inline(inline)),
     });
-    fo::BrowserContextOptions {
+    Ok(fo::BrowserContextOptions {
       // Not a public `newContext` option in Playwright either: the
       // attribute is set by `selectors.setTestIdAttribute` or the test
       // runner's `use` bag, which reach the context directly.
@@ -1307,6 +1342,8 @@ impl NapiBrowserContextOptions {
       java_script_enabled: self.java_script_enabled,
       locale: self.locale,
       offline: self.offline,
+      network_conditions,
+      cpu_throttling_rate: self.cpu_throttling,
       permissions: self.permissions,
       origin_permissions: Vec::new(),
       proxy,
@@ -1340,7 +1377,7 @@ impl NapiBrowserContextOptions {
       timezone_id: self.timezone_id,
       user_agent: self.user_agent,
       viewport,
-    }
+    })
   }
 }
 

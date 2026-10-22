@@ -114,6 +114,8 @@ impl BrowserType {
     javaScriptEnabled?: boolean;
     locale?: string;
     offline?: boolean;
+    networkConditions?: 'slow-3g' | 'slow-4g' | 'fast-4g' | { latency?: number; downloadThroughput?: number; uploadThroughput?: number };
+    cpuThrottling?: number;
     permissions?: string[];
     proxy?: { server: string; bypass?: string; username?: string; password?: string };
     recordVideo?: { dir: string; size?: { width: number; height: number } };
@@ -136,6 +138,7 @@ impl BrowserType {
     let context = opts
       .context
       .map(crate::context::NapiBrowserContextOptions::into_core)
+      .transpose()?
       .unwrap_or_default();
     let core = core_opts::LaunchPersistentContextOptions { launch, context };
     let ctx = Box::pin(
