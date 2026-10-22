@@ -166,6 +166,19 @@ test('a recorded standalone script replays successfully from its generated file'
   passed(await cli(['generated.ts'], { cwd }));
 });
 
+test('a recorded run wrapped as a test passes under ferridriver test', async () => {
+  const cwd = await workspace({});
+  passed(await cli(['--as-test', '--code-out', 'generated.spec.ts', '-e', recording], { cwd }));
+  const source = await readFile(join(cwd, 'generated.spec.ts'), 'utf8');
+  assert.ok(source.startsWith("import { test, expect } from '@ferridriver/test';\n\ntest('test', async ({ page }) => {\n"), source);
+  assert.ok(source.includes("\n  await page.locator('button').click();\n"), source);
+  assert.ok(source.endsWith('});\n'), source);
+  passed(await run(['test', '--no-inherit', '--headless', 'generated.spec.ts'], { cwd }));
+  const reported = await cli(['--as-test', '--report', '-e', recording]);
+  passed(reported);
+  assert.ok(reported.stdout.includes("test('test', async ({ page }) => {"), reported.stdout);
+});
+
 test('run reports include result and code sections without inventing a bound page', async () => {
   const reported = await cli(['--report', '--code', '-e', recording]);
   passed(reported);

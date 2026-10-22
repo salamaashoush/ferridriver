@@ -95,6 +95,14 @@ pub struct RunArgs {
   #[arg(long, value_name = "FILE", help_heading = "Output")]
   pub code_out: Option<PathBuf>,
 
+  /// Wrap the generated TypeScript as an `@ferridriver/test` spec (one
+  /// `test` whose body is what ran) instead of a script: in the
+  /// `--code-out` file and in the `--report` code section, which then holds
+  /// the whole file. Implies `--code`. Rust and Gherkin output are tests
+  /// already.
+  #[arg(long, help_heading = "Output")]
+  pub as_test: bool,
+
   /// After the run, print the agent-facing response: the result, the source
   /// reproducing what ran (with `--code`), and the page the session is left
   /// on, as `### `-titled sections. With `--format json` the same parts are folded

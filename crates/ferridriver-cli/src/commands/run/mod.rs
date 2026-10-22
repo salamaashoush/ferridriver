@@ -113,12 +113,7 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
     .map(serde_json::Value::String)
     .collect();
 
-  // `--code-out` implies `--code`: a file to write is a language to render.
-  let code_language = args
-    .code
-    .as_deref()
-    .or(args.code_out.as_ref().map(|_| "ts"))
-    .map(ferridriver::codegen::OutputLanguage::parse_cli);
+  let code_language = requested_code_language(&args).map(ferridriver::codegen::OutputLanguage::parse_cli);
   let collected_code = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
 
   // Against a live session the browser, the extensions and the sandboxes all
@@ -228,13 +223,13 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
       session.execute(&source, &script_args, opts, &ctx).await.result
     };
 
-    finish_code(&collected_code, code_language, args.code_out.as_deref())?;
+    finish_code(&collected_code, code_language, &args)?;
     sweep_artifacts(artifacts_budget, artifacts_dir.as_deref()).await;
     // A local run's script launches and owns its own browser, so this process
     // never holds a page to read state from.
     let report = args
       .report
-      .then(|| RunReport::collect(code_language, &collected_code, None, setup_secrets));
+      .then(|| RunReport::collect(code_language, &collected_code, None, setup_secrets).wrapped_as_test(args.as_test));
     Ok((result, report))
   }
   .await;
@@ -277,30 +272,53 @@ async fn close_owned_browser<T>(
 /// Write the generated source to `out`, wrapped in the language's test
 /// scaffolding so the file runs as-is. Without `out` the lines have already
 /// been streamed as they happened and there is nothing left to do.
+/// The language `--code` names, which `--code-out` and `--as-test` default
+/// to TypeScript: a file to write, or a spec to wrap, is a language to render.
+fn requested_code_language(args: &cli::RunArgs) -> Option<&str> {
+  args
+    .code
+    .as_deref()
+    .or((args.code_out.is_some() || args.as_test).then_some("ts"))
+}
+
+fn scaffold(as_test: bool) -> ferridriver::codegen::Scaffold {
+  if as_test {
+    ferridriver::codegen::Scaffold::Test
+  } else {
+    ferridriver::codegen::Scaffold::Script
+  }
+}
+
+/// Echoed lines wrapped in the language's scaffolding.
+///
+/// No opening navigation in the scaffolding: unlike the interactive recorder
+/// — which navigates before recording starts — an echoed run already has its
+/// `goto` among the lines. The file is exactly the actions that happened, in
+/// the order they happened, and a run that started on the session's current
+/// page correctly begins there.
+fn wrap_code(lines: &[String], language: ferridriver::codegen::OutputLanguage, as_test: bool) -> String {
+  let emitter = language.emitter_for(scaffold(as_test));
+  let mut file = emitter.header("");
+  for line in lines {
+    file.push_str(&emitter.line(line));
+  }
+  file.push_str(&emitter.footer());
+  file
+}
+
 fn finish_code(
   collected: &Arc<std::sync::Mutex<Vec<String>>>,
   language: Option<ferridriver::codegen::OutputLanguage>,
-  out: Option<&std::path::Path>,
+  args: &cli::RunArgs,
 ) -> anyhow::Result<()> {
-  let (Some(language), Some(path)) = (language, out) else {
+  let (Some(language), Some(path)) = (language, args.code_out.as_deref()) else {
     return Ok(());
   };
   let lines = collected
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone();
-  let emitter = language.emitter();
-  // No opening navigation in the scaffolding: unlike the interactive recorder
-  // — which navigates before recording starts — an echoed run already has its
-  // `goto` among the lines. The file is exactly the actions that happened, in
-  // the order they happened, and a run that started on the session's current
-  // page correctly begins there.
-  let mut file = emitter.header("");
-  for line in &lines {
-    file.push_str(line);
-    file.push('\n');
-  }
-  file.push_str(&emitter.footer());
+  let file = wrap_code(&lines, language, args.as_test);
   std::fs::write(path, file).map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
   eprintln!("wrote {} ({} action(s))", path.display(), lines.len());
   Ok(())
@@ -327,7 +345,7 @@ async fn run_against_session(
   }
   let mut request = build_script_request(origin, source, cwd, script_args, args.timeout_ms).await?;
   request.trace = args.trace;
-  request.code_language = args.code.clone().or(args.code_out.as_ref().map(|_| "ts".to_string()));
+  request.code_language = requested_code_language(args).map(str::to_string);
   request.page_state = args.report;
   let sinks = session::RunSinks {
     code: Arc::clone(collected_code),
@@ -338,7 +356,7 @@ async fn run_against_session(
     ..Default::default()
   };
   let result = session::run_on_session(id, args.context.as_deref(), request, ui::json(), &sinks).await?;
-  finish_code(collected_code, code_language, args.code_out.as_deref())?;
+  finish_code(collected_code, code_language, args)?;
   // The host redacted everything it sent, so the client renders it as-is.
   let report = args.report.then(|| {
     let page = sinks
@@ -352,6 +370,7 @@ async fn run_against_session(
       page,
       ferridriver::response::Secrets::default(),
     )
+    .wrapped_as_test(args.as_test)
   });
   report_code_result(&result, collected_code, report.as_ref())
 }
@@ -405,6 +424,18 @@ impl RunReport {
       page,
       secrets,
     }
+  }
+
+  /// Replace the echoed lines with the whole spec they make, for
+  /// `--as-test`.
+  fn wrapped_as_test(mut self, as_test: bool) -> Self {
+    if let (true, Some(language)) = (as_test, self.language) {
+      self.code = wrap_code(&self.code, language, true)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    }
+    self
   }
 }
 
