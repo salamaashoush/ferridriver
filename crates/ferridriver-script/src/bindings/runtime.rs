@@ -39,3 +39,42 @@ where
 {
   ensure_ferridriver(ctx)?.set(name, value)
 }
+
+#[derive(serde::Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct TotpOptions {
+  digits: Option<u32>,
+  period: Option<u64>,
+  algorithm: Option<String>,
+  /// Unix seconds; now when absent.
+  timestamp: Option<u64>,
+}
+
+/// `ferridriver.totp(secret, options?)`: the current code for a base32
+/// secret or an `otpauth://totp/` link.
+fn totp<'js>(ctx: Ctx<'js>, secret: String, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<String> {
+  let options: TotpOptions = match options.0 {
+    Some(value) if !value.is_undefined() && !value.is_null() => crate::bindings::convert::serde_from_js(&ctx, value)?,
+    _ => TotpOptions::default(),
+  };
+  let throw = |e: ferridriver::error::FerriError| crate::bindings::convert::ferri_throw(&ctx, &e);
+  let mut totp = ferridriver::totp::Totp::parse(&secret).map_err(throw)?;
+  if let Some(digits) = options.digits {
+    totp.digits = digits;
+  }
+  if let Some(period) = options.period {
+    totp.period = period;
+  }
+  if let Some(algorithm) = &options.algorithm {
+    totp.algorithm = ferridriver::totp::Algorithm::parse(algorithm).map_err(throw)?;
+  }
+  match options.timestamp {
+    Some(at) => totp.code_at(at),
+    None => totp.code(),
+  }
+  .map_err(throw)
+}
+
+pub fn install_totp(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  set(ctx, "totp", rquickjs::Function::new(ctx.clone(), totp)?)
+}

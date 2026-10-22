@@ -416,6 +416,25 @@ export interface DeviceDescriptor {
  */
 export const devices: Record<string, DeviceDescriptor>;
 
+export interface TotpOptions {
+  /** 6 by default. */
+  digits?: number;
+  /** Seconds each code lasts; 30 by default. */
+  period?: number;
+  /** 'SHA1' by default. */
+  algorithm?: 'SHA1' | 'SHA256' | 'SHA512';
+  /** Unix seconds to derive the code for; now by default. */
+  timestamp?: number;
+}
+
+/**
+ * ferridriver extension: the current one-time code (RFC 6238) for a base32
+ * secret as authenticator apps show it, or an `otpauth://totp/` link, so a
+ * test can sign in behind two-factor authentication. Keep the secret in the
+ * environment: `totp(process.env.MFA_SECRET!)`.
+ */
+export function totp(secret: string, options?: TotpOptions): string;
+
 /** Secondary browser factories, independent of the project's backend. */
 export const chromium: (options?: { transport?: 'pipe' | 'ws' }) => BrowserType;
 export const firefox: () => BrowserType;

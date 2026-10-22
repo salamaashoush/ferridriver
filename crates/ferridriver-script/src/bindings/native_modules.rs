@@ -518,6 +518,7 @@ const FERRIDRIVER_EXPORTS: &[&str] = &[
   "vars",
   "sidecars",
   "artifacts",
+  "totp",
   "page",
   "context",
   "browser",
@@ -551,6 +552,7 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     "vars",
     "sidecars",
     "artifacts",
+    "totp",
   ] {
     ns.set(name, fd_prop(ctx, name)?)?;
   }
@@ -598,6 +600,9 @@ pub struct FerridriverTestModule;
 /// else.
 const TEST_EXPORTS: &[&str] = &[
   "default",
+  // Not Playwright's: a sign-in behind an authenticator app is the usual
+  // reason a suite reaches for a helper library, and tests import from here.
+  "totp",
   "test",
   "describe",
   "expect",
@@ -638,6 +643,7 @@ fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     ("safari", global(ctx, "safari")?),
     ("_android", global(ctx, "_android")?),
     ("request", global(ctx, "request")?),
+    ("totp", fd_prop(ctx, "totp")?),
   ];
   let ns = test.as_object().cloned().unwrap_or(Object::new(ctx.clone())?);
   for (name, value) in members {

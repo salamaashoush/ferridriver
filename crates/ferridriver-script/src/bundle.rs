@@ -1119,6 +1119,7 @@ impl ferrijs::Extension for ExtractionExtension {
     // `ferridriver.host`, so each host needs its own realm to register
     // what that host would have seen.
     crate::bindings::runtime::install_host(ctx, self.host.as_str())?;
+    crate::bindings::runtime::install_totp(ctx)?;
     let _ = ctx.store_userdata(crate::bindings::registry::ExtensionPolicyUd(self.policy.clone()));
     Ok(())
   }

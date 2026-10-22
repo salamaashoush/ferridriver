@@ -23,6 +23,7 @@ import type {
   Page,
   TestFixtures,
   TestType,
+  TotpOptions,
 } from '@ferridriver/test';
 
 export type {
@@ -540,6 +541,8 @@ declare global {
      * with `defineFixtures` instead.
      */
     readonly test: TestType;
+    /** The current one-time code for a base32 secret or an `otpauth://totp/` link. */
+    totp(secret: string, options?: TotpOptions): string;
   };
 
   /**

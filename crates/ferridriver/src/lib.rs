@@ -65,6 +65,7 @@ pub(crate) mod permissions;
 pub mod protocol;
 pub mod response;
 pub(crate) mod snapshotter;
+pub mod totp;
 pub mod url_matcher;
 pub mod web_error;
 pub mod web_mcp;

@@ -635,6 +635,7 @@ impl ferrijs::Extension for FerridriverExtension {
       crate::bindings::install_sidecars(&ctx, &sidecars)?;
 
       crate::bindings::runtime::install_host(&ctx, host.as_str())?;
+      crate::bindings::runtime::install_totp(&ctx)?;
 
       crate::bindings::install_extensions(&ctx, &extensions).await?;
       // Every extension has now contributed. `defineFixtures` appends to
