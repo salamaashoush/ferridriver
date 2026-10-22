@@ -19,6 +19,7 @@ mod config;
 mod ext;
 mod run;
 mod runner;
+mod serve;
 mod session;
 mod test;
 mod tools;
@@ -30,6 +31,7 @@ pub use config::{ConfigArgs, DoctorArgs};
 pub use ext::{ExtArgs, ExtCheckArgs, ExtCommand, ExtTypesArgs};
 pub use run::RunArgs;
 pub use runner::RunnerArgs;
+pub use serve::{BrowserCommand, BrowserCommandArgs, BrowserServeArgs};
 pub use session::{SessionArgs, SessionCommand, SessionHostArgs, SessionListArgs, SessionOpenArgs, SessionTargetArgs};
 pub use test::{RustTestArgs, TestRunArgs, TestRunner};
 pub use tools::{CodegenArgs, CompletionsArgs, InitArgs, InstallArgs, McpArgs, MergeReportsArgs, UpgradeArgs};
@@ -192,9 +194,12 @@ impl Cli {
       Command::Ext(a) => a.config.clone(),
       Command::Trace(a) => a.config.clone(),
       Command::MergeReports(a) => a.config.clone(),
-      Command::Init(_) | Command::Install(_) | Command::Codegen(_) | Command::Upgrade(_) | Command::Completions(_) => {
-        ConfigSource::default()
-      },
+      Command::Init(_)
+      | Command::Install(_)
+      | Command::Codegen(_)
+      | Command::Browser(_)
+      | Command::Upgrade(_)
+      | Command::Completions(_) => ConfigSource::default(),
     }
   }
 
@@ -321,6 +326,12 @@ pub enum Command {
       ferridriver session close dev"
   )]
   Session(SessionArgs),
+
+  /// Serve a launched browser to other processes.
+  #[command(after_help = "Examples:\n  \
+    ferridriver browser serve\n  \
+    ferridriver browser serve --host 0.0.0.0 --token \"$GRID_TOKEN\"")]
+  Browser(BrowserCommandArgs),
 
   /// Show the resolved configuration: which files layered, what each key
   /// resolved to, and where that value came from.

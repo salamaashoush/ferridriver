@@ -6,6 +6,7 @@
 
 pub mod bdd;
 pub mod bootstrap;
+pub mod browser;
 pub mod codegen;
 pub mod completions;
 pub mod config;
@@ -56,6 +57,7 @@ pub async fn dispatch(
     cli::Command::Run(run_args) => Box::pin(run::run(config, run_args)).await,
     cli::Command::Install(install_args) => Box::pin(install::run(install_args)).await,
     cli::Command::Codegen(codegen_args) => Box::pin(codegen::run(codegen_args)).await,
+    cli::Command::Browser(browser_args) => Box::pin(browser::run(browser_args)).await,
     cli::Command::Session(session_args) => {
       // The detached host has to resolve the same layers this process did,
       // so `session open` hands its own `--config` / `--no-inherit` on.

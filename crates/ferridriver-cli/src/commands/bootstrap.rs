@@ -100,6 +100,7 @@ pub(crate) fn extension_host_of(command: &cli::Command) -> Option<ferridriver_sc
     cli::Command::Init(_)
     | cli::Command::Install(_)
     | cli::Command::Codegen(_)
+    | cli::Command::Browser(_)
     | cli::Command::Ext(_)
     | cli::Command::Trace(_)
     | cli::Command::MergeReports(_)
