@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from '@ferridriver/test';
-import { binary, passed, quote, run, script, workspace } from './support.mjs';
+import { binary, fixtureServer, passed, quote, run, script, workspace } from './support.mjs';
 
 const SPEC = `import { test, expect } from '@ferridriver/test';
 
@@ -121,4 +121,65 @@ test('a script serves chromium with launchServer and another connection drives i
   assert.equal(response.value.title, 'remote');
   assert.notEqual(response.value.refused, 'connected');
   assert.match(response.value.notChromium, /DevTools Protocol/);
+});
+
+// The fixture server's forwarding proxies want credentials and resolve
+// `*.test` to loopback, which nothing else does: a page on such a host went
+// through the proxy with the credentials accepted. A client connecting over
+// CDP knows neither the proxy nor its password.
+test('browser serve --proxy carries every client context through the proxy, answering its credentials', async () => {
+  test.setTimeout(180000);
+  await fixtureServer(async (baseURL) => {
+    const endpoints = await (await fetch(`${baseURL}/fx/endpoints`)).json();
+    const port = new URL(baseURL).port;
+    for (const [kind, given] of [['authProxy', 'flag'], ['socksProxy', 'env']]) {
+      const server = new URL(endpoints[kind]);
+      server.username = endpoints.proxyUser;
+      server.password = endpoints.proxyPassword;
+      const proxy = server.href.replace(/\/$/, '');
+      const serve = given === 'flag'
+        ? `exec ${quote(binary)} browser serve --proxy ${quote(proxy)}`
+        : `FERRIDRIVER_BROWSER_PROXY=${quote(proxy)} exec ${quote(binary)} browser serve`;
+      await commands.start('ui', { command: serve });
+      try {
+        const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+        const key = crypto.randomUUID();
+        const named = `http://${key}.proxied.test:${port}/fx/landed`;
+        const loopback = `${baseURL}/fx/landed?loopback=${key}`;
+        const response = await script(`
+          const browser = await chromium().connectOverCDP(${JSON.stringify(endpoint)});
+          const visits = [];
+          for (const context of [browser.contexts()[0], await browser.newContext()]) {
+            const page = await context.newPage();
+            for (const url of [${JSON.stringify(named)}, ${JSON.stringify(loopback)}]) {
+              const response = await page.goto(url);
+              visits.push([url, response?.status(), await page.textContent('body')]);
+            }
+            await page.close();
+          }
+          return visits;
+        `);
+        for (const [url, status, body] of response.value) {
+          assert.equal(status, 200, `${kind} ${url}`);
+          assert.match(body, /landed/, `${kind} ${url}`);
+        }
+        const log = await (await fetch(`${baseURL}/fx/forward-log?key=${kind === 'authProxy' ? key : `127.0.0.1:${port}`}`)).json();
+        const expected = kind === 'authProxy'
+          ? [`http GET ${named}`, `http GET ${loopback}`]
+          : [`socks 127.0.0.1:${port}`];
+        // Once per context: the served browser's own and the client's.
+        for (const line of expected) {
+          const seen = log.lines.filter((logged) => logged === line).length;
+          assert.ok(kind === 'authProxy' ? seen === 2 : seen >= 2, `${kind}: ${line} x${seen} in ${JSON.stringify(log.lines)}`);
+        }
+        if (kind === 'socksProxy') {
+          const resolved = await (await fetch(`${baseURL}/fx/forward-log?key=${key}`)).json();
+          const seen = resolved.lines.filter((logged) => logged === `socks ${key}.proxied.test:${port}`).length;
+          assert.ok(seen >= 2, JSON.stringify(resolved.lines));
+        }
+      } finally {
+        await commands.stop('ui');
+      }
+    }
+  });
 });

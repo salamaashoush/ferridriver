@@ -6,6 +6,10 @@
 //! client, admitted on the unguessable `wsPath` and, when one is set, a token,
 //! then joined frame for frame to a connection of its own to the browser.
 //! Nothing is translated, so any CDP client works, `connectOverCDP` included.
+//!
+//! A launch proxy wanting credentials is answered by the server itself, on a
+//! `DevTools` connection of its own that attaches to every target before it
+//! runs, so a client's contexts reach the proxy without knowing its password.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -50,6 +54,7 @@ pub struct BrowserServer {
   local_addr: SocketAddr,
   stop: tokio::sync::watch::Sender<bool>,
   accept: tokio::task::JoinHandle<()>,
+  proxy_answers: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl BrowserServer {
@@ -95,17 +100,23 @@ impl BrowserServer {
   /// # Errors
   ///
   /// The browser fails to close.
-  pub async fn close(self) -> Result<()> {
+  pub async fn close(mut self) -> Result<()> {
+    self.stop_serving();
+    self.browser.close().await
+  }
+
+  fn stop_serving(&mut self) {
     self.stop.send_replace(true);
     self.accept.abort();
-    self.browser.close().await
+    if let Some(answers) = self.proxy_answers.take() {
+      answers.abort();
+    }
   }
 }
 
 impl Drop for BrowserServer {
   fn drop(&mut self) {
-    self.stop.send_replace(true);
-    self.accept.abort();
+    self.stop_serving();
   }
 }
 
@@ -148,21 +159,26 @@ impl BrowserType {
 
 impl BrowserServer {
   /// Serve `browser`, launched by [`BrowserType::server_launcher`], to other
-  /// processes. Closing the server closes it.
+  /// processes. Closing the server closes it. When the browser was launched
+  /// with a proxy that wants credentials, the server answers the proxy's
+  /// challenges for every page, those of contexts its clients create
+  /// included.
   ///
   /// # Errors
   ///
-  /// The browser is not Chromium over a `DevTools` WebSocket, or the address
-  /// cannot be bound.
+  /// The browser is not Chromium over a `DevTools` WebSocket, the address
+  /// cannot be bound, or the browser refuses to attach to its targets.
   pub async fn serve(browser: Browser, options: ServeOptions) -> Result<Self> {
-    let upstream = {
+    let (upstream, proxy) = {
       let state = browser.state().read().await;
-      let plan = state.page_open_plan(&browser.default_context().key)?;
-      plan
+      let key = &browser.default_context().key;
+      let plan = state.page_open_plan(key)?;
+      let upstream = plan
         .browser
         .cdp_ws_endpoint()
         .map(str::to_string)
-        .ok_or_else(|| FerriError::backend("launchServer: the browser exposes no DevTools endpoint"))?
+        .ok_or_else(|| FerriError::backend("launchServer: the browser exposes no DevTools endpoint"))?;
+      (upstream, state.effective_proxy(&key.to_composite()))
     };
     let host = options.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
     let listener = tokio::net::TcpListener::bind((host.as_str(), options.port.unwrap_or(0)))
@@ -188,6 +204,16 @@ impl BrowserServer {
       ws_endpoint.push_str(&percent_encode(token));
     }
 
+    // An authenticated SOCKS5 proxy is reached through a relay that logs in
+    // for the browser, so it never challenges.
+    let proxy_answers = match proxy
+      .filter(|proxy| !proxy.is_authenticated_socks())
+      .as_ref()
+      .and_then(crate::options::ProxyConfig::credentials)
+    {
+      Some(credentials) => Some(answer_proxy_challenges(&upstream, credentials).await?),
+      None => None,
+    };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let accept = tokio::spawn(accept_clients(listener, upstream, admission, stopped));
     Ok(Self {
@@ -196,6 +222,7 @@ impl BrowserServer {
       local_addr,
       stop,
       accept,
+      proxy_answers,
     })
   }
 }
@@ -308,6 +335,145 @@ async fn join(
   let _ = client_tx.close().await;
   let _ = browser_tx.close().await;
   Ok(())
+}
+
+fn auto_attach() -> serde_json::Value {
+  serde_json::json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true })
+}
+
+/// Connect to the browser at `upstream` and answer the proxy's challenges on
+/// every target, present and future, until the task is aborted. Returns once
+/// the browser holds each new target until it is armed.
+async fn answer_proxy_challenges(
+  upstream: &str,
+  credentials: crate::options::HttpCredentials,
+) -> Result<tokio::task::JoinHandle<()>> {
+  let refused = |e: &dyn std::fmt::Display| FerriError::backend(format!("launchServer: proxy credentials: {e}"));
+  let (socket, _) = tokio_tungstenite::connect_async(upstream)
+    .await
+    .map_err(|e| refused(&e))?;
+  let (mut sink, mut stream) = socket.split();
+  let attach = serde_json::json!({ "id": 0, "method": "Target.setAutoAttach", "params": auto_attach() });
+  sink
+    .send(Message::Text(attach.to_string().into()))
+    .await
+    .map_err(|e| refused(&e))?;
+  let mut early = Vec::new();
+  loop {
+    let message = match stream.next().await {
+      Some(Ok(Message::Text(text))) => serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default(),
+      Some(Ok(_)) => continue,
+      Some(Err(e)) => return Err(refused(&e)),
+      None => return Err(refused(&"the browser closed the connection")),
+    };
+    if message["id"] == 0 {
+      if let Some(error) = message.get("error") {
+        return Err(refused(error));
+      }
+      break;
+    }
+    // Targets already open attach before the reply arrives.
+    early.push(message);
+  }
+  Ok(tokio::spawn(async move {
+    let mut answers = ProxyAnswers {
+      sink,
+      next_id: 0,
+      answered: rustc_hash::FxHashSet::default(),
+      credentials,
+    };
+    for message in early {
+      if answers.handle(&message).await.is_err() {
+        return;
+      }
+    }
+    while let Some(Ok(message)) = stream.next().await {
+      if let Message::Text(text) = message
+        && let Ok(message) = serde_json::from_str::<serde_json::Value>(&text)
+        && answers.handle(&message).await.is_err()
+      {
+        return;
+      }
+    }
+  }))
+}
+
+/// Bounds the requests remembered as answered on a long-lived server.
+const ANSWERED_REMEMBERED: usize = 10_000;
+
+type BrowserSink = futures::stream::SplitSink<
+  tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+  Message,
+>;
+
+struct ProxyAnswers {
+  sink: BrowserSink,
+  next_id: u64,
+  /// Requests already answered once: a second challenge means the proxy
+  /// refused the credentials, and answering again would never end.
+  answered: rustc_hash::FxHashSet<String>,
+  credentials: crate::options::HttpCredentials,
+}
+
+impl ProxyAnswers {
+  async fn command(
+    &mut self,
+    session: &str,
+    method: &str,
+    params: serde_json::Value,
+  ) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error> {
+    self.next_id += 1;
+    let message = serde_json::json!({ "id": self.next_id, "sessionId": session, "method": method, "params": params });
+    self.sink.send(Message::Text(message.to_string().into())).await
+  }
+
+  async fn handle(
+    &mut self,
+    message: &serde_json::Value,
+  ) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error> {
+    let session = message["sessionId"].as_str().unwrap_or_default().to_string();
+    let params = &message["params"];
+    match message["method"].as_str() {
+      Some("Target.attachedToTarget") => {
+        let Some(attached) = params["sessionId"].as_str() else {
+          return Ok(());
+        };
+        // In order on one session: interception is on before the target
+        // runs, and the targets it starts are held the same way.
+        let fetch = serde_json::json!({ "handleAuthRequests": true, "patterns": [{ "urlPattern": "*" }] });
+        self.command(attached, "Fetch.enable", fetch).await?;
+        self.command(attached, "Target.setAutoAttach", auto_attach()).await?;
+        self
+          .command(attached, "Runtime.runIfWaitingForDebugger", serde_json::json!({}))
+          .await
+      },
+      Some("Fetch.requestPaused") => {
+        let request = serde_json::json!({ "requestId": params["requestId"] });
+        self.command(&session, "Fetch.continueRequest", request).await
+      },
+      Some("Fetch.authRequired") => {
+        let request = params["requestId"].as_str().unwrap_or_default().to_string();
+        let response = if params["authChallenge"]["source"] != "Proxy" {
+          serde_json::json!({ "response": "Default" })
+        } else if !self.answered.contains(&request) {
+          if self.answered.len() >= ANSWERED_REMEMBERED {
+            self.answered.clear();
+          }
+          self.answered.insert(request.clone());
+          serde_json::json!({
+            "response": "ProvideCredentials",
+            "username": self.credentials.username,
+            "password": self.credentials.password,
+          })
+        } else {
+          serde_json::json!({ "response": "CancelAuth" })
+        };
+        let answer = serde_json::json!({ "requestId": request, "authChallengeResponse": response });
+        self.command(&session, "Fetch.continueWithAuth", answer).await
+      },
+      _ => Ok(()),
+    }
+  }
 }
 
 async fn until_stopped(stopped: &mut tokio::sync::watch::Receiver<bool>) {

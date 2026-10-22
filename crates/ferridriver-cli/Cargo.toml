@@ -53,6 +53,7 @@ serde_json = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
 regex = { workspace = true }
+percent-encoding = "2"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 mimalloc = { workspace = true }

@@ -21,11 +21,21 @@ async fn serve_browser(args: cli::BrowserServeArgs) -> anyhow::Result<()> {
         .filter(|token| !token.is_empty())
     })
     .or_else(|| (!args.host.is_loopback()).then(ferridriver::browser_server::random_secret));
+  let proxy = args
+    .proxy
+    .or_else(|| {
+      std::env::var("FERRIDRIVER_BROWSER_PROXY")
+        .ok()
+        .filter(|proxy| !proxy.is_empty())
+    })
+    .map(|url| proxy_from_url(&url, args.proxy_bypass))
+    .transpose()?;
   let options = ferridriver::browser_server::LaunchServerOptions {
     launch: ferridriver::options::LaunchOptions {
       headless: Some(!args.headed),
       executable_path: args.executable_path,
       args: args.args,
+      proxy,
       ..Default::default()
     },
     serve: ferridriver::browser_server::ServeOptions {
@@ -35,7 +45,7 @@ async fn serve_browser(args: cli::BrowserServeArgs) -> anyhow::Result<()> {
       token,
     },
   };
-  let server = ferridriver::BrowserType::chromium().launch_server(options).await?;
+  let server = Box::pin(ferridriver::BrowserType::chromium().launch_server(options)).await?;
 
   // The endpoint is the command's output, so it goes to stdout alone and is
   // flushed at once: a supervisor reads the first line and hands it on.
@@ -51,6 +61,38 @@ async fn serve_browser(args: cli::BrowserServeArgs) -> anyhow::Result<()> {
   ui::note(&format!("{reason}; closing the browser"));
   server.close().await?;
   Ok(())
+}
+
+/// Split credentials out of a proxy URL: browsers take the server alone and
+/// answer the proxy's challenge with the rest.
+fn proxy_from_url(url: &str, bypass: Option<String>) -> anyhow::Result<ferridriver::options::ProxyConfig> {
+  let written = if url.contains("://") {
+    url.to_string()
+  } else {
+    format!("http://{url}")
+  };
+  let mut parsed = reqwest::Url::parse(&written).map_err(|e| anyhow::anyhow!("--proxy {url:?}: {e}"))?;
+  let decode = |value: &str| {
+    percent_encoding::percent_decode_str(value)
+      .decode_utf8_lossy()
+      .into_owned()
+  };
+  let username = Some(decode(parsed.username())).filter(|name| !name.is_empty());
+  let password = parsed.password().map(decode);
+  if password.is_some() && username.is_none() {
+    anyhow::bail!("--proxy {url:?} has a password but no user name");
+  }
+  let _ = parsed.set_username("");
+  let _ = parsed.set_password(None);
+  let server = parsed.as_str().trim_end_matches('/').to_string();
+  let proxy = ferridriver::options::ProxyConfig {
+    server,
+    bypass,
+    username,
+    password,
+  };
+  proxy.validate()?;
+  Ok(proxy)
 }
 
 #[cfg(unix)]
@@ -71,4 +113,38 @@ async fn terminate_signal() -> &'static str {
 async fn terminate_signal() -> &'static str {
   let _ = tokio::signal::ctrl_c().await;
   "interrupt"
+}
+
+#[cfg(test)]
+mod tests {
+  use super::proxy_from_url;
+
+  #[test]
+  fn credentials_leave_the_proxy_url() {
+    let proxy = proxy_from_url(
+      "http://acme%40example.com:p%3Ass@127.0.0.1:3128",
+      Some("localhost".into()),
+    )
+    .unwrap();
+    assert_eq!(proxy.server, "http://127.0.0.1:3128");
+    assert_eq!(proxy.username.as_deref(), Some("acme@example.com"));
+    assert_eq!(proxy.password.as_deref(), Some("p:ss"));
+    assert_eq!(proxy.bypass.as_deref(), Some("localhost"));
+
+    let socks = proxy_from_url("socks5://acme:secret@[::1]:1080", None).unwrap();
+    assert_eq!(socks.server, "socks5://[::1]:1080");
+    assert_eq!(socks.username.as_deref(), Some("acme"));
+
+    let bare = proxy_from_url("127.0.0.1:3128", None).unwrap();
+    assert_eq!(bare.server, "http://127.0.0.1:3128");
+    assert_eq!(bare.username, None);
+    assert_eq!(bare.password, None);
+  }
+
+  #[test]
+  fn a_proxy_no_browser_can_use_is_refused() {
+    assert!(proxy_from_url("ftp://127.0.0.1:21", None).is_err());
+    assert!(proxy_from_url("http://:secret@127.0.0.1:3128", None).is_err());
+    assert!(proxy_from_url("socks4://acme:secret@127.0.0.1:1080", None).is_err());
+  }
 }

@@ -143,7 +143,7 @@ of a file.
 ```
 ferridriver browser serve [--host ADDR] [--port N] [--token TOKEN]
                           [--ws-path PATH] [--headed] [--executable-path PATH]
-                          [--arg SWITCH]...
+                          [--arg SWITCH]... [--proxy URL] [--proxy-bypass HOSTS]
 ```
 
 Launches Chromium and serves its DevTools Protocol to other processes. The
@@ -161,6 +161,20 @@ addresses prints the URL with `127.0.0.1`; a remote client swaps in the
 machine's own address. SIGTERM, SIGINT and SIGHUP
 close the browser and exit; so does the browser exiting. The Rust API is
 `BrowserType::launch_server`.
+
+`--proxy` sends all of the browser's traffic through a proxy, for every
+client: `http://host:port` or `socks5://host:port`, with credentials as
+`http://user:pass@host:port` (percent-encoded where needed). The
+credentials never reach a client. The server answers an HTTP proxy's
+challenges itself, on a DevTools connection of its own that attaches to
+every page before it runs, those of contexts a client creates included;
+a SOCKS5 proxy is reached through a loopback relay that logs in for the
+browser. `FERRIDRIVER_BROWSER_PROXY` stands in for the flag and keeps the
+password out of `ps`. Loopback goes through the proxy too unless
+`--proxy-bypass` (comma-separated hosts reached directly) names
+`localhost`, `127.0.0.1` or `::1`. A context a client creates with a
+proxy of its own uses that proxy, but the server still answers its
+challenges with the `--proxy` credentials.
 
 ## `ferridriver trace`
 

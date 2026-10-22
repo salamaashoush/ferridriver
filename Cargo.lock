@@ -1770,6 +1770,7 @@ dependencies = [
  "json-strip-comments",
  "libc",
  "mimalloc",
+ "percent-encoding",
  "regex",
  "reqwest",
  "semver",

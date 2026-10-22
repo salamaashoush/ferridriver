@@ -19,6 +19,7 @@ pub enum BrowserCommand {
   #[command(after_help = "Examples:\n  \
     ferridriver browser serve\n  \
     ferridriver browser serve --host 0.0.0.0 --port 9300 --token \"$GRID_TOKEN\"\n  \
+    FERRIDRIVER_BROWSER_PROXY=http://user:pass@proxy.example.com:3128 ferridriver browser serve\n  \
     ferridriver test --connect ws://grid-worker:9300/<path>?token=...")]
   Serve(BrowserServeArgs),
 }
@@ -55,4 +56,17 @@ pub struct BrowserServeArgs {
   /// Extra Chromium switch, repeatable (`--arg=--lang=de`).
   #[arg(long = "arg", allow_hyphen_values = true)]
   pub args: Vec<String>,
+
+  /// Proxy for all of the browser's traffic, loopback included:
+  /// `http://host:port` or `socks5://host:port`, with credentials as
+  /// `http://user:pass@host:port`. The server answers the proxy's challenges
+  /// for every client. Read from `FERRIDRIVER_BROWSER_PROXY` when not given,
+  /// which keeps the credentials out of `ps`.
+  #[arg(long)]
+  pub proxy: Option<String>,
+
+  /// Comma-separated hosts reached directly rather than through the proxy.
+  /// Naming `localhost`, `127.0.0.1` or `::1` keeps loopback off it.
+  #[arg(long)]
+  pub proxy_bypass: Option<String>,
 }
