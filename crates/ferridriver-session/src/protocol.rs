@@ -9,9 +9,17 @@
 //!
 //! The protocol is deliberately verb-agnostic: the [`Command::verb`] string
 //! and free-form [`Command::args`] object are interpreted by the host's
-//! [`crate::Dispatcher`], so adding a new verb never touches this module.
-//! In practice a bound browser understands one verb, `run`, whose args are a
-//! [`ScriptRequest`] — the session surface IS the scripting surface.
+//! [`crate::Dispatcher`]. A bound browser's main verb is `run`, whose args
+//! are a [`ScriptRequest`] — anything a script can express goes through
+//! it. The other verbs carry what a script cannot do well: a stream of
+//! screencast frames ([`SCREENCAST_VERB`]), input relayed one event at a
+//! time with no compile step ([`INPUT_VERB`]), and a recorder whose actions
+//! arrive as they happen ([`RECORDER_START_VERB`] and its siblings).
+//!
+//! A command answers in order on its connection, and a long-running one
+//! (`screencast`, `recorder.start`) holds its connection until it ends, so
+//! a client watching and driving at once uses one connection per stream.
+//! Hanging up ends a stream.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +65,146 @@ impl Command {
 /// Run a script against the bound browser.
 pub const RUN_VERB: &str = "run";
 pub const CLOSE_VERB: &str = "session.close";
+/// The first command on a connection to a token-protected endpoint; args
+/// `{"token": "..."}`. Any other first command is refused.
+pub const AUTH_VERB: &str = "session.auth";
+/// Dispatch one [`InputEvent`] to the context's page.
+pub const INPUT_VERB: &str = "input";
+/// Stream [`EventPayload::Frame`]s until the client hangs up; args are a
+/// [`ScreencastRequest`].
+pub const SCREENCAST_VERB: &str = "screencast";
+/// Record the context's page, streaming [`EventPayload::Recorded`] and
+/// [`EventPayload::RecorderMode`] until [`RECORDER_STOP_VERB`] or a hang-up;
+/// args are a [`RecorderStartRequest`], the response a [`RecordingResult`].
+pub const RECORDER_START_VERB: &str = "recorder.start";
+/// End the context's recording; answers with its [`RecordingResult`].
+pub const RECORDER_STOP_VERB: &str = "recorder.stop";
+/// Change what the next click on the recorded page means; args are a
+/// [`RecorderModeRequest`].
+pub const RECORDER_MODE_VERB: &str = "recorder.mode";
+/// Record an assertion about the page itself; args are a
+/// [`RecorderAssertRequest`], the response the recorded action.
+pub const RECORDER_ASSERT_VERB: &str = "recorder.assert";
+
+/// One input event for [`INPUT_VERB`]. Coordinates are CSS pixels in the
+/// page's viewport, the space a screencast frame depicts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputEvent {
+  MouseMove {
+    x: f64,
+    y: f64,
+  },
+  /// `button` is `left` (default), `right` or `middle`. `click_count` is
+  /// the press's place in a run of clicks: 2 for the second press of a
+  /// double click, which is what makes the page see `dblclick`.
+  MouseDown {
+    x: f64,
+    y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    button: Option<String>,
+    #[serde(default = "first_click")]
+    click_count: u32,
+  },
+  MouseUp {
+    x: f64,
+    y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    button: Option<String>,
+    #[serde(default = "first_click")]
+    click_count: u32,
+  },
+  /// Scrolls whatever is under `(x, y)`.
+  MouseWheel {
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    delta_x: f64,
+    #[serde(default)]
+    delta_y: f64,
+  },
+  /// A key by its DOM `key` name (`a`, `Enter`, `Shift`), held until
+  /// [`InputEvent::KeyUp`].
+  KeyDown {
+    key: String,
+  },
+  KeyUp {
+    key: String,
+  },
+  /// Text entered as an IME would, with no key events.
+  InsertText {
+    text: String,
+  },
+}
+
+fn first_click() -> u32 {
+  1
+}
+
+/// [`SCREENCAST_VERB`]'s arguments. Frames are JPEG, scaled down to fit
+/// `max_width` x `max_height`; unset bounds default to the viewport.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScreencastRequest {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub quality: Option<u8>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_width: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_height: Option<u32>,
+}
+
+/// [`RECORDER_START_VERB`]'s arguments.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecorderStartRequest {
+  /// `ts` (default), `rust` or `gherkin`: the language of each event's
+  /// `code` and of the final source.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub language: Option<String>,
+  /// `test` (default), an `@ferridriver/test` spec, or `script`, a file
+  /// `ferridriver run` executes. Only TypeScript has the choice.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target: Option<String>,
+  /// The test's title in a TypeScript spec. Defaults to `test`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub title: Option<String>,
+  /// Navigate here before recording starts, so the recording opens on it.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  /// The mode to start in. Defaults to `recording`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<String>,
+}
+
+/// [`RECORDER_MODE_VERB`]'s arguments: one of `recording`, `none`,
+/// `assertingVisibility`, `assertingText`, `assertingValue`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecorderModeRequest {
+  pub mode: String,
+}
+
+/// What [`RECORDER_ASSERT_VERB`] asserts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAssertion {
+  /// `toHaveURL` with the page's current URL.
+  Url,
+  /// `toHaveTitle` with the page's current title.
+  Title,
+}
+
+/// [`RECORDER_ASSERT_VERB`]'s arguments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecorderAssertRequest {
+  pub kind: PageAssertion,
+}
+
+/// What a finished recording answers with, as the response text's JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingResult {
+  /// The whole file in the requested language and target.
+  pub source: String,
+  pub actions: Vec<ferridriver::codegen::Action>,
+}
 
 /// How the host should treat [`ScriptRequest::code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -185,6 +333,34 @@ pub enum EventPayload {
   /// [`ScriptRequest::code_language`].
   Code {
     line: String,
+  },
+  /// One screencast frame, for [`SCREENCAST_VERB`]. `data` is a base64 JPEG;
+  /// `viewport_width` x `viewport_height` is the CSS-pixel viewport it
+  /// depicts, the space [`InputEvent`] coordinates are in, whatever size
+  /// the image was scaled to. `timestamp_ms` is the backend's frame clock.
+  ///
+  /// No field here is a float: event payloads are flattened, and a flattened
+  /// float does not decode where `serde_json`'s `arbitrary_precision` is on,
+  /// which the bundler turns on for the whole CLI build.
+  Frame {
+    data: String,
+    timestamp_ms: u64,
+    viewport_width: u32,
+    viewport_height: u32,
+  },
+  /// One recorded action, for [`RECORDER_START_VERB`], with the statement
+  /// that reproduces it. `replaces_previous` marks an action that supersedes
+  /// the one recorded just before it (a click that became a double click).
+  Recorded {
+    action: ferridriver::codegen::Action,
+    code: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replaces_previous: bool,
+  },
+  /// The recorder's mode changed, including its return to `recording`
+  /// after an assertion was picked.
+  RecorderMode {
+    mode: String,
   },
   /// The page the context is left on once the run finished. Sent once, after
   /// the last action, and only when the request set
@@ -374,6 +550,70 @@ mod tests {
       serde_json::from_str::<ServerFrame>(&wire).unwrap(),
       ServerFrame::Response(r) if r.text == "done"
     ));
+  }
+
+  #[test]
+  fn input_events_use_the_snake_case_wire_shape() {
+    let down: InputEvent = serde_json::from_value(serde_json::json!({
+      "type": "mouse_down", "x": 10.5, "y": 20,
+    }))
+    .unwrap();
+    assert_eq!(
+      down,
+      InputEvent::MouseDown {
+        x: 10.5,
+        y: 20.0,
+        button: None,
+        click_count: 1
+      }
+    );
+    let wheel = serde_json::to_value(InputEvent::MouseWheel {
+      x: 1.0,
+      y: 2.0,
+      delta_x: 0.0,
+      delta_y: 120.0,
+    })
+    .unwrap();
+    assert_eq!(
+      wheel,
+      serde_json::json!({"type": "mouse_wheel", "x": 1.0, "y": 2.0, "delta_x": 0.0, "delta_y": 120.0})
+    );
+    let text: InputEvent = serde_json::from_value(serde_json::json!({"type": "insert_text", "text": "hi"})).unwrap();
+    assert_eq!(text, InputEvent::InsertText { text: "hi".into() });
+  }
+
+  #[test]
+  fn a_recorded_event_carries_the_action_in_its_own_wire_shape() {
+    let wire = serde_json::to_value(ServerFrame::Event(Event {
+      id: 3,
+      payload: EventPayload::Recorded {
+        action: ferridriver::codegen::Action::Click {
+          selector: "#go".into(),
+          locator: "locator('#go')".into(),
+        },
+        code: "await page.locator('#go').click();".into(),
+        replaces_previous: false,
+      },
+    }))
+    .unwrap();
+    assert_eq!(
+      wire,
+      serde_json::json!({
+        "type": "event",
+        "id": 3,
+        "event": "recorded",
+        "action": {"type": "click", "selector": "#go", "locator": "locator('#go')"},
+        "code": "await page.locator('#go').click();",
+      })
+    );
+    let mode = serde_json::to_value(EventPayload::RecorderMode {
+      mode: "assertingText".into(),
+    })
+    .unwrap();
+    assert_eq!(
+      mode,
+      serde_json::json!({"event": "recorder_mode", "mode": "assertingText"})
+    );
   }
 
   #[test]

@@ -83,6 +83,29 @@ pub struct CodegenArgs {
   #[arg(long, default_value = "ts", value_parser = ["ts", "rust", "gherkin"])]
   pub language: String,
 
+  /// What TypeScript output is: `script`, a file `ferridriver run`
+  /// executes, or `test`, an `@ferridriver/test` spec `ferridriver test`
+  /// runs. Rust and Gherkin output are tests already.
+  #[arg(long, default_value = "script", value_parser = ["script", "test"])]
+  pub target: String,
+
+  /// The test's title in a `--target test` spec.
+  #[arg(long, value_name = "TITLE")]
+  pub title: Option<String>,
+
+  /// Record on a live session instead of launching a browser: whatever
+  /// drives the session's page, a person at its headed window or input
+  /// relayed to a headless one, is recorded. The URL, when given, is opened
+  /// first. Type `visible`, `text` or `value` and Enter, then click an
+  /// element, to record an assertion about it; `url` or `title` asserts the
+  /// page itself. `stop`, Ctrl+C or SIGTERM ends the recording.
+  #[arg(long, value_name = "SESSION", conflicts_with = "pick_locator")]
+  pub attach: Option<String>,
+
+  /// Browser context within the attached session.
+  #[arg(long, requires = "attach")]
+  pub context: Option<String>,
+
   /// Pick one element instead of recording: open the page, wait for a
   /// click, and print that element's selector. Answers "what do I call
   /// this" rather than "what did I just do", so nothing is recorded and

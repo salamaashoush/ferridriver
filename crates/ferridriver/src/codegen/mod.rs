@@ -1,9 +1,10 @@
-//! Interactive code recorder (codegen).
+//! Code generation from what a user or a script did.
 //!
-//! Opens a headed browser, records user interactions, and generates test code
-//! in real-time. Supports Rust, TypeScript, and Gherkin output formats.
+//! [`recorder::Recorder`] records a user's interactions on any page as
+//! structured [`Action`]s, [`emitter`] renders them as Rust, TypeScript or
+//! Gherkin, and [`echo`] renders the actions a script performed.
 //!
-//! Usage: `ferridriver codegen <url> [--language rust|typescript|gherkin]`
+//! Usage: `ferridriver codegen <url> [--language rust|typescript|gherkin] [--target script|test]`
 
 pub mod echo;
 pub mod emitter;
@@ -11,10 +12,12 @@ pub mod recorder;
 
 /// A recorded user action.
 ///
-/// Deserialized directly from the browser-side JSON via `serde(tag = "type")`.
-/// `selector` is the raw Playwright selector string (e.g., `internal:role=button[name="Submit"]`).
-/// `locator` is the human-readable form from `asLocator()` (e.g., `getByRole('button', { name: 'Submit' })`).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// The wire shape is the one the page-side recorder sends and the session
+/// protocol forwards: `{"type": "click", "selector": ..., "locator": ...}`.
+/// `selector` is the raw Playwright selector string (e.g.
+/// `internal:role=button[name="Submit"i]`); `locator` is the readable form
+/// `asLocator()` renders from it (e.g. `getByRole('button', { name: 'Submit' })`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Action {
   Navigate {
@@ -38,10 +41,11 @@ pub enum Action {
     locator: String,
     key: String,
   },
+  /// The options a `<select>` was left with; one for a single select.
   Select {
     selector: String,
     locator: String,
-    value: String,
+    values: Vec<String>,
   },
   Check {
     selector: String,
@@ -51,15 +55,96 @@ pub enum Action {
     selector: String,
     locator: String,
   },
+  /// The names of the files chosen in an `<input type=file>`. The page only
+  /// ever learns the names, so the generated code refers to files of those
+  /// names next to the test.
+  Upload {
+    selector: String,
+    locator: String,
+    files: Vec<String>,
+  },
+  AssertVisible {
+    selector: String,
+    locator: String,
+  },
+  /// `substring` renders `toContainText`, otherwise `toHaveText`.
+  AssertText {
+    selector: String,
+    locator: String,
+    text: String,
+    #[serde(default)]
+    substring: bool,
+  },
+  /// An empty `value` renders `toBeEmpty()`.
+  AssertValue {
+    selector: String,
+    locator: String,
+    value: String,
+  },
+  AssertChecked {
+    selector: String,
+    locator: String,
+    checked: bool,
+  },
+  AssertUrl {
+    url: String,
+  },
+  AssertTitle {
+    title: String,
+  },
+}
+
+impl Action {
+  /// Whether this is an assertion rather than an interaction.
+  #[must_use]
+  pub fn is_assertion(&self) -> bool {
+    matches!(
+      self,
+      Self::AssertVisible { .. }
+        | Self::AssertText { .. }
+        | Self::AssertValue { .. }
+        | Self::AssertChecked { .. }
+        | Self::AssertUrl { .. }
+        | Self::AssertTitle { .. }
+    )
+  }
 }
 
 /// Output language for code generation.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OutputLanguage {
   #[default]
   Rust,
   TypeScript,
   Gherkin,
+}
+
+/// What the generated code is wrapped in.
+///
+/// Only TypeScript has a choice: Rust is always a `#[ferritest]` and Gherkin
+/// always a feature, both of which are already tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scaffold {
+  /// A script `ferridriver run` executes, standalone or against a session.
+  #[default]
+  Script,
+  /// An `@ferridriver/test` spec `ferridriver test` runs.
+  Test,
+}
+
+impl Scaffold {
+  /// Parse `script` or `test`.
+  ///
+  /// # Errors
+  ///
+  /// Names the accepted values when `s` is neither.
+  pub fn parse(s: &str) -> Result<Self, String> {
+    match s {
+      "script" => Ok(Self::Script),
+      "test" => Ok(Self::Test),
+      other => Err(format!("unknown codegen target '{other}': expected 'script' or 'test'")),
+    }
+  }
 }
 
 impl OutputLanguage {
@@ -88,14 +173,21 @@ impl OutputLanguage {
     }
   }
 
-  /// The emitter that writes this language's scaffolding around a body of
-  /// recorded or echoed action lines.
+  /// The emitter that writes this language's script scaffolding around a
+  /// body of recorded or echoed action lines.
   #[must_use]
   pub fn emitter(self) -> std::sync::Arc<dyn emitter::CodeEmitter> {
-    match self {
-      Self::Rust => std::sync::Arc::new(emitter::RustEmitter),
-      Self::TypeScript => std::sync::Arc::new(emitter::TypeScriptEmitter),
-      Self::Gherkin => std::sync::Arc::new(emitter::GherkinEmitter::new()),
+    self.emitter_for(Scaffold::Script)
+  }
+
+  /// [`Self::emitter`] for an explicit [`Scaffold`].
+  #[must_use]
+  pub fn emitter_for(self, scaffold: Scaffold) -> std::sync::Arc<dyn emitter::CodeEmitter> {
+    match (self, scaffold) {
+      (Self::Rust, _) => std::sync::Arc::new(emitter::RustEmitter),
+      (Self::TypeScript, Scaffold::Script) => std::sync::Arc::new(emitter::TypeScriptEmitter),
+      (Self::TypeScript, Scaffold::Test) => std::sync::Arc::new(emitter::TypeScriptTestEmitter::default()),
+      (Self::Gherkin, _) => std::sync::Arc::new(emitter::GherkinEmitter::new()),
     }
   }
 }

@@ -12,6 +12,9 @@ pub struct CodegenConfig {
   pub url: String,
   /// Output language: "rust" (default), "typescript"/"ts", "gherkin"/"bdd".
   pub language: Option<String>,
+  /// What the TypeScript output is wrapped in: "script" (default), a file
+  /// `ferridriver run` executes, or "test", an `@ferridriver/test` spec.
+  pub target: Option<String>,
   /// Write to file instead of stdout.
   pub output_file: Option<String>,
   /// Viewport width.
@@ -38,14 +41,17 @@ impl Codegen {
       _ => None,
     };
 
+    let scaffold = ferridriver::codegen::Scaffold::parse(config.target.as_deref().unwrap_or("script"))
+      .map_err(napi::Error::from_reason)?;
     let options = ferridriver::codegen::recorder::RecorderOptions {
       url: config.url,
       language: ferridriver::codegen::OutputLanguage::parse_cli(config.language.as_deref().unwrap_or("rust")),
+      scaffold,
       output_file: config.output_file,
       viewport,
     };
 
-    ferridriver::codegen::recorder::Recorder::new(options)
+    ferridriver::codegen::recorder::HeadedRecorder::new(options)
       .start()
       .await
       .into_napi()

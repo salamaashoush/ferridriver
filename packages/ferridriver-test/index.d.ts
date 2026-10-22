@@ -2678,8 +2678,13 @@ export interface BrowserContextOptions {
 }
 
 export interface Browser {
-  /** Publishes this browser under `title` for other clients to attach to. */
-  bind(title: string, options?: { workspaceDir?: string; metadata?: Record<string, unknown>; host?: string; port?: number }): Promise<{ endpoint: string }>;
+  /**
+   * Publishes this browser under `title` for other clients to attach to.
+   * `token` (a ferridriver extension to Playwright's option bag) is what TCP
+   * clients must present; a `host` beyond loopback gets a generated one when
+   * unset. The returned endpoint carries it as `?token=`.
+   */
+  bind(title: string, options?: { workspaceDir?: string; metadata?: Record<string, unknown>; host?: string; port?: number; token?: string }): Promise<{ endpoint: string }>;
   unbind(): Promise<void>;
   newContext(options?: BrowserContextOptions): Promise<BrowserContext>;
   newPage(options?: BrowserContextOptions): Promise<Page>;

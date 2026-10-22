@@ -11,9 +11,9 @@ use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 
-use crate::protocol::{Command, Event, Response, ServerFrame};
+use crate::protocol::{AUTH_VERB, Command, Event, Response, ServerFrame};
 use crate::registry::Registry;
-use crate::server::Endpoint;
+use crate::server::{Endpoint, endpoint_token};
 use crate::transport::{read_frame, write_frame};
 use crate::{Result, SessionError};
 
@@ -31,12 +31,14 @@ enum Stream {
 
 impl SessionClient {
   /// Connect to a server at the given endpoint string (a Unix socket path or
-  /// a `ws://host:port` / `host:port` TCP address).
+  /// a `ws://host:port` / `host:port` TCP address), presenting the token a
+  /// `ws://host:port/?token=...` endpoint carries.
   ///
   /// # Errors
   ///
   /// Returns [`SessionError::Io`] if the socket / address refuses the
-  /// connection.
+  /// connection, and [`SessionError::Unauthorized`] if the server rejects
+  /// the token or requires one the endpoint did not carry.
   pub async fn connect(endpoint: &str) -> Result<Self> {
     let stream = match Endpoint::parse(endpoint) {
       #[cfg(unix)]
@@ -45,10 +47,19 @@ impl SessionClient {
       Endpoint::OwnedUnix(directory) => Stream::Unix(UnixStream::connect(directory.path().join("ipc.sock")).await?),
       Endpoint::Tcp(addr) => Stream::Tcp(TcpStream::connect(&addr).await?),
     };
-    Ok(Self {
+    let mut client = Self {
       stream,
       pending: Vec::new(),
-    })
+    };
+    if let Some(token) = endpoint_token(endpoint) {
+      let reply = client
+        .call(Command::new(0, AUTH_VERB, serde_json::json!({ "token": token })))
+        .await?;
+      if !reply.ok {
+        return Err(SessionError::Unauthorized(reply.error.unwrap_or_default()));
+      }
+    }
+    Ok(client)
   }
 
   /// Resolve a session id through the registry and connect to it.

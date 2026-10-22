@@ -7,6 +7,9 @@ use crate::protocol::{Command, Response};
 
 pub(crate) struct Lifecycle {
   endpoint: String,
+  /// What every connection must present before its first command, on an
+  /// endpoint that requires it.
+  pub(crate) token: Option<String>,
   pub(crate) generation: String,
   close_requests: std::sync::atomic::AtomicUsize,
   cleaned: std::sync::atomic::AtomicBool,
@@ -30,6 +33,7 @@ impl Lifecycle {
       close_requests: std::sync::atomic::AtomicUsize::new(0),
       cleaned: std::sync::atomic::AtomicBool::new(false),
       endpoint,
+      token: None,
       dispatcher,
       closing: watch::channel(false).0,
       draining: watch::channel(false).0,
@@ -38,6 +42,11 @@ impl Lifecycle {
       cleanup: Mutex::new(()),
       publication: std::sync::Mutex::new(None),
     })
+  }
+
+  pub(crate) fn with_token(mut self, token: Option<String>) -> Self {
+    self.token = token;
+    self
   }
 
   pub(crate) fn close_request(self: &Arc<Self>) -> CloseRequest {

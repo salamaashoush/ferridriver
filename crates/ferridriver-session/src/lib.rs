@@ -10,7 +10,8 @@
 //! - [`registry`] persists a small descriptor per session under the user
 //!   cache dir, so any process can discover live sessions by id.
 //! - [`protocol`] + [`transport`] define the NUL-delimited-JSON command wire
-//!   spoken over a Unix-domain socket (named pipe on Windows).
+//!   spoken over a Unix-domain socket (named pipe on Windows) or TCP, where
+//!   a token guards the endpoint.
 //! - [`server`] accepts client connections and routes each command frame
 //!   through a [`Dispatcher`]; [`client`] is the matching call/response side.
 //!
@@ -24,6 +25,7 @@ pub mod bind;
 pub mod browser_dispatch;
 pub mod client;
 pub mod dispatch;
+mod drive;
 mod lifecycle;
 pub mod protocol;
 pub mod registry;
@@ -39,10 +41,13 @@ pub use browser_dispatch::{
 pub use client::SessionClient;
 pub use dispatch::{ActionDetail, Dispatcher, EventSink, PageCounts, ReleaseFuture, ScriptHost};
 pub use protocol::{
-  ActionPhase, CLOSE_VERB, Command, Event, EventPayload, RUN_VERB, Response, ScriptKind, ScriptRequest, ServerFrame,
+  AUTH_VERB, ActionPhase, CLOSE_VERB, Command, Event, EventPayload, INPUT_VERB, InputEvent, PageAssertion,
+  RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB, RecorderAssertRequest,
+  RecorderModeRequest, RecorderStartRequest, RecordingResult, Response, SCREENCAST_VERB, ScreencastRequest, ScriptKind,
+  ScriptRequest, ServerFrame,
 };
 pub use registry::{Registry, SessionDescriptor};
-pub use server::{Endpoint, SessionServer};
+pub use server::{Endpoint, SessionServer, endpoint_token};
 
 use thiserror::Error;
 
@@ -65,6 +70,9 @@ pub enum SessionError {
   /// The session was bound by a different ferridriver build.
   #[error("session '{id}' was opened by ferridriver {theirs}, this is {ours}; close and reopen it")]
   VersionMismatch { id: String, theirs: String, ours: String },
+  /// The endpoint requires a token and refused the one offered (or none was).
+  #[error("session refused the connection: {0}")]
+  Unauthorized(String),
   /// A command verb the dispatcher does not implement.
   #[error("unknown command verb: '{0}'")]
   UnknownVerb(String),

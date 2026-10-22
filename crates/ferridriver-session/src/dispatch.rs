@@ -68,6 +68,16 @@ impl EventSink {
     }
   }
 
+  /// Resolve once the client this sink writes to has hung up, so a command
+  /// that streams until told to stop (a screencast, a recording) ends with
+  /// its client. A discarding sink has no client and never resolves.
+  pub async fn closed(&self) {
+    match &self.tx {
+      Some(tx) => tx.closed().await,
+      None => std::future::pending().await,
+    }
+  }
+
   /// Emit one console line.
   pub fn console(&self, level: impl Into<String>, message: impl Into<String>, ts_ms: u64) {
     self.send(EventPayload::Console {

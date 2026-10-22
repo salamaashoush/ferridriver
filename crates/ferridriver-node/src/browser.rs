@@ -473,6 +473,7 @@ impl Browser {
     metadata?: Record<string, any>;
     host?: string;
     port?: number;
+    token?: string;
   }",
     ts_return_type = "Promise<{ endpoint: string }>"
   )]
@@ -507,6 +508,7 @@ pub struct NapiBindOptions {
   pub metadata: Option<serde_json::Value>,
   pub host: Option<String>,
   pub port: Option<u32>,
+  pub token: Option<String>,
 }
 
 /// The `{ endpoint }` object returned by [`Browser::bind`].

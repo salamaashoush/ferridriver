@@ -1,10 +1,12 @@
 //! [`BrowserDispatcher`]: runs scripts against a live [`ferridriver::Browser`].
 //!
-//! This is the [`crate::Dispatcher`] a bound browser runs, and its whole
-//! surface is one verb: [`crate::protocol::RUN_VERB`]. Everything a client
-//! wants to do — snapshot, click, read state, mock a route, drive a whole
-//! flow — is a script, so the protocol carries a script rather than a table of
-//! verbs that would forever lag the scripting API behind it.
+//! This is the [`crate::Dispatcher`] a bound browser runs. Its main verb is
+//! [`crate::protocol::RUN_VERB`]: everything a client wants to do — snapshot,
+//! click, read state, mock a route, drive a whole flow — is a script, so the
+//! protocol carries a script rather than a table of verbs that would forever
+//! lag the scripting API behind it. The remaining verbs (`input`,
+//! `screencast`, `recorder.*`) watch and drive the browser from elsewhere,
+//! which is streaming and per-event work no script expresses well.
 //!
 //! Running the script is delegated to a [`ScriptHost`] supplied by a higher
 //! crate, because the scripting engine lives above this crate in the
@@ -18,13 +20,18 @@ use ferridriver::{Browser, Page};
 use tokio::sync::RwLock;
 
 use crate::dispatch::{Dispatcher, EventSink, ScriptHost};
-use crate::protocol::{Command, RUN_VERB, Response, ScriptRequest};
+use crate::drive::Recordings;
+use crate::protocol::{
+  Command, INPUT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB,
+  Response, SCREENCAST_VERB, ScriptRequest,
+};
 
 /// Runs session commands against a live browser.
 pub struct BrowserDispatcher {
   browser: Browser,
   browser_name: String,
   script_host: Option<Arc<dyn ScriptHost>>,
+  recordings: Recordings,
 }
 
 impl BrowserDispatcher {
@@ -35,6 +42,7 @@ impl BrowserDispatcher {
       browser: browser.clone(),
       browser_name: browser_name_for(browser).to_owned(),
       script_host: None,
+      recordings: Recordings::default(),
     }
   }
 
@@ -68,14 +76,54 @@ impl BrowserDispatcher {
 #[async_trait]
 impl Dispatcher for BrowserDispatcher {
   async fn dispatch(&self, command: Command, events: EventSink) -> Response {
-    if command.verb != RUN_VERB {
-      return Response::err(
-        command.id,
-        format!(
-          "unknown command verb '{}': a bound browser accepts '{RUN_VERB}'",
-          command.verb
-        ),
-      );
+    let id = command.id;
+    let context = Self::context_of(&command).to_owned();
+    let json = |value: std::result::Result<serde_json::Value, String>| match value {
+      Ok(value) => Response::ok_json(id, &value),
+      Err(error) => Response::err(id, error),
+    };
+    match command.verb.as_str() {
+      RUN_VERB => {},
+      INPUT_VERB => {
+        return match crate::drive::input(&self.browser, &context, command.args).await {
+          Ok(()) => Response::ok(id, ""),
+          Err(error) => Response::err(id, error),
+        };
+      },
+      SCREENCAST_VERB => {
+        return match crate::drive::screencast(&self.browser, &context, command.args, &events).await {
+          Ok(()) => Response::ok(id, ""),
+          Err(error) => Response::err(id, error),
+        };
+      },
+      RECORDER_START_VERB => {
+        let result = self
+          .recordings
+          .start(&self.browser, &context, command.args, &events)
+          .await;
+        return json(result.and_then(|r| to_json(&r)));
+      },
+      RECORDER_STOP_VERB => {
+        let result = self.recordings.stop(&self.browser, &context).await;
+        return json(result.and_then(|r| to_json(&r)));
+      },
+      RECORDER_MODE_VERB => {
+        let result = self.recordings.mode(&self.browser, &context, command.args).await;
+        return json(result.map(|mode| serde_json::json!({ "mode": mode.as_str() })));
+      },
+      RECORDER_ASSERT_VERB => {
+        let result = self.recordings.assert(&self.browser, &context, command.args).await;
+        return json(result.and_then(|a| to_json(&a)));
+      },
+      other => {
+        return Response::err(
+          id,
+          format!(
+            "unknown command verb '{other}': a bound browser accepts {}",
+            self.verbs().join(", ")
+          ),
+        );
+      },
     }
     let Some(host) = &self.script_host else {
       return Response::err(command.id, "scripting is not available on this session server");
@@ -99,8 +147,20 @@ impl Dispatcher for BrowserDispatcher {
   }
 
   fn verbs(&self) -> Vec<&'static str> {
-    vec![RUN_VERB]
+    vec![
+      RUN_VERB,
+      INPUT_VERB,
+      SCREENCAST_VERB,
+      RECORDER_START_VERB,
+      RECORDER_STOP_VERB,
+      RECORDER_MODE_VERB,
+      RECORDER_ASSERT_VERB,
+    ]
   }
+}
+
+fn to_json<T: serde::Serialize>(value: &T) -> std::result::Result<serde_json::Value, String> {
+  serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
 /// Normalize the reported browser product for the registry descriptor.

@@ -120,6 +120,10 @@ pub struct BindOptions {
   /// TCP port for the `host` bind path. `0` (or unset with `host` present)
   /// lets the OS choose a free port.
   pub port: Option<u16>,
+  /// The token TCP clients must present. Unset, a loopback endpoint takes
+  /// none and any other address gets a generated one; the endpoint string
+  /// carries it either way. Ignored for a Unix socket.
+  pub token: Option<String>,
 }
 
 /// A live binding: the running server, its registry entry, and enough to tear
@@ -353,7 +357,7 @@ pub async fn bind_dispatcher(
     (None, None) => default_socket_endpoint(registry)?,
   };
 
-  let server = SessionServer::bind(endpoint, dispatcher).await?;
+  let server = SessionServer::bind_with_token(endpoint, dispatcher, options.token).await?;
   let resolved_endpoint = server.endpoint_string().to_string();
   let server = Arc::new(server);
 

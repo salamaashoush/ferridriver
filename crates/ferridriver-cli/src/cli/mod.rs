@@ -295,7 +295,9 @@ pub enum Command {
   /// Record interactions in a browser and emit them as a test.
   #[command(after_help = "Examples:\n  \
     ferridriver codegen https://example.com\n  \
-    ferridriver codegen https://example.com --language gherkin -o login.feature")]
+    ferridriver codegen https://example.com --language gherkin -o login.feature\n  \
+    ferridriver codegen https://example.com --target test -o login.spec.ts\n  \
+    ferridriver codegen --attach dev --target test -o login.spec.ts")]
   Codegen(CodegenArgs),
 
   /// Manage and drive named browser sessions (open / attach / list / close).

@@ -1,196 +1,317 @@
-// Interactive recorder: captures user interactions and sends them to Rust.
-// Injected via add_init_script — survives page navigations.
-// Depends on window.__fd (engine.min.js) being present.
+// Page-side half of the recorder: turns the user's trusted input into
+// actions and reports them through the `__fdRecorderBinding` exposed
+// function. Runs as an init script in every document and frame, after the
+// selector engine and the recorder-support highlight helpers.
+//
+// Every message to the binding is answered with the recorder's current
+// mode, which is how a document that loads mid-recording learns whether it
+// is recording, paused or asserting.
 (function() {
   'use strict';
   if (window.__fdRecorder) return;
-  window.__fdRecorder = true;
-
   var injected = window.__fd && window.__fd._injected;
   if (!injected) return;
+  window.__fdRecorder = true;
 
-  var genOpts = { testIdAttributeName: 'data-testid' };
+  var genOpts = {
+    testIdAttributeName: injected.testIdAttributeNameForStrictErrorAndConsoleCodegen
+      ? injected.testIdAttributeNameForStrictErrorAndConsoleCodegen()
+      : 'data-testid',
+  };
 
-  function bestSelector(el) {
+  var mode = 'recording';
+  var active = true;
+  var fillBuffer = null; // { selector, locator, value, element }
+  var lastUrl = location.href;
+  var lastClickTime = 0;
+  var highlight = null;
+  var lastHoverTime = 0;
+  var textCache = new Map();
+
+  function asserting() {
+    return mode === 'assertingVisibility' || mode === 'assertingText' || mode === 'assertingValue';
+  }
+
+  function send(message) {
     try {
-      var result = injected.generateSelector(el, genOpts);
-      var selector = result.selector;
-      var locator = injected.utils.asLocator('javascript', selector);
-      return { selector: selector, locator: locator };
+      var reply = window.__fdRecorderBinding(JSON.stringify(message));
+      if (reply && typeof reply.then === 'function') {
+        reply.then(function(m) { if (typeof m === 'string') setMode(m); }, function() {});
+      }
+      return reply;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  function emit(action) {
+    if (!active) return;
+    send({ kind: 'action', action: action });
+  }
+
+  function describe(el, forText) {
+    try {
+      var options = forText ? { testIdAttributeName: genOpts.testIdAttributeName, forTextExpect: true } : genOpts;
+      var selector = injected.generateSelector(el, options).selector;
+      return { selector: selector, locator: injected.utils.asLocator('javascript', selector) };
     } catch (e) {
       return null;
     }
   }
 
-  // ── State ──
-
-  var fillBuffer = null; // { selector, locator, value, timer }
-  var lastUrl = location.href;
-  var lastClickTime = 0; // suppress navigation emitted right after a click
-
-  function emit(action) {
-    try { __fdRecorderAction(JSON.stringify(action)); } catch (e) { /* binding not ready */ }
-  }
-
   function flushFill() {
     if (!fillBuffer) return;
-    clearTimeout(fillBuffer.timer);
-    emit({ type: 'fill', selector: fillBuffer.selector, locator: fillBuffer.locator, value: fillBuffer.value });
+    var pending = fillBuffer;
     fillBuffer = null;
+    emit({ type: 'fill', selector: pending.selector, locator: pending.locator, value: pending.value });
   }
 
-  // ── Highlight on hover ──
+  function ensureHighlight() {
+    if (!highlight && injected.createHighlight && document.documentElement) {
+      highlight = injected.createHighlight();
+      highlight.install();
+    }
+    return highlight;
+  }
 
-  var highlight = injected.createHighlight();
-  highlight.install();
-  var lastHoverTime = 0;
+  function clearHighlight() {
+    if (highlight) highlight.clearHighlight();
+  }
+
+  function setMode(next) {
+    if (next === mode) return;
+    if (mode === 'recording') flushFill();
+    mode = next;
+    clearHighlight();
+  }
+
+  function consume(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }
+
+  function isTextField(el) {
+    var tag = (el.tagName || '').toUpperCase();
+    if (tag === 'TEXTAREA' || el.isContentEditable) return true;
+    if (tag !== 'INPUT') return false;
+    var type = (el.type || '').toLowerCase();
+    return ['checkbox', 'radio', 'file', 'button', 'submit', 'reset', 'image', 'range', 'color'].indexOf(type) === -1;
+  }
+
+  function hasValue(el) {
+    var tag = (el.tagName || '').toUpperCase();
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  }
+
+  function assertionFor(el) {
+    if (mode === 'assertingVisibility') {
+      var visible = describe(el, false);
+      return visible && { type: 'assertVisible', selector: visible.selector, locator: visible.locator };
+    }
+    if (mode === 'assertingValue') {
+      if (!hasValue(el)) return null;
+      var target = describe(el, false);
+      if (!target) return null;
+      var type = (el.type || '').toLowerCase();
+      if ((el.tagName || '').toUpperCase() === 'INPUT' && (type === 'checkbox' || type === 'radio'))
+        return { type: 'assertChecked', selector: target.selector, locator: target.locator, checked: !!el.checked };
+      return { type: 'assertValue', selector: target.selector, locator: target.locator, value: el.value };
+    }
+    if (mode === 'assertingText') {
+      var text = describe(el, true);
+      if (!text) return null;
+      textCache.clear();
+      return {
+        type: 'assertText',
+        selector: text.selector,
+        locator: text.locator,
+        text: injected.utils.elementText(textCache, el).normalized,
+        substring: true,
+      };
+    }
+    return null;
+  }
+
+  // ── Hover highlight ──
 
   document.addEventListener('mousemove', function(e) {
-    // Throttle to ~60ms to avoid jank.
+    if (!e.isTrusted || !active || mode === 'none') return;
     var now = Date.now();
     if (now - lastHoverTime < 60) return;
     lastHoverTime = now;
-
     var el = document.elementFromPoint(e.clientX, e.clientY);
-    if (!el) { highlight.clearHighlight(); return; }
-
-    var info = bestSelector(el);
+    var hl = ensureHighlight();
+    if (!hl) return;
+    if (!el) { hl.clearHighlight(); return; }
+    var info = describe(el, mode === 'assertingText');
     if (!info) return;
-    highlight.updateHighlight([{ element: el, color: '#6fa8dc7f', tooltipText: info.locator }]);
+    hl.updateHighlight([{ element: el, color: asserting() ? '#8acae480' : '#6fa8dc7f', tooltipText: info.locator }]);
   }, true);
+
+  // ── Assertion picking: the click that picks never reaches the page ──
+
+  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'dblclick', 'auxclick', 'contextmenu'].forEach(function(type) {
+    document.addEventListener(type, function(e) {
+      if (e.isTrusted && active && asserting()) consume(e);
+    }, true);
+  });
 
   // ── Click ──
 
   document.addEventListener('click', function(e) {
-    if (!e.isTrusted) return;
+    if (!e.isTrusted || !active || mode === 'none') return;
+    if (asserting()) {
+      consume(e);
+      var picked = document.elementFromPoint(e.clientX, e.clientY) || e.target;
+      var assertion = picked && assertionFor(picked);
+      if (!assertion) return;
+      mode = 'recording';
+      clearHighlight();
+      emit(assertion);
+      return;
+    }
     var el = e.target;
-    if (!el) return;
-
+    if (!el || el.nodeType !== 1) return;
     var tag = (el.tagName || '').toUpperCase();
     var type = (el.type || '').toLowerCase();
 
-    // Checkbox / radio -> check/uncheck
     if (tag === 'INPUT' && (type === 'checkbox' || type === 'radio')) {
       flushFill();
-      var info = bestSelector(el);
-      if (!info) return;
-      emit({ type: el.checked ? 'check' : 'uncheck', selector: info.selector, locator: info.locator });
+      var box = describe(el, false);
+      if (!box) return;
+      emit({ type: el.checked ? 'check' : 'uncheck', selector: box.selector, locator: box.locator });
       return;
     }
-
-    // Skip click on text inputs (fill handles them)
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return;
-    // Skip click on select (change handler handles it)
+    // A label for a checkbox clicks the box too, and that click records it.
+    if (tag === 'LABEL' && el.control && el.control.tagName === 'INPUT' &&
+        ['checkbox', 'radio'].indexOf((el.control.type || '').toLowerCase()) !== -1) return;
+    // Text fields record what was typed; a file input records the files.
+    if (isTextField(el) || (tag === 'INPUT' && type === 'file')) return;
+    // A select records the option it is left on.
     if (tag === 'SELECT' || tag === 'OPTION') return;
 
     flushFill();
-    var info = bestSelector(el);
+    var info = describe(el, false);
     if (!info) return;
     lastClickTime = Date.now();
-    emit({ type: 'click', selector: info.selector, locator: info.locator });
+    emit({ type: e.detail === 2 ? 'dblclick' : 'click', selector: info.selector, locator: info.locator });
   }, true);
 
-  // ── Double-click ──
-
-  document.addEventListener('dblclick', function(e) {
-    if (!e.isTrusted) return;
-    var el = e.target;
-    if (!el) return;
-    var info = bestSelector(el);
-    if (!info) return;
-    emit({ type: 'dblclick', selector: info.selector, locator: info.locator });
-  }, true);
-
-  // ── Input (fill coalescing) ──
+  // ── Typing: one fill per field, sent when the field is left ──
 
   document.addEventListener('input', function(e) {
-    if (!e.isTrusted) return;
+    if (!e.isTrusted || !active || mode !== 'recording') return;
     var el = e.target;
-    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el.isContentEditable)) return;
-    // Skip checkbox/radio — handled by click -> check/uncheck.
-    var inputType = (el.type || '').toLowerCase();
-    if (inputType === 'checkbox' || inputType === 'radio') return;
-
-    var info = bestSelector(el);
+    if (!el || !isTextField(el)) return;
+    var info = describe(el, false);
     if (!info) return;
-    var value = el.value !== undefined ? el.value : (el.textContent || '');
-
-    if (fillBuffer && fillBuffer.selector === info.selector) {
-      clearTimeout(fillBuffer.timer);
-      fillBuffer.value = value;
-    } else {
-      flushFill();
-      fillBuffer = { selector: info.selector, locator: info.locator, value: value };
-    }
-    fillBuffer.timer = setTimeout(flushFill, 800);
+    var value = el.isContentEditable ? (el.textContent || '') : el.value;
+    if (fillBuffer && fillBuffer.selector !== info.selector) flushFill();
+    fillBuffer = { selector: info.selector, locator: info.locator, value: value };
   }, true);
 
-  // ── Change on <select> ──
+  document.addEventListener('focusout', function(e) {
+    if (e.isTrusted) flushFill();
+  }, true);
+
+  // ── Change: selects and file inputs ──
 
   document.addEventListener('change', function(e) {
-    if (!e.isTrusted) return;
-    var el = e.target;
-    if ((el.tagName || '').toUpperCase() !== 'SELECT') return;
-
-    flushFill();
-    var info = bestSelector(el);
-    if (!info) return;
-    emit({ type: 'select', selector: info.selector, locator: info.locator, value: el.value });
-  }, true);
-
-  // ── Keyboard (special keys only) ──
-
-  // Keys that should emit press events.
-  var actionKeys = ['Enter', 'Tab', 'Escape'];
-  // Keys that are editing operations — suppressed in text inputs (fill captures the result).
-  var editingKeys = ['Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-    'Home', 'End', 'PageUp', 'PageDown'];
-  var allSpecialKeys = actionKeys.concat(editingKeys);
-
-  document.addEventListener('keydown', function(e) {
-    if (!e.isTrusted) return;
-
-    var isSpecial = allSpecialKeys.indexOf(e.key) !== -1;
-    var isAction = actionKeys.indexOf(e.key) !== -1;
-    var hasMod = e.ctrlKey || e.metaKey || e.altKey;
-
-    // Only record special keys and modifier combos (not regular typing — fill handles it)
-    if (!isSpecial && !hasMod) return;
-
-    // In text inputs: only emit action keys (Enter/Tab/Escape) and modifier combos.
-    // Editing keys (Backspace, arrows, etc.) are suppressed — fill coalescing captures the result.
+    if (!e.isTrusted || !active || mode !== 'recording') return;
     var el = e.target;
     var tag = (el.tagName || '').toUpperCase();
-    var isTextInput = tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
-    if (isTextInput && !isAction && !hasMod) return;
+    if (tag === 'SELECT') {
+      flushFill();
+      var select = describe(el, false);
+      if (!select) return;
+      var values = Array.prototype.filter.call(el.options, function(o) { return o.selected; })
+        .map(function(o) { return o.value; });
+      emit({ type: 'select', selector: select.selector, locator: select.locator, values: values });
+      return;
+    }
+    if (tag === 'INPUT' && (el.type || '').toLowerCase() === 'file') {
+      flushFill();
+      var input = describe(el, false);
+      if (!input) return;
+      var files = Array.prototype.map.call(el.files || [], function(f) { return f.name; });
+      emit({ type: 'upload', selector: input.selector, locator: input.locator, files: files });
+    }
+  }, true);
+
+  // ── Keyboard: keys that act, not keys that type ──
+
+  var actionKeys = ['Enter', 'Tab', 'Escape'];
+  var editingKeys = ['Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'PageUp', 'PageDown'];
+  var modifierKeys = ['Shift', 'Control', 'Alt', 'Meta'];
+
+  document.addEventListener('keydown', function(e) {
+    if (!e.isTrusted || !active) return;
+    if (asserting()) {
+      consume(e);
+      if (e.key === 'Escape') {
+        mode = 'recording';
+        clearHighlight();
+        send({ kind: 'mode', mode: 'recording' });
+      }
+      return;
+    }
+    if (mode !== 'recording' || modifierKeys.indexOf(e.key) !== -1) return;
+    var isAction = actionKeys.indexOf(e.key) !== -1;
+    var isSpecial = isAction || editingKeys.indexOf(e.key) !== -1;
+    var hasMod = e.ctrlKey || e.metaKey || e.altKey;
+    if (!isSpecial && !hasMod) return;
+    var el = e.target;
+    // In a text field the fill captures what editing keys did.
+    if (el && isTextField(el) && !isAction && !hasMod) return;
 
     flushFill();
-    var info = bestSelector(el);
+    var info = describe(el && el.nodeType === 1 ? el : document.body, false);
     if (!info) return;
-
     var key = e.key;
-    if (e.metaKey && key !== 'Meta') key = 'Meta+' + key;
-    if (e.ctrlKey && key !== 'Control') key = 'Control+' + key;
-    if (e.altKey && key !== 'Alt') key = 'Alt+' + key;
-    if (e.shiftKey && key.length > 1 && key !== 'Shift') key = 'Shift+' + key;
-
+    if (e.shiftKey && key.length > 1) key = 'Shift+' + key;
+    if (e.altKey) key = 'Alt+' + key;
+    if (e.ctrlKey) key = 'Control+' + key;
+    if (e.metaKey) key = 'Meta+' + key;
     emit({ type: 'press', selector: info.selector, locator: info.locator, key: key });
   }, true);
 
-  // ── Navigation detection ──
+  ['keyup', 'keypress'].forEach(function(type) {
+    document.addEventListener(type, function(e) {
+      if (e.isTrusted && active && asserting()) consume(e);
+    }, true);
+  });
+
+  // ── Same-document navigation the page did on its own ──
 
   function checkNav() {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      // Suppress navigation right after a click (the click already captures the intent).
-      if (Date.now() - lastClickTime < 300) return;
-      flushFill();
-      emit({ type: 'navigate', url: lastUrl });
-    }
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+    if (!active || mode !== 'recording' || window.top !== window) return;
+    // A click that changed the URL already says what the user did.
+    if (Date.now() - lastClickTime < 300) return;
+    flushFill();
+    emit({ type: 'navigate', url: lastUrl });
   }
 
   window.addEventListener('popstate', checkNav, true);
   window.addEventListener('hashchange', checkNav, true);
-  // SPA navigation detection via title/URL mutation
   new MutationObserver(checkNav).observe(document, { subtree: true, childList: true });
+
+  // ── Controls the host drives ──
+
+  window.__fdRecorderSetMode = setMode;
+  // Hands back the pending fill, so a stop does not wait for the field to
+  // lose focus.
+  window.__fdRecorderFlush = flushFill;
+  window.__fdRecorderTeardown = function() {
+    flushFill();
+    active = false;
+    clearHighlight();
+    if (highlight) highlight.uninstall();
+    highlight = null;
+  };
+
+  send({ kind: 'hello' });
 })();

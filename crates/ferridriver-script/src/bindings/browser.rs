@@ -336,6 +336,7 @@ impl BrowserJs {
   /// `/tmp/playwright/packages/playwright-core/src/client/browser.ts:132`.
   /// Publishes this browser under session `title` and returns the endpoint
   /// clients connect to. `host`/`port` bind over TCP; otherwise a Unix socket.
+  /// `token` is a ferridriver extension: what TCP clients must present.
   #[qjs(rename = "bind")]
   pub async fn bind<'js>(
     &self,
@@ -391,6 +392,7 @@ struct JsBindOptions {
   metadata: Option<serde_json::Value>,
   host: Option<String>,
   port: Option<u16>,
+  token: Option<String>,
 }
 
 impl JsBindOptions {
@@ -400,6 +402,7 @@ impl JsBindOptions {
       metadata: self.metadata,
       host: self.host,
       port: self.port,
+      token: self.token,
     }
   }
 }

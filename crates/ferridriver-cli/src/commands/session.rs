@@ -25,6 +25,18 @@ use crate::ui;
 /// path into a session, and `attach` must not be a privileged exception to it.
 const ATTACH_SNAPSHOT: &str = "return await page.snapshotForAI();";
 
+/// Where `session open --host` takes the token a TCP endpoint requires.
+const SESSION_TOKEN_ENV: &str = "FERRIDRIVER_SESSION_TOKEN";
+
+/// An endpoint for a table on screen: the token stays in the registry and
+/// in `--format json`, where whoever needs it reads it.
+fn display_endpoint(endpoint: &str) -> String {
+  match endpoint.split_once("?token=") {
+    Some((address, _)) => format!("{address}?token=…"),
+    None => endpoint.to_string(),
+  }
+}
+
 /// How this invocation was configured, so `open` can hand the same stack to
 /// the host it spawns.
 ///
@@ -178,6 +190,14 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
   for extension in &args.extensions {
     cmd.arg("--extension").arg(extension);
   }
+  // The token, if any, reaches the host through the environment it
+  // inherits, never its argument list, which other local users can read.
+  if let Some(host) = &args.host {
+    cmd.arg("--host").arg(host);
+  }
+  if let Some(port) = args.port {
+    cmd.arg("--port").arg(port.to_string());
+  }
   // The host resolves relative extension specs and the `fs` sandbox root
   // against ITS working directory, so it must start in the one the user
   // typed the command in.
@@ -281,7 +301,13 @@ async fn host(mut config: FerridriverConfig, args: SessionHostArgs) -> anyhow::R
       },
     ));
     let registry = Registry::open()?;
-    let mut session = bind_in(&registry, &browser, &args.id, BindOptions::default(), Some(script_host))
+    let options = BindOptions {
+      host: args.host.clone(),
+      port: args.port,
+      token: std::env::var(SESSION_TOKEN_ENV).ok().filter(|token| !token.is_empty()),
+      ..BindOptions::default()
+    };
+    let mut session = bind_in(&registry, &browser, &args.id, options, Some(script_host))
       .await
       .context("binding the session")?;
     tracing::info!(id = %args.id, endpoint = %session.endpoint(), "session host serving");
@@ -457,6 +483,11 @@ pub async fn run_on_session(
           crate::commands::run::console::print_action_end(&title, ms, error.as_deref());
         },
       },
+      // A `run` streams none of these; they belong to the screencast and
+      // recorder verbs.
+      ferridriver_session::EventPayload::Frame { .. }
+      | ferridriver_session::EventPayload::Recorded { .. }
+      | ferridriver_session::EventPayload::RecorderMode { .. } => {},
     })
     .await?;
 
@@ -493,7 +524,7 @@ fn list(_args: &SessionListArgs) -> anyhow::Result<()> {
       ui::bold(&s.id),
       s.browser_name.clone(),
       ui::dim(&s.pid.to_string()),
-      ui::dim(&s.endpoint),
+      ui::dim(&display_endpoint(&s.endpoint)),
     ]);
   }
   table.print(ui::width());

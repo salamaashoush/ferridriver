@@ -2,10 +2,18 @@
 //! through a [`Dispatcher`].
 //!
 //! A bound browser starts one server, which listens on a Unix-domain socket
-//! (default) or a TCP loopback address (the `host`/`port` bind path). Each
-//! accepted connection is handled concurrently; within a connection, commands
-//! are answered in order. The server holds an `Arc<dyn Dispatcher>` shared by
+//! (default) or a TCP address (the `host`/`port` bind path). Each accepted
+//! connection is handled concurrently; within a connection, commands are
+//! answered in order. The server holds an `Arc<dyn Dispatcher>` shared by
 //! all connections so they all drive the same live browser.
+//!
+//! A Unix socket is owner-only, so the filesystem is its access control. A
+//! TCP endpoint has none of its own and the commands it takes run arbitrary
+//! scripts, so it can require a token: the first command on every
+//! connection must then be [`crate::protocol::AUTH_VERB`] carrying it. One
+//! listening beyond loopback always requires one, generated when the caller
+//! supplies none. The token travels inside the endpoint string
+//! (`ws://host:port/?token=...`), the one value every client is handed.
 
 use std::sync::Arc;
 
@@ -16,7 +24,7 @@ use tokio::net::UnixListener;
 
 use crate::dispatch::{Dispatcher, EventSink};
 use crate::lifecycle::Lifecycle;
-use crate::protocol::{CLOSE_VERB, Command, ServerFrame};
+use crate::protocol::{AUTH_VERB, CLOSE_VERB, Command, ServerFrame};
 use crate::transport::{read_frame, write_frame};
 use crate::{Result, SessionError};
 
@@ -36,11 +44,13 @@ pub enum Endpoint {
 impl Endpoint {
   /// Parse an endpoint string as written in a registry descriptor: a
   /// `ws://host:port` or bare `host:port` becomes [`Endpoint::Tcp`], anything
-  /// else is treated as a Unix socket path.
+  /// else is treated as a Unix socket path. A `?token=` query is not part of
+  /// the address; [`endpoint_token`] reads it.
   #[must_use]
   pub fn parse(s: &str) -> Self {
     if let Some(rest) = s.strip_prefix("ws://") {
-      return Endpoint::Tcp(rest.trim_end_matches('/').to_string());
+      let address = rest.split_once('?').map_or(rest, |(address, _)| address);
+      return Endpoint::Tcp(address.trim_end_matches('/').to_string());
     }
     #[cfg(unix)]
     {
@@ -50,6 +60,57 @@ impl Endpoint {
     }
     Endpoint::Tcp(s.to_string())
   }
+}
+
+/// The token an endpoint string carries, if any.
+#[must_use]
+pub fn endpoint_token(endpoint: &str) -> Option<&str> {
+  let (_, query) = endpoint.strip_prefix("ws://")?.split_once('?')?;
+  query
+    .split('&')
+    .find_map(|pair| pair.strip_prefix("token="))
+    .filter(|token| !token.is_empty())
+}
+
+/// A fresh random token, URL-safe so it can sit in an endpoint string.
+fn generate_token() -> Result<String> {
+  use base64::Engine as _;
+  let mut bytes = [0; 32];
+  getrandom::fill(&mut bytes)
+    .map_err(|error| SessionError::Dispatch(format!("session token generation failed: {error}")))?;
+  Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// The token a TCP endpoint requires: the caller's, else a generated one
+/// unless the endpoint only listens on loopback.
+fn required_token(given: Option<String>, loopback: bool) -> Result<Option<String>> {
+  match given {
+    Some(token) => Ok(Some(token)),
+    None if loopback => Ok(None),
+    None => generate_token().map(Some),
+  }
+}
+
+/// A caller-supplied token is written into an endpoint string as-is, so it
+/// is held to the characters a URL query carries unescaped.
+fn check_token(token: &str) -> Result<()> {
+  if !token.is_empty()
+    && token
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+  {
+    return Ok(());
+  }
+  Err(SessionError::Dispatch(
+    "a session token must be non-empty and use only letters, digits, '-', '_', '.' and '~'".to_owned(),
+  ))
+}
+
+/// Compare digests rather than the tokens themselves, so the time a
+/// mismatch takes says nothing about how much of a guess was right.
+fn token_matches(expected: &str, offered: Option<&str>) -> bool {
+  use sha2::{Digest as _, Sha256};
+  offered.is_some_and(|offered| Sha256::digest(expected.as_bytes()) == Sha256::digest(offered.as_bytes()))
 }
 
 /// A running session server.
@@ -75,12 +136,32 @@ impl SessionServer {
   ///
   /// Existing Unix socket paths are never replaced. For a TCP endpoint with
   /// port `0`, the OS-assigned address is captured into
-  /// [`SessionServer::endpoint_string`].
+  /// [`SessionServer::endpoint_string`]. A TCP endpoint beyond loopback gets
+  /// a generated token; see [`SessionServer::bind_with_token`].
   ///
   /// # Errors
   ///
   /// Returns [`SessionError::Io`] if the socket / address cannot be bound.
   pub async fn bind(endpoint: Endpoint, dispatcher: Arc<dyn Dispatcher>) -> Result<Self> {
+    Self::bind_with_token(endpoint, dispatcher, None).await
+  }
+
+  /// [`SessionServer::bind`], requiring `token` on a TCP endpoint. With no
+  /// token, a loopback endpoint stays open to local processes and any other
+  /// address gets a generated one. Either way the endpoint string carries
+  /// the token clients must present. A Unix socket ignores `token`: the
+  /// socket file is owner-only already.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`SessionError::Io`] if the socket / address cannot be bound,
+  /// and [`SessionError::Dispatch`] for a token an endpoint string cannot
+  /// carry.
+  pub async fn bind_with_token(
+    endpoint: Endpoint,
+    dispatcher: Arc<dyn Dispatcher>,
+    token: Option<String>,
+  ) -> Result<Self> {
     match endpoint {
       #[cfg(unix)]
       Endpoint::Unix(path) => Self::bind_unix(&path, None, dispatcher),
@@ -89,12 +170,20 @@ impl SessionServer {
         Self::bind_unix(&directory.path().join("ipc.sock"), Some(directory), dispatcher)
       },
       Endpoint::Tcp(addr) => {
+        if let Some(token) = &token {
+          check_token(token)?;
+        }
         let listener = TcpListener::bind(&addr).await?;
         let local = listener.local_addr()?;
+        let token = required_token(token, local.ip().is_loopback())?;
+        let endpoint_string = match &token {
+          Some(token) => format!("ws://{local}/?token={token}"),
+          None => format!("ws://{local}"),
+        };
         Ok(Self {
-          endpoint_string: format!("ws://{local}"),
+          lifecycle: Arc::new(Lifecycle::new(endpoint_string.clone(), dispatcher)?.with_token(token)),
+          endpoint_string,
           listener: std::sync::Mutex::new(Some(Listener::Tcp(listener))),
-          lifecycle: Arc::new(Lifecycle::new(format!("ws://{local}"), dispatcher)?),
         })
       },
     }
@@ -148,7 +237,8 @@ impl SessionServer {
   }
 
   /// The resolved endpoint string to publish in the registry. For TCP this
-  /// reflects the OS-chosen port; for Unix it is the socket path.
+  /// reflects the OS-chosen port and carries the token, if one is
+  /// required; for Unix it is the socket path.
   #[must_use]
   pub fn endpoint_string(&self) -> &str {
     &self.endpoint_string
@@ -260,45 +350,47 @@ fn connection_ended(result: std::result::Result<Result<()>, tokio::task::JoinErr
 ///
 /// A command's events are written as they are emitted — that is what makes a
 /// remote `run` stream its console like a local one — and the response frame
-/// always comes last.
+/// always comes last. The connection keeps reading while a command runs, so
+/// commands sent ahead queue up in order and a hang-up is noticed at once:
+/// the command's event sink closes, which is what ends a stream that runs
+/// until its client goes away.
 async fn serve_connection<S>(stream: S, lifecycle: Arc<Lifecycle>) -> Result<()>
 where
   S: AsyncRead + AsyncWrite + Unpin,
 {
   let (mut reader, mut writer) = tokio::io::split(stream);
-  let mut pending = Vec::new();
+  let mut connection = Connection::default();
   let mut draining = lifecycle.draining();
+  if let Some(token) = lifecycle.token.as_deref()
+    && !authenticate(&mut reader, &mut writer, &mut connection.pending, token).await?
+  {
+    return Ok(());
+  }
   loop {
-    let command: Option<Command> = tokio::select! {
-      biased;
-      _ = draining.wait_for(|draining| *draining) => break,
-      command = read_frame(&mut reader, &mut pending) => match command {
-        Ok(c) => c,
-        Err(SessionError::ConnectionClosed) => break,
-        Err(e) => return Err(e),
-      },
+    let command = if let Some(command) = connection.queued.pop_front() {
+      command
+    } else {
+      if connection.hung_up {
+        break;
+      }
+      let command: Option<Command> = tokio::select! {
+        biased;
+        _ = draining.wait_for(|draining| *draining) => break,
+        command = read_frame(&mut reader, &mut connection.pending) => match command {
+          Ok(c) => c,
+          Err(SessionError::ConnectionClosed) => break,
+          Err(e) => return Err(e),
+        },
+      };
+      let Some(command) = command else { break };
+      command
     };
-    let Some(command) = command else { break };
+    if *draining.borrow() {
+      break;
+    }
 
     if command.verb == CLOSE_VERB {
-      if !lifecycle.identifies(&command) {
-        write_frame(
-          &mut writer,
-          &ServerFrame::Response(crate::Response::err(
-            command.id,
-            "close request does not identify this session endpoint",
-          )),
-        )
-        .await?;
-        continue;
-      }
-      let request = lifecycle.close_request();
-      let response = lifecycle.close(&command).await;
-      let closed = response.ok;
-      let written = write_frame(&mut writer, &ServerFrame::Response(response)).await;
-      drop(request);
-      written?;
-      if closed {
+      if close(&mut writer, &lifecycle, &command).await? {
         return Ok(());
       }
       continue;
@@ -315,38 +407,131 @@ where
       .await?;
       continue;
     }
+    // Closing cuts the command off wherever it is, including a write to a
+    // client that stopped reading.
     tokio::select! {
       biased;
       _ = closing.wait_for(|closing| *closing) => return Ok(()),
-      result = async {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let sink = EventSink::new(command.id, tx);
-    let mut dispatch = std::pin::pin!(lifecycle.run(command, sink));
-    // `events_open` is what keeps this from spinning: a dispatcher that drops
-    // its sink early closes the channel, and an always-ready `None` branch
-    // would otherwise be re-polled on every loop iteration.
-    let mut events_open = true;
-    let response = loop {
-      tokio::select! {
-        biased;
-        event = rx.recv(), if events_open => match event {
-          Some(event) => write_frame(&mut writer, &ServerFrame::Event(event)).await?,
-          None => events_open = false,
-        },
-        response = &mut dispatch => break response,
-      }
-    };
-    // Events emitted in the same poll that completed the dispatch are still
-    // queued; the sink is dropped with the future, so this drains and ends.
-    while let Ok(event) = rx.try_recv() {
-      write_frame(&mut writer, &ServerFrame::Event(event)).await?;
-    }
-    write_frame(&mut writer, &ServerFrame::Response(response)).await?;
-        Ok::<(), SessionError>(())
-      } => result?,
+      result = run_command(&mut reader, &mut writer, &mut connection, &lifecycle, command) => result?,
     }
   }
   Ok(())
+}
+
+/// What one connection carries between commands.
+#[derive(Default)]
+struct Connection {
+  /// Bytes read past the last complete frame.
+  pending: Vec<u8>,
+  /// Commands that arrived while an earlier one ran.
+  queued: std::collections::VecDeque<Command>,
+  /// The client has gone; nothing more is read or written.
+  hung_up: bool,
+}
+
+/// Run one command, writing its events as they come and its response last,
+/// while still reading the connection: commands sent ahead are queued, and a
+/// hang-up closes the command's event sink.
+async fn run_command<R, W>(
+  reader: &mut R,
+  writer: &mut W,
+  connection: &mut Connection,
+  lifecycle: &Lifecycle,
+  command: Command,
+) -> Result<()>
+where
+  R: AsyncRead + Unpin,
+  W: AsyncWrite + Unpin,
+{
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+  let sink = EventSink::new(command.id, tx);
+  let mut dispatch = std::pin::pin!(lifecycle.run(command, sink));
+  // `events_open` is what keeps this from spinning: a dispatcher that drops
+  // its sink early closes the channel, and an always-ready `None` branch
+  // would otherwise be re-polled on every loop iteration.
+  let mut events_open = true;
+  let response = loop {
+    tokio::select! {
+      biased;
+      event = rx.recv(), if events_open => match event {
+        Some(event) => write_frame(writer, &ServerFrame::Event(event)).await?,
+        None => events_open = false,
+      },
+      frame = read_frame::<_, Command>(reader, &mut connection.pending), if !connection.hung_up => match frame {
+        Ok(Some(next)) => connection.queued.push_back(next),
+        Ok(None) | Err(SessionError::ConnectionClosed) => {
+          // The command runs on, but nobody is listening: closing the
+          // channel tells a streaming command to end and drops the rest.
+          connection.hung_up = true;
+          connection.queued.clear();
+          rx.close();
+        },
+        Err(e) => return Err(e),
+      },
+      response = &mut dispatch => break response,
+    }
+  };
+  if connection.hung_up {
+    return Ok(());
+  }
+  // Events emitted in the same poll that completed the dispatch are still
+  // queued; the sink is dropped with the future, so this drains and ends.
+  while let Ok(event) = rx.try_recv() {
+    write_frame(writer, &ServerFrame::Event(event)).await?;
+  }
+  write_frame(writer, &ServerFrame::Response(response)).await
+}
+
+/// Answer a [`CLOSE_VERB`] command. `true` when the session closed.
+async fn close<W>(writer: &mut W, lifecycle: &Arc<Lifecycle>, command: &Command) -> Result<bool>
+where
+  W: AsyncWrite + Unpin,
+{
+  if !lifecycle.identifies(command) {
+    write_frame(
+      writer,
+      &ServerFrame::Response(crate::Response::err(
+        command.id,
+        "close request does not identify this session endpoint",
+      )),
+    )
+    .await?;
+    return Ok(false);
+  }
+  let request = lifecycle.close_request();
+  let response = lifecycle.close(command).await;
+  let closed = response.ok;
+  let written = write_frame(writer, &ServerFrame::Response(response)).await;
+  drop(request);
+  written?;
+  Ok(closed)
+}
+
+/// Read the connection's first command and accept it only if it is
+/// [`AUTH_VERB`] with the right token. `false` when the connection was
+/// refused (and told why) or hung up first.
+async fn authenticate<R, W>(reader: &mut R, writer: &mut W, pending: &mut Vec<u8>, token: &str) -> Result<bool>
+where
+  R: AsyncRead + Unpin,
+  W: AsyncWrite + Unpin,
+{
+  let command: Command = match read_frame(reader, pending).await {
+    Ok(Some(command)) => command,
+    Ok(None) | Err(SessionError::ConnectionClosed) => return Ok(false),
+    Err(error) => return Err(error),
+  };
+  let offered = command.args.get("token").and_then(serde_json::Value::as_str);
+  if command.verb == AUTH_VERB && token_matches(token, offered) {
+    write_frame(writer, &ServerFrame::Response(crate::Response::ok(command.id, ""))).await?;
+    return Ok(true);
+  }
+  let reason = if command.verb == AUTH_VERB {
+    "session token rejected"
+  } else {
+    "this session requires a token: authenticate with 'session.auth' first"
+  };
+  write_frame(writer, &ServerFrame::Response(crate::Response::err(command.id, reason))).await?;
+  Ok(false)
 }
 
 #[cfg(test)]
@@ -494,6 +679,142 @@ mod tests {
     std::fs::write(&path, "sashoush replacement").unwrap();
     drop(server);
     assert_eq!(std::fs::read_to_string(path).unwrap(), "sashoush replacement");
+  }
+
+  #[test]
+  fn only_a_loopback_endpoint_may_go_without_a_token() {
+    assert_eq!(required_token(None, true).unwrap(), None);
+    let generated = required_token(None, false).unwrap().expect("generated beyond loopback");
+    assert!(generated.len() >= 32 && check_token(&generated).is_ok(), "{generated}");
+    assert_ne!(Some(generated), required_token(None, false).unwrap());
+    assert_eq!(
+      required_token(Some("sashoush-token".into()), true).unwrap().as_deref(),
+      Some("sashoush-token")
+    );
+    assert!(check_token("has space").is_err());
+    assert!(check_token("").is_err());
+  }
+
+  #[test]
+  fn the_token_rides_in_the_endpoint_query_not_the_address() {
+    let endpoint = "ws://127.0.0.1:4000/?token=abc-123";
+    assert_eq!(endpoint_token(endpoint), Some("abc-123"));
+    assert!(matches!(Endpoint::parse(endpoint), Endpoint::Tcp(addr) if addr == "127.0.0.1:4000"));
+    assert_eq!(endpoint_token("ws://127.0.0.1:4000"), None);
+    assert_eq!(endpoint_token("/tmp/s.sock"), None);
+  }
+
+  #[tokio::test]
+  async fn a_token_endpoint_refuses_every_connection_that_does_not_present_it() {
+    let server = SessionServer::bind_with_token(
+      Endpoint::Tcp("127.0.0.1:0".into()),
+      Arc::new(EchoDispatcher),
+      Some("sashoush-secret".into()),
+    )
+    .await
+    .unwrap();
+    let endpoint = server.endpoint_string().to_string();
+    assert!(endpoint.ends_with("/?token=sashoush-secret"), "{endpoint}");
+    let _serving = tokio::spawn(async move { server.serve().await });
+
+    let mut authorized = SessionClient::connect(&endpoint).await.unwrap();
+    assert!(
+      authorized
+        .call(Command::new(1, "echo", serde_json::json!({})))
+        .await
+        .unwrap()
+        .ok
+    );
+
+    let bare = endpoint.split_once('?').unwrap().0;
+    let mut anonymous = SessionClient::connect(bare).await.unwrap();
+    let refused = anonymous
+      .call(Command::new(1, "echo", serde_json::json!({})))
+      .await
+      .unwrap();
+    assert!(!refused.ok);
+    assert!(refused.error.unwrap_or_default().contains("requires a token"));
+    // Refused means disconnected, not merely answered.
+    assert!(
+      anonymous
+        .call(Command::new(2, "echo", serde_json::json!({})))
+        .await
+        .is_err()
+    );
+
+    let wrong = endpoint.replace("sashoush-secret", "guess");
+    assert!(matches!(
+      SessionClient::connect(&wrong).await,
+      Err(SessionError::Unauthorized(reason)) if reason.contains("rejected")
+    ));
+  }
+
+  struct UntilHangup(tokio::sync::mpsc::UnboundedSender<&'static str>);
+
+  #[async_trait::async_trait]
+  impl Dispatcher for UntilHangup {
+    async fn dispatch(&self, command: Command, events: EventSink) -> crate::Response {
+      let _ = self.0.send("started");
+      events.closed().await;
+      let _ = self.0.send("client gone");
+      crate::Response::ok(command.id, "")
+    }
+  }
+
+  #[tokio::test]
+  async fn a_streaming_command_learns_its_client_hung_up() {
+    let (tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let lifecycle = Arc::new(Lifecycle::new("local".into(), Arc::new(UntilHangup(tx))).unwrap());
+    let (server, mut client) = tokio::io::duplex(1024);
+    let serving = tokio::spawn(serve_connection(server, lifecycle));
+    write_frame(&mut client, &Command::new(1, "screencast", serde_json::json!({})))
+      .await
+      .unwrap();
+    assert_eq!(seen.recv().await, Some("started"));
+    drop(client);
+    let gone = tokio::time::timeout(std::time::Duration::from_secs(5), seen.recv()).await;
+    assert_eq!(gone.unwrap(), Some("client gone"));
+    serving.await.unwrap().unwrap();
+  }
+
+  struct Slow;
+
+  #[async_trait::async_trait]
+  impl Dispatcher for Slow {
+    async fn dispatch(&self, command: Command, _events: EventSink) -> crate::Response {
+      if command.verb == "slow" {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      }
+      crate::Response::ok(command.id, command.verb)
+    }
+  }
+
+  #[tokio::test]
+  async fn commands_sent_ahead_are_answered_in_order() {
+    let lifecycle = Arc::new(Lifecycle::new("local".into(), Arc::new(Slow)).unwrap());
+    let (server, mut client) = tokio::io::duplex(4096);
+    let _serving = tokio::spawn(serve_connection(server, lifecycle));
+    for (id, verb) in [(1, "slow"), (2, "fast"), (3, "fast")] {
+      write_frame(&mut client, &Command::new(id, verb, serde_json::json!({})))
+        .await
+        .unwrap();
+    }
+    let mut pending = Vec::new();
+    let mut answered = Vec::new();
+    for _ in 0..3 {
+      let frame: ServerFrame = read_frame(&mut client, &mut pending).await.unwrap().unwrap();
+      if let ServerFrame::Response(response) = frame {
+        answered.push((response.id, response.text));
+      }
+    }
+    assert_eq!(
+      answered,
+      [
+        (1, "slow".to_string()),
+        (2, "fast".to_string()),
+        (3, "fast".to_string())
+      ]
+    );
   }
 
   async fn spawn_echo_server() -> (String, tokio::task::JoinHandle<()>) {

@@ -68,6 +68,18 @@ pub struct SessionOpenArgs {
   #[arg(long = "extension")]
   pub extensions: Vec<String>,
 
+  /// Listen on TCP at this address instead of a Unix socket, so clients on
+  /// other machines can attach. Beyond loopback the endpoint requires a
+  /// token: `FERRIDRIVER_SESSION_TOKEN` when set, otherwise a generated
+  /// one. Either way the endpoint printed (and listed) carries it.
+  #[arg(long)]
+  pub host: Option<String>,
+
+  /// TCP port to listen on; `0`, or unset with `--host`, picks a free one.
+  /// Alone it listens on loopback.
+  #[arg(long)]
+  pub port: Option<u16>,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }
@@ -90,6 +102,18 @@ pub struct SessionHostArgs {
   /// Extensions to load for this session's scripts (see `session open`).
   #[arg(long = "extension")]
   pub extensions: Vec<String>,
+
+  /// Listen on TCP at this address instead of a Unix socket, so clients on
+  /// other machines can attach. Beyond loopback the endpoint requires a
+  /// token: `FERRIDRIVER_SESSION_TOKEN` when set, otherwise a generated
+  /// one. Either way the endpoint printed (and listed) carries it.
+  #[arg(long)]
+  pub host: Option<String>,
+
+  /// TCP port to listen on; `0`, or unset with `--host`, picks a free one.
+  /// Alone it listens on loopback.
+  #[arg(long)]
+  pub port: Option<u16>,
 
   #[command(flatten)]
   pub browser: BrowserArgs,
