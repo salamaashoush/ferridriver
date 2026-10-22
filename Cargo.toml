@@ -134,14 +134,15 @@ debug = false
 opt-level = 1
 
 # ferrijs 0.7.0 on crates.io has a fetch engine whose standalone cookie jar
-# a host cannot read, and whose responses carry neither their hop's timing
-# nor the server certificate; it also answers no challenge per hop. The
-# request context needs all four, which are at this commit of ferrijs main,
-# so the crates come from there. `cargo publish` ignores this section.
+# a host cannot read, whose responses carry neither their hop's timing nor
+# the server certificate, which answers no challenge per hop, and which has
+# no proxy of its own. The request context needs all five, which are at
+# this commit of ferrijs main, so the crates come from there. `cargo
+# publish` ignores this section.
 [patch.crates-io]
-ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
-ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
-ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
-ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
-ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
-ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "12e5692d8dba25b13851bea6af43d94fdc8b84ee" }
+ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "56d4ad2a872e9c8913c4951c72715432bf7cbab3" }
+ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "56d4ad2a872e9c8913c4951c72715432bf7cbab3" }
+ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "56d4ad2a872e9c8913c4951c72715432bf7cbab3" }
+ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "56d4ad2a872e9c8913c4951c72715432bf7cbab3" }
+ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "56d4ad2a872e9c8913c4951c72715432bf7cbab3" }
+ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "56d4ad2a872e9c8913c4951c72715432bf7cbab3" }

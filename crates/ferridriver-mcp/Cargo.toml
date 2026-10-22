@@ -35,6 +35,8 @@ rustc-hash = "2"
 anyhow = { workspace = true }
 axum = { workspace = true }
 tokio-util = { workspace = true }
+tower-service = "0.3"
+sha2 = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }

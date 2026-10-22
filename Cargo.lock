@@ -1901,9 +1901,11 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "shellexpand",
  "tokio",
  "tokio-util",
+ "tower-service",
  "tracing",
  "which",
 ]
@@ -2124,7 +2126,7 @@ dependencies = [
 [[package]]
 name = "ferrijs"
 version = "0.7.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=12e5692d8dba25b13851bea6af43d94fdc8b84ee#12e5692d8dba25b13851bea6af43d94fdc8b84ee"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=56d4ad2a872e9c8913c4951c72715432bf7cbab3#56d4ad2a872e9c8913c4951c72715432bf7cbab3"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -2146,7 +2148,7 @@ dependencies = [
 [[package]]
 name = "ferrijs-bundle"
 version = "0.7.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=12e5692d8dba25b13851bea6af43d94fdc8b84ee#12e5692d8dba25b13851bea6af43d94fdc8b84ee"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=56d4ad2a872e9c8913c4951c72715432bf7cbab3#56d4ad2a872e9c8913c4951c72715432bf7cbab3"
 dependencies = [
  "dunce",
  "ferrijs",
@@ -2165,7 +2167,7 @@ dependencies = [
 [[package]]
 name = "ferrijs-fetch"
 version = "0.7.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=12e5692d8dba25b13851bea6af43d94fdc8b84ee#12e5692d8dba25b13851bea6af43d94fdc8b84ee"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=56d4ad2a872e9c8913c4951c72715432bf7cbab3#56d4ad2a872e9c8913c4951c72715432bf7cbab3"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -2184,7 +2186,7 @@ dependencies = [
 [[package]]
 name = "ferrijs-permissions"
 version = "0.7.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=12e5692d8dba25b13851bea6af43d94fdc8b84ee#12e5692d8dba25b13851bea6af43d94fdc8b84ee"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=56d4ad2a872e9c8913c4951c72715432bf7cbab3#56d4ad2a872e9c8913c4951c72715432bf7cbab3"
 dependencies = [
  "serde",
 ]
@@ -2192,7 +2194,7 @@ dependencies = [
 [[package]]
 name = "ferrijs-serde"
 version = "0.7.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=12e5692d8dba25b13851bea6af43d94fdc8b84ee#12e5692d8dba25b13851bea6af43d94fdc8b84ee"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=56d4ad2a872e9c8913c4951c72715432bf7cbab3#56d4ad2a872e9c8913c4951c72715432bf7cbab3"
 dependencies = [
  "rquickjs",
  "serde",
@@ -2201,7 +2203,7 @@ dependencies = [
 [[package]]
 name = "ferrijs-std"
 version = "0.7.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=12e5692d8dba25b13851bea6af43d94fdc8b84ee#12e5692d8dba25b13851bea6af43d94fdc8b84ee"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=56d4ad2a872e9c8913c4951c72715432bf7cbab3#56d4ad2a872e9c8913c4951c72715432bf7cbab3"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
