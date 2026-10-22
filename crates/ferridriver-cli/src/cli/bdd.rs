@@ -14,15 +14,27 @@ pub struct BddArgs {
   pub config: super::ConfigSource,
 
   /// Feature file globs. Overrides `[bdd].features` from config.
+  /// `path:line` runs only the scenario (or examples row) on that line.
   pub features: Vec<String>,
 
   /// Tag filter expression, e.g. `@smoke and not @wip`.
   #[arg(long, help_heading = "Selection")]
   pub tags: Option<String>,
 
-  /// Parse and report scenarios without executing steps.
+  /// Run every scenario without executing a step: each step is matched
+  /// against the step definitions and reported, undefined and ambiguous
+  /// ones as failures (undefined only pending with `--no-strict`). No
+  /// browser launches and no web server starts.
   #[arg(long, help_heading = "Selection")]
   pub dry_run: bool,
+
+  /// List the scenarios a run would execute, with any undefined or
+  /// ambiguous steps, without running them. With `--format json`, one
+  /// document with a record per scenario (see `ferridriver test --list`);
+  /// step problems appear on the record and in `errors`, and fail the
+  /// listing (undefined ones only under `--strict`, the default).
+  #[arg(long, help_heading = "Selection")]
+  pub list: bool,
 
   /// Treat undefined or pending steps as failures (default).
   #[arg(long, overrides_with = "no_strict", help_heading = "Gherkin")]

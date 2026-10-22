@@ -69,7 +69,7 @@ async fn run() -> anyhow::Result<()> {
   if let Some(path) = source.path.as_deref()
     && !path.exists()
   {
-    anyhow::bail!("--config {} does not exist", path.display());
+    return Err(error::usage(format!("--config {} does not exist", path.display())));
   }
   let mut startup = ferridriver_config::Startup::new(source.path.as_deref(), source.inherit());
   let config = startup.resolve_documents()?;

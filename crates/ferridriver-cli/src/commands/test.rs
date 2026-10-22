@@ -10,8 +10,10 @@ pub async fn run(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::R
   ferridriver_testjs::set_test_script_caps(caps.clone());
   ferridriver_testjs::set_test_sidecars(script_setup::sidecar_specs(&config));
 
+  let (test_files, locations) = suite::split_locations(args.files);
   let mut overrides = ferridriver_test::config::CliOverrides {
-    test_files: args.files,
+    test_files,
+    locations,
     grep: args.grep,
     grep_invert: args.grep_invert,
     tag: args.tag,

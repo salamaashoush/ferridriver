@@ -85,7 +85,9 @@ pub struct Cli {
   /// one shape whether the run succeeded or not.
   ///
   /// A suite run's document is its report, not this flag: use `--reporter
-  /// json` (or `junit`, `html`, `blob`) for `test` and `bdd`.
+  /// json` (or `junit`, `html`, `blob`, `stream`) for `test` and `bdd`.
+  /// `test --list` and `bdd --list` do read it, and print the listing as
+  /// one JSON document.
   #[arg(long, global = true, value_enum, default_value = "human", help_heading = "Global")]
   pub format: FormatArg,
 
@@ -243,7 +245,13 @@ pub enum Command {
       ferridriver test --project webkit --workers 4\n  \
       ferridriver test --ui                     browse and re-run in a web app\n  \
       ferridriver test --last-failed --debug    step through what broke\n  \
-      ferridriver test --shard 2/4 --reporter blob   one CI shard"
+      ferridriver test --shard 2/4 --reporter blob   one CI shard, report-2.zip\n  \
+      ferridriver test --list --format json     every test with its stable id\n  \
+      ferridriver test --test-list ids.txt --reporter stream=fd:3\n  \
+      ferridriver test tests/cart.spec.ts:12    the test declared on line 12\n\n\
+      Exit status: 0 passed, 1 tests failed, 2 usage or config error,\n\
+      3 interrupted by a signal, 4 infrastructure failure (a browser that\n\
+      did not launch, a worker that crashed, a web server that did not start)."
   )]
   Test(TestRunArgs),
 
@@ -254,7 +262,10 @@ pub enum Command {
       ferridriver bdd\n  \
       ferridriver bdd tests/features/ --tags \"@smoke and not @wip\"\n  \
       ferridriver bdd --steps 'tests/steps/**/*.ts' --dry-run\n  \
-      ferridriver bdd --ui"
+      ferridriver bdd --list --format json      scenarios, ids, undefined steps\n  \
+      ferridriver bdd --ui\n\n\
+      Exit status: 0 passed, 1 tests failed, 2 usage or config error,\n\
+      3 interrupted by a signal, 4 infrastructure failure."
   )]
   Bdd(BddArgs),
 
@@ -347,10 +358,13 @@ pub enum Command {
 
   /// Merge the `blob` reports of several shards into one report.
   ///
-  /// Each shard runs with `--reporter blob`, writing a `report-N.zip`;
-  /// this replays every event in those blobs through the reporters you
-  /// name, producing the single HTML / `JUnit` / JSON report the run would
-  /// have produced unsharded.
+  /// Each shard runs with `--reporter blob`, writing a `report-N.zip`
+  /// (`N` from `--shard`); this replays every event in those blobs (or in
+  /// `stream` reporter `.jsonl` files) through the reporters you name,
+  /// producing the single HTML / `JUnit` / JSON report the run would have
+  /// produced unsharded. Attempts of one test from different inputs fold
+  /// into one test, so a test that failed on one machine and passed when
+  /// re-run on another is reported flaky.
   #[command(
     name = "merge-reports",
     after_help = "Examples:\n  \

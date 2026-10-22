@@ -26,11 +26,41 @@ impl std::fmt::Display for AlreadyReported {
 
 impl std::error::Error for AlreadyReported {}
 
+/// A failure of the command line or the configuration: nothing ran, and
+/// the status says so ([`ferridriver_test::exit::USAGE`]) so a caller can
+/// tell it from a suite that ran and failed.
+#[derive(Debug)]
+pub struct Usage(pub String);
+
+impl std::fmt::Display for Usage {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&self.0)
+  }
+}
+
+impl std::error::Error for Usage {}
+
+/// A [`Usage`] failure as the `anyhow` error every command returns.
+#[must_use]
+pub fn usage(message: impl Into<String>) -> anyhow::Error {
+  anyhow::Error::new(Usage(message.into()))
+}
+
+/// The exit status for `err`: usage and config failures are
+/// [`ferridriver_test::exit::USAGE`], everything else a plain failure.
+fn status(err: &anyhow::Error) -> i32 {
+  if err.chain().any(|cause| cause.downcast_ref::<Usage>().is_some()) {
+    ferridriver_test::exit::USAGE
+  } else {
+    ferridriver_test::exit::FAILED
+  }
+}
+
 /// Print a failure and return the process exit status for it.
 #[must_use]
 pub fn report(err: &anyhow::Error) -> i32 {
   if err.downcast_ref::<AlreadyReported>().is_some() {
-    return 1;
+    return ferridriver_test::exit::FAILED;
   }
   if ui::json() {
     let causes: Vec<String> = err.chain().skip(1).map(ToString::to_string).collect();
@@ -46,7 +76,7 @@ pub fn report(err: &anyhow::Error) -> i32 {
     if let Ok(text) = serde_json::to_string_pretty(&payload) {
       println!("{text}");
     }
-    return 1;
+    return status(err);
   }
 
   eprintln!("\n{}", ui::failure(&err.to_string()));
@@ -61,7 +91,7 @@ pub fn report(err: &anyhow::Error) -> i32 {
     }
   }
   eprintln!();
-  1
+  status(err)
 }
 
 /// Commands that address a recognised failure.
@@ -171,6 +201,16 @@ mod tests {
     assert_eq!(
       hints_for_text("target disconnected while closing the page"),
       [] as [(&str, String); 0]
+    );
+  }
+
+  #[test]
+  fn a_usage_failure_exits_two_anywhere_in_the_chain() {
+    let err = usage("invalid --shard `5/4`").context("test");
+    assert_eq!(status(&err), ferridriver_test::exit::USAGE);
+    assert_eq!(
+      status(&anyhow::anyhow!("browser exited")),
+      ferridriver_test::exit::FAILED
     );
   }
 

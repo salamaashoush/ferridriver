@@ -44,6 +44,9 @@ pub fn apply_shared(
   overrides.ui = runner.ui;
   overrides.ui_port = runner.ui_port;
   overrides.shard = runner.shard()?;
+  overrides.shard_assignment = runner.shard_assignment(overrides.shard.as_ref())?;
+  overrides.test_ids = runner.test_ids()?;
+  overrides.list_json = crate::ui::json();
   overrides.headless_override = browser.headless_override();
   overrides.browser = browser.browser.map(|kind| kind.name().to_owned());
   overrides.backend = browser.backend_name().map(str::to_string);
@@ -75,11 +78,33 @@ pub async fn resolve(
   }
   let secrets = config.secrets.resolve()?;
   let mut test_config = ferridriver_test::config::resolve_config_from(config.test, overrides)
-    .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+    .map_err(|e| crate::error::usage(format!("config error: {e}")))?;
   test_config.secrets = secrets;
   bootstrap::install_module_aliases(&test_config, &[])?;
   bootstrap::install_js_reporters(&test_config, caps).await?;
   Ok(test_config)
+}
+
+/// Split positional arguments into what discovery globs and what selects
+/// tests by line: `tests/cart.spec.ts:12` discovers `tests/cart.spec.ts`
+/// and runs the test on line 12. An argument whose path part is not a file
+/// on disk stays a glob, so a pattern with a colon in it is left alone.
+#[must_use]
+pub fn split_locations(args: Vec<String>) -> (Vec<String>, Vec<ferridriver_test::config::TestLocation>) {
+  let mut files = Vec::with_capacity(args.len());
+  let mut locations = Vec::new();
+  for arg in args {
+    match ferridriver_test::config::TestLocation::parse(&arg) {
+      Some(location) if std::path::Path::new(&location.file).is_file() => {
+        if !files.contains(&location.file) {
+          files.push(location.file.clone());
+        }
+        locations.push(location);
+      },
+      _ => files.push(arg),
+    }
+  }
+  (files, locations)
 }
 
 /// Hand a runner's exit status to the process.

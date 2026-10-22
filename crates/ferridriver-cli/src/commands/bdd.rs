@@ -11,7 +11,10 @@ pub async fn run(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   ferridriver_bdd::js::set_bdd_sidecars(script_setup::sidecar_specs(&config));
 
   let strict = args.strict();
+  let (features, locations) = suite::split_locations(args.features);
   let mut overrides = ferridriver_test::config::CliOverrides {
+    locations,
+    list_only: args.list,
     bdd_tags: args.tags,
     bdd_dry_run: args.dry_run,
     bdd_fail_fast: args.runner.fail_fast,
@@ -27,8 +30,8 @@ pub async fn run(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
 
   let mut test_config = Box::pin(suite::resolve(config, &caps, args.runner.debug, &mut overrides)).await?;
   // CLI-supplied feature globs override the [test].features list when provided.
-  if !args.features.is_empty() {
-    test_config.features = args.features;
+  if !features.is_empty() {
+    test_config.features = features;
   }
 
   let exit_code = Box::pin(ferridriver_bdd::run_bdd_with(test_config, overrides)).await;

@@ -122,12 +122,14 @@ pub struct MergeReportsArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
-  /// Directory holding the shards' blob zips, or the zips themselves.
+  /// Directory holding the shards' blob zips (and `stream` reporter
+  /// `.jsonl` files), or those files themselves.
   #[arg(default_value = ".")]
   pub inputs: Vec<PathBuf>,
 
-  /// Reporter to produce from the merged stream, repeatable. Defaults to
-  /// `list` plus whatever the config declares.
+  /// Reporter to produce from the merged stream, repeatable, optionally
+  /// with a target (`junit=merged.xml`); a path names a JS/TS reporter.
+  /// Defaults to `list` plus whatever the config declares.
   #[arg(long)]
   pub reporter: Vec<String>,
 

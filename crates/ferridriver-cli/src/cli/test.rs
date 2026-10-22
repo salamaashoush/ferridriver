@@ -12,6 +12,7 @@ pub struct TestRunArgs {
   pub config: super::ConfigSource,
 
   /// Test file paths or globs. Overrides `[test].testMatch` from config.
+  /// `path:line` (or `path:line:column`) runs only the test declared there.
   pub files: Vec<String>,
 
   /// Only run tests whose full title matches this substring/regex.
@@ -34,7 +35,11 @@ pub struct TestRunArgs {
   #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", help_heading = "Selection")]
   pub only_changed: Option<String>,
 
-  /// List discovered tests without running them.
+  /// List the tests a run with these flags would execute, without running
+  /// them, starting a web server or launching a browser. With `--format
+  /// json`, one document with a record per test (stable id, project,
+  /// file, line, title path, tags, annotations, retries, timeout, serial
+  /// group).
   #[arg(long, help_heading = "Selection")]
   pub list: bool,
 
