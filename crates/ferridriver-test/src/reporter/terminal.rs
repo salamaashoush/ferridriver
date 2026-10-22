@@ -297,6 +297,7 @@ mod tests {
 
   fn id(name: &str) -> TestId {
     TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "tests/cart.spec.ts".into(),
       suite: None,

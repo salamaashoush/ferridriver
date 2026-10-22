@@ -467,6 +467,7 @@ mod tests {
 
   fn test_id() -> TestId {
     TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "/repo/tests/checkout.spec.ts".into(),
       suite: Some("/repo/tests/checkout.spec.ts::checkout".into()),
@@ -558,6 +559,7 @@ mod tests {
       shard: None,
     };
     let mut suite = crate::model::TestSuite {
+      serial_scope: None,
       name: "checkout".into(),
       file: "/repo/tests/checkout.spec.ts".into(),
       tests: Vec::new(),

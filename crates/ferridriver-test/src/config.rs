@@ -9,9 +9,10 @@
 pub use ferridriver_config::test::{
   BrowserConfig, CliOverrides, ContextConfig, DEFAULT_EXPECT_TIMEOUT_MS, ExpectConfig, GeolocationConfig,
   GracefulShutdown, HttpCredentialsConfig, ProjectConfig, ProxyConfig, ReportSlowTestsConfig, ReporterConfig,
-  RetryStrategy, ScreenshotMode, ScreenshotOption, ShardArg, StringOrList, TestConfig, ToHaveScreenshotConfig,
-  ToMatchAriaSnapshotConfig, ToMatchSnapshotConfig, ToPassConfig, TraceMode, TraceOption, UpdateSnapshotsMode,
-  VideoConfig, VideoMode, VideoOption, ViewportConfig, ViewportOverride, WebServerConfig, expand_device_keys,
+  RetryStrategy, ScreenshotMode, ScreenshotOption, ShardArg, StringOrList, TestConfig, TestLocation,
+  ToHaveScreenshotConfig, ToMatchAriaSnapshotConfig, ToMatchSnapshotConfig, ToPassConfig, TraceMode, TraceOption,
+  UpdateSnapshotsMode, VideoConfig, VideoMode, VideoOption, ViewportConfig, ViewportOverride, WebServerConfig,
+  expand_device_keys,
 };
 
 use std::path::Path;
@@ -244,6 +245,23 @@ fn apply_env_overrides(overrides: &mut CliOverrides) {
   }
 }
 
+/// A `--reporter` value: a name, or `name=target` where the target is the
+/// reporter's `outputFile` (`junit=results.xml`, `stream=fd:3`).
+fn reporter_from_flag(spec: &str) -> ReporterConfig {
+  let mut options = std::collections::BTreeMap::new();
+  let name = match spec.split_once('=') {
+    Some((name, target)) if !name.is_empty() => {
+      options.insert("outputFile".to_string(), serde_json::Value::String(target.to_string()));
+      name
+    },
+    _ => spec,
+  };
+  ReporterConfig {
+    name: name.to_string(),
+    options,
+  }
+}
+
 // ── Config resolution ───────────────────────────────────────────────────────
 
 /// Resolve the final test config by merging: defaults < config file < env vars
@@ -322,23 +340,30 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
     config.retries = r;
   }
   if !overrides.reporter.is_empty() {
-    config.reporter = overrides
-      .reporter
-      .iter()
-      .map(|name| ReporterConfig {
-        name: name.clone(),
-        options: std::collections::BTreeMap::new(),
-      })
-      .collect();
+    config.reporter = overrides.reporter.iter().map(|spec| reporter_from_flag(spec)).collect();
   }
   // Playwright's `--add-reporter`: appended to whatever the config or
   // `--reporter` chose, once each.
-  for name in &overrides.add_reporter {
-    if !config.reporter.iter().any(|r| &r.name == name) {
-      config.reporter.push(ReporterConfig {
-        name: name.clone(),
-        options: std::collections::BTreeMap::new(),
-      });
+  for spec in &overrides.add_reporter {
+    let entry = reporter_from_flag(spec);
+    if !config.reporter.iter().any(|r| r.name == entry.name) {
+      config.reporter.push(entry);
+    }
+  }
+  // A sharded run's blob and stream name their shard in the header, and the
+  // blob in its file name, unless the config already said otherwise.
+  if let Some(shard) = &overrides.shard {
+    for entry in &mut config.reporter {
+      if matches!(entry.name.as_str(), "blob" | "stream") {
+        entry
+          .options
+          .entry("shardIndex".to_string())
+          .or_insert_with(|| serde_json::Value::from(shard.current));
+        entry
+          .options
+          .entry("shardTotal".to_string())
+          .or_insert_with(|| serde_json::Value::from(shard.total));
+      }
     }
   }
   if let Some(headless) = overrides.headless_override {

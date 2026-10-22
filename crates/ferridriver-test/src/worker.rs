@@ -882,11 +882,17 @@ pub struct WorkerTestResult {
   /// consumer is the single largest allocation a finished test makes.
   pub outcome: Arc<TestOutcome>,
   pub should_retry: bool,
-  pub test_fn: crate::model::TestFn,
-  pub test_id: crate::model::TestId,
-  pub fixture_requests: Vec<String>,
+  /// The case as it was scheduled, so a retry runs with every setting it
+  /// was declared with: timeout, retries, `test.fail()`, annotations, the
+  /// `test.use` bag.
+  pub test: crate::model::TestCase,
   pub suite_key: String,
   pub hooks: Arc<Hooks>,
+  pub suite_mode: crate::model::SuiteMode,
+  /// The tests of this test's serial group that never started because it
+  /// failed and will be retried; they run after the retry, in order, on
+  /// the same worker.
+  pub serial_tail: Vec<TestAssignment>,
 }
 
 /// Per-suite state tracked on this worker.
@@ -1105,6 +1111,7 @@ impl Worker {
   fn create_suite_test_info(&self, suite_key: &str, repeat_each_index: u32) -> Arc<TestInfo> {
     Arc::new(TestInfo {
       test_id: crate::model::TestId {
+        root_path: None,
         repeat_each_index,
         file: suite_key.to_string(),
         suite: None,
@@ -1247,6 +1254,7 @@ impl Worker {
           let step_id = format!("hook:afterAll:{suite_key}:{i}");
           // Use a synthetic TestId for the suite.
           let synthetic_id = crate::model::TestId {
+            root_path: None,
             repeat_each_index: state.repeat_each_index,
             file: suite_key.clone(),
             suite: None,
@@ -1341,7 +1349,8 @@ impl Worker {
     let mut results = Vec::with_capacity(batch.assignments.len());
     let mut serial_failed = false;
 
-    for assignment in batch.assignments {
+    let mut assignments = batch.assignments.into_iter();
+    while let Some(assignment) = assignments.next() {
       if serial_failed {
         // Skip remaining tests in the serial suite.
         let test = &assignment.test;
@@ -1369,20 +1378,27 @@ impl Worker {
         results.push(WorkerTestResult {
           outcome,
           should_retry: false,
-          test_fn: Arc::clone(&test.test_fn),
-          test_id: test.id.clone(),
-          fixture_requests: test.fixture_requests.clone(),
+          test: assignment.test.clone(),
           suite_key: assignment.suite_key,
           hooks: assignment.hooks,
+          suite_mode: assignment.suite_mode,
+          serial_tail: Vec::new(),
         });
         continue;
       }
 
-      let result = ferridriver_expect::with_expect_config(
+      let mut result = ferridriver_expect::with_expect_config(
         self.expect_config(),
         Box::pin(self.run_single(browser, custom_pool, active_suites, assignment)),
       )
       .await;
+      if result.should_retry {
+        // The group resumes at the retry: what never started rides with
+        // it instead of being reported skipped and then run anyway.
+        result.serial_tail = assignments.by_ref().collect();
+        results.push(result);
+        break;
+      }
       if result.outcome.status == TestStatus::Failed || result.outcome.status == TestStatus::TimedOut {
         serial_failed = true;
       }
@@ -1427,8 +1443,9 @@ impl Worker {
     let test = &assignment.test;
     let test_id = test.id.clone();
     tracing::Span::current().record("test", test_id.full_name().as_str());
-    let test_fn = Arc::clone(&test.test_fn);
     let fixture_requests = test.fixture_requests.clone();
+    let case = test.clone();
+    let suite_mode = assignment.suite_mode;
     let attempt = assignment.attempt;
     let max_retries = test.retries.unwrap_or(self.config.retries);
     let max_attempts = max_retries + 1;
@@ -1553,11 +1570,11 @@ impl Worker {
       return WorkerTestResult {
         outcome,
         should_retry: false,
-        test_fn,
-        test_id,
-        fixture_requests,
+        test: case,
         suite_key,
         hooks,
+        suite_mode,
+        serial_tail: Vec::new(),
       };
     }
 
@@ -1592,11 +1609,11 @@ impl Worker {
       return WorkerTestResult {
         outcome,
         should_retry: false,
-        test_fn,
-        test_id,
-        fixture_requests,
+        test: case,
         suite_key,
         hooks,
+        suite_mode,
+        serial_tail: Vec::new(),
       };
     }
 
@@ -1844,11 +1861,11 @@ impl Worker {
             return WorkerTestResult {
               outcome,
               should_retry: attempt <= max_retries,
-              test_fn,
-              test_id,
-              fixture_requests,
+              test: case,
               suite_key,
               hooks,
+              suite_mode,
+              serial_tail: Vec::new(),
             };
           },
         }
@@ -2287,11 +2304,11 @@ impl Worker {
           return WorkerTestResult {
             outcome,
             should_retry: false,
-            test_fn,
-            test_id,
-            fixture_requests,
+            test: case,
             suite_key,
             hooks,
+            suite_mode,
+            serial_tail: Vec::new(),
           };
         }
 
@@ -2481,11 +2498,11 @@ impl Worker {
     WorkerTestResult {
       outcome,
       should_retry,
-      test_fn,
-      test_id,
-      fixture_requests,
+      test: case,
       suite_key,
       hooks,
+      suite_mode,
+      serial_tail: Vec::new(),
     }
   }
 }

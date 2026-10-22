@@ -559,6 +559,7 @@ mod tests {
   fn outcome(name: &str, status: TestStatus) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "tests/checkout.spec.ts".into(),
         suite: Some("Checkout".into()),

@@ -185,6 +185,7 @@ mod tests {
     ReporterEvent::TestFinished {
       outcome: Arc::new(TestOutcome {
         test_id: TestId {
+          root_path: None,
           repeat_each_index: 0,
           file: "spec.ts".into(),
           suite: None,

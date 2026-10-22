@@ -865,6 +865,7 @@ mod tests {
 
   fn test_id() -> TestId {
     TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "features/smoke.feature".into(),
       suite: Some("UI smoke".into()),

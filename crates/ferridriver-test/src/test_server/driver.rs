@@ -850,6 +850,7 @@ mod tests {
     let mut plan = TestPlan {
       repetitions_expanded: false,
       suites: vec![crate::model::TestSuite {
+        serial_scope: None,
         name: "s".into(),
         file: "a.spec.ts".into(),
         tests: vec![case("keep"), case("drop")],
@@ -949,6 +950,7 @@ mod tests {
     let plan = || TestPlan {
       repetitions_expanded: false,
       suites: vec![crate::model::TestSuite {
+        serial_scope: None,
         name: "s".into(),
         file: "a.spec.ts".into(),
         tests: vec![case("keep"), case("drop")],
@@ -986,6 +988,7 @@ mod tests {
     crate::model::TestCase {
       metadata: None,
       id: crate::model::TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "a.spec.ts".into(),
         suite: None,

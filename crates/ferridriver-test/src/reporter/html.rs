@@ -769,6 +769,7 @@ mod tests {
   fn outcome(name: &str, status: TestStatus, attempt: u32) -> TestOutcome {
     TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "specs/a.spec.ts".into(),
         suite: None,

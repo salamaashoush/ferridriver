@@ -115,6 +115,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
     let test_case: TestCase = TestCase {
       metadata: None,
       id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: file.clone(),
         suite: Some(suite_name.to_string()),
@@ -132,6 +133,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
     };
 
     let suite = suites.entry(suite_key).or_insert_with(|| TestSuite {
+      serial_scope: None,
       name: suite_name.to_string(),
       file: file.clone(),
       tests: Vec::new(),
@@ -188,7 +190,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
   let suites: Vec<TestSuite> = suites.into_values().collect();
   let total_tests = suites.iter().map(|s| s.tests.len()).sum();
 
-  apply_filters(
+  let mut plan = apply_filters(
     TestPlan {
       repetitions_expanded: false,
       suites,
@@ -196,7 +198,9 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
       shard: None,
     },
     config,
-  )
+  );
+  plan.anchor(&crate::identity::root(config));
+  plan
 }
 
 /// Discover test files on disk using glob patterns.
@@ -367,6 +371,56 @@ pub fn filter_by_rerun(plan: &mut TestPlan, rerun_path: &Path) {
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
+/// Keep only the tests whose stable id under `project` is in `ids`
+/// (`--test-id`, `--test-list`).
+pub fn filter_by_test_ids(plan: &mut TestPlan, project: &str, ids: &[String]) {
+  let wanted: rustc_hash::FxHashSet<&str> = ids.iter().map(String::as_str).collect();
+  for suite in &mut plan.suites {
+    suite
+      .tests
+      .retain(|test| wanted.contains(test.id.stable_id(project).as_str()));
+  }
+  plan.suites.retain(|s| !s.tests.is_empty());
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
+/// Keep only the tests declared at one of `locations` (`file:line`
+/// arguments). The file is compared as a resolved path, so `./a.spec.ts`
+/// and `a.spec.ts` name the same file; a column, when both sides have one,
+/// must match too.
+pub fn filter_by_locations(plan: &mut TestPlan, locations: &[crate::config::TestLocation]) {
+  let wanted: Vec<(std::path::PathBuf, usize, Option<usize>)> = locations
+    .iter()
+    .map(|location| {
+      (
+        crate::identity::comparable_path(Path::new(&location.file)),
+        location.line as usize,
+        location.column.map(|c| c as usize),
+      )
+    })
+    .collect();
+  for suite in &mut plan.suites {
+    let file = crate::identity::comparable_path(Path::new(&suite.file));
+    suite.tests.retain(|test| {
+      let test_file = if test.id.file == suite.file {
+        file.clone()
+      } else {
+        crate::identity::comparable_path(Path::new(&test.id.file))
+      };
+      wanted.iter().any(|(path, line, column)| {
+        *path == test_file
+          && test.id.line == Some(*line)
+          && match (column, test.id.column) {
+            (Some(want), Some(have)) => *want == have,
+            _ => true,
+          }
+      })
+    });
+  }
+  plan.suites.retain(|s| !s.tests.is_empty());
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
 /// Filter a test plan by tag.
 pub fn filter_by_tag(plan: &mut TestPlan, tag: &str) {
   for suite in &mut plan.suites {
@@ -390,6 +444,7 @@ mod tests {
     TestCase {
       metadata: None,
       id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "test.rs".into(),
         suite: Some("suite".into()),
@@ -412,6 +467,7 @@ mod tests {
     TestPlan {
       repetitions_expanded: false,
       suites: vec![TestSuite {
+        serial_scope: None,
         name: "suite".into(),
         file: "test.rs".into(),
         tests,

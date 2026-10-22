@@ -578,7 +578,7 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
     },
   };
   let code = ferridriver_test::runner::TestRunner::new(config, overrides)
-    .run(plan)
+    .run_with_signals(plan)
     .await;
   pool.teardown().await;
   code

@@ -1413,6 +1413,40 @@ impl ShardArg {
   }
 }
 
+/// A `file:line[:column]` selection. Playwright's location filter: the
+/// file is matched as a path, the line against each test's own line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestLocation {
+  pub file: String,
+  pub line: u32,
+  pub column: Option<u32>,
+}
+
+impl TestLocation {
+  /// Split `arg` into a path and a location when it ends in `:line` or
+  /// `:line:column`; `None` for a plain path or glob.
+  #[must_use]
+  pub fn parse(arg: &str) -> Option<Self> {
+    let (rest, last) = arg.rsplit_once(':')?;
+    let last: u32 = last.parse().ok()?;
+    if let Some((file, line)) = rest.rsplit_once(':')
+      && let Ok(line) = line.parse::<u32>()
+      && !file.is_empty()
+    {
+      return Some(Self {
+        file: file.to_string(),
+        line,
+        column: Some(last),
+      });
+    }
+    (!rest.is_empty()).then(|| Self {
+      file: rest.to_string(),
+      line: last,
+      column: None,
+    })
+  }
+}
+
 /// CLI overrides that take highest priority.
 // Independent bool flags from `clap` parse — grouping into enums adds
 // no value; each flag has its own --foo.
@@ -1435,6 +1469,17 @@ pub struct CliOverrides {
   /// `--headed` can win over a config that pins `headless = true`.
   pub headless_override: Option<bool>,
   pub shard: Option<ShardArg>,
+  /// `--shard-assignment`: stable test id to 1-based shard index. A test
+  /// it names runs on that shard (its whole serial group with it); a test
+  /// it does not name falls back to hash sharding.
+  pub shard_assignment: Option<std::collections::HashMap<String, u32>>,
+  /// `--test-id` / `--test-list`: run only the tests with these stable ids.
+  pub test_ids: Vec<String>,
+  /// `file:line` positional arguments: run only the tests declared on
+  /// these lines.
+  pub locations: Vec<TestLocation>,
+  /// `--list` renders a JSON document instead of text.
+  pub list_json: bool,
   pub config_path: Option<String>,
   pub output_dir: Option<String>,
   pub test_files: Vec<String>,
@@ -2283,5 +2328,37 @@ mod use_options_tests {
       ..TestConfig::default()
     };
     assert_eq!(bare.open_use_keys(), [] as [&String; 0]);
+  }
+}
+
+#[cfg(test)]
+mod location_tests {
+  use super::TestLocation;
+
+  #[test]
+  fn a_trailing_line_and_column_are_a_location() {
+    assert_eq!(
+      TestLocation::parse("tests/cart.spec.ts:12"),
+      Some(TestLocation {
+        file: "tests/cart.spec.ts".into(),
+        line: 12,
+        column: None,
+      })
+    );
+    assert_eq!(
+      TestLocation::parse("tests/cart.spec.ts:12:5"),
+      Some(TestLocation {
+        file: "tests/cart.spec.ts".into(),
+        line: 12,
+        column: Some(5),
+      })
+    );
+  }
+
+  #[test]
+  fn a_plain_path_or_glob_is_not() {
+    assert_eq!(TestLocation::parse("tests/**/*.spec.ts"), None);
+    assert_eq!(TestLocation::parse("tests/a:b.spec.ts"), None);
+    assert_eq!(TestLocation::parse(":12"), None);
   }
 }

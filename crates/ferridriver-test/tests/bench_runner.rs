@@ -37,6 +37,7 @@ fn make_nav_test(i: usize) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "bench.rs".into(),
       suite: Some("nav".into()),
@@ -79,6 +80,7 @@ fn make_interaction_test(i: usize) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "bench.rs".into(),
       suite: Some("click".into()),
@@ -145,6 +147,7 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
   let plan = TestPlan {
     repetitions_expanded: false,
     suites: vec![TestSuite {
+      serial_scope: None,
       name: "bench".into(),
       file: "bench.rs".into(),
       tests: make_tests(num_tests),

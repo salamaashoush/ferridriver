@@ -1094,6 +1094,7 @@ mod tests {
   fn outcome(name: &str, attempt: u32, status: TestStatus) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "spec.ts".into(),
         suite: None,
@@ -1177,6 +1178,7 @@ mod tests {
       ..Default::default()
     };
     o.test_id = TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "a.spec.ts".into(),
       suite: Some("a.spec.ts::group".into()),

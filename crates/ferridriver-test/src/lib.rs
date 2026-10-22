@@ -102,12 +102,15 @@ pub mod debug;
 pub mod discovery;
 pub mod dispatcher;
 pub mod error_context;
+pub mod exit;
 pub mod expect;
 pub mod fixture;
 pub mod fixture_graph;
 pub mod git_info;
 pub mod host;
+pub mod identity;
 pub mod interactive;
+pub mod listing;
 pub mod locks;
 pub mod logging;
 pub mod model;
@@ -220,7 +223,7 @@ pub fn run_harness() {
     let overrides = overrides;
     let config = config::resolve_config(&overrides).unwrap_or_else(|e| {
       eprintln!("config error: {e}");
-      std::process::exit(1);
+      std::process::exit(exit::USAGE);
     });
     // Spawned by `ferridriver test --ui`: stream the plan + reporter
     // events back to the CLI's UI server over its unix socket.
@@ -229,7 +232,7 @@ pub fn run_harness() {
     }
     let plan = discovery::collect_rust_tests(&config);
     let mut runner = runner::TestRunner::new(config, overrides);
-    Box::pin(runner.run(plan)).await
+    Box::pin(runner.run_with_signals(plan)).await
   });
 
   // Drain any still-running tasks so that child processes spawned via

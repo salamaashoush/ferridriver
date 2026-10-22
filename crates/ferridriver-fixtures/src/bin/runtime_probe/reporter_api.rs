@@ -43,6 +43,7 @@ fn case(spec: Case) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       suite: spec.describe.map(|describe| format!("{}::{describe}", spec.file)),
       file: spec.file,
@@ -67,6 +68,7 @@ fn plan(specs: Vec<Case>) -> TestPlan {
     .map(|spec| {
       let name = spec.describe.clone().unwrap_or_else(|| spec.file.clone());
       TestSuite {
+        serial_scope: None,
         name,
         file: spec.file.clone(),
         tests: vec![case(spec)],

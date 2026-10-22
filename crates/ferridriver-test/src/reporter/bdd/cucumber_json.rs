@@ -506,6 +506,7 @@ mod tests {
   fn scenario(name: &str, project: &str, steps: Vec<TestStep>, source: serde_json::Value) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "features/login.feature".into(),
         suite: Some("Login".into()),

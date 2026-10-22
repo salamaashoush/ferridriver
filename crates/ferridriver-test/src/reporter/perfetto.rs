@@ -535,6 +535,7 @@ mod tests {
   fn outcome(name: &str, start: u64, millis: u64, status: TestStatus) -> TestOutcome {
     TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "tests/a.test.ts".into(),
         suite: None,

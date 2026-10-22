@@ -72,6 +72,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
     let snap_dir = std::path::PathBuf::from("__snapshots__");
     let info = crate::model::TestInfo {
       test_id: crate::model::TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: String::new(),
         suite: None,

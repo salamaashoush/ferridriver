@@ -129,6 +129,7 @@ mod tests {
   fn scenario(name: &str, status: TestStatus, steps: Vec<TestStep>) -> Arc<TestOutcome> {
     Arc::new(TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "features/login.feature".into(),
         suite: Some("Login".into()),
@@ -243,6 +244,7 @@ mod tests {
         crate::reporter::StepFinishedEvent {
           project: String::new(),
           test_id: TestId {
+            root_path: None,
             repeat_each_index: 0,
             file: "features/login.feature".into(),
             suite: Some("Login".into()),

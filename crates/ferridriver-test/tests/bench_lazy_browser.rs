@@ -12,6 +12,7 @@ fn make_test(i: usize) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "bench_lazy_browser.rs".into(),
       suite: Some("no_browser".into()),
@@ -33,6 +34,7 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
   let plan = TestPlan {
     repetitions_expanded: false,
     suites: vec![TestSuite {
+      serial_scope: None,
       name: "no_browser".into(),
       file: "bench_lazy_browser.rs".into(),
       tests: (0..num_tests).map(make_test).collect(),

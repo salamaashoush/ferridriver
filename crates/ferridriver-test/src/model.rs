@@ -28,6 +28,11 @@ pub struct TestId {
   /// Source column, when the discovery layer parsed one. Reporters that
   /// mirror Playwright's JSON report emit `{file, line, column}` triples.
   pub column: Option<usize>,
+  /// `file` relative to the config root, `/`-separated. `file` is
+  /// relative to the working directory, which differs between machines
+  /// and invocations, so identity ([`Self::stable_id`]) hashes this
+  /// instead. `None` until [`TestPlan::anchor`] has run.
+  pub root_path: Option<String>,
 }
 
 impl TestId {
@@ -81,6 +86,13 @@ impl TestId {
     titles
   }
 
+  /// The file as identity sees it: relative to the config root once the
+  /// plan is anchored, the working-directory path before.
+  #[must_use]
+  pub fn anchored_file(&self) -> &str {
+    self.root_path.as_deref().unwrap_or(&self.file)
+  }
+
   /// Short, stable, filesystem- and URL-safe identity for this test in
   /// `project`.
   ///
@@ -91,9 +103,10 @@ impl TestId {
   /// found on disk by `<testId>.json`, and a UI asks to run tests by id.
   #[must_use]
   pub fn stable_id(&self, project: &str) -> String {
-    let file_id = ferridriver::tracing::sha1_hex(self.file.as_bytes());
+    let file = self.anchored_file();
+    let file_id = ferridriver::tracing::sha1_hex(file.as_bytes());
     let titles = self.title_path();
-    let mut expression = format!("[project={project}]{}\u{1e}{}", self.file, titles[1..].join("\u{1e}"));
+    let mut expression = format!("[project={project}]{file}\u{1e}{}", titles[1..].join("\u{1e}"));
     if self.repeat_each_index > 0 {
       use std::fmt::Write;
       let _ = write!(expression, " (repeat:{})", self.repeat_each_index);
@@ -167,6 +180,45 @@ pub struct TestSuite {
   pub annotations: Vec<TestAnnotation>,
   /// Execution mode for this suite.
   pub mode: SuiteMode,
+  /// The serial scope a serial suite belongs to, named by its describe
+  /// path within the file (empty for a file-level `describe.configure
+  /// ({ mode: 'serial' })`). A `describe` nested in a serial one is a
+  /// suite of its own but not a group of its own: every suite of one
+  /// file naming the same scope runs as one group, on one worker. `None`
+  /// makes a serial suite its own scope.
+  pub serial_scope: Option<String>,
+}
+
+impl TestSuite {
+  /// The scope label this suite's serial group is named by, or `None`
+  /// when its tests schedule independently.
+  #[must_use]
+  pub fn serial_label(&self) -> Option<&str> {
+    (self.mode == SuiteMode::Serial).then(|| self.serial_scope.as_deref().unwrap_or(&self.name))
+  }
+
+  /// The machine-independent name of this suite's serial group under
+  /// `project`: the config-root-relative file, then the scope. `None`
+  /// for a parallel suite.
+  #[must_use]
+  pub fn group_key(&self, project: &str) -> Option<String> {
+    let label = self.serial_label()?;
+    let file = self
+      .tests
+      .first()
+      .map_or(self.file.as_str(), |test| test.id.anchored_file());
+    let mut key = String::new();
+    if !project.is_empty() {
+      use std::fmt::Write as _;
+      let _ = write!(key, "[{project}] ");
+    }
+    key.push_str(file);
+    if !label.is_empty() {
+      key.push_str(" > ");
+      key.push_str(label);
+    }
+    Some(key)
+  }
 }
 
 /// Lifecycle hooks attached to a suite.
@@ -244,6 +296,18 @@ pub struct TestPlan {
 }
 
 impl TestPlan {
+  /// Record every test's file relative to `root`, the config root, so
+  /// its stable id and group key are the same from any working directory
+  /// and on any machine. Front-ends call this once on the plan they build.
+  pub fn anchor(&mut self, root: &std::path::Path) {
+    let root = crate::identity::comparable_path(root);
+    for suite in &mut self.suites {
+      for test in &mut suite.tests {
+        test.id.root_path = Some(crate::identity::relative_to(&root, &test.id.file));
+      }
+    }
+  }
+
   pub(crate) fn expand_repetitions(&mut self, count: u32) {
     if self.repetitions_expanded {
       return;
@@ -279,6 +343,8 @@ pub struct SuiteDef {
   pub name: String,
   pub file: String,
   pub mode: SuiteMode,
+  /// See [`TestSuite::serial_scope`].
+  pub serial_scope: Option<String>,
 }
 
 /// Hook registration for plan building.
@@ -376,10 +442,10 @@ impl TestPlanBuilder {
     use rustc_hash::FxHashMap;
 
     // Index suite metadata by ID.
-    let suite_meta: FxHashMap<String, (String, String, SuiteMode)> = self
+    let suite_meta: FxHashMap<String, (String, String, SuiteMode, Option<String>)> = self
       .suites
       .into_iter()
-      .map(|s| (s.id, (s.name, s.file, s.mode)))
+      .map(|s| (s.id, (s.name, s.file, s.mode, s.serial_scope)))
       .collect();
 
     // Group tests by suite key.
@@ -407,13 +473,13 @@ impl TestPlanBuilder {
 
     for (suite_key, tests) in grouped {
       total += tests.len();
-      let (name, file, mode) = if suite_key.is_empty() {
-        ("tests".to_string(), String::new(), SuiteMode::Parallel)
-      } else if let Some((n, f, m)) = suite_meta.get(&suite_key) {
-        (n.clone(), f.clone(), *m)
+      let (name, file, mode, serial_scope) = if suite_key.is_empty() {
+        ("tests".to_string(), String::new(), SuiteMode::Parallel, None)
+      } else if let Some((n, f, m, scope)) = suite_meta.get(&suite_key) {
+        (n.clone(), f.clone(), *m, scope.clone())
       } else {
         // Suite ID exists on tests but no SuiteDef was registered — use defaults.
-        (suite_key.clone(), String::new(), SuiteMode::Parallel)
+        (suite_key.clone(), String::new(), SuiteMode::Parallel, None)
       };
       let hooks = hook_map.remove(&suite_key).unwrap_or_default();
       plan_suites.push(TestSuite {
@@ -423,6 +489,7 @@ impl TestPlanBuilder {
         hooks,
         annotations: Vec::new(),
         mode,
+        serial_scope,
       });
     }
 
@@ -589,6 +656,7 @@ impl TestInfo {
   pub fn new_anonymous() -> Self {
     Self {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: String::new(),
         suite: None,

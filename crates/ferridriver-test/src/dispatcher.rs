@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::model::{Hooks, SuiteMode, TestCase, TestFn, TestId};
+use crate::model::{Hooks, SuiteMode, TestCase};
 
 /// A single test assigned to a worker.
 pub struct TestAssignment {
@@ -27,15 +27,15 @@ pub struct SerialBatch {
 }
 
 /// One more attempt of a test that failed.
-pub struct Retry<'a> {
-  pub test_fn: &'a TestFn,
-  pub id: &'a TestId,
-  pub fixture_requests: Vec<String>,
+pub struct Retry {
+  /// The case exactly as it was first scheduled.
+  pub test: TestCase,
   pub attempt: u32,
   pub suite_key: String,
   pub hooks: Arc<Hooks>,
-  pub metadata: Option<serde_json::Value>,
-  pub locks: Vec<crate::model::TestAnnotation>,
+  pub suite_mode: SuiteMode,
+  /// The rest of the serial group, which resumes after the retry.
+  pub serial_tail: Vec<TestAssignment>,
 }
 
 /// Work item pulled by a worker.
@@ -104,28 +104,30 @@ impl Dispatcher {
     let _ = self.tx.try_send(WorkItem::Serial(batch));
   }
 
-  /// Re-enqueue a test for retry (always as single item).
-  pub fn retry_shared(&self, retry: Retry<'_>) {
+  /// Re-enqueue a failed test for another attempt with every setting it
+  /// was scheduled with. A serial test goes back as a batch together with
+  /// the rest of its group, so the group still runs in order on one worker.
+  pub fn retry_shared(&self, retry: Retry) {
     let assignment = TestAssignment {
-      test: TestCase {
-        metadata: retry.metadata,
-        id: retry.id.clone(),
-        test_fn: Arc::clone(retry.test_fn),
-        fixture_requests: retry.fixture_requests,
-        // A retry still holds the test's locks; nothing else on the list
-        // schedules it.
-        annotations: retry.locks,
-        timeout: None,
-        retries: None,
-        expected_status: crate::model::ExpectedStatus::Pass,
-        use_options: None,
-      },
+      test: retry.test,
       attempt: retry.attempt,
-      suite_key: retry.suite_key,
-      hooks: retry.hooks,
-      suite_mode: SuiteMode::Parallel,
+      suite_key: retry.suite_key.clone(),
+      hooks: Arc::clone(&retry.hooks),
+      suite_mode: retry.suite_mode,
     };
-    let _ = self.tx.try_send(WorkItem::Single(assignment));
+    let item = if retry.suite_mode == SuiteMode::Serial {
+      let mut assignments = Vec::with_capacity(retry.serial_tail.len() + 1);
+      assignments.push(assignment);
+      assignments.extend(retry.serial_tail);
+      WorkItem::Serial(SerialBatch {
+        suite_key: retry.suite_key,
+        assignments,
+        hooks: retry.hooks,
+      })
+    } else {
+      WorkItem::Single(assignment)
+    };
+    let _ = self.tx.try_send(item);
   }
 
   /// Get a receiver clone for a worker.
@@ -159,5 +161,93 @@ impl Dispatcher {
 impl Default for Dispatcher {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use super::*;
+  use crate::model::{ExpectedStatus, TestAnnotation, TestId};
+
+  fn case(name: &str) -> TestCase {
+    TestCase {
+      id: TestId {
+        file: "a.spec.ts".into(),
+        name: name.into(),
+        ..TestId::default()
+      },
+      test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
+      fixture_requests: vec!["page".into()],
+      annotations: vec![
+        TestAnnotation::Slow {
+          reason: None,
+          condition: None,
+        },
+        TestAnnotation::Lock("db".into()),
+      ],
+      timeout: Some(Duration::from_millis(400)),
+      retries: Some(3),
+      expected_status: ExpectedStatus::Fail,
+      use_options: Some(serde_json::json!({ "locale": "de-DE" })),
+      metadata: Some(serde_json::json!({ "keyword": "Scenario" })),
+    }
+  }
+
+  fn assignment(name: &str, mode: SuiteMode) -> TestAssignment {
+    TestAssignment {
+      test: case(name),
+      attempt: 1,
+      suite_key: "a.spec.ts::group".into(),
+      hooks: Arc::new(Hooks::default()),
+      suite_mode: mode,
+    }
+  }
+
+  #[test]
+  fn a_retry_keeps_every_setting_the_test_was_scheduled_with() {
+    let dispatcher = Dispatcher::new();
+    dispatcher.retry_shared(Retry {
+      test: case("flaky"),
+      attempt: 2,
+      suite_key: "a.spec.ts::group".into(),
+      hooks: Arc::new(Hooks::default()),
+      suite_mode: SuiteMode::Parallel,
+      serial_tail: Vec::new(),
+    });
+    let Ok(WorkItem::Single(retried)) = dispatcher.receiver().try_recv() else {
+      panic!("a parallel retry goes back alone");
+    };
+    assert_eq!(retried.attempt, 2);
+    assert_eq!(retried.test.timeout, Some(Duration::from_millis(400)));
+    assert_eq!(retried.test.retries, Some(3));
+    assert_eq!(retried.test.expected_status, ExpectedStatus::Fail);
+    assert_eq!(retried.test.use_options, Some(serde_json::json!({ "locale": "de-DE" })));
+    assert_eq!(retried.test.annotations.len(), 2);
+    assert_eq!(retried.test.fixture_requests, ["page"]);
+  }
+
+  #[test]
+  fn a_serial_retry_takes_the_rest_of_its_group_with_it() {
+    let dispatcher = Dispatcher::new();
+    dispatcher.retry_shared(Retry {
+      test: case("two"),
+      attempt: 2,
+      suite_key: "a.spec.ts::group".into(),
+      hooks: Arc::new(Hooks::default()),
+      suite_mode: SuiteMode::Serial,
+      serial_tail: vec![assignment("three", SuiteMode::Serial)],
+    });
+    let Ok(WorkItem::Serial(batch)) = dispatcher.receiver().try_recv() else {
+      panic!("a serial retry goes back as a batch");
+    };
+    let order: Vec<(&str, u32)> = batch
+      .assignments
+      .iter()
+      .map(|a| (a.test.id.name.as_str(), a.attempt))
+      .collect();
+    assert_eq!(order, [("two", 2), ("three", 1)]);
+    assert_eq!(batch.assignments[0].suite_mode, SuiteMode::Serial);
   }
 }

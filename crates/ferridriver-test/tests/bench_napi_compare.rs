@@ -59,6 +59,7 @@ fn make_nav_test(i: usize) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "bench_napi_compare.rs".into(),
       suite: Some("nav".into()),
@@ -92,6 +93,7 @@ fn make_click_test(i: usize) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "bench_napi_compare.rs".into(),
       suite: Some("click".into()),
@@ -140,6 +142,7 @@ fn make_eval_test(i: usize) -> TestCase {
   TestCase {
     metadata: None,
     id: TestId {
+      root_path: None,
       repeat_each_index: 0,
       file: "bench_napi_compare.rs".into(),
       suite: Some("eval".into()),
@@ -192,6 +195,7 @@ async fn run_one(workers: u32) -> Duration {
   let plan = TestPlan {
     repetitions_expanded: false,
     suites: vec![TestSuite {
+      serial_scope: None,
       name: "bench_napi_compare".into(),
       file: "bench_napi_compare.rs".into(),
       tests: make_tests(),

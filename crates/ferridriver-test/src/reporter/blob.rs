@@ -44,7 +44,13 @@ use crate::model::{
 /// (default)]`, so a schema-3 blob still replays — with an empty
 /// preamble, which is what a reporter that needs the tree would see
 /// for a shard written by an older build.
-const SCHEMA_VERSION: u32 = 4;
+///
+/// Later additions that an older reader skips as unknown fields leave
+/// the version alone: a test id's config-root-relative `root_path` (what
+/// a merge matches attempts by), a live step's `subtitle` and `params`,
+/// and a failure screenshot by `screenshot_path` (the `stream`
+/// reporter's, which has no zip to hold the bytes).
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Wire-format mirror of `ReporterEvent`. Distinct from the runtime
 /// enum so adding a new event variant doesn't break stored blobs and
@@ -89,6 +95,10 @@ pub enum WireEvent {
     category: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     location: Option<WireStepLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subtitle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    params: Option<serde_json::Value>,
   },
   StepFinished {
     test_id: WireTestId,
@@ -141,6 +151,10 @@ pub struct WireTestId {
   pub line: Option<usize>,
   #[serde(default)]
   pub column: Option<usize>,
+  /// The file relative to the config root, which identity is computed
+  /// from. Absent in a blob written by an older build.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub root_path: Option<String>,
 }
 
 /// Every field of a [`TestOutcome`]. A merged report is rebuilt from
@@ -199,6 +213,9 @@ pub struct WireFailure {
   /// Resource name of the failure screenshot inside the zip.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub screenshot: Option<String>,
+  /// The failure screenshot as a file on disk, where there is no zip.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub screenshot_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +299,7 @@ impl From<&TestId> for WireTestId {
       line: id.line,
       column: id.column,
       repeat_each_index: id.repeat_each_index,
+      root_path: id.root_path.clone(),
     }
   }
 }
@@ -295,6 +313,7 @@ impl From<WireTestId> for TestId {
       line: w.line,
       column: w.column,
       repeat_each_index: w.repeat_each_index,
+      root_path: w.root_path,
     }
   }
 }
@@ -398,10 +417,18 @@ fn runtime_steps(steps: Vec<WireStep>) -> Vec<TestStep> {
     .collect()
 }
 
-/// Storage for inline artifact bytes. Implemented by the writer (stores
-/// into the zip) and by the reader (resolves back out of it).
-trait ResourceSink {
-  fn store(&mut self, name_hint: &str, content_type: &str, bytes: &[u8]) -> Option<String>;
+/// Where a sink put inline artifact bytes.
+pub(crate) enum Stored {
+  /// An entry of the blob zip.
+  Resource(String),
+  /// A file on disk.
+  Path(String),
+}
+
+/// Storage for inline artifact bytes: the blob writer stores them in its
+/// zip, the stream reporter in files beside the output.
+pub(crate) trait ResourceSink {
+  fn store(&mut self, name_hint: &str, content_type: &str, bytes: &[u8]) -> Option<Stored>;
 }
 
 impl WireOutcome {
@@ -426,12 +453,19 @@ impl WireOutcome {
             resource: None,
             step_id: a.step_id.clone(),
           },
-          AttachmentBody::Bytes(bytes) => WireAttachment {
-            name: a.name.clone(),
-            content_type: a.content_type.clone(),
-            path: None,
-            resource: sink.store(&a.name, &a.content_type, bytes),
-            step_id: a.step_id.clone(),
+          AttachmentBody::Bytes(bytes) => {
+            let (path, resource) = match sink.store(&a.name, &a.content_type, bytes) {
+              Some(Stored::Path(path)) => (Some(path), None),
+              Some(Stored::Resource(name)) => (None, Some(name)),
+              None => (None, None),
+            };
+            WireAttachment {
+              name: a.name.clone(),
+              content_type: a.content_type.clone(),
+              path,
+              resource,
+              step_id: a.step_id.clone(),
+            }
           },
         })
         .collect(),
@@ -497,14 +531,21 @@ impl WireOutcome {
 }
 
 fn wire_failure(failure: &TestFailure, sink: &mut dyn ResourceSink) -> WireFailure {
+  let (screenshot, screenshot_path) = match failure
+    .screenshot
+    .as_ref()
+    .and_then(|bytes| sink.store("failure", "image/png", bytes))
+  {
+    Some(Stored::Resource(name)) => (Some(name), None),
+    Some(Stored::Path(path)) => (None, Some(path)),
+    None => (None, None),
+  };
   WireFailure {
     message: failure.message.clone(),
     stack: failure.stack.clone(),
     diff: failure.diff.clone(),
-    screenshot: failure
-      .screenshot
-      .as_ref()
-      .and_then(|bytes| sink.store("failure", "image/png", bytes)),
+    screenshot,
+    screenshot_path,
   }
 }
 
@@ -513,13 +554,16 @@ fn runtime_failure(failure: WireFailure, resources: &FxHashMap<String, Vec<u8>>)
     message: failure.message,
     stack: failure.stack,
     diff: failure.diff,
-    screenshot: failure.screenshot.and_then(|name| resources.get(&name).cloned()),
+    screenshot: failure
+      .screenshot
+      .and_then(|name| resources.get(&name).cloned())
+      .or_else(|| failure.screenshot_path.and_then(|path| std::fs::read(path).ok())),
     error_context: None,
   }
 }
 
 impl WireEvent {
-  fn from_runtime(event: &ReporterEvent, sink: &mut dyn ResourceSink) -> Option<Self> {
+  pub(crate) fn from_runtime(event: &ReporterEvent, sink: &mut dyn ResourceSink) -> Option<Self> {
     Some(match event {
       ReporterEvent::RunStarted {
         total_tests,
@@ -554,6 +598,8 @@ impl WireEvent {
         title: s.title.clone(),
         category: step_category_str(&s.category).to_string(),
         location: s.location.clone().map(WireStepLocation::from),
+        subtitle: s.subtitle.clone(),
+        params: s.params.clone(),
       },
       ReporterEvent::StepFinished(s) => Self::StepFinished {
         test_id: (&s.test_id).into(),
@@ -638,6 +684,8 @@ impl WireEvent {
         title,
         category,
         location,
+        subtitle,
+        params,
       } => ReporterEvent::StepStarted(Arc::new(StepStartedEvent {
         test_id: test_id.into(),
         project,
@@ -646,8 +694,8 @@ impl WireEvent {
         title,
         category: parse_step_category(&category),
         location: location.and_then(WireStepLocation::into_runtime),
-        subtitle: None,
-        params: None,
+        subtitle,
+        params,
       })),
       Self::StepFinished {
         test_id,
@@ -731,7 +779,7 @@ struct ResourceWriter {
 }
 
 impl ResourceSink for ResourceWriter {
-  fn store(&mut self, name_hint: &str, content_type: &str, bytes: &[u8]) -> Option<String> {
+  fn store(&mut self, name_hint: &str, content_type: &str, bytes: &[u8]) -> Option<Stored> {
     if self.failed {
       return None;
     }
@@ -745,7 +793,7 @@ impl ResourceSink for ResourceWriter {
       extension_for(content_type)
     );
     if self.seen.contains(&name) {
-      return Some(name);
+      return Some(Stored::Resource(name));
     }
     let options: zip::write::SimpleFileOptions =
       zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -760,7 +808,7 @@ impl ResourceSink for ResourceWriter {
       return None;
     }
     self.seen.insert(name.clone());
-    Some(name)
+    Some(Stored::Resource(name))
   }
 }
 
@@ -769,12 +817,12 @@ impl ResourceSink for ResourceWriter {
 struct NoResources;
 
 impl ResourceSink for NoResources {
-  fn store(&mut self, _name_hint: &str, _content_type: &str, _bytes: &[u8]) -> Option<String> {
+  fn store(&mut self, _name_hint: &str, _content_type: &str, _bytes: &[u8]) -> Option<Stored> {
     None
   }
 }
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
   name
     .chars()
     .map(|c| {
@@ -787,7 +835,7 @@ fn sanitize(name: &str) -> String {
     .collect()
 }
 
-fn extension_for(content_type: &str) -> &'static str {
+pub(crate) fn extension_for(content_type: &str) -> &'static str {
   match content_type {
     "image/png" => ".png",
     "image/jpeg" => ".jpg",
@@ -821,11 +869,7 @@ impl BlobReporter {
   }
 
   fn header(&self) -> WireEvent {
-    WireEvent::Header {
-      schema: SCHEMA_VERSION,
-      shard_index: self.shard_index,
-      shard_total: self.shard_total,
-    }
+    WireEvent::header(self.shard_index, self.shard_total)
   }
 
   /// The zip, opened on demand. `None` when it could not be created —
@@ -899,7 +943,19 @@ impl Reporter for BlobReporter {
   }
 }
 
-fn write_event(buffer: &mut Vec<u8>, event: &WireEvent) {
+impl WireEvent {
+  /// The first line of every event stream.
+  #[must_use]
+  pub fn header(shard_index: Option<u32>, shard_total: Option<u32>) -> Self {
+    Self::Header {
+      schema: SCHEMA_VERSION,
+      shard_index,
+      shard_total,
+    }
+  }
+}
+
+pub(crate) fn write_event(buffer: &mut Vec<u8>, event: &WireEvent) {
   match serde_json::to_string(event) {
     Ok(line) => {
       buffer.extend_from_slice(line.as_bytes());
@@ -973,13 +1029,33 @@ pub fn read_blob(path: &std::path::Path) -> Result<Vec<ReporterEvent>, String> {
     .read_to_string(&mut buf)
     .map_err(|e| format!("read jsonl: {e}"))?;
 
+  parse_event_lines(&buf, &resources, path)
+}
+
+/// Read an event stream written by the `stream` reporter (or the
+/// `events.jsonl` of a blob, extracted): one wire event per line, inline
+/// artifacts referenced by path.
+///
+/// # Errors
+///
+/// Returns an error if the file is unreadable or a line is malformed.
+pub fn read_event_stream(path: &std::path::Path) -> Result<Vec<ReporterEvent>, String> {
+  let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+  parse_event_lines(&text, &FxHashMap::default(), path)
+}
+
+fn parse_event_lines(
+  text: &str,
+  resources: &FxHashMap<String, Vec<u8>>,
+  path: &std::path::Path,
+) -> Result<Vec<ReporterEvent>, String> {
   let mut events = Vec::new();
-  for (i, line) in buf.lines().enumerate() {
+  for (i, line) in text.lines().enumerate() {
     if line.trim().is_empty() {
       continue;
     }
     let wire: WireEvent =
-      serde_json::from_str(line).map_err(|e| format!("parse line {i} in {}: {e}", path.display()))?;
+      serde_json::from_str(line).map_err(|e| format!("parse line {} in {}: {e}", i + 1, path.display()))?;
     if let WireEvent::Header { schema, .. } = &wire
       && *schema > SCHEMA_VERSION
     {
@@ -988,7 +1064,7 @@ pub fn read_blob(path: &std::path::Path) -> Result<Vec<ReporterEvent>, String> {
         path.display()
       ));
     }
-    if let Some(event) = wire.into_runtime_with(&resources) {
+    if let Some(event) = wire.into_runtime_with(resources) {
       events.push(event);
     }
   }
@@ -1007,6 +1083,7 @@ mod tests {
 
     let outcome = TestOutcome {
       test_id: TestId {
+        root_path: None,
         repeat_each_index: 0,
         file: "a.spec.ts".into(),
         suite: Some("a.spec.ts::group".into()),
@@ -1133,5 +1210,39 @@ mod tests {
     assert_eq!(back.annotations.len(), 1);
 
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn a_live_step_keeps_its_subtitle_params_and_the_id_root_path() {
+    let started = ReporterEvent::StepStarted(Arc::new(StepStartedEvent {
+      project: "chromium".into(),
+      test_id: TestId {
+        file: "../repo/a.spec.ts".into(),
+        name: "works".into(),
+        root_path: Some("a.spec.ts".into()),
+        ..TestId::default()
+      },
+      step_id: "s1".into(),
+      parent_step_id: None,
+      title: "add to cart".into(),
+      category: StepCategory::TestStep,
+      location: None,
+      subtitle: Some("SKU 42".into()),
+      params: Some(serde_json::json!({ "sku": 42 })),
+    }));
+    let wire = WireEvent::from_runtime(&started, &mut NoResources).expect("wire");
+    let line = serde_json::to_string(&wire).expect("serialize");
+    let back: WireEvent = serde_json::from_str(&line).expect("parse");
+    let Some(ReporterEvent::StepStarted(step)) = back.into_runtime_with(&FxHashMap::default()) else {
+      panic!("expected StepStarted");
+    };
+    assert_eq!(step.subtitle.as_deref(), Some("SKU 42"));
+    assert_eq!(step.params, Some(serde_json::json!({ "sku": 42 })));
+    assert_eq!(step.test_id.root_path.as_deref(), Some("a.spec.ts"));
+    assert_eq!(step.test_id.stable_id("chromium"), {
+      let mut elsewhere = step.test_id.clone();
+      elsewhere.file = "/other/checkout/a.spec.ts".into();
+      elsewhere.stable_id("chromium")
+    });
   }
 }

@@ -203,6 +203,34 @@ fn chain_for(collected: &CollectedTests, suite: Option<usize>) -> SuiteChain {
   chain
 }
 
+/// The outermost serial scope enclosing `suite`, named as the core names a
+/// suite (describe titles joined with ` > `): empty when the whole file is
+/// serial, else the path to the first `describe` that made it so. Every
+/// describe nested inside shares it, which is what keeps a serial block
+/// with nested describes on one worker.
+fn serial_scope(collected: &CollectedTests, file_mode: Option<SuiteMode>, suite: Option<usize>) -> Option<String> {
+  if file_mode == Some(SuiteMode::Serial) {
+    return Some(String::new());
+  }
+  let mut idxs: Vec<usize> = Vec::new();
+  let mut cur = suite;
+  while let Some(i) = cur {
+    idxs.push(i);
+    cur = collected.suites[i].parent;
+  }
+  idxs.reverse();
+  let depth = idxs
+    .iter()
+    .position(|&i| collected.suites[i].mode.as_deref() == Some("serial"))?;
+  Some(
+    idxs[..=depth]
+      .iter()
+      .map(|&i| collected.suites[i].name.as_str())
+      .collect::<Vec<_>>()
+      .join(" > "),
+  )
+}
+
 /// Hook indices applying to a test: file-root hooks (same file) then
 /// suite-chain hooks outer→inner for `beforeEach`; reversed for
 /// `afterEach`.
@@ -684,6 +712,9 @@ fn lower_test(
       name: suite_name,
       file: file.clone(),
       mode: suite_mode,
+      serial_scope: (suite_mode == SuiteMode::Serial)
+        .then(|| serial_scope(collected, fscope.mode, test.suite))
+        .flatten(),
     });
   }
 
@@ -698,6 +729,7 @@ fn lower_test(
   );
 
   let id = TestId {
+    root_path: None,
     repeat_each_index: 0,
     file: file.clone(),
     suite: Some(suite_id),
@@ -971,5 +1003,7 @@ pub fn translate_tests(
     builder.add_test(case);
   }
   lower_all_hooks(source, config, cwd, &cx.cwd_arc, &cx.sessions, &mut builder);
-  Ok(builder.build())
+  let mut plan = builder.build();
+  plan.anchor(&ferridriver_test::identity::root(config));
+  Ok(plan)
 }
