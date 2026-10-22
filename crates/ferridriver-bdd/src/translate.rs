@@ -50,6 +50,7 @@ pub fn translate_features(
       .collect();
 
     suites.push(TestSuite {
+      serial_scope: None,
       name: feature_name,
       file: feature_path,
       tests: test_cases,
@@ -307,6 +308,29 @@ pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation>
   annotations
 }
 
+/// The test id of a scenario (or one row of an outline), the same for
+/// every translation of it: a run, a dry run, a listing.
+pub fn scenario_id(scenario: &ScenarioExecution, line: Option<usize>) -> TestId {
+  TestId {
+    repeat_each_index: 0,
+    file: scenario.feature_path.display().to_string(),
+    // A `Rule` and a Scenario Outline are each a describe around what
+    // they hold, the way `playwright-bdd` renders them — so a row's
+    // title path is feature > [rule >] outline > row.
+    suite: Some(
+      std::iter::once(scenario.feature_name.clone())
+        .chain(scenario.describe_path.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("::"),
+    ),
+    name: scenario.name.clone(),
+    line,
+    // Gherkin locations are line-only; a column would be invented.
+    column: None,
+    root_path: None,
+  }
+}
+
 /// Extract the scenario's 1-based source line from its `file:line`
 /// location string.
 pub fn scenario_line(scenario: &ScenarioExecution) -> Option<usize> {
@@ -331,23 +355,7 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
   // The Gherkin facts a cucumber-json document quotes and the run never
   // reads. Carried as opaque metadata, so the core stays domain-free.
   let metadata = serde_json::to_value(&scenario.source).ok();
-  let id = TestId {
-    repeat_each_index: 0,
-    file: scenario.feature_path.display().to_string(),
-    // A `Rule` and a Scenario Outline are each a describe around what
-    // they hold, the way `playwright-bdd` renders them — so a row's
-    // title path is feature > [rule >] outline > row.
-    suite: Some(
-      std::iter::once(scenario.feature_name.clone())
-        .chain(scenario.describe_path.iter().cloned())
-        .collect::<Vec<_>>()
-        .join("::"),
-    ),
-    name: scenario.name.clone(),
-    line,
-    // Gherkin locations are line-only; a column would be invented.
-    column: None,
-  };
+  let id = scenario_id(&scenario, line);
   let scenario = Arc::new(scenario);
 
   let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
@@ -536,6 +544,33 @@ impl StepObserver for TestInfoObserver {
   }
 }
 
+/// What a run says about a step no definition matches: the step, the
+/// nearest definitions, and a snippet that would implement it.
+pub fn undefined_step_message(step: &ScenarioStep, text: &str, suggestions: &[String]) -> String {
+  use std::fmt::Write as _;
+  let keyword = step.keyword.trim();
+  let snippet = crate::snippet::generate_snippet(keyword, text, step.table.is_some(), step.docstring.is_some());
+  let mut msg = format!("undefined step: \"{text}\"");
+  if !suggestions.is_empty() {
+    msg.push_str("\n  did you mean:");
+    for s in suggestions {
+      let _ = write!(msg, "\n    - {s}");
+    }
+  }
+  let _ = write!(msg, "\n\n  You can implement this step with:\n\n{snippet}");
+  msg
+}
+
+/// What a run says about a step more than one definition matches.
+pub fn ambiguous_step_message(text: &str, matches: &[crate::step::StepLocation], expressions: &[String]) -> String {
+  use std::fmt::Write as _;
+  let mut msg = format!("ambiguous step: \"{text}\" matched {} definitions:", matches.len());
+  for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
+    let _ = write!(msg, "\n  {}. {} ({})", i + 1, expr, loc);
+  }
+  msg
+}
+
 /// Execute a single BDD step: match against registry, extract params, call handler.
 pub async fn execute_bdd_step(
   registry: &StepRegistry,
@@ -549,17 +584,7 @@ pub async fn execute_bdd_step(
   let step_match = match registry.find_match(text) {
     Ok(m) => m,
     Err(MatchError::Undefined { text: t, suggestions }) => {
-      let keyword = step.keyword.trim();
-      let snippet = crate::snippet::generate_snippet(keyword, &t, step.table.is_some(), step.docstring.is_some());
-      let mut msg = format!("undefined step: \"{t}\"");
-      if !suggestions.is_empty() {
-        msg.push_str("\n  did you mean:");
-        for s in &suggestions {
-          msg.push_str(&format!("\n    - {s}"));
-        }
-      }
-      msg.push_str(&format!("\n\n  You can implement this step with:\n\n{snippet}"));
-
+      let msg = undefined_step_message(step, &t, &suggestions);
       if strict {
         return Err(crate::step::StepError::from(msg));
       }
@@ -570,11 +595,11 @@ pub async fn execute_bdd_step(
       matches,
       expressions,
     }) => {
-      let mut msg = format!("ambiguous step: \"{t}\" matched {} definitions:", matches.len());
-      for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
-        msg.push_str(&format!("\n  {}. {} ({})", i + 1, expr, loc));
-      }
-      return Err(crate::step::StepError::from(msg));
+      return Err(crate::step::StepError::from(ambiguous_step_message(
+        &t,
+        &matches,
+        &expressions,
+      )));
     },
   };
 

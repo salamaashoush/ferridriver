@@ -80,6 +80,7 @@ pub use ferridriver_bdd_macros::{after, before, given, param_type, step, then, w
 pub use inventory;
 
 pub mod data_table;
+pub mod dry_run;
 pub mod executor;
 pub mod expression;
 pub mod feature;
@@ -215,8 +216,14 @@ pub async fn run_bdd_with(
   if let Some(ref tags) = overrides.bdd_tags {
     config.tags = Some(tags.clone());
   }
-  if overrides.bdd_dry_run {
+  // Listing matches steps exactly as a dry run does, and like it never
+  // needs a browser.
+  if overrides.bdd_dry_run || overrides.list_only {
     config.dry_run = true;
+  }
+  if config.dry_run {
+    // Nothing a dry run does reaches a server.
+    config.web_server.clear();
   }
   if overrides.bdd_fail_fast {
     config.fail_fast = true;
@@ -296,7 +303,7 @@ pub async fn run_bdd_with(
           // the factory hands back one plan. A project-scoped BDD suite
           // under `--watch` re-runs the union, which is a superset —
           // never a silently narrower corpus.
-          Ok((plan, _)) => ferridriver_test::runner::PlanBuild::ok(plan),
+          Ok(plans) => ferridriver_test::runner::PlanBuild::ok(plans.shared),
           Err(e) => {
             ferridriver_test::runner::PlanBuild::failed(ferridriver_test::model::TestPlan::default(), e.to_string())
           },
@@ -315,23 +322,121 @@ pub async fn run_bdd_with(
     return code;
   }
 
-  let (plan, project_plans) = match build_bdd_plans(&config, &js_globs, &extensions, None).await {
+  let plans = match build_bdd_plans(&config, &js_globs, &extensions, None).await {
     Ok(built) => built,
     Err(e) => {
       eprintln!("{e}");
-      return 1;
+      return e.exit_code();
     },
   };
-  if plan.total_tests == 0 && project_plans.values().all(|p| p.total_tests == 0) {
+  let BddPlans {
+    shared: plan,
+    per_project: project_plans,
+    issues,
+  } = plans;
+  if plan.total_tests == 0 && project_plans.values().all(|p| p.total_tests == 0) && !overrides.list_only {
     eprintln!("no scenarios found");
     return 0;
   }
 
+  let strict = config.strict;
+  let list_only = overrides.list_only;
+  let list_json = overrides.list_json;
   let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
   runner.set_project_plans(project_plans);
-  let code = runner.run(plan).await;
+  if list_only {
+    return list_scenarios(&runner, &plan, &issues, strict, list_json);
+  }
+  let code = runner.run_with_signals(plan).await;
   js::teardown_worker_sessions().await;
   code
+}
+
+/// `bdd --list`: the scenarios a run would execute, each with the steps no
+/// definition matches (or several do). Exits non-zero when a run would
+/// fail on them: any ambiguous step, or an undefined one under `--strict`.
+fn list_scenarios(
+  runner: &ferridriver_test::runner::TestRunner,
+  plan: &ferridriver_test::model::TestPlan,
+  issues: &dry_run::StepIssues,
+  strict: bool,
+  json: bool,
+) -> i32 {
+  use ferridriver_test::exit;
+  let mut listed = match runner.validate_selection(plan).and_then(|()| runner.list(plan)) {
+    Ok(listed) => listed,
+    Err(message) => {
+      eprintln!("Error: {message}");
+      return exit::USAGE;
+    },
+  };
+  let mut errors: Vec<ferridriver_test::listing::ListError> = Vec::new();
+  let mut fatal = false;
+  for test in &mut listed {
+    let Some(found) = issues.get(&dry_run::issue_key(&test.id)) else {
+      continue;
+    };
+    for issue in found {
+      fatal |= issue.kind == "ambiguous" || strict;
+      errors.push(ferridriver_test::listing::ListError {
+        message: format!("{} step: {}{}", issue.kind, issue.keyword, issue.text),
+        stable_id: Some(test.record.stable_id.clone()),
+        file: Some(test.record.file.clone()),
+        line: Some(issue.line),
+      });
+    }
+    test.record.step_issues.clone_from(found);
+  }
+  ferridriver_test::listing::print(&listed, &errors, json);
+  if fatal { exit::FAILED } else { exit::PASSED }
+}
+
+/// Why a BDD plan could not be built, with the status that says so.
+#[derive(Debug)]
+pub enum PlanError {
+  /// The configuration or a flag is wrong (a tag expression that does
+  /// not parse): nothing could run.
+  Usage(String),
+  /// The suite itself is broken (a step bundle that does not compile).
+  Suite(String),
+}
+
+impl PlanError {
+  /// The process exit status for this failure.
+  #[must_use]
+  pub fn exit_code(&self) -> i32 {
+    match self {
+      Self::Usage(_) => ferridriver_test::exit::USAGE,
+      Self::Suite(_) => ferridriver_test::exit::FAILED,
+    }
+  }
+}
+
+impl std::fmt::Display for PlanError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Usage(message) | Self::Suite(message) => f.write_str(message),
+    }
+  }
+}
+
+impl std::error::Error for PlanError {}
+
+/// The plans of one BDD run.
+pub struct BddPlans {
+  /// The plan every project without its own discovery narrows.
+  pub shared: ferridriver_test::model::TestPlan,
+  /// A plan per project that declares its own features, steps or tags.
+  pub per_project: rustc_hash::FxHashMap<String, ferridriver_test::model::TestPlan>,
+  /// Undefined and ambiguous steps, found when the config asks for a dry
+  /// run (and so for `--list`); empty otherwise.
+  pub issues: dry_run::StepIssues,
+}
+
+/// One corpus: its plan and, in a dry run, its step issues.
+pub struct BddPlan {
+  pub plan: ferridriver_test::model::TestPlan,
+  pub issues: dry_run::StepIssues,
 }
 
 /// Build the plan every project shares, plus a plan of its own for each
@@ -356,17 +461,18 @@ pub async fn build_bdd_plans(
   js_globs: &[String],
   extensions: &[ferridriver_script::ExtensionSpec],
   only_features: Option<&[std::path::PathBuf]>,
-) -> Result<
-  (
-    ferridriver_test::model::TestPlan,
-    rustc_hash::FxHashMap<String, ferridriver_test::model::TestPlan>,
-  ),
-  String,
-> {
-  let shared = build_bdd_plan(config, js_globs, extensions, only_features).await?;
+) -> Result<BddPlans, PlanError> {
+  let BddPlan {
+    plan: shared,
+    mut issues,
+  } = build_bdd_plan(config, js_globs, extensions, only_features).await?;
   let mut per_project = rustc_hash::FxHashMap::default();
   if config.projects.is_empty() {
-    return Ok((shared, per_project));
+    return Ok(BddPlans {
+      shared,
+      per_project,
+      issues,
+    });
   }
 
   // (features, steps, tags) -> the plan they produce. Two projects that
@@ -385,13 +491,18 @@ pub async fn build_bdd_plans(
     let plan = if let Some((_, hit)) = built.iter().find(|(k, _)| *k == key) {
       hit.clone()
     } else {
-      let plan = build_bdd_plan(&merged, &globs, extensions, only_features).await?;
-      built.push((key, plan.clone()));
-      plan
+      let corpus = build_bdd_plan(&merged, &globs, extensions, only_features).await?;
+      issues.extend(corpus.issues);
+      built.push((key, corpus.plan.clone()));
+      corpus.plan
     };
     per_project.insert(project.name.clone(), plan);
   }
-  Ok((shared, per_project))
+  Ok(BddPlans {
+    shared,
+    per_project,
+    issues,
+  })
 }
 
 /// Build a BDD test plan from disk: discover + parse features (narrowed
@@ -406,7 +517,7 @@ pub async fn build_bdd_plan(
   js_globs: &[String],
   extensions: &[ferridriver_script::ExtensionSpec],
   only_features: Option<&[std::path::PathBuf]>,
-) -> Result<ferridriver_test::model::TestPlan, String> {
+) -> Result<BddPlan, PlanError> {
   use std::sync::Arc;
 
   let patterns: Vec<String> = match only_features {
@@ -419,27 +530,37 @@ pub async fn build_bdd_plan(
   let options = crate::scenario::ExpandOptions {
     examples_title_format: config.examples_title_format.clone(),
     tag_filter: match config.tags.as_deref() {
-      Some(expr) => Some(filter::TagExpression::parse(expr).map_err(|e| format!("invalid tag expression: {e}"))?),
+      Some(expr) => {
+        Some(filter::TagExpression::parse(expr).map_err(|e| PlanError::Usage(format!("invalid tag expression: {e}")))?)
+      },
       None => None,
     },
   };
   let feature_set = feature::FeatureSet::discover_and_parse(&patterns, &config.test_ignore)
-    .map_err(|e| format!("feature discovery error: {e}"))?;
+    .map_err(|e| PlanError::Usage(format!("feature discovery error: {e}")))?;
   if feature_set.features.is_empty() {
     // Not an error: one-shot runs report "no scenarios found" and exit
     // 0 (pre-watch behavior); watch cycles simply idle until the next
     // change.
     eprintln!("no feature files found matching: {patterns:?}");
-    return Ok(ferridriver_test::model::TestPlan {
-      repetitions_expanded: false,
-      suites: Vec::new(),
-      total_tests: 0,
-      shard: None,
+    return Ok(BddPlan {
+      plan: ferridriver_test::model::TestPlan::default(),
+      issues: dry_run::StepIssues::default(),
     });
   }
+  let root = ferridriver_test::identity::root(config);
   if js_globs.is_empty() && extensions.is_empty() {
     let registry = Arc::new(registry::StepRegistry::build());
-    Ok(translate::translate_features(&feature_set, registry, config, &options))
+    let (mut plan, issues) = if config.dry_run {
+      dry_run::translate(&feature_set, &registry, config, &options, true)
+    } else {
+      (
+        translate::translate_features(&feature_set, registry, config, &options),
+        dry_run::StepIssues::default(),
+      )
+    };
+    plan.anchor(&root);
+    Ok(BddPlan { plan, issues })
   } else {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // Extensions load once per plan build, through the gate every host
@@ -467,14 +588,26 @@ pub async fn build_bdd_plan(
     // plan build.
     let bundle = js::bundle_steps_with(js_globs, extensions, &cwd)
       .await
-      .map_err(|e| format!("step bundle error: {e}"))?;
-    Ok(js::translate_features_js(
-      &feature_set,
-      config,
-      bundle,
-      cwd,
-      Arc::new(bindings),
-      &options,
-    ))
+      .map_err(|e| PlanError::Suite(format!("step bundle error: {e}")))?;
+    let bindings = Arc::new(bindings);
+    let (mut plan, issues) = if config.dry_run {
+      let setup = js::BddSessionSetup {
+        world_parameters: config.world_parameters.clone(),
+        open_use_keys: Arc::new(Vec::new()),
+        extensions: Arc::clone(&bindings),
+        builtin_steps: config.builtin_steps,
+      };
+      let registry = js::collect_step_registry(bundle, &cwd, &setup)
+        .await
+        .map_err(|e| PlanError::Suite(format!("step bundle error: {e}")))?;
+      dry_run::translate(&feature_set, &registry, config, &options, false)
+    } else {
+      (
+        js::translate_features_js(&feature_set, config, bundle, cwd, bindings, &options),
+        dry_run::StepIssues::default(),
+      )
+    };
+    plan.anchor(&root);
+    Ok(BddPlan { plan, issues })
   }
 }

@@ -617,9 +617,8 @@ fn expand_feature(source: &str, title_format: Option<String>) -> Result<Value> {
 }
 
 async fn bdd_plan(config: &ferridriver_config::test::TestConfig) -> Result<Value> {
-  let (plan, projects) = Box::pin(ferridriver_bdd::build_bdd_plans(config, &[], &[], None))
-    .await
-    .map_err(anyhow::Error::msg)?;
+  let plans = Box::pin(ferridriver_bdd::build_bdd_plans(config, &[], &[], None)).await?;
+  let (plan, projects) = (plans.shared, plans.per_project);
   let projects = projects
     .into_iter()
     .map(|(name, plan)| {

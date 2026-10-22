@@ -341,49 +341,7 @@ impl JsBddSession {
         .map_err(|e| anyhow::anyhow!(e))?;
     }
 
-    let mut registry = if setup.builtin_steps {
-      StepRegistry::build()
-    } else {
-      StepRegistry::empty()
-    };
-    for pt in &snapshot.param_types {
-      registry
-        .register_param_type(CustomParamType {
-          name: pt.name.clone(),
-          regex: pt.regexp.clone(),
-          transformer: None,
-        })
-        .map_err(|e| anyhow::anyhow!("defineParameterType `{}`: {}", pt.name, e))?;
-    }
-    for (idx, step) in snapshot.steps.iter().enumerate() {
-      let kind = match step.kind.as_str() {
-        "Given" => StepKind::Given,
-        "When" => StepKind::When,
-        "Then" => StepKind::Then,
-        _ => StepKind::Step,
-      };
-      let handler = js_step_handler(vm.clone(), idx, Arc::clone(&bundle));
-      let loc = StepLocation {
-        file: JS_STEP_LOCATION,
-        line: 0,
-      };
-      registry
-        .register_js(
-          kind,
-          &step.pattern,
-          step.is_regex,
-          handler,
-          loc,
-          StepFixtures {
-            // An ambient `Given`/`When`/`Then` belongs to the base
-            // chain: it is the one an extension's contributed fixtures
-            // land in, so an unmodified suite still receives them.
-            set: step.fixture_set.unwrap_or(0),
-            names: step.requested.clone(),
-          },
-        )
-        .map_err(|e| anyhow::anyhow!("register step `{}`: {}", step.pattern, e))?;
-    }
+    let registry = step_registry(&vm, &bundle, &snapshot, setup.builtin_steps)?;
 
     let hooks = snapshot
       .hooks
@@ -885,6 +843,102 @@ impl JsBddSession {
   }
 }
 
+/// The step registry a step bundle's registrations make, with the
+/// built-in step library under them when `builtin_steps`.
+fn step_registry(
+  vm: &VmHandle,
+  bundle: &Arc<CompiledBundle>,
+  snapshot: &ferridriver_script::CollectedRegistry,
+  builtin_steps: bool,
+) -> anyhow::Result<StepRegistry> {
+  let mut registry = if builtin_steps {
+    StepRegistry::build()
+  } else {
+    StepRegistry::empty()
+  };
+  for pt in &snapshot.param_types {
+    registry
+      .register_param_type(CustomParamType {
+        name: pt.name.clone(),
+        regex: pt.regexp.clone(),
+        transformer: None,
+      })
+      .map_err(|e| anyhow::anyhow!("defineParameterType `{}`: {}", pt.name, e))?;
+  }
+  for (idx, step) in snapshot.steps.iter().enumerate() {
+    let kind = match step.kind.as_str() {
+      "Given" => StepKind::Given,
+      "When" => StepKind::When,
+      "Then" => StepKind::Then,
+      _ => StepKind::Step,
+    };
+    let handler = js_step_handler(vm.clone(), idx, Arc::clone(bundle));
+    let loc = StepLocation {
+      file: JS_STEP_LOCATION,
+      line: 0,
+    };
+    registry
+      .register_js(
+        kind,
+        &step.pattern,
+        step.is_regex,
+        handler,
+        loc,
+        StepFixtures {
+          // An ambient `Given`/`When`/`Then` belongs to the base
+          // chain: it is the one an extension's contributed fixtures
+          // land in, so an unmodified suite still receives them.
+          set: step.fixture_set.unwrap_or(0),
+          names: step.requested.clone(),
+        },
+      )
+      .map_err(|e| anyhow::anyhow!("register step `{}`: {}", step.pattern, e))?;
+  }
+  Ok(registry)
+}
+
+/// The step registry a worker would build from `bundle`, for matching
+/// steps without running them (`--dry-run`, `--list`). The bundle's top
+/// level is evaluated, as cucumber's dry run loads support code, but no
+/// hook runs and no browser is involved.
+///
+/// # Errors
+/// When the step bundle fails to evaluate or registers an invalid step.
+pub async fn collect_step_registry(
+  bundle: Arc<CompiledBundle>,
+  cwd: &Path,
+  setup: &BddSessionSetup,
+) -> anyhow::Result<StepRegistry> {
+  let run_ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    script_root: cwd.to_path_buf(),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    extensions: (*setup.extensions).clone(),
+    host: ferridriver_script::ExtensionHost::Bdd,
+    caps: BDD_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
+    session: None,
+  };
+  let engine_config = ScriptEngineConfig {
+    sidecars: BDD_SIDECARS.get().cloned().unwrap_or_default(),
+    ..Default::default()
+  };
+  let session = Session::create(engine_config, &run_ctx)
+    .await
+    .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
+  let vm = session.vm_handle();
+  eval_bundle(&vm, &bundle)
+    .await
+    .map_err(|e| anyhow::anyhow!("step bundle failed to load: {}", bundle.format_error(&e)))?;
+  let snapshot = collect_registry(&vm)
+    .await
+    .map_err(|e| anyhow::anyhow!("collect registry: {}", e.message))?;
+  step_registry(&vm, &bundle, &snapshot, setup.builtin_steps)
+}
+
 fn js_step_handler(vm: VmHandle, idx: usize, bundle: Arc<CompiledBundle>) -> StepHandler {
   Arc::new(move |_world, params, table, doc| {
     let vm = vm.clone();
@@ -1071,7 +1125,7 @@ pub fn translate_features_js(
   extensions: Arc<Vec<ferridriver_script::ExtensionBinding>>,
   options: &crate::scenario::ExpandOptions,
 ) -> ferridriver_test::model::TestPlan {
-  use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestId, TestSuite};
+  use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestSuite};
 
   let cwd = Arc::new(cwd);
   let step_graph = bundle_key(&bundle);
@@ -1101,19 +1155,7 @@ pub fn translate_features_js(
       // scenario into an Arc so the per-invocation closure shares it via a
       // refcount bump instead of deep-cloning the step Vec twice (mirrors
       // the Rust-step path in `translate::translate_scenario`).
-      let id = TestId {
-        repeat_each_index: 0,
-        file: scenario.feature_path.display().to_string(),
-        suite: Some(
-          std::iter::once(scenario.feature_name.clone())
-            .chain(scenario.describe_path.iter().cloned())
-            .collect::<Vec<_>>()
-            .join("::"),
-        ),
-        name: scenario.name.clone(),
-        line: crate::translate::scenario_line(&scenario),
-        column: None,
-      };
+      let id = crate::translate::scenario_id(&scenario, crate::translate::scenario_line(&scenario));
       let annotations = crate::translate::scenario_annotations(&scenario);
       let use_options = crate::translate::scenario_use_options(&scenario);
       let metadata = serde_json::to_value(&scenario.source).ok();
@@ -1223,6 +1265,7 @@ pub fn translate_features_js(
     }
 
     suites.push(TestSuite {
+      serial_scope: None,
       name: feature_name,
       file: feature_path,
       tests,
