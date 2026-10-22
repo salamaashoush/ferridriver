@@ -150,6 +150,99 @@ impl BrowserType {
     .into_napi()?;
     Ok(crate::context::BrowserContext::wrap(ctx))
   }
+
+  /// Playwright `browserType.launchServer(options?) -> Promise<BrowserServer>`.
+  ///
+  /// Serves the Chrome `DevTools` Protocol, so Chromium only; a client dials
+  /// `wsEndpoint()` with `connectOverCDP` or `connect`. `token`, when set,
+  /// must come with every client as `Authorization: Bearer <token>` or a
+  /// `token` query parameter, which the endpoint URL carries.
+  #[napi(ts_args_type = "options?: {
+    headless?: boolean;
+    executablePath?: string;
+    args?: string[];
+    channel?: string;
+    slowMo?: number;
+    timeout?: number;
+    downloadsPath?: string;
+    tracesDir?: string;
+    ignoreDefaultArgs?: boolean | string[];
+    proxy?: { server: string; bypass?: string; username?: string; password?: string };
+    chromiumSandbox?: boolean;
+    host?: string;
+    port?: number;
+    wsPath?: string;
+    token?: string;
+  }")]
+  pub async fn launch_server(&self, options: Option<LaunchServerOptions>) -> Result<BrowserServer> {
+    let opts = options.unwrap_or_default();
+    let core = ferridriver::browser_server::LaunchServerOptions {
+      launch: lower_launch_options(opts.launch),
+      serve: ferridriver::browser_server::ServeOptions {
+        host: opts.server.host,
+        port: opts.server.port,
+        ws_path: opts.server.ws_path,
+        token: opts.server.token,
+      },
+    };
+    let server = Box::pin(self.inner.launch_server(core)).await.into_napi()?;
+    Ok(BrowserServer {
+      ws_endpoint: server.ws_endpoint().to_string(),
+      inner: tokio::sync::Mutex::new(Some(server)),
+    })
+  }
+}
+
+/// The server half of `launchServer`'s options bag.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ServerListenOptions {
+  pub host: Option<String>,
+  pub port: Option<u16>,
+  pub ws_path: Option<String>,
+  pub token: Option<String>,
+}
+
+/// `launchServer`'s merged bag split into the launch and the listener,
+/// read from the one JS object like [`PersistentContextOptions`].
+#[derive(Default)]
+pub struct LaunchServerOptions {
+  pub launch: LaunchOptions,
+  pub server: ServerListenOptions,
+}
+
+impl napi::bindgen_prelude::FromNapiValue for LaunchServerOptions {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, value: napi::sys::napi_value) -> napi::Result<Self> {
+    Ok(Self {
+      launch: unsafe { LaunchOptions::from_napi_value(env, value)? },
+      server: unsafe { ServerListenOptions::from_napi_value(env, value)? },
+    })
+  }
+}
+
+/// Playwright `BrowserServer`: a launched browser other processes connect to.
+#[napi]
+pub struct BrowserServer {
+  ws_endpoint: String,
+  inner: tokio::sync::Mutex<Option<ferridriver::browser_server::BrowserServer>>,
+}
+
+#[napi]
+impl BrowserServer {
+  /// Playwright `browserServer.wsEndpoint()`.
+  #[napi]
+  pub fn ws_endpoint(&self) -> String {
+    self.ws_endpoint.clone()
+  }
+
+  /// Playwright `browserServer.close()`: stop serving and close the browser.
+  #[napi]
+  pub async fn close(&self) -> Result<()> {
+    match self.inner.lock().await.take() {
+      Some(server) => server.close().await.into_napi(),
+      None => Ok(()),
+    }
+  }
 }
 
 /// Internal helper: split the merged persistent-context options bag

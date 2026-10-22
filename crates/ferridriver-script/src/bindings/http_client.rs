@@ -262,8 +262,17 @@ struct JsNewContextOptions {
   fail_on_status_code: Option<bool>,
   max_redirects: Option<u32>,
   storage_state: Option<serde_json::Value>,
-  proxy: Option<serde_json::Value>,
+  proxy: Option<JsProxy>,
   client_certificates: Option<serde_json::Value>,
+}
+
+/// Playwright's `ProxySettings`.
+#[derive(serde::Deserialize)]
+struct JsProxy {
+  server: String,
+  bypass: Option<String>,
+  username: Option<String>,
+  password: Option<String>,
 }
 
 /// The body of `request.newContext`: options to a standalone context
@@ -277,8 +286,19 @@ fn new_api_context<'js>(
     Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(ctx, v)?,
     _ => JsNewContextOptions::default(),
   };
-  if options.proxy.is_some() {
-    return Err(type_error(ctx, "proxy is not supported for request.newContext yet"));
+  let proxy = options.proxy.map(|p| ferridriver::options::ProxyConfig {
+    server: p.server,
+    bypass: p.bypass,
+    username: p.username,
+    password: p.password,
+  });
+  if let Some(proxy) = &proxy {
+    let policy = match &attenuation {
+      Some(declared) => Some(crate::bindings::net_policy::attenuated(ctx, Arc::clone(declared))),
+      None => crate::bindings::net_policy::realm_policy(ctx),
+    };
+    let guard = crate::bindings::net_policy::guard(policy);
+    ferridriver::http_client::check_proxy(proxy, &guard).into_js_with(ctx)?;
   }
   if options.client_certificates.is_some() {
     return Err(type_error(
@@ -311,6 +331,7 @@ fn new_api_context<'js>(
     user_agent: options.user_agent,
     fail_on_status_code: options.fail_on_status_code,
     max_redirects: options.max_redirects,
+    proxy,
   };
   let mut client = HttpClient::new(core);
   if let Some(state) = storage {

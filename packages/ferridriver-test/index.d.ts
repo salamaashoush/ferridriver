@@ -2592,6 +2592,20 @@ export interface BrowserType {
   connect(wsEndpoint: string, options?: ConnectOptions): Promise<Browser>;
   connectOverCDP(endpointURL: string, options?: { headers?: Record<string, string>; slowMo?: number; timeout?: number }): Promise<Browser>;
   launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & LaunchOptions): Promise<BrowserContext>;
+  /**
+   * Launch Chromium and serve its DevTools Protocol to other processes.
+   * Chromium only. `token`, when set, must come with every client as
+   * `Authorization: Bearer <token>` or a `token` query parameter.
+   */
+  launchServer(options?: LaunchOptions & { host?: string; port?: number; wsPath?: string; token?: string }): Promise<BrowserServer>;
+}
+
+/** Playwright's `BrowserServer`: a launched browser other processes connect to. */
+export interface BrowserServer {
+  /** The WebSocket URL a client dials, token included when there is one. */
+  wsEndpoint(): string;
+  /** Stop serving and close the browser. */
+  close(): Promise<void>;
 }
 
 /** Connection options, including W3C capabilities for WebDriver HTTP endpoints. */
@@ -2790,6 +2804,11 @@ export interface APIRequestNewContextOptions {
   maxRedirects?: number;
   /** A file path or an object; its cookies seed the new context. */
   storageState?: string | StorageState;
+  /**
+   * An HTTP(S) or SOCKS proxy every request goes through. `socks5` resolves
+   * names on the proxy; credentials are sent to HTTP and SOCKS5 proxies.
+   */
+  proxy?: { server: string; bypass?: string; username?: string; password?: string };
 }
 
 export interface APIRequestContext {

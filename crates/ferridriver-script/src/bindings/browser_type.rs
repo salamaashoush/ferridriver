@@ -80,6 +80,38 @@ impl BrowserTypeJs {
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
+  /// Playwright `browserType.launchServer(options?)`: Chromium serving its
+  /// `DevTools` Protocol on `host:port` (loopback and a free port unless
+  /// given), admitting clients on `wsPath` and, when set, `token`.
+  #[qjs(rename = "launchServer")]
+  pub async fn launch_server<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let (launch, serve) = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        let listen: JsServeOptions = serde_from_js(&ctx, v.clone())?;
+        (parse_launch_options(&ctx, v)?, listen.into_core())
+      },
+      _ => (
+        LaunchOptions::default(),
+        ferridriver::browser_server::ServeOptions::default(),
+      ),
+    };
+    let launcher =
+      BrowserType::server_launcher(self.inner.kind()).map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
+    let browser = resources(&ctx)?
+      .launch(launcher, launch)
+      .await
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
+    let server = ferridriver::browser_server::BrowserServer::serve(browser, serve)
+      .await
+      .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
+    let wrapper = BrowserServerJs {
+      ws_endpoint: server.ws_endpoint().to_string(),
+      inner: Arc::new(tokio::sync::Mutex::new(Some(server))),
+    };
+    let instance = Class::instance(ctx.clone(), wrapper)?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
   /// Playwright `browserType.connect(wsEndpoint, options?)`.
   #[qjs(rename = "connect")]
   pub async fn connect<'js>(
@@ -154,6 +186,59 @@ impl BrowserTypeJs {
     let wrapper = BrowserContextJs::new(Arc::new(ctx_ref));
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+}
+
+/// The listener half of `launchServer`'s options.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsServeOptions {
+  host: Option<String>,
+  port: Option<u16>,
+  ws_path: Option<String>,
+  token: Option<String>,
+}
+
+impl JsServeOptions {
+  fn into_core(self) -> ferridriver::browser_server::ServeOptions {
+    ferridriver::browser_server::ServeOptions {
+      host: self.host,
+      port: self.port,
+      ws_path: self.ws_path,
+      token: self.token,
+    }
+  }
+}
+
+/// Playwright `BrowserServer`.
+#[derive(JsLifetime, Trace)]
+#[rquickjs::class(rename = "BrowserServer")]
+pub struct BrowserServerJs {
+  #[qjs(skip_trace)]
+  ws_endpoint: String,
+  #[qjs(skip_trace)]
+  inner: Arc<tokio::sync::Mutex<Option<ferridriver::browser_server::BrowserServer>>>,
+}
+
+#[rquickjs::methods]
+impl BrowserServerJs {
+  /// Playwright `browserServer.wsEndpoint()`.
+  #[qjs(rename = "wsEndpoint")]
+  pub fn ws_endpoint(&self) -> String {
+    self.ws_endpoint.clone()
+  }
+
+  /// Playwright `browserServer.close()`: stop serving and close the browser.
+  #[qjs(rename = "close")]
+  pub async fn close(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+    let server = self.inner.lock().await.take();
+    match server {
+      Some(server) => server
+        .close()
+        .await
+        .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e)),
+      None => Ok(()),
+    }
   }
 }
 
@@ -335,6 +420,7 @@ fn webkit_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
 /// BiDi) — never a product swap.
 pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<BrowserTypeJs>::define(&ctx.globals())?;
+  Class::<BrowserServerJs>::define(&ctx.globals())?;
 
   ctx
     .globals()

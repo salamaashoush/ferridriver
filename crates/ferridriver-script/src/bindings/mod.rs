@@ -148,6 +148,7 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<WebErrorJs>::define(&g)?;
   Class::<VideoJs>::define(&g)?;
   Class::<BrowserTypeJs>::define(&g)?;
+  Class::<browser_type::BrowserServerJs>::define(&g)?;
   Class::<FrameLocatorJs>::define(&g)?;
   Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
   // `Headers` / `Request` / `Response`, `DOMException`, `Event` /

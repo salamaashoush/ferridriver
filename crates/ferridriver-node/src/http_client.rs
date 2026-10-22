@@ -38,9 +38,9 @@ pub struct HttpClientOptions {
   /// A `storageState` file path or object: its cookies seed the context.
   #[napi(ts_type = "string | { cookies?: any[]; origins?: any[] }")]
   pub storage_state: Option<serde_json::Value>,
-  /// Not supported yet for API contexts; refused rather than ignored.
-  #[napi(ts_type = "{ server: string; bypass?: string; username?: string; password?: string }")]
-  pub proxy: Option<serde_json::Value>,
+  /// An HTTP(S) or SOCKS proxy every request goes through, credentials
+  /// included.
+  pub proxy: Option<crate::context::NapiProxyConfig>,
   /// Not supported yet for API contexts; refused rather than ignored.
   #[napi(ts_type = "Array<Record<string, unknown>>")]
   pub client_certificates: Option<serde_json::Value>,
@@ -339,10 +339,14 @@ impl HttpClient {
 #[napi(namespace = "request", ts_return_type = "Promise<APIRequestContext>")]
 pub async fn new_context(options: Option<HttpClientOptions>) -> Result<HttpClient> {
   let opts = options.unwrap_or_default();
-  if opts.proxy.is_some() {
-    return Err(crate::error::to_napi(ferridriver::error::FerriError::unsupported(
-      "proxy is not supported for request.newContext yet",
-    )));
+  let proxy = opts.proxy.map(|p| ferridriver::options::ProxyConfig {
+    server: p.server,
+    bypass: p.bypass,
+    username: p.username,
+    password: p.password,
+  });
+  if let Some(proxy) = &proxy {
+    proxy.validate().into_napi()?;
   }
   if opts.client_certificates.is_some() {
     return Err(crate::error::to_napi(ferridriver::error::FerriError::unsupported(
@@ -371,6 +375,7 @@ pub async fn new_context(options: Option<HttpClientOptions>) -> Result<HttpClien
     user_agent: opts.user_agent,
     fail_on_status_code: opts.fail_on_status_code,
     max_redirects: opts.max_redirects,
+    proxy,
   };
   let mut client = ferridriver::http_client::HttpClient::new(core_opts);
   if let Some(state) = storage {
@@ -510,12 +515,31 @@ mod tests {
 
   #[tokio::test]
   async fn options_it_cannot_honour_are_refused() {
-    let proxy = HttpClientOptions {
-      proxy: Some(serde_json::json!({ "server": "http://proxy.example.com" })),
+    let certificates = HttpClientOptions {
+      client_certificates: Some(serde_json::json!([])),
       ..HttpClientOptions::default()
     };
-    let refused = new_context(Some(proxy)).await.err().map(|e| e.reason);
-    assert!(refused.is_some_and(|reason| reason.contains("proxy is not supported")));
+    let refused = new_context(Some(certificates)).await.err().map(|e| e.reason);
+    assert!(refused.is_some_and(|reason| reason.contains("clientCertificates is not supported")));
     assert!(new_context(None).await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn a_proxy_that_names_no_proxy_is_refused_where_it_is_given() {
+    let proxy = |server: &str| HttpClientOptions {
+      proxy: Some(crate::context::NapiProxyConfig {
+        server: server.into(),
+        bypass: None,
+        username: None,
+        password: None,
+      }),
+      ..HttpClientOptions::default()
+    };
+    let refused = new_context(Some(proxy("ftp://proxy.example.com")))
+      .await
+      .err()
+      .map(|e| e.reason);
+    assert!(refused.is_some_and(|reason| reason.contains("proxy")));
+    assert!(new_context(Some(proxy("http://proxy.example.com:3128"))).await.is_ok());
   }
 }
