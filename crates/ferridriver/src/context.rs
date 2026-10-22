@@ -494,7 +494,7 @@ impl ContextRef {
       //     (`wkBrowser.ts::WKBrowserContext.initialize`), then per-page
       //     overrides applied in `attach()` before the about:blank document
       //     becomes scriptable.
-      let ctx_id = plan.browser.new_context(ctx_opts.as_ref()).await?;
+      let ctx_id = Box::pin(self.create_backend_context(&plan.browser, ctx_opts.as_ref())).await?;
       let page = Box::pin(
         plan
           .browser
@@ -517,6 +517,8 @@ impl ContextRef {
     let page = Page::with_context(any_page, self.clone());
     page.set_cached_viewport(effective_viewport.as_ref().map(|vp| (vp.width, vp.height)));
 
+    Box::pin(self.apply_effective_proxy(&page)).await?;
+
     // Apply the BrowserContextOptions bag to the fresh page. Fields
     // without a backend implementation are silently skipped;
     // backend-specific failures funnel up as `FerriError` and fail
@@ -526,7 +528,7 @@ impl ContextRef {
       apply_context_options(&page, opts).await?;
       self.install_record_har(opts).await;
 
-      self.hydrate_storage_state(opts).await?;
+      Box::pin(self.hydrate_storage_state(opts)).await?;
     }
 
     // If the context was configured with `recordVideo`, spawn the
@@ -551,12 +553,12 @@ impl ContextRef {
     // Re-apply every context-level WebSocket route so sockets created
     // in the fresh page are intercepted just like on pages that were
     // open when `context.routeWebSocket` was called.
-    self.apply_context_ws_routes(&page).await?;
+    Box::pin(self.apply_context_ws_routes(&page)).await?;
 
     // Re-apply every context-level route (`context.route` /
     // `context.routeFromHAR`) so requests from the fresh page are
     // intercepted and consume the shared `times` budget.
-    self.apply_context_routes(&page).await?;
+    Box::pin(self.apply_context_routes(&page)).await?;
 
     // Re-apply every context-level init script (`context.addInitScript`
     // and the fake-clock engine + call log) so new documents in the
@@ -587,6 +589,37 @@ impl ContextRef {
     self.emit_page_created(page.clone());
 
     Ok(page)
+  }
+
+  /// The proxy was fixed when the context was made; a page still has to
+  /// answer its challenges, and `BiDi` re-issues rewritten routes through it.
+  async fn apply_effective_proxy(&self, page: &Page) -> Result<()> {
+    let proxy = self.state.read().await.effective_proxy(&self.key.to_composite());
+    if proxy.is_some() {
+      Box::pin(page.inner().set_proxy(proxy)).await?;
+    }
+    Ok(())
+  }
+
+  /// Create this context in the browser. An authenticated SOCKS5 proxy,
+  /// which no browser can log in to, is handed over as a loopback relay that
+  /// logs in for it.
+  async fn create_backend_context(
+    &self,
+    browser: &crate::backend::AnyBrowser,
+    stored: Option<&crate::options::BrowserContextOptions>,
+  ) -> Result<String> {
+    let Some(proxy) = stored
+      .and_then(|opts| opts.proxy.as_ref())
+      .filter(|proxy| proxy.is_authenticated_socks())
+    else {
+      return browser.new_context(stored).await;
+    };
+    let composite = self.key.to_composite();
+    let relayed = self.state.read().await.browser_facing_proxy(&composite, proxy).await?;
+    let mut opts = stored.cloned().unwrap_or_default();
+    opts.proxy = Some(relayed);
+    browser.new_context(Some(&opts)).await
   }
 
   /// Fire `ContextEvent::Page` on this context's shared emitter — used
@@ -1161,6 +1194,13 @@ impl ContextRef {
             .and_then(|options| options.http_credentials)
             .unwrap_or_default()
         })
+      }))
+      .with_live_proxy(std::sync::Arc::new({
+        let context = self.clone();
+        move || {
+          let context = context.clone();
+          Box::pin(async move { context.state.read().await.effective_proxy(&context.key.to_composite()) })
+        }
       }))
   }
 
@@ -2114,7 +2154,7 @@ impl ContextRef {
       .traced("route", params, async {
         let registration = crate::route::RegisteredRoute::context_scoped(matcher.clone(), handler, times)
           .with_client(Some(self.http_client()));
-        self.install_context_route(registration).await?;
+        Box::pin(self.install_context_route(registration)).await?;
         let ctx = self.clone();
         Ok(crate::disposable::Disposable::new(move || async move {
           ctx.unroute(&matcher, None).await
@@ -2243,9 +2283,7 @@ impl ContextRef {
     }
     let handler = crate::har::route_handler_from_file(path, options.not_found)?;
     let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
-    self
-      .install_context_route(crate::route::RegisteredRoute::context_scoped(matcher, handler, None))
-      .await
+    Box::pin(self.install_context_route(crate::route::RegisteredRoute::context_scoped(matcher, handler, None))).await
   }
 
   /// Register a `routeFromHAR({ update: true })` recorder, flushed when
@@ -2595,10 +2633,15 @@ async fn register_popup(
   // deadlock the pump. Options, init scripts, route interception, and
   // the paused-safe binding install are all pre-document protocol
   // calls, so the popup's first document sees them from the start.
-  let ctx_opts = {
+  let (ctx_opts, proxy) = {
     let s = state.read().await;
-    s.get_context_options(&composite)
+    (s.get_context_options(&composite), s.effective_proxy(&composite))
   };
+  if proxy.is_some()
+    && let Err(e) = Box::pin(page.inner().set_proxy(proxy)).await
+  {
+    tracing::debug!("popup proxy: {e}");
+  }
   if let Some(opts) = ctx_opts.as_ref()
     && let Err(e) = apply_context_options(&page, opts).await
   {

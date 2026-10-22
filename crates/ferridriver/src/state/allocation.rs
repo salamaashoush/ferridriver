@@ -230,12 +230,17 @@ impl Allocation {
     if self.is_closing() {
       return Err(Self::closed_error());
     }
-    let (mode, effective) = Box::pin(spec.resolve_off_lock(instance)).await?;
+    let (mode, mut effective) = Box::pin(spec.resolve_off_lock(instance)).await?;
     if self.is_closing() {
       return Err(Self::closed_error());
     }
     let browser = match &mode {
-      ConnectMode::Launch => spec.launch_browser(&effective).await?,
+      ConnectMode::Launch => {
+        let relay = spec.relay_launch_proxy(&mut effective).await?;
+        let browser = spec.launch_browser(&effective).await?;
+        spec.record_launched_proxy(instance, effective.launched_proxy.as_ref(), relay);
+        browser
+      },
       other => {
         let connect = connect_browser(
           other,
@@ -243,8 +248,17 @@ impl Allocation {
           spec.connection_headers.as_ref(),
           &effective.args,
         );
-        if matches!(other, ConnectMode::ConnectUrl(_) | ConnectMode::AutoConnect { .. }) {
-          let requested = crate::operation_budget::OperationBudget::new(effective.launch_timeout.unwrap_or(30_000))?;
+        if matches!(
+          other,
+          ConnectMode::ConnectUrl(_) | ConnectMode::ConnectUrlWith { .. } | ConnectMode::AutoConnect { .. }
+        ) {
+          let timeout = match other {
+            ConnectMode::ConnectUrlWith {
+              timeout: Some(timeout), ..
+            } => Some(*timeout),
+            _ => effective.launch_timeout,
+          };
+          let requested = crate::operation_budget::OperationBudget::new(timeout.unwrap_or(30_000))?;
           let budget = *self.connection_budget.get_or_init(|| requested);
           budget
             .scope(budget.wait(connect))

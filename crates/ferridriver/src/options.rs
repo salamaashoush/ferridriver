@@ -2124,6 +2124,11 @@ pub struct InstanceOverrides {
   pub env: rustc_hash::FxHashMap<String, String>,
   /// Built-in switches to drop for this instance.
   pub ignore_default_args: Option<IgnoreDefaultArgs>,
+  /// The proxy this instance's `args` already point the browser at,
+  /// carried whole because no flag can hold its credentials: they answer
+  /// the proxy's challenges, and a context without a proxy of its own
+  /// sends its request client through it. Not lowered into flags again.
+  pub launched_proxy: Option<ProxyConfig>,
 }
 
 /// Connect-to-server options bag for `browserType.connect(wsEndpoint, options)`.
@@ -2750,6 +2755,72 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
+  /// The credentials that answer this proxy's authentication challenge.
+  /// Playwright's `proxyCredentials()`: present when a username is.
+  #[must_use]
+  pub fn credentials(&self) -> Option<HttpCredentials> {
+    self
+      .username
+      .as_deref()
+      .filter(|name| !name.is_empty())
+      .map(|username| HttpCredentials {
+        username: username.to_string(),
+        password: self.password.clone().unwrap_or_default(),
+        origin: None,
+        send: None,
+      })
+  }
+
+  /// `server` as Chromium takes it. Chromium resolves names on a SOCKS5
+  /// proxy whichever way the scheme is spelled but knows only `socks5`, so
+  /// `socks5h` is lowered to it.
+  #[must_use]
+  pub fn chromium_server(&self) -> String {
+    match self.server.strip_prefix("socks5h://") {
+      Some(rest) => format!("socks5://{rest}"),
+      None => self.server.clone(),
+    }
+  }
+
+  /// The URL scheme of `server`, `http` when it names none.
+  #[must_use]
+  pub fn scheme(&self) -> &str {
+    self.server.split_once("://").map_or("http", |(scheme, _)| scheme)
+  }
+
+  /// Whether this is a SOCKS proxy that wants credentials, which no browser
+  /// can send: Chromium, Firefox and `WebKit` speak SOCKS5 without the
+  /// username/password method.
+  #[must_use]
+  pub fn is_authenticated_socks(&self) -> bool {
+    self.credentials().is_some() && self.scheme().starts_with("socks")
+  }
+
+  /// The proxy as the request client speaks to it.
+  #[must_use]
+  pub fn transport(&self) -> ferrijs_fetch::Proxy {
+    ferrijs_fetch::Proxy {
+      server: self.server.clone(),
+      bypass: self.bypass.clone(),
+      username: self.username.clone(),
+      password: self.password.clone(),
+    }
+  }
+
+  /// Refuse settings no client could use, where they were given rather than
+  /// on the first request.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::InvalidArgument`] for a server that is not a
+  /// proxy URL, or credentials on a `socks4` proxy.
+  pub fn validate(&self) -> crate::error::Result<()> {
+    self
+      .transport()
+      .validate()
+      .map_err(|e| crate::error::FerriError::invalid_argument("proxy", e.to_string()))
+  }
+
   /// Command-line flags pointing `backend`'s binary at this proxy.
   ///
   /// The spelling is per engine, exactly as Playwright spells it for the same
@@ -2764,7 +2835,7 @@ impl ProxyConfig {
     let bypass = self.bypass.as_deref();
 
     if backend != crate::backend::BackendKind::WebKit {
-      let mut flags = vec![format!("--proxy-server={}", self.server)];
+      let mut flags = vec![format!("--proxy-server={}", self.chromium_server())];
       if let Some(bypass) = bypass {
         flags.push(format!("--proxy-bypass-list={bypass}"));
       }

@@ -205,6 +205,12 @@ impl ContextWatch {
   }
 }
 
+#[derive(Debug, Default)]
+struct AuthCredentials {
+  site: Vec<crate::options::HttpCredentials>,
+  proxy: Option<crate::options::HttpCredentials>,
+}
+
 /// Playwright `WebKit` page. Cheaply cloneable; clones share the
 /// underlying sessions + managers.
 #[derive(Clone)]
@@ -255,6 +261,10 @@ pub struct WebKitPage {
   init_scripts: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
   /// Monotonic id source for [`Self::init_scripts`] identifiers.
   init_script_seq: Arc<std::sync::atomic::AtomicU64>,
+  /// Both halves of `Emulation.setAuthCredentials`: one command sets
+  /// the site credentials and the proxy's together, so each is resent
+  /// with the other.
+  auth_credentials: Arc<std::sync::Mutex<AuthCredentials>>,
   /// Extra HTTP headers applied via `Network.setExtraHTTPHeaders`. The
   /// backend recreates the target session on every cross-document navigation, so
   /// (like Playwright's `_updateState`) the headers are stashed here and
@@ -638,6 +648,7 @@ impl WebKitPage {
         init_scripts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
+        auth_credentials: Arc::default(),
         emulated_media: Arc::new(std::sync::Mutex::new(None)),
         emulated_viewport: Arc::new(std::sync::Mutex::new(None)),
         requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
@@ -1914,20 +1925,49 @@ impl WebKitPage {
   /// `wkPage.updateHttpCredentials` — `Emulation.setAuthCredentials` on
   /// the page-proxy session; clearing sends an empty credentials list.
   pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
-    let credentials: Vec<Value> = creds
-      .unwrap_or_default()
-      .into_iter()
-      .map(|creds| {
-        let mut value = json!({ "username": creds.username, "password": creds.password });
-        if let Some(origin) = creds.origin {
-          value["origin"] = json!(origin);
-        }
-        value
-      })
-      .collect();
+    if let Ok(mut auth) = self.auth_credentials.lock() {
+      auth.site = creds.unwrap_or_default();
+    }
+    self.send_auth_credentials().await
+  }
+
+  /// The proxy this page's context sends through; its credentials answer
+  /// the proxy's challenges (`proxyCredentials`, which `WebKit` uses for
+  /// those and nothing else). The context was already created with the
+  /// proxy (`Playwright.createContext({ proxyServer })`).
+  pub async fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> Result<()> {
+    if let Ok(mut auth) = self.auth_credentials.lock() {
+      auth.proxy = proxy.as_ref().and_then(crate::options::ProxyConfig::credentials);
+    }
+    self.send_auth_credentials().await
+  }
+
+  async fn send_auth_credentials(&self) -> Result<()> {
+    let params = {
+      let auth = self
+        .auth_credentials
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      let credentials: Vec<Value> = auth
+        .site
+        .iter()
+        .map(|creds| {
+          let mut value = json!({ "username": creds.username, "password": creds.password });
+          if let Some(origin) = &creds.origin {
+            value["origin"] = json!(origin);
+          }
+          value
+        })
+        .collect();
+      let mut params = json!({ "credentials": credentials });
+      if let Some(proxy) = &auth.proxy {
+        params["proxyCredentials"] = json!({ "username": proxy.username, "password": proxy.password });
+      }
+      params
+    };
     self
       .proxy_session()
-      .send("Emulation.setAuthCredentials", json!({ "credentials": credentials }))
+      .send("Emulation.setAuthCredentials", params)
       .await
       .map_err(conn_err)?;
     Ok(())

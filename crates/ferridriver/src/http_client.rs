@@ -26,7 +26,7 @@ use futures::StreamExt as _;
 
 use ferrijs_fetch as fetch;
 
-use crate::options::{HttpCredentials, HttpCredentialsSend};
+use crate::options::{HttpCredentials, HttpCredentialsSend, ProxyConfig};
 
 pub use ferrijs_fetch::{
   BridgeFuture, ContextBridge, ContextDefaults, Credentials, FetchError, MultipartField, MultipartValue, NetGuard,
@@ -54,12 +54,26 @@ pub struct HttpClientOptions {
   pub fail_on_status_code: Option<bool>,
   /// Redirects a request follows unless it says otherwise.
   pub max_redirects: Option<u32>,
+  /// Playwright `proxy`: an HTTP(S) or SOCKS proxy every request goes
+  /// through, credentials included.
+  pub proxy: Option<ProxyConfig>,
 }
 
 /// The credentials a context-bound client answers challenges with, read
 /// when one is needed so `setHTTPCredentials` after the client was made
 /// still counts.
 pub type LiveHttpCredentials = Arc<dyn Fn() -> futures::future::BoxFuture<'static, Vec<HttpCredentials>> + Send + Sync>;
+
+/// The proxy a context-bound client sends through: the context's own, or
+/// the browser's launch proxy. Read once, on the first request, since a
+/// context's proxy is fixed when the context is made.
+pub type LiveProxy = Arc<dyn Fn() -> futures::future::BoxFuture<'static, Option<ProxyConfig>> + Send + Sync>;
+
+#[derive(Clone)]
+struct ContextProxy {
+  resolve: LiveProxy,
+  pool: Arc<tokio::sync::OnceCell<fetch::ClientPool>>,
+}
 
 #[derive(Clone)]
 enum CredentialSource {
@@ -71,6 +85,34 @@ fn basic_authorization(credentials: &HttpCredentials) -> String {
   use base64::Engine as _;
   let pair = format!("{}:{}", credentials.username, credentials.password);
   format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(pair))
+}
+
+/// Refuse a proxy that `guard` would not let a request reach. The proxy is a
+/// host the client connects to like any other, and a sandboxed caller must
+/// not reach through one what its policy keeps it from reaching directly.
+///
+/// # Errors
+///
+/// The settings name no proxy, or the policy refuses the proxy's host.
+pub fn check_proxy(proxy: &ProxyConfig, guard: &NetGuard) -> crate::error::Result<()> {
+  proxy.validate()?;
+  let server = proxy.server.trim();
+  let written = if server.contains("://") {
+    server.to_string()
+  } else {
+    format!("http://{server}")
+  };
+  let parsed = reqwest::Url::parse(&written)
+    .map_err(|e| crate::error::FerriError::invalid_argument("proxy", format!("{server:?}: {e}")))?;
+  let host = parsed.host_str().unwrap_or_default();
+  let port = parsed.port().unwrap_or(match parsed.scheme() {
+    "https" => 443,
+    "http" => 80,
+    _ => 1080,
+  });
+  let probe = reqwest::Url::parse(&format!("http://{host}:{port}/"))
+    .map_err(|e| crate::error::FerriError::invalid_argument("proxy", format!("{server:?}: {e}")))?;
+  fetch::check_url(&probe, guard).map_err(|e| fetch::FetchError::from(e).into())
 }
 
 /// Per-request options (overrides context defaults). This is the
@@ -592,6 +634,9 @@ pub struct HttpClient {
   /// The `origins` of the `storageState` a standalone client was made
   /// with, handed back by [`Self::storage_state`].
   origins: Vec<crate::options::OriginState>,
+  /// `Some` for a context-bound client, whose pool takes the context's
+  /// proxy the first time it sends.
+  context_proxy: Option<ContextProxy>,
 }
 
 /// Playwright's `rewriteCookies` (`server/network.ts`): a cookie given
@@ -694,7 +739,8 @@ impl HttpClient {
   #[must_use]
   pub fn new(options: HttpClientOptions) -> Self {
     Self {
-      pool: fetch::ClientPool::standalone(options.ignore_https_errors),
+      pool: fetch::ClientPool::standalone(options.ignore_https_errors)
+        .with_proxy(options.proxy.as_ref().map(ProxyConfig::transport)),
       base_url: options.base_url,
       extra_headers: options.extra_http_headers,
       default_timeout: options.timeout.unwrap_or(Duration::from_secs(30)),
@@ -706,6 +752,7 @@ impl HttpClient {
       fail_on_status_code: options.fail_on_status_code,
       max_redirects: options.max_redirects,
       origins: Vec::new(),
+      context_proxy: None,
     }
   }
 
@@ -766,6 +813,7 @@ impl HttpClient {
       fail_on_status_code: None,
       max_redirects: None,
       origins: Vec::new(),
+      context_proxy: None,
     }
   }
 
@@ -847,6 +895,31 @@ impl HttpClient {
     self
   }
 
+  /// Send through whatever proxy `resolve` returns when the first request
+  /// is made, as a context's `request` sends through the context's proxy.
+  #[must_use]
+  pub fn with_live_proxy(mut self, resolve: LiveProxy) -> Self {
+    self.context_proxy = Some(ContextProxy {
+      resolve,
+      pool: Arc::new(tokio::sync::OnceCell::new()),
+    });
+    self
+  }
+
+  async fn transport_pool(&self) -> fetch::ClientPool {
+    let Some(live) = &self.context_proxy else {
+      return self.pool.clone();
+    };
+    live
+      .pool
+      .get_or_init(|| async {
+        let proxy = (live.resolve)().await;
+        self.pool.clone().with_proxy(proxy.as_ref().map(ProxyConfig::transport))
+      })
+      .await
+      .clone()
+  }
+
   async fn http_credentials(&self) -> Vec<HttpCredentials> {
     match &self.credentials {
       CredentialSource::Fixed(list) => list.clone(),
@@ -866,7 +939,8 @@ impl HttpClient {
         crate::options::matching_http_credentials(&credentials, url.as_str()).map(basic_authorization)
       }));
     }
-    Ok(fetch::send(&self.pool, self.bridge.as_ref(), request).await?)
+    let pool = self.transport_pool().await;
+    Ok(fetch::send(&pool, self.bridge.as_ref(), request).await?)
   }
 
   /// Effective per-request defaults. Bridged: read live from the browser
@@ -964,8 +1038,9 @@ impl HttpClient {
       headers.set(&name, value);
     }
 
+    let pool = self.transport_pool().await;
     fetch::send(
-      &self.pool,
+      &pool,
       self.bridge.as_ref(),
       fetch::Request {
         method,

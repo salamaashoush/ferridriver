@@ -326,6 +326,17 @@ pub struct BrowserState {
   /// (`browserType.launch({ proxy })`). A context's own `proxy` overrides it,
   /// exactly as it does in Playwright.
   pub proxy: Option<crate::options::ProxyConfig>,
+  /// The proxy each instance was actually launched with, the state's or
+  /// its own override, written when the launch succeeds so a context of
+  /// that instance answers the right proxy's challenges.
+  launched_proxies: LaunchedProxies,
+  /// Loopback relays standing in for a context's authenticated SOCKS5
+  /// proxy, which the browser cannot authenticate to itself; kept for the
+  /// context's life.
+  context_relays: Arc<std::sync::Mutex<HashMap<String, Arc<crate::socks_relay::SocksRelay>>>>,
+  /// Milliseconds every input, focus and navigation action waits after it
+  /// runs (`launch`/`connect({ slowMo })`), launched or connected alike.
+  pub slow_mo: Option<u64>,
   /// Per-instance additional chrome args. Called with instance name when launching.
   instance_overrides_fn: Option<InstanceOverridesFn>,
   /// Per-instance connect mode resolver. Called before launching to check if
@@ -492,6 +503,15 @@ pub enum ConnectMode {
   Launch,
   /// Connect to browser at explicit ws:// or http:// URL
   ConnectUrl(String),
+  /// [`Self::ConnectUrl`] with Playwright's `connectOptions`: `headers` go on
+  /// the WebSocket handshake (and the discovery request of an HTTP CDP
+  /// endpoint), which is how a remote browser behind an authenticating
+  /// gateway is reached; `timeout` bounds the connection.
+  ConnectUrlWith {
+    url: String,
+    headers: Option<rustc_hash::FxHashMap<String, String>>,
+    timeout: Option<u64>,
+  },
   /// Create a W3C `WebDriver` session and use its negotiated protocol.
   WebDriver {
     endpoint: String,
@@ -552,6 +572,9 @@ impl BrowserState {
       extra_args: plan.args,
       base_ignore_default_args: plan.ignore_default_args,
       proxy: plan.proxy,
+      launched_proxies: Arc::default(),
+      context_relays: Arc::default(),
+      slow_mo: plan.slow_mo,
       instance_overrides_fn: None,
       instance_resolver_fn: None,
       known_instances: Arc::from(Vec::new()),
@@ -728,6 +751,51 @@ impl BrowserState {
   pub fn get_context_options(&self, composite_key: &str) -> Option<crate::options::BrowserContextOptions> {
     let map = self.context_options.lock().ok()?;
     map.get(composite_key).cloned()
+  }
+
+  /// The proxy a context's traffic leaves through: its own, else the one
+  /// its instance was launched with. Playwright's
+  /// `this._options.proxy || this._browser.options.proxy`.
+  #[must_use]
+  pub fn effective_proxy(&self, composite_key: &str) -> Option<crate::options::ProxyConfig> {
+    let own = self
+      .context_options
+      .lock()
+      .ok()
+      .and_then(|map| map.get(composite_key).and_then(|options| options.proxy.clone()));
+    own.or_else(|| {
+      let instance = self.session_key(composite_key).instance;
+      self
+        .launched_proxies
+        .lock()
+        .ok()
+        .and_then(|launched| launched.get(&*instance).map(|launched| launched.proxy.clone()))
+    })
+  }
+
+  /// The proxy to create `composite`'s browser context with. An
+  /// authenticated SOCKS5 proxy, which no browser can log in to, is swapped
+  /// for a loopback relay that logs in for it, held until the context goes.
+  ///
+  /// # Errors
+  ///
+  /// The relay cannot start.
+  pub(crate) async fn browser_facing_proxy(
+    &self,
+    composite: &str,
+    proxy: &crate::options::ProxyConfig,
+  ) -> Result<crate::options::ProxyConfig> {
+    if !proxy.is_authenticated_socks() {
+      return Ok(proxy.clone());
+    }
+    let relay = crate::socks_relay::SocksRelay::start(proxy).await?;
+    let browser_proxy = relay.browser_proxy(proxy);
+    self
+      .context_relays
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(composite.to_string(), relay);
+    Ok(browser_proxy)
   }
 
   /// Enable `recordVideo` for every page opened under `composite_key`
@@ -919,6 +987,7 @@ impl BrowserState {
       base_args: self.extra_args.clone(),
       base_ignore_default_args: self.base_ignore_default_args.clone(),
       proxy: self.proxy.clone(),
+      launched_proxies: Arc::clone(&self.launched_proxies),
       default_viewport: self.default_viewport.clone(),
       overrides_fn: self.instance_overrides_fn.clone(),
       resolver_fn: self.instance_resolver_fn.clone(),
@@ -1294,6 +1363,16 @@ impl BrowserState {
   }
 }
 
+/// What an instance was launched pointing at, by instance name.
+type LaunchedProxies = Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, LaunchedProxy>>>;
+
+#[derive(Debug)]
+struct LaunchedProxy {
+  proxy: crate::options::ProxyConfig,
+  /// Held, never read: the relay serves the browser until dropped.
+  _relay: Option<Arc<crate::socks_relay::SocksRelay>>,
+}
+
 /// Immutable snapshot of the launch-relevant state, taken under a read
 /// guard so the launch runs unlocked.
 struct LaunchSpec {
@@ -1311,6 +1390,7 @@ struct LaunchSpec {
   base_args: Vec<String>,
   base_ignore_default_args: Option<crate::options::IgnoreDefaultArgs>,
   proxy: Option<crate::options::ProxyConfig>,
+  launched_proxies: LaunchedProxies,
   default_viewport: Option<crate::options::ViewportConfig>,
   overrides_fn: Option<InstanceOverridesFn>,
   resolver_fn: Option<InstanceResolverFn>,
@@ -1332,6 +1412,9 @@ struct EffectiveLaunch {
   env: rustc_hash::FxHashMap<String, String>,
   ignore_default_args: Option<crate::options::IgnoreDefaultArgs>,
   proxy: Option<crate::options::ProxyConfig>,
+  /// What the browser ends up pointed at: `proxy`, or the proxy an
+  /// instance's own flags name.
+  launched_proxy: Option<crate::options::ProxyConfig>,
 }
 
 impl EffectiveLaunch {
@@ -1449,8 +1532,43 @@ impl LaunchSpec {
         .ignore_default_args
         .or_else(|| self.base_ignore_default_args.clone()),
       proxy: self.proxy.clone(),
+      launched_proxy: overrides.launched_proxy.or_else(|| self.proxy.clone()),
     };
     Ok((mode, effective))
+  }
+
+  fn record_launched_proxy(
+    &self,
+    instance: &str,
+    proxy: Option<&crate::options::ProxyConfig>,
+    relay: Option<Arc<crate::socks_relay::SocksRelay>>,
+  ) {
+    let mut launched = self
+      .launched_proxies
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match proxy {
+      Some(proxy) => launched.insert(
+        instance.to_string(),
+        LaunchedProxy {
+          proxy: proxy.clone(),
+          _relay: relay,
+        },
+      ),
+      None => launched.remove(instance),
+    };
+  }
+
+  /// Point `eff` at a loopback relay when its proxy is an authenticated
+  /// SOCKS5 one, which no browser can log in to. The relay has to outlive
+  /// the launch, so it is handed back to be kept with the instance.
+  async fn relay_launch_proxy(&self, eff: &mut EffectiveLaunch) -> Result<Option<Arc<crate::socks_relay::SocksRelay>>> {
+    let Some(proxy) = eff.proxy.as_ref().filter(|proxy| proxy.is_authenticated_socks()) else {
+      return Ok(None);
+    };
+    let relay = crate::socks_relay::SocksRelay::start(proxy).await?;
+    eff.proxy = Some(relay.browser_proxy(proxy));
+    Ok(Some(relay))
   }
 
   async fn launch_browser(&self, eff: &EffectiveLaunch) -> Result<AnyBrowser> {
@@ -1632,6 +1750,10 @@ async fn connect_classic(mode: &ConnectMode) -> Result<AnyBrowser> {
     ConnectMode::ConnectUrl(endpoint) => {
       crate::backend::webdriver::browser::WebDriverBrowser::connect(endpoint, "safari", None, None, None).await?
     },
+    ConnectMode::ConnectUrlWith { url, headers, timeout } => {
+      crate::backend::webdriver::browser::WebDriverBrowser::connect(url, "safari", None, headers.as_ref(), *timeout)
+        .await?
+    },
     _ => {
       return Err(FerriError::invalid_argument(
         "endpoint",
@@ -1653,6 +1775,17 @@ async fn connect_browser(
 ) -> Result<AnyBrowser> {
   use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
+  // An endpoint's own `connectOptions.headers` win over the state-wide ones.
+  let merged;
+  let headers = match mode {
+    ConnectMode::ConnectUrlWith { headers: Some(own), .. } => {
+      let mut all = headers.cloned().unwrap_or_default();
+      all.extend(own.iter().map(|(name, value)| (name.clone(), value.clone())));
+      merged = all;
+      Some(&merged)
+    },
+    _ => headers,
+  };
   if let ConnectMode::Device { target, headless } = mode {
     return match target {
       crate::device::DeviceTarget::Android(options) => crate::android::launch(options, *headless, args).await,
@@ -1683,15 +1816,17 @@ async fn connect_browser(
   }
   if backend_kind == BackendKind::Bidi {
     let endpoint = match mode {
-      ConnectMode::ConnectUrl(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
+      ConnectMode::ConnectUrl(endpoint) | ConnectMode::ConnectUrlWith { url: endpoint, .. }
+        if endpoint.starts_with("http://") || endpoint.starts_with("https://") =>
+      {
         return Ok(AnyBrowser::Bidi(
           Box::pin(crate::backend::bidi::BidiBrowser::connect_webdriver(
-            endpoint, "firefox", None, None, None,
+            endpoint, "firefox", None, headers, None,
           ))
           .await?,
         ));
       },
-      ConnectMode::ConnectUrl(endpoint) => endpoint,
+      ConnectMode::ConnectUrl(endpoint) | ConnectMode::ConnectUrlWith { url: endpoint, .. } => endpoint,
       _ => return Err(FerriError::unsupported("WebDriver BiDi requires a WebSocket endpoint")),
     };
     return Ok(AnyBrowser::Bidi(
@@ -1702,8 +1837,14 @@ async fn connect_browser(
     ));
   }
   let ws_url = match mode {
-    ConnectMode::ConnectUrl(url) if url.starts_with("ws://") || url.starts_with("wss://") => url.clone(),
-    ConnectMode::ConnectUrl(url) => discover_ws_with_headers(url, headers).await?,
+    ConnectMode::ConnectUrl(url) | ConnectMode::ConnectUrlWith { url, .. }
+      if url.starts_with("ws://") || url.starts_with("wss://") =>
+    {
+      url.clone()
+    },
+    ConnectMode::ConnectUrl(url) | ConnectMode::ConnectUrlWith { url, .. } => {
+      discover_ws_with_headers(url, headers).await?
+    },
     ConnectMode::AutoConnect { channel, user_data_dir } => discover_chrome_ws(channel, user_data_dir.as_deref())?,
     ConnectMode::Device { .. } | ConnectMode::WebDriver { .. } => {
       return Err(FerriError::unsupported(
@@ -1859,6 +2000,19 @@ impl BrowserState {
   async fn connect_with_resolved_mode(&mut self, instance_name: &str, mode: ConnectMode) -> Result<usize> {
     match mode {
       ConnectMode::ConnectUrl(url) => Box::pin(self.connect_to_url(instance_name, &url)).await,
+      mode @ ConnectMode::ConnectUrlWith { .. } => {
+        self.ensure_not_disposed()?;
+        self.evict_instance(instance_name).await?;
+        let browser = Box::pin(connect_browser(
+          &mode,
+          self.backend_kind,
+          self.connection_headers.as_ref(),
+          &[],
+        ))
+        .await?;
+        Box::pin(self.install_instance(instance_name, browser, true, true)).await?;
+        Ok(self.instance(instance_name)?.context("default")?.pages.len())
+      },
       ConnectMode::Device { .. } | ConnectMode::WebDriver { .. } => Err(FerriError::unsupported(
         "connect_to_url cannot be used with a WebDriver session mode",
       )),
@@ -2198,6 +2352,7 @@ impl BrowserState {
     drop_key(&self.context_options, composite);
     drop_key(&self.har_recorders, composite);
     drop_key(&self.context_har_updates, composite);
+    drop_key(&self.context_relays, composite);
     self
       .clock_installed
       .lock()
@@ -4037,11 +4192,27 @@ mod tests {
         kind: None,
         env: [("APP_ENV".to_string(), instance.to_string())].into_iter().collect(),
         ignore_default_args: Some(crate::options::IgnoreDefaultArgs::Some(vec!["--no-sandbox".into()])),
+        launched_proxy: Some(crate::options::ProxyConfig {
+          server: "http://127.0.0.1:3128".into(),
+          username: Some("user".into()),
+          password: Some("secret".into()),
+          bypass: None,
+        }),
       })
     }));
 
     let spec = state.launch_spec();
     let (mode, eff) = spec.resolve_off_lock("staging").await.expect("resolve");
+    assert_eq!(
+      eff
+        .launched_proxy
+        .as_ref()
+        .and_then(crate::options::ProxyConfig::credentials)
+        .map(|c| c.username),
+      Some("user".to_string()),
+      "the instance's proxy credentials reach the launch"
+    );
+    assert!(eff.proxy.is_none(), "the instance's own flags already name its proxy");
 
     assert!(matches!(mode, ConnectMode::Launch));
     assert!(eff.args.contains(&"--instance-flag".to_string()));

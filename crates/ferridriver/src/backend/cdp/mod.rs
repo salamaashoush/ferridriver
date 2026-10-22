@@ -819,6 +819,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
+      proxy_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
       headful,
@@ -970,6 +971,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
+      proxy_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
       headful: self.headful,
@@ -1011,7 +1013,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     }
     let mut params = serde_json::json!({"disposeOnDetach": true});
     if let Some(p) = proxy {
-      params["proxyServer"] = serde_json::json!(p.server);
+      params["proxyServer"] = serde_json::json!(p.chromium_server());
       if let Some(ref bypass) = p.bypass {
         params["proxyBypassList"] = serde_json::json!(bypass);
       }
@@ -1159,6 +1161,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
+      proxy_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       // Seed the metrics cache with the exact params `enable_domains`
       // just shipped, so the first `apply_context_options` call
@@ -1325,6 +1328,13 @@ impl CdpBrowser<pipe::PipeTransport> {
 // ── WS-specific launch + connect ─────────────────────────────────────────────
 
 impl CdpBrowser<ws::WsTransport> {
+  /// The browser's own `DevTools` WebSocket endpoint, the one a second CDP
+  /// client can dial.
+  #[must_use]
+  pub fn ws_endpoint(&self) -> &str {
+    self.transport.endpoint()
+  }
+
   /// Launch Chrome with `--remote-debugging-port` and communicate over WebSocket.
   pub async fn launch(chromium_path: &str) -> Result<Self> {
     Box::pin(Self::launch_with_flags(
@@ -1934,6 +1944,15 @@ pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, coun
     return result;\
   }";
 
+/// What the Fetch listener answers authentication challenges with: the
+/// site's credentials for a server's challenge, the proxy's for the
+/// proxy's.
+#[derive(Clone)]
+struct Credentials {
+  server: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
+  proxy: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
+}
+
 pub struct CdpPage<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<Arc<str>>,
@@ -1970,6 +1989,9 @@ pub struct CdpPage<T: CdpTransport> {
   fetch: Arc<renderer::FetchState>,
   /// HTTP credentials for Fetch.authRequired handling (digest/NTLM/basic).
   http_credentials: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
+  /// The context proxy's credentials, which answer only challenges whose
+  /// `authChallenge.source` is `Proxy`.
+  proxy_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
   main_frame_id: Arc<tokio::sync::OnceCell<String>>,
   /// Most recently applied `Emulation.setDeviceMetricsOverride`
@@ -2324,6 +2346,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       routes: self.routes.clone(),
       fetch: self.fetch.clone(),
       http_credentials: self.http_credentials.clone(),
+      proxy_credentials: self.proxy_credentials.clone(),
       main_frame_id: self.main_frame_id.clone(),
       last_metrics_params: self.last_metrics_params.clone(),
       headful: self.headful,
@@ -5642,6 +5665,18 @@ impl<T: CdpWrap> CdpPage<T> {
     self.ensure_fetch_enabled().await
   }
 
+  /// The proxy this page's context sends through, whose credentials
+  /// answer its challenges. The context was already created with it
+  /// (`Target.createBrowserContext({ proxyServer })`); Playwright passes
+  /// `proxyCredentials()` beside the site credentials to
+  /// `crNetworkManager.authenticate`, and either arms `handleAuthRequests`.
+  pub async fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> Result<()> {
+    let creds = proxy.as_ref().and_then(crate::options::ProxyConfig::credentials);
+    let arm = creds.is_some();
+    *self.proxy_credentials.write().await = creds;
+    if arm { self.ensure_fetch_enabled().await } else { Ok(()) }
+  }
+
   // ---- Heap profiling ----
 
   /// Take a V8 heap snapshot, as `HeapProfiler.takeHeapSnapshot` writes
@@ -7070,7 +7105,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   async fn ensure_fetch_enabled_current(&self) -> Result<()> {
     let _transition = self.fetch.transition.lock().await;
-    let has_creds = self.http_credentials.read().await.is_some();
+    let has_creds = self.http_credentials.read().await.is_some() || self.proxy_credentials.read().await.is_some();
     if self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       // Already enabled — but may need to re-enable with auth handling.
       if has_creds {
@@ -7092,7 +7127,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       self.transport.clone(),
       self.session_id.clone(),
       self.routes.clone(),
-      self.http_credentials.clone(),
+      Credentials {
+        server: self.http_credentials.clone(),
+        proxy: self.proxy_credentials.clone(),
+      },
     );
     // Dedicated slot so the disable path can abort exactly this loop;
     // also on `listener_tasks` for page-close cleanup (abort is
@@ -7126,12 +7164,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
-    http_credentials: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
+    credentials: Credentials,
   ) -> tokio::task::AbortHandle {
     // Subscribe before enabling Fetch: Chrome can pause a request before its enable reply.
     let rx = transport.tap_event_domains(&["Fetch"], session_id.as_deref());
     tokio::spawn(async move {
-      Self::handle_fetch_events(transport, session_id, routes, http_credentials, rx).await;
+      Self::handle_fetch_events(transport, session_id, routes, credentials, rx).await;
     })
     .abort_handle()
   }
@@ -7163,7 +7201,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
-    http_credentials: Arc<tokio::sync::RwLock<Option<Vec<crate::options::HttpCredentials>>>>,
+    credentials: Credentials,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>,
   ) {
     let mut attempted_auth = rustc_hash::FxHashSet::<String>::default();
@@ -7180,7 +7218,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       // Playwright answers with the first entry bound to no origin or to
       // the request's (`crNetworkManager.ts::_onAuthRequired`). When none
       // matches, the browser's default stands and the 401 surfaces, rather
-      // than credentials going to a host they were not meant for.
+      // than credentials going to a host they were not meant for. A
+      // challenge from the proxy is answered only with the proxy's own
+      // credentials, never the website's, and each source gets one attempt
+      // per request.
       if method == Some("Fetch.authRequired") {
         let Some(params) = event.get("params") else { continue };
         let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
@@ -7189,24 +7230,41 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .and_then(|r| r.get("url"))
           .and_then(|v| v.as_str())
           .unwrap_or("");
-        let creds = http_credentials.read().await;
-        let challenge = match creds.as_deref() {
-          Some(list) => match crate::options::matching_http_credentials(list, req_url) {
-            // A second challenge for one request means the credentials
-            // were refused; answering again would never end.
-            Some(_) if !attempted_auth.insert(request_id.to_string()) => {
-              serde_json::json!({ "response": "CancelAuth" })
-            },
+        let from_proxy = params
+          .get("authChallenge")
+          .and_then(|c| c.get("source"))
+          .and_then(|v| v.as_str())
+          == Some("Proxy");
+        let attempt = format!("{request_id}:{}", if from_proxy { "proxy" } else { "server" });
+        let challenge = if from_proxy {
+          match credentials.proxy.read().await.clone() {
+            Some(_) if !attempted_auth.insert(attempt) => serde_json::json!({ "response": "CancelAuth" }),
             Some(entry) => serde_json::json!({
               "response": "ProvideCredentials",
               "username": entry.username,
               "password": entry.password,
             }),
             None => serde_json::json!({ "response": "Default" }),
-          },
-          None => serde_json::json!({ "response": "CancelAuth" }),
+          }
+        } else {
+          let creds = credentials.server.read().await;
+          match creds.as_deref() {
+            Some(list) => match crate::options::matching_http_credentials(list, req_url) {
+              // A second challenge for one request means the credentials
+              // were refused; answering again would never end.
+              Some(_) if !attempted_auth.insert(attempt) => {
+                serde_json::json!({ "response": "CancelAuth" })
+              },
+              Some(entry) => serde_json::json!({
+                "response": "ProvideCredentials",
+                "username": entry.username,
+                "password": entry.password,
+              }),
+              None => serde_json::json!({ "response": "Default" }),
+            },
+            None => serde_json::json!({ "response": "CancelAuth" }),
+          }
         };
-        drop(creds);
         let response = serde_json::json!({ "requestId": request_id, "authChallengeResponse": challenge });
         // Spawned so the auth round-trip never stalls the loop —
         // while this listener is blocked the broadcast buffer fills,

@@ -763,6 +763,16 @@ impl AnyBrowser {
   /// from the child process instead: a browser that exited is dead
   /// however it died. A handle that did not launch the process
   /// (`connect`) has nothing to check and reports alive, as before.
+  /// The `DevTools` WebSocket endpoint of a Chromium driven over one, which a
+  /// second CDP client can dial. `None` on every other transport.
+  #[must_use]
+  pub fn cdp_ws_endpoint(&self) -> Option<&str> {
+    match self {
+      Self::CdpWs(b) => Some(b.ws_endpoint()),
+      _ => None,
+    }
+  }
+
   #[must_use]
   pub fn is_alive(&self) -> bool {
     match self {
@@ -1589,6 +1599,21 @@ impl AnyPage {
   /// `browserContext.setHTTPCredentials(creds | null)`).
   pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     page_dispatch!(self, set_http_credentials(creds))
+  }
+
+  /// The proxy this page's context sends through (its own, else the
+  /// launch proxy): its credentials answer the proxy's challenges.
+  pub async fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> Result<()> {
+    match self {
+      AnyPage::CdpPipe(p) => p.set_proxy(proxy).await,
+      AnyPage::CdpWs(p) => p.set_proxy(proxy).await,
+      AnyPage::WebKit(p) => p.set_proxy(proxy).await,
+      AnyPage::Bidi(p) => p.set_proxy(proxy).await,
+      AnyPage::WebDriver(_) if proxy.is_some() => Err(FerriError::unsupported(
+        "Classic WebDriver has no per-context proxy; set the proxy in the session's capabilities",
+      )),
+      AnyPage::WebDriver(_) => Ok(()),
+    }
   }
 
   /// Reset any context-granted permissions. Backs

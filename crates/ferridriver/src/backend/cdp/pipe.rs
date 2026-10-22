@@ -608,7 +608,10 @@ mod tests {
       transport,
       Some(Arc::from("session")),
       Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      Arc::new(tokio::sync::RwLock::new(None)),
+      super::super::Credentials {
+        server: Arc::new(tokio::sync::RwLock::new(None)),
+        proxy: Arc::new(tokio::sync::RwLock::new(None)),
+      },
     );
     dispatcher.dispatch_message(&serde_json::to_vec(&serde_json::json!({
       "sessionId": "session", "method": "Fetch.requestPaused",

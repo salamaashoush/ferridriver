@@ -643,8 +643,8 @@ fn parse_bidi_proxy(server: &str) -> (&'static str, String, bool, Option<i64>) {
   let (scheme, rest) = server.split_once("://").unwrap_or(("", server));
   let host_port = rest.to_string();
   match scheme {
-    "socks5" => ("manual", host_port, true, Some(5)),
-    "socks4" => ("manual", host_port, true, Some(4)),
+    "socks5" | "socks5h" => ("manual", host_port, true, Some(5)),
+    "socks4" | "socks4a" => ("manual", host_port, true, Some(4)),
     _ => ("manual", host_port, false, None),
   }
 }
@@ -696,6 +696,20 @@ mod proxy_capability_tests {
       capability.get("httpProxy").is_none(),
       "a socks proxy is not an http one"
     );
+  }
+
+  #[test]
+  fn socks5h_is_socks_version_5_not_an_http_proxy() {
+    let capability = bidi_proxy_capability(&ProxyConfig {
+      server: "socks5h://127.0.0.1:1080".to_string(),
+      bypass: None,
+      username: None,
+      password: None,
+    });
+
+    assert_eq!(capability["socksProxy"], "127.0.0.1:1080");
+    assert_eq!(capability["socksVersion"], 5);
+    assert!(capability.get("httpProxy").is_none());
   }
 }
 

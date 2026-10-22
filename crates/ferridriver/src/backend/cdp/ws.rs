@@ -15,6 +15,8 @@ pub struct WsTransport {
   write_tx: tokio::sync::mpsc::Sender<Message>,
   dispatcher: Arc<CdpDispatcher>,
   tasks: crate::backend::transport_tasks::TransportTasks,
+  /// The browser's own `DevTools` endpoint this transport dialled.
+  endpoint: Arc<str>,
 }
 
 impl WsTransport {
@@ -76,7 +78,14 @@ impl WsTransport {
       write_tx,
       dispatcher,
       tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
+      endpoint: Arc::from(ws_url),
     })
+  }
+
+  /// The browser's own `DevTools` WebSocket endpoint.
+  #[must_use]
+  pub fn endpoint(&self) -> &str {
+    &self.endpoint
   }
 
   /// Spawn Chrome with `--remote-debugging-port` and connect via WebSocket.
@@ -314,6 +323,7 @@ mod tests {
       write_tx: write_tx.clone(),
       dispatcher: dispatcher.clone(),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+      endpoint: Arc::from("ws://127.0.0.1:9/devtools/browser/test"),
     };
     super::super::transport::verify_operation_budgets(
       transport,

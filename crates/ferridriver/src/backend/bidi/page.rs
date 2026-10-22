@@ -350,6 +350,10 @@ pub struct BidiPage {
   /// challenges are cancelled (surfacing the native 401) rather than
   /// left paused.
   pub(crate) http_credentials: Arc<std::sync::Mutex<Option<Vec<crate::options::HttpCredentials>>>>,
+  /// The context's proxy and TLS posture: the proxy's credentials answer
+  /// its `407`s, and a route's `continue({ url })`, which this backend
+  /// re-issues itself, leaves through the same proxy the page does.
+  network: Arc<std::sync::Mutex<NetworkSettings>>,
   /// Context-level permission grants. `BiDi`'s
   /// `permissions.setPermission` requires a concrete origin, but our
   /// context-level grant is origin-global — mirror Playwright's `BiDi`
@@ -504,6 +508,7 @@ impl BidiPage {
       forwarded_requests: Arc::new(std::sync::Mutex::new(None)),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       http_credentials: Arc::new(std::sync::Mutex::new(None)),
+      network: Arc::default(),
       permissions: Arc::new(std::sync::Mutex::new(BidiPermissions::default())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
     }
@@ -1762,6 +1767,11 @@ impl BidiPage {
     {
       *slot = Some(c);
     }
+    if let Some(ignore) = opts.ignore_https_errors
+      && let Ok(mut network) = self.network.lock()
+    {
+      network.ignore_https_errors = ignore;
+    }
 
     let perms_fut: OptionFuture<_> = (opts.permissions.is_some() || !opts.origin_permissions.is_empty())
       .then_some(async move {
@@ -2013,6 +2023,17 @@ impl BidiPage {
   ) -> impl std::future::Future<Output = Result<()>> {
     if let Ok(mut slot) = self.http_credentials.lock() {
       *slot = creds;
+    }
+    std::future::ready(Ok(()))
+  }
+
+  /// The proxy this page's context sends through. The user context was
+  /// already created with it (`browser.createUserContext({ proxy })`);
+  /// this is what answers the proxy's challenges and what a rewritten
+  /// route is re-issued through.
+  pub fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> impl std::future::Future<Output = Result<()>> {
+    if let Ok(mut network) = self.network.lock() {
+      network.proxy = proxy;
     }
     std::future::ready(Ok(()))
   }
@@ -2273,6 +2294,7 @@ impl BidiPage {
       self.context_id.clone(),
       self.nav_request_slot.clone(),
       self.http_credentials.clone(),
+      self.network.clone(),
     ));
     let page_for_grants = self.clone();
     let (binding_tx, mut binding_rx) =
@@ -3129,6 +3151,7 @@ impl BidiPage {
   async fn resolve_blocked_request(
     session: &Arc<BidiSession>,
     routes: &Arc<RwLock<Vec<crate::route::RegisteredRoute>>>,
+    network: &Arc<std::sync::Mutex<NetworkSettings>>,
     event: &super::transport::BidiEvent,
   ) {
     let req_obj = event.params.get("request");
@@ -3181,14 +3204,17 @@ impl BidiPage {
       let session2 = Arc::clone(session);
       let request_id_owned = request_id.to_string();
       let routes2 = Arc::clone(routes);
+      let network = Arc::clone(network);
       tokio::spawn(async move {
         let action = crate::route::run_route_chain(&routes2, intercepted).await;
+        let network = network.lock().map(|settings| settings.clone()).unwrap_or_default();
         execute_bidi_route_action(
           &session2.transport,
           &request_id_owned,
           action,
           &orig_method,
           &orig_headers,
+          &network,
         )
         .await;
       });
@@ -3229,6 +3255,7 @@ impl BidiPage {
     let intercept_ids = self.intercept_ids.clone();
     let session = self.session.clone();
     let routes = self.routes.clone();
+    let network = self.network.clone();
 
     let route_listener = tokio::spawn(async move {
       loop {
@@ -3270,7 +3297,7 @@ impl BidiPage {
           continue;
         }
 
-        Self::resolve_blocked_request(&session, &routes, &event).await;
+        Self::resolve_blocked_request(&session, &routes, &network, &event).await;
       }
     });
     self.track_listener(route_listener.abort_handle());
@@ -4066,6 +4093,9 @@ struct BidiNetworkTracker {
   /// Shared with [`BidiPage::http_credentials`] — answers
   /// `network.authRequired` challenges.
   credentials: Arc<std::sync::Mutex<Option<Vec<crate::options::HttpCredentials>>>>,
+  /// Shared with [`BidiPage::network`]; its proxy's credentials answer
+  /// the proxy's challenges.
+  network: Arc<std::sync::Mutex<NetworkSettings>>,
   /// Request ids already answered with `provideCredentials`. A repeat
   /// challenge for the same request means the credentials were wrong —
   /// cancel instead of looping (Playwright's
@@ -4079,6 +4109,7 @@ impl BidiNetworkTracker {
     context_id: Arc<str>,
     nav_request_slot: crate::network::NavRequestSlot,
     credentials: Arc<std::sync::Mutex<Option<Vec<crate::options::HttpCredentials>>>>,
+    network: Arc<std::sync::Mutex<NetworkSettings>>,
   ) -> Self {
     Self {
       session,
@@ -4087,6 +4118,7 @@ impl BidiNetworkTracker {
       responses: tokio::sync::Mutex::new(FxHashMap::default()),
       nav_request_slot,
       credentials,
+      network,
       attempted_auth: tokio::sync::Mutex::new(rustc_hash::FxHashSet::default()),
     }
   }
@@ -4234,7 +4266,7 @@ impl BidiNetworkTracker {
     if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
       resp.finish_success().await;
     }
-    self.attempted_auth.lock().await.remove(&request_id);
+    forget_auth_attempts(&mut *self.attempted_auth.lock().await, &request_id);
     emitter.emit(PageEvent::RequestFinished(req));
   }
 
@@ -4274,10 +4306,29 @@ impl BidiNetworkTracker {
     let matching = creds
       .as_deref()
       .and_then(|list| crate::options::matching_http_credentials(list, url));
-    let answer = match matching {
-      Some(c) if is_basic => {
+    // Chromium reports neither the challenges nor reliably the status
+    // over BiDi, so as in `bidiNetworkManager.ts` a challenge that is not
+    // a plain 401 and matches no site credentials is taken for the proxy's.
+    let status = params
+      .get("response")
+      .and_then(|r| r.get("status"))
+      .and_then(serde_json::Value::as_u64)
+      .unwrap_or(0);
+    let from_proxy = status == 407 || (status != 401 && matching.is_none());
+    let answering = if from_proxy {
+      self.network.lock().ok().and_then(|network| {
+        network
+          .proxy
+          .as_ref()
+          .and_then(crate::options::ProxyConfig::credentials)
+      })
+    } else {
+      matching.filter(|_| is_basic).cloned()
+    };
+    let answer = match answering {
+      Some(c) => {
         let mut attempted = self.attempted_auth.lock().await;
-        if attempted.insert(request_id.to_string()) {
+        if attempted.insert(auth_attempt_key(request_id, from_proxy)) {
           json!({
             "request": request_id,
             "action": "provideCredentials",
@@ -4290,7 +4341,7 @@ impl BidiNetworkTracker {
           json!({"request": request_id, "action": "cancel"})
         }
       },
-      _ => json!({"request": request_id, "action": "cancel"}),
+      None => json!({"request": request_id, "action": "cancel"}),
     };
     let session = self.session.clone();
     tracing::debug!(
@@ -4328,7 +4379,7 @@ impl BidiNetworkTracker {
     if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
       resp.finish_failure(error_text).await;
     }
-    self.attempted_auth.lock().await.remove(&request_id);
+    forget_auth_attempts(&mut *self.attempted_auth.lock().await, &request_id);
     emitter.emit(PageEvent::RequestFailed(req));
   }
 
@@ -4483,6 +4534,7 @@ async fn execute_bidi_route_action(
   action: crate::route::RouteAction,
   orig_method: &str,
   orig_headers: &FxHashMap<String, String>,
+  network: &NetworkSettings,
 ) {
   match action {
     crate::route::RouteAction::Fulfill(resp) => {
@@ -4535,10 +4587,13 @@ async fn execute_bidi_route_action(
         bidi_continue_via_fetch(
           transport,
           request_id,
-          target_url,
-          method,
-          &merged,
-          overrides.post_data.as_deref(),
+          RouteRefetch {
+            url: target_url,
+            method,
+            headers: &merged,
+            body: overrides.post_data.as_deref(),
+            network,
+          },
         )
         .await;
       } else {
@@ -4575,6 +4630,15 @@ async fn execute_bidi_route_action(
   }
 }
 
+/// A route's `continue({ url })` as this backend re-issues it.
+struct RouteRefetch<'a> {
+  url: &'a str,
+  method: &'a str,
+  headers: &'a [(String, String)],
+  body: Option<&'a [u8]>,
+  network: &'a NetworkSettings,
+}
+
 /// Continue an intercepted request with a `url` override on `BiDi` by issuing
 /// the request to the new URL ourselves and fulfilling the ORIGINAL request
 /// with the result — Firefox's `network.continueRequest` `url` field aborts
@@ -4584,12 +4648,9 @@ async fn execute_bidi_route_action(
 async fn bidi_continue_via_fetch(
   transport: &super::transport::BidiTransport,
   request_id: &str,
-  url: &str,
-  method: &str,
-  headers: &[(String, String)],
-  body: Option<&[u8]>,
+  refetch: RouteRefetch<'_>,
 ) {
-  match fetch_for_route(url, method, headers, body).await {
+  match fetch_for_route(&refetch).await {
     Ok((status, resp_headers, resp_body)) => {
       let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp_body);
       let hdrs: Vec<serde_json::Value> = resp_headers
@@ -4618,63 +4679,74 @@ async fn bidi_continue_via_fetch(
   }
 }
 
-/// Issue the HTTP request for a route `url` override. Hop-by-hop / length
-/// headers are dropped (reqwest sets them on the request; the browser
-/// recomputes them when the fulfilled body is delivered).
-async fn fetch_for_route(
-  url: &str,
-  method: &str,
-  headers: &[(String, String)],
-  body: Option<&[u8]>,
-) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
-  use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-
-  let client = reqwest::Client::builder()
-    .build()
-    .map_err(|e| FerriError::protocol("route url override", format!("http client: {e}")))?;
-  let m = reqwest::Method::from_bytes(method.as_bytes())
-    .map_err(|e| FerriError::protocol("route url override", format!("bad method {method:?}: {e}")))?;
-
-  let mut hmap = HeaderMap::new();
-  for (k, v) in headers {
-    if matches!(
-      k.to_ascii_lowercase().as_str(),
-      "host" | "content-length" | "connection" | "accept-encoding"
-    ) {
-      continue;
-    }
-    if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
-      hmap.insert(name, val);
-    }
-  }
-
-  let mut req = client.request(m, url).headers(hmap);
-  if let Some(b) = body {
-    req = req.body(b.to_vec());
-  }
-  let resp = req
-    .send()
+/// Issue the HTTP request for a route `url` override, through the context's
+/// proxy and with its TLS posture, as the browser would have sent it.
+/// Hop-by-hop / length headers are dropped (the client sets them on the
+/// request; the browser recomputes them when the fulfilled body is
+/// delivered).
+async fn fetch_for_route(refetch: &RouteRefetch<'_>) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+  let headers: Vec<(String, String)> = refetch
+    .headers
+    .iter()
+    .filter(|(k, _)| {
+      !matches!(
+        k.to_ascii_lowercase().as_str(),
+        "host" | "content-length" | "connection" | "accept-encoding"
+      )
+    })
+    .cloned()
+    .collect();
+  let client = crate::http_client::HttpClient::new(crate::http_client::HttpClientOptions {
+    ignore_https_errors: refetch.network.ignore_https_errors,
+    proxy: refetch.network.proxy.clone(),
+    ..Default::default()
+  });
+  let response = client
+    .fetch(
+      refetch.url,
+      Some(crate::http_client::RequestOptions {
+        method: Some(refetch.method.to_string()),
+        headers: Some(headers),
+        data: refetch.body.map(<[u8]>::to_vec),
+        fail_on_status_code: Some(false),
+        ..Default::default()
+      }),
+    )
     .await
-    .map_err(|e| FerriError::protocol("route url override", format!("request to {url} failed: {e}")))?;
+    .map_err(|e| FerriError::protocol("route url override", format!("request to {} failed: {e}", refetch.url)))?;
 
-  let status = resp.status().as_u16();
-  let resp_headers: Vec<(String, String)> = resp
+  let status = response.status();
+  let resp_headers: Vec<(String, String)> = response
     .headers()
     .iter()
     .filter(|(k, _)| {
       !matches!(
-        k.as_str().to_ascii_lowercase().as_str(),
-        "content-length" | "transfer-encoding" | "connection"
+        k.to_ascii_lowercase().as_str(),
+        "content-length" | "transfer-encoding" | "connection" | "content-encoding"
       )
     })
-    .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+    .cloned()
     .collect();
-  let bytes = resp
-    .bytes()
-    .await
-    .map_err(|e| FerriError::protocol("route url override", format!("body read failed: {e}")))?
-    .to_vec();
-  Ok((status, resp_headers, bytes))
+  Ok((status, resp_headers, response.body()?.to_vec()))
+}
+
+/// The proxy and TLS posture a page's context was made with.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NetworkSettings {
+  pub(crate) proxy: Option<crate::options::ProxyConfig>,
+  pub(crate) ignore_https_errors: bool,
+}
+
+/// One attempt per request and per source: a proxy's challenge and then the
+/// site's for the same request are two attempts, as in Playwright's
+/// `authAttemptKey`.
+fn auth_attempt_key(request: &str, from_proxy: bool) -> String {
+  format!("{request}:{}", if from_proxy { "proxy" } else { "server" })
+}
+
+fn forget_auth_attempts(attempted: &mut rustc_hash::FxHashSet<String>, request: &str) {
+  attempted.remove(&auth_attempt_key(request, true));
+  attempted.remove(&auth_attempt_key(request, false));
 }
 
 /// Parse a `BiDi` network cookie into our `CookieData`.
