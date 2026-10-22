@@ -125,6 +125,11 @@ pub struct ReporterModule {
   bundle: Arc<CompiledBundle>,
   cwd: PathBuf,
   caps: ScriptCaps,
+  /// Where the reporter's `console` and `process.stdout` go. Playwright
+  /// runs a reporter in the runner process, so what it prints reaches the
+  /// terminal; `None` keeps it in the VM's buffer, for a host that reads
+  /// the output itself.
+  console: Option<Arc<dyn ferrijs::ConsoleSink>>,
   /// `printsToStdio()` as the module's own instance answered it, probed
   /// at load time — the default-terminal decision is made before any
   /// reporter instance exists.
@@ -183,6 +188,7 @@ pub fn load<'a>(
   config: &'a TestConfig,
   cwd: &'a Path,
   caps: ScriptCaps,
+  console: Option<Arc<dyn ferrijs::ConsoleSink>>,
 ) -> impl std::future::Future<Output = Result<ReporterModule, ScriptError>> + Send + 'a {
   Box::pin(async move {
     let path = resolve(&entry.name, config, cwd).ok_or_else(|| {
@@ -205,6 +211,7 @@ pub fn load<'a>(
       bundle: Arc::new(bundle),
       cwd: cwd.to_path_buf(),
       caps,
+      console,
       prints_to_stdio: true,
       probe: std::sync::Mutex::new(None),
     };
@@ -261,7 +268,11 @@ impl ReporterModule {
       caps: self.caps.clone(),
       session: None,
     };
-    let session = Session::create(ScriptEngineConfig::default(), &run_ctx).await?;
+    let engine = ScriptEngineConfig {
+      console_sink: self.console.clone(),
+      ..ScriptEngineConfig::default()
+    };
+    let session = Session::create(engine, &run_ctx).await?;
     let vm = session.vm_handle();
     let options = self.options.clone();
     let label = self.label.clone();
@@ -1301,7 +1312,12 @@ impl JsReporterFactory {
   /// Fails on the first module that does not resolve, bundle,
   /// evaluate, or export a class — before the run, which is where a
   /// broken reporter has to be reported.
-  pub async fn load(config: &TestConfig, cwd: &Path, caps: &ScriptCaps) -> Result<Self, ScriptError> {
+  pub async fn load(
+    config: &TestConfig,
+    cwd: &Path,
+    caps: &ScriptCaps,
+    console: Option<Arc<dyn ferrijs::ConsoleSink>>,
+  ) -> Result<Self, ScriptError> {
     let mut modules = Vec::new();
     for entry in &config.reporter {
       if ferridriver_test::reporter::REPORTER_NAMES.contains(&entry.name.as_str())
@@ -1319,7 +1335,7 @@ impl JsReporterFactory {
       {
         continue;
       }
-      modules.push(Arc::new(load(entry, config, cwd, caps.clone()).await?));
+      modules.push(Arc::new(load(entry, config, cwd, caps.clone(), console.clone()).await?));
     }
     Ok(Self { modules })
   }
@@ -1347,8 +1363,13 @@ impl ferridriver_test::reporter::ReporterFactory for JsReporterFactory {
 ///
 /// Propagates [`JsReporterFactory::load`]'s failure, so a run refuses
 /// to start with a reporter that cannot load.
-pub async fn install(config: &TestConfig, cwd: &Path, caps: &ScriptCaps) -> Result<(), ScriptError> {
-  let factory = JsReporterFactory::load(config, cwd, caps).await?;
+pub async fn install(
+  config: &TestConfig,
+  cwd: &Path,
+  caps: &ScriptCaps,
+  console: Option<Arc<dyn ferrijs::ConsoleSink>>,
+) -> Result<(), ScriptError> {
+  let factory = JsReporterFactory::load(config, cwd, caps, console).await?;
   if factory.is_empty() {
     return Ok(());
   }

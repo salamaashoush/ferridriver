@@ -117,7 +117,10 @@ pub(crate) async fn install_js_reporters(
   caps: &ferridriver_script::ScriptCaps,
 ) -> anyhow::Result<()> {
   let cwd = std::env::current_dir()?;
-  ferridriver_script::reporter::install(test, &cwd, caps)
+  // A reporter prints to the terminal, as it does under Playwright.
+  let console: std::sync::Arc<dyn ferridriver_script::ConsoleSink> =
+    std::sync::Arc::new(super::run::console::StreamingConsole);
+  ferridriver_script::reporter::install(test, &cwd, caps, Some(console))
     .await
     .map_err(|e| anyhow::anyhow!("{}", e.message))
 }

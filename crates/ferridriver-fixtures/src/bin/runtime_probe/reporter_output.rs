@@ -43,6 +43,7 @@ async fn js_reporter(config: &TestConfig) -> Result<Box<dyn Reporter>> {
     config,
     &std::env::current_dir()?,
     ferridriver_script::ScriptCaps::default(),
+    None,
   )
   .await?;
   Ok(Box::new(Arc::new(module).reporter()))

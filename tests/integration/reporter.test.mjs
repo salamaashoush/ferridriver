@@ -58,3 +58,18 @@ test('a reporter constructor failure fails the command and preserves its message
   assert.notEqual(result.code, 0, result.text);
   assert.match(result.text, /no reporter for you/);
 });
+
+test('a reporter module prints to the terminal like any Playwright reporter', async () => {
+  const cwd = await reporterWorkspace(`export default class Loud {
+    onBegin() {
+      console.log('reporter console.log');
+      process.stdout.write('reporter stdout write\\n');
+      console.error('reporter console.error');
+    }
+  }`);
+  const result = await run(['test', '--no-inherit', '--headless', '--project', 'cdp-pipe'], { cwd });
+  passed(result);
+  assert.match(result.stdout, /^reporter console\.log$/m);
+  assert.match(result.stdout, /^reporter stdout write$/m);
+  assert.match(result.stderr, /^reporter console\.error$/m);
+});
