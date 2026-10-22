@@ -47,8 +47,20 @@ ferridriver mcp --transport http --port 8080
 
 Point the client at `http://localhost:8080/mcp`.
 
-There is no built-in authentication. Deploy behind a firewall or reverse
-proxy.
+The server listens on `127.0.0.1` unless told otherwise. To serve other
+machines, give it an address and a bearer token; it refuses a non-loopback
+address without one:
+
+```bash
+FERRIDRIVER_MCP_TOKEN="$TOKEN" ferridriver mcp --transport http --host 0.0.0.0 --port 8080
+```
+
+Clients send `Authorization: Bearer <token>`; anything else gets `401`.
+Repeat `--token` (or comma-separate the variable) to serve several clients:
+each token gets browsers of its own, so one client cannot reach another's
+pages. Clients that share a token share its browsers, separated only by
+their session keys. There is no TLS; put a TLS-terminating proxy in front
+when the network is not trusted.
 
 ## Install the binary
 

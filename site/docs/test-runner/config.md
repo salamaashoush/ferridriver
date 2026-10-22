@@ -105,6 +105,52 @@ name = "admin"
 profile = "admin"          # -> only this project's tests
 ```
 
+### Proxy
+
+`use.proxy` (or `test.use({ proxy })`) is a context option, as in
+Playwright: each test's browser context is created with it, and the
+`request` fixture and `page.request` / `context.request` send through it
+too, as does `route.fetch`.
+
+```toml
+[test.use.proxy]
+server   = "socks5://127.0.0.1:1080"   # http://, https:// and socks4:// too
+bypass   = "localhost, .internal.example.com"
+username = "user"
+password = "secret"
+```
+
+Credentials answer the proxy's challenge on every backend. Browsers speak
+SOCKS5 without authentication, so a `socks5` proxy with credentials is
+reached through a loopback relay that authenticates for the browser; the
+request client authenticates itself. `socks5` resolves host names on the
+proxy, as `socks5h` does. No launch-level proxy is needed for a context
+proxy on any backend, Chromium included.
+
+Firefox keeps a proxy's credentials browser-wide, keyed by the proxy's
+address: two contexts of one Firefox pointed at the same proxy with
+different credentials both use whichever logged in first. Chromium and
+WebKit keep them per context.
+
+### Remote browsers
+
+`ferridriver test --connect <url>` (and `bdd`) runs on an existing browser
+instead of launching one. To keep the endpoint in config, name an instance
+with `connectUrl`; `connectOptions.headers` goes on the WebSocket handshake
+of a `ws://` CDP or BiDi endpoint:
+
+```toml
+[test.browser]
+instance = "grid"
+
+[browser.instances.grid]
+connectUrl = "wss://grid.example.com/session/abc"
+connectOptions = { headers = { authorization = "Bearer …" }, timeout = 30000 }
+```
+
+`[test.browser].slowMo` pauses after each input and navigation action,
+launched or connected alike.
+
 ### Devices
 
 `device` names an entry of Playwright's device registry and pre-seeds

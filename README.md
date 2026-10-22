@@ -395,8 +395,9 @@ Claude Code, Claude Desktop, Cursor, or any MCP client.
 # stdio transport (Claude Code, Cursor)
 ferridriver mcp
 
-# HTTP transport (remote clients)
+# HTTP transport (remote clients); a token is required off loopback
 ferridriver mcp --transport http --port 8080
+FERRIDRIVER_MCP_TOKEN=… ferridriver mcp --transport http --host 0.0.0.0
 
 # Backend choice + headless
 ferridriver mcp --backend webkit --headless

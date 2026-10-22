@@ -78,7 +78,13 @@ sessions](/scripting/named-sessions#watching-driving-and-recording-remotely).
 --user-data-dir DIR     Persistent Chrome profile directory (used by --auto-connect)
 --transport TRANSPORT   stdio (default) | http
 --port N                HTTP port (default 8080)
+--host ADDR             HTTP listen address (default 127.0.0.1)
+--token TOKEN           Bearer token a client must send; repeat for one
+                        isolated set of browsers per token
+                        (env FERRIDRIVER_MCP_TOKEN, comma-separated)
 ```
+
+A non-loopback `--host` without a token is refused.
 
 See [MCP overview](/mcp/overview) and [Client setup](/mcp/setup).
 
@@ -104,6 +110,10 @@ no `--steps` flag is provided.
 
 Browser flags shared with `mcp`: `--backend`, `--headless`,
 `--executable-path`, `--connect`, `--auto-connect`, `--user-data-dir`.
+`--connect` and `--auto-connect` run the suite on that browser instead of
+launching one, for `ferridriver test` too: every worker opens its own
+connection and each test still gets a fresh context. The browser is left
+running when the run ends.
 
 ## `ferridriver test`
 
@@ -127,6 +137,30 @@ source with top-level `import` / `export`, is rolldown-bundled and
 transpiled before running. `args` is the positional list exposed as a
 global. `-` reads source from stdin. `--eval` runs inline source instead
 of a file.
+
+## `ferridriver browser serve`
+
+```
+ferridriver browser serve [--host ADDR] [--port N] [--token TOKEN]
+                          [--ws-path PATH] [--headed] [--executable-path PATH]
+                          [--arg SWITCH]...
+```
+
+Launches Chromium and serves its DevTools Protocol to other processes. The
+first line on stdout is the WebSocket URL to dial, for
+`ferridriver test --connect`, `chromium().connectOverCDP()` or any CDP
+client. Each client gets its own connection to the browser; nothing is
+translated.
+
+A client is admitted on the URL's path, an unguessable string unless
+`--ws-path` names one, and, when the server has a token, on
+`Authorization: Bearer <token>` or the `token` query parameter the printed
+URL carries. Binding anything but loopback without `--token` (or
+`FERRIDRIVER_BROWSER_TOKEN`) generates a token. Listening on all
+addresses prints the URL with `127.0.0.1`; a remote client swaps in the
+machine's own address. SIGTERM, SIGINT and SIGHUP
+close the browser and exit; so does the browser exiting. The Rust API is
+`BrowserType::launch_server`.
 
 ## `ferridriver trace`
 
