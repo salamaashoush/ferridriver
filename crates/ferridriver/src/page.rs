@@ -542,8 +542,25 @@ impl Page {
       if let Some(span) = span {
         self.snapshot_after_and_finish(span, result.as_ref().err()).await;
       }
+      self.slow_mo_pause(class, method).await;
       result
     })
+  }
+
+  /// Wait out the browser's `slowMo` after an action Playwright slows down:
+  /// the ones `protocolMetainfo.ts` marks `slowMo: true`, which are input,
+  /// focus and navigation. Reads, evaluation and waits run at full speed.
+  pub(crate) async fn slow_mo_pause(&self, class: &str, method: &str) {
+    if !slows_down(class, method) {
+      return;
+    }
+    let Some(context) = self.context_ref.as_ref() else {
+      return;
+    };
+    let slow_mo = context.state.read().await.slow_mo;
+    if let Some(ms) = slow_mo.filter(|ms| *ms > 0) {
+      tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
   }
 
   /// Capture the "after" DOM snapshot, stamp it, and finish the span.
@@ -745,6 +762,7 @@ impl Page {
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
+    self.slow_mo_pause("Page", "goto").await;
     // A goto that returned a document Response committed a NEW document
     // — deterministically advance the observed since-navigation window
     // past pre-nav entries even if the listener's `FrameNavigated` mark
@@ -850,6 +868,7 @@ impl Page {
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
+    self.slow_mo_pause("Page", "goBack").await;
     result
   }
 
@@ -876,6 +895,7 @@ impl Page {
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
+    self.slow_mo_pause("Page", "goForward").await;
     result
   }
 
@@ -903,6 +923,7 @@ impl Page {
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
+    self.slow_mo_pause("Page", "reload").await;
     // A successful reload ALWAYS commits a new document — advance the
     // observed since-navigation window even when the listener's
     // `FrameNavigated` mark was dropped (lagged broadcast receiver).
@@ -5491,5 +5512,77 @@ mod tests {
       parse_named_keys("{Tab}{Enter}", true),
       vec![TypeToken::Key("Tab".to_string()), TypeToken::Key("Enter".to_string())]
     );
+  }
+}
+
+/// Whether Playwright waits out `slowMo` after `class.method`: the methods
+/// `protocolMetainfo.ts` flags `slowMo: true`, under the names this crate
+/// traces them by (a locator action runs the frame method of the same name).
+fn slows_down(class: &str, method: &str) -> bool {
+  const FRAME: &[&str] = &[
+    "blur",
+    "check",
+    "click",
+    "dragAndDrop",
+    "drop",
+    "dblclick",
+    "dispatchEvent",
+    "fill",
+    "focus",
+    "goto",
+    "hover",
+    "press",
+    "pressSequentially",
+    "selectOption",
+    "setInputFiles",
+    "tap",
+    "type",
+    "uncheck",
+    "setChecked",
+  ];
+  const ELEMENT: &[&str] = &[
+    "check",
+    "click",
+    "dblclick",
+    "dispatchEvent",
+    "fill",
+    "focus",
+    "hover",
+    "press",
+    "scrollIntoViewIfNeeded",
+    "selectOption",
+    "selectText",
+    "setInputFiles",
+    "tap",
+    "type",
+    "uncheck",
+    "setChecked",
+  ];
+  match class {
+    "Frame" => FRAME.contains(&method),
+    "Locator" => FRAME.contains(&method) || ELEMENT.contains(&method),
+    "ElementHandle" => ELEMENT.contains(&method),
+    "Page" => matches!(method, "goto" | "goBack" | "goForward" | "reload") || FRAME.contains(&method),
+    "Keyboard" => matches!(method, "down" | "up" | "insertText" | "type" | "press"),
+    "Mouse" => matches!(method, "move" | "down" | "up" | "click" | "dblclick" | "wheel"),
+    "Touchscreen" => method == "tap",
+    _ => false,
+  }
+}
+
+#[cfg(test)]
+mod slow_mo_tests {
+  use super::slows_down;
+
+  #[test]
+  fn input_and_navigation_slow_down_reads_do_not() {
+    assert!(slows_down("Locator", "click"));
+    assert!(slows_down("Locator", "fill"));
+    assert!(slows_down("Page", "goto"));
+    assert!(slows_down("Keyboard", "press"));
+    assert!(slows_down("Mouse", "wheel"));
+    assert!(!slows_down("Locator", "textContent"));
+    assert!(!slows_down("Frame", "evaluate"));
+    assert!(!slows_down("Page", "screenshot"));
   }
 }

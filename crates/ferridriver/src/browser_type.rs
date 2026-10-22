@@ -229,6 +229,7 @@ impl BrowserType {
         kind: self.kind,
         ws_endpoint: Some(ws_endpoint.to_string()),
         default_viewport: None,
+        slow_mo: options.slow_mo,
         ..LaunchPlan::default()
       };
       let browser_name = match self.kind {
@@ -254,6 +255,7 @@ impl BrowserType {
         ws_endpoint: Some(ws_endpoint.to_string()),
         connection_headers: options.headers,
         timeout: options.timeout,
+        slow_mo: options.slow_mo,
         ..LaunchPlan::default()
       };
       let state = BrowserState::with_plan(ConnectMode::ConnectUrl(ws_endpoint.to_string()), plan)
@@ -300,6 +302,7 @@ impl BrowserType {
       ws_endpoint: Some(endpoint_url.to_string()),
       connection_headers: options.headers,
       timeout: options.timeout,
+      slow_mo: options.slow_mo,
       default_viewport: None,
       ..LaunchPlan::default()
     };

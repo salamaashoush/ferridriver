@@ -240,6 +240,7 @@ macro_rules! retry_resolve {
         .snapshot_after_and_finish(__s, __result.as_ref().err())
         .await;
     }
+    __trace_page.slow_mo_pause("Locator", $op).await;
     __result
   }};
 }
