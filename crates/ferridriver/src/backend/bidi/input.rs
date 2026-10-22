@@ -394,14 +394,14 @@ pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64), steps: u3
 
 /// Build a wheel scroll action.
 #[must_use]
-pub fn wheel_scroll(context: &str, delta_x: f64, delta_y: f64) -> serde_json::Value {
+pub fn wheel_scroll(context: &str, x: f64, y: f64, delta_x: f64, delta_y: f64) -> serde_json::Value {
   json!({
     "context": context,
     "actions": [{
       "type": "wheel",
       "id": "wheel",
       "actions": [
-        {"type": "scroll", "x": 0, "y": 0, "deltaX": coord(delta_x), "deltaY": coord(delta_y), "duration": 0}
+        {"type": "scroll", "x": coord(x), "y": coord(y), "deltaX": coord(delta_x), "deltaY": coord(delta_y), "duration": 0}
       ]
     }]
   })

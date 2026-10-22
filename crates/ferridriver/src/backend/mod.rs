@@ -1470,16 +1470,18 @@ impl AnyPage {
     page_dispatch!(self, move_mouse_smooth(from_x, from_y, to_x, to_y, steps))
   }
 
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
-    page_dispatch!(self, mouse_wheel(delta_x, delta_y))
+  /// Dispatch a wheel event at `(x, y)`, the pointer's position: the
+  /// browser scrolls whatever is under it, as a real wheel would.
+  pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
+    page_dispatch!(self, mouse_wheel(x, y, delta_x, delta_y))
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
-    page_dispatch!(self, mouse_down(x, y, button))
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    page_dispatch!(self, mouse_down(x, y, button, click_count))
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
-    page_dispatch!(self, mouse_up(x, y, button))
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    page_dispatch!(self, mouse_up(x, y, button, click_count))
   }
 
   pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {

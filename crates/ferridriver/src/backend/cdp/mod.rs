@@ -4725,7 +4725,7 @@ impl<T: CdpWrap> CdpPage<T> {
     // and re-dispatched as `dragEnter`/`dragOver`/`drop`, while JS drag
     // libraries see stepped `mousemove`s carrying `buttons: 1`.
     self.move_mouse(from.0, from.1).await?;
-    self.mouse_down(from.0, from.1, "left").await?;
+    self.mouse_down(from.0, from.1, "left", 1).await?;
     let steps = steps.max(1);
     for i in 1..=steps {
       let (x, y) = if steps == 1 {
@@ -4737,21 +4737,21 @@ impl<T: CdpWrap> CdpPage<T> {
       };
       self.move_mouse(x, y).await?;
     }
-    self.mouse_up(to.0, to.1, "left").await?;
+    self.mouse_up(to.0, to.1, "left", 1).await?;
     Ok(())
   }
 
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
+  pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseWheel", "x": 0, "y": 0, "deltaX": delta_x, "deltaY": delta_y}),
+        serde_json::json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y}),
       )
       .await?;
     Ok(())
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let mask = self.drag_manager.update_buttons(|m| *m |= cdp_button_bit(button));
     // Playwright skips the protocol press while a native drag is in
     // flight (`crInput.ts::RawMouseImpl.down`) — the browser considers
@@ -4763,14 +4763,14 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": 1}),
+        serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": click_count}),
       )
       .await?;
     self.set_cursor_pos(x, y);
     Ok(())
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let mask = self.drag_manager.update_buttons(|m| *m &= !cdp_button_bit(button));
     // An in-flight intercepted drag ends in a `drop`, not a
     // `mouseReleased` (`crInput.ts::RawMouseImpl.up`).
@@ -4787,7 +4787,7 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": 1}),
+        serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": click_count}),
       )
       .await?;
     self.set_cursor_pos(x, y);

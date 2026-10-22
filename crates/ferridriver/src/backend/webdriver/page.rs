@@ -456,13 +456,15 @@ impl WebDriverPage {
       .await
   }
 
-  pub async fn mouse_wheel(&self, x: f64, y: f64) -> Result<()> {
+  pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::wheel_scroll("", x, y))
+      .perform_actions(crate::backend::bidi::input::wheel_scroll("", x, y, delta_x, delta_y))
       .await
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
+  /// Classic `WebDriver` actions carry no click count either; see the `BiDi`
+  /// backend's `mouse_down`.
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::mouse_down(
         "",
@@ -473,7 +475,7 @@ impl WebDriverPage {
       .await
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::mouse_up(
         "",

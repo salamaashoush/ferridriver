@@ -1527,17 +1527,22 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
+  pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .cmd(
         "input.performActions",
-        input::wheel_scroll(&self.context_id, delta_x, delta_y),
+        input::wheel_scroll(&self.context_id, x, y, delta_x, delta_y),
       )
       .await?;
     Ok(())
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
+  /// `WebDriver` `BiDi`'s `pointerDown` has no click count, so `_click_count`
+  /// cannot be forwarded (Playwright's `bidiInput.ts` drops it too). Firefox
+  /// counts clicks only within one action chain and resets the count at the
+  /// end of each (`Actions.sys.mjs`), so presses sent one call at a time
+  /// always report a click count of 1.
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     let btn = input::button_name_to_id(button);
     self
       .cmd("input.performActions", input::mouse_down(&self.context_id, x, y, btn))
@@ -1545,7 +1550,7 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     let btn = input::button_name_to_id(button);
     self
       .cmd("input.performActions", input::mouse_up(&self.context_id, x, y, btn))

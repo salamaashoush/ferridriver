@@ -3101,7 +3101,11 @@ impl Page {
   ///
   /// Returns an error if the wheel event dispatch fails.
   pub(crate) async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
-    self.inner.mouse_wheel(delta_x, delta_y).await
+    let (x, y) = *self
+      .mouse_position
+      .lock()
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))?;
+    self.inner.mouse_wheel(x, y, delta_x, delta_y).await
   }
 
   /// Mouse button down (without up). For custom drag sequences.
@@ -3109,8 +3113,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
-  pub(crate) async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
-    self.inner.mouse_down(x, y, button).await?;
+  pub(crate) async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    self.inner.mouse_down(x, y, button, click_count).await?;
     *self
       .mouse_position
       .lock()
@@ -3123,8 +3127,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
-  pub(crate) async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
-    self.inner.mouse_up(x, y, button).await?;
+  pub(crate) async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    self.inner.mouse_up(x, y, button, click_count).await?;
     *self
       .mouse_position
       .lock()
@@ -4746,6 +4750,56 @@ impl Page {
     self.inner.screencast_hub()?.stop_user(&self.inner).await;
     Ok(())
   }
+
+  /// A screencast stream of the caller's own, for a viewer that relays
+  /// frames somewhere else.
+  ///
+  /// Unlike [`Self::start_screencast`], which is the page's one
+  /// script-facing stream and is replaced by the next call, every stream
+  /// returned here is independent: it shares the page's backend screencast
+  /// with traces, videos and other viewers, and ends when it is stopped or
+  /// dropped.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend cannot screencast.
+  pub async fn screencast_frames(&self, quality: u8, max_width: u32, max_height: u32) -> Result<ScreencastFrames> {
+    let params = crate::backend::screencast::ScreencastParams::new(quality, max_width, max_height);
+    let (subscription, frames) = self.inner.subscribe_screencast(params).await?;
+    Ok(ScreencastFrames {
+      subscription: Some(subscription),
+      frames,
+    })
+  }
+}
+
+/// A stream from [`Page::screencast_frames`].
+pub struct ScreencastFrames {
+  subscription: Option<crate::backend::screencast::ScreencastSubscription>,
+  frames: tokio::sync::mpsc::UnboundedReceiver<crate::backend::screencast::ScreencastFrame>,
+}
+
+impl ScreencastFrames {
+  /// The next frame as `(jpeg_bytes, timestamp_secs)`, the same shape
+  /// [`Page::start_screencast`] yields. `None` once the stream ended,
+  /// including when the page closed.
+  pub async fn next(&mut self) -> Option<(Vec<u8>, f64)> {
+    self.frames.recv().await.map(|frame| (frame.data, frame.timestamp))
+  }
+
+  /// Leave the screencast, stopping the backend stream if nothing else
+  /// reads it.
+  pub async fn stop(mut self) {
+    if let Some(subscription) = self.subscription.take() {
+      subscription.stop().await;
+    }
+  }
+}
+
+impl std::fmt::Debug for ScreencastFrames {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ScreencastFrames").finish_non_exhaustive()
+  }
 }
 
 impl std::fmt::Debug for Page {
@@ -4950,10 +5004,10 @@ impl<'a> Mouse<'a> {
     match opts.as_ref().and_then(|o| o.delay) {
       Some(ms) => {
         self.page.move_mouse(x, y).await?;
-        for _ in 0..count {
-          self.page.mouse_down(x, y, button).await?;
+        for click in 1..=count {
+          self.page.mouse_down(x, y, button, click).await?;
           tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-          self.page.mouse_up(x, y, button).await?;
+          self.page.mouse_up(x, y, button, click).await?;
         }
         Ok(())
       },
@@ -5027,13 +5081,13 @@ impl<'a> Mouse<'a> {
   async fn dblclick_untraced(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button).unwrap_or_default().as_cdp();
     self.page.move_mouse(x, y).await?;
-    self.page.mouse_down(x, y, button).await?;
-    self.page.mouse_up(x, y, button).await?;
+    self.page.mouse_down(x, y, button, 1).await?;
+    self.page.mouse_up(x, y, button, 1).await?;
     if let Some(ms) = opts.as_ref().and_then(|o| o.delay) {
       tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
-    self.page.mouse_down(x, y, button).await?;
-    self.page.mouse_up(x, y, button).await?;
+    self.page.mouse_down(x, y, button, 2).await?;
+    self.page.mouse_up(x, y, button, 2).await?;
     Ok(())
   }
 
@@ -5063,7 +5117,8 @@ impl<'a> Mouse<'a> {
       .mouse_position
       .lock()
       .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))?;
-    self.page.mouse_down(x, y, button).await
+    let click_count = opts.as_ref().and_then(|o| o.click_count).unwrap_or(1);
+    self.page.mouse_down(x, y, button, click_count).await
   }
 
   /// Release mouse button at the current cursor position.
@@ -5092,7 +5147,8 @@ impl<'a> Mouse<'a> {
       .mouse_position
       .lock()
       .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))?;
-    self.page.mouse_up(x, y, button).await
+    let click_count = opts.as_ref().and_then(|o| o.click_count).unwrap_or(1);
+    self.page.mouse_up(x, y, button, click_count).await
   }
 
   /// Scroll via mouse wheel.

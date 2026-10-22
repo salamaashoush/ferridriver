@@ -1733,16 +1733,16 @@ impl WebKitPage {
     super::input::move_mouse_smooth(self, from_x, from_y, to_x, to_y, steps).await
   }
 
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
-    super::input::mouse_wheel(self, delta_x, delta_y).await
+  pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
+    super::input::mouse_wheel(self, x, y, delta_x, delta_y).await
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
-    super::input::mouse_down(self, x, y, button).await
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    super::input::mouse_down(self, x, y, button, click_count).await
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
-    super::input::mouse_up(self, x, y, button).await
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    super::input::mouse_up(self, x, y, button, click_count).await
   }
 
   pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {

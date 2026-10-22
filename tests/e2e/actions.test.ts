@@ -384,11 +384,49 @@ describe('actions', () => {
   });
 
   test('script_mouse_wheel', async ({ page }) => {
-    // Verify the binding dispatches the wheel event without error.
-    // Whether the event produces a visible scroll depends on the
-    // engine's input routing with the current mouse position.
-    await page.goto(dataUrl("<body style='height:3000px'></body>"));
+    // The wheel lands where the pointer is, so it scrolls the box under
+    // it rather than the document a wheel at the origin would.
+    await page.goto(
+      dataUrl(
+        "<body style='margin:0;height:3000px'>" +
+          "<div id='box' style='position:absolute;left:100px;top:100px;width:200px;height:200px;overflow:auto'>" +
+          "<div style='height:2000px'>inner</div></div></body>",
+      ),
+    );
+    await page.mouse.move(200, 200);
     await page.mouse.wheel(0, 400);
+    await expect.poll(() => page.evaluate("document.getElementById('box').scrollTop")).toBeGreaterThan(0);
+    expect(await page.evaluate('window.scrollY')).toBe(0);
+  });
+
+  test('script_mouse_down_click_count', async ({ page, browserName }) => {
+    // `clickCount` reaches the press, so a second press reported as the
+    // second click of a pair fires `dblclick`.
+    await page.goto(
+      dataUrl(
+        "<div id='d' style='position:fixed;left:0;top:0;width:200px;height:200px'></div>" +
+          '<script>window.details=[];window.dbl=0;' +
+          "const d=document.getElementById('d');" +
+          "d.addEventListener('mousedown',e=>window.details.push(e.detail));" +
+          "d.addEventListener('dblclick',()=>window.dbl++);" +
+          '</script>',
+      ),
+    );
+    await page.mouse.move(50, 50);
+    await page.mouse.down();
+    await page.mouse.up();
+    await page.mouse.down({ clickCount: 2 });
+    await page.mouse.up({ clickCount: 2 });
+    if (browserName === 'firefox') {
+      // WebDriver BiDi has no click count to send, and Firefox resets its own
+      // count at the end of every action chain, so separate presses never
+      // pair up (Playwright's BiDi backend is bound by the same rule).
+      expect(await page.evaluate('JSON.stringify(window.details)')).toBe('[1,1]');
+      expect(await page.evaluate('window.dbl')).toBe(0);
+      return;
+    }
+    expect(await page.evaluate('JSON.stringify(window.details)')).toBe('[1,2]');
+    expect(await page.evaluate('window.dbl')).toBe(1);
   });
 
   test('script_click_options', async ({ page }) => {

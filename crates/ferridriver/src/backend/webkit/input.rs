@@ -224,7 +224,7 @@ pub async fn move_mouse_smooth(
   Ok(())
 }
 
-pub async fn mouse_wheel(page: &WebKitPage, delta_x: f64, delta_y: f64) -> Result<()> {
+pub async fn mouse_wheel(page: &WebKitPage, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
   page
     .target_session()
     .send("Page.updateScrollingState", json!({}))
@@ -238,14 +238,14 @@ pub async fn mouse_wheel(page: &WebKitPage, delta_x: f64, delta_y: f64) -> Resul
     .proxy_session()
     .send(
       "Input.dispatchWheelEvent",
-      json!({ "x": 0, "y": 0, "deltaX": delta_x, "deltaY": delta_y, "modifiers": 0 }),
+      json!({ "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y, "modifiers": 0 }),
     )
     .await
     .map_err(err)?;
   Ok(())
 }
 
-pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str) -> Result<()> {
+pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
   mouse_event(
     page,
@@ -255,14 +255,14 @@ pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str) -> Resu
       buttons: button_mask(b),
       x,
       y,
-      click_count: 1,
+      click_count,
       modifiers: 0,
     },
   )
   .await
 }
 
-pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str) -> Result<()> {
+pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
   mouse_event(
     page,
@@ -272,7 +272,7 @@ pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str) -> Result
       buttons: 0,
       x,
       y,
-      click_count: 1,
+      click_count,
       modifiers: 0,
     },
   )
