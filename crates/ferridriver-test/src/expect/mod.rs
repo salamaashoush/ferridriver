@@ -125,6 +125,16 @@ impl ScreenshotMatcherOptions {
     if self.timeout.is_none() {
       self.timeout = cfg.timeout.map(std::time::Duration::from_millis);
     }
+    if let Some(masks) = &cfg.mask {
+      for mask in masks {
+        if !self.mask.contains(mask) {
+          self.mask.push(mask.clone());
+        }
+      }
+    }
+    if self.mask_color.is_none() {
+      self.mask_color.clone_from(&cfg.mask_color);
+    }
     self
   }
 }

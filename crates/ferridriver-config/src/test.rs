@@ -379,8 +379,9 @@ impl ExpectConfig {
   }
 }
 
-/// `expect.toHaveScreenshot` defaults. Every key is Playwright's; the
-/// per-call option bag layers on top of whatever is set here.
+/// `expect.toHaveScreenshot` defaults. Every key but `mask` and
+/// `maskColor` is Playwright's; the per-call option bag layers on top of
+/// whatever is set here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ToHaveScreenshotConfig {
@@ -398,6 +399,13 @@ pub struct ToHaveScreenshotConfig {
   pub path_template: Option<String>,
   /// Overrides `expect.timeout` for this matcher only.
   pub timeout: Option<u64>,
+  /// Selectors masked in every screenshot, beside any a call masks.
+  /// Playwright keeps `mask` out of config because a `Locator` does not
+  /// serialize; a selector does, and dynamic regions (clocks, ads) are
+  /// usually the same on every page of a suite.
+  pub mask: Option<Vec<String>>,
+  /// The masks' colour when a call names none.
+  pub mask_color: Option<String>,
 }
 
 /// `expect.toMatchSnapshot` defaults (`types/test.d.ts:279`).

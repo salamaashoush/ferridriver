@@ -493,6 +493,8 @@ scale             = "css"
 stylePath         = ["screenshot.css"]   # relative to this config file
 pathTemplate      = "{testDir}/__screenshots__/{testFilePath}/{arg}{ext}"
 timeout           = 10000
+mask              = ["[data-testid=clock]", ".ad-slot"]   # ferridriver: masked in every screenshot
+maskColor         = "#FF00FF"
 
 [test.expect.toMatchSnapshot]
 threshold         = 0.2
@@ -507,6 +509,11 @@ children     = "equal"          # contain | equal | deep-equal
 timeout   = 10000
 intervals = [100, 250, 500, 1000]
 ```
+
+`mask` and `maskColor` are ferridriver's own: Playwright accepts `mask`
+only per call, as locators, which a config file cannot hold. Selectors
+listed here are masked in every `toHaveScreenshot`, in addition to any the
+call masks; a call's `maskColor` wins over the config's.
 
 A project may carry its own `expect` block, and it **replaces** the
 config's whole object rather than merging into it — Playwright's
