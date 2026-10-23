@@ -69,6 +69,10 @@ struct HtmlAttempt {
   steps: Vec<HtmlStep>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   attachments: Vec<HtmlAttachment>,
+  /// The attempt's snapshot comparisons; their images are looked up among
+  /// `attachments` by name.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  snapshots: Vec<crate::snapshot_record::SnapshotComparison>,
 }
 
 #[derive(serde::Serialize)]
@@ -376,6 +380,7 @@ fn attempt_of(outcome: &TestOutcome) -> HtmlAttempt {
     },
     steps: serialize_html_steps(&outcome.steps),
     attachments: attachments_of(outcome),
+    snapshots: outcome.snapshots.clone(),
   }
 }
 
@@ -548,6 +553,20 @@ a{color:#58a6ff}
 .attachment a.zoom{display:inline-block}
 .attachment code{background:#161b22;border:1px solid #30363d;border-radius:4px;padding:2px 6px;font-size:11px}
 .empty{text-align:center;padding:48px;color:#8b949e}
+.visual{border:1px solid #30363d;border-radius:6px;padding:8px 10px;margin-top:6px;font-size:12px}
+.visual-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.visual-head strong{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.visual-modes{margin-left:auto;display:flex;gap:4px}
+.visual-modes button{background:#161b22;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer}
+.visual-modes button.active{background:#21262d;border-color:#58a6ff}
+.visual-panes{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.visual-pane{flex:1;min-width:160px}
+.visual-pane img{max-width:100%;max-height:320px;border-radius:4px;display:block}
+.visual-slider{position:relative;display:inline-block;margin-top:8px;max-width:100%}
+.visual-slider img{display:block;max-width:100%;max-height:420px}
+.visual-slider .over{position:absolute;inset:0;overflow:hidden}
+.visual-slider .over img{max-width:none}
+.visual-slider input{width:100%;margin-top:4px}
 </style>
 </head>
 <body>
@@ -655,6 +674,7 @@ function render() {
   for (const header of content.querySelectorAll('.test-header')) {
     header.onclick = () => header.parentElement.classList.toggle('open');
   }
+  wireSnapshots(content);
 }
 
 function renderTest(test) {
@@ -697,6 +717,9 @@ function renderAttempt(attempt, showTitle) {
     if (err.diff) html += `<div class="diff">${diffHtml(err.diff)}</div>`;
   }
   if (attempt.steps && attempt.steps.length) html += `<div class="label">Steps</div>${renderSteps(attempt.steps)}`;
+  if (attempt.snapshots && attempt.snapshots.length) {
+    html += `<div class="label">Visual comparisons</div>${attempt.snapshots.map(s => renderSnapshot(s, attempt.attachments || [])).join('')}`;
+  }
   if (attempt.attachments && attempt.attachments.length) {
     html += `<div class="label">Attachments</div><div class="attachments">${attempt.attachments.map(renderAttachment).join('')}</div>`;
   }
@@ -723,6 +746,63 @@ function renderAttachment(attachment) {
     }
   }
   return `<div class="attachment">${body}</div>`;
+}
+
+const SNAPSHOT_STATUS = { passed: 'pass', changed: 'fail', missing: 'fail', written: 'skip', updated: 'flaky' };
+
+function renderSnapshot(snapshot, attachments) {
+  const image = name => {
+    const found = name && attachments.find(a => a.name === name);
+    return found && found.data_url ? found.data_url : null;
+  };
+  const expected = image(snapshot.expected), actual = image(snapshot.actual), diff = image(snapshot.diff);
+  const ratio = snapshot.diff_ratio != null ? `${(snapshot.diff_ratio * 100).toFixed(2)}% of pixels differ` : '';
+  const pane = (label, src) => src
+    ? `<div class="visual-pane"><div class="muted">${label}</div><a href="${src}" target="_blank" rel="noreferrer"><img src="${src}" alt="${esc(label + ' ' + snapshot.name)}"></a></div>`
+    : '';
+  const modes = [];
+  if (expected || actual || diff) modes.push(['side', 'Side by side']);
+  if (expected && actual) modes.push(['slider', 'Slider']);
+  if (diff) modes.push(['diff', 'Diff']);
+  const buttons = modes.length > 1
+    ? `<div class="visual-modes">${modes.map(([mode, label], i) => `<button type="button" data-mode="${mode}"${i === 0 ? ' class="active"' : ''}>${label}</button>`).join('')}</div>`
+    : '';
+  const side = `<div class="visual-panes" data-view="side">${pane('Expected', expected)}${pane('Actual', actual)}${pane('Diff', diff)}</div>`;
+  const slider = expected && actual
+    ? `<div data-view="slider" hidden><div class="visual-slider"><img src="${expected}" alt="${esc('Expected ' + snapshot.name)}"><div class="over" style="width:50%"><img src="${actual}" alt="${esc('Actual ' + snapshot.name)}"></div></div><input type="range" min="0" max="100" value="50" aria-label="${esc('Reveal actual ' + snapshot.name)}"></div>`
+    : '';
+  const diffView = diff ? `<div data-view="diff" hidden>${pane('Diff', diff)}</div>` : '';
+  return `<div class="visual" data-snapshot>
+    <div class="visual-head"><strong>${esc(snapshot.name)}</strong>
+      <span class="${SNAPSHOT_STATUS[snapshot.status] || 'muted'}">${esc(snapshot.status)}</span>
+      <span class="muted">${esc(ratio)}</span>${buttons}</div>
+    ${snapshot.message ? `<div class="muted" style="margin-top:4px">${esc(snapshot.message)}</div>` : ''}
+    ${side}${slider}${diffView}
+  </div>`;
+}
+
+function wireSnapshots(root) {
+  for (const block of root.querySelectorAll('[data-snapshot]')) {
+    for (const button of block.querySelectorAll('[data-mode]')) {
+      button.onclick = () => {
+        for (const other of block.querySelectorAll('[data-mode]')) other.classList.toggle('active', other === button);
+        for (const view of block.querySelectorAll('[data-view]')) view.hidden = view.dataset.view !== button.dataset.mode;
+        const range = block.querySelector('input[type=range]');
+        if (range && range.oninput) range.oninput();
+      };
+    }
+    const range = block.querySelector('input[type=range]');
+    if (range) {
+      const over = block.querySelector('.visual-slider .over');
+      const base = block.querySelector('.visual-slider > img');
+      const sync = () => {
+        over.style.width = range.value + '%';
+        over.firstElementChild.style.width = base.clientWidth + 'px';
+      };
+      range.oninput = sync;
+      base.onload = sync;
+    }
+  }
 }
 
 function renderSteps(steps) {
@@ -816,6 +896,41 @@ mod tests {
     assert_eq!(test.duration_ms, 240, "the test's time is all of its attempts");
     assert_eq!(test.project.as_deref(), Some("webkit"));
     assert_eq!(report.flaky, 1);
+  }
+
+  #[tokio::test]
+  async fn snapshot_comparisons_reach_the_report_with_their_images() {
+    use crate::snapshot_record::{SnapshotComparison, SnapshotComparisonKind, SnapshotStatus};
+    let mut reporter = HtmlReporter::new(PathBuf::from("report.html"));
+    let mut failed = outcome("hero", TestStatus::Failed, 1);
+    let mut comparison = SnapshotComparison::new(
+      "hero.png".into(),
+      SnapshotComparisonKind::Screenshot,
+      "/base/hero.png".into(),
+      SnapshotStatus::Changed,
+    );
+    comparison.actual = Some("hero-actual.png".into());
+    comparison.diff_ratio = Some(0.125);
+    failed.snapshots = vec![comparison];
+    failed.attachments = vec![Attachment {
+      name: "hero-actual.png".into(),
+      content_type: "image/png".into(),
+      body: AttachmentBody::Bytes(vec![137, 80, 78, 71]),
+      step_id: None,
+    }];
+    record(&mut reporter, failed).await;
+    let report = reporter.report();
+    let json = serde_json::to_value(&report).unwrap();
+    let attempt = &json["tests"][0]["attempts"][0];
+    assert_eq!(attempt["snapshots"][0]["status"], "changed");
+    assert_eq!(attempt["snapshots"][0]["actual"], "hero-actual.png");
+    assert!(
+      attempt["attachments"][0]["data_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("data:image/png;base64,")
+    );
+    assert!(HTML_TEMPLATE.contains("Visual comparisons"));
   }
 
   #[tokio::test]
