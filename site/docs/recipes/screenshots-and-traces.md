@@ -71,6 +71,24 @@ First run writes the baseline. Subsequent runs compare. Update with:
 cargo test --test e2e -- --update-snapshots
 ```
 
+In a `ferridriver test` run, a comparison that fails attaches
+`<name>-expected.png`, `<name>-actual.png` and `<name>-diff.png` to the
+test, as Playwright does, and every comparison is also recorded as data
+(`passed`, `changed`, `missing`, `written` or `updated`, with the share
+of pixels that differ) in the HTML report, the blob and the `stream`
+reporter; see [Snapshot comparisons](../test-runner/reporters.md#snapshot-comparisons).
+An `--update-snapshots changed` run attaches the baseline it replaced
+as `-expected`, so the update itself can be reviewed.
+
+Regions that change on every run (a clock, an ad slot) can be masked in
+every screenshot from the config rather than in each call:
+
+```toml
+[test.expect.toHaveScreenshot]
+mask = ["[data-testid=clock]", ".ad-slot"]
+maskColor = "#FF00FF"
+```
+
 ## ARIA / accessibility snapshots
 
 YAML representation of the accessibility tree — readable, deterministic,

@@ -102,6 +102,11 @@ boolean ones can also be flipped from the environment as
 | `open` | `never` (default), `always`, or `on-failure` — whether to open the finished report in a browser. |
 | `mergeFiles` | Group tests by their outermost `describe` instead of the file they are in, so a suite split over several files reads as one. Also `FERRIDRIVER_HTML_MERGE_FILES=1`. |
 
+Each attempt that compared screenshots shows a "Visual comparisons"
+block per comparison: its status, the share of pixels that differ, and
+the expected, actual and diff images side by side, as a slider (the
+actual revealed over the expected) or as the diff alone.
+
 **`blob`**
 
 | Option | Effect |
@@ -123,6 +128,48 @@ test attached inline (a failure screenshot, `attach(name, { body })`)
 are written under `<outputDir>/stream-attachments/` and referenced by
 absolute path. The lines concatenated are a blob event body:
 `merge-reports` reads a `.jsonl` file the way it reads a zip.
+
+### Snapshot comparisons
+
+Every `toHaveScreenshot` and `toMatchSnapshot` call (not `.not`, and
+not under `--ignore-snapshots`) leaves one entry in the attempt's
+`outcome.snapshots`, in the blob, the stream and merged reports alike.
+The images it names are among the attempt's attachments, named as
+Playwright names them (`hero-expected.png`, `hero-actual.png`,
+`hero-diff.png`, `hero-previous.png`):
+
+```json
+{
+  "name": "hero.png",
+  "kind": "screenshot",
+  "status": "changed",
+  "snapshot_path": "/repo/tests/hero.spec.ts-snapshots/hero-chromium-darwin.png",
+  "failed": true,
+  "message": "1520 pixels (ratio 0.04 of all image pixels) are different.",
+  "expected": "hero-expected.png",
+  "actual": "hero-actual.png",
+  "diff": "hero-diff.png",
+  "diff_pixels": 1520,
+  "diff_ratio": 0.0396,
+  "width": 320,
+  "height": 120,
+  "max_diff_pixel_ratio": 0.01
+}
+```
+
+| `status` | Meaning |
+|---|---|
+| `passed` | Matched the baseline within the budget. |
+| `changed` | Differed beyond the budget; the assertion failed. |
+| `missing` | No baseline, and none was written (`--update-snapshots none`, or captures that never settled). |
+| `written` | No baseline; the actual became it. `failed` is true under the default mode, which fails the test softly. |
+| `updated` | A baseline differed and `--update-snapshots changed` or `all` rewrote it. The replaced baseline is attached as `-expected` beside the new `-actual` and the `-diff`, so an update can be reviewed. |
+
+`kind` is `screenshot` for `toHaveScreenshot` and `snapshot` for
+`toMatchSnapshot`. `diff_ratio` is the differing pixels over the
+expected image's pixels, unrounded; `threshold`, `max_diff_pixels` and
+`max_diff_pixel_ratio` are the budget the comparison ran under, absent
+when it took the defaults.
 
 **`allure`**
 
