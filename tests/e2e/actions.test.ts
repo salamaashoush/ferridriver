@@ -647,6 +647,29 @@ describe('actions', () => {
     expect(await page.evaluate("document.getElementById('ro').value")).toBe('bypass');
   });
 
+  test('script_fill_multiline', async ({ page }) => {
+    // fill writes the value as given, on every kind of editable: line
+    // breaks, quotes, backslashes and line separators included.
+    await page.goto(
+      dataUrl(
+        "<textarea id='t'></textarea><input id='i'><div id='c' contenteditable='true'></div>" +
+          "<script>window.inputs = 0; document.getElementById('t').addEventListener('input', () => window.inputs++);</script>",
+      ),
+    );
+    const text = "first line\nit's \"quoted\"\r\nback\\slash\u2028separated\n\nlast";
+    await page.locator('#t').fill(text);
+    expect(await page.locator('#t').inputValue()).toBe(text.replace(/\r\n?/g, '\n'));
+    expect(await page.evaluate('window.inputs')).toBe(1);
+    await expect(page.locator('#t')).toHaveValue(text.replace(/\r\n?/g, '\n'));
+
+    // A single-line input drops the line breaks, as the browser does for a typed value.
+    await page.locator('#i').fill('one\ntwo');
+    expect(await page.locator('#i').inputValue()).toBe('onetwo');
+
+    await page.locator('#c').fill('top\nbottom');
+    expect(await page.locator('#c').textContent()).toMatch(/^top\s*bottom$/);
+  });
+
   test('script_tap_native', async ({ page, browserName }) => {
     // `locator.tap` uses the backend's native touch primitive on every
     // backend: CDP `Input.dispatchTouchEvent`, WebKit

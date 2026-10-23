@@ -359,7 +359,9 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
       return Err(FerriError::backend(state_raw));
     }
   }
-  let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+  // A JSON string is a JavaScript string literal with every line break,
+  // quote and control character escaped.
+  let literal = serde_json::to_string(value)?;
   // Use the prototype's native `value` setter — React (and other
   // controlled-input frameworks) wrap the descriptor on the element
   // instance to track changes. Setting `this.value = '…'` directly
@@ -376,7 +378,7 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
             this.focus(); \
             if (this.isContentEditable) {{ \
               this.textContent = ''; \
-              this.textContent = '{escaped}'; \
+              this.textContent = {literal}; \
               this.dispatchEvent(new InputEvent('input', {{bubbles: true}})); \
             }} else {{ \
               var proto = Object.getPrototypeOf(this); \
@@ -384,10 +386,10 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
               var setter = desc && desc.set; \
               if (setter) {{ \
                 setter.call(this, ''); \
-                setter.call(this, '{escaped}'); \
+                setter.call(this, {literal}); \
               }} else {{ \
                 this.value = ''; \
-                this.value = '{escaped}'; \
+                this.value = {literal}; \
               }} \
               this.dispatchEvent(new Event('input', {{bubbles: true}})); \
               this.dispatchEvent(new Event('change', {{bubbles: true}})); \
