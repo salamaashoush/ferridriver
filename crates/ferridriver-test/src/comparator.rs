@@ -114,6 +114,31 @@ pub struct ImageMismatch {
   pub diff: Vec<u8>,
 }
 
+/// What comparing two images measured, whether or not they matched.
+#[derive(Debug, Clone)]
+pub struct ImageComparison {
+  /// Pixels the comparator counted as different.
+  pub diff_pixels: u64,
+  /// Pixels of the expected image, what the ratio budget is a share of.
+  pub total_pixels: u64,
+  pub width: u32,
+  pub height: u32,
+  /// Set when the images differ beyond the budget.
+  pub mismatch: Option<ImageMismatch>,
+}
+
+impl ImageComparison {
+  /// `diff_pixels` as a share of `total_pixels`, unrounded.
+  #[must_use]
+  pub fn diff_ratio(&self) -> f64 {
+    if self.total_pixels == 0 {
+      return 0.0;
+    }
+    num_traits::ToPrimitive::to_f64(&self.diff_pixels).unwrap_or(f64::MAX)
+      / num_traits::ToPrimitive::to_f64(&self.total_pixels).unwrap_or(f64::MAX)
+  }
+}
+
 /// `comparators.ts::compareImages`: `Ok(None)` when the images match
 /// within the budget.
 ///
@@ -125,6 +150,20 @@ pub fn compare_images(
   expected: &[u8],
   options: &ImageComparatorOptions,
 ) -> Result<Option<ImageMismatch>, String> {
+  measure_images(format, actual, expected, options).map(|comparison| comparison.mismatch)
+}
+
+/// [`compare_images`], keeping the pixel counts a report shows beside the
+/// verdict.
+///
+/// # Errors
+/// When the expected image is not of its format, or either fails to decode.
+pub fn measure_images(
+  format: ImageFormat,
+  actual: &[u8],
+  expected: &[u8],
+  options: &ImageComparatorOptions,
+) -> Result<ImageComparison, String> {
   format.validate(expected)?;
   let decode = |bytes: &[u8]| -> Result<Image, String> {
     let image = image::load_from_memory_with_format(bytes, format.decoder())
@@ -138,6 +177,7 @@ pub fn compare_images(
   };
   let mut actual = decode(actual)?;
   let mut expected = decode(expected)?;
+  let (actual_width, actual_height) = (actual.width, actual.height);
   let (width, height) = (expected.width.max(actual.width), expected.height.max(actual.height));
   let mut sizes_mismatch = String::new();
   if expected.width != actual.width || expected.height != actual.height {
@@ -162,6 +202,7 @@ pub fn compare_images(
     ),
   };
 
+  let total_pixels = u64::from(expected.width) * u64::from(expected.height);
   let pixels = f64::from(expected.width) * f64::from(expected.height);
   let by_ratio = options.max_diff_pixel_ratio.map(|ratio| pixels * ratio);
   let by_count = options
@@ -178,18 +219,26 @@ pub fn compare_images(
   } else {
     String::new()
   };
+  let mut comparison = ImageComparison {
+    diff_pixels: u64::try_from(count).unwrap_or(u64::MAX),
+    total_pixels,
+    width: actual_width,
+    height: actual_height,
+    mismatch: None,
+  };
   if pixels_mismatch.is_empty() && sizes_mismatch.is_empty() {
-    return Ok(None);
+    return Ok(comparison);
   }
   let mut png = Vec::new();
   image::RgbaImage::from_raw(width, height, diff)
     .ok_or("diff image size")?
     .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
     .map_err(|e| e.to_string())?;
-  Ok(Some(ImageMismatch {
+  comparison.mismatch = Some(ImageMismatch {
     message: sizes_mismatch + &pixels_mismatch,
     diff: png,
-  }))
+  });
+  Ok(comparison)
 }
 
 // ── pixelmatch ───────────────────────────────────────────────────────────

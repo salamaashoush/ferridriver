@@ -267,8 +267,8 @@ impl TestHostBridge for InfoBridge {
       max_diff_pixel_ratio: parsed.max_diff_pixel_ratio.or(defaults.max_diff_pixel_ratio),
       comparator: parsed.comparator,
     };
-    let soft =
-      crate::snapshot::match_value_snapshot(info, &received, &name, &comparator, is_not).map_err(|f| f.message)?;
+    let judged = crate::snapshot::match_value_snapshot(info, &received, &name, &comparator, is_not);
+    let soft = info.record_snapshot(judged).map_err(|f| f.message)?;
     record_missing_baseline(info, soft);
     Ok(())
   }
@@ -297,8 +297,9 @@ impl TestHostBridge for InfoBridge {
       let paths = crate::snapshot::ScreenshotFiles::new(
         resolved.absolute_snapshot_path,
         &info.output_dir.join(&resolved.relative_output_path),
+        resolved.relative_output_path.to_string_lossy().into_owned(),
       );
-      let soft = crate::snapshot::to_have_screenshot(&paths, &opts, info.update_snapshots, is_not, timeout, || {
+      let judged = crate::snapshot::judge_screenshot(&paths, &opts, info.update_snapshots, is_not, timeout, || {
         let target = target.clone();
         let opts = &opts;
         async move {
@@ -315,8 +316,8 @@ impl TestHostBridge for InfoBridge {
           }
         }
       })
-      .await
-      .map_err(|f| f.message)?;
+      .await;
+      let soft = info.record_snapshot(judged).map_err(|f| f.message)?;
       record_missing_baseline(&info, soft);
       Ok(())
     })

@@ -1145,6 +1145,8 @@ impl Worker {
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
+      snapshots: Arc::default(),
+      snapshot_attachments: Arc::default(),
       steps: Arc::default(),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1694,6 +1696,8 @@ impl Worker {
       update_snapshots: self.config.update_snapshots,
       ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
+      snapshots: Arc::default(),
+      snapshot_attachments: Arc::default(),
       steps: Arc::default(),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2434,6 +2438,18 @@ impl Worker {
     );
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
+    attachments.extend(
+      test_info
+        .snapshot_attachments
+        .lock()
+        .map(|mut held| std::mem::take(&mut *held))
+        .unwrap_or_default(),
+    );
+    let snapshots = test_info
+      .snapshots
+      .lock()
+      .map(|mut held| std::mem::take(&mut *held))
+      .unwrap_or_default();
 
     // Attach or clean up video recording.
     // For buffered mode, video_path is only Some when the test failed (already filtered).
@@ -2493,6 +2509,7 @@ impl Worker {
       error,
       errors,
       attachments,
+      snapshots,
       steps,
       stdout: output.stdout,
       stderr: output.stderr,

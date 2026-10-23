@@ -91,6 +91,8 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       update_snapshots: crate::snapshot::env_update_mode(),
       ignore_snapshots: false,
       attachments: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      snapshots: std::sync::Arc::default(),
+      snapshot_attachments: std::sync::Arc::default(),
       steps: std::sync::Arc::default(),
       soft_errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -114,13 +116,16 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       open_steps: std::sync::Arc::default(),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
     };
-    crate::snapshot::settle_outside_host(crate::snapshot::match_value_snapshot(
-      &info,
-      &crate::snapshot::SnapshotValue::Text(actual),
-      &crate::snapshot_path::SnapshotName::One(name.to_string()),
-      &crate::comparator::ImageComparatorOptions::default(),
-      false,
-    ))
+    crate::snapshot::settle_outside_host(
+      crate::snapshot::match_value_snapshot(
+        &info,
+        &crate::snapshot::SnapshotValue::Text(actual),
+        &crate::snapshot_path::SnapshotName::One(name.to_string()),
+        &crate::comparator::ImageComparatorOptions::default(),
+        false,
+      )
+      .result,
+    )
   }
 
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {

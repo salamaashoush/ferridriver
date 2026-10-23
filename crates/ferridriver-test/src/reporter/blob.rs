@@ -175,6 +175,10 @@ pub struct WireOutcome {
   pub errors: Vec<WireFailure>,
   #[serde(default)]
   pub attachments: Vec<WireAttachment>,
+  /// The snapshot comparisons of the attempt, naming attachments above.
+  /// Absent from lines written before they were recorded.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub snapshots: Vec<crate::snapshot_record::SnapshotComparison>,
   #[serde(default)]
   pub steps: Vec<WireStep>,
   #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -469,6 +473,7 @@ impl WireOutcome {
           },
         })
         .collect(),
+      snapshots: outcome.snapshots.clone(),
       steps: wire_steps(&outcome.steps),
       stdout: outcome.stdout.clone(),
       stderr: outcome.stderr.clone(),
@@ -511,6 +516,7 @@ impl WireOutcome {
           })
         })
         .collect(),
+      snapshots: self.snapshots,
       steps: runtime_steps(self.steps),
       stdout: self.stdout,
       stderr: self.stderr,
@@ -1074,6 +1080,47 @@ fn parse_event_lines(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn snapshot_comparisons_ride_the_wire_and_older_lines_still_read() {
+    use crate::snapshot_record::{SnapshotComparison, SnapshotComparisonKind, SnapshotStatus};
+    let old = serde_json::json!({
+      "test_id": { "file": "a.spec.ts", "suite": null, "name": "works", "line": 3 },
+      "status": "passed", "duration_ms": 5, "attempt": 1,
+    });
+    let parsed: WireOutcome = serde_json::from_value(old).unwrap();
+    assert_eq!(parsed.snapshots, Vec::new());
+    assert!(
+      serde_json::to_value(&parsed).unwrap().get("snapshots").is_none(),
+      "nothing written when empty"
+    );
+
+    let mut comparison = SnapshotComparison::new(
+      "hero.png".into(),
+      SnapshotComparisonKind::Screenshot,
+      "/base/hero.png".into(),
+      SnapshotStatus::Changed,
+    );
+    comparison.failed = true;
+    comparison.diff = Some("hero-diff.png".into());
+    comparison.diff_pixels = Some(12);
+    let outcome = TestOutcome {
+      snapshots: vec![comparison.clone()],
+      ..Default::default()
+    };
+    struct NoSink;
+    impl ResourceSink for NoSink {
+      fn store(&mut self, _: &str, _: &str, _: &[u8]) -> Option<Stored> {
+        None
+      }
+    }
+    let wire = WireOutcome::from_runtime(&outcome, &mut NoSink);
+    let line = serde_json::to_string(&wire).unwrap();
+    assert!(line.contains("\"snapshots\":[{\"name\":\"hero.png\""), "{line}");
+    let back: WireOutcome = serde_json::from_str(&line).unwrap();
+    let runtime = back.into_runtime(&FxHashMap::default());
+    assert_eq!(runtime.snapshots, vec![comparison]);
+  }
 
   #[tokio::test]
   async fn an_outcome_round_trips_with_its_steps_and_artifacts() {

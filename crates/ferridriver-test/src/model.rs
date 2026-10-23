@@ -533,6 +533,12 @@ pub struct TestInfo {
   pub ignore_snapshots: bool,
   /// Collected attachments.
   pub attachments: Arc<Mutex<Vec<Attachment>>>,
+  /// Every snapshot comparison the test made, in order.
+  pub snapshots: Arc<std::sync::Mutex<Vec<crate::snapshot_record::SnapshotComparison>>>,
+  /// The images those comparisons attached. Kept apart from `attachments`
+  /// behind a plain mutex because `toMatchSnapshot` records from a
+  /// synchronous matcher, which cannot await the attachments lock.
+  pub snapshot_attachments: Arc<std::sync::Mutex<Vec<Attachment>>>,
   /// Collected test steps. A plain mutex: a browser call opens and
   /// closes its step from an action observer, which cannot await.
   pub steps: Arc<std::sync::Mutex<Vec<TestStep>>>,
@@ -675,6 +681,8 @@ impl TestInfo {
       update_snapshots: crate::config::UpdateSnapshotsMode::default(),
       ignore_snapshots: false,
       attachments: Arc::new(Mutex::new(Vec::new())),
+      snapshots: Arc::default(),
+      snapshot_attachments: Arc::default(),
       steps: Arc::default(),
       soft_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
       non_retriable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -784,6 +792,28 @@ impl TestInfo {
       body,
       step_id,
     });
+  }
+
+  /// Keep what a snapshot matcher compared and attached, and hand back
+  /// its verdict.
+  ///
+  /// # Errors
+  ///
+  /// The matcher's own failure.
+  pub fn record_snapshot(&self, judged: crate::snapshot::Judged) -> Result<Option<String>, TestFailure> {
+    if let Some(comparison) = judged.comparison {
+      self
+        .snapshots
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(comparison);
+    }
+    self
+      .snapshot_attachments
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .extend(judged.attachments);
+    judged.result
   }
 
   /// Record a soft assertion error (test continues, fails at end).
@@ -1869,6 +1899,9 @@ pub struct TestOutcome {
   /// `TestResult.errors`; `error` is the first entry.
   pub errors: Vec<TestFailure>,
   pub attachments: Vec<Attachment>,
+  /// The snapshot comparisons the attempt made; their images are among
+  /// `attachments`.
+  pub snapshots: Vec<crate::snapshot_record::SnapshotComparison>,
   pub steps: Vec<TestStep>,
   pub stdout: String,
   pub stderr: String,
@@ -1907,6 +1940,7 @@ impl Default for TestOutcome {
       error: None,
       errors: Vec::new(),
       attachments: Vec::new(),
+      snapshots: Vec::new(),
       steps: Vec::new(),
       stdout: String::new(),
       stderr: String::new(),
