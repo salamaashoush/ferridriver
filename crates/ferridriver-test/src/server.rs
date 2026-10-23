@@ -191,11 +191,21 @@ async fn start_server(config: &crate::config::WebServerConfig) -> ferridriver::e
     tracing::info!(name = %name, "[{name}] Reusing existing server at {url}");
     return Ok(RunningServer::Reused { url: url.to_string() });
   }
-  let mut child = spawn_command(command, config.cwd.as_deref().unwrap_or("."), &config.env)?;
+  let output = OutputPolicy {
+    name: name.clone(),
+    stdout: config.stdout.as_deref() == Some("pipe"),
+    stderr: config.stderr.as_deref() != Some("ignore"),
+  };
+  let (mut child, tail) = spawn_command(command, config.cwd.as_deref().unwrap_or("."), &config.env, &output)?;
   let ready = tokio::select! {
     biased;
     status = child.wait() => {
-      Err(ferridriver::FerriError::backend(format!("[{name}] webServer process exited: {}", status?)))
+      let status = status?;
+      // The reader ends at the pipe's end of file, which a child the
+      // server left running would hold open; past a second, report what
+      // has arrived.
+      let _ = tokio::time::timeout(std::time::Duration::from_secs(1), tail.finished()).await;
+      Err(ferridriver::FerriError::backend(exit_message(&name, status, &tail.lines())))
     },
     result = wait_for_url(&client, url, deadline, config.timeout, &name) => result,
   };
@@ -320,7 +330,8 @@ fn spawn_command(
   command: &str,
   cwd: &str,
   env: &std::collections::BTreeMap<String, String>,
-) -> ferridriver::error::Result<tokio::process::Child> {
+  output: &OutputPolicy,
+) -> ferridriver::error::Result<(tokio::process::Child, OutputTail)> {
   let mut cmd = if cfg!(target_os = "windows") {
     let mut c = tokio::process::Command::new("cmd");
     c.args(["/C", command]);
@@ -346,18 +357,123 @@ fn spawn_command(
     .stderr(std::process::Stdio::piped());
   let mut child = ferridriver::backend::process::spawn_exclusive(|| cmd.spawn())
     .map_err(|e| ferridriver::FerriError::backend(format!("spawn '{command}': {e}")))?;
+  let tail = OutputTail::default();
   if let Some(stdout) = child.stdout.take() {
-    drain_output(stdout);
+    drain_output(
+      stdout,
+      output.stdout.then(|| (Stream::Stdout, output.name.clone())),
+      None,
+    );
   }
   if let Some(stderr) = child.stderr.take() {
-    drain_output(stderr);
+    drain_output(
+      stderr,
+      output.stderr.then(|| (Stream::Stderr, output.name.clone())),
+      Some(tail.clone()),
+    );
   }
-  Ok(child)
+  Ok((child, tail))
 }
 
-fn drain_output(mut output: impl tokio::io::AsyncRead + Unpin + Send + 'static) {
+/// What a command server's output is forwarded to, as Playwright's
+/// `webServer.stdout` (`ignore` unless `pipe`) and `webServer.stderr`
+/// (`pipe` unless `ignore`): each line printed with the server's name.
+struct OutputPolicy {
+  name: String,
+  stdout: bool,
+  stderr: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+  Stdout,
+  Stderr,
+}
+
+/// The last lines a server wrote to stderr, whatever is forwarded, so a
+/// server that exits before it is ready says why.
+#[derive(Clone, Default)]
+struct OutputTail {
+  lines: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+  ended: std::sync::Arc<tokio::sync::Notify>,
+  done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl OutputTail {
+  const LINES: usize = 20;
+
+  fn end(&self) {
+    self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+    self.ended.notify_waiters();
+  }
+
+  async fn finished(&self) {
+    let ended = self.ended.notified();
+    if !self.done.load(std::sync::atomic::Ordering::SeqCst) {
+      ended.await;
+    }
+  }
+
+  fn push(&self, line: String) {
+    let mut lines = self.lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if lines.len() == Self::LINES {
+      lines.pop_front();
+    }
+    lines.push_back(line);
+  }
+
+  fn lines(&self) -> Vec<String> {
+    self
+      .lines
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .iter()
+      .cloned()
+      .collect()
+  }
+}
+
+fn exit_message(name: &str, status: std::process::ExitStatus, tail: &[String]) -> String {
+  let mut message = format!("[{name}] webServer process exited: {status}");
+  if !tail.is_empty() {
+    message.push_str("; its last output:");
+    for line in tail {
+      message.push_str(&format!("\n[{name}] {line}"));
+    }
+  }
+  message
+}
+
+fn drain_output(
+  output: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+  forward: Option<(Stream, String)>,
+  tail: Option<OutputTail>,
+) {
+  use tokio::io::AsyncBufReadExt as _;
   tokio::spawn(async move {
-    let _ = tokio::io::copy(&mut output, &mut tokio::io::sink()).await;
+    let mut reader = tokio::io::BufReader::new(output);
+    let mut buffer = Vec::new();
+    loop {
+      buffer.clear();
+      match reader.read_until(b'\n', &mut buffer).await {
+        Ok(0) | Err(_) => break,
+        Ok(_) => {},
+      }
+      let line = String::from_utf8_lossy(&buffer)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+      match &forward {
+        Some((Stream::Stdout, name)) => println!("[{name}] {line}"),
+        Some((Stream::Stderr, name)) => eprintln!("[{name}] {line}"),
+        None => {},
+      }
+      if let Some(tail) = &tail {
+        tail.push(line);
+      }
+    }
+    if let Some(tail) = &tail {
+      tail.end();
+    }
   });
 }
 
@@ -498,6 +614,32 @@ while True:
       .unwrap();
     assert_eq!(std::fs::read_to_string(dir.path().join("built")).unwrap(), "built");
     manager.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_server_that_exits_before_it_is_ready_says_why() {
+    let (dir, port) = workspace().unwrap();
+    for stderr in [None, Some("ignore".to_string())] {
+      let config = WebServerConfig {
+        stderr: stderr.clone(),
+        name: Some("api".into()),
+        ..serving(
+          "echo starting; echo 'no database named' >&2; exit 3".into(),
+          port,
+          dir.path(),
+        )
+      };
+      let Err(error) = WebServerManager::start(&[config]).await else {
+        panic!("a server that exited started (stderr: {stderr:?})");
+      };
+      let message = error.to_string();
+      assert!(message.contains("exit status: 3"), "{message}");
+      assert!(message.contains("[api] no database named"), "{message}");
+      assert!(
+        !message.contains("starting"),
+        "stdout is not part of the reason: {message}"
+      );
+    }
   }
 
   #[tokio::test]
