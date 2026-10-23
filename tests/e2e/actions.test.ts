@@ -871,6 +871,20 @@ describe('actions', () => {
     expect((await page.inputValue('#t')).length).toBeGreaterThan(0);
   });
 
+  test('script_keyboard_press_plus', async ({ page }) => {
+    // Playwright reads a `+` that starts a key as the plus key, alone or
+    // after modifiers, rather than as a separator with empty names around it.
+    await page.goto(
+      dataUrl(
+        "<input id='t'><script>window.keys=[];addEventListener('keydown',e=>keys.push(e.key+':'+e.shiftKey+':'+e.ctrlKey))</script>",
+      ),
+    );
+    await page.locator('#t').focus();
+    await page.keyboard.press('+');
+    await page.keyboard.press('Control++');
+    expect(await page.evaluate('window.keys')).toEqual(['+:false:false', 'Control:false:true', '+:false:true']);
+  });
+
   test('script_keyboard_type_named_keys', async ({ page }) => {
     // namedKeys=true: `{Enter}` presses Enter, producing a newline in
     // the textarea. Without the option the literal text `{Enter}` would

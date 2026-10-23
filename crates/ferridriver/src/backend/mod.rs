@@ -2369,6 +2369,23 @@ impl screencast::ScreencastSource for AnyPage {
   }
 }
 
+/// A key combo split into its keys as Playwright splits one
+/// (`server/input.ts::split`): a `+` that starts a key is that key, so
+/// `"+"` is the plus key and `"Shift++"` is Shift and plus, where a plain
+/// `split('+')` leaves empty names behind.
+pub(crate) fn split_key_combo(combo: &str) -> Vec<&str> {
+  let mut keys = Vec::new();
+  let mut start = 0;
+  for (at, ch) in combo.char_indices() {
+    if ch == '+' && at > start {
+      keys.push(&combo[start..at]);
+      start = at + 1;
+    }
+  }
+  keys.push(&combo[start..]);
+  keys
+}
+
 #[cfg(test)]
 mod binding_result_tests {
   use super::{PageBackref, binding_result_expression, binding_settle_js};
@@ -2426,5 +2443,19 @@ mod binding_result_tests {
       binding_settle_js(7, &outcome),
       r#"globalThis.__fd_bc.reject(7, "the page of this binding is closed")"#
     );
+  }
+}
+
+#[cfg(test)]
+mod key_combo_tests {
+  use super::split_key_combo;
+
+  #[test]
+  fn a_plus_that_starts_a_key_is_the_plus_key() {
+    assert_eq!(split_key_combo("+"), ["+"]);
+    assert_eq!(split_key_combo("Shift++"), ["Shift", "+"]);
+    assert_eq!(split_key_combo("Control+Shift+T"), ["Control", "Shift", "T"]);
+    assert_eq!(split_key_combo("a"), ["a"]);
+    assert_eq!(split_key_combo("Control+="), ["Control", "="]);
   }
 }

@@ -462,7 +462,7 @@ pub fn key_up(context: &str, key: &str) -> serde_json::Value {
 #[must_use]
 pub fn press_key(context: &str, key: &str) -> serde_json::Value {
   // Handle modifier+key combos like "Control+a", "Shift+Enter"
-  let parts: Vec<&str> = key.split('+').collect();
+  let parts = crate::backend::split_key_combo(key);
   if parts.len() > 1 {
     return press_key_combo(context, &parts);
   }

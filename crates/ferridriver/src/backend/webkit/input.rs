@@ -626,7 +626,7 @@ pub async fn key_up(page: &WebKitPage, key: &str) -> Result<()> {
 /// mask so the page sees `e.ctrlKey === true`. Mirrors the CDP backend's
 /// `press_key` combo handling and `wkInput.ts::keydown`.
 pub async fn press_key(page: &WebKitPage, key: &str) -> Result<()> {
-  let parts: Vec<&str> = key.split('+').collect();
+  let parts = crate::backend::split_key_combo(key);
   if parts.len() <= 1 {
     dispatch_key(page, "keyDown", key).await?;
     dispatch_key(page, "keyUp", key).await?;

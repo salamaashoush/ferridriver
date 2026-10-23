@@ -5029,7 +5029,7 @@ impl<T: CdpWrap> CdpPage<T> {
         name
       }
     }
-    let parts: Vec<&str> = key.split('+').map(resolve).collect();
+    let parts: Vec<&str> = crate::backend::split_key_combo(key).into_iter().map(resolve).collect();
     if parts.len() <= 1 {
       let key = resolve(key);
       self.key_down(key).await?;
