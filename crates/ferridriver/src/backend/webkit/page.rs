@@ -403,12 +403,17 @@ pub(crate) struct LifecycleSignals {
   /// only trusts `load` once its own loader has committed: the previous
   /// document's late load would otherwise finish it early.
   pub committed_loader: std::sync::Mutex<Option<String>>,
+  /// The main frame navigated within its document since the last reset
+  /// (`Page.navigatedWithinDocument`): a history step onto an entry of the
+  /// same document, which commits nothing and fires no load.
+  pub same_document: AtomicBool,
   pub notify: tokio::sync::Notify,
 }
 
 impl LifecycleSignals {
   pub fn reset(&self) {
     self.commit.store(false, Ordering::SeqCst);
+    self.same_document.store(false, Ordering::SeqCst);
     self.domcontentloaded.store(false, Ordering::SeqCst);
     self.load.store(false, Ordering::SeqCst);
     self.failed.store(false, Ordering::SeqCst);
@@ -479,6 +484,11 @@ impl LifecycleSignals {
       .iter()
       .find(|failure| loader_id.is_none() || failure.loader_id.is_none() || failure.loader_id.as_deref() == loader_id)
       .map(|failure| failure.error_text.clone())
+  }
+
+  pub fn mark_same_document(&self) {
+    self.same_document.store(true, Ordering::SeqCst);
+    self.notify.notify_waiters();
   }
 
   pub fn mark(&self, kind: NavLifecycle) {
@@ -1313,8 +1323,48 @@ impl WebKitPage {
       }
       return Err(conn_err(e));
     }
-    self.wait_for_lifecycle(lifecycle, timeout_ms, None).await?;
+    // A step onto an entry of the same document fires no load; Playwright
+    // answers it with a null response once it commits.
+    if self.wait_for_history_commit(lifecycle, timeout_ms).await? {
+      return Ok(None);
+    }
     Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
+  }
+
+  /// [`Self::wait_for_lifecycle`] for a history step: also done when the
+  /// main frame navigated within its document, which it reports as `true`.
+  async fn wait_for_history_commit(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<bool> {
+    let signals = Arc::clone(&self.lifecycle);
+    let nav_slot = self.nav_request_slot.clone();
+    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
+      loop {
+        let notified = signals.notify.notified();
+        if signals.seen(lifecycle) {
+          return Ok(false);
+        }
+        if signals.same_document.load(Ordering::SeqCst) && !signals.seen(NavLifecycle::Commit) {
+          return Ok(true);
+        }
+        if let Some(err) = signals.provisional_failure(None) {
+          return Err(FerriError::backend(format!("webkit navigate: {err}")));
+        }
+        if let Some((event_request_id, err)) = signals.failure()
+          && let Some(req) = nav_slot.get_for(None)
+          && event_request_id == req.id()
+        {
+          return Err(FerriError::backend(format!("webkit navigate: {err}")));
+        }
+        notified.await;
+      }
+    })
+    .await;
+    match result {
+      Ok(inner) => inner,
+      Err(_) => Err(FerriError::timeout(
+        format!("waiting for navigation lifecycle {lifecycle:?}"),
+        timeout_ms,
+      )),
+    }
   }
 
   pub async fn url(&self) -> Result<Option<String>> {

@@ -1093,6 +1093,17 @@ impl CdpDispatcher {
           }
           tracker.notify.notify_waiters();
         },
+        "Page.navigatedWithinDocument" => {
+          let params = json_scan::json_field(raw, b"params");
+          let frame_id = json_scan::json_string(json_scan::json_field(params, b"frameId"));
+          let frame_id_owned = std::str::from_utf8(frame_id).unwrap_or("").to_string();
+          {
+            let mut state = lock_or_recover(&tracker.state);
+            state.same_document_seq = state.same_document_seq.wrapping_add(1);
+            state.same_document_frame = frame_id_owned;
+          }
+          tracker.notify.notify_waiters();
+        },
         "Page.frameStartedNavigating" => {
           // A navigation began (any frame). Bump the generation counter so a
           // post-input settle knows the action created a navigation and must
@@ -1539,6 +1550,8 @@ mod tests {
       current_loader_id: String::new(),
       nav_started_seq: 0,
       nav_committed_seq: 0,
+      same_document_seq: 0,
+      same_document_frame: String::new(),
       fired: 0,
       crashed: false,
     }));
@@ -1592,6 +1605,8 @@ mod tests {
       "https://example.test/frame#a"
     );
     assert_eq!(lock_or_recover(&state).current_loader_id, "L1");
+    assert_eq!(lock_or_recover(&state).same_document_seq, 1);
+    assert_eq!(lock_or_recover(&state).same_document_frame, "child");
     dispatcher.dispatch_message(
       br#"{"method":"Page.frameAttached","sessionId":"s1","params":{"frameId":"grandchild","parentFrameId":"child"}}"#,
     );

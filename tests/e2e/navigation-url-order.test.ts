@@ -89,3 +89,36 @@ test('navigation completes with the current page and main-frame URL', async ({ b
     }
   }));
 });
+
+test('history steps between entries of one document resolve at once with no response', async ({ page, baseURL }) => {
+  const landed = `${baseURL}/fx/landed`;
+  await page.goto(landed);
+  await page.evaluate(() => {
+    history.pushState({}, '', '?tab=two');
+    history.pushState({}, '', '?tab=three');
+  });
+  const started = Date.now();
+  expect(await page.goBack({ timeout: 5000 })).toBeNull();
+  expect(page.url()).toBe(`${landed}?tab=two`);
+  expect(await page.goBack({ timeout: 5000 })).toBeNull();
+  expect(page.url()).toBe(landed);
+  expect(await page.goForward({ timeout: 5000 })).toBeNull();
+  expect(page.url()).toBe(`${landed}?tab=two`);
+  expect(await page.goForward({ timeout: 5000 })).toBeNull();
+  expect(page.url()).toBe(`${landed}?tab=three`);
+  expect(Date.now() - started).toBeLessThan(4000);
+});
+
+test('a history step across documents still waits for the document it lands on', async ({ page, baseURL }) => {
+  const landed = `${baseURL}/fx/landed`;
+  const framed = `${baseURL}/fx/srcdoc`;
+  await page.goto(landed);
+  await page.evaluate(() => history.pushState({}, '', '?tab=two'));
+  await page.goto(framed);
+  expect((await page.goBack())!.url()).toBe(`${landed}?tab=two`);
+  expect(await page.goBack()).toBeNull();
+  expect(page.url()).toBe(landed);
+  expect(await page.goForward()).toBeNull();
+  expect((await page.goForward())!.url()).toBe(framed);
+  expect(page.frames().length).toBe(2);
+});

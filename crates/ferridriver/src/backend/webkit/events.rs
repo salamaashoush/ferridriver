@@ -666,7 +666,16 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_frame_detached(&env.params, &ctx.frame_cache, &ctx.emitter_frame, &ctx.frame_contexts).await;
     },
     Some("Page.navigatedWithinDocument") => {
+      let frame_id = env.params.get("frameId").and_then(Value::as_str);
+      let main_frame = ctx
+        .main_frame_id_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
       handle_frame_navigated_within(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+      if main_frame.is_none() || main_frame.as_deref() == frame_id {
+        ctx.lifecycle.mark_same_document();
+      }
     },
     Some("Worker.workerCreated") => super::worker::created(&env.params, &ctx.target(), &ctx.workers, &ctx.emitter),
     Some("Worker.dispatchMessageFromWorker") => super::worker::dispatched(&env.params, &ctx.workers),

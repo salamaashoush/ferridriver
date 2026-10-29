@@ -1836,6 +1836,12 @@ pub struct LifecycleState {
   /// settle waits for THIS to advance (not a loaderId change) so a reload —
   /// which re-commits the same loaderId — also satisfies the barrier.
   pub nav_committed_seq: u64,
+  /// Generation counter bumped on every `Page.navigatedWithinDocument`
+  /// (any frame), with the frame it named. A history step onto an entry
+  /// of the same document commits no loader, so this is the only signal
+  /// that it landed.
+  pub same_document_seq: u64,
+  pub same_document_frame: String,
   /// Lifecycle events fired for the current document.
   pub fired: u8,
   /// Set by the transport dispatcher when `Inspector.targetCrashed`
@@ -1886,6 +1892,8 @@ impl LifecycleState {
       current_loader_id: String::new(),
       nav_started_seq: 0,
       nav_committed_seq: 0,
+      same_document_seq: 0,
+      same_document_frame: String::new(),
       fired: 0,
       crashed: false,
     }
@@ -2834,16 +2842,21 @@ impl<T: CdpWrap> CdpPage<T> {
 
     self.nav_request_slot.clear();
     let target_event = Self::lifecycle_key(lifecycle);
-    let pre_loader_id = {
+    let (pre_loader_id, pre_same_document) = {
       let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      state.current_loader_id.clone()
+      (state.current_loader_id.clone(), state.same_document_seq)
     };
     self
       .cmd("Page.navigateToHistoryEntry", serde_json::json!({"entryId": entry_id}))
       .await?;
-    self
-      .await_loader_change(&pre_loader_id, target_event, timeout_ms)
-      .await?;
+    // Playwright answers a history step that stays in the document with a
+    // null response as soon as it commits (`Frame._waitForNavigation`).
+    if self
+      .await_history_commit(&pre_loader_id, pre_same_document, target_event, timeout_ms)
+      .await?
+    {
+      return Ok(None);
+    }
     let grace = Self::nav_grace_for(self.current_loader_id() != pre_loader_id);
     Ok(self.await_nav_response(grace).await)
   }
@@ -2908,6 +2921,49 @@ impl<T: CdpWrap> CdpPage<T> {
       }
       if tokio::time::timeout_at(deadline, notified).await.is_err() {
         return Ok(());
+      }
+    }
+  }
+
+  /// [`Self::await_loader_change`] for a history step, which may land on
+  /// an entry of the current document: that commits no loader and fires
+  /// no lifecycle event, only `Page.navigatedWithinDocument` for the main
+  /// frame. Returns `true` when the step stayed in the document, `false`
+  /// when a new document committed and fired `target_event` (or on
+  /// timeout, which stays permissive like `await_loader_change`).
+  async fn await_history_commit(
+    &self,
+    pre_loader_id: &str,
+    pre_same_document: u64,
+    target_event: &str,
+    timeout_ms: u64,
+  ) -> Result<bool> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let main_frame = self.peek_main_frame_id();
+    loop {
+      let notified = self.lifecycle_notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      {
+        let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.crashed {
+          return Err(FerriError::target_closed(Some("target crashed".into())));
+        }
+        if state.current_loader_id != pre_loader_id
+          && !state.current_loader_id.is_empty()
+          && Self::lifecycle_fired(state.fired, target_event)
+        {
+          return Ok(false);
+        }
+        if state.same_document_seq != pre_same_document
+          && state.current_loader_id == pre_loader_id
+          && main_frame.as_deref().is_none_or(|id| id == state.same_document_frame)
+        {
+          return Ok(true);
+        }
+      }
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return Ok(false);
       }
     }
   }
