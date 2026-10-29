@@ -24,8 +24,19 @@ impl FixtureServer {
       });
     }
     let mut command = Command::new(root.join("target/debug/ferridriver-fixtures"));
+    // The same server ferridriver.toml's webServer starts: the e2e suite
+    // reuses whichever is listening, and its proxy specs need the proxies.
     command
-      .args(["--port", "47831", "--static", "tests/assets"])
+      .args([
+        "--port",
+        "47831",
+        "--auth-proxy-port",
+        "47832",
+        "--socks-proxy-port",
+        "47833",
+        "--static",
+        "tests/assets",
+      ])
       .current_dir(root)
       .env("TOKIO_WORKER_THREADS", runtime_workers(2))
       .stdin(Stdio::null())
