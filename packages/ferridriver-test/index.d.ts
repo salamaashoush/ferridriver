@@ -48,7 +48,8 @@ export interface TestInfo {
   readonly project: TestProject | null;
   /** The resolved config this run used — Playwright's `FullConfig`. */
   readonly config: Record<string, unknown>;
-  readonly annotations: TestDetailsAnnotation[];
+  /** What the test declared and recorded; pushing onto it records the annotation, as in Playwright. */
+  annotations: TestDetailsAnnotation[];
   readonly attachmentCount: number;
   readonly errors: string[];
   attach(

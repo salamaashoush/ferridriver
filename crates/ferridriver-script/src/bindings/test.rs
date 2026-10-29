@@ -191,6 +191,70 @@ pub(crate) struct CurrentTest {
   pub(crate) test_info: Persistent<Object<'static>>,
   pub(crate) bridge: Arc<dyn TestHostBridge>,
   pub(crate) pending: Vec<PendingFixture>,
+  pub(crate) annotations: AnnotationsMirror,
+}
+
+/// `testInfo.annotations` as Playwright has it: one array the test may
+/// push to. It mirrors what the host recorded (declared annotations,
+/// `annotate()`, `test.skip()` and the like); entries a body pushed itself
+/// are handed to the host when the test ends ([`fold_pushed_annotations`]).
+#[derive(Clone)]
+pub(crate) struct AnnotationsMirror {
+  array: Persistent<rquickjs::Array<'static>>,
+  /// The entries copied from the host, by identity, so a fold leaves them
+  /// out however the body reordered the array.
+  mirrored: Persistent<rquickjs::Array<'static>>,
+}
+
+impl AnnotationsMirror {
+  fn new(ctx: &Ctx<'_>) -> rquickjs::Result<Self> {
+    Ok(Self {
+      array: Persistent::save(ctx, rquickjs::Array::new(ctx.clone())?),
+      mirrored: Persistent::save(ctx, rquickjs::Array::new(ctx.clone())?),
+    })
+  }
+
+  /// The array, with whatever the host recorded since the last look
+  /// appended.
+  fn sync<'js>(&self, ctx: &Ctx<'js>, bridge: &dyn TestHostBridge) -> rquickjs::Result<rquickjs::Array<'js>> {
+    let array = self.array.clone().restore(ctx)?;
+    let mirrored = self.mirrored.clone().restore(ctx)?;
+    for (kind, description) in bridge.annotations().into_iter().skip(mirrored.len()) {
+      let entry = Object::new(ctx.clone())?;
+      entry.set("type", kind)?;
+      if let Some(description) = description {
+        entry.set("description", description)?;
+      }
+      array.set(array.len(), entry.clone())?;
+      mirrored.set(mirrored.len(), entry)?;
+    }
+    Ok(array)
+  }
+}
+
+/// Hand the host every annotation the running test pushed onto
+/// `testInfo.annotations` itself.
+fn fold_pushed_annotations(ctx: &Ctx<'_>) {
+  let Ok(Some((mirror, bridge))) = with_test_registry(ctx, |r| {
+    r.current
+      .as_ref()
+      .map(|c| (c.annotations.clone(), Arc::clone(&c.bridge)))
+  }) else {
+    return;
+  };
+  let (Ok(array), Ok(mirrored)) = (mirror.sync(ctx, bridge.as_ref()), mirror.mirrored.clone().restore(ctx)) else {
+    return;
+  };
+  let mirrored: Vec<Object<'_>> = mirrored.iter::<Object<'_>>().flatten().collect();
+  for entry in array.iter::<Object<'_>>().flatten() {
+    if mirrored.contains(&entry) {
+      continue;
+    }
+    let Ok(type_name) = entry.get::<_, String>("type") else {
+      continue;
+    };
+    bridge.annotate(type_name, entry.get::<_, Option<String>>("description").ok().flatten());
+  }
 }
 
 /// A `test.skip(callback[, description])` registered at file or
@@ -1809,6 +1873,7 @@ fn build_test_info<'js>(
   ctx: &Ctx<'js>,
   info: &TestInfoData,
   bridge: &Arc<dyn TestHostBridge>,
+  annotations: &AnnotationsMirror,
 ) -> Result<Object<'js>, ScriptError> {
   let obj = Object::new(ctx.clone()).map_err(se)?;
   obj.set("title", info.title.clone()).map_err(se)?;
@@ -1842,21 +1907,11 @@ fn build_test_info<'js>(
   }
 
   // Live getters backed by the bridge: annotations grows via
-  // `annotate()`, attachmentCount via `attach()`.
+  // `annotate()` and pushes, attachmentCount via `attach()`.
   install_bridge_getter(ctx, &obj, "annotations", {
     let bridge = Arc::clone(bridge);
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-      let arr = rquickjs::Array::new(ctx.clone())?;
-      for (i, (kind, description)) in bridge.annotations().into_iter().enumerate() {
-        let a = Object::new(ctx.clone())?;
-        a.set("type", kind)?;
-        if let Some(d) = description {
-          a.set("description", d)?;
-        }
-        arr.set(i, a)?;
-      }
-      Ok(arr.into_value())
-    }
+    let mirror = annotations.clone();
+    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { Ok(mirror.sync(ctx, bridge.as_ref())?.into_value()) }
   })
   .map_err(se)?;
   install_bridge_getter(ctx, &obj, "attachmentCount", {
@@ -2073,7 +2128,8 @@ pub(crate) fn set_current_test(
   if let Some(b) = &world.browser {
     install_browser_on(ctx, &obj, Arc::clone(b)).map_err(se)?;
   }
-  let info_obj = build_test_info(ctx, &world.info, &bridge)?;
+  let annotations = AnnotationsMirror::new(ctx).map_err(se)?;
+  let info_obj = build_test_info(ctx, &world.info, &bridge, &annotations)?;
   obj.set("testInfo", info_obj.clone()).map_err(se)?;
   // The `expect` block this test's project resolved to — every bare
   // `expect(...)` the body makes starts from its timeout.
@@ -2087,6 +2143,7 @@ pub(crate) fn set_current_test(
       test_info: info_saved,
       bridge,
       pending: Vec::new(),
+      annotations,
     });
   })
 }
@@ -2672,6 +2729,7 @@ pub async fn run_test(
 
     let result = drive_current_test(&ctx, &spec, &world).await;
 
+    fold_pushed_annotations(&ctx);
     let teardown = teardown_test_fixtures(&ctx).await;
     let _ = with_test_registry(&ctx, |r| r.current = None);
     match (result, teardown) {
@@ -2703,6 +2761,7 @@ pub async fn run_script_test(
     set_current_test(&ctx, &route_vm, &world, Arc::clone(&bridge))?;
     let result = drive_script(&ctx, &script, &world).await;
     clear_script_globals(&ctx);
+    fold_pushed_annotations(&ctx);
     let teardown = teardown_test_fixtures(&ctx).await;
     let _ = with_test_registry(&ctx, |r| r.current = None);
     match (result, teardown) {
@@ -2985,6 +3044,7 @@ pub async fn run_standalone_hook(
     }
     .await;
 
+    fold_pushed_annotations(&ctx);
     let teardown = teardown_test_fixtures(&ctx).await;
     let _ = with_test_registry(&ctx, |r| r.current = None);
     match (result, teardown) {
