@@ -130,10 +130,13 @@ pub enum Scaffold {
   Script,
   /// An `@ferridriver/test` spec `ferridriver test` runs.
   Test,
+  /// A plain script `ferridriver test` runs as one test (`[test]
+  /// scriptMatch`): the recorded steps alone, against its `page`.
+  Plain,
 }
 
 impl Scaffold {
-  /// Parse `script` or `test`.
+  /// Parse `script`, `test` or `plain`.
   ///
   /// # Errors
   ///
@@ -142,7 +145,10 @@ impl Scaffold {
     match s {
       "script" => Ok(Self::Script),
       "test" => Ok(Self::Test),
-      other => Err(format!("unknown codegen target '{other}': expected 'script' or 'test'")),
+      "plain" => Ok(Self::Plain),
+      other => Err(format!(
+        "unknown codegen target '{other}': expected 'script', 'test' or 'plain'"
+      )),
     }
   }
 }
@@ -187,6 +193,7 @@ impl OutputLanguage {
       (Self::Rust, _) => std::sync::Arc::new(emitter::RustEmitter),
       (Self::TypeScript, Scaffold::Script) => std::sync::Arc::new(emitter::TypeScriptEmitter),
       (Self::TypeScript, Scaffold::Test) => std::sync::Arc::new(emitter::TypeScriptTestEmitter::default()),
+      (Self::TypeScript, Scaffold::Plain) => std::sync::Arc::new(emitter::TypeScriptPlainEmitter),
       (Self::Gherkin, _) => std::sync::Arc::new(emitter::GherkinEmitter::new()),
     }
   }

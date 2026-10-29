@@ -13,7 +13,8 @@ pub struct CodegenConfig {
   /// Output language: "rust" (default), "typescript"/"ts", "gherkin"/"bdd".
   pub language: Option<String>,
   /// What the TypeScript output is wrapped in: "script" (default), a file
-  /// `ferridriver run` executes, or "test", an `@ferridriver/test` spec.
+  /// `ferridriver run` executes, "test", an `@ferridriver/test` spec, or
+  /// "plain", the steps alone for a `[test] scriptMatch` file.
   pub target: Option<String>,
   /// Write to file instead of stdout.
   pub output_file: Option<String>,

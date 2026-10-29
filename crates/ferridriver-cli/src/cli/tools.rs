@@ -84,9 +84,11 @@ pub struct CodegenArgs {
   pub language: String,
 
   /// What TypeScript output is: `script`, a file `ferridriver run`
-  /// executes, or `test`, an `@ferridriver/test` spec `ferridriver test`
-  /// runs. Rust and Gherkin output are tests already.
-  #[arg(long, default_value = "script", value_parser = ["script", "test"])]
+  /// executes, `test`, an `@ferridriver/test` spec `ferridriver test`
+  /// runs, or `plain`, the steps alone, which `ferridriver test` runs as a
+  /// file `[test] scriptMatch` names. Rust and Gherkin output are tests
+  /// already.
+  #[arg(long, default_value = "script", value_parser = ["script", "test", "plain"])]
   pub target: String,
 
   /// The test's title in a `--target test` spec.

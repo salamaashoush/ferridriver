@@ -64,8 +64,12 @@ fn wrote(path: &std::path::Path, target: &str) {
     "wrote {}",
     ui::path(&path.display().to_string())
   )));
-  let command = if target == "test" { "test" } else { "run" };
-  ui::next_steps(&[("run it", format!("ferridriver {command} {}", path.display()))]);
+  let step = match target {
+    "test" => format!("ferridriver test {}", path.display()),
+    "plain" => format!("name {} in [test] scriptMatch, then ferridriver test", path.display()),
+    _ => format!("ferridriver run {}", path.display()),
+  };
+  ui::next_steps(&[("run it", step)]);
 }
 
 fn emitter(language: OutputLanguage, scaffold: Scaffold, title: Option<&str>) -> Arc<dyn CodeEmitter> {

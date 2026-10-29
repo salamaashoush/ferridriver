@@ -261,6 +261,29 @@ impl CodeEmitter for TypeScriptEmitter {
   }
 }
 
+/// A plain script: the recording as top-level statements against the
+/// `page` a `[test] scriptMatch` run puts in scope, with nothing to launch
+/// and nothing to close.
+pub struct TypeScriptPlainEmitter;
+
+impl CodeEmitter for TypeScriptPlainEmitter {
+  fn header(&self, url: &str) -> String {
+    if url.is_empty() {
+      String::new()
+    } else {
+      format!("await page.goto('{}');\n", escape_js(url))
+    }
+  }
+
+  fn action(&self, action: &Action) -> String {
+    format!("{}\n", typescript_statement(action))
+  }
+
+  fn footer(&self) -> String {
+    String::new()
+  }
+}
+
 /// An `@ferridriver/test` spec: one `test` whose body is the recording, run
 /// by `ferridriver test` against the `page` fixture.
 pub struct TypeScriptTestEmitter {
@@ -489,6 +512,33 @@ mod tests {
        \x20 await expect(page.locator('#greeting')).toContainText('Welcome');\n\
        \x20 await expect(page).toHaveURL('https://example.com/home');\n\
        });\n"
+    );
+  }
+
+  #[test]
+  fn the_plain_scaffold_is_the_recording_alone() {
+    let actions = [
+      Action::Navigate {
+        url: "https://example.com/login".into(),
+      },
+      click("getByRole('button', { name: 'Sign in' })"),
+      Action::AssertUrl {
+        url: "https://example.com/home".into(),
+      },
+    ];
+    assert_eq!(
+      render(&TypeScriptPlainEmitter, &actions),
+      "await page.goto('https://example.com/login');\n\
+       await page.getByRole('button', { name: 'Sign in' }).click();\n\
+       await expect(page).toHaveURL('https://example.com/home');\n"
+    );
+    assert_eq!(
+      TypeScriptPlainEmitter.header("https://example.com/"),
+      "await page.goto('https://example.com/');\n"
+    );
+    assert_eq!(
+      super::super::Scaffold::parse("plain").map(|s| super::super::OutputLanguage::TypeScript.emitter_for(s).footer()),
+      Ok(String::new())
     );
   }
 
