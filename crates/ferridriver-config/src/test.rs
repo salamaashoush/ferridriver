@@ -541,6 +541,10 @@ fn deserialize_optional_workers<'de, D: serde::Deserializer<'de>>(deserializer: 
 #[serde(default, rename_all = "camelCase")]
 pub struct TestConfig {
   pub test_match: Vec<String>,
+  /// Files that run as plain scripts rather than test files: each is one
+  /// test whose body is the file's own top-level code, with `page`,
+  /// `context`, `browser`, `request`, `expect` and `test` in scope.
+  pub script_match: Vec<String>,
   pub test_dir: Option<String>,
   pub test_ignore: Vec<String>,
   pub timeout: u64,
@@ -1593,6 +1597,7 @@ impl Default for TestConfig {
       // defaults when the user does not. Hard-coding `.rs` here forced every
       // TS test-runner config to redeclare `testMatch` to escape that default.
       test_match: Vec::new(),
+      script_match: Vec::new(),
       test_dir: None,
       test_ignore: vec!["**/node_modules/**".into(), "**/target/**".into()],
       timeout: 30_000,

@@ -512,6 +512,16 @@ fn push_test<'js>(
   title_override: Option<String>,
 ) -> rquickjs::Result<()> {
   warn_off_test_host(ctx, &reg.title);
+  if with_test_registry(ctx, |r| r.current.is_some()).map_err(|e| throw_script_error(ctx, &e))? {
+    return Err(throw_script_error(
+      ctx,
+      &ScriptError::internal(format!(
+        "test(\"{}\") was called while a test is running; tests are declared at the top level of a test file. \
+         A plain script is one test already: name its parts with test.step()",
+        reg.title
+      )),
+    ));
+  }
   let (line, col) = capture_location(ctx);
   let requested = destructured_keys(ctx, &reg.body);
   let saved = Persistent::save(ctx, reg.body);
@@ -2670,6 +2680,99 @@ pub async fn run_test(
     }
   })
   .await?
+}
+
+/// The globals a plain script sees for the length of its run: the test's
+/// own fixtures, under the names a test body destructures them by.
+const SCRIPT_FIXTURES: [&str; 4] = ["page", "context", "browser", "request"];
+
+/// Execute a plain script as the body of one test: the base chain's
+/// fixtures (an extension's auto fixtures and overrides included) are set
+/// up as for any test, put on the global object together with the base
+/// `test`, and the script's module evaluates from its own bytecode, so
+/// every run starts from a fresh top level and its frames map through its
+/// own source map onto the file the user wrote.
+pub async fn run_script_test(
+  vm: &ferrijs::VmHandle,
+  script: Arc<crate::bundle::CompiledBundle>,
+  world: TestWorldData,
+  bridge: Arc<dyn TestHostBridge>,
+) -> Result<(), ScriptError> {
+  let route_vm = vm.clone();
+  crate::vm_with!(vm => |ctx| {
+    set_current_test(&ctx, &route_vm, &world, Arc::clone(&bridge))?;
+    let result = drive_script(&ctx, &script, &world).await;
+    clear_script_globals(&ctx);
+    let teardown = teardown_test_fixtures(&ctx).await;
+    let _ = with_test_registry(&ctx, |r| r.current = None);
+    match (result, teardown) {
+      (Err(thrown), _) => {
+        bridge.set_failure_context(thrown.aria_snapshot);
+        Err(thrown.error)
+      },
+      (Ok(()), Err(e)) => Err(e),
+      (Ok(()), Ok(())) => Ok(()),
+    }
+  })
+  .await?
+}
+
+async fn drive_script(
+  ctx: &Ctx<'_>,
+  script: &crate::bundle::CompiledBundle,
+  world: &TestWorldData,
+) -> Result<(), Thrown> {
+  let world_obj = with_test_registry(ctx, |r| r.current.as_ref().map(|c| c.world.clone()))?
+    .ok_or_else(|| ScriptError::internal("no current test".to_string()))?
+    .restore(ctx)
+    .map_err(se)?;
+  let requested: Vec<String> = SCRIPT_FIXTURES.iter().map(|name| (*name).to_string()).collect();
+  resolve_custom_fixtures(
+    ctx,
+    &world_obj,
+    BASE_FIXTURE_SET,
+    &requested,
+    &world.use_options,
+    &script.module_name,
+  )
+  .await?;
+  let globals = ctx.globals();
+  for name in SCRIPT_FIXTURES {
+    let value: Value<'_> = world_obj.get(name).map_err(se)?;
+    globals.set(name, value).map_err(se)?;
+  }
+  let test = crate::bindings::runtime::ensure_ferridriver(ctx)
+    .and_then(|fd| fd.get::<_, Value<'_>>("test"))
+    .map_err(se)?;
+  globals.set("test", test).map_err(se)?;
+
+  crate::bindings::call_site::register_bundle(ctx, script.mapper());
+  // SAFETY: `script.bytecode` was produced by `Module::write` by this
+  // exact rquickjs/QuickJS build, in this process or restored from the
+  // bytecode disk cache whose ABI tag guarantees an ABI-identical
+  // toolchain wrote it: the precondition `Module::load` documents. QuickJS
+  // creates a new module at every load, so a retry evaluates it afresh.
+  #[allow(unsafe_code)]
+  let declared = unsafe { rquickjs::Module::load(ctx.clone(), &script.bytecode) }
+    .catch(ctx)
+    .map_err(|e| Thrown::caught(e, &script.module_name))?;
+  let (_, promise) = declared
+    .eval()
+    .catch(ctx)
+    .map_err(|e| Thrown::caught(e, &script.module_name))?;
+  promise
+    .into_future::<()>()
+    .await
+    .catch(ctx)
+    .map_err(|e| Thrown::caught(e, &script.module_name))
+}
+
+/// A later test in the same VM must not find this run's page.
+fn clear_script_globals(ctx: &Ctx<'_>) {
+  let globals = ctx.globals();
+  for name in SCRIPT_FIXTURES.iter().chain(&["test"]) {
+    let _ = globals.remove(*name);
+  }
 }
 
 async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorldData) -> Result<(), ScriptError> {

@@ -366,10 +366,24 @@ fn file_scope(collected: &CollectedTests, bundle: &CompiledBundle, cwd: &Path, f
   out
 }
 
+/// What a test runs: a body the test bundle registered, or a plain script.
+enum TestBody {
+  Registered {
+    test_idx: usize,
+    modifiers: Vec<usize>,
+    hooks_before: Vec<usize>,
+    hooks_after: Vec<usize>,
+  },
+  /// Its module is `TestFnParams::bundle`.
+  Script,
+}
+
 /// Everything a test body closure needs, resolved at translation time.
 struct TestFnParams {
-  test_idx: usize,
+  body: TestBody,
   sessions: Arc<crate::SessionPool>,
+  /// The module the body's frames map through: the test bundle, or the
+  /// script's own.
   bundle: Arc<CompiledBundle>,
   cwd: Arc<std::path::PathBuf>,
   /// The root config's `use` block. Only the fallback: a run resolves
@@ -388,9 +402,6 @@ struct TestFnParams {
   base_url: Option<String>,
   expected_status: ExpectedStatus,
   requests: Vec<String>,
-  modifiers: Vec<usize>,
-  hooks_before: Vec<usize>,
-  hooks_after: Vec<usize>,
 }
 
 /// Resolve the pool fixtures the body requested into a [`TestWorldData`].
@@ -488,13 +499,6 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
   let p = Arc::new(p);
   Arc::new(move |pool| {
     let p = Arc::clone(&p);
-    let spec = RunTestSpec {
-      test_idx: p.test_idx,
-      modifiers: p.modifiers.clone(),
-      hooks_before: p.hooks_before.clone(),
-      hooks_after: p.hooks_after.clone(),
-      source_label: p.file.as_str().to_string(),
-    };
     Box::pin(async move {
       let test_info: Arc<TestInfo> = pool
         .get("test_info")
@@ -538,7 +542,27 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
         worker_index: test_info.worker_index,
         clean: false,
       };
-      let result = ferridriver_script::run_test(&session.vm_handle(), spec, world, bridge.clone() as _).await;
+      let result = match &p.body {
+        TestBody::Registered {
+          test_idx,
+          modifiers,
+          hooks_before,
+          hooks_after,
+        } => {
+          let spec = RunTestSpec {
+            test_idx: *test_idx,
+            modifiers: modifiers.clone(),
+            hooks_before: hooks_before.clone(),
+            hooks_after: hooks_after.clone(),
+            source_label: p.file.as_str().to_string(),
+          };
+          ferridriver_script::run_test(&session.vm_handle(), spec, world, bridge.clone() as _).await
+        },
+        TestBody::Script => {
+          ferridriver_script::run_script_test(&session.vm_handle(), Arc::clone(&p.bundle), world, bridge.clone() as _)
+            .await
+        },
+      };
       halt.clean = !session.session().deadline().force_halted();
       session.session().disarm_deadline();
       drop(halt);
@@ -750,7 +774,12 @@ fn lower_test(
     .collect();
 
   let test_fn = make_test_fn(TestFnParams {
-    test_idx,
+    body: TestBody::Registered {
+      test_idx,
+      modifiers,
+      hooks_before,
+      hooks_after,
+    },
     sessions: Arc::clone(&cx.sessions),
     bundle: Arc::clone(bundle),
     cwd: Arc::clone(&cx.cwd_arc),
@@ -765,9 +794,6 @@ fn lower_test(
     base_url: cx.config.base_url.clone(),
     expected_status: meta.expected_status,
     requests: requests.clone(),
-    modifiers,
-    hooks_before,
-    hooks_after,
   });
 
   Ok(TestCase {
@@ -781,6 +807,78 @@ fn lower_test(
     expected_status: meta.expected_status,
     use_options: meta.use_bag,
   })
+}
+
+/// A plain script lowered to one test of a suite of its own, titled by the
+/// file's name without its extensions. Its body needs every fixture a
+/// script can name, and line 1 is where it starts.
+fn lower_script(cx: &PlanCx<'_>, script: &crate::ScriptSource, builder: &mut TestPlanBuilder) -> TestCase {
+  let process_dir = std::env::current_dir().ok();
+  let file = script
+    .file
+    .strip_prefix(process_dir.as_deref().unwrap_or(cx.cwd))
+    .map_or_else(|_| script.file.display().to_string(), |r| r.display().to_string());
+  let title = script
+    .file
+    .file_name()
+    .and_then(|name| name.to_str())
+    .map(|name| name.split('.').next().unwrap_or(name))
+    .filter(|stem| !stem.is_empty())
+    .map_or_else(|| file.clone(), str::to_string);
+  builder.add_suite(SuiteDef {
+    id: file.clone(),
+    name: file.clone(),
+    file: file.clone(),
+    mode: SuiteMode::default(),
+    serial_scope: None,
+  });
+  let id = TestId {
+    root_path: None,
+    repeat_each_index: 0,
+    file: file.clone(),
+    suite: Some(file.clone()),
+    name: title.clone(),
+    line: Some(1),
+    column: None,
+  };
+  let title_path: Vec<String> = id.title_path();
+  let annotations = title_tags(std::slice::from_ref(&title));
+  let tags: Vec<String> = annotations
+    .iter()
+    .filter_map(|a| match a {
+      TestAnnotation::Tag(t) => Some(t.clone()),
+      _ => None,
+    })
+    .collect();
+  let requests: Vec<String> = DEFAULT_REQUESTS.iter().map(|s| (*s).to_string()).collect();
+  let test_fn = make_test_fn(TestFnParams {
+    body: TestBody::Script,
+    sessions: Arc::clone(&cx.sessions),
+    bundle: Arc::clone(&script.bundle),
+    cwd: Arc::clone(&cx.cwd_arc),
+    config_use: Arc::clone(&cx.config_use),
+    spec_use: Arc::new(serde_json::json!({})),
+    static_annotations: Arc::new(static_annotation_pairs(&annotations)),
+    tags: Arc::new(tags),
+    title_path: Arc::new(title_path),
+    file: Arc::new(file),
+    title: Arc::new(title),
+    browser_config: cx.config.browser.clone(),
+    base_url: cx.config.base_url.clone(),
+    expected_status: ExpectedStatus::Pass,
+    requests: requests.clone(),
+  });
+  TestCase {
+    metadata: None,
+    id,
+    test_fn,
+    fixture_requests: requests,
+    annotations,
+    timeout: None,
+    retries: None,
+    expected_status: ExpectedStatus::Pass,
+    use_options: None,
+  }
 }
 
 /// Register `beforeAll`/`afterAll` hooks as suite-scoped core hooks
@@ -1000,6 +1098,10 @@ pub fn translate_tests(
   let mut registered_suites: Vec<String> = Vec::new();
   for test_idx in 0..source.collected.tests.len() {
     let case = lower_test(&cx, test_idx, &mut builder, &mut registered_suites)?;
+    builder.add_test(case);
+  }
+  for script in &source.scripts {
+    let case = lower_script(&cx, script, &mut builder);
     builder.add_test(case);
   }
   lower_all_hooks(source, config, cwd, &cx.cwd_arc, &cx.sessions, &mut builder);

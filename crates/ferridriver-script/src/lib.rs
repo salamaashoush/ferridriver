@@ -77,7 +77,7 @@ pub use bindings::{
   CollectedTests, ExtensionBinding, ExtensionCommandsJs, FORWARDED_CONTEXT_KEYS, HookArg, HttpClientJs, HttpResponseJs,
   JsArg, KeyboardJs, LocatorJs, MouseJs, PageJs, ScenarioSpec, ScriptAttachment, StepOutcome, TEST_SKIP_SENTINEL,
   TOOL_CONTEXT_KEYS, begin_scenario, collect_registry, collect_tests, drain_attachments, end_scenario,
-  install_extensions, invoke_hook, invoke_step, run_standalone_hook, run_test, set_hook_world,
+  install_extensions, invoke_hook, invoke_step, run_script_test, run_standalone_hook, run_test, set_hook_world,
   teardown_worker_fixtures,
 };
 pub use bundle::{

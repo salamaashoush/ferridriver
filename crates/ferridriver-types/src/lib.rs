@@ -21,6 +21,11 @@ pub const TEST_DTS: &str = include_str!("../../../packages/ferridriver-test/inde
 /// from `TEST_DTS`.
 pub const TEST_NODE_DTS: &str = include_str!("../../../packages/ferridriver-test/node.d.ts");
 
+/// The globals of a plain script (`[test] scriptMatch`): `page`,
+/// `context`, `browser`, `request`, `expect` and `test`. Only a script sees
+/// them, so an editor of test files leaves this out.
+pub const TEST_SCRIPT_DTS: &str = include_str!("../../../packages/ferridriver-test/script.d.ts");
+
 /// Playwright's device registry as JSON, keyed by device name: the same
 /// file `ferridriver::devices` compiles in, so a name listed here is one
 /// `use.device` resolves.
@@ -43,7 +48,7 @@ pub const PACKAGES: &[TypesPackage] = &[
   TypesPackage {
     name: "@ferridriver/test",
     declaration: TEST_DTS,
-    additional: &[("node.d.ts", TEST_NODE_DTS)],
+    additional: &[("node.d.ts", TEST_NODE_DTS), ("script.d.ts", TEST_SCRIPT_DTS)],
   },
 ];
 

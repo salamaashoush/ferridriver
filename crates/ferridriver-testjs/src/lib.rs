@@ -86,8 +86,23 @@ fn test_engine_config(
 /// Discover test entry files for the config's `testMatch` globs,
 /// resolved against `cwd` (and `testDir` when set). `.feature` globs
 /// belong to the BDD path and are skipped here; `testIgnore` prunes.
+///
+/// A file `scriptMatch` also names is a script, not a test file.
 #[must_use]
 pub fn discover_test_files(config: &TestConfig, cwd: &Path) -> Vec<PathBuf> {
+  let scripts = discover_script_files(config, cwd);
+  let mut files = discover_sources(config, cwd, &config.test_match);
+  files.retain(|file| !scripts.contains(file));
+  files
+}
+
+/// Discover the files `scriptMatch` names, which run as plain scripts.
+#[must_use]
+pub fn discover_script_files(config: &TestConfig, cwd: &Path) -> Vec<PathBuf> {
+  discover_sources(config, cwd, &config.script_match)
+}
+
+fn discover_sources(config: &TestConfig, cwd: &Path, patterns: &[String]) -> Vec<PathBuf> {
   let base = match &config.test_dir {
     Some(dir) => {
       let p = Path::new(dir);
@@ -101,7 +116,7 @@ pub fn discover_test_files(config: &TestConfig, cwd: &Path) -> Vec<PathBuf> {
     .filter_map(|p| glob::Pattern::new(p).ok())
     .collect();
   let mut files = Vec::new();
-  for pat in &config.test_match {
+  for pat in patterns {
     if pat.ends_with(".feature") || pat.contains(".feature") {
       continue;
     }
@@ -398,6 +413,15 @@ pub struct TsTestSource {
   pub bundle: Arc<CompiledBundle>,
   pub collected: CollectedTests,
   pub files: Vec<PathBuf>,
+  /// Plain scripts, each compiled on its own: its top level runs as a
+  /// test's body, never at collection.
+  pub scripts: Vec<ScriptSource>,
+}
+
+/// One plain script and its module.
+pub struct ScriptSource {
+  pub file: PathBuf,
+  pub bundle: Arc<CompiledBundle>,
 }
 
 /// Discover, bundle and collect — everything up to translation. Returns
@@ -410,14 +434,33 @@ pub struct TsTestSource {
 /// fails.
 pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Option<TsTestSource>> {
   let files = discover_test_files(config, cwd);
-  if files.is_empty() {
+  let script_files = discover_script_files(config, cwd);
+  if files.is_empty() && script_files.is_empty() {
     return Ok(None);
   }
-  let bundle = Arc::new(
+  // Workers evaluate the test bundle whether or not there are test files,
+  // so a run of scripts alone gets an empty one.
+  let bundle = Arc::new(if files.is_empty() {
+    ferridriver_script::compile_bundled_source("export {};\n", BUNDLE_NAME, None)
+      .await
+      .map_err(|e| anyhow::anyhow!("compile an empty test bundle: {}", e.message))?
+  } else {
     bundle_and_compile_named(&files, cwd, BUNDLE_NAME)
       .await
-      .map_err(|e| anyhow::anyhow!("bundle test files: {}", e.message))?,
-  );
+      .map_err(|e| anyhow::anyhow!("bundle test files: {}", e.message))?
+  });
+  let mut scripts = Vec::with_capacity(script_files.len());
+  for (index, file) in script_files.into_iter().enumerate() {
+    // A name of its own per script: frames are mapped by module name.
+    let name = format!("ferridriver-script-{index}.js");
+    let script = bundle_and_compile_named(std::slice::from_ref(&file), cwd, &name)
+      .await
+      .map_err(|e| anyhow::anyhow!("bundle script {}: {}", file.display(), e.message))?;
+    scripts.push(ScriptSource {
+      file,
+      bundle: Arc::new(script),
+    });
+  }
 
   // Collection session: evaluate once, snapshot registrations. The
   // session is discarded — workers build their own.
@@ -452,6 +495,7 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
     bundle,
     collected,
     files,
+    scripts,
   }))
 }
 
@@ -521,7 +565,8 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
   if !overrides.test_files.is_empty() {
     config.test_match = overrides.test_files.clone();
   }
-  if config.test_match.is_empty() {
+  // A config naming only scripts asked for no test files.
+  if config.test_match.is_empty() && config.script_match.is_empty() {
     config.test_match = DEFAULT_TEST_MATCH.iter().map(|s| (*s).to_string()).collect();
   }
 
@@ -551,7 +596,10 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
             ferridriver_test::runner::PlanBuild::ok(plan)
           },
           Ok(None) => {
-            eprintln!("no test files found (testMatch: {:?})", config.test_match);
+            eprintln!(
+              "no test files found (testMatch: {:?}, scriptMatch: {:?})",
+              config.test_match, config.script_match
+            );
             ferridriver_test::runner::PlanBuild::ok(empty_plan())
           },
           Err(e) => ferridriver_test::runner::PlanBuild::failed(empty_plan(), e.to_string()),
@@ -569,7 +617,10 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
   let (plan, pool) = match build_ts_plan(&config, &cwd).await {
     Ok(Some(built)) => built,
     Ok(None) => {
-      eprintln!("no test files found (testMatch: {:?})", config.test_match);
+      eprintln!(
+        "no test files found (testMatch: {:?}, scriptMatch: {:?})",
+        config.test_match, config.script_match
+      );
       return i32::from(!overrides.pass_with_no_tests);
     },
     Err(e) => {

@@ -483,6 +483,7 @@ declare global {
     retryStrategy?: unknown;
     screenshot?: unknown;
     screenshotOnFailure?: unknown;
+    scriptMatch?: unknown;
     snapshotDir?: unknown;
     snapshotPathTemplate?: unknown;
     steps?: unknown;

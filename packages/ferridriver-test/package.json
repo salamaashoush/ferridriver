@@ -7,10 +7,14 @@
   "exports": {
     ".": {
       "types": "./index.d.ts"
+    },
+    "./script": {
+      "types": "./script.d.ts"
     }
   },
   "files": [
     "index.d.ts",
-    "node.d.ts"
+    "node.d.ts",
+    "script.d.ts"
   ]
 }

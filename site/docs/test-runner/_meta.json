@@ -1,6 +1,7 @@
 [
   "overview",
   "rust",
+  "scripts",
   "expect",
   "fixtures-and-hooks",
   "reporters",

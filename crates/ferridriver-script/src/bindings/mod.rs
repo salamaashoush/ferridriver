@@ -99,8 +99,8 @@ pub use registry::{CollectedAllow, CollectedTool, ScriptAttachment, tools_len, t
 pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use test::{
   CollectedAnnotation, CollectedFileConfigure, CollectedFileUse, CollectedFixture, CollectedSuite, CollectedTest,
-  CollectedTestHook, CollectedTests, TEST_SKIP_SENTINEL, collect_tests, install_test, run_standalone_hook, run_test,
-  teardown_worker_fixtures,
+  CollectedTestHook, CollectedTests, TEST_SKIP_SENTINEL, collect_tests, install_test, run_script_test,
+  run_standalone_hook, run_test, teardown_worker_fixtures,
 };
 pub use test_debug::{PendingAction, TestDebugControl};
 pub use video::VideoJs;

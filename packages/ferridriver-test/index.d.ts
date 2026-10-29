@@ -351,6 +351,7 @@ export interface FerridriverTestConfig {
   retryStrategy?: unknown;
   screenshot?: unknown;
   screenshotOnFailure?: unknown;
+  scriptMatch?: unknown;
   snapshotDir?: unknown;
   snapshotPathTemplate?: unknown;
   steps?: unknown;
