@@ -614,7 +614,7 @@ pub(crate) fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_js
 /// The same shape serves `session.new` (browser-wide, from
 /// `launch({ proxy })`) and `browser.createUserContext` (per context).
 pub(crate) fn bidi_proxy_capability(proxy: &crate::options::ProxyConfig) -> serde_json::Value {
-  let (proxy_type, host_port, is_socks, socks_version) = parse_bidi_proxy(&proxy.server);
+  let (proxy_type, host_port, is_socks, socks_version) = parse_bidi_proxy(&proxy.server_origin());
   let mut capability = json!({ "proxyType": proxy_type });
 
   if is_socks {

@@ -1647,7 +1647,7 @@ impl LaunchSpec {
           env: eff.env.clone(),
           user_data_dir: eff.user_data_dir.as_ref().map(std::path::PathBuf::from),
           extra_args: eff.args.clone(),
-          proxy_server: eff.proxy.as_ref().map(|p| p.server.clone()),
+          proxy_server: eff.proxy.as_ref().map(crate::options::ProxyConfig::server_origin),
           proxy_bypass_list: eff.proxy.as_ref().and_then(crate::options::ProxyConfig::bypass_list),
         };
         AnyBrowser::WebKit(Box::pin(WebKitBrowser::launch(&config)).await?)

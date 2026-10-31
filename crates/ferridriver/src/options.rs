@@ -2776,10 +2776,24 @@ impl ProxyConfig {
   /// `socks5h` is lowered to it.
   #[must_use]
   pub fn chromium_server(&self) -> String {
-    match self.server.strip_prefix("socks5h://") {
+    let server = self.server_origin();
+    match server.strip_prefix("socks5h://") {
       Some(rest) => format!("socks5://{rest}"),
-      None => self.server.clone(),
+      None => server,
     }
+  }
+
+  /// `server` as the origin engines take, `scheme://host[:port]`: `http`
+  /// when no scheme is written, without credentials or a path. `WebKit`
+  /// finds no host at all in `127.0.0.1:3128`, so the scheme cannot be left
+  /// to the engine.
+  #[must_use]
+  pub fn server_origin(&self) -> String {
+    let server = self.server.trim();
+    let (scheme, rest) = server.split_once("://").unwrap_or(("http", server));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    format!("{}://{host}", scheme.to_ascii_lowercase())
   }
 
   /// `bypass` with each entry trimmed and empty entries dropped. `WebKit`
@@ -2887,7 +2901,7 @@ impl ProxyConfig {
       return flags;
     }
 
-    let mut flags = vec![format!("--proxy={}", self.server)];
+    let mut flags = vec![format!("--proxy={}", self.server_origin())];
     if let Some(bypass) = bypass {
       if cfg!(target_os = "linux") {
         // The GTK/WPE build takes one host per flag, not a list.
@@ -4032,6 +4046,31 @@ mod proxy_lowering_tests {
       );
     }
     assert!(!with(Some("localhost.example.com,127.0.0.2")).bypasses_loopback());
+  }
+
+  #[test]
+  fn engines_take_the_server_as_an_origin() {
+    let with = |server: &str| ProxyConfig {
+      server: server.to_string(),
+      ..proxy()
+    };
+    assert_eq!(with("127.0.0.1:3128").server_origin(), "http://127.0.0.1:3128");
+    assert_eq!(
+      with(" HTTP://proxy.example.com:3128/ ").server_origin(),
+      "http://proxy.example.com:3128"
+    );
+    assert_eq!(
+      with("http://user:pass@proxy.example.com:3128/path?q").server_origin(),
+      "http://proxy.example.com:3128"
+    );
+    assert_eq!(
+      with("socks5h://127.0.0.1:1080").chromium_server(),
+      "socks5://127.0.0.1:1080"
+    );
+    assert_eq!(
+      with("127.0.0.1:3128").launch_flags(BackendKind::WebKit)[0],
+      "--proxy=http://127.0.0.1:3128"
+    );
   }
 
   #[test]

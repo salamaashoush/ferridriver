@@ -340,7 +340,7 @@ impl WebKitBrowser {
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = CreateContextParams::default();
     if let Some(p) = proxy {
-      params.proxy_server = Some(p.server.clone());
+      params.proxy_server = Some(p.server_origin());
       params.proxy_bypass_list = p.bypass_list();
     }
     let resp = self
