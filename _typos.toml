@@ -55,9 +55,11 @@ deperecated = "deperecated"
 IIFEs = "IIFEs"
 
 [default]
-# Deliberately invalid keys and values exercise schema error messages, and
-# `--disable-fre` is Chrome's first-run-experience switch.
+# Deliberately invalid keys and values exercise schema error messages,
+# `--disable-fre` is Chrome's first-run-experience switch, and a test's stable
+# id is two hex hashes whose letters spell nothing.
 extend-ignore-re = [
+  '[0-9a-f]{20}-[0-9a-f]{20}',
   '''["'](?:entrys|testIdAttribut|netwrok|apiLevl)["']''',
   '"(?:más|mas) informacion"',
   '--disable-fre',
