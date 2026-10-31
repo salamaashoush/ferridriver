@@ -933,7 +933,11 @@ pub fn parse_file(path: &Path) -> anyhow::Result<Value> {
   let value: Value = match ext.as_str() {
     "toml" => toml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid TOML config {}: {e}", path.display()))?,
     "yaml" | "yml" => {
-      serde_yaml::from_str(&content).map_err(|e| anyhow::anyhow!("invalid YAML config {}: {e}", path.display()))?
+      // YAML 1.2 booleans only: `trace: on` names a mode, not `true`.
+      let mut options = serde_saphyr::Options::default();
+      options.strict_booleans = true;
+      serde_saphyr::from_str_with_options(&content, options)
+        .map_err(|e| anyhow::anyhow!("invalid YAML config {}: {e}", path.display()))?
     },
     "json" => {
       serde_json::from_str(&content).map_err(|e| anyhow::anyhow!("invalid JSON config {}: {e}", path.display()))?
@@ -1585,5 +1589,26 @@ mod tests {
   fn suggestion_names_the_camel_case_spelling() {
     assert!(suggestion_for("mcp.browser.chrome_args").contains("chromeArgs"));
     assert_eq!(suggestion_for("mcp.browser.nonsense"), "");
+  }
+}
+
+#[cfg(test)]
+mod yaml_tests {
+  #[test]
+  fn yaml_keeps_on_and_yes_as_strings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ferridriver.yaml");
+    std::fs::write(
+      &path,
+      "test:\n  use:\n    trace: { mode: on, snapshots: false }\n    video: on\n    note: yes\n    headless: true\n",
+    )
+    .unwrap();
+    let value = super::parse_file(&path).unwrap();
+    let used = &value["test"]["use"];
+    assert_eq!(used["trace"]["mode"], "on");
+    assert_eq!(used["trace"]["snapshots"], false);
+    assert_eq!(used["video"], "on");
+    assert_eq!(used["note"], "yes");
+    assert_eq!(used["headless"], true);
   }
 }

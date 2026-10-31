@@ -19,7 +19,7 @@ ferrijs-permissions = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "1.1"
-serde_yaml = "0.9"
+serde-saphyr = "2"
 anyhow = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
