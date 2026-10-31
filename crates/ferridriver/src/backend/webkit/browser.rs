@@ -341,7 +341,7 @@ impl WebKitBrowser {
     let mut params = CreateContextParams::default();
     if let Some(p) = proxy {
       params.proxy_server = Some(p.server.clone());
-      params.proxy_bypass_list = p.bypass.clone();
+      params.proxy_bypass_list = p.bypass_list();
     }
     let resp = self
       .inner

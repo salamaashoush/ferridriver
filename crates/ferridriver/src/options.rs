@@ -2782,6 +2782,21 @@ impl ProxyConfig {
     }
   }
 
+  /// `bypass` with each entry trimmed and empty entries dropped. `WebKit`
+  /// matches entries verbatim, so `"a.example, localhost"` would otherwise
+  /// name a host `" localhost"` that never matches.
+  #[must_use]
+  pub fn bypass_list(&self) -> Option<String> {
+    let entries: Vec<&str> = self
+      .bypass
+      .as_deref()?
+      .split(',')
+      .map(str::trim)
+      .filter(|entry| !entry.is_empty())
+      .collect();
+    (!entries.is_empty()).then(|| entries.join(","))
+  }
+
   /// The URL scheme of `server`, `http` when it names none.
   #[must_use]
   pub fn scheme(&self) -> &str {
@@ -2832,7 +2847,7 @@ impl ProxyConfig {
   /// authentication challenge, so they are not lowered here.
   #[must_use]
   pub fn launch_flags(&self, backend: crate::backend::BackendKind) -> Vec<String> {
-    let bypass = self.bypass.as_deref();
+    let bypass = self.bypass_list();
 
     if backend != crate::backend::BackendKind::WebKit {
       let mut flags = vec![format!("--proxy-server={}", self.chromium_server())];
@@ -2846,7 +2861,7 @@ impl ProxyConfig {
     if let Some(bypass) = bypass {
       if cfg!(target_os = "linux") {
         // The GTK/WPE build takes one host per flag, not a list.
-        flags.extend(bypass.split(',').map(|host| format!("--ignore-host={}", host.trim())));
+        flags.extend(bypass.split(',').map(|host| format!("--ignore-host={host}")));
       } else {
         flags.push(format!("--proxy-bypass-list={bypass}"));
       }
@@ -3948,6 +3963,31 @@ mod proxy_lowering_tests {
 
     assert_eq!(no_bypass.launch_flags(BackendKind::WebKit).len(), 1);
     assert_eq!(no_bypass.launch_flags(BackendKind::CdpWs).len(), 1);
+  }
+
+  #[test]
+  fn bypass_entries_reach_every_engine_trimmed() {
+    let spaced = ProxyConfig {
+      bypass: Some(" a.example.com ,localhost, ".to_string()),
+      ..proxy()
+    };
+    assert_eq!(spaced.bypass_list().as_deref(), Some("a.example.com,localhost"));
+    assert_eq!(
+      spaced.launch_flags(BackendKind::CdpPipe)[1..],
+      ["--proxy-bypass-list=a.example.com,localhost"]
+    );
+    let webkit = spaced.launch_flags(BackendKind::WebKit);
+    if cfg!(target_os = "linux") {
+      assert_eq!(webkit[1..], ["--ignore-host=a.example.com", "--ignore-host=localhost"]);
+    } else {
+      assert_eq!(webkit[1..], ["--proxy-bypass-list=a.example.com,localhost"]);
+    }
+    let blank = ProxyConfig {
+      bypass: Some(" , ".to_string()),
+      ..proxy()
+    };
+    assert_eq!(blank.bypass_list(), None);
+    assert_eq!(blank.launch_flags(BackendKind::CdpPipe).len(), 1);
   }
 }
 
