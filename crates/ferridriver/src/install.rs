@@ -112,9 +112,13 @@ struct PwBrowsersJson {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PwBrowserEntry {
   name: String,
   revision: String,
+  /// Host platforms pinned to an older build, such as `mac14-arm64`.
+  #[serde(default)]
+  revision_overrides: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1056,21 +1060,25 @@ impl BrowserInstaller {
       .await
       .map_err(|e| backend_err(format!("failed to parse Playwright browsers.json: {e}")))?;
 
+    let platform = webkit_platform_for_host()?;
+    let archive = webkit_archive(&platform)
+      .ok_or_else(|| FerriError::unsupported(format!("no Playwright WebKit build for {platform}")))?;
     let revision = browsers
       .browsers
       .into_iter()
       .find(|b| b.name == "webkit")
-      .map(|b| b.revision)
+      .map(|mut b| b.revision_overrides.remove(&platform).unwrap_or(b.revision))
       .ok_or_else(|| backend_err("Playwright browsers.json missing webkit entry"))?;
-
-    let archive = webkit_archive_for_host()?;
 
     let webkit_root = self.cache_dir.join("webkit");
     let install_dir = webkit_root.join(format!("webkit-{revision}"));
     let marker_file = install_dir.join(".downloaded");
     let executable = install_dir.join("pw_run.sh");
 
-    if marker_file.exists() && executable.exists() {
+    // The marker names the archive, so a build made for another OS release
+    // under the same revision is replaced rather than kept.
+    let installed = tokio::fs::read_to_string(&marker_file).await.unwrap_or_default();
+    if installed == archive && executable.exists() {
       let path = executable.to_string_lossy().to_string();
       progress(InstallProgress::AlreadyInstalled {
         version: revision.clone(),
@@ -1137,7 +1145,7 @@ impl BrowserInstaller {
       )));
     }
 
-    let _ = tokio::fs::write(&marker_file, revision.as_bytes()).await;
+    let _ = tokio::fs::write(&marker_file, archive.as_bytes()).await;
 
     let path = executable.to_string_lossy().to_string();
     progress(InstallProgress::Complete {
@@ -1293,35 +1301,74 @@ impl Default for BrowserInstaller {
 // Platform detection
 // ---------------------------------------------------------------------------
 
-/// Map the host to the Playwright `WebKit` archive name. Mirrors the
-/// table in `packages/playwright-core/src/server/registry/index.ts`.
-fn webkit_archive_for_host() -> Result<String> {
+/// The platform name the `WebKit` builds are published under for this host:
+/// `mac26-arm64`, `ubuntu24.04-x64`, `win64`.
+fn webkit_platform_for_host() -> Result<String> {
   let os = std::env::consts::OS;
   let arch = std::env::consts::ARCH;
-
-  let archive = match (os, arch) {
+  match os {
     #[cfg(target_os = "linux")]
-    ("linux", _) => {
+    "linux" => {
       let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-      let platform = linux::host_platform(&os_release, arch);
-      return linux::webkit_archive(&platform)
-        .map(str::to_string)
-        .ok_or_else(|| FerriError::unsupported(format!("no Playwright WebKit build for {platform}")));
+      Ok(linux::host_platform(&os_release, arch))
     },
-    #[cfg(not(target_os = "linux"))]
-    ("linux", "aarch64") => "webkit-ubuntu-24.04-arm64.zip",
-    #[cfg(not(target_os = "linux"))]
-    ("linux", _) => "webkit-ubuntu-24.04.zip",
-    ("macos", "aarch64") => "webkit-mac-15-arm64.zip",
-    ("macos", _) => "webkit-mac-15.zip",
-    ("windows", _) => "webkit-win64.zip",
-    _ => {
-      return Err(FerriError::unsupported(format!(
-        "no Playwright WebKit build for {os}/{arch}"
-      )));
+    #[cfg(unix)]
+    "macos" => {
+      let uname = rustix::system::uname();
+      Ok(mac_host_platform(&uname.release().to_string_lossy(), arch))
     },
+    "windows" => Ok("win64".to_string()),
+    _ => Err(FerriError::unsupported(format!(
+      "no Playwright WebKit build for {os}/{arch}"
+    ))),
+  }
+}
+
+/// The newest macOS major a `WebKit` build is published for. A newer
+/// Darwin, a beta say, takes this one's build.
+const LAST_STABLE_MACOS_MAJOR: u32 = 26;
+
+/// The macOS platform name from the Darwin kernel release
+/// (`uname -r`). Darwin 20 to 24 are macOS 11 to 15; Apple then jumped to
+/// macOS 26 for Darwin 25.
+fn mac_host_platform(darwin_release: &str, arch: &str) -> String {
+  let darwin = darwin_release
+    .split('.')
+    .next()
+    .and_then(|major| major.parse::<u32>().ok())
+    .unwrap_or(0);
+  let version = match darwin {
+    ..18 => "10.13".to_string(),
+    18 => "10.14".to_string(),
+    19 => "10.15".to_string(),
+    20..25 => (darwin - 9).to_string(),
+    _ => (darwin + 1).min(LAST_STABLE_MACOS_MAJOR).to_string(),
   };
-  Ok(archive.to_string())
+  let suffix = if darwin >= 20 && arch == "aarch64" {
+    "-arm64"
+  } else {
+    ""
+  };
+  format!("mac{version}{suffix}")
+}
+
+/// The `WebKit` archive built for `platform`. macOS before 14 has no
+/// current build.
+fn webkit_archive(platform: &str) -> Option<&'static str> {
+  #[cfg(target_os = "linux")]
+  if let Some(archive) = linux::webkit_archive(platform) {
+    return Some(archive);
+  }
+  Some(match platform {
+    "mac14" => "webkit-mac-14.zip",
+    "mac14-arm64" => "webkit-mac-14-arm64.zip",
+    "mac15" => "webkit-mac-15.zip",
+    "mac15-arm64" => "webkit-mac-15-arm64.zip",
+    "mac26" => "webkit-mac-26.zip",
+    "mac26-arm64" => "webkit-mac-26-arm64.zip",
+    "win64" => "webkit-win64.zip",
+    _ => return None,
+  })
 }
 
 fn current_platform() -> String {
@@ -1799,5 +1846,43 @@ mod extraction_tests {
     let dest = root.path().join("out2");
     std::fs::create_dir_all(&dest).unwrap();
     assert!(extract_zip(&escaping, &dest).is_err());
+  }
+}
+
+#[cfg(test)]
+mod webkit_platform_tests {
+  use super::{PwBrowsersJson, mac_host_platform, webkit_archive};
+
+  #[test]
+  fn darwin_releases_map_to_mac_platforms() {
+    for (release, arch, platform) in [
+      ("17.7.0", "x86_64", "mac10.13"),
+      ("18.0.0", "x86_64", "mac10.14"),
+      ("19.6.0", "x86_64", "mac10.15"),
+      ("20.6.0", "aarch64", "mac11-arm64"),
+      ("23.6.0", "aarch64", "mac14-arm64"),
+      ("24.1.0", "x86_64", "mac15"),
+      ("25.0.0", "aarch64", "mac26-arm64"),
+      ("27.2.0", "aarch64", "mac26-arm64"),
+    ] {
+      assert_eq!(mac_host_platform(release, arch), platform, "{release} {arch}");
+    }
+  }
+
+  #[test]
+  fn each_mac_release_takes_the_build_made_for_it() {
+    assert_eq!(webkit_archive("mac14-arm64"), Some("webkit-mac-14-arm64.zip"));
+    assert_eq!(webkit_archive("mac15"), Some("webkit-mac-15.zip"));
+    assert_eq!(webkit_archive("mac26-arm64"), Some("webkit-mac-26-arm64.zip"));
+    assert_eq!(webkit_archive("mac13-arm64"), None);
+  }
+
+  #[test]
+  fn revision_overrides_are_read_per_platform() {
+    let json = r#"{"browsers":[{"name":"webkit","revision":"2387","revisionOverrides":{"mac14-arm64":"2251"}}]}"#;
+    let mut browsers: PwBrowsersJson = serde_json::from_str(json).unwrap();
+    let mut webkit = browsers.browsers.remove(0);
+    assert_eq!(webkit.revision_overrides.remove("mac14-arm64").as_deref(), Some("2251"));
+    assert_eq!(webkit.revision, "2387");
   }
 }
