@@ -950,9 +950,15 @@ mod tests {
     };
     let mut retained = None;
     assert!(
-      launch_prepared(&AndroidOptions::default(), true, "_", sdk, &mut retained)
-        .await
-        .is_err()
+      Box::pin(launch_prepared(
+        &AndroidOptions::default(),
+        true,
+        "_",
+        sdk,
+        &mut retained
+      ))
+      .await
+      .is_err()
     );
     let owner = retained.unwrap();
     assert!(!owner.cleanup_complete());
