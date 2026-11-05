@@ -384,11 +384,9 @@ async fn a_session_host_on_a_served_browser_opens_its_pages_as_the_configured_ph
     "{seen}"
   );
 
-  // The other app's page keeps the browser's own settings, as the session
-  // host sees it and as the app does once it looks.
-  if !seen["foreign"].is_null() {
-    ensure!(seen["foreign"][0] == 1 && seen["foreign"][2] == 0, "{seen}");
-  }
+  // The other app's page is not the session's: the host does not list it,
+  // and it keeps the browser's own settings when the app looks.
+  ensure!(seen["foreign"].is_null(), "{seen}");
   let attached = other
     .send(
       None,
@@ -435,7 +433,7 @@ async fn observe(origin: &str, registry: &Registry) -> anyhow::Result<serde_json
      const opened = await context.newPage();
      await opened.goto('{origin}/help');
      const pages = [page, await popup, opened];
-     // Every page a connection reaches is listed, the other app's too.
+     // A page of a context another app made is not one of the session's.
      const foreign = context.pages().find(p => p.url().endsWith('?own'));
      const seen = {{ pages: [], agents: [], foreign: foreign ? await foreign.evaluate(() => {DEVICE}) : null }};
      for (const p of pages) {{
@@ -460,4 +458,76 @@ async fn observe(origin: &str, registry: &Registry) -> anyhow::Result<serde_json
   Ok(serde_json::from_str(
     reply["value"].as_str().context("the script's answer")?,
   )?)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_host_leaves_the_pages_of_another_apps_context_alone() -> anyhow::Result<()> {
+  let origin = serve_pages()?;
+  let served = Served::start()?;
+
+  // Another app's context, holding a blank tab and a page, is all the
+  // browser has when the session host connects.
+  let mut other = Cdp::connect(&served.endpoint).await?;
+  let context = other
+    .send(None, "Target.createBrowserContext", serde_json::json!({}))
+    .await?;
+  let blank = other
+    .send(
+      None,
+      "Target.createTarget",
+      serde_json::json!({"url": "about:blank", "browserContextId": context["browserContextId"]}),
+    )
+    .await?;
+  other
+    .send(
+      None,
+      "Target.createTarget",
+      serde_json::json!({"url": format!("{origin}/help?own"), "browserContextId": context["browserContextId"]}),
+    )
+    .await?;
+
+  let scratch = tempfile::tempdir()?;
+  let registry_dir = scratch.path().join("registry");
+  let opened = cli(
+    &registry_dir,
+    &["session", "open", "apart", "--headless", "--connect", &served.endpoint],
+  )?;
+  ensure!(
+    opened.status.success(),
+    "session open: {}",
+    String::from_utf8_lossy(&opened.stderr)
+  );
+  let ran = async {
+    let endpoint = Registry::open_at(&registry_dir)?
+      .get("apart")?
+      .context("the session's descriptor")?
+      .endpoint;
+    let reply = call(
+      &endpoint,
+      ferridriver_session::RUN_VERB,
+      serde_json::json!({"code": format!(
+        "await page.goto('{origin}/?session');
+         return JSON.stringify(context.pages().map(p => p.url()));"
+      )}),
+    )
+    .await?;
+    let reply: serde_json::Value = serde_json::from_str(&reply.text)?;
+    ensure!(reply["status"] == "ok", "{reply}");
+    let listed: Vec<String> = serde_json::from_str(reply["value"].as_str().context("the script's answer")?)?;
+    anyhow::Ok(listed)
+  }
+  .await;
+  let _ = cli(&registry_dir, &["session", "close", "apart"]);
+  let listed = ran?;
+
+  assert_eq!(listed, [format!("{origin}/?session")], "the session's pages");
+  let targets = other.send(None, "Target.getTargets", serde_json::json!({})).await?;
+  let theirs = targets["targetInfos"]
+    .as_array()
+    .context("the targets")?
+    .iter()
+    .find(|info| info["targetId"] == blank["targetId"])
+    .context("the other app's blank tab is still open")?;
+  assert_eq!(theirs["url"], "about:blank", "the other app's blank tab: {targets}");
+  Ok(())
 }

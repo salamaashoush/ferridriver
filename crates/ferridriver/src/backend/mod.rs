@@ -701,7 +701,9 @@ impl AnyBrowser {
     }
   }
 
-  /// List all open pages in this browser.
+  /// List the open pages of this browser's default context. Pages of a
+  /// context another client of the same browser created are that client's
+  /// and are not listed.
   ///
   /// # Errors
   ///
@@ -713,22 +715,6 @@ impl AnyBrowser {
       Self::WebKit(b) => Box::pin(b.pages()).await,
       Self::Bidi(b) => Box::pin(b.pages()).await,
       Self::WebDriver(b) => Ok(b.pages().await?.into_iter().map(AnyPage::WebDriver).collect()),
-    }
-  }
-
-  /// The pages, by [`AnyPage::backend_target_id`], that belong to a
-  /// context some client created rather than to the default one. Only CDP
-  /// reaches pages of other clients' contexts; the other backends answer
-  /// none.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend fails to enumerate contexts or targets.
-  pub async fn created_context_targets(&self) -> Result<rustc_hash::FxHashSet<String>> {
-    match self {
-      Self::CdpPipe(b) => b.created_context_targets().await,
-      Self::CdpWs(b) => b.created_context_targets().await,
-      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => Ok(rustc_hash::FxHashSet::default()),
     }
   }
 

@@ -356,6 +356,37 @@ struct ParkedTarget {
 
 type CreateLedger = crate::backend::CreateLedger<ParkedTarget>;
 
+/// The browser contexts some client created, by id. The browser's own
+/// default context is never among them.
+async fn created_browser_contexts<T: CdpTransport>(transport: &T) -> Result<rustc_hash::FxHashSet<String>> {
+  let contexts = transport
+    .send_command(None, "Target.getBrowserContexts", &super::EMPTY_PARAMS)
+    .await?;
+  Ok(
+    contexts
+      .get("browserContextIds")
+      .and_then(serde_json::Value::as_array)
+      .map(|ids| {
+        ids
+          .iter()
+          .filter_map(serde_json::Value::as_str)
+          .map(str::to_string)
+          .collect()
+      })
+      .unwrap_or_default(),
+  )
+}
+
+/// Whether a `Target.getTargets` entry is a page of the default context:
+/// a page target in none of the `created` contexts.
+fn is_default_context_page(target: &serde_json::Value, created: &rustc_hash::FxHashSet<String>) -> bool {
+  target.get("type").and_then(serde_json::Value::as_str) == Some("page")
+    && !target
+      .get("browserContextId")
+      .and_then(serde_json::Value::as_str)
+      .is_some_and(|id| created.contains(id))
+}
+
 impl<T: CdpWrap> CdpBrowser<T> {
   /// Enable required CDP domains on a session so events and queries work.
   /// If `viewport` is provided, sets viewport in the same parallel batch.
@@ -885,45 +916,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Arc::clone(&self.popup_taps)
   }
 
-  /// The page targets that live in a browser context some client created,
-  /// rather than in the browser's default one.
-  pub async fn created_context_targets(&self) -> Result<rustc_hash::FxHashSet<String>> {
-    let contexts = self
-      .transport
-      .send_command(None, "Target.getBrowserContexts", &super::EMPTY_PARAMS)
-      .await?;
-    let created: rustc_hash::FxHashSet<&str> = contexts
-      .get("browserContextIds")
-      .and_then(serde_json::Value::as_array)
-      .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).collect())
-      .unwrap_or_default();
-    let targets = self
-      .transport
-      .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
-      .await?;
-    Ok(
-      targets
-        .get("targetInfos")
-        .and_then(serde_json::Value::as_array)
-        .map(|infos| {
-          infos
-            .iter()
-            .filter(|info| {
-              info
-                .get("browserContextId")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| created.contains(id))
-            })
-            .filter_map(|info| info.get("targetId").and_then(serde_json::Value::as_str))
-            .map(str::to_string)
-            .collect()
-        })
-        .unwrap_or_default(),
-    )
-  }
-
-  /// Retrieve all open page targets, attaching to any not yet tracked.
+  /// The open pages of the browser's default context, attaching to any
+  /// not yet tracked. A page of a context some other client created is
+  /// that client's, and is neither listed nor attached to.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
+    let created = created_browser_contexts(&*self.transport).await?;
     let result = self
       .transport
       .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
@@ -937,7 +934,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
     let mut pages = renderer::AdoptedPages::new();
     for target in targets {
-      if target.get("type").and_then(|v| v.as_str()) != Some("page") {
+      if !is_default_context_page(&target, &created) {
         continue;
       }
       let target_id = target
@@ -1440,8 +1437,9 @@ impl CdpBrowser<ws::WsTransport> {
     let Some(targets) = targets.get("targetInfos").and_then(|t| t.as_array()) else {
       return Ok(false);
     };
+    let created = created_browser_contexts(&**transport).await?;
     for target in targets {
-      if target.get("type").and_then(|v| v.as_str()) != Some("page") {
+      if !is_default_context_page(target, &created) {
         continue;
       }
       let target_id = target

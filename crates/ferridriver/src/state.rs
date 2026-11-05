@@ -1315,8 +1315,9 @@ impl BrowserState {
     //
     // A config with device or context options ([`Self::context_defaults`])
     // gets all of them, not just the viewport: they are the options of the
-    // default context's pages, and emulation is per page, so the pages of
-    // any context another client made are left as they are.
+    // default context's pages. Only those pages are adopted: a page of a
+    // context another client made is that client's, so it is neither
+    // emulated, listed by `context.pages()`, nor taken over as a blank page.
     let existing_pages = Box::pin(inst.browser.pages()).await?;
     let ctx = inst.context_mut("default");
     for page in existing_pages {
@@ -1325,11 +1326,7 @@ impl BrowserState {
     }
     context_pages.set(&format!("{instance_name}:default"), &ctx.pages);
     if let Some(options) = defaults {
-      let foreign = inst.browser.created_context_targets().await?;
       for page in &inst.context_mut("default").pages {
-        if foreign.contains(&page.backend_target_id()) {
-          continue;
-        }
         // Boxed as `dyn`: the whole options path inlined into the launch
         // task's future overflows the compiler's `Send` check on it.
         let applied: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =

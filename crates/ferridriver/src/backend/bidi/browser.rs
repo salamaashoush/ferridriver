@@ -447,7 +447,9 @@ impl BidiBrowser {
     Ok(())
   }
 
-  /// List all open pages (top-level browsing contexts).
+  /// List the open pages (top-level browsing contexts) of the default user
+  /// context. A user context another client created holds that client's
+  /// pages, which are left alone.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let result = self
       .session
@@ -466,6 +468,9 @@ impl BidiBrowser {
         .and_then(|v| v.as_str())
         .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "context missing 'context' field"))?;
       let user_context = ctx.get("userContext").and_then(|v| v.as_str());
+      if user_context.is_some_and(|id| id != "default") {
+        continue;
+      }
       pages.push(AnyPage::Bidi(BidiPage::create(
         self.session.clone(),
         context_id.to_string(),
