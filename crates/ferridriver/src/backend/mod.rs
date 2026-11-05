@@ -1481,15 +1481,10 @@ impl AnyPage {
     page_dispatch!(self, click_and_drag(from, to, steps))
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<()> {
-    page_dispatch!(self, type_str(text))
-  }
-
-  /// Insert text without emitting keyboard events (only `input` event).
-  /// This is Playwright's `keyboard.insertText()` semantic.
+  /// Insert text at the focus without emitting keyboard events (only
+  /// `input` event). This is Playwright's `keyboard.insertText()` semantic.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
-    // type_str on all backends uses Input.insertText / equivalent
-    self.type_str(text).await
+    page_dispatch!(self, insert_text(text))
   }
 
   /// Press `key` and keep it held. A held modifier applies to every

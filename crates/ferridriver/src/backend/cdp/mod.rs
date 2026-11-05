@@ -4960,7 +4960,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<()> {
+  pub async fn insert_text(&self, text: &str) -> Result<()> {
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }

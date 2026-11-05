@@ -1809,7 +1809,7 @@ impl WebKitPage {
     super::input::click_and_drag(self, from, to, steps).await
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<()> {
+  pub async fn insert_text(&self, text: &str) -> Result<()> {
     super::input::type_text(self, text).await
   }
 

@@ -495,7 +495,7 @@ impl WebDriverPage {
       .await
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<()> {
+  pub async fn insert_text(&self, text: &str) -> Result<()> {
     self.execute_script("const el = document.activeElement; if (!el) throw new Error('No focused element'); document.execCommand('insertText', false, arguments[0]);", vec![json!(text)]).await?;
     Ok(())
   }

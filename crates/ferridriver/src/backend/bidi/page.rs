@@ -251,6 +251,53 @@ fn f64_to_u64_saturating(n: f64) -> u64 {
   clamped
 }
 
+/// Insert text where the document's focus is and announce it with an
+/// `input` event, or answer the window of the frame element the focus is
+/// in. A text control takes it at its caret, over its selection; a
+/// contenteditable takes it at its selection, a line break as `<br>`.
+const INSERT_TEXT: &str = r"(text) => {
+  let element = document.activeElement;
+  while (element && element.shadowRoot)
+    element = element.shadowRoot.activeElement;
+  if (!element)
+    return undefined;
+  const name = element.nodeName.toLowerCase();
+  if (name === 'iframe' || name === 'frame')
+    return element.contentWindow;
+  if (name === 'input' || name === 'textarea') {
+    const start = element.selectionStart;
+    if (start === null) {
+      element.value += text;
+    } else {
+      const end = element.selectionEnd;
+      element.value = element.value.slice(0, start) + text + element.value.slice(end);
+      element.setSelectionRange(start + text.length, start + text.length);
+    }
+  } else if (element instanceof HTMLElement && element.isContentEditable) {
+    const selection = window.getSelection();
+    let range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    if (!range || !element.contains(range.commonAncestorContainer)) {
+      range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(true);
+    }
+    range.deleteContents();
+    const lines = text.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      range.insertNode(document.createTextNode(lines[i]));
+      if (i > 0)
+        range.insertNode(document.createElement('br'));
+    }
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } else {
+    return undefined;
+  }
+  element.dispatchEvent(new InputEvent('input', { data: text, bubbles: true, composed: true }));
+  return undefined;
+}";
+
 /// Page handle for the `BiDi` backend. Cheaply cloneable (Arc-based).
 #[derive(Clone)]
 pub struct BidiPage {
@@ -1559,11 +1606,42 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<()> {
-    self
-      .cmd("input.performActions", input::type_text(&self.context_id, text))
-      .await?;
-    Ok(())
+  /// Insert `text` at the focus from a page script, as one `input` event
+  /// and no key events: Firefox's input actions can only press keys. The
+  /// script reports a focused frame element by its window, whose context
+  /// the text is then inserted in, until the focus is found.
+  pub async fn insert_text(&self, text: &str) -> Result<()> {
+    let mut context = self.context_id.to_string();
+    loop {
+      let result = self
+        .cmd(
+          "script.callFunction",
+          json!({
+            "functionDeclaration": INSERT_TEXT,
+            "target": {"context": &context},
+            "arguments": [{"type": "string", "value": text}],
+            "awaitPromise": false,
+            "resultOwnership": "none",
+          }),
+        )
+        .await?;
+      if result.get("type").and_then(serde_json::Value::as_str) == Some("exception") {
+        let reason = result
+          .pointer("/exceptionDetails/text")
+          .and_then(serde_json::Value::as_str)
+          .unwrap_or("inserting text threw");
+        return Err(FerriError::evaluation(reason.to_string()));
+      }
+      match result
+        .pointer("/result/value/context")
+        .and_then(serde_json::Value::as_str)
+      {
+        Some(frame) if result.pointer("/result/type").and_then(serde_json::Value::as_str) == Some("window") => {
+          context = frame.to_string();
+        },
+        _ => return Ok(()),
+      }
+    }
   }
 
   /// `BiDi` presses the key by name; the browser keeps the held keys on
