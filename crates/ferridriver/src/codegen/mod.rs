@@ -26,10 +26,14 @@ pub enum Action {
   Click {
     selector: String,
     locator: String,
+    #[serde(default, skip_serializing_if = "ClickOptions::is_plain")]
+    options: ClickOptions,
   },
   Dblclick {
     selector: String,
     locator: String,
+    #[serde(default, skip_serializing_if = "ClickOptions::is_plain")]
+    options: ClickOptions,
   },
   Fill {
     selector: String,
@@ -94,6 +98,48 @@ pub enum Action {
   },
 }
 
+/// How a recorded click differs from a plain left click, in the shape of
+/// the options object the code passes: `{"button": "right", "modifiers":
+/// ["Shift"], "clickCount": 3, "position": {"x": 4, "y": 6}}`, each key
+/// only when it differs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClickOptions {
+  /// `middle` or `right`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub button: Option<String>,
+  /// `Alt`, `ControlOrMeta` or `Shift`, in that order.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub modifiers: Vec<String>,
+  /// Three or more: two is a double click, which says so by its name.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub click_count: Option<u32>,
+  /// The point clicked, from the element's padding edge, for a canvas.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub position: Option<ClickPosition>,
+}
+
+impl ClickOptions {
+  /// A plain left click, which takes no options.
+  #[must_use]
+  pub fn is_plain(&self) -> bool {
+    self == &Self::default()
+  }
+
+  /// The click count the gesture reached: a double click is two.
+  fn count(&self, double: bool) -> u32 {
+    self.click_count.unwrap_or(if double { 2 } else { 1 })
+  }
+}
+
+/// A point in CSS pixels. Whole pixels: a recorded event's fields are
+/// flattened on the wire, where a float would not decode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClickPosition {
+  pub x: i64,
+  pub y: i64,
+}
+
 /// The name generated code gives the page a recording starts on.
 pub const FIRST_PAGE: &str = "page";
 
@@ -136,8 +182,8 @@ impl Action {
   /// element.
   pub fn target_mut(&mut self) -> Option<(&mut String, &mut String)> {
     match self {
-      Self::Click { selector, locator }
-      | Self::Dblclick { selector, locator }
+      Self::Click { selector, locator, .. }
+      | Self::Dblclick { selector, locator, .. }
       | Self::Fill { selector, locator, .. }
       | Self::Press { selector, locator, .. }
       | Self::Select { selector, locator, .. }
@@ -169,6 +215,28 @@ impl Action {
       | Self::AssertValue { selector, .. }
       | Self::AssertChecked { selector, .. } => Some(selector),
       Self::Navigate { .. } | Self::AssertUrl { .. } | Self::AssertTitle { .. } => None,
+    }
+  }
+
+  /// The click count of a click or double click on `selector`.
+  fn click_count_on(&self, target: &str) -> Option<u32> {
+    match self {
+      Self::Click { selector, options, .. } if selector == target => Some(options.count(false)),
+      Self::Dblclick { selector, options, .. } if selector == target => Some(options.count(true)),
+      _ => None,
+    }
+  }
+
+  /// Whether this click continues `earlier`: a higher click count on the
+  /// same element is the double or triple click it began as.
+  #[must_use]
+  pub fn continues_click(&self, earlier: &Action) -> bool {
+    let Some(selector) = self.selector() else {
+      return false;
+    };
+    match (self.click_count_on(selector), earlier.click_count_on(selector)) {
+      (Some(now), Some(before)) => now > before,
+      _ => false,
     }
   }
 

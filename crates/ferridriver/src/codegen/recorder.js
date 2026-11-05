@@ -329,9 +329,61 @@
       record({ type: checkbox.checked ? 'check' : 'uncheck' }, hoveredSelectorOr(target));
       return;
     }
-    lastClickTime = Date.now();
-    record({ type: e.detail === 2 ? 'dblclick' : 'click' }, hoveredSelectorOr(target));
+    recordClick(e, buttonFor(e), e.detail, target);
   }, true);
+
+  // A middle click; a right click is the context menu's.
+  document.addEventListener('auxclick', function(e) {
+    if (!e.isTrusted || !active || mode !== 'recording' || onOverlay(e) || e.button === 2) return;
+    var target = deepEventTarget(e);
+    if (ignoredMouseTarget(target)) return;
+    recordClick(e, buttonFor(e), e.detail || 1, target);
+  }, true);
+
+  // A context menu the keyboard opened is not a click.
+  document.addEventListener('contextmenu', function(e) {
+    if (!e.isTrusted || !active || mode !== 'recording' || onOverlay(e) || e.button !== 2) return;
+    var target = deepEventTarget(e);
+    if (ignoredMouseTarget(target)) return;
+    recordClick(e, 'right', 1, target);
+  }, true);
+
+  function buttonFor(e) {
+    if (e.which === 2) return 'middle';
+    if (e.which === 3) return 'right';
+    return 'left';
+  }
+
+  function modifiersFor(e) {
+    var modifiers = [];
+    if (e.altKey) modifiers.push('Alt');
+    if (e.ctrlKey) modifiers.push('ControlOrMeta');
+    if (e.metaKey) modifiers.push('ControlOrMeta');
+    if (e.shiftKey) modifiers.push('Shift');
+    return modifiers;
+  }
+
+  // The options a click is replayed with: only the ones that differ from a
+  // plain left click, a double click's count being its name, and a
+  // position only on a canvas, where the point is the target.
+  function clickOptions(e, button, clickCount) {
+    var options = {};
+    if (button !== 'left') options.button = button;
+    var modifiers = modifiersFor(e);
+    if (modifiers.length) options.modifiers = modifiers;
+    if (clickCount > 2) options.clickCount = clickCount;
+    if (e.target && e.target.nodeName === 'CANVAS')
+      options.position = { x: Math.round(e.offsetX), y: Math.round(e.offsetY) };
+    return options;
+  }
+
+  function recordClick(e, button, clickCount, target) {
+    lastClickTime = Date.now();
+    var action = { type: clickCount === 2 ? 'dblclick' : 'click' };
+    var options = clickOptions(e, button, clickCount);
+    if (Object.keys(options).length) action.options = options;
+    record(action, hoveredSelectorOr(target));
+  }
 
   // ── Input: every change of value, trusted or not ──
   //

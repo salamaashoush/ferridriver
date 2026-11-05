@@ -35,12 +35,12 @@ const center = async loc => { const b = await loc.boundingBox(); return [b.x + b
 const click = async (p, loc) => { const [x, y] = await center(loc); await p.mouse.move(x, y); await p.mouse.down(); await p.mouse.up(); };
 `;
 
-// Record `journey` on a session of `backend` showing the shop, check the
-// spec's body is `expected`, and replay the spec.
-async function journey(backend, id, script, expected) {
+// Record `journey` on a session of `backend` showing `page` (the shop by
+// default), check the spec's body is `expected`, and replay the spec.
+async function journey(backend, id, script, expected, page = 'shop') {
   const origin = await serveAssets();
   try {
-    const { body, cwd } = await record(backend, id, `${origin}/recorder/shop.html`, script);
+    const { body, cwd } = await record(backend, id, `${origin}/recorder/${page}.html`, script);
     assert.deepEqual(body, expected);
     passed(await run(['test', '--no-inherit', '--headless', 'recorded.spec.ts'], { cwd }));
   } finally {
@@ -57,7 +57,9 @@ async function record(backend, id, shop, journey) {
     const command = ['env', `FERRIDRIVER_SESSION_DIR=${registry}`, binary, 'codegen', '--attach', id,
       '--target', 'test', '-o', 'recorded.spec.ts'].map(quote).join(' ');
     await commands.open('stdio', { command: `cd ${quote(cwd)} && exec ${command} 2>&1` });
-    await readUntil('stdio', 'type stop');
+    // The opening navigation is recorded once the recorder is in every
+    // frame; input before that would go unrecorded.
+    await readUntil('stdio', 'recorded navigate');
     passed(await run(['run', '--session', id, '--eval', helpers + journey], { cwd, env }));
     await commands.write('stdio', 'stop\n');
     const output = await readUntil('stdio', 'wrote');
@@ -109,6 +111,69 @@ for (const backend of ['cdp-pipe', 'cdp-raw', 'webkit', 'bidi']) {
       "  await page.locator('iframe[title=\"Coupon\"]').contentFrame().getByRole('textbox', { name: 'Code' }).fill('SAVE10');",
       "  await page.locator('iframe[title=\"Coupon\"]').contentFrame().getByRole('button', { name: 'Apply' }).click();",
     ]);
+  });
+
+  test(`${backend}: starts a frame path in any frame where that picks out the frame alone`, async () => {
+    await journey(backend, `deep-${backend}`, `
+      const inner = page.frameLocator('iframe[title="Outer"]').frameLocator('iframe[title="Inner"]');
+      await click(page, inner.getByRole('button', { name: 'Deep' }));
+      await click(page, inner.getByRole('button', { name: 'Only' }));
+    `, [
+      // Another frame has a Deep button too, so its path stays whole.
+      "  await page.locator('iframe[title=\"Outer\"]').contentFrame().locator('iframe[title=\"Inner\"]').contentFrame().getByRole('button', { name: 'Deep' }).click();",
+      "  await page.frameLocator().getByRole('button', { name: 'Only' }).click();",
+    ], 'frames');
+  });
+
+  test(`${backend}: records the button, held keys, count and canvas point of a click`, async () => {
+    await journey(backend, `clicks-${backend}`, `
+      const at = async loc => { const [x, y] = await center(loc); await page.mouse.move(x, y); return [x, y]; };
+      const button = name => page.getByRole('button', { name });
+      let [x, y] = await at(button('Alpha'));
+      await page.mouse.click(x, y, { clickCount: 3 });
+      [x, y] = await at(button('Bravo'));
+      await page.keyboard.down('Shift'); await page.mouse.click(x, y); await page.keyboard.up('Shift');
+      [x, y] = await at(button('Charlie'));
+      await page.keyboard.down('Alt'); await page.keyboard.down('ControlOrMeta');
+      await page.mouse.click(x, y);
+      await page.keyboard.up('ControlOrMeta'); await page.keyboard.up('Alt');
+      [x, y] = await at(button('Delta'));
+      await page.mouse.click(x, y, { button: 'middle' });
+      [x, y] = await at(button('Echo'));
+      await page.mouse.click(x, y, { button: 'right' });
+      [x, y] = await at(button('Foxtrot'));
+      // One press after another, as a person double-clicks: Firefox counts
+      // the clicks of one input action only.
+      await page.keyboard.down('Shift'); await page.mouse.click(x, y, { clickCount: 2 }); await page.keyboard.up('Shift');
+      const canvas = await page.locator('canvas').boundingBox();
+      await page.mouse.move(canvas.x + 5, canvas.y + 7);
+      await page.mouse.click(canvas.x + 5, canvas.y + 7);
+    `, [
+      "  await page.getByRole('button', { name: 'Alpha' }).click({",
+      "    clickCount: 3",
+      "  });",
+      "  await page.getByRole('button', { name: 'Bravo' }).click({",
+      "    modifiers: ['Shift']",
+      "  });",
+      "  await page.getByRole('button', { name: 'Charlie' }).click({",
+      "    modifiers: ['Alt', 'ControlOrMeta']",
+      "  });",
+      "  await page.getByRole('button', { name: 'Delta' }).click({",
+      "    button: 'middle'",
+      "  });",
+      "  await page.getByRole('button', { name: 'Echo' }).click({",
+      "    button: 'right'",
+      "  });",
+      "  await page.getByRole('button', { name: 'Foxtrot' }).dblclick({",
+      "    modifiers: ['Shift']",
+      "  });",
+      "  await page.locator('canvas').click({",
+      "    position: {",
+      "      x: 5,",
+      "      y: 7",
+      "    }",
+      "  });",
+    ], 'clicks');
   });
 
   test(`${backend}: records the popup a target=_blank link opens, and the opener after it`, async () => {

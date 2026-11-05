@@ -242,12 +242,11 @@ impl Shared {
       }
       let replaces_previous = state.actions.last().is_some_and(|last| {
         last.page == action.page
-          && matches!(
-            (&last.action, &action.action),
-            (Action::Click { selector: a, .. }, Action::Dblclick { selector: b, .. })
-              | (Action::Fill { selector: a, .. }, Action::Fill { selector: b, .. })
-              if a == b
-          )
+          && (action.action.continues_click(&last.action)
+            || matches!(
+              (&last.action, &action.action),
+              (Action::Fill { selector: a, .. }, Action::Fill { selector: b, .. }) if a == b
+            ))
       });
       if replaces_previous && let Some(previous) = state.actions.pop() {
         action.popup = action.popup.or(previous.popup);
@@ -363,7 +362,7 @@ async fn run(shared: Arc<Shared>, mut inbound: mpsc::UnboundedReceiver<Inbound>)
                 frame_paths.insert(Arc::clone(frame.id()), path);
               }
               if let Some(path) = frame_paths.get(frame.id()) {
-                enter_frames(action, path);
+                enter_frames(action, &page.main_frame(), &frame, path).await;
               }
             }
             shared.on_message(&alias, &message)
@@ -380,15 +379,59 @@ async fn run(shared: Arc<Shared>, mut inbound: mpsc::UnboundedReceiver<Inbound>)
 
 /// Prefix a frame's action with the path into the frame, and say it the
 /// way the path reads in code.
-fn enter_frames(action: &mut serde_json::Value, path: &[String]) {
+///
+/// A path two or more frames deep is shortened where it can be: the
+/// selector starts in any frame instead, with as few of the innermost
+/// frame elements in front of it as still pick out this frame alone.
+async fn enter_frames(action: &mut serde_json::Value, main: &Frame, frame: &Frame, path: &[String]) {
   let Some(selector) = action.get("selector").and_then(serde_json::Value::as_str) else {
     return;
   };
-  let mut full = path.join(ENTER_FRAME);
-  full.push_str(ENTER_FRAME);
-  full.push_str(selector);
+  let mut full = through_frames(path, selector);
+  let shortest = async {
+    for candidate in any_frame_candidates(path, selector) {
+      if crate::locator::any_frame_resolves_to(main, &candidate, frame).await {
+        return Some(candidate);
+      }
+    }
+    None
+  };
+  if let Ok(Some(shorter)) = tokio::time::timeout(FRAME_SEARCH, shortest).await {
+    full = shorter;
+  }
   action["locator"] = crate::locator_generator::as_locator(&full).into();
   action["selector"] = full.into();
+}
+
+/// How long the search for a shorter frame path may take before the full
+/// path is used.
+const FRAME_SEARCH: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn through_frames(path: &[String], selector: &str) -> String {
+  let mut full = path.join(ENTER_FRAME);
+  if !full.is_empty() {
+    full.push_str(ENTER_FRAME);
+  }
+  full.push_str(selector);
+  full
+}
+
+/// The any-frame forms of a path, shortest first, down to the one that
+/// still names two frame elements fewer than the full path.
+fn any_frame_candidates(path: &[String], selector: &str) -> Vec<String> {
+  if path.len() < 2 {
+    return Vec::new();
+  }
+  (2..=path.len())
+    .rev()
+    .map(|skipped| {
+      format!(
+        "{} >> {}",
+        crate::locator::ANY_FRAME,
+        through_frames(&path[skipped..], selector)
+      )
+    })
+    .collect()
 }
 
 /// The selectors of the frame elements from the main frame down to
@@ -922,7 +965,8 @@ mod tests {
       shared.state().actions,
       [RecordedAction::on_first_page(Action::Dblclick {
         selector: "#b".into(),
-        locator: "locator('#b')".into()
+        locator: "locator('#b')".into(),
+        options: super::super::ClickOptions::default(),
       })]
     );
     let flags: Vec<bool> = seen
@@ -940,6 +984,41 @@ mod tests {
       })
       .collect();
     assert_eq!(flags, [false, true]);
+  }
+
+  #[test]
+  fn a_triple_click_folds_into_one_click_and_two_clicks_stay_two() {
+    let (shared, _) = shared();
+    let on = |kind: &str, options: serde_json::Value| serde_json::json!({ "type": kind, "selector": "#a", "locator": "locator('#a')", "options": options });
+    shared.on_message(FIRST_PAGE, &message(&on("click", serde_json::json!({}))));
+    shared.on_message(FIRST_PAGE, &message(&on("dblclick", serde_json::json!({}))));
+    shared.on_message(
+      FIRST_PAGE,
+      &message(&on("click", serde_json::json!({ "clickCount": 3 }))),
+    );
+    shared.on_message(
+      FIRST_PAGE,
+      &message(&on("click", serde_json::json!({ "modifiers": ["Shift"] }))),
+    );
+    shared.on_message(
+      FIRST_PAGE,
+      &message(&on("click", serde_json::json!({ "button": "right" }))),
+    );
+    let options: Vec<serde_json::Value> = shared
+      .state()
+      .actions
+      .iter()
+      .map(|action| serde_json::to_value(action).unwrap())
+      .map(|value| value.get("options").cloned().unwrap_or_default())
+      .collect();
+    assert_eq!(
+      options,
+      [
+        serde_json::json!({ "clickCount": 3 }),
+        serde_json::json!({ "modifiers": ["Shift"] }),
+        serde_json::json!({ "button": "right" }),
+      ]
+    );
   }
 
   #[test]
@@ -963,25 +1042,44 @@ mod tests {
 
   #[test]
   fn an_action_in_a_frame_reaches_in_through_the_frame_elements() {
-    let mut action = serde_json::json!({
-      "type": "click",
-      "selector": "internal:role=textbox[name=\"Code\"i]",
-      "locator": "getByRole('textbox', { name: 'Code' })",
-    });
-    enter_frames(
-      &mut action,
-      &["iframe[title=\"Coupon\"]".to_string(), "#inner".to_string()],
-    );
+    let path = ["iframe[title=\"Coupon\"]".to_string(), "#inner".to_string()];
+    let selector = "internal:role=textbox[name=\"Code\"i]";
+    let full = through_frames(&path, selector);
     assert_eq!(
-      action["selector"],
+      full,
       "iframe[title=\"Coupon\"] >> internal:control=enter-frame >> #inner >> internal:control=enter-frame >> \
        internal:role=textbox[name=\"Code\"i]"
     );
     assert_eq!(
-      action["locator"],
+      crate::locator_generator::as_locator(&full),
       "locator('iframe[title=\"Coupon\"]').contentFrame().locator('#inner').contentFrame().getByRole('textbox', { name: 'Code' })"
     );
+    assert_eq!(through_frames(&[], selector), selector);
     assert_eq!(quote_css_attribute_value("a\"b\\c"), "\"a\\\"b\\\\c\"");
+  }
+
+  #[test]
+  fn a_deep_path_is_tried_from_any_frame_shortest_first() {
+    let selector = "internal:role=button[name=\"Deep\"i]";
+    let one = ["#a".to_string()];
+    assert_eq!(any_frame_candidates(&one, selector), Vec::<String>::new());
+    let three = ["#a".to_string(), "#b".to_string(), "#c".to_string()];
+    let candidates = any_frame_candidates(&three, selector);
+    assert_eq!(
+      candidates,
+      [
+        "internal:control=any-frame >> internal:role=button[name=\"Deep\"i]",
+        "internal:control=any-frame >> #c >> internal:control=enter-frame >> internal:role=button[name=\"Deep\"i]",
+      ]
+    );
+    assert_eq!(
+      crate::locator_generator::as_locator(&candidates[0]),
+      "frameLocator().getByRole('button', { name: 'Deep' })"
+    );
+    assert_eq!(
+      crate::locator_generator::as_locator(&candidates[1]),
+      "frameLocator().locator('#c').contentFrame().getByRole('button', { name: 'Deep' })"
+    );
   }
 
   #[test]

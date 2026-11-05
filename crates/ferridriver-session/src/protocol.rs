@@ -661,6 +661,7 @@ mod tests {
           action: ferridriver::codegen::Action::Click {
             selector: "#go".into(),
             locator: "locator('#go')".into(),
+            options: ferridriver::codegen::ClickOptions::default(),
           },
           popup: Some("page1".into()),
         },

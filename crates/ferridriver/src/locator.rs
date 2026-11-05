@@ -2950,6 +2950,22 @@ async fn resolve_in_any_frame(root: &crate::frame::Frame, selector: &str) -> Res
   )
 }
 
+/// Whether `selector`, starting with [`ANY_FRAME`], matches from `root` in
+/// `frame` and in no other frame.
+pub(crate) async fn any_frame_resolves_to(
+  root: &crate::frame::Frame,
+  selector: &str,
+  frame: &crate::frame::Frame,
+) -> bool {
+  let Ok(Some(rest)) = any_frame_rest(selector) else {
+    return false;
+  };
+  match Box::pin(resolve_in_any_frame(root, rest)).await {
+    Ok((resolved, rest)) => rest != MATCHES_NOTHING && resolved.id() == frame.id(),
+    Err(_) => false,
+  }
+}
+
 /// How many elements `selector` matches in `frame`, without strictness.
 async fn count_in(frame: &crate::frame::Frame, selector: &str) -> Result<usize> {
   let parts_json = selectors::build_parts_json(&selectors::parse(selector)?);

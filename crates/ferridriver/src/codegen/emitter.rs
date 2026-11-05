@@ -1,6 +1,6 @@
 //! Code emitters: convert recorded actions into test code.
 
-use super::{Action, RecordedAction};
+use super::{Action, ClickOptions, RecordedAction};
 
 /// Emits test code for a specific language.
 pub trait CodeEmitter: Send + Sync {
@@ -95,6 +95,71 @@ fn escape_js(s: &str) -> String {
   out
 }
 
+/// A click's options as a JavaScript object literal laid out one key per
+/// line, keys in order, nested objects indented under their key.
+fn js_click_options(options: &ClickOptions) -> String {
+  let mut keys = Vec::new();
+  if let Some(button) = &options.button {
+    keys.push(format!("button: '{}'", escape_js(button)));
+  }
+  if let Some(count) = options.click_count {
+    keys.push(format!("clickCount: {count}"));
+  }
+  if !options.modifiers.is_empty() {
+    let names: Vec<String> = options
+      .modifiers
+      .iter()
+      .map(|m| format!("'{}'", escape_js(m)))
+      .collect();
+    keys.push(format!("modifiers: [{}]", names.join(", ")));
+  }
+  if let Some(position) = options.position {
+    keys.push(format!(
+      "position: {{\n    x: {},\n    y: {}\n  }}",
+      position.x, position.y
+    ));
+  }
+  if keys.is_empty() {
+    return String::new();
+  }
+  format!("{{\n  {}\n}}", keys.join(",\n  "))
+}
+
+/// A click's options as Rust: the options call on the action, or nothing
+/// for a plain click.
+fn rust_click_options(options: &ClickOptions, double: bool) -> String {
+  if options.is_plain() {
+    return String::new();
+  }
+  let mut fields = Vec::new();
+  if let Some(button) = &options.button {
+    let variant = if button == "middle" { "Middle" } else { "Right" };
+    fields.push(format!("button: Some(ferridriver::options::MouseButton::{variant})"));
+  }
+  if let Some(count) = options.click_count.filter(|_| !double) {
+    fields.push(format!("click_count: Some({count})"));
+  }
+  if !options.modifiers.is_empty() {
+    let modifiers: Vec<String> = options
+      .modifiers
+      .iter()
+      .map(|m| format!("ferridriver::options::Modifier::{m}"))
+      .collect();
+    fields.push(format!("modifiers: vec![{}]", modifiers.join(", ")));
+  }
+  if let Some(position) = options.position {
+    fields.push(format!(
+      "position: Some(ferridriver::options::Point {{ x: {}.0, y: {}.0 }})",
+      position.x, position.y
+    ));
+  }
+  let kind = if double { "DblClickOptions" } else { "ClickOptions" };
+  format!(
+    ".options(ferridriver::options::{kind} {{ {}, ..Default::default() }})",
+    fields.join(", ")
+  )
+}
+
 fn quote_js_list(values: &[String]) -> String {
   match values {
     [single] => format!("'{}'", escape_js(single)),
@@ -133,8 +198,12 @@ impl CodeEmitter for RustEmitter {
     let locator = |selector: &str| format!("{page}.locator(\"{}\")", escape_rust(selector));
     let call = match &recorded.action {
       Action::Navigate { url } => format!("{page}.goto(\"{}\")", escape_rust(url)),
-      Action::Click { selector, .. } => format!("{}.click()", locator(selector)),
-      Action::Dblclick { selector, .. } => format!("{}.dblclick()", locator(selector)),
+      Action::Click { selector, options, .. } => {
+        format!("{}.click(){}", locator(selector), rust_click_options(options, false))
+      },
+      Action::Dblclick { selector, options, .. } => {
+        format!("{}.dblclick(){}", locator(selector), rust_click_options(options, true))
+      },
       Action::Fill { selector, value, .. } => {
         format!("{}.fill(\"{}\")", locator(selector), escape_rust(value))
       },
@@ -218,8 +287,12 @@ impl CodeEmitter for RustEmitter {
 fn typescript_statement(page: &str, action: &Action) -> String {
   match action {
     Action::Navigate { url } => format!("await {page}.goto('{}');", escape_js(url)),
-    Action::Click { locator, .. } => format!("await {page}.{locator}.click();"),
-    Action::Dblclick { locator, .. } => format!("await {page}.{locator}.dblclick();"),
+    Action::Click { locator, options, .. } => {
+      format!("await {page}.{locator}.click({});", js_click_options(options))
+    },
+    Action::Dblclick { locator, options, .. } => {
+      format!("await {page}.{locator}.dblclick({});", js_click_options(options))
+    },
     Action::Fill { locator, value, .. } => format!("await {page}.{locator}.fill('{}');", escape_js(value)),
     Action::Press { locator, key, .. } => format!("await {page}.{locator}.press('{}');", escape_js(key)),
     Action::Select { locator, values, .. } => {
@@ -273,9 +346,11 @@ fn typescript_statements(recorded: &RecordedAction) -> Vec<String> {
 fn typescript_lines(recorded: &RecordedAction, indent: &str) -> String {
   let mut lines = String::new();
   for statement in typescript_statements(recorded) {
-    lines.push_str(indent);
-    lines.push_str(&statement);
-    lines.push('\n');
+    for line in statement.lines() {
+      lines.push_str(indent);
+      lines.push_str(line);
+      lines.push('\n');
+    }
   }
   lines
 }
@@ -454,6 +529,9 @@ impl CodeEmitter for GherkinEmitter {
     let kw = self.keyword(action.is_assertion());
     let step = match action {
       Action::Navigate { url } => format!("I navigate to \"{url}\""),
+      Action::Click { selector, options, .. } if options.button.as_deref() == Some("right") => {
+        format!("I right click \"{selector}\"")
+      },
       Action::Click { selector, .. } => format!("I click \"{selector}\""),
       Action::Dblclick { selector, .. } => format!("I double click \"{selector}\""),
       Action::Fill { selector, value, .. } => format!("I fill \"{selector}\" with \"{value}\""),
@@ -520,6 +598,7 @@ mod tests {
     Action::Click {
       selector: "internal:role=button[name=\"Go\"i]".into(),
       locator: locator.into(),
+      options: ClickOptions::default(),
     }
   }
 
@@ -770,6 +849,7 @@ mod tests {
       action: Action::Click {
         selector: "internal:role=link[name=\"Details\"i]".into(),
         locator: "getByRole('link', { name: 'Details' })".into(),
+        options: ClickOptions::default(),
       },
       popup: Some("page1".into()),
     };
@@ -813,6 +893,74 @@ mod tests {
         "    And I switch to tab 1\n    And I fill \"#email\" with \"sashoush@example.com\"\n",
         "    And I switch to tab 0\n    Then the page title should be \"Shop\"\n",
       ]
+    );
+  }
+
+  #[test]
+  fn click_options_render_as_the_options_object() {
+    let on = |options: ClickOptions| Action::Click {
+      selector: "#a".into(),
+      locator: "locator('#a')".into(),
+      options,
+    };
+    let triple = on(ClickOptions {
+      click_count: Some(3),
+      ..ClickOptions::default()
+    });
+    let held = on(ClickOptions {
+      button: Some("middle".into()),
+      modifiers: vec!["Alt".into(), "ControlOrMeta".into()],
+      ..ClickOptions::default()
+    });
+    let canvas = on(ClickOptions {
+      position: Some(super::super::ClickPosition { x: 4, y: 6 }),
+      ..ClickOptions::default()
+    });
+    let double = Action::Dblclick {
+      selector: "#a".into(),
+      locator: "locator('#a')".into(),
+      options: ClickOptions {
+        modifiers: vec!["Shift".into()],
+        ..ClickOptions::default()
+      },
+    };
+    let actions = on_first_page(&[triple, held, canvas, double]);
+    assert_eq!(
+      render(&TypeScriptPlainEmitter, &actions),
+      "await page.locator('#a').click({\n  clickCount: 3\n});\n\
+       await page.locator('#a').click({\n  button: 'middle',\n  modifiers: ['Alt', 'ControlOrMeta']\n});\n\
+       await page.locator('#a').click({\n  position: {\n    x: 4,\n    y: 6\n  }\n});\n\
+       await page.locator('#a').dblclick({\n  modifiers: ['Shift']\n});\n"
+    );
+    assert_eq!(
+      TypeScriptTestEmitter::default().action(&actions[0]),
+      "  await page.locator('#a').click({\n    clickCount: 3\n  });\n"
+    );
+    assert_eq!(
+      RustEmitter.action(&actions[1]),
+      "  page.locator(\"#a\").click().options(ferridriver::options::ClickOptions { \
+       button: Some(ferridriver::options::MouseButton::Middle), \
+       modifiers: vec![ferridriver::options::Modifier::Alt, ferridriver::options::Modifier::ControlOrMeta], \
+       ..Default::default() }).await?;\n"
+    );
+    assert_eq!(
+      RustEmitter.action(&actions[3]),
+      "  page.locator(\"#a\").dblclick().options(ferridriver::options::DblClickOptions { \
+       modifiers: vec![ferridriver::options::Modifier::Shift], ..Default::default() }).await?;\n"
+    );
+    let right = on(ClickOptions {
+      button: Some("right".into()),
+      ..ClickOptions::default()
+    });
+    assert_eq!(GherkinEmitter::new().emit(&right), "    When I right click \"#a\"\n");
+    assert_eq!(
+      serde_json::to_value(&actions[0].action).unwrap(),
+      serde_json::json!({ "type": "click", "selector": "#a", "locator": "locator('#a')", "options": { "clickCount": 3 } })
+    );
+    assert_eq!(
+      serde_json::to_value(click("x")).unwrap().get("options"),
+      None,
+      "a plain click carries no options"
     );
   }
 

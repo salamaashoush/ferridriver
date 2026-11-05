@@ -311,12 +311,7 @@ impl Recordings {
         action,
         replaces_previous,
       } => sink_events.send(EventPayload::Recorded {
-        code: line_emitter
-          .action(&action)
-          .lines()
-          .map(str::trim)
-          .collect::<Vec<_>>()
-          .join("\n"),
+        code: dedent(&line_emitter.action(&action)),
         action,
         replaces_previous,
       }),
@@ -393,9 +388,34 @@ impl Recordings {
   }
 }
 
+/// `code` without the indent the scaffold puts every line of its body
+/// at, keeping the indent within a statement that spans lines.
+fn dedent(code: &str) -> String {
+  let indent = code
+    .lines()
+    .filter(|line| !line.trim().is_empty())
+    .map(|line| line.len() - line.trim_start().len())
+    .min()
+    .unwrap_or(0);
+  code
+    .lines()
+    .map(|line| line.get(indent..).unwrap_or_else(|| line.trim_start()))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
-  use super::typed_without_a_key;
+  use super::{dedent, typed_without_a_key};
+
+  #[test]
+  fn a_statement_keeps_its_own_indent_without_the_bodys() {
+    assert_eq!(
+      dedent("  await page.locator('#a').click({\n    clickCount: 3\n  });\n"),
+      "await page.locator('#a').click({\n  clickCount: 3\n});"
+    );
+    assert_eq!(dedent("    When I click \"#a\"\n"), "When I click \"#a\"");
+  }
 
   #[test]
   fn only_a_character_the_us_keyboard_lacks_is_typed_as_text() {
