@@ -11,7 +11,7 @@
 //! as code.
 
 use std::io::Write;
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
@@ -139,7 +139,11 @@ fn attached_contexts() -> &'static Mutex<rustc_hash::FxHashSet<String>> {
 struct RecordedPage {
   id: usize,
   alias: String,
-  page: Weak<Page>,
+  /// Held, not just named: a page reaches a binding call only through a
+  /// live handle, and nothing else holds one for a popup a session host
+  /// adopted, so without this its actions arrived with no page and were
+  /// dropped.
+  page: Arc<Page>,
 }
 
 struct Shared {
@@ -190,7 +194,7 @@ impl Shared {
         state.pages.push(RecordedPage {
           id,
           alias: alias.clone(),
-          page: Arc::downgrade(page),
+          page: Arc::clone(page),
         });
         alias
       }
@@ -316,7 +320,7 @@ impl Shared {
       .pages
       .iter()
       .find(|page| page.alias == alias)
-      .and_then(|page| Some((page.alias.clone(), page.page.upgrade()?)))
+      .map(|page| (page.alias.clone(), Arc::clone(&page.page)))
   }
 }
 
