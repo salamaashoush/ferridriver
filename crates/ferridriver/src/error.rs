@@ -72,6 +72,12 @@ pub enum FerriError {
   #[error("interrupted: {0}")]
   Interrupted(String),
 
+  /// An action's input reached the page, and then the action failed. It is
+  /// never tried again: the page may already have acted on the input (a
+  /// form submitted), and a second attempt would act on it twice.
+  #[error("{action}: the input was sent, then {message}")]
+  InputSent { action: String, message: String },
+
   /// The call's `signal` fired. Mirrors Playwright's `AbortError`:
   /// `message` is the abort reason, or "The operation was aborted" for a
   /// signal that had fired before the call.

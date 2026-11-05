@@ -987,7 +987,15 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       if interceptor_installed {
         let _ = finalize_hit_interceptor(element).await;
       }
-      return Err(e);
+      // Some of the events may have reached the page, which may have
+      // acted on them; clicking again could submit a form twice.
+      if opts.is_trial() {
+        return Err(e);
+      }
+      return Err(FerriError::InputSent {
+        action: "click".into(),
+        message: e.to_string(),
+      });
     }
 
     if !interceptor_installed {

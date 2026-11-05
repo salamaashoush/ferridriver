@@ -200,7 +200,7 @@ macro_rules! retry_resolve {
               },
               ::std::result::Result::Err(e) => {
                 let __msg = e.to_string();
-                if $crate::locator::is_retryable_action_error(&__msg) {
+                if $crate::locator::retries(&e) {
                   // Retriable: actionability signals
                   // (`error:notvisible` / `error:notenabled` / ...) plus
                   // stale-handle backend errors (the node detached
@@ -261,6 +261,12 @@ pub(crate) fn action_log_line(msg: &str) -> String {
     "connected" => "element is not attached to the DOM".to_string(),
     _ => format!("element is not {state}"),
   }
+}
+
+/// Whether a failed attempt is tried again: never once its input was
+/// sent, otherwise as [`is_retryable_action_error`] says.
+pub(crate) fn retries(error: &crate::error::FerriError) -> bool {
+  !matches!(error, crate::error::FerriError::InputSent { .. }) && is_retryable_action_error(&error.to_string())
 }
 
 /// Should a failed action attempt be retried (re-resolve + try again
@@ -3770,5 +3776,25 @@ mod retry_classify_tests {
     ] {
       assert!(!is_retryable_action_error(msg), "should NOT be retryable: {msg}");
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::retries;
+  use crate::error::FerriError;
+
+  #[test]
+  fn an_attempt_whose_input_was_sent_is_never_tried_again() {
+    assert!(retries(&FerriError::backend("No node with given id found")));
+    assert!(retries(&FerriError::backend("error:notvisible")));
+    assert!(!retries(&FerriError::InputSent {
+      action: "click".into(),
+      message: "No node with given id found".into(),
+    }));
+    assert!(!retries(&FerriError::InputSent {
+      action: "click".into(),
+      message: "transport closed".into(),
+    }));
   }
 }

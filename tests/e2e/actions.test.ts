@@ -794,6 +794,23 @@ describe('actions', () => {
     expect(await page.locator('#t').inputValue()).toBe('02:00');
   });
 
+  test('script_click_submits_once_through_a_slow_handler', async ({ page }) => {
+    // The page is busy with the submit for a while, and answers it by
+    // putting a fresh form in place; one click is still one submit.
+    await page.goto(
+      dataUrl(
+        '<script>window.submits = 0;' +
+          "function form() { document.body.innerHTML = '<form onsubmit=\"return submitted(event)\"><button>Sign up</button></form>'; }" +
+          'function submitted(e) { e.preventDefault(); window.submits++; const t = Date.now();' +
+          ' while (Date.now() - t < 400) {} setTimeout(form, 50); return false; }' +
+          "addEventListener('DOMContentLoaded', form);</script>",
+      ),
+    );
+    await page.getByRole('button', { name: 'Sign up' }).click();
+    await page.waitForTimeout(200);
+    expect(Number(await page.evaluate('window.submits'))).toBe(1);
+  });
+
   test('script_tap_native', async ({ page, browserName }) => {
     // `locator.tap` uses the backend's native touch primitive on every
     // backend: CDP `Input.dispatchTouchEvent`, WebKit
