@@ -50,6 +50,12 @@ impl McpServerConfig for McpConfig {
     })
   }
 
+  /// A device name the registry lacks never gets here: loading the config
+  /// refuses it.
+  fn default_context_options(&self) -> Option<ferridriver::options::BrowserContextOptions> {
+    McpConfig::context_options(self).ok().flatten()
+  }
+
   fn resolve_instance(&self, instance: &str) -> Option<ConnectMode> {
     McpConfig::resolve_instance(self, instance)
   }
@@ -158,6 +164,10 @@ impl McpServerConfig for ferridriver_config::FerridriverConfig {
 
   fn default_viewport(&self) -> Option<ferridriver::options::ViewportConfig> {
     McpServerConfig::default_viewport(&self.mcp)
+  }
+
+  fn default_context_options(&self) -> Option<ferridriver::options::BrowserContextOptions> {
+    McpServerConfig::default_context_options(&self.mcp)
   }
 
   fn resolve_instance(&self, instance: &str) -> Option<ConnectMode> {

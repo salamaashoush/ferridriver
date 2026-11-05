@@ -410,6 +410,12 @@ pub struct BrowserState {
   /// every fresh page. Sync mutex so non-async construction paths
   /// can write without owning a tokio guard.
   pub context_options: Arc<std::sync::Mutex<HashMap<String, crate::options::BrowserContextOptions>>>,
+  /// The options a context gets when nobody gave it any: the device and
+  /// context options an MCP server or session host is configured with,
+  /// for the contexts it opens pages in. A context made with
+  /// `browser.newContext()` has options of its own, even an empty set, and
+  /// never falls back to these.
+  pub context_defaults: Arc<std::sync::Mutex<Option<crate::options::BrowserContextOptions>>>,
   /// Per-context active HAR recorder registry (`tracing.startHar` →
   /// `stopHar`). Keyed by composite session key; an entry exists only
   /// while a recording is in flight. Sync mutex so the start/stop paths
@@ -589,6 +595,7 @@ impl BrowserState {
       context_test_id_attribute: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      context_defaults: Arc::default(),
       har_recorders: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_har_updates: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
@@ -746,11 +753,26 @@ impl BrowserState {
     map.insert(composite_key.to_string(), opts);
   }
 
-  /// Fetch a clone of the options bag for a composite key, if any.
+  /// Fetch a clone of the options bag for a composite key: its own, else
+  /// [`Self::context_defaults`].
   #[must_use]
   pub fn get_context_options(&self, composite_key: &str) -> Option<crate::options::BrowserContextOptions> {
-    let map = self.context_options.lock().ok()?;
-    map.get(composite_key).cloned()
+    let own = self.context_options.lock().ok()?.get(composite_key).cloned();
+    own.or_else(|| {
+      self
+        .context_defaults
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    })
+  }
+
+  /// Set [`Self::context_defaults`].
+  pub fn set_context_defaults(&self, options: Option<crate::options::BrowserContextOptions>) {
+    *self
+      .context_defaults
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = options;
   }
 
   /// The proxy a context's traffic leaves through: its own, else the one

@@ -96,6 +96,20 @@ pub struct BrowserConfig {
   /// entirely.
   #[serde(default, deserialize_with = "crate::browser::written_viewport")]
   pub viewport: Option<crate::browser::ViewportOverride>,
+  /// A device from Playwright's registry, named as `use.device` names it
+  /// (`"iPhone 15"`): the pages this server opens get its viewport,
+  /// screen, user agent, scale factor and mobile and touch flags. A key
+  /// below, or `viewport`, set beside it wins over what the device says.
+  pub device: Option<String>,
+  /// Device pixel ratio of the pages this server opens.
+  pub device_scale_factor: Option<f64>,
+  /// Whether those pages lay out as on a phone: the meta viewport tag is
+  /// honoured. Firefox has no such mode.
+  pub is_mobile: Option<bool>,
+  /// Whether those pages get touch events.
+  pub has_touch: Option<bool>,
+  /// The user agent those pages send and report.
+  pub user_agent: Option<String>,
   /// Base browser arguments applied to ALL instances.
   #[serde(alias = "chrome_args")]
   pub chrome_args: Vec<String>,
@@ -156,6 +170,60 @@ impl McpConfig {
         || Some(crate::browser::ViewportConfig::default()),
         crate::browser::ViewportOverride::size,
       )
+  }
+
+  /// The options of the contexts this server opens pages in, when the
+  /// section names a device or a context option beside the viewport, which
+  /// [`Self::viewport`] carries alone.
+  ///
+  /// The section's own `viewport` wins over the device's, and the device's
+  /// over the top-level `[browser].viewport`.
+  ///
+  /// # Errors
+  ///
+  /// Names a device the registry does not have.
+  pub fn context_options(&self) -> Result<Option<ferridriver::options::BrowserContextOptions>, String> {
+    let section = &self.browser;
+    let device = match section.device.as_deref() {
+      Some(name) => Some(ferridriver::devices::get(name).ok_or_else(|| {
+        format!("unknown device '{name}': name one of Playwright's devices, as `use.device` takes it")
+      })?),
+      None => None,
+    };
+    if device.is_none()
+      && section.device_scale_factor.is_none()
+      && section.is_mobile.is_none()
+      && section.has_touch.is_none()
+      && section.user_agent.is_none()
+    {
+      return Ok(None);
+    }
+    let size = match (&section.viewport, device) {
+      (Some(written), _) => written.size().map(|v| (v.width, v.height)),
+      (None, Some(device)) => Some((device.viewport.width, device.viewport.height)),
+      (None, None) => self.viewport().map(|v| (v.width, v.height)),
+    };
+    Ok(Some(ferridriver::options::BrowserContextOptions {
+      viewport: size.map_or(ferridriver::options::ViewportOption::Null, |(width, height)| {
+        ferridriver::options::ViewportOption::Size { width, height }
+      }),
+      screen: device
+        .and_then(|device| device.screen)
+        .map(|screen| ferridriver::options::ScreenSize {
+          width: screen.width,
+          height: screen.height,
+        }),
+      device_scale_factor: section
+        .device_scale_factor
+        .or_else(|| device.map(|device| device.device_scale_factor)),
+      is_mobile: section.is_mobile.or_else(|| device.map(|device| device.is_mobile)),
+      has_touch: section.has_touch.or_else(|| device.map(|device| device.has_touch)),
+      user_agent: section
+        .user_agent
+        .clone()
+        .or_else(|| device.map(|device| device.user_agent.to_string())),
+      ..Default::default()
+    }))
   }
 
   #[must_use]
@@ -780,6 +848,74 @@ mod tests {
       ..Default::default()
     });
     assert!(config.viewport().is_none());
+  }
+
+  #[test]
+  fn a_device_seeds_the_context_and_the_keys_beside_it_win() {
+    let config: McpConfig = serde_json::from_value(serde_json::json!({
+      "browser": { "device": "iPhone 15", "userAgent": "sashoush-agent" },
+    }))
+    .expect("parse");
+    let device = ferridriver::devices::get("iPhone 15").expect("a vendored device");
+    let options = config.context_options().expect("a known device").expect("options");
+    assert_eq!(
+      options.viewport,
+      ferridriver::options::ViewportOption::Size {
+        width: device.viewport.width,
+        height: device.viewport.height,
+      }
+    );
+    assert_eq!(options.device_scale_factor, Some(device.device_scale_factor));
+    assert_eq!(options.is_mobile, Some(true));
+    assert_eq!(options.has_touch, Some(true));
+    assert_eq!(options.user_agent.as_deref(), Some("sashoush-agent"));
+    assert_eq!(
+      options.screen.map(|s| (s.width, s.height)),
+      device.screen.map(|s| (s.width, s.height))
+    );
+
+    let mut sized = config;
+    sized.browser.viewport = Some(crate::browser::ViewportOverride::Size(crate::browser::ViewportConfig {
+      width: 500,
+      height: 400,
+    }));
+    let options = sized.context_options().expect("known").expect("options");
+    assert_eq!(
+      options.viewport,
+      ferridriver::options::ViewportOption::Size {
+        width: 500,
+        height: 400
+      }
+    );
+  }
+
+  #[test]
+  fn context_options_alone_keep_the_section_viewport_and_a_bare_viewport_needs_none() {
+    assert!(
+      McpConfig::default()
+        .context_options()
+        .expect("nothing to resolve")
+        .is_none()
+    );
+    let config: McpConfig =
+      serde_json::from_value(serde_json::json!({ "browser": { "isMobile": true, "hasTouch": true } })).expect("parse");
+    let options = config.context_options().expect("no device").expect("options");
+    assert_eq!(
+      options.viewport,
+      ferridriver::options::ViewportOption::Size {
+        width: 1280,
+        height: 720
+      }
+    );
+    assert_eq!((options.is_mobile, options.has_touch), (Some(true), Some(true)));
+    assert_eq!(options.user_agent, None);
+  }
+
+  #[test]
+  fn an_unknown_device_is_refused_by_name() {
+    let config: McpConfig =
+      serde_json::from_value(serde_json::json!({ "browser": { "device": "Nokia 3310" } })).expect("parse");
+    assert!(config.context_options().unwrap_err().contains("'Nokia 3310'"));
   }
 
   #[test]

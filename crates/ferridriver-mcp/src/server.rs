@@ -274,6 +274,14 @@ pub trait McpServerConfig: Send + Sync + 'static {
     Some(ferridriver::options::ViewportConfig::default())
   }
 
+  /// Options of the contexts this server opens pages in (a device's
+  /// viewport, user agent, scale factor, mobile and touch flags), beyond
+  /// the viewport [`Self::default_viewport`] gives. `None` leaves those
+  /// contexts with the browser's own.
+  fn default_context_options(&self) -> Option<ferridriver::options::BrowserContextOptions> {
+    None
+  }
+
   /// Resolve how to connect to a browser instance by name.
   ///
   /// Called before launching a new browser. If this returns `Some(ConnectMode)`,
@@ -551,6 +559,8 @@ pub fn browser_state_for(
       ..Default::default()
     },
   );
+
+  browser_state.set_context_defaults(config.default_context_options());
 
   // A bare session key that names a configured instance must select
   // that instance rather than a context on `default`.

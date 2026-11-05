@@ -50,6 +50,9 @@ pub struct Browser {
   /// [`crate::context::ContextRef::new_page`]. Kept alongside
   /// `context_options` until the video-only registry is retired.
   record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
+  /// Direct handle to [`BrowserState::context_defaults`]: a context
+  /// `new_context` makes gets options of its own instead.
+  context_defaults: Arc<std::sync::Mutex<Option<crate::options::BrowserContextOptions>>>,
   /// Ordered registry of live context names (`"default"` plus every
   /// `new_context`), so `contexts()` stays sync like Playwright's
   /// `browser.contexts()` — no `RwLock<BrowserState>` read, no
@@ -107,6 +110,11 @@ impl Browser {
         .default_browser()
         .is_none_or(crate::backend::AnyBrowser::supports_isolated_contexts)
     });
+    let context_defaults = state
+      .try_read()
+      .ok()
+      .map(|state| Arc::clone(&state.context_defaults))
+      .unwrap_or_default();
     Self {
       isolated_contexts,
       state,
@@ -116,6 +124,7 @@ impl Browser {
       headless,
       context_options,
       record_video,
+      context_defaults,
       connected,
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
@@ -213,6 +222,7 @@ impl Browser {
       headless: guard.headless,
       context_options: Arc::clone(&guard.context_options),
       record_video: Arc::clone(&guard.record_video),
+      context_defaults: Arc::clone(&guard.context_defaults),
       context_names: default_context_registry(),
       connected: Arc::clone(&guard.connected),
       events: crate::events::BrowserEventEmitter::new(),
@@ -317,6 +327,11 @@ impl Browser {
         .default_browser()
         .is_none_or(crate::backend::AnyBrowser::supports_isolated_contexts)
     });
+    let context_defaults = state
+      .try_read()
+      .ok()
+      .map(|state| Arc::clone(&state.context_defaults))
+      .unwrap_or_default();
     Self {
       isolated_contexts,
       state,
@@ -326,6 +341,7 @@ impl Browser {
       headless,
       context_options,
       record_video,
+      context_defaults,
       connected,
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
@@ -449,7 +465,14 @@ impl Browser {
       });
     }
     let ctx = ContextRef::new(self.state.clone(), name).with_browser(self.clone());
-    if let Some(opts) = options {
+    let defaults_apply = self
+      .context_defaults
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .is_some();
+    // A context someone asked for gets what they asked for, not the
+    // defaults the server opens its own pages with.
+    if let Some(opts) = options.or_else(|| defaults_apply.then(Default::default)) {
       self.seed_context_options(&ctx, opts);
     }
     if listed {

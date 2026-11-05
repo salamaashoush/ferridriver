@@ -701,8 +701,9 @@ impl FerridriverConfig {
   /// # Errors
   ///
   /// Returns an error if two sidecars share a `name`, a sidecar has an
-  /// empty `command`, or a `[test]` browser/backend spelling is not
-  /// recognised (including inside a project).
+  /// empty `command`, a `[test]` browser/backend spelling is not
+  /// recognised (including inside a project), or `[mcp.browser]` names a
+  /// device the registry does not have.
   pub fn validate(&self) -> anyhow::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for s in &self.sidecars {
@@ -714,6 +715,10 @@ impl FerridriverConfig {
       }
     }
 
+    self
+      .mcp
+      .context_options()
+      .map_err(|e| anyhow::anyhow!("[mcp.browser]: {e}"))?;
     self
       .test
       .browser
