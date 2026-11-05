@@ -837,6 +837,26 @@ pub async fn resolve_click_point(
     .ok_or_else(|| FerriError::backend("could not compute click point"))
 }
 
+/// Hold exactly an action's `modifiers` option for the action, returning
+/// the modifiers to restore after it. An action without the option
+/// keeps whatever the keyboard holds.
+async fn hold_modifiers(page: &AnyPage, modifiers: &[crate::options::Modifier]) -> Result<Option<u32>> {
+  if modifiers.is_empty() {
+    return Ok(None);
+  }
+  let held = page
+    .ensure_modifiers(crate::options::modifiers_bitmask(modifiers))
+    .await?;
+  Ok(Some(held))
+}
+
+async fn restore_modifiers(page: &AnyPage, restore: Option<u32>) -> Result<()> {
+  match restore {
+    Some(modifiers) => page.ensure_modifiers(modifiers).await.map(|_| ()),
+    None => Ok(()),
+  }
+}
+
 /// Dispatch a click with the full Playwright [`crate::options::ClickOptions`]
 /// surface. Mirrors Playwright's `/tmp/playwright/packages/playwright-core/
 /// src/server/dom.ts::ElementHandle._click`:
@@ -954,13 +974,13 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       }
     };
 
-    page.press_modifiers(&opts.modifiers).await?;
+    let restore = hold_modifiers(page, &opts.modifiers).await?;
     let dispatch = if opts.is_trial() {
       Ok(())
     } else {
       page.click_at_with(x, y, &args).await
     };
-    let _ = page.release_modifiers(&opts.modifiers).await;
+    let dispatch = dispatch.and(restore_modifiers(page, restore).await);
 
     if let Err(e) = dispatch {
       // Clean up any installed interceptor on dispatch failure so the
@@ -1134,17 +1154,15 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     }
   };
 
-  page.press_modifiers(&opts.modifiers).await?;
+  let restore = hold_modifiers(page, &opts.modifiers).await?;
   let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
-    let args = crate::backend::BackendHoverArgs {
-      modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
-      steps: 1,
-    };
-    page.hover_at_with(x, y, &args).await
+    page
+      .hover_at_with(x, y, &crate::backend::BackendHoverArgs { steps: 1 })
+      .await
   };
-  let _ = page.release_modifiers(&opts.modifiers).await;
+  let result = result.and(restore_modifiers(page, restore).await);
 
   if interceptor_installed {
     // Always tear down (a dispatch error must not leak an armed
@@ -1214,16 +1232,13 @@ pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::o
     }
   };
 
-  page.press_modifiers(&opts.modifiers).await?;
+  let restore = hold_modifiers(page, &opts.modifiers).await?;
   let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
-    let args = crate::backend::BackendTapArgs {
-      modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
-    };
-    page.tap_at_with(x, y, &args).await
+    page.tap_at_with(x, y).await
   };
-  let _ = page.release_modifiers(&opts.modifiers).await;
+  let result = result.and(restore_modifiers(page, restore).await);
 
   if interceptor_installed {
     let hit = finalize_hit_interceptor(element).await;

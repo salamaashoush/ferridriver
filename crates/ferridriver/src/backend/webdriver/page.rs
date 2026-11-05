@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::session::{Command, Target, WebDriverSession};
 use crate::error::{FerriError, Result};
 use crate::operation_budget::OperationBudget;
+use ferridriver_types::keyboard::KeyStroke;
 
 #[derive(Clone)]
 pub struct WebDriverPage {
@@ -22,6 +23,7 @@ pub struct WebDriverPage {
   pub(crate) file_chooser_manager: crate::file_chooser::FileChooserManager,
   pub(crate) download_manager: crate::download::DownloadManager,
   pub(crate) capabilities: Arc<Value>,
+  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
 }
 
 impl WebDriverPage {
@@ -41,6 +43,7 @@ impl WebDriverPage {
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       download_manager: crate::download::DownloadManager::new(),
       capabilities: Arc::new(Value::Null),
+      keyboard: Arc::default(),
     }
   }
 
@@ -420,26 +423,12 @@ impl WebDriverPage {
       .await
   }
 
-  pub async fn tap_at_with(&self, x: f64, y: f64, _args: &crate::backend::BackendTapArgs) -> Result<()> {
+  pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     self.perform_actions(crate::backend::bidi::input::tap("", x, y)).await
   }
 
-  pub async fn press_modifiers(&self, modifiers: &[crate::options::Modifier]) -> Result<()> {
-    if modifiers.is_empty() {
-      return Ok(());
-    }
-    self
-      .perform_actions(crate::backend::bidi::input::modifiers_down("", modifiers))
-      .await
-  }
-
-  pub async fn release_modifiers(&self, modifiers: &[crate::options::Modifier]) -> Result<()> {
-    if modifiers.is_empty() {
-      return Ok(());
-    }
-    self
-      .perform_actions(crate::backend::bidi::input::modifiers_up("", modifiers))
-      .await
+  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
+    &self.keyboard
   }
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
@@ -492,19 +481,17 @@ impl WebDriverPage {
       .await
   }
 
-  pub async fn key_down(&self, key: &str) -> Result<()> {
+  /// Classic actions keep the held keys in the session's input state,
+  /// which applies them to later key and pointer actions.
+  pub(crate) async fn dispatch_key_down(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::key_down("", key))
+      .perform_actions(crate::backend::bidi::input::key_down("", name))
       .await
   }
 
-  pub async fn key_up(&self, key: &str) -> Result<()> {
-    self.perform_actions(crate::backend::bidi::input::key_up("", key)).await
-  }
-
-  pub async fn press_key(&self, key: &str) -> Result<()> {
+  pub(crate) async fn dispatch_key_up(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::press_key("", key))
+      .perform_actions(crate::backend::bidi::input::key_up("", name))
       .await
   }
 

@@ -986,47 +986,6 @@ impl Modifier {
       },
     }
   }
-
-  /// Platform-resolved key name for keydown/keyup events when pressing
-  /// modifiers around an action. `ControlOrMeta` collapses to `Meta` on
-  /// macOS, `Control` elsewhere.
-  #[must_use]
-  pub fn key_name(self) -> &'static str {
-    match self {
-      Self::Alt => "Alt",
-      Self::Control => "Control",
-      Self::Meta => "Meta",
-      Self::Shift => "Shift",
-      Self::ControlOrMeta => {
-        if cfg!(target_os = "macos") {
-          "Meta"
-        } else {
-          "Control"
-        }
-      },
-    }
-  }
-
-  /// DOM `KeyboardEvent.code` for this modifier's left variant — used
-  /// when we synthesize `Input.dispatchKeyEvent` in CDP to satisfy the
-  /// `code` parameter. Right variants have different codes but the
-  /// outward JS observability is identical.
-  #[must_use]
-  pub fn key_code(self) -> &'static str {
-    match self {
-      Self::Alt => "AltLeft",
-      Self::Control => "ControlLeft",
-      Self::Shift => "ShiftLeft",
-      Self::Meta => "MetaLeft",
-      Self::ControlOrMeta => {
-        if cfg!(target_os = "macos") {
-          "MetaLeft"
-        } else {
-          "ControlLeft"
-        }
-      },
-    }
-  }
 }
 
 /// Fold a list of modifiers into the CDP bitmask expected by
@@ -3806,12 +3765,8 @@ mod click_option_tests {
     // Platform-aware ControlOrMeta
     if cfg!(target_os = "macos") {
       assert_eq!(Modifier::ControlOrMeta.cdp_bit(), 4);
-      assert_eq!(Modifier::ControlOrMeta.key_name(), "Meta");
-      assert_eq!(Modifier::ControlOrMeta.key_code(), "MetaLeft");
     } else {
       assert_eq!(Modifier::ControlOrMeta.cdp_bit(), 2);
-      assert_eq!(Modifier::ControlOrMeta.key_name(), "Control");
-      assert_eq!(Modifier::ControlOrMeta.key_code(), "ControlLeft");
     }
   }
 

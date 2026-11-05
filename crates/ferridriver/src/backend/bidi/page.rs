@@ -26,6 +26,7 @@ use crate::network::{
   self, BodyFn, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit, SecurityDetails,
 };
 use crate::state::DialogEvent;
+use ferridriver_types::keyboard::KeyStroke;
 
 /// `BiDi` channel name the exposed-binding shim sends its payloads
 /// through (`script.addPreloadScript` channel argument →
@@ -374,6 +375,7 @@ pub struct BidiPage {
   /// `HandleRemote::Bidi` wire shape carries no context, so we recover
   /// it here, inside the backend, keyed on the reference string.
   pub(crate) handle_realms: Arc<std::sync::Mutex<FxHashMap<String, Arc<str>>>>,
+  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
 }
 
 /// Permission-grant bookkeeping for one page's context. `global` is
@@ -511,6 +513,7 @@ impl BidiPage {
       network: Arc::default(),
       permissions: Arc::new(std::sync::Mutex::new(BidiPermissions::default())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
+      keyboard: Arc::default(),
     }
   }
 
@@ -1473,16 +1476,15 @@ impl BidiPage {
   /// `pointerType === 'touch'` plus real `touchstart`/`touchend` and
   /// the compatibility mouse sequence.
   ///
-  /// Modifier keys are the one gap: the caller's
-  /// [`Self::press_modifiers`] holds them on the shared key source
-  /// (which Firefox applies to mouse-pointer events), but Firefox does
-  /// not propagate key-source modifier state onto touch-pointer events
-  /// — `e.shiftKey` stays false on every event of the tap sequence
-  /// (verified empirically; the `BiDi` wire has no per-action modifier
-  /// field to express it differently). Surface that as a typed error
-  /// instead of silently dropping the requested modifiers.
-  pub async fn tap_at_with(&self, x: f64, y: f64, args: &super::super::BackendTapArgs) -> Result<()> {
-    if args.modifiers_bitmask != 0 {
+  /// Held modifiers are the one gap: the keyboard holds them on the
+  /// shared key source (which Firefox applies to mouse-pointer events),
+  /// but Firefox does not propagate key-source modifier state onto
+  /// touch-pointer events — `e.shiftKey` stays false on every event of
+  /// the tap sequence (verified empirically; the `BiDi` wire has no
+  /// per-action modifier field to express it differently). Surface that
+  /// as a typed error instead of silently dropping the modifiers.
+  pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
+    if self.keyboard.modifiers() != 0 {
       return Err(FerriError::unsupported(
         "tap with modifiers is not available on the BiDi backend — Firefox does not apply \
          key-source modifier state to touch-pointer events, so the requested modifiers would be \
@@ -1495,24 +1497,8 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    if mods.is_empty() {
-      return Ok(());
-    }
-    self
-      .cmd("input.performActions", input::modifiers_down(&self.context_id, mods))
-      .await?;
-    Ok(())
-  }
-
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    if mods.is_empty() {
-      return Ok(());
-    }
-    self
-      .cmd("input.performActions", input::modifiers_up(&self.context_id, mods))
-      .await?;
-    Ok(())
+  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
+    &self.keyboard
   }
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
@@ -1580,23 +1566,18 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn key_down(&self, key: &str) -> Result<()> {
+  /// `BiDi` presses the key by name; the browser keeps the held keys on
+  /// the shared key source and applies them itself.
+  pub(crate) async fn dispatch_key_down(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {
     self
-      .cmd("input.performActions", input::key_down(&self.context_id, key))
+      .cmd("input.performActions", input::key_down(&self.context_id, name))
       .await?;
     Ok(())
   }
 
-  pub async fn key_up(&self, key: &str) -> Result<()> {
+  pub(crate) async fn dispatch_key_up(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {
     self
-      .cmd("input.performActions", input::key_up(&self.context_id, key))
-      .await?;
-    Ok(())
-  }
-
-  pub async fn press_key(&self, key: &str) -> Result<()> {
-    self
-      .cmd("input.performActions", input::press_key(&self.context_id, key))
+      .cmd("input.performActions", input::key_up(&self.context_id, name))
       .await?;
     Ok(())
   }

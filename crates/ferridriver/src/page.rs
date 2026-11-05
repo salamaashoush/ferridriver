@@ -2622,7 +2622,7 @@ impl Page {
   ///
   /// Returns an error if the key press dispatch fails.
   pub(crate) async fn press_key(&self, key: &str) -> Result<()> {
-    self.inner.press_key(key).await
+    self.inner.press_key(key, 0).await
   }
 
   /// Find element by CSS selector (raw backend access).
@@ -4839,12 +4839,16 @@ pub struct Keyboard<'a> {
 impl<'a> Keyboard<'a> {
   /// Dispatch a keyDown event. The key is held until `up()` is called.
   ///
-  /// Supports modifier keys: "Shift", "Control", "Alt", "Meta".
-  /// Holding Shift will type uppercase text via subsequent `press()` or `type()` calls.
+  /// A held modifier (`"Shift"`, `"Control"`, `"Alt"`, `"Meta"`, `"ControlOrMeta"`)
+  /// applies to every later key and mouse event. With Shift held, a key
+  /// named by its code (`"KeyA"`, `"Digit1"`) produces its shifted
+  /// character; with any other modifier held, keys type no text. A
+  /// second `down` of a held key is an auto-repeat.
   ///
   /// # Errors
   ///
-  /// Returns an error if the key down dispatch fails.
+  /// Returns an error for a key the US layout does not have, or if the
+  /// key down dispatch fails.
   pub async fn down(&self, key: &str) -> Result<()> {
     self
       .page
@@ -4903,16 +4907,8 @@ impl<'a> Keyboard<'a> {
   }
 
   async fn press_untraced(&self, key: &str, opts: Option<KeyboardPressOptions>) -> Result<()> {
-    match opts.and_then(|o| o.delay) {
-      // Playwright `delay` waits between keydown and keyup. Combos
-      // ("Control+a") keep the atomic `press_key` path.
-      Some(ms) if !key.contains('+') => {
-        self.page.key_down(key).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-        self.page.key_up(key).await
-      },
-      _ => self.page.press_key(key).await,
-    }
+    let delay = opts.and_then(|o| o.delay).unwrap_or(0);
+    self.page.inner.press_key(key, delay).await
   }
 
   /// Type text character by character with full keyboard events.
@@ -4960,7 +4956,7 @@ impl<'a> Keyboard<'a> {
       first = false;
       match token {
         TypeToken::Key(key) => self.page.press_key(&key).await?,
-        TypeToken::Char(ch) => self.page.press_key(&ch.to_string()).await?,
+        TypeToken::Char(ch) => self.page.inner.type_char(ch).await?,
       }
     }
     Ok(())
@@ -5312,10 +5308,7 @@ impl Touchscreen<'_> {
         "Touchscreen",
         "tap",
         serde_json::json!({ "x": x, "y": y }),
-        self
-          .page
-          .inner
-          .tap_at_with(x, y, &crate::backend::BackendTapArgs { modifiers_bitmask: 0 }),
+        self.page.inner.tap_at_with(x, y),
       )
       .await
   }

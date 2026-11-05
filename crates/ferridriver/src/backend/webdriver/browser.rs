@@ -610,8 +610,8 @@ mod tests {
       .await
       .unwrap_err();
     assert!(matches!(error, FerriError::Evaluation(_)));
-    page.press_modifiers(&[]).await.unwrap();
-    page.release_modifiers(&[]).await.unwrap();
+    let page = crate::backend::AnyPage::WebDriver(page);
+    assert_eq!(page.ensure_modifiers(0).await.unwrap(), 0);
     browser.close().await.unwrap();
     let requests = server.await.unwrap();
     assert_eq!(requests[1].0, "POST /session/xcuitest/execute/sync HTTP/1.1");

@@ -13,6 +13,7 @@
 pub(crate) mod async_tempdir;
 pub mod cdp;
 pub(crate) mod json_scan;
+pub(crate) mod keyboard;
 pub mod process;
 pub mod reaper;
 pub(crate) mod screencast;
@@ -329,22 +330,14 @@ pub struct MetricData {
 /// `BackendClickArgs::from_options` from the user's
 /// [`crate::options::ClickOptions`]. Every per-backend `click_at_with`
 /// receives this struct — keeps the wire-level per-backend impls free
-/// of `ClickOptions` parsing and defaulting logic.
-///
-/// Modifiers are carried as the raw Playwright enum slice so each
-/// backend can compute its own bitmask / key-name / wire format; the
-/// CDP bitmask (`u32`) is cached in [`Self::modifiers_bitmask`] so the
-/// hot mouse-dispatch paths don't recompute it.
+/// of `ClickOptions` parsing and defaulting logic. The modifiers are
+/// not here: every mouse event carries the page keyboard's held ones.
 #[derive(Debug, Clone)]
 pub struct BackendClickArgs {
   pub button: crate::options::MouseButton,
   pub click_count: u32,
   /// Milliseconds to sleep between `mousedown` and `mouseup`.
   pub delay_ms: u64,
-  /// CDP modifier bitmask (cached from [`Self::modifiers`]).
-  pub modifiers_bitmask: u32,
-  /// Full modifier list (for backends that need key-name strings).
-  pub modifiers: Vec<crate::options::Modifier>,
   /// Interpolated `mousemove` events between the current cursor and
   /// `(x, y)`. `1` = single move at destination.
   pub steps: u32,
@@ -357,8 +350,6 @@ impl BackendClickArgs {
       button: opts.resolved_button(),
       click_count: opts.resolved_click_count(),
       delay_ms: opts.resolved_delay_ms(),
-      modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
-      modifiers: opts.modifiers.clone(),
       steps: opts.resolved_steps(),
     }
   }
@@ -371,8 +362,6 @@ impl BackendClickArgs {
       button: crate::options::MouseButton::Left,
       click_count: 1,
       delay_ms: 0,
-      modifiers_bitmask: 0,
-      modifiers: Vec::new(),
       steps: 1,
     }
   }
@@ -380,29 +369,12 @@ impl BackendClickArgs {
 
 /// Backend-ready hover arguments. Produced by
 /// [`crate::actions::hover_with_opts`] from the user's
-/// [`crate::options::HoverOptions`]. Shape is the subset of
-/// [`BackendClickArgs`] a hover needs — modifiers bitmask + `steps`
-/// interpolated `mousemove` events.
+/// [`crate::options::HoverOptions`].
 #[derive(Debug, Clone, Copy)]
 pub struct BackendHoverArgs {
-  /// CDP modifier bitmask carried on each synthesised mouse event.
-  pub modifiers_bitmask: u32,
   /// Interpolated `mousemove` events between the current cursor and
   /// `(x, y)`. `1` = single move at destination.
   pub steps: u32,
-}
-
-/// Backend-ready tap arguments. Produced by
-/// [`crate::actions::tap_with_opts`] from the user's
-/// [`crate::options::TapOptions`]. CDP dispatches
-/// `Input.dispatchTouchEvent`, `WebKit` `Input.dispatchTapEvent`, and
-/// `BiDi` an `input.performActions` `touch` pointer sequence.
-#[derive(Debug, Clone, Copy)]
-pub struct BackendTapArgs {
-  /// CDP modifier bitmask (same scheme as mouse/key events) carried on
-  /// the dispatched touch events so `event.shiftKey` etc. are true when
-  /// the caller requested them.
-  pub modifiers_bitmask: u32,
 }
 
 /// Navigation lifecycle target — which CDP event to wait for after Page.navigate.
@@ -1433,43 +1405,52 @@ impl AnyPage {
   }
 
   /// Dispatch a click at page-level coordinates `(x, y)` with the full
-  /// Playwright option bag: `button`, `click_count`, modifiers, delay
-  /// between press/release, and `steps` interpolated `mousemove` events
-  /// between the current cursor and the target. Modifier keydown/keyup
-  /// is the caller's responsibility — use [`Self::press_modifiers`] /
-  /// [`Self::release_modifiers`] around this call when
-  /// `!args.modifiers.is_empty()`.
+  /// Playwright option bag: `button`, `click_count`, delay between
+  /// press/release, and `steps` interpolated `mousemove` events between
+  /// the current cursor and the target. The events carry the held
+  /// modifiers; [`Self::ensure_modifiers`] sets them for one action.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &BackendClickArgs) -> Result<()> {
     page_dispatch!(self, click_at_with(x, y, args))
   }
 
   /// Dispatch a hover (no press/release) at `(x, y)` with `steps`
-  /// interpolated `mousemove` events and the caller's modifier bitmask
-  /// on each. Modifier keydown/keyup is the caller's responsibility.
+  /// interpolated `mousemove` events carrying the held modifiers.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
     page_dispatch!(self, hover_at_with(x, y, args))
   }
 
   /// Dispatch a native tap at `(x, y)` — CDP `Input.dispatchTouchEvent`
-  /// (`touchStart` + `touchEnd`, matching Playwright's
-  /// `server/chromium/crInput.ts::RawTouchscreenImpl::tap`), `WebKit`
-  /// `Input.dispatchTapEvent`, `BiDi` a `touch`-pointer
-  /// `input.performActions` sequence.
-  pub async fn tap_at_with(&self, x: f64, y: f64, args: &BackendTapArgs) -> Result<()> {
-    page_dispatch!(self, tap_at_with(x, y, args))
+  /// (`touchStart` + `touchEnd`), `WebKit` `Input.dispatchTapEvent`,
+  /// `BiDi` a `touch`-pointer `input.performActions` sequence.
+  pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
+    page_dispatch!(self, tap_at_with(x, y))
   }
 
-  /// Press all modifiers in `mods` via the backend's keyboard input
-  /// protocol (CDP `Input.dispatchKeyEvent { type: "keyDown" }`, `BiDi`
-  /// `input.performActions`, or `WebKit` host IPC). Idempotent for empty
-  /// lists. Callers pair this with [`Self::release_modifiers`].
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    page_dispatch!(self, press_modifiers(mods))
+  pub(crate) fn keyboard(&self) -> &keyboard::KeyboardState {
+    match self {
+      Self::CdpPipe(p) => p.keyboard(),
+      Self::CdpWs(p) => p.keyboard(),
+      Self::WebKit(p) => p.keyboard(),
+      Self::Bidi(p) => p.keyboard(),
+      Self::WebDriver(p) => p.keyboard(),
+    }
   }
 
-  /// Release all modifiers in `mods`. See [`Self::press_modifiers`].
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    page_dispatch!(self, release_modifiers(mods))
+  /// Hold exactly the modifiers in `modifiers` (a CDP mask), pressing
+  /// the missing ones and releasing the extra ones, and return the mask
+  /// that was held before, which restores it.
+  pub async fn ensure_modifiers(&self, modifiers: u32) -> Result<u32> {
+    let restore = self.keyboard().modifiers();
+    for modifier in ferridriver_types::keyboard::Modifier::ALL {
+      let need = modifiers & modifier.bit() != 0;
+      let held = self.keyboard().modifiers() & modifier.bit() != 0;
+      if need && !held {
+        self.key_down(modifier.key()).await?;
+      } else if !need && held {
+        self.key_up(modifier.key()).await?;
+      }
+    }
+    Ok(restore)
   }
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
@@ -1509,16 +1490,61 @@ impl AnyPage {
     self.type_str(text).await
   }
 
+  /// Press `key` and keep it held. A held modifier applies to every
+  /// later key, mouse and touch event until [`Self::key_up`].
+  ///
+  /// # Errors
+  ///
+  /// `InvalidArgument` for a key the US layout does not have.
   pub async fn key_down(&self, key: &str) -> Result<()> {
-    page_dispatch!(self, key_down(key))
+    let stroke = self.keyboard().down(key)?;
+    let name = ferridriver_types::keyboard::resolve_control_or_meta(key, keyboard::MAC);
+    page_dispatch!(self, dispatch_key_down(name, &stroke))
   }
 
+  /// Release `key`.
+  ///
+  /// # Errors
+  ///
+  /// `InvalidArgument` for a key the US layout does not have.
   pub async fn key_up(&self, key: &str) -> Result<()> {
-    page_dispatch!(self, key_up(key))
+    let stroke = self.keyboard().up(key)?;
+    let name = ferridriver_types::keyboard::resolve_control_or_meta(key, keyboard::MAC);
+    page_dispatch!(self, dispatch_key_up(name, &stroke))
   }
 
-  pub async fn press_key(&self, key: &str) -> Result<()> {
-    page_dispatch!(self, press_key(key))
+  /// Press a key or a `+` combination (`"Control+a"`): every key goes
+  /// down in order, the last one is held for `delay_ms`, and they come
+  /// up in reverse.
+  pub async fn press_key(&self, key: &str, delay_ms: u64) -> Result<()> {
+    let keys = split_key_combo(key);
+    let Some((last, held)) = keys.split_last() else {
+      return Ok(());
+    };
+    for k in held {
+      self.key_down(k).await?;
+    }
+    self.key_down(last).await?;
+    if delay_ms > 0 {
+      tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
+    self.key_up(last).await?;
+    for k in held.iter().rev() {
+      self.key_up(k).await?;
+    }
+    Ok(())
+  }
+
+  /// Type one character: a key press when the US layout has a key for
+  /// it, inserted text otherwise.
+  pub async fn type_char(&self, ch: char) -> Result<()> {
+    let mut buf = [0u8; 4];
+    let ch = ch.encode_utf8(&mut buf);
+    if ferridriver_types::keyboard::describe(ch, false).is_some() {
+      self.press_key(ch, 0).await
+    } else {
+      self.insert_text(ch).await
+    }
   }
 
   // ── Cookies ──

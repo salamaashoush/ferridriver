@@ -869,7 +869,7 @@ impl Locator {
           // With a per-char delay, fall back to the character-by-character
           // keyboard dispatch (same code path `pressSequentially` uses).
           for ch in text.chars() {
-            page.press_key(&ch.to_string()).await?;
+            page.type_char(ch).await?;
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
           }
           Ok(())
@@ -909,15 +909,7 @@ impl Locator {
         // usually the body, and the element under the locator never sees
         // it.
         el.call_js_fn("function() { this.focus(); }").await?;
-        if delay_ms > 0 {
-          // With a delay, press is equivalent to keyDown + sleep(delay)
-          // + keyUp so the page observes the held-key interval.
-          page.key_down(key).await?;
-          tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-          page.key_up(key).await
-        } else {
-          page.press_key(key).await
-        }
+        page.press_key(key, delay_ms).await
       }
     )
   }

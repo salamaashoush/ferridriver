@@ -17,6 +17,8 @@ pub mod transport;
 pub mod ws;
 
 #[cfg(test)]
+mod key_event_tests;
+#[cfg(test)]
 mod listener_tests;
 #[cfg(test)]
 mod startup_tests;
@@ -32,6 +34,7 @@ use crate::network::{
   self, BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, RequestInit, RequestSizes, RequestTiming, Response,
   ResponseInit, SecurityDetails, WebSocket,
 };
+use ferridriver_types::keyboard::KeyStroke;
 use rustc_hash::FxHashMap;
 use std::time::Duration;
 use transport::CdpTransport;
@@ -845,6 +848,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
+      keyboard: Arc::default(),
     };
     page.transport.register_lifecycle_tracker(
       page.session_id.as_deref().unwrap_or(""),
@@ -997,6 +1001,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
+      keyboard: Arc::default(),
     }
   }
 
@@ -1191,6 +1196,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
+      keyboard: Arc::default(),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -2172,6 +2178,7 @@ pub struct CdpPage<T: CdpTransport> {
   listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
   /// Native drag-and-drop interception state. See [`DragManagerState`].
   drag_manager: Arc<DragManagerState>,
+  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
 }
 
 /// Port of Playwright's `crDragDrop.ts::DragManager` plus the
@@ -2259,6 +2266,45 @@ impl DragManagerState {
       "none"
     }
   }
+}
+
+/// `Input.dispatchKeyEvent` for a keydown. A key that types nothing is a
+/// `rawKeyDown`; on macOS the editing commands go with it, because
+/// Chromium there performs a shortcut such as select-all only when the
+/// event names its command.
+fn key_down_params(stroke: &KeyStroke, mac: bool) -> serde_json::Value {
+  let d = &stroke.description;
+  let commands = if mac {
+    ferridriver_types::keyboard::mac_editing_commands(d.code, stroke.modifiers)
+  } else {
+    Vec::new()
+  };
+  serde_json::json!({
+    "type": if d.text.is_empty() { "rawKeyDown" } else { "keyDown" },
+    "modifiers": stroke.modifiers,
+    "windowsVirtualKeyCode": d.key_code_without_location,
+    "code": d.code,
+    "commands": commands,
+    "key": d.key,
+    "text": d.text,
+    "unmodifiedText": d.text,
+    "autoRepeat": stroke.auto_repeat,
+    "location": d.location,
+    "isKeypad": d.is_keypad(),
+  })
+}
+
+fn key_up_params(stroke: &KeyStroke) -> serde_json::Value {
+  let d = &stroke.description;
+  serde_json::json!({
+    "type": "keyUp",
+    "modifiers": stroke.modifiers,
+    "key": d.key,
+    "windowsVirtualKeyCode": d.key_code_without_location,
+    "code": d.code,
+    "location": d.location,
+    "isKeypad": d.is_keypad(),
+  })
 }
 
 fn cdp_button_bit(button: &str) -> u32 {
@@ -2392,6 +2438,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       observed: self.observed.clone(),
       listener_tasks: self.listener_tasks.clone(),
       drag_manager: self.drag_manager.clone(),
+      keyboard: self.keyboard.clone(),
     }
   }
 }
@@ -4283,14 +4330,19 @@ impl<T: CdpWrap> CdpPage<T> {
     self.click_at_opts(x, y, "left", 1).await
   }
 
+  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
+    &self.keyboard
+  }
+
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    let mods = self.keyboard.modifiers();
     let press = self.cmd(
       "Input.dispatchMouseEvent",
-      serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": click_count}),
+      serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": click_count, "modifiers": mods}),
     );
     let release = self.cmd(
       "Input.dispatchMouseEvent",
-      serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": click_count}),
+      serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": click_count, "modifiers": mods}),
     );
     let _ = tokio::try_join!(press, release)?;
     if let Ok(mut guard) = self.last_cursor_pos.lock() {
@@ -4343,14 +4395,12 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Dispatch a click at `(x, y)` honoring the full Playwright option
-  /// bag: `button`, `click_count`, modifiers bitmask, delay between
-  /// press/release, and `steps` interpolated mousemoves from the last
-  /// cursor position to the target. Modifier keydown/keyup is done by
-  /// the caller via [`Self::press_modifiers`] /
-  /// [`Self::release_modifiers`].
+  /// bag: `button`, `click_count`, delay between press/release, and
+  /// `steps` interpolated mousemoves from the last cursor position to
+  /// the target, every event carrying the held modifiers.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<()> {
     let button = args.button.as_cdp();
-    let mods = args.modifiers_bitmask;
+    let mods = self.keyboard.modifiers();
     // Steps-1 intermediate mousemoves + one final at (x,y). Playwright
     // default is `steps: 1` → single mousemove at dest. Mirror that by
     // emitting a `mouseMoved` at the target before press so the page
@@ -4443,10 +4493,10 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
-  /// events with the caller's CDP `modifiers` bitmask on each, ending
-  /// at `(x, y)` exactly. No `mousePressed` / `mouseReleased`.
+  /// events with the held modifiers on each, ending at `(x, y)` exactly.
+  /// No `mousePressed` / `mouseReleased`.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<()> {
-    let mods = args.modifiers_bitmask;
+    let mods = self.keyboard.modifiers();
     let steps = args.steps.max(1);
     let skip_move = steps == 1
       && match self.last_cursor_pos.lock() {
@@ -4483,7 +4533,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// by `touchEnd` with an empty `touchPoints` array. Matches Playwright's
   /// `server/chromium/crInput.ts::RawTouchscreenImpl::tap` (commit
   /// reference: `/tmp/playwright/packages/playwright-core/src/server/chromium/crInput.ts:174`).
-  /// Modifier bitmask rides on each event so the page sees
+  /// The held modifiers ride on each event so the page sees
   /// `event.shiftKey` etc. as expected.
   ///
   /// Before the first dispatch we flip `Emulation.setTouchEmulationEnabled
@@ -4494,8 +4544,8 @@ impl<T: CdpWrap> CdpPage<T> {
   /// listener fires. Playwright's `BrowserContextOptions.hasTouch` wires
   /// this on context creation; we opt in lazily on first tap so callers
   /// who never tap pay nothing.
-  pub async fn tap_at_with(&self, x: f64, y: f64, args: &super::BackendTapArgs) -> Result<()> {
-    let mods = args.modifiers_bitmask;
+  pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
+    let mods = self.keyboard.modifiers();
     self
       .cmd(
         "Emulation.setTouchEmulationEnabled",
@@ -4522,47 +4572,6 @@ impl<T: CdpWrap> CdpPage<T> {
         }),
       )
       .await?;
-    Ok(())
-  }
-
-  /// Press each modifier in `mods` via CDP
-  /// `Input.dispatchKeyEvent { type: "keyDown" }`. `key` is the
-  /// platform-resolved key name (e.g. `"Meta"` on macOS for
-  /// `ControlOrMeta`) and `code` is the DOM `KeyboardEvent.code`.
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    for md in mods {
-      self
-        .cmd(
-          "Input.dispatchKeyEvent",
-          serde_json::json!({
-            "type": "keyDown",
-            "key": md.key_name(),
-            "code": md.key_code(),
-            "modifiers": u32::from(md.cdp_bit()),
-          }),
-        )
-        .await?;
-    }
-    Ok(())
-  }
-
-  /// Release each modifier in `mods` via CDP
-  /// `Input.dispatchKeyEvent { type: "keyUp" }`. Iterates in reverse
-  /// order to match Playwright's unwind behavior in
-  /// `/tmp/playwright/packages/playwright-core/src/server/input.ts`.
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    for md in mods.iter().rev() {
-      self
-        .cmd(
-          "Input.dispatchKeyEvent",
-          serde_json::json!({
-            "type": "keyUp",
-            "key": md.key_name(),
-            "code": md.key_code(),
-          }),
-        )
-        .await?;
-    }
     Ok(())
   }
 
@@ -4655,6 +4664,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// adopt the `Input.dragIntercepted` payload as the active drag and
   /// announce it with a `dragEnter`.
   async fn intercept_drag_caused_by_move(&self, x: f64, y: f64, mask: u32) -> Result<()> {
+    let mods = self.keyboard.modifiers();
     self.ensure_drag_intercept_tap();
     match self.drag_manager.intercepted_slot.lock() {
       Ok(mut slot) => *slot = None,
@@ -4673,7 +4683,7 @@ impl<T: CdpWrap> CdpPage<T> {
         self
           .cmd(
             "Input.dispatchMouseEvent",
-            serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": mask}),
+            serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": mask, "modifiers": mods}),
           )
           .await?;
         self.set_cursor_pos(x, y);
@@ -4684,7 +4694,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let move_result = self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": mask}),
+        serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": mask, "modifiers": mods}),
       )
       .await;
     let expecting = self
@@ -4728,7 +4738,7 @@ impl<T: CdpWrap> CdpPage<T> {
       self
         .cmd(
           "Input.dispatchDragEvent",
-          serde_json::json!({"type": "dragEnter", "x": x, "y": y, "data": data, "modifiers": 0}),
+          serde_json::json!({"type": "dragEnter", "x": x, "y": y, "data": data, "modifiers": mods}),
         )
         .await?;
       *self.drag_manager.drag_data.lock().await = Some(data);
@@ -4768,7 +4778,7 @@ impl<T: CdpWrap> CdpPage<T> {
       self
         .cmd(
           "Input.dispatchDragEvent",
-          serde_json::json!({"type": "dragOver", "x": x, "y": y, "data": data, "modifiers": 0}),
+          serde_json::json!({"type": "dragOver", "x": x, "y": y, "data": data, "modifiers": self.keyboard.modifiers()}),
         )
         .await?;
       self.set_cursor_pos(x, y);
@@ -4781,7 +4791,14 @@ impl<T: CdpWrap> CdpPage<T> {
       self
         .cmd(
           "Input.dispatchMouseEvent",
-          serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": self.drag_manager.move_button(), "buttons": mask}),
+          serde_json::json!({
+            "type": "mouseMoved",
+            "x": x,
+            "y": y,
+            "button": self.drag_manager.move_button(),
+            "buttons": mask,
+            "modifiers": self.keyboard.modifiers(),
+          }),
         )
         .await?;
       self.set_cursor_pos(x, y);
@@ -4836,7 +4853,14 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y}),
+        serde_json::json!({
+          "type": "mouseWheel",
+          "x": x,
+          "y": y,
+          "deltaX": delta_x,
+          "deltaY": delta_y,
+          "modifiers": self.keyboard.modifiers(),
+        }),
       )
       .await?;
     Ok(())
@@ -4854,7 +4878,15 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": click_count}),
+        serde_json::json!({
+          "type": "mousePressed",
+          "x": x,
+          "y": y,
+          "button": button,
+          "buttons": mask,
+          "clickCount": click_count,
+          "modifiers": self.keyboard.modifiers(),
+        }),
       )
       .await?;
     self.set_cursor_pos(x, y);
@@ -4869,7 +4901,7 @@ impl<T: CdpWrap> CdpPage<T> {
       self
         .cmd(
           "Input.dispatchDragEvent",
-          serde_json::json!({"type": "drop", "x": x, "y": y, "data": data, "modifiers": 0}),
+          serde_json::json!({"type": "drop", "x": x, "y": y, "data": data, "modifiers": self.keyboard.modifiers()}),
         )
         .await?;
       self.set_cursor_pos(x, y);
@@ -4878,7 +4910,15 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "buttons": mask, "clickCount": click_count}),
+        serde_json::json!({
+          "type": "mouseReleased",
+          "x": x,
+          "y": y,
+          "button": button,
+          "buttons": mask,
+          "clickCount": click_count,
+          "modifiers": self.keyboard.modifiers(),
+        }),
       )
       .await?;
     self.set_cursor_pos(x, y);
@@ -4890,251 +4930,23 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  /// Resolve a Playwright-style key name to (DOM key, virtual keycode, text).
-  fn resolve_key(key: &str) -> (&str, u32, Option<&str>) {
-    match key {
-      "Enter" => ("Enter", 13, Some("\r")),
-      "Tab" => ("Tab", 9, Some("\t")),
-      "Space" | " " => (" ", 32, Some(" ")),
-      "Backspace" => ("Backspace", 8, None),
-      "Delete" => ("Delete", 46, None),
-      "Escape" => ("Escape", 27, None),
-      "ArrowLeft" => ("ArrowLeft", 37, None),
-      "ArrowRight" => ("ArrowRight", 39, None),
-      "ArrowUp" => ("ArrowUp", 38, None),
-      "ArrowDown" => ("ArrowDown", 40, None),
-      "Home" => ("Home", 36, None),
-      "End" => ("End", 35, None),
-      "PageUp" => ("PageUp", 33, None),
-      "PageDown" => ("PageDown", 34, None),
-      "Shift" | "ShiftLeft" | "ShiftRight" => ("Shift", 16, None),
-      "Control" | "ControlLeft" | "ControlRight" => ("Control", 17, None),
-      "Alt" | "AltLeft" | "AltRight" => ("Alt", 18, None),
-      "Meta" | "MetaLeft" => ("Meta", 91, None),
-      "MetaRight" => ("Meta", 93, None),
-      "F1" => ("F1", 112, None),
-      "F2" => ("F2", 113, None),
-      "F3" => ("F3", 114, None),
-      "F4" => ("F4", 115, None),
-      "F5" => ("F5", 116, None),
-      "F6" => ("F6", 117, None),
-      "F7" => ("F7", 118, None),
-      "F8" => ("F8", 119, None),
-      "F9" => ("F9", 120, None),
-      "F10" => ("F10", 121, None),
-      "F11" => ("F11", 122, None),
-      "F12" => ("F12", 123, None),
-      ch => (ch, 0, if ch.len() == 1 { Some(ch) } else { None }),
-    }
-  }
-
-  /// Dispatch a keyDown event for a single key (does NOT release it).
-  pub async fn key_down(&self, key: &str) -> Result<()> {
-    self.key_down_with_mods(key, 0).await
-  }
-
-  /// Dispatch a keyDown carrying a CDP `modifiers` bitfield (Alt=1,
-  /// Ctrl=2, Meta=4, Shift=8). Used by `press_key` to handle
-  /// Playwright-style combos like `"Control+a"`.
-  pub(crate) async fn key_down_with_mods(&self, key: &str, modifiers: u32) -> Result<()> {
+  pub(crate) async fn dispatch_key_down(&self, _name: &str, stroke: &KeyStroke) -> Result<()> {
     // Escape cancels an in-flight intercepted drag instead of reaching
-    // the page (`crInput.ts::RawKeyboardImpl.keydown`).
-    if key == "Escape" && self.cancel_drag().await? {
+    // the page.
+    if stroke.description.code == "Escape" && self.cancel_drag().await? {
       return Ok(());
     }
-    let (dom_key, vk, text) = Self::resolve_key(key);
-    let down_type = if text.is_some() { "keyDown" } else { "rawKeyDown" };
-    // Don't emit text characters while a non-Shift modifier is held —
-    // otherwise `Control+a` inserts the literal "a" instead of doing a
-    // select-all (mirrors Playwright's behaviour).
-    let suppress_text = modifiers & !8 != 0;
-    let mut params = serde_json::json!({
-        "type": down_type, "key": dom_key,
-        "windowsVirtualKeyCode": vk,
-        "modifiers": modifiers,
-    });
-    if let Some(code) = Self::resolve_code(key) {
-      params["code"] = serde_json::json!(code);
-    }
-    if let Some(t) = text
-      && !suppress_text
-    {
-      params["text"] = serde_json::json!(t);
-    }
-    self.cmd("Input.dispatchKeyEvent", params).await?;
-    Ok(())
-  }
-
-  /// Dispatch a keyUp carrying the current `modifiers` bitfield. The
-  /// up event for a modifier itself should still carry the modifier
-  /// bit (it's released as part of this event).
-  pub(crate) async fn key_up_with_mods(&self, key: &str, modifiers: u32) -> Result<()> {
-    let (dom_key, vk, _) = Self::resolve_key(key);
-    let mut params = serde_json::json!({
-        "type": "keyUp", "key": dom_key,
-        "windowsVirtualKeyCode": vk,
-        "modifiers": modifiers,
-    });
-    if let Some(code) = Self::resolve_code(key) {
-      params["code"] = serde_json::json!(code);
-    }
-    self.cmd("Input.dispatchKeyEvent", params).await?;
-    Ok(())
-  }
-
-  /// Map a Playwright key name to the DOM `code` value (e.g. `"a"` ->
-  /// `"KeyA"`, `"1"` -> `"Digit1"`, modifiers/named keys -> their
-  /// canonical code). Required by Chrome to interpret `Control+a` as a
-  /// real Ctrl+A keystroke (select-all) instead of plain text input.
-  fn resolve_code(key: &str) -> Option<&'static str> {
-    match key {
-      "Control" | "ControlLeft" => Some("ControlLeft"),
-      "ControlRight" => Some("ControlRight"),
-      "Shift" | "ShiftLeft" => Some("ShiftLeft"),
-      "ShiftRight" => Some("ShiftRight"),
-      "Alt" | "AltLeft" => Some("AltLeft"),
-      "AltRight" => Some("AltRight"),
-      "Meta" | "MetaLeft" => Some("MetaLeft"),
-      "MetaRight" => Some("MetaRight"),
-      "Enter" => Some("Enter"),
-      "Tab" => Some("Tab"),
-      "Backspace" => Some("Backspace"),
-      "Delete" => Some("Delete"),
-      "Escape" => Some("Escape"),
-      "ArrowUp" => Some("ArrowUp"),
-      "ArrowDown" => Some("ArrowDown"),
-      "ArrowLeft" => Some("ArrowLeft"),
-      "ArrowRight" => Some("ArrowRight"),
-      "Home" => Some("Home"),
-      "End" => Some("End"),
-      "PageUp" => Some("PageUp"),
-      "PageDown" => Some("PageDown"),
-      "Space" | " " => Some("Space"),
-      k if k.len() == 1 => {
-        let c = k.chars().next()?;
-        // ASCII letters -> Key<UPPER>; digits -> Digit<n>.
-        if c.is_ascii_alphabetic() {
-          let upper = c.to_ascii_uppercase();
-          Some(match upper {
-            'A' => "KeyA",
-            'B' => "KeyB",
-            'C' => "KeyC",
-            'D' => "KeyD",
-            'E' => "KeyE",
-            'F' => "KeyF",
-            'G' => "KeyG",
-            'H' => "KeyH",
-            'I' => "KeyI",
-            'J' => "KeyJ",
-            'K' => "KeyK",
-            'L' => "KeyL",
-            'M' => "KeyM",
-            'N' => "KeyN",
-            'O' => "KeyO",
-            'P' => "KeyP",
-            'Q' => "KeyQ",
-            'R' => "KeyR",
-            'S' => "KeyS",
-            'T' => "KeyT",
-            'U' => "KeyU",
-            'V' => "KeyV",
-            'W' => "KeyW",
-            'X' => "KeyX",
-            'Y' => "KeyY",
-            'Z' => "KeyZ",
-            _ => return None,
-          })
-        } else if c.is_ascii_digit() {
-          Some(match c {
-            '0' => "Digit0",
-            '1' => "Digit1",
-            '2' => "Digit2",
-            '3' => "Digit3",
-            '4' => "Digit4",
-            '5' => "Digit5",
-            '6' => "Digit6",
-            '7' => "Digit7",
-            '8' => "Digit8",
-            '9' => "Digit9",
-            _ => return None,
-          })
-        } else {
-          None
-        }
-      },
-      _ => None,
-    }
-  }
-
-  /// Dispatch a keyUp event for a single key.
-  pub async fn key_up(&self, key: &str) -> Result<()> {
-    let (dom_key, vk, _) = Self::resolve_key(key);
     self
       .cmd(
         "Input.dispatchKeyEvent",
-        serde_json::json!({
-            "type": "keyUp", "key": dom_key,
-            "windowsVirtualKeyCode": vk,
-        }),
+        key_down_params(stroke, crate::backend::keyboard::MAC),
       )
       .await?;
     Ok(())
   }
 
-  pub async fn press_key(&self, key: &str) -> Result<()> {
-    // Playwright-style modifier combos: `"Control+a"`, `"Shift+Alt+T"`.
-    // Press each modifier (down), then the primary key with the
-    // modifiers bitfield set so the page sees a real combo (e.g.
-    // select-all on Ctrl+A), then release in reverse.
-    //
-    // `ControlOrMeta` resolves per-OS BEFORE key lookup, exactly like
-    // Playwright's `resolveSmartModifierString` (keyboards.ts): Meta on
-    // macOS, Control elsewhere.
-    fn resolve(name: &str) -> &str {
-      if name == "ControlOrMeta" {
-        if cfg!(target_os = "macos") { "Meta" } else { "Control" }
-      } else {
-        name
-      }
-    }
-    let parts: Vec<&str> = crate::backend::split_key_combo(key).into_iter().map(resolve).collect();
-    if parts.len() <= 1 {
-      let key = resolve(key);
-      self.key_down(key).await?;
-      self.key_up(key).await?;
-      return Ok(());
-    }
-    let (mods, primary) = parts.split_at(parts.len() - 1);
-    let primary = primary[0];
-    let mod_bit = |name: &str| -> u32 {
-      match name {
-        "Alt" => 1,
-        "Control" => 2,
-        "Meta" => 4,
-        "Shift" => 8,
-        _ => 0,
-      }
-    };
-    let mut bits = 0u32;
-    for m in mods {
-      let b = mod_bit(m);
-      if b != 0 {
-        bits |= b;
-        // The modifier's own keyDown carries the cumulative bitfield
-        // (Chrome expects to see Ctrl set on the Ctrl keyDown itself).
-        self.key_down_with_mods(m, bits).await?;
-      }
-    }
-    self.key_down_with_mods(primary, bits).await?;
-    self.key_up_with_mods(primary, bits).await?;
-    let mut down_bits = bits;
-    for m in mods.iter().rev() {
-      let b = mod_bit(m);
-      if b != 0 {
-        self.key_up_with_mods(m, down_bits).await?;
-        down_bits &= !b;
-      }
-    }
+  pub(crate) async fn dispatch_key_up(&self, _name: &str, stroke: &KeyStroke) -> Result<()> {
+    self.cmd("Input.dispatchKeyEvent", key_up_params(stroke)).await?;
     Ok(())
   }
 

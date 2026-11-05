@@ -93,11 +93,19 @@ pub(crate) async fn input(browser: &Browser, context: &str, args: serde_json::Va
       mouse.r#move(x, y).await.map_err(|e| e.to_string())?;
       mouse.wheel(delta_x, delta_y).await
     },
+    // A viewer on another layout sends characters the US keyboard has no
+    // key for; they arrive as the text they type.
+    InputEvent::KeyDown { key } if typed_without_a_key(&key) => keyboard.insert_text(&key).await,
+    InputEvent::KeyUp { key } if typed_without_a_key(&key) => Ok(()),
     InputEvent::KeyDown { key } => keyboard.down(&key).await,
     InputEvent::KeyUp { key } => keyboard.up(&key).await,
     InputEvent::InsertText { text } => keyboard.insert_text(&text).await,
   };
   result.map_err(|e| e.to_string())
+}
+
+fn typed_without_a_key(key: &str) -> bool {
+  key.chars().count() == 1 && ferridriver_types::keyboard::describe(key, false).is_none()
 }
 
 // ── screencast ──
@@ -371,5 +379,19 @@ impl Recordings {
       PageAssertion::Url => Ok(recorder.assert_url().await),
       PageAssertion::Title => recorder.assert_title().await.map_err(|e| e.to_string()),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::typed_without_a_key;
+
+  #[test]
+  fn only_a_character_the_us_keyboard_lacks_is_typed_as_text() {
+    assert!(typed_without_a_key("é"));
+    assert!(!typed_without_a_key("a"));
+    assert!(!typed_without_a_key("A"));
+    assert!(!typed_without_a_key("Enter"));
+    assert!(!typed_without_a_key("Unidentified"));
   }
 }

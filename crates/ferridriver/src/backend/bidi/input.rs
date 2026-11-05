@@ -26,7 +26,8 @@ fn coord(v: f64) -> serde_json::Value {
 pub fn key_to_bidi(key: &str) -> String {
   match key {
     // Navigation keys
-    "Enter" | "Return" | "NumpadEnter" => "\u{E006}".into(),
+    "Enter" | "Return" | "\r" | "\n" => "\u{E006}".into(),
+    "NumpadEnter" => "\u{E007}".into(),
     "Tab" => "\u{E004}".into(),
     "Backspace" => "\u{E003}".into(),
     "Delete" => "\u{E017}".into(),
@@ -47,8 +48,8 @@ pub fn key_to_bidi(key: &str) -> String {
     "Insert" => "\u{E016}".into(),
 
     // Modifier keys. `ControlOrMeta` resolves per-OS before the wire
-    // mapping, matching Playwright's `resolveSmartModifierString`.
-    "Shift" | "ShiftLeft" | "ShiftRight" => "\u{E008}".into(),
+    // mapping.
+    "Shift" | "ShiftLeft" => "\u{E008}".into(),
     "ControlOrMeta" => {
       if cfg!(target_os = "macos") {
         "\u{E03D}".into()
@@ -56,9 +57,13 @@ pub fn key_to_bidi(key: &str) -> String {
         "\u{E009}".into()
       }
     },
-    "Control" | "ControlLeft" | "ControlRight" => "\u{E009}".into(),
-    "Alt" | "AltLeft" | "AltRight" => "\u{E00A}".into(),
-    "Meta" | "MetaLeft" | "MetaRight" => "\u{E03D}".into(),
+    "Control" | "ControlLeft" => "\u{E009}".into(),
+    "Alt" | "AltLeft" => "\u{E00A}".into(),
+    "Meta" | "MetaLeft" => "\u{E03D}".into(),
+    "ShiftRight" => "\u{E050}".into(),
+    "ControlRight" => "\u{E051}".into(),
+    "AltRight" => "\u{E052}".into(),
+    "MetaRight" => "\u{E053}".into(),
 
     // Function keys
     "F1" => "\u{E031}".into(),
@@ -91,8 +96,12 @@ pub fn key_to_bidi(key: &str) -> String {
     "NumpadDecimal" => "\u{E028}".into(),
     "NumpadDivide" => "\u{E029}".into(),
 
-    // Pass through single characters and unknowns
-    other => other.into(),
+    // A key named by its code (`KeyA`, `Digit1`, `Quote`) is the
+    // character it types; single characters pass through.
+    other => match ferridriver_types::keyboard::describe(other, false) {
+      Some(d) if d.key.chars().count() == 1 => d.key.into(),
+      _ => other.into(),
+    },
   }
 }
 
@@ -188,10 +197,9 @@ pub fn click_with_args(context: &str, x: f64, y: f64, args: &crate::backend::Bac
 }
 
 /// Build a hover action — `steps` interpolated `pointerMove`s ending
-/// at `(x, y)`. No `pointerDown` / `pointerUp`. Modifier state on
-/// Firefox `BiDi` is carried via a prior `modifiers_down` call on a
-/// separate `key` source; `BiDi` doesn't accept a per-action modifier
-/// bitmask like CDP does.
+/// at `(x, y)`. No `pointerDown` / `pointerUp`. Held modifiers on
+/// Firefox `BiDi` live on the separate `key` source; `BiDi` doesn't
+/// accept a per-action modifier bitmask like CDP does.
 #[must_use]
 pub fn hover_with_args(context: &str, x: f64, y: f64, args: crate::backend::BackendHoverArgs) -> serde_json::Value {
   let steps = args.steps.max(1);
@@ -214,52 +222,13 @@ pub fn hover_with_args(context: &str, x: f64, y: f64, args: crate::backend::Back
   })
 }
 
-/// Press a list of modifier keys via a single `key` input source.
-/// Each modifier fires `keyDown` with its Playwright key-name (e.g.
-/// `"Meta"` on macOS for `ControlOrMeta`).
-#[must_use]
-pub fn modifiers_down(context: &str, mods: &[crate::options::Modifier]) -> serde_json::Value {
-  let actions: Vec<serde_json::Value> = mods
-    .iter()
-    .map(|m| json!({"type": "keyDown", "value": key_to_bidi(m.key_name())}))
-    .collect();
-  json!({
-    "context": context,
-    "actions": [{
-      "type": "key",
-      "id": "keyboard",
-      "actions": actions
-    }]
-  })
-}
-
-/// Release a list of modifier keys (reverse order — matches
-/// Playwright's unwind behavior in `server/input.ts`).
-#[must_use]
-pub fn modifiers_up(context: &str, mods: &[crate::options::Modifier]) -> serde_json::Value {
-  let actions: Vec<serde_json::Value> = mods
-    .iter()
-    .rev()
-    .map(|m| json!({"type": "keyUp", "value": key_to_bidi(m.key_name())}))
-    .collect();
-  json!({
-    "context": context,
-    "actions": [{
-      "type": "key",
-      "id": "keyboard",
-      "actions": actions
-    }]
-  })
-}
-
 /// Build a native tap: a `touch` pointer source performing
 /// `pointerMove` -> `pointerDown` -> `pointerUp` at `(x, y)`. The
 /// `WebDriver` `BiDi` `input.performActions` pointer parameters accept
 /// `pointerType: "touch"` (`Input.PointerType` in the spec, shared with
 /// `WebDriver` classic actions); Firefox dispatches pointer events with
 /// `pointerType === 'touch'` plus the compatibility mouse sequence.
-/// Modifier state is carried by a prior `modifiers_down` on the key
-/// source, same as click/hover.
+/// Held modifiers live on the key source, same as click/hover.
 #[must_use]
 pub fn tap(context: &str, x: f64, y: f64) -> serde_json::Value {
   json!({
@@ -454,63 +423,6 @@ pub fn key_up(context: &str, key: &str) -> serde_json::Value {
       "actions": [
         {"type": "keyUp", "value": bidi_key}
       ]
-    }]
-  })
-}
-
-/// Build a key press action (keyDown + keyUp).
-#[must_use]
-pub fn press_key(context: &str, key: &str) -> serde_json::Value {
-  // Handle modifier+key combos like "Control+a", "Shift+Enter"
-  let parts = crate::backend::split_key_combo(key);
-  if parts.len() > 1 {
-    return press_key_combo(context, &parts);
-  }
-
-  let bidi_key = key_to_bidi(key);
-  json!({
-    "context": context,
-    "actions": [{
-      "type": "key",
-      "id": "keyboard",
-      "actions": [
-        {"type": "keyDown", "value": bidi_key},
-        {"type": "keyUp", "value": bidi_key}
-      ]
-    }]
-  })
-}
-
-/// Build a key combo action (e.g. Ctrl+A = keyDown Ctrl, keyDown a, keyUp a, keyUp Ctrl).
-fn press_key_combo(context: &str, parts: &[&str]) -> serde_json::Value {
-  let mut actions = Vec::new();
-
-  // Press modifiers first
-  let modifiers = &parts[..parts.len() - 1];
-  let key = parts[parts.len() - 1];
-
-  for modifier in modifiers {
-    let bidi_mod = key_to_bidi(modifier);
-    actions.push(json!({"type": "keyDown", "value": bidi_mod}));
-  }
-
-  // Press and release the main key
-  let bidi_key = key_to_bidi(key);
-  actions.push(json!({"type": "keyDown", "value": bidi_key}));
-  actions.push(json!({"type": "keyUp", "value": bidi_key}));
-
-  // Release modifiers in reverse order
-  for modifier in modifiers.iter().rev() {
-    let bidi_mod = key_to_bidi(modifier);
-    actions.push(json!({"type": "keyUp", "value": bidi_mod}));
-  }
-
-  json!({
-    "context": context,
-    "actions": [{
-      "type": "key",
-      "id": "keyboard",
-      "actions": actions
     }]
   })
 }

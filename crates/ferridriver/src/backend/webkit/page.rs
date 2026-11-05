@@ -26,6 +26,7 @@ use crate::error::{FerriError, Result};
 use crate::events::EventEmitter;
 use crate::network::{Request as NetworkRequest, Response};
 use crate::state::DialogEvent;
+use ferridriver_types::keyboard::KeyStroke;
 
 /// Name of the utility execution context — mirrors `UTILITY_WORLD_NAME`
 /// in `wkPage.ts`.
@@ -320,6 +321,7 @@ pub struct WebKitPage {
   /// realm throws forever (`__fd` is undefined there) and the wait
   /// times out. Cleared on navigation.
   frame_engine_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<i64, FrameEngineContext>>>,
+  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
   /// Main-frame id captured from the initial `Page.getResourceTree`
   /// response. PW `WebKit`'s `frame_id` is distinct from `target_id`
   /// (the page proxy's id); returning `target_id` from
@@ -668,6 +670,7 @@ impl WebKitPage {
         applied_timezone: Arc::new(std::sync::Mutex::new(pre_timezone)),
         frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+        keyboard: Arc::default(),
         main_frame_id_cache,
         websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
         workers: Arc::default(),
@@ -1774,16 +1777,12 @@ impl WebKitPage {
     super::input::hover(self, x, y, args).await
   }
 
-  pub async fn tap_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendTapArgs) -> Result<()> {
-    super::input::tap(self, x, y, args).await
+  pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
+    super::input::tap(self, x, y).await
   }
 
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    super::input::press_modifiers(self, mods).await
-  }
-
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
-    super::input::release_modifiers(self, mods).await
+  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
+    &self.keyboard
   }
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
@@ -1814,16 +1813,12 @@ impl WebKitPage {
     super::input::type_text(self, text).await
   }
 
-  pub async fn key_down(&self, key: &str) -> Result<()> {
-    super::input::key_down(self, key).await
+  pub(crate) async fn dispatch_key_down(&self, _name: &str, stroke: &KeyStroke) -> Result<()> {
+    super::input::key_down(self, stroke).await
   }
 
-  pub async fn key_up(&self, key: &str) -> Result<()> {
-    super::input::key_up(self, key).await
-  }
-
-  pub async fn press_key(&self, key: &str) -> Result<()> {
-    super::input::press_key(self, key).await
+  pub(crate) async fn dispatch_key_up(&self, _name: &str, stroke: &KeyStroke) -> Result<()> {
+    super::input::key_up(self, stroke).await
   }
 
   // ── Cookies ───────────────────────────────────────────────────────────
