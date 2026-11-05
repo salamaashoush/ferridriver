@@ -52,7 +52,9 @@ fn button(name: Option<&str>) -> Outcome<MouseButton> {
 pub(crate) async fn input(browser: &Browser, context: &str, args: serde_json::Value) -> Outcome<()> {
   let InputRequest { event, page: target } = parse("input", args)?;
   let page = match target {
-    Some(target) => page_with_target_id(browser, context, &target).map_err(|e| e.to_string())?,
+    Some(target) => page_with_target_id(browser, context, &target)
+      .await
+      .map_err(|e| e.to_string())?,
     None => page(browser, context).await?,
   };
   let mouse = page.mouse();

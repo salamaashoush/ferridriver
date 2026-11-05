@@ -1,0 +1,270 @@
+//! A session host connected to a browser another process serves, the way a
+//! web app runs one: `browser serve` owns Chromium, `session open --connect`
+//! records and relays input to it, and a raw CDP client of the app's own
+//! watches the tabs. A popup a page opens has to become a page of the
+//! session's context there too: the active page, a page `input` can name by
+//! the target id the watcher saw, and a page the recorder records in.
+
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::process::{Child, Command as Process, Stdio};
+use std::time::Duration;
+
+use anyhow::{Context as _, bail, ensure};
+use ferridriver_session::{
+  Command, EventPayload, INPUT_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RecordingResult, Registry, Response,
+  SessionClient,
+};
+use futures::{SinkExt as _, StreamExt as _};
+use tokio::sync::mpsc;
+
+const SHOP: &str = "<!doctype html><title>Shop</title><body style=margin:0>\
+<a href=/help target=_blank style=position:absolute;left:10px;top:10px;width:120px;height:30px>Help</a></body>";
+
+const HELP: &str = "<!doctype html><title>Help</title><body style=margin:0>\
+<label style=position:absolute;left:10px;top:10px>Question <input style=width:200px></label>\
+<button type=button style=position:absolute;left:10px;top:60px;width:120px;height:30px>Ask</button></body>";
+
+fn ferridriver_bin() -> std::path::PathBuf {
+  std::env::var_os("FERRIDRIVER_BIN").map_or_else(
+    || std::path::PathBuf::from(env!("CARGO_BIN_EXE_ferridriver")),
+    std::path::PathBuf::from,
+  )
+}
+
+/// Serve the two pages over HTTP, a thread per connection and every reply
+/// closing it, so a browser's idle preconnection never holds up a request.
+fn serve_pages() -> anyhow::Result<String> {
+  let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+  let origin = format!("http://{}", listener.local_addr()?);
+  std::thread::spawn(move || {
+    for stream in listener.incoming().flatten() {
+      std::thread::spawn(move || {
+        let mut stream = stream;
+        let mut request = [0_u8; 4096];
+        let read = stream.read(&mut request).unwrap_or(0);
+        let head = String::from_utf8_lossy(&request[..read]);
+        let path = head.split_whitespace().nth(1).unwrap_or("/");
+        let (status, body) = match path {
+          "/" => ("200 OK", SHOP),
+          "/help" => ("200 OK", HELP),
+          _ => ("404 Not Found", ""),
+        };
+        let _ = write!(
+          stream,
+          "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+          body.len()
+        );
+      });
+    }
+  });
+  Ok(origin)
+}
+
+/// `browser serve`, killed when dropped.
+struct Served {
+  child: Child,
+  endpoint: String,
+}
+
+impl Served {
+  fn start() -> anyhow::Result<Self> {
+    let mut child = Process::new(ferridriver_bin())
+      .args(["browser", "serve"])
+      .env("FERRIDRIVER_NO_INHERIT", "1")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::null())
+      .spawn()?;
+    let stdout = child.stdout.take().context("serve stdout")?;
+    let mut endpoint = String::new();
+    BufReader::new(stdout).read_line(&mut endpoint)?;
+    let endpoint = endpoint.trim().to_string();
+    ensure!(endpoint.starts_with("ws://"), "serve printed {endpoint:?}");
+    Ok(Self { child, endpoint })
+  }
+}
+
+impl Drop for Served {
+  fn drop(&mut self) {
+    let _ = self.child.kill();
+    let _ = self.child.wait();
+  }
+}
+
+/// The CLI against the test's own session registry.
+fn cli(registry: &std::path::Path, args: &[&str]) -> anyhow::Result<std::process::Output> {
+  Ok(
+    Process::new(ferridriver_bin())
+      .args(args)
+      .env("FERRIDRIVER_SESSION_DIR", registry)
+      .env("FERRIDRIVER_NO_INHERIT", "1")
+      .output()?,
+  )
+}
+
+/// The app's own CDP client: discovers targets and attaches to every page,
+/// reporting each page's target id as it appears.
+async fn watch_pages(endpoint: &str) -> anyhow::Result<mpsc::UnboundedReceiver<String>> {
+  use tokio_tungstenite::tungstenite::Message;
+  let (socket, _) = tokio_tungstenite::connect_async(endpoint).await?;
+  let (mut sink, mut source) = socket.split();
+  sink
+    .send(Message::text(
+      serde_json::json!({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": true}}).to_string(),
+    ))
+    .await?;
+  let (pages, seen) = mpsc::unbounded_channel();
+  tokio::spawn(async move {
+    let mut id = 1;
+    while let Some(Ok(message)) = source.next().await {
+      let Ok(text) = message.to_text() else { continue };
+      let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        continue;
+      };
+      if value["method"] != "Target.targetCreated" || value["params"]["targetInfo"]["type"] != "page" {
+        continue;
+      }
+      let Some(target) = value["params"]["targetInfo"]["targetId"].as_str() else {
+        continue;
+      };
+      id += 1;
+      let attach = serde_json::json!({
+        "id": id,
+        "method": "Target.attachToTarget",
+        "params": {"targetId": target, "flatten": true},
+      });
+      if sink.send(Message::text(attach.to_string())).await.is_err() || pages.send(target.to_string()).is_err() {
+        break;
+      }
+    }
+  });
+  Ok(seen)
+}
+
+async fn call(endpoint: &str, verb: &str, args: serde_json::Value) -> anyhow::Result<Response> {
+  let mut client = SessionClient::connect(endpoint).await?;
+  let reply = client.call(Command::new(1, verb, args.clone())).await?;
+  ensure!(reply.ok, "{verb} {args}: {:?}", reply.error);
+  Ok(reply)
+}
+
+async fn click(endpoint: &str, (x, y): (f64, f64), page: Option<&str>) -> anyhow::Result<()> {
+  for kind in ["mouse_move", "mouse_down", "mouse_up"] {
+    let mut args = serde_json::json!({"type": kind, "x": x, "y": y});
+    if let Some(page) = page {
+      args["page"] = page.into();
+    }
+    call(endpoint, INPUT_VERB, args).await?;
+  }
+  Ok(())
+}
+
+async fn next<T>(receiver: &mut mpsc::UnboundedReceiver<T>, what: &str) -> anyhow::Result<T> {
+  tokio::time::timeout(Duration::from_secs(15), receiver.recv())
+    .await
+    .with_context(|| format!("timed out waiting for {what}"))?
+    .with_context(|| format!("stream ended waiting for {what}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_popup_of_a_served_browser_is_a_page_of_the_session() -> anyhow::Result<()> {
+  let origin = serve_pages()?;
+  let served = Served::start()?;
+  let scratch = tempfile::tempdir()?;
+  let registry_dir = scratch.path().join("registry");
+  let opened = cli(
+    &registry_dir,
+    &["session", "open", "served", "--headless", "--connect", &served.endpoint],
+  )?;
+  ensure!(
+    opened.status.success(),
+    "session open: {}",
+    String::from_utf8_lossy(&opened.stderr)
+  );
+  let result = drive(&origin, &served, &Registry::open_at(&registry_dir)?).await;
+  let _ = cli(&registry_dir, &["session", "close", "served"]);
+  let (source, actions) = result?;
+
+  let body: Vec<&str> = source
+    .lines()
+    .skip_while(|line| !line.starts_with("test("))
+    .skip(2)
+    .take_while(|line| *line != "});")
+    .collect();
+  assert_eq!(
+    body,
+    [
+      "  const page1Promise = page.waitForEvent('popup');",
+      "  await page.getByRole('link', { name: 'Help' }).click();",
+      "  const page1 = await page1Promise;",
+      "  await page1.getByRole('textbox', { name: 'Question' }).click();",
+      "  await page1.getByRole('textbox', { name: 'Question' }).fill('sashoush');",
+      "  await page1.getByRole('button', { name: 'Ask' }).click();",
+    ],
+    "{source}"
+  );
+  ensure!(
+    actions.iter().filter(|action| action.page == "page1").count() == 3,
+    "{actions:#?}"
+  );
+  Ok(())
+}
+
+async fn drive(
+  origin: &str,
+  served: &Served,
+  registry: &Registry,
+) -> anyhow::Result<(String, Vec<ferridriver::codegen::RecordedAction>)> {
+  let endpoint = registry.get("served")?.context("the session's descriptor")?.endpoint;
+  let mut targets = watch_pages(&served.endpoint).await?;
+
+  // The recording opens its page on the shop, as the app starts it.
+  let (events, mut streamed) = mpsc::unbounded_channel();
+  let mut recorder = SessionClient::connect(&endpoint).await?;
+  let start = Command::new(
+    1,
+    RECORDER_START_VERB,
+    serde_json::json!({"target": "test", "url": format!("{origin}/")}),
+  );
+  let recording = tokio::spawn(async move {
+    recorder
+      .call_with_events(start, |event| {
+        let _ = events.send(event.payload);
+      })
+      .await
+  });
+  let opening = next(&mut streamed, "the opening navigation").await?;
+  ensure!(matches!(opening, EventPayload::Recorded { .. }), "{opening:?}");
+  // Every tab open so far, which the watcher reports first.
+  let mut before = vec![next(&mut targets, "the shop's target").await?];
+  while let Ok(Some(target)) = tokio::time::timeout(Duration::from_millis(500), targets.recv()).await {
+    before.push(target);
+  }
+
+  // The link opens a tab of its own; the watcher learns its target id.
+  click(&endpoint, (40.0, 20.0), None).await?;
+  let help = loop {
+    let target = next(&mut targets, "the popup's target").await?;
+    if !before.contains(&target) {
+      break target;
+    }
+  };
+
+  // Named, the click lands in the popup. Unnamed, the text follows it
+  // there too: the popup is the active page.
+  click(&endpoint, (150.0, 20.0), Some(&help)).await?;
+  call(
+    &endpoint,
+    INPUT_VERB,
+    serde_json::json!({"type": "insert_text", "text": "sashoush"}),
+  )
+  .await?;
+  click(&endpoint, (40.0, 75.0), Some(&help)).await?;
+
+  let stopped = call(&endpoint, RECORDER_STOP_VERB, serde_json::json!({})).await?;
+  let result: RecordingResult = serde_json::from_str(&stopped.text)?;
+  match recording.await? {
+    Ok(reply) if reply.ok => {},
+    other => bail!("recorder.start ended with {other:?}"),
+  }
+  Ok((result.source, result.actions))
+}

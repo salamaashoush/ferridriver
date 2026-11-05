@@ -216,27 +216,54 @@ pub async fn page_for(browser: &Browser, context: &str) -> ferridriver::Result<A
   Box::pin(ctx_ref.new_page()).await
 }
 
+/// How long a target id the context does not know yet is waited for. A
+/// popup is configured before its context announces it, while a client
+/// watching the browser itself learns its id the moment it is created.
+const ADOPTION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The page of `context` whose target id (its main frame id) is
-/// `target_id`.
+/// `target_id`, waiting [`ADOPTION_GRACE`] for one the context is still
+/// adopting.
 ///
 /// # Errors
 ///
 /// Rejects a context of another bound browser instance, and answers an
 /// invalid argument when no open page of the context has that id.
-pub fn page_with_target_id(browser: &Browser, context: &str, target_id: &str) -> ferridriver::Result<Arc<Page>> {
+pub async fn page_with_target_id(browser: &Browser, context: &str, target_id: &str) -> ferridriver::Result<Arc<Page>> {
   let key = context_key_for(browser, context)?;
-  let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(browser.state()), key.to_composite())
+  let ctx_ref = ferridriver::context::ContextRef::new_async(Arc::clone(browser.state()), key.to_composite())
+    .await
     .with_browser(browser.clone());
-  ctx_ref
-    .pages()
-    .into_iter()
-    .find(|page| !page.is_closed() && &**page.main_frame().id() == target_id)
-    .ok_or_else(|| {
-      ferridriver::FerriError::invalid_argument(
-        "page",
-        format!("no open page of context '{context}' has target id '{target_id}'"),
-      )
-    })
+  let named = |page: &Arc<Page>| !page.is_closed() && &**page.main_frame().id() == target_id;
+  // Listening before looking, so a page announced in between is not missed.
+  let (announced, mut opened) = tokio::sync::mpsc::unbounded_channel();
+  let listener = ctx_ref.on(
+    "page",
+    Arc::new(move |event| {
+      if let ferridriver::events::ContextEvent::Page(page) = event {
+        let _ = announced.send(page);
+      }
+    }),
+  );
+  let found = async {
+    if let Some(page) = ctx_ref.pages().into_iter().find(|page| named(page)) {
+      return Some(page);
+    }
+    while let Some(page) = opened.recv().await {
+      if named(&page) {
+        return Some(page);
+      }
+    }
+    None
+  };
+  let page = tokio::time::timeout(ADOPTION_GRACE, found).await.ok().flatten();
+  ctx_ref.off(listener);
+  page.ok_or_else(|| {
+    ferridriver::FerriError::invalid_argument(
+      "page",
+      format!("no open page of context '{context}' has target id '{target_id}'"),
+    )
+  })
 }
 
 /// # Errors
