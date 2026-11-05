@@ -2439,8 +2439,31 @@ impl FixtureSetup {
   }
 }
 
+/// A fixture function's third argument: the running test's `testInfo`
+/// for a test-scoped fixture, and for a worker-scoped one the worker's
+/// part of it (`workerIndex`, `parallelIndex`, `project`), which every
+/// test in the worker shares. `undefined` when no test is running.
+fn fixture_info<'js>(ctx: &Ctx<'js>, worker_scoped: bool) -> Result<Value<'js>, ScriptError> {
+  let saved = with_test_registry(ctx, |r| r.current.as_ref().map(|c| c.test_info.clone()))?;
+  let Some(info) = saved else {
+    return Ok(Value::new_undefined(ctx.clone()));
+  };
+  let info = info.restore(ctx).map_err(se)?;
+  if !worker_scoped {
+    return Ok(info.into_value());
+  }
+  let worker = Object::new(ctx.clone()).map_err(se)?;
+  for key in ["workerIndex", "parallelIndex", "project", "config"] {
+    let value: Value<'js> = info.get(key).map_err(se)?;
+    if !value.is_undefined() {
+      worker.set(key, value).map_err(se)?;
+    }
+  }
+  Ok(worker.into_value())
+}
+
 /// Run one `use()`-handshake factory to its suspension point: call
-/// `factory(fixtures, use)`, drive it on the VM schedular, and wait
+/// `factory(fixtures, use, info)`, drive it on the VM schedular, and wait
 /// until it either calls `use(value)` (setup done, factory parked on
 /// the gate promise) or settles without doing so (error).
 async fn run_fixture_factory<'js>(
@@ -2500,7 +2523,8 @@ async fn run_fixture_factory<'js>(
   )
   .map_err(se)?;
 
-  let called: rquickjs::Result<MaybePromise<'_>> = factory.call((world_obj.clone(), use_fn));
+  let info = fixture_info(ctx, worker_scoped)?;
+  let called: rquickjs::Result<MaybePromise<'_>> = factory.call((world_obj.clone(), use_fn, info));
   let mp = called.catch(ctx).map_err(|e| {
     let inner = caught_to_script_error(e, source_label);
     ScriptError::internal(format!("fixture `{name}` setup failed: {}", inner.message))

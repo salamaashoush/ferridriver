@@ -180,10 +180,21 @@ export interface FixtureOptions {
   box?: boolean | 'self';
 }
 
+/// What a worker-scoped fixture is given as its third argument: the part
+/// of `TestInfo` every test in the worker shares.
+export interface WorkerInfo {
+  readonly workerIndex: number;
+  readonly parallelIndex: number;
+  readonly project: TestProject | null;
+}
+
+/// A test-scoped fixture's third argument is the running test's
+/// `TestInfo`; a worker-scoped one (`{ scope: 'worker' }`) gets its
+/// `WorkerInfo`.
 export type FixtureValue<T, TFixtures> =
-  | ((fixtures: TFixtures, use: (value: T) => Promise<void>) => void | Promise<void>)
+  | ((fixtures: TFixtures, use: (value: T) => Promise<void>, testInfo: TestInfo) => void | Promise<void>)
   | [
-      T | ((fixtures: TFixtures, use: (value: T) => Promise<void>) => void | Promise<void>),
+      T | ((fixtures: TFixtures, use: (value: T) => Promise<void>, info: WorkerInfo) => void | Promise<void>),
       FixtureOptions,
     ];
 
