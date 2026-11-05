@@ -1233,10 +1233,17 @@ impl BrowserState {
       .cleanup_instances_except(Some(instance_name), Some(generation))
       .await?;
     if adopt_pages {
-      let viewport = if preserve_viewport {
-        None
+      let (viewport, defaults) = if preserve_viewport {
+        (None, None)
       } else {
-        self.default_viewport.clone()
+        (
+          self.default_viewport.clone(),
+          self
+            .context_defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone(),
+        )
       };
       let index = self.pending_instance_index(generation)?;
       let context_pages = self.context_pages.clone();
@@ -1244,7 +1251,15 @@ impl BrowserState {
         .1
         .instance_mut()
         .ok_or_else(|| FerriError::backend("browser is not ready for adoption"))?;
-      if let Err(error) = Self::adopt_instance_pages(instance_name, instance, viewport.as_ref(), &context_pages).await {
+      if let Err(error) = Self::adopt_instance_pages(
+        instance_name,
+        instance,
+        viewport.as_ref(),
+        defaults.as_ref(),
+        &context_pages,
+      )
+      .await
+      {
         return match self.cleanup_instances(Some(instance_name)).await {
           Ok(()) => Err(error),
           Err(cleanup) => Err(FerriError::backend(format!(
@@ -1280,6 +1295,7 @@ impl BrowserState {
     instance_name: &str,
     inst: &mut BrowserInstance,
     viewport: Option<&crate::options::ViewportConfig>,
+    defaults: Option<&crate::options::BrowserContextOptions>,
     context_pages: &ContextPages,
   ) -> Result<()> {
     // Adopt existing pages into the "default" context of this instance.
@@ -1296,6 +1312,11 @@ impl BrowserState {
     // `viewport: null` is how a config asks to leave it alone; the
     // explicit `connect` tool ([`Self::connect_to_url`]) never touches
     // it, matching Playwright's `connectOverCDP`.
+    //
+    // A config with device or context options ([`Self::context_defaults`])
+    // gets all of them, not just the viewport: they are the options of the
+    // default context's pages, and emulation is per page, so the pages of
+    // any context another client made are left as they are.
     let existing_pages = Box::pin(inst.browser.pages()).await?;
     let ctx = inst.context_mut("default");
     for page in existing_pages {
@@ -1303,7 +1324,26 @@ impl BrowserState {
       ctx.pages.push(page);
     }
     context_pages.set(&format!("{instance_name}:default"), &ctx.pages);
-    if let Some(vp) = viewport {
+    if let Some(options) = defaults {
+      let foreign = inst.browser.created_context_targets().await?;
+      for page in &inst.context_mut("default").pages {
+        if foreign.contains(&page.backend_target_id()) {
+          continue;
+        }
+        // Boxed as `dyn`: the whole options path inlined into the launch
+        // task's future overflows the compiler's `Send` check on it.
+        let applied: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =
+          Box::pin(page.apply_context_options(options));
+        if let Err(e) = applied.await {
+          tracing::warn!(
+            target: "ferridriver::state",
+            instance = instance_name,
+            error = %e,
+            "could not apply the configured context options to an adopted page",
+          );
+        }
+      }
+    } else if let Some(vp) = viewport {
       for page in &inst.context_mut("default").pages {
         if let Err(e) = page.emulate_viewport(vp).await {
           tracing::warn!(

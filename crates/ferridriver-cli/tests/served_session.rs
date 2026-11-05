@@ -17,10 +17,10 @@ use ferridriver_session::{
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::sync::mpsc;
 
-const SHOP: &str = "<!doctype html><title>Shop</title><body style=margin:0>\
+const SHOP: &str = "<!doctype html><title>Shop</title><meta name=viewport content=width=device-width><body style=margin:0>\
 <a href=/help target=_blank style=position:absolute;left:10px;top:10px;width:120px;height:30px>Help</a></body>";
 
-const HELP: &str = "<!doctype html><title>Help</title><body style=margin:0>\
+const HELP: &str = "<!doctype html><title>Help</title><meta name=viewport content=width=device-width><body style=margin:0>\
 <label style=position:absolute;left:10px;top:10px>Question <input style=width:200px></label>\
 <button type=button style=position:absolute;left:10px;top:60px;width:120px;height:30px>Ask</button></body>";
 
@@ -92,9 +92,15 @@ impl Drop for Served {
 
 /// The CLI against the test's own session registry.
 fn cli(registry: &std::path::Path, args: &[&str]) -> anyhow::Result<std::process::Output> {
+  cli_in(registry, registry.parent().unwrap_or(registry), args)
+}
+
+/// [`cli`] run in `dir`, whose config file is the only one it reads.
+fn cli_in(registry: &std::path::Path, dir: &std::path::Path, args: &[&str]) -> anyhow::Result<std::process::Output> {
   Ok(
     Process::new(ferridriver_bin())
       .args(args)
+      .current_dir(dir)
       .env("FERRIDRIVER_SESSION_DIR", registry)
       .env("FERRIDRIVER_NO_INHERIT", "1")
       .output()?,
@@ -267,4 +273,191 @@ async fn drive(
     other => bail!("recorder.start ended with {other:?}"),
   }
   Ok((result.source, result.actions))
+}
+
+/// A CDP client of another app's: one command at a time, answers matched by id.
+struct Cdp {
+  socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+  next: u64,
+}
+
+impl Cdp {
+  async fn connect(endpoint: &str) -> anyhow::Result<Self> {
+    Ok(Self {
+      socket: tokio_tungstenite::connect_async(endpoint).await?.0,
+      next: 0,
+    })
+  }
+
+  async fn send(
+    &mut self,
+    session: Option<&str>,
+    method: &str,
+    params: serde_json::Value,
+  ) -> anyhow::Result<serde_json::Value> {
+    use tokio_tungstenite::tungstenite::Message;
+    self.next += 1;
+    let id = self.next;
+    let mut command = serde_json::json!({"id": id, "method": method, "params": params});
+    if let Some(session) = session {
+      command["sessionId"] = session.into();
+    }
+    self.socket.send(Message::text(command.to_string())).await?;
+    loop {
+      let message = tokio::time::timeout(Duration::from_secs(15), self.socket.next())
+        .await
+        .with_context(|| format!("no answer to {method}"))?
+        .with_context(|| format!("socket closed before answering {method}"))??;
+      let Ok(text) = message.to_text() else { continue };
+      let value: serde_json::Value = serde_json::from_str(text)?;
+      if value["id"] == id {
+        ensure!(value.get("error").is_none(), "{method}: {}", value["error"]);
+        return Ok(value["result"].clone());
+      }
+    }
+  }
+}
+
+/// What a page says about the device it runs on.
+const DEVICE: &str =
+  "[devicePixelRatio, matchMedia('(pointer: coarse)').matches, navigator.maxTouchPoints, innerWidth, innerHeight]";
+
+const PHONE_AGENT: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 \
+(KHTML, like Gecko) Version/27.2 Mobile/15E148 Safari/604.1";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_host_on_a_served_browser_opens_its_pages_as_the_configured_phone() -> anyhow::Result<()> {
+  let origin = serve_pages()?;
+  let served = Served::start()?;
+
+  // The browser's own tab, which the session host takes over, and another
+  // app's page in a context of its own, both open before the host arrives.
+  let mut other = Cdp::connect(&served.endpoint).await?;
+  other
+    .send(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
+    .await?;
+  let context = other
+    .send(None, "Target.createBrowserContext", serde_json::json!({}))
+    .await?;
+  let own = other
+    .send(
+      None,
+      "Target.createTarget",
+      serde_json::json!({"url": format!("{origin}/help?own"), "browserContextId": context["browserContextId"]}),
+    )
+    .await?;
+
+  let scratch = tempfile::tempdir()?;
+  let config = serde_json::json!({"mcp": {"browser": {
+    "viewport": {"width": 393, "height": 659},
+    "deviceScaleFactor": 3,
+    "isMobile": true,
+    "hasTouch": true,
+    "userAgent": PHONE_AGENT,
+  }}});
+  std::fs::write(scratch.path().join("ferridriver.json"), config.to_string())?;
+  let registry_dir = scratch.path().join("registry");
+  let opened = cli_in(
+    &registry_dir,
+    scratch.path(),
+    &["session", "open", "phone", "--headless", "--connect", &served.endpoint],
+  )?;
+  ensure!(
+    opened.status.success(),
+    "session open: {}",
+    String::from_utf8_lossy(&opened.stderr)
+  );
+  let result = observe(&origin, &Registry::open_at(&registry_dir)?).await;
+  let _ = cli(&registry_dir, &["session", "close", "phone"]);
+  let seen = result?;
+
+  let phone = serde_json::json!([3, true, 5, 393, 659]);
+  for (which, value) in ["the recorded page", "its popup", "a page it opens"]
+    .iter()
+    .zip(seen["pages"].as_array().context("the pages")?)
+  {
+    assert_eq!(value, &phone, "{which}: {seen}");
+  }
+  assert_eq!(
+    seen["agents"],
+    serde_json::json!([PHONE_AGENT, PHONE_AGENT, PHONE_AGENT]),
+    "{seen}"
+  );
+
+  // The other app's page keeps the browser's own settings, as the session
+  // host sees it and as the app does once it looks.
+  if !seen["foreign"].is_null() {
+    ensure!(seen["foreign"][0] == 1 && seen["foreign"][2] == 0, "{seen}");
+  }
+  let attached = other
+    .send(
+      None,
+      "Target.attachToTarget",
+      serde_json::json!({"targetId": own["targetId"], "flatten": true}),
+    )
+    .await?;
+  let own_session = attached["sessionId"].as_str().context("a session")?.to_string();
+  let untouched = other
+    .send(
+      Some(&own_session),
+      "Runtime.evaluate",
+      serde_json::json!({"expression": format!("JSON.stringify([{DEVICE}, navigator.userAgent])"), "returnByValue": true}),
+    )
+    .await?;
+  let untouched: serde_json::Value = serde_json::from_str(untouched["result"]["value"].as_str().context("a value")?)?;
+  ensure!(untouched[0][0] == 1 && untouched[0][2] == 0, "{untouched}");
+  ensure!(untouched[1] != PHONE_AGENT, "{untouched}");
+  Ok(())
+}
+
+/// Start a recording on the shop as the app does, open its popup and a
+/// page of the session's own, and read what each reports.
+async fn observe(origin: &str, registry: &Registry) -> anyhow::Result<serde_json::Value> {
+  let endpoint = registry.get("phone")?.context("the session's descriptor")?.endpoint;
+  let (events, mut streamed) = mpsc::unbounded_channel();
+  let mut recorder = SessionClient::connect(&endpoint).await?;
+  let start = Command::new(
+    1,
+    RECORDER_START_VERB,
+    serde_json::json!({"target": "test", "url": format!("{origin}/")}),
+  );
+  let recording = tokio::spawn(async move {
+    recorder
+      .call_with_events(start, |event| {
+        let _ = events.send(event.payload);
+      })
+      .await
+  });
+  next(&mut streamed, "the opening navigation").await?;
+  let script = format!(
+    "const popup = page.waitForEvent('popup');
+     await page.getByRole('link', {{ name: 'Help' }}).click();
+     const opened = await context.newPage();
+     await opened.goto('{origin}/help');
+     const pages = [page, await popup, opened];
+     // Every page a connection reaches is listed, the other app's too.
+     const foreign = context.pages().find(p => p.url().endsWith('?own'));
+     const seen = {{ pages: [], agents: [], foreign: foreign ? await foreign.evaluate(() => {DEVICE}) : null }};
+     for (const p of pages) {{
+       seen.pages.push(await p.evaluate(() => {DEVICE}));
+       seen.agents.push(await p.evaluate(() => navigator.userAgent));
+     }}
+     return JSON.stringify(seen);"
+  );
+  let ran = call(
+    &endpoint,
+    ferridriver_session::RUN_VERB,
+    serde_json::json!({"code": script}),
+  )
+  .await?;
+  call(&endpoint, RECORDER_STOP_VERB, serde_json::json!({})).await?;
+  match recording.await? {
+    Ok(reply) if reply.ok => {},
+    other => bail!("recorder.start ended with {other:?}"),
+  }
+  let reply: serde_json::Value = serde_json::from_str(&ran.text)?;
+  ensure!(reply["status"] == "ok", "{reply}");
+  Ok(serde_json::from_str(
+    reply["value"].as_str().context("the script's answer")?,
+  )?)
 }

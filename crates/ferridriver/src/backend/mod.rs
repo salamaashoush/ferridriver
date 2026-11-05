@@ -716,6 +716,22 @@ impl AnyBrowser {
     }
   }
 
+  /// The pages, by [`AnyPage::backend_target_id`], that belong to a
+  /// context some client created rather than to the default one. Only CDP
+  /// reaches pages of other clients' contexts; the other backends answer
+  /// none.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend fails to enumerate contexts or targets.
+  pub async fn created_context_targets(&self) -> Result<rustc_hash::FxHashSet<String>> {
+    match self {
+      Self::CdpPipe(b) => b.created_context_targets().await,
+      Self::CdpWs(b) => b.created_context_targets().await,
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => Ok(rustc_hash::FxHashSet::default()),
+    }
+  }
+
   /// Create a new browser context (isolated cookies, storage, cache).
   ///
   /// `options` carries the full `BrowserContextOptions` bag — most

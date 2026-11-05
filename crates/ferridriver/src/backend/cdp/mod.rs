@@ -885,6 +885,43 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Arc::clone(&self.popup_taps)
   }
 
+  /// The page targets that live in a browser context some client created,
+  /// rather than in the browser's default one.
+  pub async fn created_context_targets(&self) -> Result<rustc_hash::FxHashSet<String>> {
+    let contexts = self
+      .transport
+      .send_command(None, "Target.getBrowserContexts", &super::EMPTY_PARAMS)
+      .await?;
+    let created: rustc_hash::FxHashSet<&str> = contexts
+      .get("browserContextIds")
+      .and_then(serde_json::Value::as_array)
+      .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).collect())
+      .unwrap_or_default();
+    let targets = self
+      .transport
+      .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
+      .await?;
+    Ok(
+      targets
+        .get("targetInfos")
+        .and_then(serde_json::Value::as_array)
+        .map(|infos| {
+          infos
+            .iter()
+            .filter(|info| {
+              info
+                .get("browserContextId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| created.contains(id))
+            })
+            .filter_map(|info| info.get("targetId").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect()
+        })
+        .unwrap_or_default(),
+    )
+  }
+
   /// Retrieve all open page targets, attaching to any not yet tracked.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let result = self
