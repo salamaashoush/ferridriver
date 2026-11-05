@@ -390,14 +390,18 @@ pub enum EventPayload {
     viewport_height: u32,
   },
   /// One recorded action, for [`RECORDER_START_VERB`], with the statements
-  /// that reproduce it. `replaces_previous` marks an action that supersedes
-  /// the one recorded just before it (a click that became a double click,
-  /// a fill that grew, a click found to have opened a popup).
+  /// that reproduce it. `replacesIndex` is the index, in the list of
+  /// recorded actions, of an entry this one supersedes: a click that became
+  /// a double click, a fill that grew, an action found to have opened a
+  /// popup however far back. `replaces_previous` is also set when that
+  /// entry is the last one.
   Recorded {
     action: ferridriver::codegen::RecordedAction,
     code: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     replaces_previous: bool,
+    #[serde(rename = "replacesIndex", default, skip_serializing_if = "Option::is_none")]
+    replaces_index: Option<usize>,
   },
   /// The recorder's mode changed, including its return to `recording`
   /// after an assertion was picked.
@@ -667,6 +671,7 @@ mod tests {
         },
         code: "await page.locator('#go').click();".into(),
         replaces_previous: false,
+        replaces_index: Some(4),
       },
     }))
     .unwrap();
@@ -676,6 +681,7 @@ mod tests {
       "event": "recorded",
       "action": {"type": "click", "selector": "#go", "locator": "locator('#go')", "page": "page", "popup": "page1"},
       "code": "await page.locator('#go').click();",
+      "replacesIndex": 4,
     });
     assert_eq!(wire, expected);
     // The flattened action decodes back through the flattened payload.

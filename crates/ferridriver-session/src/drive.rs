@@ -310,10 +310,12 @@ impl Recordings {
       RecorderEvent::Action {
         action,
         replaces_previous,
+        replaces_index,
       } => sink_events.send(EventPayload::Recorded {
         code: dedent(&line_emitter.action(&action)),
         action,
         replaces_previous,
+        replaces_index,
       }),
       RecorderEvent::Mode(mode) => sink_events.send(EventPayload::RecorderMode {
         mode: mode.as_str().to_string(),

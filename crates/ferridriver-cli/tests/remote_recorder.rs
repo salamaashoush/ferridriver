@@ -431,3 +431,175 @@ async fn input_reaches_the_page_it_names_on_webkit() -> anyhow::Result<()> {
 async fn input_reaches_the_page_it_names_on_bidi() -> anyhow::Result<()> {
   input_reaches_the_page_it_names(launch(ferridriver::firefox()).await?, false).await
 }
+
+/// The list a watcher keeps from the recorded events: each one appended,
+/// or put in the place of the entry it replaces.
+fn watched_steps(events: &[EventPayload]) -> Vec<RecordedAction> {
+  let mut steps: Vec<RecordedAction> = Vec::new();
+  for event in events {
+    if let EventPayload::Recorded {
+      action,
+      replaces_previous,
+      replaces_index,
+      ..
+    } = event
+    {
+      match (replaces_index, replaces_previous) {
+        (Some(index), _) if *index < steps.len() => steps[*index] = action.clone(),
+        (_, true) => {
+          steps.pop();
+          steps.push(action.clone());
+        },
+        _ => steps.push(action.clone()),
+      }
+    }
+  }
+  steps
+}
+
+async fn bound(
+  browser: &ferridriver::Browser,
+  name: &str,
+) -> anyhow::Result<(ferridriver_session::BoundSession, String, tempfile::TempDir)> {
+  let scratch = tempfile::tempdir()?;
+  let registry = Registry::open_at(scratch.path().join("registry"))?;
+  let options = BindOptions {
+    host: Some("127.0.0.1".into()),
+    port: Some(0),
+    ..Default::default()
+  };
+  let session = bind_in(&registry, browser, name, options, None).await?;
+  let endpoint = session.endpoint().to_string();
+  Ok((session, endpoint, scratch))
+}
+
+// The opener has a link that opens a popup at once and a button that
+// opens another a while after it is pressed.
+const LATE_OPENER: &str = "<!doctype html><body style=margin:0>\
+<a href=/here target=_blank style=position:absolute;left:10px;top:10px;width:120px;height:30px>open</a>\
+<button style=position:absolute;left:10px;top:60px;width:120px;height:30px \
+onclick=\"setTimeout(() => window.open('/here'), 1500)\">Later</button></body>";
+
+const LATE_POPUP: &str = "<!doctype html><body style=margin:0>\
+<button style=position:absolute;left:10px;top:10px;width:120px;height:30px>Here</button></body>";
+
+/// Serve the opener and its popup over HTTP, a thread per connection: a
+/// page may not open a data URL in a window of its own.
+fn serve_late() -> anyhow::Result<String> {
+  use std::io::{Read as _, Write as _};
+  let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+  let origin = format!("http://{}", listener.local_addr()?);
+  std::thread::spawn(move || {
+    for stream in listener.incoming().flatten() {
+      std::thread::spawn(move || {
+        let mut stream = stream;
+        let mut request = [0_u8; 4096];
+        let read = stream.read(&mut request).unwrap_or(0);
+        let head = String::from_utf8_lossy(&request[..read]);
+        let body = if head.split_whitespace().nth(1) == Some("/here") {
+          LATE_POPUP
+        } else {
+          LATE_OPENER
+        };
+        let _ = write!(
+          stream,
+          "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+          body.len()
+        );
+      });
+    }
+  });
+  Ok(origin)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_popup_opened_after_another_step_replaces_the_step_that_opened_it() -> anyhow::Result<()> {
+  let browser = launch(ferridriver::chromium()).await?;
+  let (session, endpoint, _scratch) = bound(&browser, "late").await?;
+  let opener = page_for(&browser, "default").await?;
+  opener.goto(&format!("{}/", serve_late()?)).await?;
+  let opener_id = target_id(&opener, true).await?;
+  let start = Command::new(1, RECORDER_START_VERB, serde_json::json!({"target": "test"}));
+  let (mut events, recording) = stream(&endpoint, start).await?;
+  let mut streamed = vec![next_event(&mut events, "the opening navigation").await?];
+
+  // The link's popup is announced at once, on the click that opened it.
+  let (popup, ()) = opener
+    .expect_popup(|| async {
+      click(&endpoint, (40.0, 20.0))
+        .await
+        .map_err(|error| ferridriver::FerriError::backend(error.to_string()))
+    })
+    .await?;
+  popup.wait_for_load_state(None).await?;
+
+  // The opener's button opens its popup only after a step on the first
+  // popup has been recorded.
+  let later = opener.wait_for_event("popup", Some(15_000));
+  for kind in ["mouse_move", "mouse_down", "mouse_up"] {
+    ok(
+      &endpoint,
+      INPUT_VERB,
+      serde_json::json!({"type": kind, "x": 40.0, "y": 75.0, "page": opener_id}),
+    )
+    .await?;
+  }
+  click(&endpoint, (40.0, 20.0)).await?;
+  later.await?;
+
+  let late = loop {
+    let event = match next_event(&mut events, "the late popup's replacement").await {
+      Ok(event) => event,
+      Err(error) => bail!("{error}: streamed {streamed:#?}"),
+    };
+    streamed.push(event.clone());
+    if let EventPayload::Recorded {
+      replaces_index: Some(index),
+      replaces_previous: false,
+      action,
+      ..
+    } = event
+    {
+      break (index, action);
+    }
+  };
+  let stopped = ok(&endpoint, RECORDER_STOP_VERB, serde_json::json!({})).await?;
+  let result: RecordingResult = serde_json::from_str(&stopped.text)?;
+  ensure!(recording.await??.ok, "recorder.start failed");
+  while let Ok(event) = events.try_recv() {
+    streamed.push(event);
+  }
+
+  let kinds: Vec<(String, Option<&str>)> = result
+    .actions
+    .iter()
+    .map(|action| {
+      (
+        format!("{}:{}", action.page, action_kind(action)),
+        action.popup.as_deref(),
+      )
+    })
+    .collect();
+  assert_eq!(
+    kinds,
+    [
+      ("page:navigate".to_string(), None),
+      ("page:click".to_string(), Some("page1")),
+      ("page:click".to_string(), Some("page2")),
+      ("page1:click".to_string(), None),
+    ],
+    "{:#?}",
+    result.actions
+  );
+  assert_eq!(late.0, 2, "the late popup replaces the step that opened it");
+  assert_eq!(late.1, result.actions[2]);
+  assert_eq!(
+    watched_steps(&streamed),
+    result.actions,
+    "the watcher's list is the recording"
+  );
+
+  drop(session);
+  browser.close().await?;
+  Ok(())
+}

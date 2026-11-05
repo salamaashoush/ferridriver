@@ -45,8 +45,18 @@ impl LiveSource {
   }
 
   /// Take the next recorded action; answers the code of the one before it
-  /// once that one can no longer change.
-  pub fn push(&mut self, action: RecordedAction, replaces_previous: bool) -> Option<String> {
+  /// once that one can no longer change. An action replacing an entry
+  /// further back than the one held back changes code already written, so
+  /// it is left out here and is right in the finished file.
+  pub fn push(
+    &mut self,
+    action: RecordedAction,
+    replaces_previous: bool,
+    replaces_index: Option<usize>,
+  ) -> Option<String> {
+    if replaces_index.is_some() && !replaces_previous {
+      return None;
+    }
     let finished = if replaces_previous { None } else { self.pending.take() };
     self.pending = Some(action);
     finished.map(|action| self.emitter.action(&action))
@@ -974,15 +984,17 @@ mod tests {
         value: value.into(),
       })
     };
-    assert_eq!(live.push(fill("a"), false), None);
-    assert_eq!(live.push(fill("ab"), true), None);
+    assert_eq!(live.push(fill("a"), false, None), None);
+    assert_eq!(live.push(fill("ab"), true, Some(0)), None);
     assert_eq!(
       live.push(
         RecordedAction::on_first_page(click("getByRole('button', { name: 'Go' })")),
-        false
+        false,
+        None
       ),
       Some("await page.locator('#q').fill('ab');\n".to_string())
     );
+    assert_eq!(live.push(fill("written"), false, Some(0)), None);
     assert_eq!(
       live.finish(),
       Some("await page.getByRole('button', { name: 'Go' }).click();\n".to_string())

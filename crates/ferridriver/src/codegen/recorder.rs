@@ -91,13 +91,15 @@ impl RecorderMode {
 /// Something the recorder observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecorderEvent {
-  /// An action was recorded. `replaces_previous` is set when it supersedes
-  /// the action recorded just before it (a double click that began as a
-  /// click, a field typed into again, a click found to have opened a
-  /// popup), so a consumer keeping a list drops that last entry first.
+  /// An action was recorded. `replaces_index` is the index of the entry it
+  /// supersedes in the list of everything recorded: a double click that
+  /// began as a click, a field typed into again, an action found to have
+  /// opened a popup, however far back. `replaces_previous` is set as well
+  /// when that entry is the last one.
   Action {
     action: RecordedAction,
     replaces_previous: bool,
+    replaces_index: Option<usize>,
   },
   /// The mode changed, including the switch back to recording after an
   /// assertion was picked.
@@ -162,6 +164,20 @@ struct State {
 }
 
 impl State {
+  /// Put the popup `alias` on the last action done on `opener`, which is
+  /// the one that opened it, and say so as a replacement of that entry.
+  fn open_popup(&mut self, opener: &str, alias: &str) -> Option<RecorderEvent> {
+    let index = self.actions.iter().rposition(|action| action.page == opener)?;
+    let last = index + 1 == self.actions.len();
+    let opening = &mut self.actions[index];
+    opening.popup = Some(alias.to_string());
+    Some(RecorderEvent::Action {
+      action: opening.clone(),
+      replaces_previous: last,
+      replaces_index: Some(index),
+    })
+  }
+
   fn alias_of(&self, id: usize) -> Option<&str> {
     self
       .pages
@@ -213,29 +229,19 @@ impl Shared {
       if state.detached || !state.announced_popups.insert(popup.backend_page_id()) {
         return;
       }
-      let Some(index) = state.actions.iter().rposition(|action| action.page == opener_alias) else {
+      let Some(updated) = state.open_popup(&opener_alias, alias) else {
         return;
       };
-      let last = index + 1 == state.actions.len();
-      let opening = &mut state.actions[index];
-      opening.popup = Some(alias.to_string());
-      // A consumer keeping a list can only replace the last entry; one
-      // further back stays as it was streamed and is right in the result.
-      last.then(|| opening.clone())
+      updated
     };
-    if let Some(action) = updated {
-      self.sink.event(RecorderEvent::Action {
-        action,
-        replaces_previous: true,
-      });
-    }
+    self.sink.event(updated);
   }
 
   /// Record `action`, folding it into the previous one where the page
   /// reported the same gesture twice. Returns the mode the page should be
   /// in afterwards.
   fn record(&self, mut action: RecordedAction) -> RecorderMode {
-    let (replaces_previous, mode_change, action) = {
+    let (replaces_index, mode_change, action) = {
       let mut state = self.state();
       if state.detached {
         return RecorderMode::None;
@@ -251,16 +257,18 @@ impl Shared {
       if replaces_previous && let Some(previous) = state.actions.pop() {
         action.popup = action.popup.or(previous.popup);
       }
+      let index = state.actions.len();
       state.actions.push(action.clone());
       let mode_change = (action.action.is_assertion() && state.mode != RecorderMode::Recording).then(|| {
         state.mode = RecorderMode::Recording;
         RecorderMode::Recording
       });
-      (replaces_previous, mode_change, action)
+      (replaces_previous.then_some(index), mode_change, action)
     };
     self.sink.event(RecorderEvent::Action {
       action,
-      replaces_previous,
+      replaces_previous: replaces_index.is_some(),
+      replaces_index,
     });
     if let Some(mode) = mode_change {
       self.sink.event(RecorderEvent::Mode(mode));
@@ -853,12 +861,14 @@ impl HeadedRecorder {
       if let RecorderEvent::Action {
         action,
         replaces_previous,
+        replaces_index,
       } = event
         && live
-        && let Some(code) = written
-          .lock()
-          .unwrap_or_else(PoisonError::into_inner)
-          .push(action, replaces_previous)
+        && let Some(code) =
+          written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(action, replaces_previous, replaces_index)
       {
         let mut out = std::io::stdout();
         let _ = out.write_all(code.as_bytes());
@@ -969,21 +979,57 @@ mod tests {
         options: super::super::ClickOptions::default(),
       })]
     );
-    let flags: Vec<bool> = seen
+    let flags: Vec<(bool, Option<usize>)> = seen
       .lock()
       .unwrap()
       .iter()
-      .map(|event| {
-        matches!(
-          event,
-          RecorderEvent::Action {
-            replaces_previous: true,
-            ..
-          }
-        )
+      .filter_map(|event| match event {
+        RecorderEvent::Action {
+          replaces_previous,
+          replaces_index,
+          ..
+        } => Some((*replaces_previous, *replaces_index)),
+        _ => None,
       })
       .collect();
-    assert_eq!(flags, [false, true]);
+    assert_eq!(flags, [(false, None), (true, Some(0))]);
+  }
+
+  #[test]
+  fn a_popup_announced_late_replaces_the_entry_that_opened_it() {
+    let click = |page: &str, selector: &str| RecordedAction {
+      page: page.into(),
+      action: Action::Click {
+        selector: selector.into(),
+        locator: format!("locator('{selector}')"),
+        options: super::super::ClickOptions::default(),
+      },
+      popup: None,
+    };
+    let mut state = State {
+      actions: vec![click(FIRST_PAGE, "#later"), click("page1", "#other")],
+      ..State::default()
+    };
+    let Some(RecorderEvent::Action {
+      action,
+      replaces_previous,
+      replaces_index,
+    }) = state.open_popup(FIRST_PAGE, "page2")
+    else {
+      panic!("the opener's action was not replaced");
+    };
+    assert_eq!((replaces_previous, replaces_index), (false, Some(0)));
+    assert_eq!(action.popup.as_deref(), Some("page2"));
+    assert_eq!(state.actions[0].popup.as_deref(), Some("page2"));
+    assert!(matches!(
+      state.open_popup("page1", "page3"),
+      Some(RecorderEvent::Action {
+        replaces_previous: true,
+        replaces_index: Some(1),
+        ..
+      })
+    ));
+    assert!(state.open_popup("page4", "page5").is_none());
   }
 
   #[test]

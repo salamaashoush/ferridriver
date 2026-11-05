@@ -206,14 +206,15 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
       EventPayload::Recorded {
         action,
         replaces_previous,
+        replaces_index,
         ..
       } => {
         if to_stdout {
-          if let Some(code) = source.push(action, replaces_previous) {
+          if let Some(code) = source.push(action, replaces_previous, replaces_index) {
             print!("{code}");
             let _ = std::io::stdout().flush();
           }
-        } else if !replaces_previous {
+        } else if replaces_index.is_none() {
           ui::note(&format!("recorded {}", action_name(&action.action)));
         }
       },
