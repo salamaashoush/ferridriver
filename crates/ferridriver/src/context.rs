@@ -289,7 +289,7 @@ impl ContextRef {
   /// writer is enough to make `try_read` fail; the popup pump hit this
   /// deterministically. Anywhere there is an `.await` to spend, spend it
   /// here instead of degrading.
-  pub(crate) async fn new_async(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
+  pub async fn new_async(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
     let (key, events, closed, test_id_attribute, pages) = {
       let s = state.read().await;
       let key = s.session_key(&name);
@@ -436,18 +436,7 @@ impl ContextRef {
     // across a browser spawn stalls every other session in the process,
     // including ones on a different instance.
     Box::pin(BrowserState::ensure_instance_shared(&self.state, &self.key.instance)).await?;
-    // First page open of this browser generation also starts the
-    // instance's popup pump, so `window.open` popups from any page get
-    // registered, configured, and announced as `'page'` events. The
-    // read-lock check keeps the steady-state page open off the global
-    // write guard — with N workers opening pages, that guard is the one
-    // thing they all have to queue behind.
-    if !self.state.read().await.popup_pump_claimed(&self.key.instance) {
-      let mut state = self.state.write().await;
-      if let Some(browser) = state.claim_popup_pump(&self.key.instance) {
-        spawn_popup_pump(self.state.clone(), self.key.instance.clone(), &browser);
-      }
-    }
+    ensure_popup_pump(&self.state, &self.key.instance).await;
 
     // Read the (optional) `BrowserContextOptions` bag before the open —
     // a custom `viewport` (or `null` viewport) has to be known up-front
@@ -2557,6 +2546,21 @@ fn bind_source(binding: crate::events::ExposedBinding, context_key: String) -> c
 /// "apply the whole bag or don't".
 async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserContextOptions) -> Result<()> {
   Box::pin(page.apply_context_options(opts)).await
+}
+
+/// Start `instance`'s popup pump unless its current browser generation
+/// already has one, so `window.open` popups from any page get registered,
+/// configured, and announced as `'page'` events. The read-lock check keeps
+/// the steady state off the global write guard, which every worker opening
+/// a page would otherwise queue behind.
+pub(crate) async fn ensure_popup_pump(state: &Arc<RwLock<BrowserState>>, instance: &Arc<str>) {
+  if state.read().await.popup_pump_claimed(instance) {
+    return;
+  }
+  let mut guard = state.write().await;
+  if let Some(browser) = guard.claim_popup_pump(instance) {
+    spawn_popup_pump(Arc::clone(state), Arc::clone(instance), &browser);
+  }
 }
 
 /// Consume one instance's [`crate::backend::PopupInfo`] stream. Each

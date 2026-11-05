@@ -132,6 +132,12 @@ impl Start {
         created,
       ))
       .await;
+      // Pages adopted from a browser connected to never go through a page
+      // open, which was the only other place the pump started, so popups
+      // they opened were left to run unmanaged.
+      if result.is_ok() {
+        crate::context::ensure_popup_pump(&state, &Arc::from(instance.as_str())).await;
+      }
       if let Err(Err(error)) = reply.send(result) {
         tracing::debug!(%error, instance, "Browser initialization finished after its caller disconnected");
       }

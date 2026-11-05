@@ -199,6 +199,12 @@ impl Browser {
       name: default_context,
       listed: default_is_live,
     }]));
+    // The state is new and unshared, so the claim cannot wait on the lock.
+    if let Ok(mut state) = browser.state.try_write()
+      && let Some(backend) = state.claim_popup_pump(instance)
+    {
+      crate::context::spawn_popup_pump(Arc::clone(&browser.state), Arc::from(instance), &backend);
+    }
     Ok(browser.watch_connection(Some(closed)))
   }
 
