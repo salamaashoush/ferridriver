@@ -22,6 +22,9 @@ mod android;
 mod ios;
 #[cfg(any(target_os = "linux", test))]
 mod linux;
+mod playwright_cache;
+
+pub use playwright_cache::{CachedBrowser, find_playwright_browser, playwright_cache_dir};
 
 use std::path::{Path, PathBuf};
 
@@ -335,16 +338,8 @@ impl BrowserInstaller {
   /// Override with `FERRIDRIVER_BROWSERS_PATH` env var.
   #[must_use]
   pub fn new() -> Self {
-    let cache_dir = if let Ok(p) = std::env::var("FERRIDRIVER_BROWSERS_PATH") {
-      PathBuf::from(p)
-    } else {
-      dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from(".cache"))
-        .join("ferridriver")
-    };
-
     Self {
-      cache_dir,
+      cache_dir: default_cache_dir(),
       client: Client::new(),
     }
   }
@@ -1270,6 +1265,23 @@ impl BrowserInstaller {
       .find(|dir| dir.join(".downloaded").exists() && ANDROID_DRIVER_APKS.iter().all(|apk| dir.join(apk).exists()))
   }
 
+  /// Return the path to an installed `WebKit`, or `None` if not installed.
+  #[must_use]
+  pub fn find_installed_webkit(&self) -> Option<String> {
+    let root = CacheFamily::WebKit.root(&self.cache_dir);
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_name().to_string_lossy().starts_with("webkit-"))
+      .collect();
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
+
+    candidates.into_iter().find_map(|entry| {
+      let exe = entry.path().join("pw_run.sh");
+      (entry.path().join(".downloaded").exists() && exe.is_file()).then(|| exe.to_string_lossy().to_string())
+    })
+  }
+
   /// Return the path to an installed Firefox, or `None` if not installed.
   #[must_use]
   pub fn find_installed_firefox(&self) -> Option<String> {
@@ -1289,6 +1301,20 @@ impl BrowserInstaller {
     }
     None
   }
+}
+
+/// ferridriver's own browser cache: `FERRIDRIVER_BROWSERS_PATH`, or
+/// `ferridriver` under the platform cache directory.
+#[must_use]
+pub fn default_cache_dir() -> PathBuf {
+  std::env::var_os("FERRIDRIVER_BROWSERS_PATH").map_or_else(
+    || {
+      dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from(".cache"))
+        .join("ferridriver")
+    },
+    PathBuf::from,
+  )
 }
 
 impl Default for BrowserInstaller {

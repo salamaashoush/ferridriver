@@ -564,11 +564,14 @@ bun test
 - Rust nightly (edition 2024). The toolchain is pinned in
   `rust-toolchain.toml`; `rust-version` (MSRV) is 1.91.
 - Chrome or Chromium (`ferridriver install chromium`, or set
-  `FERRIDRIVER_BROWSERS_PATH` to use an existing install).
-- Firefox installed locally for the `bidi` backend (ferridriver does not
-  bundle Firefox).
+  `CHROMIUM_PATH` to use an existing install).
+- Firefox for the `bidi` backend (`ferridriver install firefox`, or set
+  `FIREFOX_PATH`).
 - Playwright WebKit binary for the `webkit` backend (`ferridriver install
-  webkit`, set `FERRIDRIVER_WEBKIT`, or use Playwright's cache).
+  webkit`, or set `FERRIDRIVER_WEBKIT`).
+- Without an explicit path, a launch takes the newest build in ferridriver's
+  own cache (`FERRIDRIVER_BROWSERS_PATH`), then the newest in Playwright's
+  (`PLAYWRIGHT_BROWSERS_PATH`), then a browser installed on the system.
 - `ffmpeg` on `PATH` at runtime for video recording (optional).
 - Node.js 16+ or Bun 1.0+ only if you build or consume `@ferridriver/node`.
 

@@ -3129,8 +3129,12 @@ pub(crate) const CHROMIUM_SWITCHES: &[&str] = &[
 /// Precedence (headless=true):
 /// 1. `CHROMIUM_HEADLESS_SHELL_PATH` env var
 /// 2. `CHROMIUM_PATH` env var (explicit user override always wins over auto-detection)
-/// 3. Auto-detect headless shell (Playwright cache, ferridriver cache)
-/// 4. Auto-detect regular Chrome (`detect_chromium()`)
+/// 3. ferridriver's own cache: its headless shell, then its Chromium
+/// 4. Playwright's headless shell
+/// 5. Auto-detect regular Chrome (`detect_chromium()`)
+///
+/// A build in ferridriver's cache outranks any build in Playwright's, so a
+/// Playwright install elsewhere on the machine never changes the browser.
 ///
 /// Precedence (headless=false):
 /// 1. `CHROMIUM_PATH` env var
@@ -3152,8 +3156,12 @@ pub fn resolve_chromium(headless: bool) -> String {
       return p;
     }
 
-    // Auto-detect headless shell (Playwright cache, ferridriver cache)
-    if let Some(p) = detect_chromium_headless_shell() {
+    let installer = crate::install::BrowserInstaller::new();
+    if let Some(p) = installer
+      .find_installed_headless_shell()
+      .or_else(|| installer.find_installed_chromium())
+      .or_else(|| playwright_build(crate::install::CachedBrowser::ChromiumHeadlessShell))
+    {
       return p;
     }
   }
@@ -3164,68 +3172,17 @@ pub fn resolve_chromium(headless: bool) -> String {
 
 /// Auto-detect Chrome Headless Shell binary on the system.
 ///
-/// Searches Playwright's cache and ferridriver's own cache for installed
-/// headless shell binaries. Does NOT check env vars (that's `resolve_chromium()`'s job).
+/// ferridriver's own cache first, then Playwright's. Does NOT check env vars
+/// (that's `resolve_chromium()`'s job).
 #[must_use]
 pub fn detect_chromium_headless_shell() -> Option<String> {
-  // Check Playwright's cache for headless shell
-  if let Some(p) = find_playwright_headless_shell() {
-    return Some(p);
-  }
-
-  // Check ferridriver's own cache
-  if let Some(p) = crate::install::BrowserInstaller::new().find_installed_headless_shell() {
-    return Some(p);
-  }
-
-  None
+  crate::install::BrowserInstaller::new()
+    .find_installed_headless_shell()
+    .or_else(|| playwright_build(crate::install::CachedBrowser::ChromiumHeadlessShell))
 }
 
-/// Chrome for Testing / Chromium builds under a browser cache directory,
-/// newest first. Covers every layout Chrome for Testing has shipped: the
-/// per-arch `chrome-mac-arm64` / `chrome-mac-x64` bundles it uses now, and
-/// the older `chrome-mac/Chromium.app` that Playwright caches still carry.
-fn cached_chromium_in(cache: &std::path::Path) -> Option<String> {
-  const LAYOUTS: [&str; 6] = [
-    "chrome-linux64/chrome",
-    "chrome-linux/chrome",
-    "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-    "chrome-win64/chrome.exe",
-  ];
-
-  let entries = std::fs::read_dir(cache).ok()?;
-  let mut candidates: Vec<_> = entries
-    .filter_map(std::result::Result::ok)
-    .filter(|e| {
-      let name = e.file_name().to_string_lossy().into_owned();
-      name.starts_with("chromium-") && !name.starts_with("chromium-headless-shell-")
-    })
-    .collect();
-  candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name())); // newest first
-
-  for entry in candidates {
-    for layout in LAYOUTS {
-      let exe = entry.path().join(layout);
-      if exe.exists() {
-        return Some(exe.to_string_lossy().to_string());
-      }
-    }
-  }
-  None
-}
-
-/// Playwright's browser cache, following Playwright's own registry logic:
-/// `PLAYWRIGHT_BROWSERS_PATH`, then `XDG_CACHE_HOME`, then `~/.cache`.
-fn playwright_cache_dir() -> Option<std::path::PathBuf> {
-  if let Ok(p) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
-    return Some(std::path::PathBuf::from(p));
-  }
-  std::env::var("XDG_CACHE_HOME")
-    .ok()
-    .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
-    .map(|c| std::path::PathBuf::from(c).join("ms-playwright"))
+fn playwright_build(browser: crate::install::CachedBrowser) -> Option<String> {
+  crate::install::find_playwright_browser(browser).map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Detect Chrome/Chromium binary on the system.
@@ -3250,10 +3207,7 @@ pub fn detect_chromium() -> String {
     return p;
   }
 
-  if let Some(pw_cache) = playwright_cache_dir()
-    && pw_cache.is_dir()
-    && let Some(p) = cached_chromium_in(&pw_cache)
-  {
+  if let Some(p) = playwright_build(crate::install::CachedBrowser::Chromium) {
     return p;
   }
 
@@ -3338,15 +3292,6 @@ pub fn detect_chromium() -> String {
     }
   }
 
-  // Check ferridriver's own browser cache
-  if let Some(p) = crate::install::BrowserInstaller::new().find_installed_chromium() {
-    return p;
-  }
-
-  if let Some(p) = find_playwright_chrome() {
-    return p;
-  }
-
   "chromium".to_string()
 }
 
@@ -3376,7 +3321,7 @@ pub fn detect_firefox() -> Result<String> {
   }
 
   // 3. Playwright's Firefox cache
-  if let Some(p) = find_playwright_firefox() {
+  if let Some(p) = playwright_build(crate::install::CachedBrowser::Firefox) {
     return Ok(p);
   }
 
@@ -3455,183 +3400,6 @@ pub fn detect_firefox() -> Result<String> {
   Err(FerriError::backend(
     "Firefox not found. Install with `ferridriver install firefox` or set FIREFOX_PATH.",
   ))
-}
-
-/// Search Playwright's cache for an installed Firefox binary.
-fn find_playwright_firefox() -> Option<String> {
-  let home = std::env::var("HOME").ok()?;
-
-  #[cfg(target_os = "macos")]
-  let cache_base = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
-  #[cfg(target_os = "linux")]
-  let cache_base = std::env::var("XDG_CACHE_HOME")
-    .map_or_else(
-      |_| std::path::PathBuf::from(&home).join(".cache"),
-      std::path::PathBuf::from,
-    )
-    .join("ms-playwright");
-  #[cfg(target_os = "windows")]
-  let cache_base = std::env::var("LOCALAPPDATA")
-    .map(std::path::PathBuf::from)
-    .unwrap_or_else(|_| std::path::PathBuf::from(&home))
-    .join("ms-playwright");
-
-  let entries = std::fs::read_dir(&cache_base).ok()?;
-  let mut firefox_dirs: Vec<_> = entries
-    .filter_map(std::result::Result::ok)
-    .filter(|e| {
-      let name = e.file_name().to_string_lossy().to_string();
-      name.starts_with("firefox-")
-    })
-    .collect();
-  firefox_dirs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
-
-  for dir in firefox_dirs {
-    let path = dir.path();
-    #[cfg(target_os = "macos")]
-    let exe = path.join("Firefox.app/Contents/MacOS/firefox");
-    #[cfg(target_os = "linux")]
-    let exe = path.join("firefox/firefox");
-    #[cfg(target_os = "windows")]
-    let exe = path.join("firefox/firefox.exe");
-
-    if exe.exists() {
-      return Some(exe.to_string_lossy().to_string());
-    }
-  }
-  None
-}
-
-/// Search Playwright's cache dir for a Chrome Headless Shell binary.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn find_playwright_headless_shell() -> Option<String> {
-  let home = std::env::var("HOME").ok()?;
-
-  #[cfg(target_os = "macos")]
-  let cache_dir = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
-  #[cfg(target_os = "linux")]
-  let cache_dir = std::path::PathBuf::from(&home).join(".cache/ms-playwright");
-
-  if !cache_dir.exists() {
-    return None;
-  }
-
-  let mut best_rev: u32 = 0;
-  let mut best_name = String::new();
-  let prefix = "chromium_headless_shell-";
-
-  if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-    for entry in entries.flatten() {
-      let name = entry.file_name().to_string_lossy().to_string();
-      if let Some(rev_str) = name.strip_prefix(prefix)
-        && let Ok(rev) = rev_str.parse::<u32>()
-        && rev > best_rev
-      {
-        best_rev = rev;
-        best_name = name;
-      }
-    }
-  }
-
-  if best_rev == 0 {
-    return None;
-  }
-
-  #[cfg(target_os = "macos")]
-  let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
-  #[cfg(target_os = "linux")]
-  let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
-
-  #[cfg(target_os = "macos")]
-  let plat = "mac";
-  #[cfg(target_os = "linux")]
-  let plat = "linux";
-
-  let cft_binary = cache_dir
-    .join(&best_name)
-    .join(format!("chrome-headless-shell-{plat}-{arch}"))
-    .join("chrome-headless-shell");
-
-  if cft_binary.exists() {
-    return Some(cft_binary.to_string_lossy().to_string());
-  }
-
-  None
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn find_playwright_headless_shell() -> Option<String> {
-  None
-}
-
-/// Search Playwright's cache dir for a chromium headless shell binary.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn find_playwright_chrome() -> Option<String> {
-  let home = std::env::var("HOME").ok()?;
-
-  #[cfg(target_os = "macos")]
-  let cache_dir = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
-  #[cfg(target_os = "linux")]
-  let cache_dir = std::path::PathBuf::from(&home).join(".cache/ms-playwright");
-
-  if !cache_dir.exists() {
-    return None;
-  }
-
-  let mut best_rev: u32 = 0;
-  let mut best_name = String::new();
-  let prefix = "chromium_headless_shell-";
-
-  if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-    for entry in entries.flatten() {
-      let name = entry.file_name().to_string_lossy().to_string();
-      if let Some(rev_str) = name.strip_prefix(prefix)
-        && let Ok(rev) = rev_str.parse::<u32>()
-        && rev > best_rev
-      {
-        best_rev = rev;
-        best_name = name;
-      }
-    }
-  }
-
-  if best_rev == 0 {
-    return None;
-  }
-
-  #[cfg(target_os = "macos")]
-  let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
-  #[cfg(target_os = "linux")]
-  let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
-
-  #[cfg(target_os = "macos")]
-  let plat = "mac";
-  #[cfg(target_os = "linux")]
-  let plat = "linux";
-
-  let cft_binary = cache_dir
-    .join(&best_name)
-    .join(format!("chrome-headless-shell-{plat}-{arch}"))
-    .join("chrome-headless-shell");
-
-  if cft_binary.exists() {
-    return Some(cft_binary.to_string_lossy().to_string());
-  }
-
-  #[cfg(target_os = "linux")]
-  {
-    let alt_binary = cache_dir.join(&best_name).join("chrome-linux").join("headless_shell");
-    if alt_binary.exists() {
-      return Some(alt_binary.to_string_lossy().to_string());
-    }
-  }
-
-  None
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn find_playwright_chrome() -> Option<String> {
-  None
 }
 
 /// Each context's open pages, by composite session key, outside the
@@ -3728,12 +3496,16 @@ fn http_origin(url: &str) -> Option<String> {
 #[cfg(test)]
 mod discovery_tests {
   use super::{discover_ws_from_http, parse_devtools_active_port};
-  use tokio::io::AsyncWriteExt;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
   /// Serve one hand-rolled HTTP response, then hold the socket open.
   ///
   /// Keeping the connection alive is the whole point: Chrome 136+ ignores our
   /// `Connection: close`, so a reader that waits for EOF waits forever.
+  ///
+  /// The request head is read before answering: bytes that arrive while the
+  /// client is still writing its request are an unexpected message to hyper,
+  /// which cancels the request instead of reading the response.
   async fn serve_once(response: &'static str) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
@@ -3741,6 +3513,14 @@ mod discovery_tests {
       let Ok((mut sock, _)) = listener.accept().await else {
         return;
       };
+      let mut head = Vec::new();
+      let mut chunk = [0_u8; 1024];
+      while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match sock.read(&mut chunk).await {
+          Ok(0) | Err(_) => return,
+          Ok(read) => head.extend_from_slice(&chunk[..read]),
+        }
+      }
       let _ = sock.write_all(response.as_bytes()).await;
       let _ = sock.flush().await;
       // Never shut down the write half, and never drop `sock`.
@@ -3811,63 +3591,6 @@ mod adoption_tests;
 
 #[cfg(test)]
 mod tests {
-  use super::cached_chromium_in;
-
-  /// Chrome for Testing has shipped several directory layouts and a cache
-  /// commonly holds more than one build; picking the wrong entry is how a
-  /// machine silently falls through to its enrolled system Chrome.
-  #[test]
-  fn cached_chromium_prefers_the_newest_build_and_knows_every_layout() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-
-    let old = root
-      .join("chromium-100")
-      .join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS");
-    std::fs::create_dir_all(&old).expect("mkdir");
-    std::fs::write(old.join("Google Chrome for Testing"), b"x").expect("write");
-
-    let new = root
-      .join("chromium-150")
-      .join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS");
-    std::fs::create_dir_all(&new).expect("mkdir");
-    std::fs::write(new.join("Google Chrome for Testing"), b"x").expect("write");
-
-    let found = cached_chromium_in(root).expect("a build");
-    assert!(found.contains("chromium-150"), "newest build must win, got {found}");
-  }
-
-  /// `chromium-headless-shell-*` also starts with `chromium-` but is a
-  /// different binary; treating it as a headed build yields a browser that
-  /// can never open a window.
-  #[test]
-  fn cached_chromium_ignores_the_headless_shell() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path();
-
-    // Sorts AFTER "chromium-150" descending, so a naive filter picks it first.
-    let shell = root
-      .join("chromium-headless-shell-999")
-      .join("chrome-headless-shell-mac-arm64");
-    std::fs::create_dir_all(&shell).expect("mkdir");
-    std::fs::write(shell.join("chrome-headless-shell"), b"x").expect("write");
-
-    assert!(
-      cached_chromium_in(root).is_none(),
-      "headless shell is not a headed build"
-    );
-
-    let headed = root.join("chromium-150").join("chrome-linux64");
-    std::fs::create_dir_all(&headed).expect("mkdir");
-    std::fs::write(headed.join("chrome"), b"x").expect("write");
-
-    let found = cached_chromium_in(root).expect("a build");
-    assert!(
-      found.contains("chromium-150"),
-      "must skip the shell and take the headed build, got {found}"
-    );
-  }
-
   use std::sync::Arc;
 
   use super::*;

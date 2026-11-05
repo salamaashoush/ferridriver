@@ -3,9 +3,9 @@
 //! transport; we dup our socketpair halves into place before exec so
 //! `pw_run.sh` inherits them naturally.
 //!
-//! Binary discovery: `FERRIDRIVER_WEBKIT` env var first, then the
-//! Playwright Node.js cache, then ferridriver's own cache (populated
-//! by `ferridriver install webkit`).
+//! Binary discovery: `FERRIDRIVER_WEBKIT` env var first, then
+//! ferridriver's own cache (populated by `ferridriver install webkit`),
+//! then Playwright's browser cache.
 
 use crate::backend::process::ChildGroup;
 use std::path::{Path, PathBuf};
@@ -31,14 +31,12 @@ pub struct LaunchConfig {
 #[derive(Debug, Error)]
 pub enum LaunchError {
   #[error(
-    "Playwright WebKit binary not found in any of: FERRIDRIVER_WEBKIT, Playwright cache, ferridriver cache. Run `ferridriver install webkit` to download it."
+    "Playwright WebKit binary not found in any of: FERRIDRIVER_WEBKIT, ferridriver cache, Playwright cache. Run `ferridriver install webkit` to download it."
   )]
   BinaryNotFound,
   #[error("io: {0}")]
   Io(#[from] std::io::Error),
 }
-
-const BINARY_RELATIVE: &str = "pw_run.sh";
 
 /// Resolve the `pw_run.sh` (or platform-equivalent) path. Returns the
 /// first existing candidate from the search order.
@@ -49,12 +47,11 @@ pub fn locate_binary() -> Result<PathBuf, LaunchError> {
       return Ok(p);
     }
   }
-  for root in playwright_caches() {
-    if let Some(found) = newest_pw_run(&root) {
-      return Ok(found);
-    }
-  }
-  Err(LaunchError::BinaryNotFound)
+  crate::install::BrowserInstaller::new()
+    .find_installed_webkit()
+    .map(PathBuf::from)
+    .or_else(|| crate::install::find_playwright_browser(crate::install::CachedBrowser::WebKit))
+    .ok_or(LaunchError::BinaryNotFound)
 }
 
 /// The PW `WebKit` build revision parsed from the located binary's
@@ -187,60 +184,4 @@ fn pre_exec_setup_fds(read_fd: i32, write_fd: i32) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn pre_exec_setup_fds(_read_fd: i32, _write_fd: i32) -> std::io::Result<()> {
   Err(std::io::Error::other("webkit launcher: non-unix not yet supported"))
-}
-
-fn playwright_caches() -> Vec<PathBuf> {
-  let mut out = Vec::new();
-  if let Some(home) = dirs::home_dir() {
-    // Playwright Node.js cache (macOS + Linux + Windows variants).
-    #[cfg(target_os = "macos")]
-    out.push(home.join("Library/Caches/ms-playwright"));
-    #[cfg(target_os = "linux")]
-    out.push(home.join(".cache/ms-playwright"));
-    #[cfg(target_os = "windows")]
-    out.push(home.join("AppData/Local/ms-playwright"));
-  }
-  // ferridriver's own cache (populated by `install webkit`). Mirrors
-  // BrowserInstaller::new(): respects FERRIDRIVER_BROWSERS_PATH first,
-  // then dirs::cache_dir() (~/.cache on Linux, ~/Library/Caches on
-  // macOS, %LOCALAPPDATA% on Windows) joined with `ferridriver/webkit`.
-  let ferri_cache = if let Ok(p) = std::env::var("FERRIDRIVER_BROWSERS_PATH") {
-    PathBuf::from(p)
-  } else {
-    dirs::cache_dir()
-      .unwrap_or_else(|| PathBuf::from(".cache"))
-      .join("ferridriver")
-  };
-  out.push(ferri_cache.join("webkit"));
-  out
-}
-
-fn newest_pw_run(root: &Path) -> Option<PathBuf> {
-  if !root.is_dir() {
-    return None;
-  }
-  let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-  for entry in std::fs::read_dir(root).ok()?.flatten() {
-    let path = entry.path();
-    if !path.is_dir() {
-      continue;
-    }
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if !name.starts_with("webkit-") {
-      continue;
-    }
-    let candidate = path.join(BINARY_RELATIVE);
-    if !candidate.is_file() {
-      continue;
-    }
-    let mtime = entry
-      .metadata()
-      .and_then(|m| m.modified())
-      .unwrap_or(std::time::UNIX_EPOCH);
-    match best {
-      Some((_, ref best_mtime)) if mtime <= *best_mtime => {},
-      _ => best = Some((candidate, mtime)),
-    }
-  }
-  best.map(|(p, _)| p)
 }
