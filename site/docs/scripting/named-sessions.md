@@ -22,6 +22,13 @@ ferridriver session list
 ferridriver session close work
 ```
 
+A session lives until it is closed. A supervisor that starts sessions for
+its own work can tie one to itself instead: `session open --exit-with-stdin`
+hands the command's standard input to the session's host, and the session
+closes its browser and ends when that input does. Started with a pipe the
+supervisor keeps open, the session goes with the supervisor however it
+exits, a kill included.
+
 ## Why it is a script, not a verb
 
 Everything you do *to* a session is one command: run this script. There is

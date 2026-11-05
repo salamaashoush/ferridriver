@@ -146,6 +146,44 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
     );
   }
 
+  let mut cmd = host_command(&args, &origin)?;
+  cmd.stdout(std::process::Stdio::null());
+  let mut diagnostics = tempfile::NamedTempFile::new_in(registry.dir()).context("creating session startup result")?;
+  cmd.arg("--startup-error").arg(diagnostics.path());
+  cmd.stderr(std::process::Stdio::null());
+  let mut child = cmd.spawn().context("spawning session host process")?;
+
+  // The host owns the configured provisioning deadline, including SDK installation.
+  let descriptor = match wait_for_descriptor(&registry, &args.id, &mut child).await {
+    Ok(descriptor) => descriptor,
+    Err(error) => {
+      if child.try_wait()?.is_some() {
+        use std::io::{Read as _, Seek as _};
+        diagnostics.as_file_mut().rewind()?;
+        let mut detail = String::new();
+        diagnostics.as_file_mut().read_to_string(&mut detail)?;
+        anyhow::bail!("{error:#}: {}", detail.trim());
+      }
+      return Err(error);
+    },
+  };
+  ui::say(&ui::success(&format!(
+    "session {} open {}",
+    ui::bold(&args.id),
+    ui::dim(&format!("(pid {}) {}", child.id(), descriptor.endpoint))
+  )));
+  ui::next_steps(&[
+    (
+      "drive it",
+      format!("ferridriver run -e \"await page.goto('…')\" --session {}", args.id),
+    ),
+    ("close it", format!("ferridriver session close {}", args.id)),
+  ]);
+  Ok(())
+}
+
+/// The detached `session host` that `open` starts for `args`.
+fn host_command(args: &SessionOpenArgs, origin: &ConfigOrigin<'_>) -> anyhow::Result<std::process::Command> {
   let exe = std::env::current_exe().context("resolving the ferridriver executable")?;
   let mut cmd = std::process::Command::new(exe);
   // The config flags belong to the commands that read configuration, so they
@@ -198,6 +236,9 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
   if let Some(port) = args.port {
     cmd.arg("--port").arg(port.to_string());
   }
+  if args.exit_with_stdin {
+    cmd.arg("--exit-with-stdin");
+  }
   // The host resolves relative extension specs and the `fs` sandbox root
   // against ITS working directory, so it must start in the one the user
   // typed the command in.
@@ -210,40 +251,12 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
     use std::os::unix::process::CommandExt as _;
     cmd.process_group(0);
   }
-  cmd.stdin(std::process::Stdio::null());
-  cmd.stdout(std::process::Stdio::null());
-  let mut diagnostics = tempfile::NamedTempFile::new_in(registry.dir()).context("creating session startup result")?;
-  cmd.arg("--startup-error").arg(diagnostics.path());
-  cmd.stderr(std::process::Stdio::null());
-  let mut child = cmd.spawn().context("spawning session host process")?;
-
-  // The host owns the configured provisioning deadline, including SDK installation.
-  let descriptor = match wait_for_descriptor(&registry, &args.id, &mut child).await {
-    Ok(descriptor) => descriptor,
-    Err(error) => {
-      if child.try_wait()?.is_some() {
-        use std::io::{Read as _, Seek as _};
-        diagnostics.as_file_mut().rewind()?;
-        let mut detail = String::new();
-        diagnostics.as_file_mut().read_to_string(&mut detail)?;
-        anyhow::bail!("{error:#}: {}", detail.trim());
-      }
-      return Err(error);
-    },
-  };
-  ui::say(&ui::success(&format!(
-    "session {} open {}",
-    ui::bold(&args.id),
-    ui::dim(&format!("(pid {}) {}", child.id(), descriptor.endpoint))
-  )));
-  ui::next_steps(&[
-    (
-      "drive it",
-      format!("ferridriver run -e \"await page.goto('…')\" --session {}", args.id),
-    ),
-    ("close it", format!("ferridriver session close {}", args.id)),
-  ]);
-  Ok(())
+  if args.exit_with_stdin {
+    cmd.stdin(std::process::Stdio::inherit());
+  } else {
+    cmd.stdin(std::process::Stdio::null());
+  }
+  Ok(cmd)
 }
 
 async fn wait_for_descriptor(
@@ -311,9 +324,15 @@ async fn host(mut config: FerridriverConfig, args: SessionHostArgs) -> anyhow::R
       .await
       .context("binding the session")?;
     tracing::info!(id = %args.id, endpoint = %session.endpoint(), "session host serving");
+    let stdin = if args.exit_with_stdin {
+      futures::future::Either::Left(crate::commands::lifetime::stdin_closed()?)
+    } else {
+      futures::future::Either::Right(std::future::pending())
+    };
     tokio::select! {
       result = session.wait() => result.context("serving the session")?,
       () = shutdown_signal() => tracing::info!(id = %args.id, "session host received shutdown signal"),
+      () = stdin => tracing::info!(id = %args.id, "session host's standard input closed"),
     }
     drop(session);
     Ok::<_, anyhow::Error>(())

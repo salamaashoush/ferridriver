@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from '@ferridriver/test';
-import { passed, quote, run, workspace } from './support.mjs';
+import { binary, passed, quote, run, workspace } from './support.mjs';
 
 async function openSession(id, url = 'data:text/html,<p>seed</p>', files = {}, flags = []) {
   const cwd = await workspace(files);
@@ -258,3 +258,38 @@ for (const [title, args, message] of [
     assert.ok(result.stderr.includes(message), result.text);
   });
 }
+
+test('session open --exit-with-stdin ends the session when the holder of its input goes', async () => {
+  test.setTimeout(90000);
+  const cwd = await workspace({});
+  const registry = await workspace({});
+  const fifo = join(registry, 'stdin');
+  passed(await run(['-c', `mkfifo ${quote(fifo)}`], { executable: 'sh' }));
+  const env = { FERRIDRIVER_SESSION_DIR: registry, FERRIDRIVER_NO_INHERIT: '1' };
+  // The writer holds the pipe as a supervisor would; stopping it is the
+  // supervisor's death.
+  await commands.start('stdio', { command: `exec sleep 600 > ${quote(fifo)}` });
+  try {
+    const opened = await run(['-c', `exec ${[binary, 'session', 'open', 'held', '--headless', '--exit-with-stdin'].map(quote).join(' ')} < ${quote(fifo)}`],
+      { cwd, env, executable: 'sh' });
+    passed(opened);
+    const listed = await run(['session', 'list', '--format', 'json'], { cwd, env });
+    passed(listed);
+    const host = JSON.parse(listed.stdout).find((session) => session.id === 'held');
+    assert.ok(host, listed.stdout);
+    passed(await run(['run', '--session', 'held', '--eval', 'return page.url();'], { cwd, env }));
+
+    await commands.stop('stdio');
+    const deadline = Date.now() + 30000;
+    while ((await run(['-c', `kill -0 ${host.pid}`], { executable: 'sh' })).code === 0) {
+      assert.ok(Date.now() < deadline, 'the session host ends once its input does');
+      await new Promise((done) => setTimeout(done, 200));
+    }
+    const after = await run(['session', 'list', '--format', 'json'], { cwd, env });
+    passed(after);
+    assert.equal(JSON.parse(after.stdout).some((session) => session.id === 'held'), false, after.stdout);
+  } finally {
+    await commands.stop('stdio').catch(() => {});
+    await run(['session', 'close', 'held'], { cwd, env });
+  }
+});

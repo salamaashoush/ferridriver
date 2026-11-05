@@ -80,6 +80,13 @@ pub struct SessionOpenArgs {
   #[arg(long)]
   pub port: Option<u16>,
 
+  /// End the session, closing its browser, when this command's standard
+  /// input ends. The session's host keeps that input after `open` returns,
+  /// so whoever holds the other end of the pipe decides how long the
+  /// session lives, and takes it down however it exits.
+  #[arg(long)]
+  pub exit_with_stdin: bool,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }
@@ -114,6 +121,10 @@ pub struct SessionHostArgs {
   /// Alone it listens on loopback.
   #[arg(long)]
   pub port: Option<u16>,
+
+  /// Stop when standard input ends (see `session open`).
+  #[arg(long, hide = true)]
+  pub exit_with_stdin: bool,
 
   #[command(flatten)]
   pub browser: BrowserArgs,
