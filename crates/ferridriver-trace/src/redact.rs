@@ -99,17 +99,24 @@ impl Redactor {
     Cow::Owned(out)
   }
 
-  /// Bytes that may or may not be text: redacted when they are UTF-8,
-  /// returned untouched otherwise.
+  /// Bytes that may or may not be text, every spelling of a secret replaced
+  /// wherever its bytes appear: a body that is not UTF-8 (another charset,
+  /// or a binary format carrying text) holds a secret's bytes just the same.
   #[must_use]
   pub fn redact_bytes<'a>(&self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
-    match std::str::from_utf8(bytes) {
-      Ok(text) => match self.redact(text) {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+      return match self.redact(text) {
         Cow::Borrowed(_) => Cow::Borrowed(bytes),
         Cow::Owned(text) => Cow::Owned(text.into_bytes()),
-      },
-      Err(_) => Cow::Borrowed(bytes),
+      };
     }
+    let mut out: Cow<'a, [u8]> = Cow::Borrowed(bytes);
+    for (needle, replacement) in &self.needles {
+      if let Some(replaced) = replace_bytes(&out, needle.as_bytes(), replacement.as_bytes()) {
+        out = Cow::Owned(replaced);
+      }
+    }
+    out
   }
 
   /// Every string and object key in `value`, in place.
@@ -137,36 +144,150 @@ impl Redactor {
   }
 }
 
-/// The spellings a value travels in: as is, percent-encoded the way a URL
-/// or form body carries it, and base64 (basic auth, data URLs).
+/// Bytes left as they are by `encodeURIComponent`, by a form body
+/// (`application/x-www-form-urlencoded`, `URLSearchParams`), and by RFC 3986
+/// percent-encoding of everything but the unreserved set.
+const KEPT: [&[u8]; 3] = [b"-_.!~*'()", b"-_.*", b"-_.~"];
+
+/// The spellings a value travels in: as is; percent-encoded the ways URLs
+/// and form bodies carry it, with either case of hex digit and a space as
+/// `%20` or `+`; escaped as a JSON string; and base64 in both alphabets
+/// (basic auth, data URLs, tokens).
 fn forms(value: &str) -> Vec<String> {
   let mut forms = vec![value.to_owned()];
-  let encoded = percent_encode(value);
-  if encoded != value {
-    forms.push(encoded);
+  for kept in KEPT {
+    for upper in [true, false] {
+      let encoded = percent_encode(value, kept, upper);
+      forms.push(encoded.replace("%20", "+"));
+      forms.push(encoded);
+    }
   }
-  let plus = percent_encode(value).replace("%20", "+");
-  if !forms.contains(&plus) {
-    forms.push(plus);
+  if let Ok(quoted) = serde_json::to_string(value) {
+    let escaped = &quoted[1..quoted.len() - 1];
+    forms.push(escaped.to_owned());
+    forms.push(escaped.replace('/', "\\/"));
+    let ascii = ascii_json(escaped);
+    forms.push(ascii.replace('/', "\\/"));
+    forms.push(ascii);
   }
-  forms.push(base64::engine::general_purpose::STANDARD.encode(value));
-  forms.push(base64::engine::general_purpose::STANDARD_NO_PAD.encode(value));
-  forms.dedup();
+  for engine in [
+    &base64::engine::general_purpose::STANDARD,
+    &base64::engine::general_purpose::STANDARD_NO_PAD,
+    &base64::engine::general_purpose::URL_SAFE,
+    &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+  ] {
+    forms.push(engine.encode(value));
+  }
+  let mut seen = std::collections::HashSet::new();
+  forms.retain(|form| seen.insert(form.clone()));
   forms
 }
 
-/// `encodeURIComponent`.
-fn percent_encode(value: &str) -> String {
+fn percent_encode(value: &str, kept: &[u8], upper: bool) -> String {
+  use std::fmt::Write as _;
   let mut out = String::with_capacity(value.len());
   for byte in value.bytes() {
-    if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+    if byte.is_ascii_alphanumeric() || kept.contains(&byte) {
       out.push(char::from(byte));
-    } else {
-      use std::fmt::Write as _;
+    } else if upper {
       let _ = write!(out, "%{byte:02X}");
+    } else {
+      let _ = write!(out, "%{byte:02x}");
     }
   }
   out
+}
+
+/// A JSON string body with every character beyond ASCII written as a
+/// `\u` escape, as serializers that keep their output ASCII write it.
+fn ascii_json(escaped: &str) -> String {
+  use std::fmt::Write as _;
+  let mut out = String::with_capacity(escaped.len());
+  for c in escaped.chars() {
+    if c.is_ascii() {
+      out.push(c);
+    } else {
+      let mut units = [0_u16; 2];
+      for unit in c.encode_utf16(&mut units) {
+        let _ = write!(out, "\\u{unit:04x}");
+      }
+    }
+  }
+  out
+}
+
+/// `haystack` with every `needle` replaced, or `None` when it holds none.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+  if needle.is_empty() || !haystack.windows(needle.len()).any(|window| window == needle) {
+    return None;
+  }
+  let mut out = Vec::with_capacity(haystack.len());
+  let mut at = 0;
+  while at < haystack.len() {
+    if haystack[at..].starts_with(needle) {
+      out.extend_from_slice(replacement);
+      at += needle.len();
+    } else {
+      out.push(haystack[at]);
+      at += 1;
+    }
+  }
+  Some(out)
+}
+
+/// Request and response headers that carry a credential whatever the
+/// secrets are: a session cookie or a basic-auth pair is never a declared
+/// value, and is the account itself to whoever reads it.
+const CREDENTIAL_HEADERS: [&str; 4] = ["authorization", "proxy-authorization", "cookie", "set-cookie"];
+
+/// What a blanked credential reads as.
+pub const BLANKED: &str = "<credential>";
+
+/// Blanks credential headers and cookie values in a HAR-shaped request or
+/// response (`headers: [{name, value}]`, `cookies: [{name, value}]`).
+fn blank_credentials(message: &mut Value) {
+  if let Some(headers) = message.get_mut("headers").and_then(Value::as_array_mut) {
+    for header in headers {
+      let credential = header
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| CREDENTIAL_HEADERS.iter().any(|known| name.eq_ignore_ascii_case(known)));
+      if credential && let Some(value) = header.get_mut("value") {
+        *value = Value::String(BLANKED.to_owned());
+      }
+    }
+  }
+  if let Some(cookies) = message.get_mut("cookies").and_then(Value::as_array_mut) {
+    for cookie in cookies {
+      if let Some(value) = cookie.get_mut("value") {
+        *value = Value::String(BLANKED.to_owned());
+      }
+    }
+  }
+}
+
+/// A HAR log with every secret removed: credential headers and cookies
+/// blanked, base64 bodies decoded, redacted and encoded again, and every
+/// other string redacted as text.
+pub fn redact_har(har: &mut Value, redactor: &Redactor) {
+  if let Some(entries) = har.pointer_mut("/log/entries").and_then(Value::as_array_mut) {
+    for entry in entries {
+      for side in ["request", "response"] {
+        if let Some(message) = entry.get_mut(side) {
+          blank_credentials(message);
+        }
+      }
+      if let Some(content) = entry.pointer_mut("/response/content")
+        && content.get("encoding").and_then(Value::as_str) == Some("base64")
+        && let Some(text) = content.get("text").and_then(Value::as_str)
+        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text)
+        && let Cow::Owned(redacted) = redactor.redact_bytes(&bytes)
+      {
+        content["text"] = Value::String(base64::engine::general_purpose::STANDARD.encode(redacted));
+      }
+    }
+  }
+  redactor.redact_json(har);
 }
 
 /// What [`rewrite_zip`] does besides redacting.
@@ -178,6 +299,9 @@ pub struct RewriteOptions {
   /// Drop image attachments (the failure screenshot the runner also writes
   /// beside the trace).
   pub drop_image_attachments: bool,
+  /// Blank credential headers and cookies in every recorded request and
+  /// response, for a trace that leaves the machine.
+  pub blank_credentials: bool,
 }
 
 /// What [`rewrite_zip`] changed.
@@ -220,8 +344,13 @@ pub fn rewrite_zip(
     streams.push((name, rewritten));
   }
 
-  let tmp = dst.with_extension("rewrite.tmp");
-  let file = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+  // A fresh name, created exclusively: a fixed one could already be a link
+  // to somewhere else.
+  let parent = dst
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+    .unwrap_or(Path::new("."));
+  let (file, tmp) = exclusive_temp(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
   let mut writer = zip::ZipWriter::new(file);
   let mut report = RewriteReport::default();
   for index in 0..archive.len() {
@@ -236,34 +365,46 @@ pub fn rewrite_zip(
     if let Some((_, bytes)) = streams.iter().find(|(stream, _)| *stream == name) {
       writer.start_file(name.as_str(), options).map_err(|e| err(&e))?;
       writer.write_all(bytes).map_err(|e| err(&e))?;
-    } else if is_text(&name) {
+    } else {
       let mut bytes = Vec::new();
       entry.read_to_end(&mut bytes).map_err(|e| err(&e))?;
-      writer.start_file(name.as_str(), options).map_err(|e| err(&e))?;
-      writer.write_all(&redactor.redact_bytes(&bytes)).map_err(|e| err(&e))?;
-    } else {
       drop(entry);
-      let entry = archive.by_index_raw(index).map_err(|e| err(&e))?;
-      writer.raw_copy_file(entry).map_err(|e| err(&e))?;
+      if let Cow::Owned(redacted) = redactor.redact_bytes(&bytes) {
+        writer.start_file(name.as_str(), options).map_err(|e| err(&e))?;
+        writer.write_all(&redacted).map_err(|e| err(&e))?;
+      } else {
+        let entry = archive.by_index_raw(index).map_err(|e| err(&e))?;
+        writer.raw_copy_file(entry).map_err(|e| err(&e))?;
+      }
     }
     report.entries += 1;
   }
   writer.finish().map_err(|e| err(&e))?;
-  std::fs::rename(&tmp, dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+  std::fs::rename(&tmp, dst).map_err(|e| {
+    let _ = std::fs::remove_file(&tmp);
+    format!("{}: {e}", dst.display())
+  })?;
   Ok(report)
 }
 
-/// Resources whose bytes are text a secret could appear in. Bodies are
-/// named `<sha1>.<ext>` after their MIME type; sources `src@<sha1>.txt`.
-fn is_text(name: &str) -> bool {
-  let ext = Path::new(name)
-    .extension()
-    .and_then(|e| e.to_str())
-    .map(str::to_ascii_lowercase);
-  matches!(
-    ext.as_deref(),
-    Some("html" | "htm" | "js" | "mjs" | "css" | "json" | "txt" | "xml" | "svg" | "md" | "map" | "csv" | "dat")
-  ) || !name.contains('.')
+fn exclusive_temp(dir: &Path) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+  use std::hash::{BuildHasher as _, Hasher as _};
+  let mut attempt = 0_u32;
+  loop {
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u32(attempt);
+    hasher.write_u128(
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos()),
+    );
+    let path = dir.join(format!(".rewrite-{:016x}.tmp", hasher.finish()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+      Ok(file) => return Ok((file, path)),
+      Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 16 => attempt += 1,
+      Err(error) => return Err(error),
+    }
+  }
 }
 
 const MEDIA: &[&str] = &[
@@ -289,6 +430,13 @@ fn rewrite_stream(
       out.push('\n');
       continue;
     };
+    if options.blank_credentials && event.get("type").and_then(Value::as_str) == Some("resource-snapshot") {
+      for side in ["request", "response"] {
+        if let Some(message) = event.get_mut("snapshot").and_then(|snapshot| snapshot.get_mut(side)) {
+          blank_credentials(message);
+        }
+      }
+    }
     match event.get("type").and_then(Value::as_str) {
       Some("frame-snapshot") => {
         if let Some(html) = event.get_mut("snapshot").and_then(|s| s.get_mut("html")) {
@@ -371,7 +519,7 @@ mod tests {
   #[test]
   fn replaces_every_form_of_a_value() {
     let r = redactor();
-    let encoded = percent_encode(SECRET);
+    let encoded = percent_encode(SECRET, KEPT[0], true);
     let b64 = base64::engine::general_purpose::STANDARD.encode(SECRET);
     let text = format!("typed {SECRET}, sent ?p={encoded}, auth Basic {b64}");
     assert_eq!(
@@ -422,7 +570,7 @@ mod tests {
 
   #[test]
   fn a_rewritten_trace_holds_no_secret_anywhere() {
-    let encoded = percent_encode(SECRET);
+    let encoded = percent_encode(SECRET, KEPT[0], true);
     let trace = [
       serde_json::json!({ "type": "before", "callId": "call@1", "class": "Locator", "method": "fill",
         "params": { "selector": "#pw", "value": SECRET } }),
@@ -439,7 +587,8 @@ mod tests {
     .join("\n");
     let network = [
       serde_json::json!({ "type": "resource-snapshot", "snapshot": {
-        "request": { "url": format!("https://a.test/?p={encoded}"), "headers": [{ "name": "x-token", "value": SECRET }],
+        "request": { "url": format!("https://a.test/?p={encoded}"), "headers": [{ "name": "x-token", "value": SECRET },
+            { "name": "Cookie", "value": "sid=session-cookie-value" }],
           "postData": { "text": format!("password={encoded}") } },
         "response": { "status": 200, "content": { "mimeType": "text/html", "_sha1": "page.html" } } } }),
       serde_json::json!({ "type": "resource-snapshot", "snapshot": {
@@ -460,6 +609,11 @@ mod tests {
         ("resources/logo.png", b"\x89PNG", zip::CompressionMethod::Stored),
         ("resources/shot.png", b"\x89PNG", zip::CompressionMethod::Stored),
         ("resources/page@1-1.jpeg", b"\xff\xd8", zip::CompressionMethod::Stored),
+        (
+          "resources/body.bin",
+          &[&[0xff_u8, 0xfe][..], SECRET.as_bytes()].concat(),
+          zip::CompressionMethod::Stored,
+        ),
       ],
     );
     let report = rewrite_zip(
@@ -469,6 +623,7 @@ mod tests {
       RewriteOptions {
         drop_media_bodies: true,
         drop_image_attachments: true,
+        blank_credentials: true,
       },
     )
     .unwrap();
@@ -481,7 +636,8 @@ mod tests {
         "trace.trace",
         "trace.network",
         "resources/page.html",
-        "resources/page@1-1.jpeg"
+        "resources/page@1-1.jpeg",
+        "resources/body.bin"
       ]
     );
     assert_eq!(report.dropped, ["resources/logo.png", "resources/shot.png"]);
@@ -493,8 +649,52 @@ mod tests {
         !text.contains("hunter2-unknown"),
         "{name} still holds a password input's value"
       );
+      assert!(!text.contains("session-cookie-value"), "{name} still holds a cookie");
+      assert!(
+        !bytes.windows(SECRET.len()).any(|window| window == SECRET.as_bytes()),
+        "{name} still holds the secret's bytes"
+      );
     }
     let trace = String::from_utf8_lossy(&entries[0].1);
     assert!(trace.contains(r#""value":"<secret>APP_PASSWORD</secret>""#));
+  }
+
+  #[test]
+  fn form_bodies_lowercase_hex_and_json_escapes_are_found() {
+    let r = Redactor::new([("APP_PASSWORD".to_owned(), "Sümmer \"2026\"!/x".to_owned())]);
+    for spelling in [
+      "S%C3%BCmmer+%222026%22%21%2Fx",
+      "S%c3%bcmmer%20%222026%22!%2fx",
+      r#"S\u00fcmmer \"2026\"!\/x"#,
+      r#"Sümmer \"2026\"!/x"#,
+    ] {
+      assert_eq!(r.redact(spelling), "<secret>APP_PASSWORD</secret>", "{spelling}");
+    }
+  }
+
+  #[test]
+  fn a_har_loses_credentials_and_secrets_in_base64_bodies() {
+    let body = base64::engine::general_purpose::STANDARD.encode(format!("token={SECRET}"));
+    let mut har = serde_json::json!({ "log": { "entries": [{
+      "request": { "headers": [{ "name": "Authorization", "value": "Basic dXNlcjpwYXNz" }], "cookies": [{ "name": "sid", "value": "abc" }] },
+      "response": { "headers": [{ "name": "set-cookie", "value": "sid=abc" }, { "name": "x-note", "value": SECRET }],
+        "content": { "encoding": "base64", "text": body } },
+    }] } });
+    redact_har(&mut har, &redactor());
+    let entry = &har["log"]["entries"][0];
+    assert_eq!(entry["request"]["headers"][0]["value"], BLANKED);
+    assert_eq!(entry["request"]["cookies"][0]["value"], BLANKED);
+    assert_eq!(entry["response"]["headers"][0]["value"], BLANKED);
+    assert_eq!(
+      entry["response"]["headers"][1]["value"],
+      "<secret>APP_PASSWORD</secret>"
+    );
+    let decoded = base64::engine::general_purpose::STANDARD
+      .decode(entry["response"]["content"]["text"].as_str().unwrap())
+      .unwrap();
+    assert_eq!(
+      String::from_utf8(decoded).unwrap(),
+      "token=<secret>APP_PASSWORD</secret>"
+    );
   }
 }
