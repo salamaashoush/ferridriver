@@ -57,9 +57,9 @@ async function record(backend, id, shop, journey) {
     const command = ['env', `FERRIDRIVER_SESSION_DIR=${registry}`, binary, 'codegen', '--attach', id,
       '--target', 'test', '-o', 'recorded.spec.ts'].map(quote).join(' ');
     await commands.open('stdio', { command: `cd ${quote(cwd)} && exec ${command} 2>&1` });
-    // The opening navigation is recorded once the recorder is in every
-    // frame; input before that would go unrecorded.
-    await readUntil('stdio', 'recorded navigate');
+    // Told to start once the recorder is in every frame: input before
+    // that would go unrecorded.
+    await readUntil('stdio', 'type stop');
     passed(await run(['run', '--session', id, '--eval', helpers + journey], { cwd, env }));
     await commands.write('stdio', 'stop\n');
     const output = await readUntil('stdio', 'wrote');

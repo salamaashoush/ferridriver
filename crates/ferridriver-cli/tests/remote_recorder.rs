@@ -262,7 +262,8 @@ async fn relayed_input_is_recorded_and_the_spec_passes() -> anyhow::Result<()> {
       _ => None,
     })
     .collect();
-  assert_eq!(modes, ["assertingText", "recording"]);
+  // The mode it started in, once attached, then each change.
+  assert_eq!(modes, ["recording", "assertingText", "recording"]);
 
   first_frame(&mut frames, watching).await?;
 

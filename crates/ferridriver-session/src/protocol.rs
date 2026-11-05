@@ -427,8 +427,9 @@ pub enum EventPayload {
     #[serde(rename = "replacesIndex", default, skip_serializing_if = "Option::is_none")]
     replaces_index: Option<usize>,
   },
-  /// The recorder's mode changed, including its return to `recording`
-  /// after an assertion was picked.
+  /// The recorder's mode: first once it is attached to every page, input
+  /// before that going unrecorded, then each time it changes, including
+  /// its return to `recording` after an assertion was picked.
   RecorderMode {
     mode: String,
   },

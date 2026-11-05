@@ -329,8 +329,13 @@ impl Recordings {
     })
     .await
     .map_err(|e| format!("attaching the recorder: {e}"))?;
-    if let Some(mode) = mode {
-      recorder.set_mode(mode).await;
+    // The client learns the recorder is in every page, and so that input
+    // from now on is recorded, from the mode it starts in.
+    match mode {
+      Some(mode) if mode != recorder.mode() => recorder.set_mode(mode).await,
+      _ => events.send(EventPayload::RecorderMode {
+        mode: recorder.mode().as_str().to_string(),
+      }),
     }
     *recording.recorder.lock().await = Some(recorder);
 

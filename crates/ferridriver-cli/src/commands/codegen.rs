@@ -193,15 +193,16 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
   let start =
     Command::new(1, RECORDER_START_VERB, serde_json::to_value(&request)?).with_context(context.map(str::to_string));
 
-  ui::note(&format!("recording on session {}", ui::bold(session)));
-  ui::note("type visible, text or value then click an element to assert on it; url or title asserts the page");
-  ui::note("type stop or press Ctrl+C to finish");
+  ui::note(&format!("starting to record on session {}", ui::bold(session)));
   if to_stdout {
     print!("{}", live.header(""));
     let _ = std::io::stdout().flush();
   }
 
   let mut source = LiveSource::new(Arc::clone(&live));
+  // The first mode report says the recorder is in every page: only then
+  // is input recorded, so only then is the reader told to start.
+  let mut ready = false;
   let reply = {
     let recording = client.call_with_events(start, |event| match event.payload {
       EventPayload::Recorded {
@@ -218,6 +219,12 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
         } else if replaces_index.is_none() {
           ui::note(&format!("recorded {}", action_name(&action.action)));
         }
+      },
+      EventPayload::RecorderMode { mode } if !ready => {
+        ready = true;
+        ui::note(&format!("recording on session {} in {mode} mode", ui::bold(session)));
+        ui::note("type visible, text or value then click an element to assert on it; url or title asserts the page");
+        ui::note("type stop or press Ctrl+C to finish");
       },
       EventPayload::RecorderMode { mode } => ui::note(&format!("mode: {mode}")),
       _ => {},
