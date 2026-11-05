@@ -4,18 +4,20 @@ use crate::step::StepError;
 use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{step, when};
 
+/// The step's text as the page function's argument, never spliced into its
+/// source, so no value can end the string it would sit in.
+fn strings(values: &[&str]) -> Result<ferridriver::protocol::SerializedArgument, StepError> {
+  ferridriver::protocol::argument_from_serde(values).map_err(|e| StepError::wrap("serialize the step's values", e))
+}
+
 #[when("I set local storage {string} to {string}")]
 async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String) {
   world
     .page()?
     .evaluate(
-      &format!(
-        "localStorage.setItem('{}', '{}')",
-        key.replace('\'', "\\'"),
-        value.replace('\'', "\\'")
-      ),
-      ferridriver::protocol::SerializedArgument::default(),
-      None,
+      "([key, value]) => localStorage.setItem(key, value)",
+      strings(&[&key, &value])?,
+      Some(true),
     )
     .await
     .map_err(|e| StepError::wrap(format!("set localStorage \"{key}\""), e))?;
@@ -25,11 +27,7 @@ async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String)
 async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
   world
     .page()?
-    .evaluate(
-      &format!("localStorage.removeItem('{}')", key.replace('\'', "\\'")),
-      ferridriver::protocol::SerializedArgument::default(),
-      None,
-    )
+    .evaluate("([key]) => localStorage.removeItem(key)", strings(&[&key])?, Some(true))
     .await
     .map_err(|e| StepError::wrap(format!("remove localStorage \"{key}\""), e))?;
 }
@@ -52,13 +50,9 @@ async fn set_session_storage(world: &mut BrowserWorld, key: String, value: Strin
   world
     .page()?
     .evaluate(
-      &format!(
-        "sessionStorage.setItem('{}', '{}')",
-        key.replace('\'', "\\'"),
-        value.replace('\'', "\\'")
-      ),
-      ferridriver::protocol::SerializedArgument::default(),
-      None,
+      "([key, value]) => sessionStorage.setItem(key, value)",
+      strings(&[&key, &value])?,
+      Some(true),
     )
     .await
     .map_err(|e| StepError::wrap(format!("set sessionStorage \"{key}\""), e))?;
@@ -69,9 +63,9 @@ async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
   world
     .page()?
     .evaluate(
-      &format!("sessionStorage.removeItem('{}')", key.replace('\'', "\\'")),
-      ferridriver::protocol::SerializedArgument::default(),
-      None,
+      "([key]) => sessionStorage.removeItem(key)",
+      strings(&[&key])?,
+      Some(true),
     )
     .await
     .map_err(|e| StepError::wrap(format!("remove sessionStorage \"{key}\""), e))?;

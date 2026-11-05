@@ -28,3 +28,12 @@ Feature: Storage
     And I clear session storage
     And I evaluate "document.title = sessionStorage.length.toString()"
     Then the page title should be "0"
+
+  Scenario: Values are stored exactly as written
+    Given I navigate to "http://127.0.0.1:47831/example-domain.html"
+    When I set local storage "C:\temp\it's" to "C:\temp\it's"
+    And I evaluate "document.title = localStorage.getItem(localStorage.key(0))"
+    Then the page title should be "C:\temp\it's"
+    When I remove local storage "C:\temp\it's"
+    And I evaluate "document.title = localStorage.length.toString()"
+    Then the page title should be "0"

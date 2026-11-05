@@ -645,11 +645,13 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
 ///
 /// Returns an error if the element is not a select or the target option is not found.
 pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -> Result<SelectResult> {
-  let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
+  // A JSON string is a JS string literal whatever it holds.
+  let target_json =
+    serde_json::to_string(target).map_err(|e| FerriError::Backend(format!("select_option serialize: {e}")))?;
   let fd = ensure_mcp_support(page).await?;
   let result_json = element
     .call_js_fn_value(&format!(
-      "function() {{ return JSON.stringify({fd}.selectOption(this, '{escaped}')); }}"
+      "function() {{ return JSON.stringify({fd}.selectOption(this, {target_json})); }}"
     ))
     .await
     .ok()
