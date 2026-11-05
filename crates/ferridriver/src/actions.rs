@@ -346,27 +346,44 @@ pub async fn click_prep(
 /// input of a type that takes no text, a value a date input rejects), or
 /// what inserting the text failed with.
 pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool) -> Result<()> {
-  let fd = page.injected_script().await?;
   // A JSON string is a JavaScript string literal with every line break,
   // quote and control character escaped.
   let literal = serde_json::to_string(value)?;
   let check = if force {
     String::new()
   } else {
-    format!(
-      "var state = {fd}.checkElementStates(this, ['visible', 'enabled', 'editable']); \
-       if (state !== 'done') return JSON.stringify({{ result: state }}); "
+    "var state = fd.checkElementStates(this, ['visible', 'enabled', 'editable']); \
+     if (state !== 'done') return JSON.stringify({ result: state }); "
+      .to_string()
+  };
+  // In the utility world, as the engine runs there in Playwright: a value
+  // the fill sets (a date, a colour) goes through the element's own
+  // setter, so a framework tracking the value it set itself sees a change.
+  let fill = format!(
+    "function() {{ var fd = window.__fd; \
+       if (!(fd instanceof Object)) return JSON.stringify({{ result: 'inject' }}); \
+       {check}\
+       try {{ return JSON.stringify({{ result: fd.fill(this, {literal}) }}); }} \
+       catch (e) {{ return JSON.stringify({{ error: String(e && e.message || e) }}); }} }}"
+  );
+  let call = || async {
+    Ok::<_, FerriError>(
+      page
+        .call_on_element_in_utility(element, &fill)
+        .await?
+        .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+        .unwrap_or_default(),
     )
   };
-  let raw = element
-    .call_js_fn_value(&format!(
-      "function() {{ {check}\
-         try {{ return JSON.stringify({{ result: {fd}.fill(this, {literal}) }}); }} \
-         catch (e) {{ return JSON.stringify({{ error: String(e && e.message || e) }}); }} }}"
-    ))
-    .await?
-    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-    .unwrap_or_default();
+  let mut raw = call().await?;
+  if raw.contains("\"inject\"") {
+    let inject = format!(
+      "async function() {{ await {}; return true; }}",
+      crate::selectors::build_lazy_inject_js()
+    );
+    page.call_on_element_in_utility(element, &inject).await?;
+    raw = call().await?;
+  }
   let answer: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
   if let Some(error) = answer.get("error").and_then(serde_json::Value::as_str) {
     return Err(FerriError::backend(error));

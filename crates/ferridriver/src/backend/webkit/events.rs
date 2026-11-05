@@ -173,6 +173,7 @@ pub fn attach_listeners(
   let nav_slot = page.nav_request_slot.clone();
   let routes = page.routes.clone();
   let frame_contexts = page.frame_contexts.clone();
+  let utility_contexts = page.utility_contexts.clone();
   let frame_cache = page.frame_cache.clone();
   let websockets = page.websockets.clone();
   let emitter_frame = emitter.clone();
@@ -196,6 +197,7 @@ pub fn attach_listeners(
     nav_slot,
     routes,
     frame_contexts,
+    utility_contexts,
     frame_cache,
     websockets,
     workers: page.workers.clone(),
@@ -453,6 +455,7 @@ struct TargetListenerCtx {
   nav_slot: crate::network::NavRequestSlot,
   routes: Routes,
   frame_contexts: FrameContexts,
+  utility_contexts: FrameContexts,
   frame_cache: FrameCache,
   websockets: WebSockets,
   workers: super::worker::Workers,
@@ -656,7 +659,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       if let Some(context) = env.params.pointer("/context/id").and_then(Value::as_i64) {
         ctx.engine_injected.context_created(context);
       }
-      handle_exec_context_created(&env.params, &ctx.frame_contexts).await;
+      handle_exec_context_created(&env.params, &ctx.frame_contexts, &ctx.utility_contexts).await;
     },
     Some("Page.frameAttached") => {
       handle_frame_attached(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
@@ -666,7 +669,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_frame_navigated(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
     },
     Some("Page.frameDetached") => {
-      handle_frame_detached(&env.params, &ctx.frame_cache, &ctx.emitter_frame, &ctx.frame_contexts).await;
+      handle_frame_detached(&env.params, ctx).await;
     },
     Some("Page.navigatedWithinDocument") => {
       let frame_id = env.params.get("frameId").and_then(Value::as_str);
@@ -1036,10 +1039,20 @@ type Routes = Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>;
 type FrameContexts = Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>;
 type FrameCache = Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>;
 
-async fn handle_exec_context_created(params: &Value, frame_contexts: &FrameContexts) {
+async fn handle_exec_context_created(params: &Value, frame_contexts: &FrameContexts, utility_contexts: &FrameContexts) {
   let Some(ctx) = params.get("context") else {
     return;
   };
+  if ctx.get("type").and_then(Value::as_str) == Some("user")
+    && ctx.get("name").and_then(Value::as_str) == Some(super::page::UTILITY_WORLD_NAME)
+    && let (Some(frame_id), Some(id)) = (
+      ctx.get("frameId").and_then(Value::as_str),
+      ctx.get("id").and_then(Value::as_i64),
+    )
+  {
+    utility_contexts.write().await.insert(frame_id.to_string(), id);
+    return;
+  }
   // Track only the frame's normal (main-world) context — mirrors the CDP
   // tracker's `isDefault` filter. WebKit announces the utility world
   // (`__playwright_utility_world__`, type "user") right after the normal
@@ -1123,20 +1136,16 @@ fn handle_frame_navigated_within(params: &Value, frame_cache: &FrameCache, emitt
   ));
 }
 
-async fn handle_frame_detached(
-  params: &Value,
-  frame_cache: &FrameCache,
-  emitter: &crate::events::EventEmitter,
-  frame_contexts: &FrameContexts,
-) {
+async fn handle_frame_detached(params: &Value, ctx: &TargetListenerCtx) {
   let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
     return;
   };
-  if let Ok(mut cache) = frame_cache.lock() {
+  if let Ok(mut cache) = ctx.frame_cache.lock() {
     cache.detach(frame_id);
   }
-  frame_contexts.write().await.remove(frame_id);
-  emitter.emit(crate::events::PageEvent::FrameDetached {
+  ctx.frame_contexts.write().await.remove(frame_id);
+  ctx.utility_contexts.write().await.remove(frame_id);
+  ctx.emitter_frame.emit(crate::events::PageEvent::FrameDetached {
     frame_id: frame_id.to_string(),
   });
 }

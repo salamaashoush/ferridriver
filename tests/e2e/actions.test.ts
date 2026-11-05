@@ -770,6 +770,30 @@ describe('actions', () => {
     expect(changes[changes.length - 1]).toBe('');
   });
 
+  test('script_fill_sets_a_tracked_time_input', async ({ page }) => {
+    // A time field that takes no typing has its value set, and set past
+    // whatever the page put on the element: a framework that records each
+    // value its code sets (React's controlled inputs) still sees the change.
+    await page.goto(
+      dataUrl(
+        "<input id='t' type='time' value='09:30'><p id='state'></p><script>" +
+          "const input = document.getElementById('t');" +
+          "const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');" +
+          "let tracked = '09:30';" +
+          "Object.defineProperty(input, 'value', { configurable: true," +
+          " get() { return native.get.call(this); }," +
+          " set(v) { tracked = String(v); native.set.call(this, v); } });" +
+          "const changed = () => { if (input.value === tracked) return; tracked = input.value;" +
+          " document.getElementById('state').textContent = 'changed:' + input.value; };" +
+          "input.addEventListener('input', changed); input.addEventListener('change', changed);" +
+          "</script>",
+      ),
+    );
+    await page.locator('#t').fill('02:00');
+    await expect(page.locator('#state')).toHaveText('changed:02:00');
+    expect(await page.locator('#t').inputValue()).toBe('02:00');
+  });
+
   test('script_tap_native', async ({ page, browserName }) => {
     // `locator.tap` uses the backend's native touch primitive on every
     // backend: CDP `Input.dispatchTouchEvent`, WebKit

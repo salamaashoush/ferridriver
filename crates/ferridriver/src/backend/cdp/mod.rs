@@ -45,6 +45,10 @@ pub(crate) const LC_LOAD: u8 = 0b100;
 
 /// Sealed trait mapping transport types to their `AnyPage`/`AnyElement` enum constructors.
 /// This avoids having "abstract" methods or duplicated impls on the generic types.
+/// The name of the isolated world ferridriver's own scripts run in where
+/// the page's changes to the DOM objects must not reach them.
+pub(crate) const UTILITY_WORLD: &str = "__ferridriver_utility";
+
 pub trait CdpWrap: CdpTransport + Sized {
   fn wrap_page(page: CdpPage<Self>) -> AnyPage;
   fn wrap_element(elem: CdpElement<Self>) -> AnyElement;
@@ -7643,6 +7647,80 @@ impl<T: CdpTransport> CdpElement<T> {
         }),
       )
       .await?;
+    thrown_in_page(&result)?;
+    Ok(result.get("result").and_then(|r| r.get("value")).cloned())
+  }
+
+  /// [`Self::call_js_fn_value`] in the frame's utility world, where the
+  /// element is the browser's own and nothing the page put on it (a
+  /// framework's own `value` property) is seen. The world is created by
+  /// name, so every call reaches the same one.
+  pub async fn call_js_fn_value_in_utility(&self, function: &str) -> Result<Option<serde_json::Value>> {
+    let object_id = self.object_id().await?;
+    let root = self
+      .cmd(
+        "Runtime.callFunctionOn",
+        serde_json::json!({
+          "objectId": &*object_id,
+          "functionDeclaration": "function() { return (this.ownerDocument || this).documentElement; }",
+        }),
+      )
+      .await?;
+    thrown_in_page(&root)?;
+    let root = root
+      .pointer("/result/objectId")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::target_closed(Some("the element has no document".into())))?;
+    let frame = self
+      .cmd("DOM.describeNode", serde_json::json!({ "objectId": root }))
+      .await?;
+    let frame_id = frame
+      .pointer("/node/frameId")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::protocol("DOM.describeNode", "the document has no frame"))?
+      .to_string();
+    let world = self
+      .cmd(
+        "Page.createIsolatedWorld",
+        serde_json::json!({ "frameId": frame_id, "worldName": UTILITY_WORLD, "grantUniveralAccess": true }),
+      )
+      .await?;
+    let context = world["executionContextId"]
+      .as_i64()
+      .ok_or_else(|| FerriError::protocol("Page.createIsolatedWorld", "missing execution context"))?;
+    let node = self
+      .cmd("DOM.describeNode", serde_json::json!({ "objectId": &*object_id }))
+      .await?;
+    let backend_node = node
+      .pointer("/node/backendNodeId")
+      .and_then(serde_json::Value::as_i64)
+      .ok_or_else(|| FerriError::protocol("DOM.describeNode", "missing backendNodeId"))?;
+    let adopted = self
+      .cmd(
+        "DOM.resolveNode",
+        serde_json::json!({ "backendNodeId": backend_node, "executionContextId": context }),
+      )
+      .await?;
+    let adopted = adopted
+      .pointer("/object/objectId")
+      .and_then(serde_json::Value::as_str)
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "the element is not in the utility world"))?
+      .to_string();
+    let result = self
+      .cmd(
+        "Runtime.callFunctionOn",
+        serde_json::json!({
+          "objectId": adopted,
+          "functionDeclaration": function,
+          "returnByValue": true,
+          "awaitPromise": true,
+        }),
+      )
+      .await;
+    let _ = self
+      .cmd("Runtime.releaseObject", serde_json::json!({ "objectId": adopted }))
+      .await;
+    let result = result?;
     thrown_in_page(&result)?;
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }

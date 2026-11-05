@@ -1296,6 +1296,30 @@ impl AnyPage {
     page_dispatch!(self, injected_script())
   }
 
+  /// Call `function` on `element` in its frame's utility world, where the
+  /// element is the browser's own: what the page put on it, a framework's
+  /// own `value` property, is not seen there. `WebDriver` Classic has no
+  /// other world, so the call runs in the page's.
+  ///
+  /// # Errors
+  ///
+  /// The protocol error, or what the function threw.
+  pub async fn call_on_element_in_utility(
+    &self,
+    element: &AnyElement,
+    function: &str,
+  ) -> Result<Option<serde_json::Value>> {
+    match (self, element) {
+      (_, AnyElement::CdpPipe(element)) => element.call_js_fn_value_in_utility(function).await,
+      (_, AnyElement::CdpWs(element)) => element.call_js_fn_value_in_utility(function).await,
+      (_, AnyElement::Bidi(element)) => element.call_js_fn_value_in_utility(function).await,
+      (AnyPage::WebKit(page), AnyElement::WebKit(element)) => {
+        element.call_js_fn_value_in(&page.utility_contexts, function).await
+      },
+      (_, other) => other.call_js_fn_value(function).await,
+    }
+  }
+
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     page_dispatch!(self, ensure_engine_injected())
   }

@@ -212,6 +212,14 @@ struct AuthCredentials {
   proxy: Option<crate::options::HttpCredentials>,
 }
 
+/// The main frame's id in a `Page.getResourceTree` answer.
+fn main_frame_id(resource_tree: Option<&Value>) -> Option<String> {
+  resource_tree?
+    .pointer("/frameTree/frame/id")
+    .and_then(Value::as_str)
+    .map(str::to_string)
+}
+
 /// Playwright `WebKit` page. Cheaply cloneable; clones share the
 /// underlying sessions + managers.
 #[derive(Clone)]
@@ -309,6 +317,10 @@ pub struct WebKitPage {
   /// `Runtime.executionContextCreated` events. Used by
   /// [`Self::evaluate_in_frame`] to evaluate inside an iframe's realm.
   pub(crate) frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
+  /// `frameId` → `executionContextId` of the frame's utility world
+  /// ([`UTILITY_WORLD_NAME`]), where the page's changes to DOM objects do
+  /// not reach.
+  pub(crate) utility_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
   /// Per-execution-context cache of the global-object `objectId` keyed
   /// by `executionContextId`, plus a flag for whether the `window.__fd`
   /// selector engine has been injected into that context. The main
@@ -630,18 +642,7 @@ impl WebKitPage {
         .send("Page.setBootstrapScript", json!({ "source": CONTEXT_MENU_SUPPRESSOR }))
         .await;
       let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
-      let main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-      if let Some(tree) = resource_tree
-        .as_ref()
-        .and_then(|r| r.get("frameTree"))
-        .and_then(|t| t.get("frame"))
-        .and_then(|f| f.get("id"))
-        .and_then(Value::as_str)
-      {
-        *main_frame_id_cache
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tree.to_string());
-      }
+      let main_frame_id_cache = Arc::new(std::sync::Mutex::new(main_frame_id(resource_tree.as_ref())));
 
       let page = WebKitPage {
         proxy,
@@ -669,6 +670,7 @@ impl WebKitPage {
         intercept_enabled: Arc::new(AtomicBool::new(false)),
         applied_timezone: Arc::new(std::sync::Mutex::new(pre_timezone)),
         frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+        utility_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         keyboard: Arc::default(),
         main_frame_id_cache,

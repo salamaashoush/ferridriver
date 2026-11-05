@@ -13,6 +13,10 @@ use super::types::EvaluateResult;
 use crate::error::{FerriError, Result};
 
 /// Element handle for the `BiDi` backend.
+/// The sandbox ferridriver's own scripts run in where the page's changes
+/// to the DOM objects must not reach them.
+const UTILITY_SANDBOX: &str = "__ferridriver_utility";
+
 pub struct BidiElement {
   pub(crate) session: Arc<BidiSession>,
   pub(crate) context_id: Arc<str>,
@@ -52,6 +56,31 @@ impl BidiElement {
   /// Call a JS function and parse the evaluate result to a JSON value.
   async fn call_fn_value(&self, func: &str) -> Result<Option<serde_json::Value>> {
     let result = self.call_fn(func).await?;
+    Self::value_of(result)
+  }
+
+  /// [`Self::call_fn_value`] in the frame's utility sandbox, where the
+  /// element is the browser's own and nothing the page put on it (a
+  /// framework's own `value` property) is seen.
+  pub async fn call_js_fn_value_in_utility(&self, func: &str) -> Result<Option<serde_json::Value>> {
+    let result = self
+      .session
+      .send_command(
+        "script.callFunction",
+        json!({
+          "functionDeclaration": func,
+          "target": {"context": &*self.context_id, "sandbox": UTILITY_SANDBOX},
+          "this": {"type": "sharedReference", "sharedId": self.shared_id},
+          "arguments": [{"type": "sharedReference", "sharedId": self.shared_id}],
+          "awaitPromise": true,
+          "resultOwnership": "none"
+        }),
+      )
+      .await?;
+    Self::value_of(result)
+  }
+
+  fn value_of(result: serde_json::Value) -> Result<Option<serde_json::Value>> {
     let eval_result: EvaluateResult = serde_json::from_value(result)
       .map_err(|e| FerriError::protocol("script.callFunction", format!("BiDi element call_fn parse: {e}")))?;
 

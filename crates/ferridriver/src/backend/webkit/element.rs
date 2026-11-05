@@ -131,6 +131,47 @@ impl WebKitElement {
     self.call_fn_value(function).await
   }
 
+  /// [`Self::call_js_fn_value`] on this element's node seen from the
+  /// utility world execution context `utility`, where nothing the page put
+  /// on the element (a framework's own `value` property) is seen.
+  pub(crate) async fn call_js_fn_value_in(
+    &self,
+    utility: &tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>,
+    function: &str,
+  ) -> Result<Option<Value>> {
+    let node = self
+      .target
+      .send("DOM.describeNode", json!({ "objectId": self.object_id }))
+      .await
+      .map_err(map_err)?;
+    let frame_id = node
+      .get("ownerFrameId")
+      .and_then(Value::as_str)
+      .ok_or_else(|| FerriError::protocol("DOM.describeNode", "the element has no frame"))?;
+    let context = utility
+      .read()
+      .await
+      .get(frame_id)
+      .copied()
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "the frame has no utility world yet"))?;
+    let adopted = self
+      .target
+      .send(
+        "DOM.resolveNode",
+        json!({ "objectId": self.object_id, "executionContextId": context }),
+      )
+      .await
+      .map_err(map_err)?;
+    let adopted = adopted
+      .pointer("/object/objectId")
+      .and_then(Value::as_str)
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "the element is not in the utility world"))?;
+    let adopted = Self::new(self.target.clone(), adopted.to_string());
+    let result = Box::pin(adopted.call_fn_value(function)).await;
+    let _ = adopted.release().await;
+    result
+  }
+
   pub async fn scroll_into_view(&self) -> Result<()> {
     self
       .call_fn(
