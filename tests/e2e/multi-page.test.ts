@@ -22,3 +22,14 @@ test('independent pages keep their input, actions, and screenshots separate', as
     await Promise.all(pages.map(page => page.close()));
   }
 });
+
+test('closing a closed page does nothing', async ({ context }) => {
+  const page = await context.newPage();
+  await page.goto('about:blank');
+  await page.close();
+  expect(page.isClosed()).toBe(true);
+  // Long enough for the browser to have forgotten the page altogether.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await page.close();
+  expect(page.isClosed()).toBe(true);
+});

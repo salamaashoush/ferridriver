@@ -4663,6 +4663,11 @@ impl Page {
   /// Implementation of [`Self::close`].
   #[tracing::instrument(skip(self, opts))]
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::PageCloseOptions>) -> Result<()> {
+    // Closing a closed page does nothing, as in Playwright; the browser
+    // has nothing left to close and some backends answer with an error.
+    if self.is_closed() {
+      return Ok(());
+    }
     let opts = opts.unwrap_or_default();
     if let Some(reason) = opts.reason.clone() {
       // Poisoned mutex is recoverable here — the stored reason is just
