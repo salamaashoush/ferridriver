@@ -97,9 +97,12 @@ describe('emulation and storage', () => {
         for (let i = 0; i < 3e7; i++) x += i % 7;
         return [performance.now() - start, x][0];
       }));
-    const fast = await spin();
+    // The fastest of a few runs is the CPU's own cost; a single run also
+    // measures whatever else the machine was doing at that moment.
+    const fastest = async () => Math.min(await spin(), await spin(), await spin());
+    const fast = await fastest();
     await context.setCPUThrottling(6);
-    const slow = await spin();
+    const slow = await fastest();
     await context.setCPUThrottling(null);
     expect(slow).toBeGreaterThan(fast * 2);
     await expect(context.setCPUThrottling(0.5)).rejects.toThrow(/at least 1/);

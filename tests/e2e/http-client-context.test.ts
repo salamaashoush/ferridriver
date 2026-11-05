@@ -18,7 +18,8 @@ describe('context-bound request', () => {
 
   test('document_cookie_reaches_page_request', async ({ page, baseURL }) => {
     await page.goto(`${baseURL}/fx/landed`);
-    await page.evaluate("document.cookie = 'fromdoc=yes; path=/'");
+    // Reading document.cookie back waits for WebKit's asynchronous cookie write.
+    await page.evaluate("document.cookie = 'fromdoc=yes; path=/'; document.cookie");
     const resp = await page.request.get(`${baseURL}/fx/echo-headers`);
     const headers = (await resp.json()) as Record<string, string>;
     expect(String(headers.cookie ?? '')).toContain('fromdoc=yes');

@@ -84,7 +84,9 @@ describe('context request cookies', () => {
     const stored = (await context.cookies()).find(c => c.name === 'viaRequest')!;
     expect([stored.domain, stored.path, stored.secure]).toEqual(['127.0.0.1', '/fx/', false]);
 
-    await page.evaluate("document.cookie = 'viaPage=yes; path=/'");
+    // WebKit stores a script's cookie asynchronously; reading document.cookie
+    // back waits for that write, as a page would see it.
+    await page.evaluate("document.cookie = 'viaPage=yes; path=/'; document.cookie");
     expect(await names(context.request)).toEqual(['viaPage', 'viaRequest']);
     expect(await names(page.request, `${OTHER}/`)).toEqual([]);
 
