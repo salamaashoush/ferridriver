@@ -224,3 +224,24 @@ test.describe('frame content', () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(140);
   });
 });
+
+test.describe('a frame inside a frame', () => {
+  const NESTED = `<iframe name=outer srcdoc="<iframe name=inner srcdoc='<p>deep</p>'></iframe>"></iframe>`;
+
+  test('knows the frame it is in', async ({ page }) => {
+    await page.setContent(NESTED);
+    await expect(page.frameLocator('iframe').frameLocator('iframe').locator('p')).toHaveText('deep');
+    const inner = page.frame('inner');
+    expect(inner).not.toBeNull();
+    expect(inner!.parentFrame()?.name()).toBe('outer');
+    expect(inner!.parentFrame()?.parentFrame()?.name()).toBe('');
+  });
+
+  test('calls a binding the page exposed', async ({ page }) => {
+    await page.exposeFunction('twice', (n: number) => n * 2);
+    await page.setContent(NESTED);
+    await expect(page.frameLocator('iframe').frameLocator('iframe').locator('p')).toHaveText('deep');
+    const answer = await page.frame('inner')!.evaluate('window.twice(21)');
+    expect(Number(answer)).toBe(42);
+  });
+});

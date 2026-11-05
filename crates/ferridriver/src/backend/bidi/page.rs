@@ -2370,7 +2370,8 @@ impl BidiPage {
       // `contextCreated` / `contextDestroyed`. Used to scope events that
       // only carry a `source.context` (exposed-binding dispatch via
       // `log.entryAdded`) to this page's frame tree.
-      let mut child_frames: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+      // Each child frame, at any depth, and the frame it is in.
+      let mut child_frames: rustc_hash::FxHashMap<String, String> = rustc_hash::FxHashMap::default();
       while let Some(event) = rx.recv().await {
         // Filter events for this context. Accepts events targeting this
         // top-level context directly, events with no `context` field
@@ -2379,8 +2380,10 @@ impl BidiPage {
         // iframes that BiDi reports under the child's own id.
         let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
         let event_parent = event.params.get("parent").and_then(|v| v.as_str()).unwrap_or("");
-        let child_of_this = !event_parent.is_empty() && event_parent == &*ctx;
-        if event_ctx != &*ctx && !event_ctx.is_empty() && !child_of_this && !child_frames.contains(event_ctx) {
+        // A frame inside a frame names its own parent, which is one of ours.
+        let child_of_this =
+          !event_parent.is_empty() && (event_parent == &*ctx || child_frames.contains_key(event_parent));
+        if event_ctx != &*ctx && !event_ctx.is_empty() && !child_of_this && !child_frames.contains_key(event_ctx) {
           continue;
         }
 
@@ -2396,7 +2399,7 @@ impl BidiPage {
         // `browsingContext.getTree` to enrich the cache record with
         // name + final url once Firefox has wired the iframe up.
         if event.method == "browsingContext.contextCreated" && child_of_this {
-          child_frames.insert(event_ctx.to_string());
+          child_frames.insert(event_ctx.to_string(), event_parent.to_string());
           let frame_id = event_ctx.to_string();
           let url = event
             .params
@@ -2404,7 +2407,7 @@ impl BidiPage {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-          let parent_id = (*ctx).to_string();
+          let parent_id = event_parent.to_string();
           emitter.emit(PageEvent::FrameAttached(crate::backend::FrameInfo {
             frame_id: frame_id.clone(),
             parent_frame_id: Some(parent_id.clone()),
@@ -2481,10 +2484,10 @@ impl BidiPage {
                 name: String::new(),
                 url,
               }));
-            } else if child_frames.contains(event_ctx) {
+            } else if let Some(parent) = child_frames.get(event_ctx) {
               emitter.emit(PageEvent::FrameNavigatedWithinDocument(crate::backend::FrameInfo {
                 frame_id: event_ctx.to_string(),
-                parent_frame_id: Some((*ctx).to_string()),
+                parent_frame_id: Some(parent.clone()),
                 name: String::new(),
                 url,
               }));
@@ -2528,7 +2531,9 @@ impl BidiPage {
                 name: String::new(),
                 url,
               }));
-            } else if event.method == "browsingContext.navigationCommitted" && child_frames.contains(event_ctx) {
+            } else if event.method == "browsingContext.navigationCommitted"
+              && let Some(parent) = child_frames.get(event_ctx)
+            {
               // Child-iframe cross-document navigation — surface it like
               // CDP's per-frame `Page.frameNavigated` so frame-scoped
               // consumers (e.g. WebSocket-route teardown) observe it.
@@ -2540,7 +2545,7 @@ impl BidiPage {
                 .to_string();
               emitter.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
                 frame_id: event_ctx.to_string(),
-                parent_frame_id: Some((*ctx).to_string()),
+                parent_frame_id: Some(parent.clone()),
                 name: String::new(),
                 url,
               }));
@@ -2603,7 +2608,7 @@ impl BidiPage {
             // this session sees every envelope. Only dispatch calls
             // originating in THIS page's frame tree; otherwise a
             // same-named binding on another page would double-fire.
-            if call_ctx != *ctx && !child_frames.contains(&call_ctx) {
+            if call_ctx != *ctx && !child_frames.contains_key(&call_ctx) {
               continue;
             }
             let source = crate::events::BindingSource {
