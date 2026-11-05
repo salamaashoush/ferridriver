@@ -82,9 +82,14 @@ sessions](/scripting/named-sessions#watching-driving-and-recording-remotely).
 --token TOKEN           Bearer token a client must send; repeat for one
                         isolated set of browsers per token
                         (env FERRIDRIVER_MCP_TOKEN, comma-separated)
+--exit-with-stdin       Stop the HTTP transport, closing its browsers, when
+                        stdin ends
 ```
 
-A non-loopback `--host` without a token is refused.
+A non-loopback `--host` without a token is refused. The stdio transport
+always ends with its input; `--exit-with-stdin` gives the HTTP transport the
+same lifetime, so a supervisor holding the other end of a pipe takes the
+server and its browsers down with it however the supervisor exits.
 
 See [MCP overview](/mcp/overview) and [Client setup](/mcp/setup).
 
@@ -144,6 +149,7 @@ of a file.
 ferridriver browser serve [--host ADDR] [--port N] [--token TOKEN]
                           [--ws-path PATH] [--headed] [--executable-path PATH]
                           [--arg SWITCH]... [--proxy URL] [--proxy-bypass HOSTS]
+                          [--exit-with-stdin]
 ```
 
 Launches Chromium and serves its DevTools Protocol to other processes. The
@@ -159,7 +165,11 @@ URL carries. Binding anything but loopback without `--token` (or
 `FERRIDRIVER_BROWSER_TOKEN`) generates a token. Listening on all
 addresses prints the URL with `127.0.0.1`; a remote client swaps in the
 machine's own address. SIGTERM, SIGINT and SIGHUP
-close the browser and exit; so does the browser exiting. The Rust API is
+close the browser and exit; so does the browser exiting, and, with
+`--exit-with-stdin`, standard input ending. A supervisor that starts the
+server with a pipe on its stdin and keeps the other end open takes the
+server and its browser down with it however the supervisor exits, a kill
+included, since the kernel closes the pipe either way. The Rust API is
 `BrowserType::launch_server`.
 
 `--proxy` sends all of the browser's traffic through a proxy, for every

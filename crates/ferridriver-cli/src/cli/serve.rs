@@ -14,8 +14,8 @@ pub enum BrowserCommand {
   ///
   /// Prints the WebSocket URL a CDP client dials (`connectOverCDP`,
   /// `ferridriver test --connect`) on stdout, then serves until it is sent
-  /// SIGTERM or SIGINT, or the browser exits, closing the browser on the
-  /// way out.
+  /// SIGTERM or SIGINT, the browser exits, or (with `--exit-with-stdin`) its
+  /// input ends, closing the browser on the way out.
   #[command(after_help = "Examples:\n  \
     ferridriver browser serve\n  \
     ferridriver browser serve --host 0.0.0.0 --port 9300 --token \"$GRID_TOKEN\"\n  \
@@ -69,4 +69,10 @@ pub struct BrowserServeArgs {
   /// Naming `localhost`, `127.0.0.1` or `::1` keeps loopback off it.
   #[arg(long)]
   pub proxy_bypass: Option<String>,
+
+  /// Stop, closing the browser, when standard input ends. A supervisor that
+  /// holds the other end of a pipe takes the server down with it however
+  /// the supervisor exits, a kill included.
+  #[arg(long)]
+  pub exit_with_stdin: bool,
 }

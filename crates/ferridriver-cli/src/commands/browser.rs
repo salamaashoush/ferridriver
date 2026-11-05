@@ -54,9 +54,15 @@ async fn serve_browser(args: cli::BrowserServeArgs) -> anyhow::Result<()> {
   stdout.flush()?;
   ui::note(&format!("serving Chromium on {}", server.local_addr()));
 
+  let stdin = if args.exit_with_stdin {
+    futures::future::Either::Left(super::lifetime::stdin_closed()?)
+  } else {
+    futures::future::Either::Right(std::future::pending())
+  };
   let reason = tokio::select! {
     signal = terminate_signal() => signal,
     _ = server.disconnected() => "browser exited",
+    () = stdin => "standard input closed",
   };
   ui::note(&format!("{reason}; closing the browser"));
   server.close().await?;

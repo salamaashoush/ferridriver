@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { test } from '@ferridriver/test';
 import { binary, fixtureServer, passed, quote, run, script, workspace } from './support.mjs';
 
@@ -182,4 +183,73 @@ test('browser serve --proxy carries every client context through the proxy, answ
       }
     }
   });
+});
+
+// A supervisor killed outright never signals what it started; its end of the
+// pipe closes, which is all --exit-with-stdin waits for.
+async function heldInput() {
+  const fifo = join(await workspace({}), 'stdin');
+  const made = await commands.exec('probe', { command: `mkfifo ${quote(fifo)}` });
+  assert.equal(made.exitCode, 0, made.stderr);
+  return fifo;
+}
+
+function running(pid) {
+  return commands.exec('probe', { command: `kill -0 ${pid}` }).then((result) => result.exitCode === 0);
+}
+
+// Either may have gone already, which is what these tests wait for.
+async function stopEach(...names) {
+  for (const name of names) await commands.stop(name).catch(() => {});
+}
+
+async function until(condition, what, ms = 30000) {
+  const deadline = Date.now() + ms;
+  while (!(await condition())) {
+    assert.ok(Date.now() < deadline, what);
+    await new Promise((done) => setTimeout(done, 200));
+  }
+}
+
+test('browser serve --exit-with-stdin closes its browser when the supervisor goes', async () => {
+  test.setTimeout(120000);
+  const fifo = await heldInput();
+  await commands.start('ui', { command: `exec ${quote(binary)} browser serve --exit-with-stdin < ${quote(fifo)}` });
+  await commands.start('stdio', { command: `exec sleep 600 > ${quote(fifo)}` });
+  try {
+    const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+    const response = await script(`
+      const browser = await chromium().connectOverCDP(${JSON.stringify(endpoint)});
+      const cdp = await browser.newBrowserCDPSession();
+      const info = await cdp.send('SystemInfo.getProcessInfo');
+      return info.processInfo.find((process) => process.type === 'browser').id;
+    `);
+    const pid = response.value;
+    assert.ok(await running(pid), 'the browser runs while the supervisor does');
+
+    await commands.stop('stdio');
+    await until(async () => !commands.status('ui').running, 'the server stops once its input ends');
+    await until(async () => !(await running(pid)), 'the browser ends with the server');
+    assert.match(commands.status('ui').stderr, /standard input closed; closing the browser/);
+  } finally {
+    await stopEach('stdio', 'ui');
+  }
+});
+
+test('MCP over HTTP with --exit-with-stdin stops when the supervisor goes', async () => {
+  test.setTimeout(60000);
+  const cwd = await workspace({});
+  const fifo = await heldInput();
+  const command = [binary, 'mcp', '--no-inherit', '--transport', 'http', '--port', '0', '--headless', '--exit-with-stdin']
+    .map(quote).join(' ');
+  await commands.start('ui', { command: `cd ${quote(cwd)} && exec ${command} < ${quote(fifo)} 2>&1` });
+  await commands.start('stdio', { command: `exec sleep 600 > ${quote(fifo)}` });
+  try {
+    await commands.waitForOutput('ui', '/mcp\n', 30000);
+    assert.equal(commands.status('ui').running, true);
+    await commands.stop('stdio');
+    await until(async () => !commands.status('ui').running, 'the MCP server stops once its input ends');
+  } finally {
+    await stopEach('stdio', 'ui');
+  }
 });

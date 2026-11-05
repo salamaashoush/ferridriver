@@ -57,7 +57,16 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
       let options = ferridriver_mcp::mcp::HttpOptions {
         host: args.transport.host,
         port: args.transport.port,
+        ..Default::default()
       };
+      if args.transport.exit_with_stdin {
+        let closed = super::lifetime::stdin_closed()?;
+        let shutdown = options.shutdown.clone();
+        tokio::spawn(async move {
+          closed.await;
+          shutdown.cancel();
+        });
+      }
       // One server, with its own browsers, per token: a client cannot reach
       // another's pages by guessing its session key.
       let mut given = args.transport.tokens.clone();

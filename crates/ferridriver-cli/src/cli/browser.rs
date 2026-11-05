@@ -133,6 +133,13 @@ pub struct TransportArgs {
   /// (comma-separated) when not given, which keeps it out of `ps`.
   #[arg(long = "token", help_heading = "Transport")]
   pub tokens: Vec<String>,
+
+  /// Stop the HTTP transport, closing its browsers, when standard input
+  /// ends, so a supervisor holding the other end of a pipe takes the server
+  /// down with it however it exits. The stdio transport always ends with
+  /// its input.
+  #[arg(long, help_heading = "Transport")]
+  pub exit_with_stdin: bool,
 }
 
 #[derive(Clone, ValueEnum)]

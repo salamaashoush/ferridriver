@@ -73,16 +73,19 @@ async fn reclaim_leaked_browsers() {
 
 /// Run `servers` until the transport ends or the process is signalled,
 /// then close every browser each of them launched.
-async fn serve_until_shutdown<S>(servers: &[McpServer], serve: S) -> anyhow::Result<()>
+async fn serve_until_shutdown<S, T>(servers: &[McpServer], serve: S, stop: T) -> anyhow::Result<()>
 where
   S: std::future::Future<Output = anyhow::Result<()>>,
+  T: std::future::Future<Output = ()>,
 {
   let (outcome, signalled) = {
     let serve = std::pin::pin!(serve);
     let signal = std::pin::pin!(terminate_signal());
+    let stop = std::pin::pin!(stop);
     tokio::select! {
       r = serve => (r, false),
       () = signal => (Ok(()), true),
+      () = stop => (Ok(()), false),
     }
   };
   let shutdowns = futures_shutdown(servers);
@@ -169,20 +172,27 @@ pub async fn serve_stdio_with(server: McpServer) -> anyhow::Result<()> {
   reclaim_leaked_browsers().await;
   let handle = server.clone();
   let svc = Box::pin(server.serve(rmcp::transport::io::stdio())).await?;
-  serve_until_shutdown(std::slice::from_ref(&handle), async move {
-    svc.waiting().await?;
-    Ok(())
-  })
+  serve_until_shutdown(
+    std::slice::from_ref(&handle),
+    async move {
+      svc.waiting().await?;
+      Ok(())
+    },
+    std::future::pending(),
+  )
   .await
 }
 
-/// Where the HTTP transport listens.
-#[derive(Debug, Clone, Copy)]
+/// Where the HTTP transport listens, and what stops it.
+#[derive(Debug, Clone)]
 pub struct HttpOptions {
   /// `127.0.0.1` unless the caller means to serve the network, which needs
   /// every client to present a token.
   pub host: std::net::IpAddr,
   pub port: u16,
+  /// Cancelling it stops the server as a terminating signal would: every
+  /// client's browsers are closed before the serve call returns.
+  pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl Default for HttpOptions {
@@ -190,6 +200,7 @@ impl Default for HttpOptions {
     Self {
       host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
       port: 8080,
+      shutdown: tokio_util::sync::CancellationToken::new(),
     }
   }
 }
@@ -290,15 +301,19 @@ pub async fn serve_http_clients(clients: Vec<HttpClient>, options: HttpOptions) 
     }
   };
 
-  serve_until_shutdown(&owners, async move {
-    let app = axum::Router::new()
-      .route("/mcp", axum::routing::any(handler.clone()))
-      .route("/mcp/{*rest}", axum::routing::any(handler));
-    axum::serve(listener, app)
-      .with_graceful_shutdown(async move { ct.cancelled_owned().await })
-      .await?;
-    Ok(())
-  })
+  serve_until_shutdown(
+    &owners,
+    async move {
+      let app = axum::Router::new()
+        .route("/mcp", axum::routing::any(handler.clone()))
+        .route("/mcp/{*rest}", axum::routing::any(handler));
+      axum::serve(listener, app)
+        .with_graceful_shutdown(async move { ct.cancelled_owned().await })
+        .await?;
+      Ok(())
+    },
+    options.shutdown.cancelled_owned(),
+  )
   .await
 }
 

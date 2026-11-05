@@ -14,6 +14,7 @@ pub mod ext;
 pub mod init;
 pub mod install;
 pub mod instance;
+pub mod lifetime;
 pub mod mcp;
 pub mod merge;
 pub mod run;
