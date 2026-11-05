@@ -1823,21 +1823,14 @@ impl Worker {
             let _ = std::fs::create_dir_all(&test_info.output_dir);
             // Eager when the recording is kept even on a pass; buffered
             // when only a failure keeps it.
+            let (video_width, video_height) = self.config.video.frame_size(page.viewport_size());
             if video_mode.records_eagerly(attempt) {
               let ext = ferridriver::video::video_extension();
               let video_path =
                 test_info
                   .output_dir
                   .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-              match ferridriver::video::start_recording(
-                &page,
-                video_path,
-                self.config.video.width,
-                self.config.video.height,
-                80,
-              )
-              .await
-              {
+              match ferridriver::video::start_recording(&page, video_path, video_width, video_height, 80).await {
                 Ok(h) => Some(VideoHandle::Eager(h)),
                 Err(e) => {
                   tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
@@ -1845,14 +1838,7 @@ impl Worker {
                 },
               }
             } else {
-              match ferridriver::video::start_buffered_recording(
-                &page,
-                self.config.video.width,
-                self.config.video.height,
-                80,
-              )
-              .await
-              {
+              match ferridriver::video::start_buffered_recording(&page, video_width, video_height, 80).await {
                 Ok(h) => Some(VideoHandle::Buffered(h)),
                 Err(e) => {
                   tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");

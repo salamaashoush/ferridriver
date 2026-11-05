@@ -192,12 +192,21 @@ dir  = "test-results/videos"
 size = { width = 1280, height = 720 }
 ```
 
-Modes:
+Modes, alone or with a frame size:
 
 ```toml
+[test]
+video = "retain-on-failure"   # off | on | retain-on-failure | on-first-retry | ...
+
+# or
 [test.video]
-mode = "retain-on-failure"   # off | on | retain-on-failure
+mode = "on"
+width = 640
+height = 360
 ```
+
+Without a size, a video takes the page's viewport scaled down to fit
+800x800: a 1280x720 page records at 800x450.
 
 Requires `ffmpeg` on `PATH` at runtime.
 

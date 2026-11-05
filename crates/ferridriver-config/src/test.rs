@@ -167,22 +167,38 @@ impl VideoMode {
 }
 
 /// Video recording configuration: a mode (`video = "on"`), or a mode with
-/// the frame size.
-#[derive(Debug, Clone, Serialize)]
+/// the frame size. Without a size a video takes the page's viewport, scaled
+/// down to fit 800x800.
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoConfig {
   pub mode: VideoMode,
-  pub width: u32,
-  pub height: u32,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub width: Option<u32>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub height: Option<u32>,
 }
 
-impl Default for VideoConfig {
-  fn default() -> Self {
-    Self {
-      mode: VideoMode::Off,
-      width: 1280,
-      height: 720,
-    }
+impl VideoConfig {
+  /// The frame size for a page whose viewport is `viewport`: the size
+  /// given, else the viewport scaled down to fit 800x800 (800x600 for a
+  /// page with none), each side even, as video encoders need.
+  #[must_use]
+  pub fn frame_size(&self, viewport: Option<(i64, i64)>) -> (u32, u32) {
+    let (width, height) = match (self.width, self.height, viewport) {
+      (Some(width), Some(height), _) => (width, height),
+      (_, _, Some((width, height))) if width > 0 && height > 0 => {
+        let (width, height) = (width.unsigned_abs(), height.unsigned_abs());
+        let longest = width.max(height);
+        let fit = |side: u64| {
+          let scaled = if longest > 800 { side * 800 / longest } else { side };
+          u32::try_from(scaled).unwrap_or(800)
+        };
+        (fit(width), fit(height))
+      },
+      _ => (800, 600),
+    };
+    ((width & !1).max(2), (height & !1).max(2))
   }
 }
 
@@ -347,19 +363,12 @@ mode_or_object!(ScreenshotOption, ScreenshotFields, ScreenshotMode);
 mode_or_object!(VideoOption, VideoFields, VideoMode);
 mode_or_object!(TraceOption, TraceFields, TraceMode);
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct VideoConfigFields {
   mode: VideoMode,
-  width: u32,
-  height: u32,
-}
-
-impl Default for VideoConfigFields {
-  fn default() -> Self {
-    let VideoConfig { mode, width, height } = VideoConfig::default();
-    Self { mode, width, height }
-  }
+  width: Option<u32>,
+  height: Option<u32>,
 }
 
 impl From<VideoConfigFields> for VideoConfig {
@@ -1766,8 +1775,8 @@ impl TestConfig {
     if let Some(ref video) = used.video {
       self.video.mode = video.mode;
       if let Some(ref size) = video.size {
-        self.video.width = u32::try_from(size.width.max(0)).unwrap_or(u32::MAX);
-        self.video.height = u32::try_from(size.height.max(0)).unwrap_or(u32::MAX);
+        self.video.width = Some(u32::try_from(size.width.max(0)).unwrap_or(u32::MAX));
+        self.video.height = Some(u32::try_from(size.height.max(0)).unwrap_or(u32::MAX));
       }
     }
     match used.screenshot {
@@ -2103,13 +2112,22 @@ mod expect_config_tests {
   #[test]
   fn video_takes_a_mode_or_a_mode_with_its_size() {
     let on = config("video = \"on\"\n").video;
-    assert_eq!((on.mode, on.width, on.height), (super::VideoMode::On, 1280, 720));
-    let sized = config("[video]\nmode = \"retain-on-failure\"\nwidth = 800\n").video;
+    assert_eq!((on.mode, on.width, on.height), (super::VideoMode::On, None, None));
+    let sized = config("[video]\nmode = \"retain-on-failure\"\nwidth = 640\nheight = 360\n").video;
     assert_eq!(
-      (sized.mode, sized.width, sized.height),
-      (super::VideoMode::RetainOnFailure, 800, 720)
+      (sized.mode, sized.frame_size(Some((1280, 720)))),
+      (super::VideoMode::RetainOnFailure, (640, 360))
     );
     assert_eq!(config("").video.mode, super::VideoMode::Off);
+  }
+
+  #[test]
+  fn an_unsized_video_follows_the_viewport_within_800_by_800() {
+    let video = config("video = \"on\"\n").video;
+    assert_eq!(video.frame_size(Some((1280, 720))), (800, 450));
+    assert_eq!(video.frame_size(Some((393, 852))), (368, 800));
+    assert_eq!(video.frame_size(Some((640, 481))), (640, 480));
+    assert_eq!(video.frame_size(None), (800, 600));
   }
 
   #[test]
