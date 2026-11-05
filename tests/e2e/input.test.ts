@@ -107,7 +107,10 @@ describe('input', () => {
           "<script>document.getElementById('i').addEventListener('change', function(e) { document.getElementById('r').textContent = 'changed:' + e.target.value; });</script>",
       ),
     );
+    // Typing commits with a change when the field is left, not before.
     await page.fill('#i', 'test');
+    expect(await page.textContent('#r')).toBe('');
+    await page.locator('#i').blur();
     expect(await page.textContent('#r')).toBe('changed:test');
   });
 });

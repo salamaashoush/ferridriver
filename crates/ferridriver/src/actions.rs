@@ -326,78 +326,60 @@ pub async fn click_prep(
 
 // ─── Fill ───────────────────────────────────────────────────────────────────
 
-/// Fill an input element: when `force` is `false`, run Playwright's
-/// `['visible', 'enabled', 'editable']` pre-check via the injected
-/// `checkElementStates` helper and propagate the `error:not<state>`
-/// signal back to the retry loop so callers keep polling. With
-/// `force = true` both checks are skipped and the value is set
-/// immediately, matching Playwright's `_fill(force)` short-circuit in
-/// `/tmp/playwright/packages/playwright-core/src/server/dom.ts:615`.
+/// Fill an input, a textarea or a contenteditable, or the control a label
+/// names.
 ///
-/// Handles both regular inputs (`.value`) and contenteditable elements
-/// (`.textContent`) with the accompanying `input` / `change` events.
+/// Unless `force` is set, the element must first be visible, enabled and
+/// editable; an `error:not<state>` answer goes back to the retry loop,
+/// which keeps polling. Then the injected `fill` either sets the value of
+/// an input that takes no typing (a date, a colour, a range) and fires
+/// `input` and `change`, or focuses the element and selects its content.
+/// What it selected is then replaced the way typing replaces it: the text
+/// goes in through the backend's input domain, or a Delete empties it, so
+/// the page gets trusted `beforeinput` and `input` events and a framework
+/// that tracks the value (a React-controlled input) sees the edit.
 ///
 /// # Errors
 ///
-/// Returns `error:not<state>` when the non-force pre-check fails (the
-/// retry loop treats it as retriable), or a generic fill error when
-/// the JS `.value` / `.textContent` assignment fails.
+/// Returns `error:not<state>` when the pre-check fails (retriable), the
+/// injected script's own error for an element that cannot be filled (an
+/// input of a type that takes no text, a value a date input rejects), or
+/// what inserting the text failed with.
 pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool) -> Result<()> {
-  if !force {
-    let fd = page.injected_script().await?;
-    let state_raw = element
-      .call_js_fn_value(&format!(
-        "function() {{ return {fd}.checkElementStates(this, ['visible', 'enabled', 'editable']); }}"
-      ))
-      .await?
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_else(|| "error:notconnected".to_string());
-    if state_raw != "done" {
-      // Playwright-style retriable marker: `error:notvisible`,
-      // `error:notenabled`, `error:noteditable`, or `error:notconnected`.
-      // `retry_resolve!` treats `error:not*` as retry-until-deadline.
-      return Err(FerriError::backend(state_raw));
-    }
-  }
+  let fd = page.injected_script().await?;
   // A JSON string is a JavaScript string literal with every line break,
   // quote and control character escaped.
   let literal = serde_json::to_string(value)?;
-  // Use the prototype's native `value` setter — React (and other
-  // controlled-input frameworks) wrap the descriptor on the element
-  // instance to track changes. Setting `this.value = '…'` directly
-  // bypasses React's tracker and the controlled component never sees
-  // the new value, so onChange never fires and component state stays
-  // stale (the input visually shows the new text but useState() keeps
-  // the old). Calling the prototype setter via `setter.call(el, v)`
-  // restores the change-detection signal — this is the same trick
-  // Playwright uses (`packages/injected/src/injectedScript.ts::fill`
-  // → keyboard typing path) and React DevTools.
-  element
-    .call_js_fn(&format!(
-      "function() {{ \
-            this.focus(); \
-            if (this.isContentEditable) {{ \
-              this.textContent = ''; \
-              this.textContent = {literal}; \
-              this.dispatchEvent(new InputEvent('input', {{bubbles: true}})); \
-            }} else {{ \
-              var proto = Object.getPrototypeOf(this); \
-              var desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
-              var setter = desc && desc.set; \
-              if (setter) {{ \
-                setter.call(this, ''); \
-                setter.call(this, {literal}); \
-              }} else {{ \
-                this.value = ''; \
-                this.value = {literal}; \
-              }} \
-              this.dispatchEvent(new Event('input', {{bubbles: true}})); \
-              this.dispatchEvent(new Event('change', {{bubbles: true}})); \
-            }} \
-        }}"
+  let check = if force {
+    String::new()
+  } else {
+    format!(
+      "var state = {fd}.checkElementStates(this, ['visible', 'enabled', 'editable']); \
+       if (state !== 'done') return JSON.stringify({{ result: state }}); "
+    )
+  };
+  let raw = element
+    .call_js_fn_value(&format!(
+      "function() {{ {check}\
+         try {{ return JSON.stringify({{ result: {fd}.fill(this, {literal}) }}); }} \
+         catch (e) {{ return JSON.stringify({{ error: String(e && e.message || e) }}); }} }}"
     ))
-    .await
-    .map_err(|e| FerriError::Backend(format!("Fill: {e}")))
+    .await?
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .unwrap_or_default();
+  let answer: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+  if let Some(error) = answer.get("error").and_then(serde_json::Value::as_str) {
+    return Err(FerriError::backend(error));
+  }
+  match answer.get("result").and_then(serde_json::Value::as_str) {
+    Some("done") => Ok(()),
+    Some("needsinput") if value.is_empty() => page.press_key("Delete", 0).await,
+    Some("needsinput") => page.insert_text(value).await,
+    // `error:notvisible`, `error:notenabled`, `error:noteditable` or
+    // `error:notconnected`: `retry_resolve!` polls on `error:not*`.
+    Some(state) => Err(FerriError::backend(state)),
+    None => Err(FerriError::backend("error:notconnected")),
+  }
 }
 
 // ─── Navigation ─────────────────────────────────────────────────────────────

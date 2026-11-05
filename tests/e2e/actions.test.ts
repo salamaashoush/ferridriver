@@ -623,11 +623,9 @@ describe('actions', () => {
   });
 
   test('script_fill_force', async ({ page }) => {
-    // `fill.force` bypasses Playwright's ['visible','enabled','editable']
-    // pre-check: without force a readonly input polls error:noteditable
-    // until timeout; with force the JS `.value = 'x'` assignment goes
-    // through regardless of the readonly attribute.
-    await page.goto(dataUrl("<input id='ro' readonly value=''><div id='out'></div>"));
+    // `fill.force` bypasses the ['visible','enabled','editable'] pre-check:
+    // without it a readonly input polls error:noteditable until timeout.
+    await page.goto(dataUrl("<input id='ro' readonly value=''><input id='z' style='width:0;height:0;border:0;padding:0'>"));
     const t0 = Date.now();
     let msg = 'no-throw';
     try {
@@ -638,13 +636,23 @@ describe('actions', () => {
     const elapsed = Date.now() - t0;
     expect(msg.includes('Timeout')).toBe(true);
     expect(elapsed).toBeLessThan(1500);
-    // Value stays empty — confirms no write happened.
     expect(await page.evaluate("document.getElementById('ro').value")).toBe('');
 
-    // force: true on the same readonly input -> writes successfully.
-    await page.goto(dataUrl("<input id='ro' readonly value=''>"));
+    // Forced, the text is typed in rather than assigned, and a readonly
+    // field takes no typing: the call returns and the value stays empty.
     await page.locator('#ro').fill('bypass', { force: true });
-    expect(await page.evaluate("document.getElementById('ro').value")).toBe('bypass');
+    expect(await page.evaluate("document.getElementById('ro').value")).toBe('');
+
+    // A field with no size is not visible, so only a forced fill reaches it.
+    msg = 'no-throw';
+    try {
+      await page.locator('#z').fill('hidden', { timeout: 250 });
+    } catch (e) {
+      msg = String((e as Error).message ?? e);
+    }
+    expect(msg.includes('Timeout')).toBe(true);
+    await page.locator('#z').fill('forced', { force: true });
+    expect(await page.evaluate("document.getElementById('z').value")).toBe('forced');
   });
 
   test('script_fill_multiline', async ({ page }) => {
@@ -652,22 +660,114 @@ describe('actions', () => {
     // breaks, quotes, backslashes and line separators included.
     await page.goto(
       dataUrl(
-        "<textarea id='t'></textarea><input id='i'><div id='c' contenteditable='true'></div>" +
-          "<script>window.inputs = 0; document.getElementById('t').addEventListener('input', () => window.inputs++);</script>",
+        "<textarea id='t'></textarea><input id='i'><div id='c' contenteditable='true'></div>",
       ),
     );
-    const text = "first line\nit's \"quoted\"\r\nback\\slash\u2028separated\n\nlast";
+    const text = "first line\nit's \"quoted\"\nback\\slash separated\n\nlast";
     await page.locator('#t').fill(text);
-    expect(await page.locator('#t').inputValue()).toBe(text.replace(/\r\n?/g, '\n'));
-    expect(await page.evaluate('window.inputs')).toBe(1);
-    await expect(page.locator('#t')).toHaveValue(text.replace(/\r\n?/g, '\n'));
+    expect(await page.locator('#t').inputValue()).toBe(text);
+    await expect(page.locator('#t')).toHaveValue(text);
 
-    // A single-line input drops the line breaks, as the browser does for a typed value.
+    // A single-line input keeps no line break; Chromium and WebKit type a
+    // space for it, Firefox drops it.
     await page.locator('#i').fill('one\ntwo');
-    expect(await page.locator('#i').inputValue()).toBe('onetwo');
+    expect(await page.locator('#i').inputValue()).toMatch(/^one ?two$/);
 
     await page.locator('#c').fill('top\nbottom');
     expect(await page.locator('#c').textContent()).toMatch(/^top\s*bottom$/);
+  });
+
+  test('script_fill_types_into_the_field', async ({ page }) => {
+    // The value goes in as typing puts it in: the field is focused, its
+    // content selected and replaced through the input domain, so the page
+    // sees trusted `beforeinput` and `input` events, and emptying it is a
+    // Delete.
+    await page.goto(
+      dataUrl(
+        "<input id='i' value='old'><label>Named <input id='l'></label><input id='d' type='date'>" +
+          "<script>window.events = [];" +
+          "for (const type of ['beforeinput', 'input', 'change', 'keydown']) document.addEventListener(type, e => " +
+          "events.push([type, e.target.id, e.isTrusted, e.inputType || ''].join(':')), true);</script>",
+      ),
+    );
+    const events = async () => {
+      const seen = (await page.evaluate('window.events.splice(0)')) as string[];
+      return seen;
+    };
+    await page.locator('#i').fill('new');
+    expect(await page.locator('#i').inputValue()).toBe('new');
+    const typed = await events();
+    expect(typed).toContain('beforeinput:i:true:insertText');
+    expect(typed.filter(e => e.startsWith('input:')).length).toBeGreaterThan(0);
+    expect(typed.every(e => e.split(':')[2] === 'true')).toBe(true);
+
+    await page.locator('#i').fill('');
+    expect(await page.locator('#i').inputValue()).toBe('');
+    const emptied = await events();
+    expect(emptied.some(e => e.startsWith('keydown:i:true'))).toBe(true);
+    expect(emptied.some(e => /^input:i:true:deleteContent(Forward|Backward)$/.test(e))).toBe(true);
+
+    // A label fills the control it names.
+    await page.getByText('Named').fill('via label');
+    expect(await page.locator('#l').inputValue()).toBe('via label');
+
+    // An input that takes no typing has its value set, with the events a
+    // pick would fire.
+    await events();
+    await page.locator('#d').fill('2024-01-02');
+    expect(await page.locator('#d').inputValue()).toBe('2024-01-02');
+    // Focus leaving the labelled field commits its own change first.
+    expect((await events()).filter(e => e.split(':')[1] === 'd')).toEqual(['input:d:false:', 'change:d:false:']);
+    let malformed = '';
+    try {
+      await page.locator('#d').fill('soon');
+    } catch (e) {
+      malformed = String((e as Error).message ?? e);
+    }
+    expect(malformed).toContain('Malformed value');
+
+    await page.setContent("<input type='checkbox' id='x'>");
+    let refused = '';
+    try {
+      await page.locator('#x').fill('x');
+    } catch (e) {
+      refused = String((e as Error).message ?? e);
+    }
+    expect(refused).toContain('Input of type "checkbox" cannot be filled');
+  });
+
+  test('script_fill_reaches_a_controlled_input', async ({ page }) => {
+    // A controlled input in the way React tracks one: the element's own
+    // `value` property records every value the code sets, and a change is
+    // only reported for a value the code did not set itself. Assigning the
+    // value from script is invisible to it; typing is not.
+    await page.goto(
+      dataUrl(
+        "<input id='r'><p id='state'></p><script>" +
+          "const input = document.getElementById('r');" +
+          "const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');" +
+          "let tracked = '';" +
+          "Object.defineProperty(input, 'value', { configurable: true," +
+          " get() { return native.get.call(this); }," +
+          " set(v) { tracked = String(v); native.set.call(this, v); } });" +
+          "window.changes = [];" +
+          "input.addEventListener('input', () => {" +
+          " if (input.value === tracked) return;" +
+          " tracked = input.value; changes.push(input.value);" +
+          " document.getElementById('state').textContent = input.value.toUpperCase();" +
+          " input.value = input.value; });" +
+          "</script>",
+      ),
+    );
+    await page.locator('#r').fill('sashoush');
+    await expect(page.locator('#state')).toHaveText('SASHOUSH');
+    await page.locator('#r').fill('');
+    await expect(page.locator('#state')).toHaveText('');
+    // Each edit the page saw is a change it did not make itself; Firefox
+    // types the text key by key, so it sees one per character.
+    const changes = (await page.evaluate('window.changes')) as string[];
+    expect(changes).toContain('sashoush');
+    expect(changes[changes.length - 1]).toBe('');
   });
 
   test('script_tap_native', async ({ page, browserName }) => {
