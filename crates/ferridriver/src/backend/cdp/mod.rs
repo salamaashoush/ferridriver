@@ -7197,6 +7197,11 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     if let Ok(mut guard) = self.listener_tasks.lock() {
       guard.push(handle.clone());
     }
+    // A request the renderer answers from its memory cache never reaches
+    // the network, so no route would see it.
+    let _ = self
+      .cmd("Network.setCacheDisabled", serde_json::json!({ "cacheDisabled": true }))
+      .await;
     if let Err(error) = self
       .cmd(
         "Fetch.enable",
@@ -7245,6 +7250,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let _transition = self.fetch.transition.lock().await;
     self.fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
     let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
+    let _ = self
+      .cmd(
+        "Network.setCacheDisabled",
+        serde_json::json!({ "cacheDisabled": false }),
+      )
+      .await;
     if let Ok(mut slot) = self.fetch.interceptor.lock()
       && let Some(handle) = slot.take()
     {

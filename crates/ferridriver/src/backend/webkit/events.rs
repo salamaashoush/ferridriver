@@ -345,6 +345,9 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
       .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
       .await;
     let _ = new_target
+      .send("Network.setResourceCachingDisabled", json!({ "disabled": true }))
+      .await;
+    let _ = new_target
       .send(
         "Network.addInterception",
         json!({ "url": ".*", "stage": "request", "isRegex": true }),

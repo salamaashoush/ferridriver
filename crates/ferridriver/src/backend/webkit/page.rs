@@ -2499,6 +2499,13 @@ impl WebKitPage {
       .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
       .await
       .map_err(conn_err)?;
+    // A resource served from the page's memory cache is never requested,
+    // so no route would see it.
+    self
+      .target_session()
+      .send("Network.setResourceCachingDisabled", json!({ "disabled": true }))
+      .await
+      .map_err(conn_err)?;
     self
       .target_session()
       .send(

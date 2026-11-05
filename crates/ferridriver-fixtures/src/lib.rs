@@ -630,6 +630,14 @@ async fn handle_fx(
       }
     },
     "landed" => fx_text("landed"),
+    // Cacheable for a year: a second fetch is answered by the browser's
+    // cache unless something bypasses it.
+    "cached" => fx_build(
+      200,
+      "text/plain",
+      b"cached".to_vec(),
+      &[("cache-control", "public, max-age=31536000".to_owned())],
+    ),
     "event-stream" => fx_event_stream(),
     "event-stream-page" => fx_html(
       "<!doctype html><h1>waiting</h1><script>new EventSource('/fx/event-stream').onmessage = (e) => \

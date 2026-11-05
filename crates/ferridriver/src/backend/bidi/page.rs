@@ -3134,6 +3134,14 @@ impl BidiPage {
         .to_string();
 
       self.intercept_ids.write().await.push(intercept_id);
+      // A resource served from the page's memory cache is never requested,
+      // so no route would see it.
+      let _ = self
+        .cmd(
+          "network.setCacheBehavior",
+          json!({ "cacheBehavior": "bypass", "contexts": [&*self.context_id] }),
+        )
+        .await;
     }
 
     // Spawn the route-event listener exactly once per page. It reads the
@@ -3328,6 +3336,12 @@ impl BidiPage {
       for id in ids.drain(..) {
         let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
       }
+      let _ = self
+        .cmd(
+          "network.setCacheBehavior",
+          json!({ "cacheBehavior": "default", "contexts": [&*self.context_id] }),
+        )
+        .await;
     }
 
     Ok(())
@@ -3355,6 +3369,12 @@ impl BidiPage {
       for id in ids.drain(..) {
         let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
       }
+      let _ = self
+        .cmd(
+          "network.setCacheBehavior",
+          json!({ "cacheBehavior": "default", "contexts": [&*self.context_id] }),
+        )
+        .await;
     }
     Ok(())
   }
