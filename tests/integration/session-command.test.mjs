@@ -295,7 +295,7 @@ test('session open --exit-with-stdin ends the session when the holder of its inp
 });
 
 test('a session opened on a served browser drives its one page, with no spare beside it', async () => {
-  test.setTimeout(90000);
+  test.setTimeout(120000);
   const cwd = await workspace({});
   const registry = await workspace({});
   const env = { FERRIDRIVER_SESSION_DIR: registry, FERRIDRIVER_NO_INHERIT: '1' };
@@ -306,6 +306,11 @@ test('a session opened on a served browser drives its one page, with no spare be
     const counted = await run(['run', '--session', 'served', '--json', '--eval', 'return context.pages().length;'], { cwd, env });
     passed(counted);
     assert.equal(JSON.parse(counted.stdout).value, 1, counted.stdout);
+    // The page answers: a page left waiting for a debugger never navigates.
+    const driven = await run(['run', '--session', 'served', '--json', '--eval',
+      "await page.goto('data:text/html,<title>driven</title>'); return page.title();"], { cwd, env });
+    passed(driven);
+    assert.equal(JSON.parse(driven.stdout).value, 'driven', driven.stdout);
     const seen = await run(['run', '--no-inherit', '--json', '--eval',
       `const browser = await chromium().connectOverCDP(${JSON.stringify(endpoint)});
        return browser.contexts().flatMap((context) => context.pages()).length;`], { cwd });

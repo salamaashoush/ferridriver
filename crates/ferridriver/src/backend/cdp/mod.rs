@@ -1499,6 +1499,8 @@ impl CdpBrowser<ws::WsTransport> {
     if !found_page {
       // Same ledger bracket as `new_page` — auto-attach is armed, so
       // this created target must not be mistaken for a noopener popup.
+      // Tapped before the create: the attach event can beat its response.
+      let mut attach_events = transport.tap_event_methods(&["Target.attachedToTarget"], None);
       create_ledger.begin_create();
       let create_result = transport
         .send_command(None, "Target.createTarget", &serde_json::json!({"url": "about:blank"}))
@@ -1509,21 +1511,31 @@ impl CdpBrowser<ws::WsTransport> {
       };
       create_ledger.end_create(if target_id.is_empty() { None } else { Some(&target_id) });
       create_result?;
-      let attach = transport
-        .send_command(
-          None,
-          "Target.attachToTarget",
-          &serde_json::json!({"targetId": target_id, "flatten": true}),
-        )
-        .await?;
-      let sid = attach
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .map(std::string::ToString::to_string);
+      // Auto-attach parked the new target on waitForDebuggerOnStart, on a
+      // session of its own. That is the session to set up and resume: a
+      // second session attached by hand can run commands, but resuming
+      // there leaves the page frozen, never painting and never answering
+      // a navigation.
+      let tid = target_id.clone();
+      let sid = tokio::time::timeout(Duration::from_secs(30), async move {
+        while let Some(event) = attach_events.recv().await {
+          if let Some(params) = event.get("params")
+            && params
+              .get("targetInfo")
+              .and_then(|info| info.get("targetId"))
+              .and_then(|v| v.as_str())
+              == Some(tid.as_str())
+          {
+            return Ok(params.get("sessionId").and_then(|v| v.as_str()).map(String::from));
+          }
+        }
+        Err(FerriError::target_closed(Some(
+          "CDP event channel closed while waiting for Target.attachedToTarget".into(),
+        )))
+      })
+      .await
+      .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
       Box::pin(Self::enable_domains(&transport, sid.as_deref(), None, false, None)).await?;
-      // Auto-attach parked this fresh target on waitForDebuggerOnStart
-      // (the launch flow's new_page resumes inside its enable batch;
-      // this manual path must do it explicitly or the page stays frozen).
       let _ = transport
         .send_command(sid.as_deref(), "Runtime.runIfWaitingForDebugger", &super::EMPTY_PARAMS)
         .await;
