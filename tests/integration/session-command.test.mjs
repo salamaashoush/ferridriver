@@ -293,3 +293,26 @@ test('session open --exit-with-stdin ends the session when the holder of its inp
     await run(['session', 'close', 'held'], { cwd, env });
   }
 });
+
+test('a session opened on a served browser drives its one page, with no spare beside it', async () => {
+  test.setTimeout(90000);
+  const cwd = await workspace({});
+  const registry = await workspace({});
+  const env = { FERRIDRIVER_SESSION_DIR: registry, FERRIDRIVER_NO_INHERIT: '1' };
+  await commands.start('ui', { command: `exec ${quote(binary)} browser serve` });
+  try {
+    const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+    passed(await run(['session', 'open', 'served', '--headless', '--connect', endpoint], { cwd, env }));
+    const counted = await run(['run', '--session', 'served', '--json', '--eval', 'return context.pages().length;'], { cwd, env });
+    passed(counted);
+    assert.equal(JSON.parse(counted.stdout).value, 1, counted.stdout);
+    const seen = await run(['run', '--no-inherit', '--json', '--eval',
+      `const browser = await chromium().connectOverCDP(${JSON.stringify(endpoint)});
+       return browser.contexts().flatMap((context) => context.pages()).length;`], { cwd });
+    passed(seen);
+    assert.equal(JSON.parse(seen.stdout).value, 1, `the browser holds one page: ${seen.stdout}`);
+  } finally {
+    await run(['session', 'close', 'served'], { cwd, env });
+    await commands.stop('ui').catch(() => {});
+  }
+});

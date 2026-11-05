@@ -96,8 +96,20 @@ pub async fn provision_instance(
   } else {
     browser.default_context()
   };
+  // A browser connected to keeps its pages. One it had to be given a blank
+  // page for (connecting needs a page to attach to) hands that page over
+  // rather than holding it beside another, which would leave the session
+  // with a spare renderer and two pages a watcher has to tell apart. A page
+  // that shows something is someone's, and is left alone.
   let existing = if created_session {
     ctx_ref.discover_pages().await?
+  } else if !launched && !fresh {
+    ctx_ref
+      .discover_pages()
+      .await?
+      .into_iter()
+      .filter(|page| matches!(page.url().as_str(), "" | "about:blank"))
+      .collect()
   } else {
     Vec::new()
   };
