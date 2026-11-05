@@ -26,12 +26,26 @@ async fn closing_an_attached_browser_disconnects_retained_protocol_handles() {
       let result = match method {
         "Browser.getVersion" => json!({"product":"Chrome/contract"}),
         "Target.getTargets" => json!({"targetInfos":[]}),
+        "Target.createTarget" => json!({"targetId":"page-1"}),
         _ => json!({}),
       };
       socket
         .send(json!({"id":request["id"],"result":result}).to_string().into())
         .await
         .unwrap();
+      // A browser connected to with no page is given one, which
+      // auto-attach then announces.
+      if method == "Target.createTarget" {
+        let attached = json!({
+          "method": "Target.attachedToTarget",
+          "params": {
+            "sessionId": "session-1",
+            "targetInfo": {"targetId": "page-1", "type": "page", "url": "about:blank"},
+            "waitingForDebugger": false,
+          },
+        });
+        socket.send(attached.to_string().into()).await.unwrap();
+      }
     }
     methods
   });
