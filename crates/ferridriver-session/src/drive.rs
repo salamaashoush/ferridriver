@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
 use ferridriver::codegen::emitter::{CodeEmitter, TypeScriptTestEmitter};
-use ferridriver::codegen::recorder::{Recorder, RecorderEvent, RecorderMode};
+use ferridriver::codegen::recorder::{Recorder, RecorderEvent, RecorderMode, Secrets};
 use ferridriver::codegen::{OutputLanguage, Scaffold};
 use ferridriver::options::MouseButton;
 use ferridriver::page::{MouseDownOptions, MouseUpOptions};
@@ -22,7 +22,7 @@ use crate::browser_dispatch::{context_key_for, page_for, page_with_target_id};
 use crate::dispatch::EventSink;
 use crate::protocol::{
   EventPayload, InputEvent, InputRequest, PageAssertion, RecorderAssertRequest, RecorderModeRequest,
-  RecorderStartRequest, RecordingResult, ScreencastRequest,
+  RecorderSecretRequest, RecorderStartRequest, RecordingResult, ScreencastRequest,
 };
 
 type Outcome<T> = std::result::Result<T, String>;
@@ -275,6 +275,11 @@ impl Recordings {
     let language = OutputLanguage::parse_cli(request.language.as_deref().unwrap_or("ts"));
     let scaffold = parse_target(language, request.target.as_deref())?;
     let mode = request.mode.as_deref().map(RecorderMode::parse).transpose()?;
+    let secrets = match request.secrets.as_deref() {
+      None => Secrets::Literal,
+      Some("env") => Secrets::Env,
+      Some(other) => return Err(format!("unknown secrets '{other}': expected 'env'")),
+    };
     let key = key(browser, context)?;
 
     // Claimed before anything slow happens, so two starts on one context
@@ -306,7 +311,7 @@ impl Recordings {
     }
     let line_emitter = recording.emitter();
     let sink_events = events.clone();
-    let recorder = Recorder::attach(&page, move |event: RecorderEvent| match event {
+    let recorder = Recorder::attach_with(&page, secrets, move |event: RecorderEvent| match event {
       RecorderEvent::Action {
         action,
         replaces_previous,
@@ -320,6 +325,7 @@ impl Recordings {
       RecorderEvent::Mode(mode) => sink_events.send(EventPayload::RecorderMode {
         mode: mode.as_str().to_string(),
       }),
+      RecorderEvent::Secret { name, value } => sink_events.send(EventPayload::Secret { name, value }),
     })
     .await
     .map_err(|e| format!("attaching the recorder: {e}"))?;
@@ -332,13 +338,14 @@ impl Recordings {
       () = recording.stop.notified() => {},
       () = events.closed() => {},
     }
-    let actions = match recording.recorder.lock().await.take() {
-      Some(recorder) => recorder.detach().await,
-      None => Vec::new(),
+    let finished = match recording.recorder.lock().await.take() {
+      Some(recorder) => recorder.finish().await,
+      None => ferridriver::codegen::recorder::Recorded::default(),
     };
     let result = Arc::new(RecordingResult {
-      source: ferridriver::codegen::emitter::render(&*recording.emitter(), &actions),
-      actions,
+      source: ferridriver::codegen::emitter::render(&*recording.emitter(), &finished.actions),
+      actions: finished.actions,
+      secrets: finished.secrets,
     });
     recording.result.send_replace(Some(Arc::clone(&result)));
     Ok(Arc::unwrap_or_clone(result))
@@ -404,6 +411,28 @@ fn dedent(code: &str) -> String {
     .map(|line| line.get(indent..).unwrap_or_else(|| line.trim_start()))
     .collect::<Vec<_>>()
     .join("\n")
+}
+
+impl Recordings {
+  /// Make a recorded step's value a secret.
+  pub(crate) async fn secret(
+    &self,
+    browser: &Browser,
+    context: &str,
+    args: serde_json::Value,
+  ) -> Outcome<serde_json::Value> {
+    let request: RecorderSecretRequest = parse("recorder.secret", args)?;
+    let recording = self.get(browser, context)?;
+    let recorder = recording.recorder.lock().await;
+    let recorder = recorder
+      .as_ref()
+      .ok_or_else(|| format!("the recording on context '{context}' is still starting"))?;
+    let steps = recorder
+      .secret(request.step, &request.name)
+      .await
+      .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "name": request.name, "steps": steps }))
+  }
 }
 
 #[cfg(test)]

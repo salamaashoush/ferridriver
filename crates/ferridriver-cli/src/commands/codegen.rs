@@ -188,6 +188,7 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
     title: args.title.clone(),
     url: args.url.clone(),
     mode: None,
+    secrets: None,
   };
   let start =
     Command::new(1, RECORDER_START_VERB, serde_json::to_value(&request)?).with_context(context.map(str::to_string));

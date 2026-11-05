@@ -170,6 +170,27 @@ fn rust_click_options(options: &ClickOptions, double: bool) -> String {
   )
 }
 
+/// The environment read that stands for the secret `name` in `language`.
+/// A recorded name is always an identifier, so TypeScript reads it as a
+/// property.
+fn secret_value(name: &str, language: super::OutputLanguage) -> String {
+  match language {
+    super::OutputLanguage::TypeScript => format!("process.env.{name}"),
+    other => crate::response::Secrets::env_expression(name, other),
+  }
+}
+
+/// A fill's text or an expected value: the literal quoted for `language`,
+/// or the read of the secret it is.
+fn typed(value: Option<&str>, secret: Option<&str>, language: super::OutputLanguage) -> String {
+  match (secret, language) {
+    (Some(name), _) => secret_value(name, language),
+    (None, super::OutputLanguage::TypeScript) => format!("'{}'", escape_js(value.unwrap_or_default())),
+    (None, super::OutputLanguage::Rust) => format!("\"{}\"", escape_rust(value.unwrap_or_default())),
+    (None, super::OutputLanguage::Gherkin) => value.unwrap_or_default().to_string(),
+  }
+}
+
 fn quote_js_list(values: &[String]) -> String {
   match values {
     [single] => format!("'{}'", escape_js(single)),
@@ -214,9 +235,16 @@ impl CodeEmitter for RustEmitter {
       Action::Dblclick { selector, options, .. } => {
         format!("{}.dblclick(){}", locator(selector), rust_click_options(options, true))
       },
-      Action::Fill { selector, value, .. } => {
-        format!("{}.fill(\"{}\")", locator(selector), escape_rust(value))
-      },
+      Action::Fill {
+        selector,
+        value,
+        secret,
+        ..
+      } => format!(
+        "{}.fill({})",
+        locator(selector),
+        typed(value.as_deref(), secret.as_deref(), super::OutputLanguage::Rust)
+      ),
       Action::Press { selector, key, .. } => {
         format!("{}.press(\"{}\")", locator(selector), escape_rust(key))
       },
@@ -260,13 +288,23 @@ impl CodeEmitter for RustEmitter {
         let matcher = if *substring { "to_contain_text" } else { "to_have_text" };
         format!("expect(&{}).{matcher}(\"{}\")", locator(selector), escape_rust(text))
       },
-      Action::AssertValue { selector, value, .. } if value.is_empty() => {
+      Action::AssertValue {
+        selector,
+        value,
+        secret: None,
+        ..
+      } if value.as_deref().unwrap_or_default().is_empty() => {
         format!("expect(&{}).to_be_empty()", locator(selector))
       },
-      Action::AssertValue { selector, value, .. } => format!(
-        "expect(&{}).to_have_value(\"{}\")",
+      Action::AssertValue {
+        selector,
+        value,
+        secret,
+        ..
+      } => format!(
+        "expect(&{}).to_have_value({})",
         locator(selector),
-        escape_rust(value)
+        typed(value.as_deref(), secret.as_deref(), super::OutputLanguage::Rust)
       ),
       Action::AssertChecked { selector, checked, .. } => {
         let not = if *checked { "" } else { ".not()" };
@@ -303,7 +341,12 @@ fn typescript_statement(page: &str, action: &Action) -> String {
     Action::Dblclick { locator, options, .. } => {
       format!("await {page}.{locator}.dblclick({});", js_click_options(options))
     },
-    Action::Fill { locator, value, .. } => format!("await {page}.{locator}.fill('{}');", escape_js(value)),
+    Action::Fill {
+      locator, value, secret, ..
+    } => format!(
+      "await {page}.{locator}.fill({});",
+      typed(value.as_deref(), secret.as_deref(), super::OutputLanguage::TypeScript)
+    ),
     Action::Press { locator, key, .. } => format!("await {page}.{locator}.press('{}');", escape_js(key)),
     Action::Select { locator, values, .. } => {
       format!("await {page}.{locator}.selectOption({});", quote_js_list(values))
@@ -323,12 +366,20 @@ fn typescript_statement(page: &str, action: &Action) -> String {
       let matcher = if *substring { "toContainText" } else { "toHaveText" };
       format!("await expect({page}.{locator}).{matcher}('{}');", escape_js(text))
     },
-    Action::AssertValue { locator, value, .. } if value.is_empty() => {
+    Action::AssertValue {
+      locator,
+      value,
+      secret: None,
+      ..
+    } if value.as_deref().unwrap_or_default().is_empty() => {
       format!("await expect({page}.{locator}).toBeEmpty();")
     },
-    Action::AssertValue { locator, value, .. } => {
-      format!("await expect({page}.{locator}).toHaveValue('{}');", escape_js(value))
-    },
+    Action::AssertValue {
+      locator, value, secret, ..
+    } => format!(
+      "await expect({page}.{locator}).toHaveValue({});",
+      typed(value.as_deref(), secret.as_deref(), super::OutputLanguage::TypeScript)
+    ),
     Action::AssertChecked { locator, checked, .. } => {
       let not = if *checked { "" } else { ".not" };
       format!("await expect({page}.{locator}){not}.toBeChecked();")
@@ -544,7 +595,15 @@ impl CodeEmitter for GherkinEmitter {
       },
       Action::Click { selector, .. } => format!("I click \"{selector}\""),
       Action::Dblclick { selector, .. } => format!("I double click \"{selector}\""),
-      Action::Fill { selector, value, .. } => format!("I fill \"{selector}\" with \"{value}\""),
+      Action::Fill {
+        selector,
+        value,
+        secret,
+        ..
+      } => format!(
+        "I fill \"{selector}\" with \"{}\"",
+        typed(value.as_deref(), secret.as_deref(), super::OutputLanguage::Gherkin)
+      ),
       Action::Press { selector, key, .. } => format!("I press \"{key}\" on \"{selector}\""),
       Action::Select { selector, values, .. } => {
         format!("I select \"{}\" from \"{selector}\"", values.join(","))
@@ -562,8 +621,21 @@ impl CodeEmitter for GherkinEmitter {
         ..
       } => format!("\"{selector}\" should contain text \"{text}\""),
       Action::AssertText { selector, text, .. } => format!("\"{selector}\" should have text \"{text}\""),
-      Action::AssertValue { selector, value, .. } if value.is_empty() => format!("\"{selector}\" should be empty"),
-      Action::AssertValue { selector, value, .. } => format!("\"{selector}\" should have value \"{value}\""),
+      Action::AssertValue {
+        selector,
+        value,
+        secret: None,
+        ..
+      } if value.as_deref().unwrap_or_default().is_empty() => format!("\"{selector}\" should be empty"),
+      Action::AssertValue {
+        selector,
+        value,
+        secret,
+        ..
+      } => format!(
+        "\"{selector}\" should have value \"{}\"",
+        typed(value.as_deref(), secret.as_deref(), super::OutputLanguage::Gherkin)
+      ),
       Action::AssertChecked {
         selector,
         checked: true,
@@ -634,7 +706,8 @@ mod tests {
     let fill = e.emit(&Action::Fill {
       selector: "#email".into(),
       locator: "getByLabel('Email')".into(),
-      value: "a@b.com".into(),
+      value: Some("a@b.com".into()),
+      secret: None,
     });
     assert_eq!(fill, "await page.getByLabel('Email').fill('a@b.com');\n");
 
@@ -662,7 +735,8 @@ mod tests {
       Action::Fill {
         selector: "internal:label=\"Email\"i".into(),
         locator: "getByLabel('Email')".into(),
-        value: "sashoush@example.com".into(),
+        value: Some("sashoush@example.com".into()),
+        secret: None,
       },
       click("getByRole('button', { name: 'Sign in' })"),
       Action::AssertText {
@@ -752,7 +826,8 @@ mod tests {
         Action::AssertValue {
           selector: "#a".into(),
           locator: "locator('#a')".into(),
-          value: String::new(),
+          value: Some(String::new()),
+          secret: None,
         },
         "await expect(page.locator('#a')).toBeEmpty();",
         "expect(&page.locator(\"#a\")).to_be_empty().await?;",
@@ -761,7 +836,8 @@ mod tests {
         Action::AssertValue {
           selector: "#a".into(),
           locator: "locator('#a')".into(),
-          value: "42".into(),
+          value: Some("42".into()),
+          secret: None,
         },
         "await expect(page.locator('#a')).toHaveValue('42');",
         "expect(&page.locator(\"#a\")).to_have_value(\"42\").await?;",
@@ -818,7 +894,8 @@ mod tests {
     let fill = Action::Fill {
       selector: "#notes".into(),
       locator: "locator('#notes')".into(),
-      value: "first\nit's\tsecond".into(),
+      value: Some("first\nit's\tsecond".into()),
+      secret: None,
     };
     assert_eq!(
       TypeScriptEmitter.emit(&fill),
@@ -868,7 +945,8 @@ mod tests {
       action: Action::Fill {
         selector: "#email".into(),
         locator: "getByLabel('Email')".into(),
-        value: "sashoush@example.com".into(),
+        value: Some("sashoush@example.com".into()),
+        secret: None,
       },
       popup: None,
     };
@@ -981,7 +1059,8 @@ mod tests {
       RecordedAction::on_first_page(Action::Fill {
         selector: "#q".into(),
         locator: "locator('#q')".into(),
-        value: value.into(),
+        value: Some(value.into()),
+        secret: None,
       })
     };
     assert_eq!(live.push(fill("a"), false, None), None);

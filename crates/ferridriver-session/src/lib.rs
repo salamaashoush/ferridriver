@@ -42,9 +42,10 @@ pub use client::SessionClient;
 pub use dispatch::{ActionDetail, Dispatcher, EventSink, PageCounts, ReleaseFuture, ScriptHost};
 pub use protocol::{
   AUTH_VERB, ActionPhase, CLOSE_VERB, Command, Event, EventPayload, INPUT_VERB, InputEvent, InputRequest,
-  PageAssertion, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB,
-  RecorderAssertRequest, RecorderModeRequest, RecorderStartRequest, RecordingResult, Response, SCREENCAST_VERB,
-  ScreencastRequest, ScriptKind, ScriptRequest, ServerFrame,
+  PageAssertion, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_SECRET_VERB, RECORDER_START_VERB,
+  RECORDER_STOP_VERB, RUN_VERB, RecorderAssertRequest, RecorderModeRequest, RecorderSecretRequest,
+  RecorderStartRequest, RecordingResult, Response, SCREENCAST_VERB, ScreencastRequest, ScriptKind, ScriptRequest,
+  ServerFrame,
 };
 pub use registry::{Registry, SessionDescriptor};
 pub use server::{Endpoint, SessionServer, endpoint_token};

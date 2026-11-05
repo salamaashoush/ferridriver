@@ -87,6 +87,10 @@ pub const RECORDER_MODE_VERB: &str = "recorder.mode";
 /// Record an assertion about the page itself; args are a
 /// [`RecorderAssertRequest`], the response the recorded action.
 pub const RECORDER_ASSERT_VERB: &str = "recorder.assert";
+/// Make a recorded step's value a secret; args are a
+/// [`RecorderSecretRequest`], the response `{"name": ..., "steps": [...]}`,
+/// the indices of the steps rewritten.
+pub const RECORDER_SECRET_VERB: &str = "recorder.secret";
 
 /// One input event for [`INPUT_VERB`]. Coordinates are CSS pixels in the
 /// page's viewport, the space a screencast frame depicts.
@@ -214,6 +218,23 @@ pub struct RecorderStartRequest {
   /// The mode to start in. Defaults to `recording`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub mode: Option<String>,
+  /// `env`: a value typed into a secret field (a password field, or one
+  /// whose `autocomplete` asks for a password, a one-time code, or a
+  /// card's number or code) is recorded as the environment variable the
+  /// code reads in its place. Its value reaches only this command's
+  /// client, as [`EventPayload::Secret`], and the result's `secrets`.
+  /// Absent, values are recorded as typed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub secrets: Option<String>,
+}
+
+/// [`RECORDER_SECRET_VERB`]'s arguments: the index of a fill or value
+/// assertion among the recorded actions, and the environment variable its
+/// value is to be read from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecorderSecretRequest {
+  pub step: usize,
+  pub name: String,
 }
 
 /// [`RECORDER_MODE_VERB`]'s arguments: one of `recording`, `none`,
@@ -245,6 +266,9 @@ pub struct RecordingResult {
   /// The whole file in the requested language and target.
   pub source: String,
   pub actions: Vec<ferridriver::codegen::RecordedAction>,
+  /// Under `"secrets": "env"`, each secret the actions read and its value.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub secrets: Vec<ferridriver::codegen::recorder::RecordedSecret>,
 }
 
 /// How the host should treat [`ScriptRequest::code`].
@@ -407,6 +431,13 @@ pub enum EventPayload {
   /// after an assertion was picked.
   RecorderMode {
     mode: String,
+  },
+  /// The value the secret `name` stands for, sent under `"secrets": "env"`
+  /// to the client that started the recording and no one else, once the
+  /// step that typed it is settled. The only message carrying the value.
+  Secret {
+    name: String,
+    value: String,
   },
   /// The page the context is left on once the run finished. Sent once, after
   /// the last action, and only when the request set

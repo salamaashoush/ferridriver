@@ -56,9 +56,31 @@
     }
   }
 
-  function emit(action) {
+  function emit(action, field) {
     if (!active) return;
-    send({ kind: 'action', action: action });
+    var message = { kind: 'action', action: action };
+    if (field) message.secretField = field;
+    send(message);
+  }
+
+  // The autocomplete tokens that ask for a secret.
+  var secretAutocomplete = ['current-password', 'new-password', 'one-time-code', 'cc-number', 'cc-csc'];
+
+  // What names a secret field's value, for a field that holds a secret:
+  // a password input, or one whose autocomplete asks for a secret.
+  function secretFieldOf(el) {
+    if (!el || (el.nodeName !== 'INPUT' && el.nodeName !== 'TEXTAREA')) return null;
+    var password = el.nodeName === 'INPUT' && (el.type || '').toLowerCase() === 'password';
+    var tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+    var asked = tokens.some(function(token) { return secretAutocomplete.indexOf(token) !== -1; });
+    if (!password && !asked) return null;
+    var label = '';
+    try {
+      label = (window.__fd.getAccessibleName && window.__fd.getAccessibleName(el)) || '';
+    } catch (e) {
+      label = '';
+    }
+    return { password: password, label: label, name: el.getAttribute('name') || '', id: el.id || '' };
   }
 
   function generate(el, options) {
@@ -166,12 +188,12 @@
     return selectorFor(element);
   }
 
-  function record(action, selector) {
+  function record(action, selector, field) {
     if (!selector) return;
     var described = describeSelector(selector);
     action.selector = described.selector;
     action.locator = described.locator;
-    emit(action);
+    emit(action, field);
   }
 
   function hasValue(el) {
@@ -312,7 +334,7 @@
       if (!assertion) return;
       mode = 'recording';
       clearHighlight();
-      emit(assertion);
+      emit(assertion, assertion.type === 'assertValue' ? secretFieldOf(picked) : null);
       return;
     }
     // Sliding a range can end in a click on another element.
@@ -414,7 +436,7 @@
       // A contenteditable already holds the new text, so its selector must
       // not depend on that text.
       var selector = target.isContentEditable ? selectorFor(target, { noText: true }) : activeSelectorFor(target);
-      record({ type: 'fill', value: target.isContentEditable ? target.innerText : target.value }, selector);
+      record({ type: 'fill', value: target.isContentEditable ? target.innerText : target.value }, selector, secretFieldOf(target));
       return;
     }
 

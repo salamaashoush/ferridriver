@@ -236,7 +236,7 @@ async fn relayed_input_is_recorded_and_the_spec_passes() -> anyhow::Result<()> {
     "{:#?}",
     result.actions
   );
-  assert!(matches!(&result.actions[2].action, Action::Fill { value, .. } if value == "sashoush@example.com"));
+  assert_eq!(result.actions[2].action.typed_value(), Some("sashoush@example.com"));
   assert!(matches!(
     &result.actions[5].action,
     Action::AssertText { text, substring: true, .. } if text == "Welcome, sashoush"
@@ -598,6 +598,162 @@ async fn a_popup_opened_after_another_step_replaces_the_step_that_opened_it() ->
     result.actions,
     "the watcher's list is the recording"
   );
+
+  drop(session);
+  browser.close().await?;
+  Ok(())
+}
+const LOGIN: &str = "data:text/html,<title>Sign in</title><body style=margin:0>\
+<label style=position:absolute;left:10px;top:10px>Password <input type=password id=pw style=width:150px></label>\
+<input id=code autocomplete=one-time-code style=position:absolute;left:10px;top:50px;width:150px>\
+<label style=position:absolute;left:10px;top:90px>PIN <input id=pin style=width:150px></label>\
+<label style=position:absolute;left:10px;top:130px>Confirm PIN <input id=again style=width:150px></label>\
+<button style=position:absolute;left:10px;top:170px;width:100px;height:30px>Go</button></body>";
+
+async fn type_keys(endpoint: &str, text: &str) -> anyhow::Result<()> {
+  for key in text.chars() {
+    let reply = press(endpoint, &key.to_string(), None).await?;
+    ensure!(reply.ok, "{:?}", reply.error);
+  }
+  Ok(())
+}
+
+/// Run `source` as a spec with each secret's value in the environment the
+/// code reads it from, and only there.
+fn replay_from_the_environment(
+  dir: &std::path::Path,
+  source: &str,
+  secrets: &[(String, String)],
+) -> anyhow::Result<()> {
+  std::fs::write(dir.join("recorded.spec.ts"), source)?;
+  let names: Vec<String> = secrets.iter().map(|(name, _)| format!("{name:?}")).collect();
+  std::fs::write(
+    dir.join("ferridriver.toml"),
+    format!("[scripting]\nallowEnv = [{}]\n", names.join(", ")),
+  )?;
+  let run = std::process::Command::new(ferridriver_bin())
+    .args(["test", "--no-inherit", "--headless", "recorded.spec.ts"])
+    .current_dir(dir)
+    .envs(secrets.iter().map(|(name, value)| (name, value)))
+    .output()?;
+  ensure!(
+    run.status.success(),
+    "the recorded spec failed:\n{source}\n{}\n{}",
+    String::from_utf8_lossy(&run.stdout),
+    String::from_utf8_lossy(&run.stderr)
+  );
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typed_secret_reaches_only_the_host_and_the_code_reads_it_from_the_environment() -> anyhow::Result<()> {
+  let browser = launch(ferridriver::chromium()).await?;
+  let (session, endpoint, scratch) = bound(&browser, "secrets").await?;
+  let page = page_for(&browser, "default").await?;
+  page.goto(LOGIN).await?;
+  let start = Command::new(
+    1,
+    RECORDER_START_VERB,
+    serde_json::json!({"target": "test", "secrets": "env"}),
+  );
+  let (mut events, recording) = stream(&endpoint, start).await?;
+  let mut streamed = vec![next_event(&mut events, "the opening navigation").await?];
+
+  // A password field and a one-time code field are found by their kind;
+  // the PIN fields are plain, so the host names the first one.
+  click(&endpoint, center(&page, "#pw").await?).await?;
+  type_keys(&endpoint, "hunter2").await?;
+  click(&endpoint, center(&page, "#code").await?).await?;
+  type_keys(&endpoint, "123456").await?;
+  click(&endpoint, center(&page, "#pin").await?).await?;
+  type_keys(&endpoint, "4321").await?;
+  click(&endpoint, center(&page, "#again").await?).await?;
+  type_keys(&endpoint, "4321").await?;
+  click(&endpoint, center(&page, "button").await?).await?;
+  let named = ok(
+    &endpoint,
+    ferridriver_session::RECORDER_SECRET_VERB,
+    serde_json::json!({"step": 6, "name": "PIN"}),
+  )
+  .await?;
+  let named: serde_json::Value = serde_json::from_str(&named.text)?;
+  assert_eq!(named, serde_json::json!({"name": "PIN", "steps": [6, 8]}));
+
+  let stopped = ok(&endpoint, RECORDER_STOP_VERB, serde_json::json!({})).await?;
+  let result: RecordingResult = serde_json::from_str(&stopped.text)?;
+  ensure!(recording.await??.ok, "recorder.start failed");
+  while let Ok(event) = events.try_recv() {
+    streamed.push(event);
+  }
+
+  // Each value reaches the host once, settled, in a message of its own.
+  let secrets: Vec<(String, String)> = streamed
+    .iter()
+    .filter_map(|event| match event {
+      EventPayload::Secret { name, value } => Some((name.clone(), value.clone())),
+      _ => None,
+    })
+    .collect();
+  let expected = [
+    ("PASSWORD".to_string(), "hunter2".to_string()),
+    ("CODE".to_string(), "123456".to_string()),
+    ("PIN".to_string(), "4321".to_string()),
+  ];
+  assert_eq!(secrets, expected);
+  let named_secrets: Vec<(String, String)> = result
+    .secrets
+    .iter()
+    .map(|secret| (secret.name.clone(), secret.value.clone()))
+    .collect();
+  assert_eq!(named_secrets, expected);
+
+  // The password and code were never anywhere else; the PIN only before
+  // the host named it.
+  for event in streamed
+    .iter()
+    .filter(|event| !matches!(event, EventPayload::Secret { .. }))
+  {
+    let wire = serde_json::to_string(&ferridriver_session::ServerFrame::Event(ferridriver_session::Event {
+      id: 1,
+      payload: event.clone(),
+    }))?;
+    ensure!(!wire.contains("hunter2") && !wire.contains("123456"), "{wire}");
+  }
+  let kept = serde_json::to_string(&result.actions)? + &result.source;
+  for literal in ["hunter2", "123456", "4321"] {
+    ensure!(!kept.contains(literal), "{literal} in the result:\n{kept}");
+  }
+  assert_eq!(
+    watched_steps(&streamed),
+    result.actions,
+    "the watcher's list is the recording"
+  );
+  for (index, name) in [(2, "PASSWORD"), (4, "CODE"), (6, "PIN"), (8, "PIN")] {
+    assert_eq!(
+      result.actions[index].action.secret(),
+      Some(name),
+      "{:#?}",
+      result.actions
+    );
+    assert_eq!(
+      serde_json::to_value(&result.actions[index])?["value"],
+      serde_json::Value::Null
+    );
+  }
+  let fills: Vec<&str> = result.source.lines().filter(|line| line.contains(".fill(")).collect();
+  assert_eq!(
+    fills,
+    [
+      "  await page.getByRole('textbox', { name: 'Password' }).fill(process.env.PASSWORD);",
+      "  await page.locator('#code').fill(process.env.CODE);",
+      "  await page.getByRole('textbox', { name: 'PIN', exact: true }).fill(process.env.PIN);",
+      "  await page.getByRole('textbox', { name: 'Confirm PIN' }).fill(process.env.PIN);",
+    ],
+    "{}",
+    result.source
+  );
+
+  replay_from_the_environment(scratch.path(), &result.source, &expected)?;
 
   drop(session);
   browser.close().await?;

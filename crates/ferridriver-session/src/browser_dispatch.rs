@@ -22,8 +22,8 @@ use tokio::sync::RwLock;
 use crate::dispatch::{Dispatcher, EventSink, ScriptHost};
 use crate::drive::Recordings;
 use crate::protocol::{
-  Command, INPUT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB,
-  Response, SCREENCAST_VERB, ScriptRequest,
+  Command, INPUT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_SECRET_VERB, RECORDER_START_VERB,
+  RECORDER_STOP_VERB, RUN_VERB, Response, SCREENCAST_VERB, ScriptRequest,
 };
 
 /// Runs session commands against a live browser.
@@ -115,6 +115,9 @@ impl Dispatcher for BrowserDispatcher {
         let result = self.recordings.assert(&self.browser, &context, command.args).await;
         return json(result.and_then(|a| to_json(&a)));
       },
+      RECORDER_SECRET_VERB => {
+        return json(self.recordings.secret(&self.browser, &context, command.args).await);
+      },
       other => {
         return Response::err(
           id,
@@ -155,6 +158,7 @@ impl Dispatcher for BrowserDispatcher {
       RECORDER_STOP_VERB,
       RECORDER_MODE_VERB,
       RECORDER_ASSERT_VERB,
+      RECORDER_SECRET_VERB,
     ]
   }
 }

@@ -35,10 +35,14 @@ pub enum Action {
     #[serde(default, skip_serializing_if = "ClickOptions::is_plain")]
     options: ClickOptions,
   },
+  /// `value` is `None` for a secret, which `secret` names: the code reads
+  /// it from the environment variable of that name.
   Fill {
     selector: String,
     locator: String,
-    value: String,
+    value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
   },
   Press {
     selector: String,
@@ -79,11 +83,14 @@ pub enum Action {
     #[serde(default)]
     substring: bool,
   },
-  /// An empty `value` renders `toBeEmpty()`.
+  /// An empty `value` renders `toBeEmpty()`; `None` is a secret's, which
+  /// `secret` names, as for [`Action::Fill`].
   AssertValue {
     selector: String,
     locator: String,
-    value: String,
+    value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
   },
   AssertChecked {
     selector: String,
@@ -215,6 +222,38 @@ impl Action {
       | Self::AssertValue { selector, .. }
       | Self::AssertChecked { selector, .. } => Some(selector),
       Self::Navigate { .. } | Self::AssertUrl { .. } | Self::AssertTitle { .. } => None,
+    }
+  }
+
+  /// The value a fill typed or a value assertion expects, unless it is a
+  /// secret's.
+  #[must_use]
+  pub fn typed_value(&self) -> Option<&str> {
+    match self {
+      Self::Fill {
+        value, secret: None, ..
+      }
+      | Self::AssertValue {
+        value, secret: None, ..
+      } => value.as_deref(),
+      _ => None,
+    }
+  }
+
+  /// The name of the secret a fill or value assertion reads.
+  #[must_use]
+  pub fn secret(&self) -> Option<&str> {
+    match self {
+      Self::Fill { secret, .. } | Self::AssertValue { secret, .. } => secret.as_deref(),
+      _ => None,
+    }
+  }
+
+  /// Make the value of a fill or value assertion the secret `name`.
+  fn hide_value(&mut self, name: &str) {
+    if let Self::Fill { value, secret, .. } | Self::AssertValue { value, secret, .. } = self {
+      *value = None;
+      *secret = Some(name.to_string());
     }
   }
 

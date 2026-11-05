@@ -88,6 +88,82 @@ impl RecorderMode {
   }
 }
 
+/// What a recording does with a value typed into a secret field: an
+/// `<input type=password>`, or a field whose `autocomplete` asks for a
+/// password, a one-time code, or a card's number or security code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Secrets {
+  /// The value is recorded as typed.
+  #[default]
+  Literal,
+  /// The value is recorded as the environment variable the code reads in
+  /// its place, named after the field. It reaches the sink once, as
+  /// [`RecorderEvent::Secret`], and nowhere else.
+  Env,
+}
+
+/// A secret's name and the value it stands for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecordedSecret {
+  pub name: String,
+  pub value: String,
+}
+
+/// What the page knows of a secret field, to name its secret by.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+struct SecretField {
+  password: bool,
+  label: String,
+  name: String,
+  id: String,
+}
+
+impl SecretField {
+  /// The field's accessible label as an environment variable name, else
+  /// its `name`, else its `id`, else what kind of secret it holds.
+  fn base_name(&self) -> String {
+    [&self.label, &self.name, &self.id]
+      .into_iter()
+      .find_map(|text| env_name(text))
+      .unwrap_or_else(|| if self.password { "PASSWORD" } else { "SECRET" }.to_string())
+  }
+}
+
+/// `text` in `UPPER_SNAKE_CASE`: ASCII letters and digits, each run of
+/// anything else one `_`, none at the ends, and a `_` before a leading
+/// digit. `None` when nothing is left.
+fn env_name(text: &str) -> Option<String> {
+  let mut name = String::new();
+  let mut gap = false;
+  for ch in text.chars() {
+    if ch.is_ascii_alphanumeric() {
+      if gap && !name.is_empty() {
+        name.push('_');
+      }
+      gap = false;
+      name.push(ch.to_ascii_uppercase());
+    } else {
+      gap = true;
+    }
+  }
+  if name.is_empty() {
+    return None;
+  }
+  if name.starts_with(|ch: char| ch.is_ascii_digit()) {
+    name.insert(0, '_');
+  }
+  Some(name)
+}
+
+/// Whether `name` can be an environment variable a script reads as
+/// `process.env.NAME`.
+fn is_env_name(name: &str) -> bool {
+  let mut chars = name.chars();
+  chars.next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 /// Something the recorder observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecorderEvent {
@@ -104,6 +180,11 @@ pub enum RecorderEvent {
   /// The mode changed, including the switch back to recording after an
   /// assertion was picked.
   Mode(RecorderMode),
+  /// The value the secret `name` stands for, under [`Secrets::Env`]. Sent
+  /// once the step that typed it is settled (no keystroke can change it),
+  /// before the next recorded action, and again only if a later edit of
+  /// that same step changed it.
+  Secret { name: String, value: String },
 }
 
 /// Where a [`Recorder`] delivers what it observes: a callback or a channel.
@@ -161,6 +242,13 @@ struct State {
   /// Popups whose opening was already put on the action that opened them.
   announced_popups: rustc_hash::FxHashSet<usize>,
   detached: bool,
+  secrets: Secrets,
+  /// Every secret name in use and its value, in the order they were given.
+  names: Vec<RecordedSecret>,
+  /// The value each name was last sent to the sink with.
+  announced: FxHashMap<String, String>,
+  /// Fields the host made secret, by selector, and the name it chose.
+  named_fields: FxHashMap<String, String>,
 }
 
 impl State {
@@ -176,6 +264,169 @@ impl State {
       replaces_previous: last,
       replaces_index: Some(index),
     })
+  }
+
+  /// Record a fill or value assertion's value as a secret where it is
+  /// one: typed into a secret field, into a field the host made secret, or
+  /// the value of a secret already named. `previous` is the entry `action`
+  /// replaces, whose name lapses if no other step reads it.
+  fn hide_secret(&mut self, action: &mut Action, field: Option<&SecretField>, previous: Option<&RecordedAction>) {
+    if let Some(lapsed) = previous.and_then(|previous| previous.action.secret())
+      && !self.actions.iter().any(|action| action.action.secret() == Some(lapsed))
+    {
+      self.names.retain(|secret| secret.name != lapsed);
+    }
+    let (Some(selector), Some(literal)) = (action.selector(), action.typed_value()) else {
+      return;
+    };
+    if literal.is_empty() {
+      return;
+    }
+    if let Some(known) = self.names.iter().find(|secret| secret.value == literal) {
+      let name = known.name.clone();
+      action.hide_value(&name);
+      return;
+    }
+    let Some(base) = self
+      .named_fields
+      .get(selector)
+      .cloned()
+      .or_else(|| field.map(SecretField::base_name))
+    else {
+      return;
+    };
+    let name = self.unused_name(&base);
+    self.names.push(RecordedSecret {
+      name: name.clone(),
+      value: literal.to_string(),
+    });
+    action.hide_value(&name);
+  }
+
+  /// `base`, or `base_2`, `base_3`, ... where a different value has it.
+  /// One past the number of names in use is always free.
+  fn unused_name(&self, base: &str) -> String {
+    let taken = |name: &str| self.names.iter().any(|secret| secret.name == name);
+    if !taken(base) {
+      return base.to_string();
+    }
+    (2..=self.names.len() + 1)
+      .map(|n| format!("{base}_{n}"))
+      .find(|name| !taken(name))
+      .unwrap_or_else(|| format!("{base}_{}", self.names.len() + 2))
+  }
+
+  /// The secrets whose settled value the sink has not been sent, sent now.
+  /// Called once no step can change any more: before a step that does not
+  /// replace the last one, and when the recording ends.
+  fn settle_secrets(&mut self) -> Vec<RecorderEvent> {
+    let mut events = Vec::new();
+    for secret in &self.names {
+      if self.announced.get(&secret.name) == Some(&secret.value) {
+        continue;
+      }
+      self.announced.insert(secret.name.clone(), secret.value.clone());
+      events.push(RecorderEvent::Secret {
+        name: secret.name.clone(),
+        value: secret.value.clone(),
+      });
+    }
+    events
+  }
+
+  /// The secrets the recorded steps read, in the order they were named.
+  fn secrets_in_use(&self) -> Vec<RecordedSecret> {
+    self
+      .names
+      .iter()
+      .filter(|secret| {
+        self
+          .actions
+          .iter()
+          .any(|action| action.action.secret() == Some(secret.name.as_str()))
+      })
+      .cloned()
+      .collect()
+  }
+
+  /// Make step `index` the secret `name`, with every later step holding
+  /// the same value, and have later values typed into its field use the
+  /// name too. Answers the indices rewritten and the events that say so.
+  fn make_secret(&mut self, index: usize, name: &str) -> Result<(Vec<usize>, Vec<RecorderEvent>)> {
+    if self.secrets != Secrets::Env {
+      return Err(FerriError::invalid_argument(
+        "secrets",
+        "only a recording started with secrets \"env\" keeps secrets",
+      ));
+    }
+    if !is_env_name(name) {
+      return Err(FerriError::invalid_argument(
+        "name",
+        format!("'{name}' is not an environment variable name: use letters, digits and _, not starting with a digit"),
+      ));
+    }
+    let step = self.actions.get(index).ok_or_else(|| {
+      FerriError::invalid_argument("step", format!("no step {index}: {} recorded", self.actions.len()))
+    })?;
+    if let Some(existing) = step.action.secret() {
+      return if existing == name {
+        Ok((Vec::new(), Vec::new()))
+      } else {
+        Err(FerriError::invalid_argument(
+          "step",
+          format!("step {index} is already the secret {existing}"),
+        ))
+      };
+    }
+    let (Some(selector), Some(literal)) = (step.action.selector(), step.action.typed_value()) else {
+      return Err(FerriError::invalid_argument(
+        "step",
+        format!("step {index} types no value to keep secret"),
+      ));
+    };
+    let (selector, literal) = (selector.to_string(), literal.to_string());
+    if literal.is_empty() {
+      return Err(FerriError::invalid_argument(
+        "step",
+        format!("step {index} types nothing"),
+      ));
+    }
+    if self
+      .names
+      .iter()
+      .any(|secret| secret.name == name && secret.value != literal)
+    {
+      return Err(FerriError::invalid_argument(
+        "name",
+        format!("{name} already stands for another value"),
+      ));
+    }
+    if !self.names.iter().any(|secret| secret.name == name) {
+      self.names.push(RecordedSecret {
+        name: name.to_string(),
+        value: literal.clone(),
+      });
+    }
+    self.named_fields.insert(selector, name.to_string());
+    self.announced.insert(name.to_string(), literal.clone());
+    let mut events = vec![RecorderEvent::Secret {
+      name: name.to_string(),
+      value: literal.clone(),
+    }];
+    let last = self.actions.len().saturating_sub(1);
+    let mut rewritten = Vec::new();
+    for (at, step) in self.actions.iter_mut().enumerate().skip(index) {
+      if step.action.typed_value() == Some(literal.as_str()) {
+        step.action.hide_value(name);
+        rewritten.push(at);
+        events.push(RecorderEvent::Action {
+          action: step.clone(),
+          replaces_previous: at == last,
+          replaces_index: Some(at),
+        });
+      }
+    }
+    Ok((rewritten, events))
   }
 
   fn alias_of(&self, id: usize) -> Option<&str> {
@@ -240,8 +491,14 @@ impl Shared {
   /// Record `action`, folding it into the previous one where the page
   /// reported the same gesture twice. Returns the mode the page should be
   /// in afterwards.
-  fn record(&self, mut action: RecordedAction) -> RecorderMode {
-    let (replaces_index, mode_change, action) = {
+  fn record(&self, action: RecordedAction) -> RecorderMode {
+    self.record_typed(action, None)
+  }
+
+  /// [`Self::record`] for an action the page says was typed into the
+  /// secret `field`.
+  fn record_typed(&self, mut action: RecordedAction, field: Option<&SecretField>) -> RecorderMode {
+    let (settled, replaces_index, mode_change, action) = {
       let mut state = self.state();
       if state.detached {
         return RecorderMode::None;
@@ -254,8 +511,17 @@ impl Shared {
               (Action::Fill { selector: a, .. }, Action::Fill { selector: b, .. }) if a == b
             ))
       });
-      if replaces_previous && let Some(previous) = state.actions.pop() {
-        action.popup = action.popup.or(previous.popup);
+      let previous = if replaces_previous { state.actions.pop() } else { None };
+      if let Some(previous) = &previous {
+        action.popup = action.popup.or_else(|| previous.popup.clone());
+      }
+      let settled = if replaces_previous {
+        Vec::new()
+      } else {
+        state.settle_secrets()
+      };
+      if state.secrets == Secrets::Env {
+        state.hide_secret(&mut action.action, field, previous.as_ref());
       }
       let index = state.actions.len();
       state.actions.push(action.clone());
@@ -263,8 +529,11 @@ impl Shared {
         state.mode = RecorderMode::Recording;
         RecorderMode::Recording
       });
-      (replaces_previous.then_some(index), mode_change, action)
+      (settled, replaces_previous.then_some(index), mode_change, action)
     };
+    for secret in settled {
+      self.sink.event(secret);
+    }
     self.sink.event(RecorderEvent::Action {
       action,
       replaces_previous: replaces_index.is_some(),
@@ -294,11 +563,20 @@ impl Shared {
   fn on_message(&self, page: &str, message: &serde_json::Value) -> RecorderMode {
     match message.get("kind").and_then(serde_json::Value::as_str) {
       Some("action") => match message.get("action").cloned().map(serde_json::from_value::<Action>) {
-        Some(Ok(action)) => self.record(RecordedAction {
-          page: page.to_string(),
-          action,
-          popup: None,
-        }),
+        Some(Ok(action)) => {
+          let field = message
+            .get("secretField")
+            .cloned()
+            .and_then(|field| serde_json::from_value::<SecretField>(field).ok());
+          self.record_typed(
+            RecordedAction {
+              page: page.to_string(),
+              action,
+              popup: None,
+            },
+            field.as_ref(),
+          )
+        },
         Some(Err(error)) => {
           tracing::debug!(target: "ferridriver::codegen", "unreadable recorded action: {error}");
           self.state().mode
@@ -494,6 +772,14 @@ fn quote_css_attribute_value(text: &str) -> String {
   quoted
 }
 
+/// Everything a recording recorded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recorded {
+  pub actions: Vec<RecordedAction>,
+  /// Under [`Secrets::Env`], the secrets the actions read.
+  pub secrets: Vec<RecordedSecret>,
+}
+
 /// A recorder attached to one browser context.
 ///
 /// Records every page of the context until [`Self::detach`]. Dropping it
@@ -525,6 +811,16 @@ impl Recorder {
   /// has a recorder, or when the page-side scripts or binding cannot be
   /// installed.
   pub async fn attach(page: &Arc<Page>, sink: impl RecorderSink) -> Result<Self> {
+    Self::attach_with(page, Secrets::Literal, sink).await
+  }
+
+  /// [`Self::attach`], doing `secrets` with the values typed into secret
+  /// fields.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::attach`].
+  pub async fn attach_with(page: &Arc<Page>, secrets: Secrets, sink: impl RecorderSink) -> Result<Self> {
     let context = page
       .context()
       .cloned()
@@ -542,7 +838,10 @@ impl Recorder {
     }
     let shared = Arc::new(Shared {
       sink: Box::new(sink),
-      state: Mutex::new(State::default()),
+      state: Mutex::new(State {
+        secrets,
+        ..State::default()
+      }),
     });
     shared.alias_for(page);
     let (inbound, receiver) = mpsc::unbounded_channel();
@@ -741,18 +1040,54 @@ impl Recorder {
   /// Stop recording and remove the page-side scripts. Returns everything
   /// recorded. A page that went away has nothing left to clean, so this
   /// cannot fail.
-  pub async fn detach(mut self) -> Vec<RecordedAction> {
+  pub async fn detach(self) -> Vec<RecordedAction> {
+    self.finish().await.actions
+  }
+
+  /// [`Self::detach`], answering the secrets the steps read as well, once
+  /// the sink has been sent each one's settled value.
+  pub async fn finish(mut self) -> Recorded {
     self.flush().await;
-    let actions = {
+    let (settled, recorded) = {
       let mut state = self.shared.state();
+      let settled = state.settle_secrets();
       state.detached = true;
-      state.actions.clone()
+      (
+        settled,
+        Recorded {
+          actions: state.actions.clone(),
+          secrets: state.secrets_in_use(),
+        },
+      )
     };
+    for secret in settled {
+      self.shared.sink.event(secret);
+    }
     self
       .in_every_frame("window.__fdRecorderTeardown && window.__fdRecorderTeardown()")
       .await;
     self.uninstall().await;
-    actions
+    recorded
+  }
+
+  /// Make step `index`, a fill or value assertion, the secret `name`, as
+  /// the detection would have had the field been a secret one: it and
+  /// every later step typing the same value are rewritten, the sink is
+  /// sent the value and the rewritten steps, and later values typed into
+  /// that field are secrets too. Answers the indices rewritten.
+  ///
+  /// # Errors
+  ///
+  /// Refused unless the recording keeps secrets ([`Secrets::Env`]), for a
+  /// name no environment variable can have, a step that types no value or
+  /// is another secret already, and a name that stands for another value.
+  pub async fn secret(&self, index: usize, name: &str) -> Result<Vec<usize>> {
+    self.flush().await;
+    let (rewritten, events) = self.shared.state().make_secret(index, name)?;
+    for event in events {
+      self.shared.sink.event(event);
+    }
+    Ok(rewritten)
   }
 }
 
@@ -1126,6 +1461,166 @@ mod tests {
       crate::locator_generator::as_locator(&candidates[1]),
       "frameLocator().locator('#c').contentFrame().getByRole('button', { name: 'Deep' })"
     );
+  }
+
+  fn fill(selector: &str, value: &str, field: Option<serde_json::Value>) -> serde_json::Value {
+    let mut message = message(&serde_json::json!({
+      "type": "fill", "selector": selector, "locator": format!("locator('{selector}')"), "value": value,
+    }));
+    if let Some(field) = field {
+      message["secretField"] = field;
+    }
+    message
+  }
+
+  fn secret_events(seen: &[RecorderEvent]) -> Vec<(String, String)> {
+    seen
+      .iter()
+      .filter_map(|event| match event {
+        RecorderEvent::Secret { name, value } => Some((name.clone(), value.clone())),
+        _ => None,
+      })
+      .collect()
+  }
+
+  #[test]
+  fn a_secret_field_is_named_after_its_label_name_id_or_kind() {
+    assert_eq!(env_name("Password").as_deref(), Some("PASSWORD"));
+    assert_eq!(env_name("  Card number: ").as_deref(), Some("CARD_NUMBER"));
+    assert_eq!(env_name("2fa-code").as_deref(), Some("_2FA_CODE"));
+    assert_eq!(env_name("Mot de passe é").as_deref(), Some("MOT_DE_PASSE"));
+    assert_eq!(env_name("***"), None);
+    let field = |label: &str, name: &str, id: &str, password: bool| SecretField {
+      password,
+      label: label.into(),
+      name: name.into(),
+      id: id.into(),
+    };
+    assert_eq!(field("Your password", "pw", "p", true).base_name(), "YOUR_PASSWORD");
+    assert_eq!(field("", "user-pw", "p", true).base_name(), "USER_PW");
+    assert_eq!(field("", "", "otp", false).base_name(), "OTP");
+    assert_eq!(field("", "", "", true).base_name(), "PASSWORD");
+    assert_eq!(field("", "", "", false).base_name(), "SECRET");
+    assert!(is_env_name("PIN_2") && is_env_name("_x") && !is_env_name("2X") && !is_env_name("A-B"));
+  }
+
+  #[test]
+  fn a_typed_secret_is_named_and_sent_once_it_is_settled() {
+    let (shared, seen) = shared();
+    shared.state().secrets = Secrets::Env;
+    let field = serde_json::json!({ "password": true, "label": "Password", "name": "", "id": "pw" });
+    for typed in ["h", "hu", "hunter2"] {
+      shared.on_message(FIRST_PAGE, &fill("#pw", typed, Some(field.clone())));
+    }
+    assert!(
+      secret_events(&seen.lock().unwrap()).is_empty(),
+      "nothing is sent while typing"
+    );
+    // The same value again reuses the name; another value takes the next.
+    shared.on_message(FIRST_PAGE, &fill("#again", "hunter2", Some(field.clone())));
+    shared.on_message(FIRST_PAGE, &fill("#new", "s3cret", Some(field.clone())));
+    // A value typed into a plain field stays as typed.
+    shared.on_message(FIRST_PAGE, &fill("#user", "sashoush", None));
+    let actions: Vec<serde_json::Value> = shared
+      .state()
+      .actions
+      .iter()
+      .map(|action| serde_json::to_value(action).unwrap())
+      .collect();
+    assert_eq!(
+      actions[0],
+      serde_json::json!({"type": "fill", "selector": "#pw", "locator": "locator('#pw')", "value": null, "secret": "PASSWORD", "page": "page"})
+    );
+    assert_eq!(actions[1]["secret"], "PASSWORD");
+    assert_eq!(actions[2]["secret"], "PASSWORD_2");
+    assert_eq!(actions[3]["value"], "sashoush");
+    assert!(actions[3].get("secret").is_none());
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+      secret_events(&seen),
+      [
+        ("PASSWORD".to_string(), "hunter2".to_string()),
+        ("PASSWORD_2".to_string(), "s3cret".to_string()),
+      ]
+    );
+    // Each value is sent before the step that settled it, and no other
+    // event carries one.
+    let secret_at = seen
+      .iter()
+      .position(|e| matches!(e, RecorderEvent::Secret { .. }))
+      .unwrap();
+    assert!(
+      matches!(&seen[secret_at + 1], RecorderEvent::Action { action, .. } if action.action.selector() == Some("#again"))
+    );
+    for event in seen.iter().filter(|e| !matches!(e, RecorderEvent::Secret { .. })) {
+      let shown = format!("{event:?}");
+      assert!(!shown.contains("hunter") && !shown.contains("s3cret"), "{shown}");
+    }
+    drop(seen);
+    assert_eq!(
+      shared.state().secrets_in_use(),
+      [
+        RecordedSecret {
+          name: "PASSWORD".into(),
+          value: "hunter2".into()
+        },
+        RecordedSecret {
+          name: "PASSWORD_2".into(),
+          value: "s3cret".into()
+        },
+      ]
+    );
+  }
+
+  #[test]
+  fn without_secrets_a_secret_field_records_its_value() {
+    let (shared, seen) = shared();
+    let field = serde_json::json!({ "password": true, "label": "Password" });
+    shared.on_message(FIRST_PAGE, &fill("#pw", "hunter2", Some(field)));
+    assert_eq!(shared.state().actions[0].action.typed_value(), Some("hunter2"));
+    assert_eq!(secret_events(&seen.lock().unwrap()), []);
+    assert!(shared.state().make_secret(0, "PASSWORD").is_err());
+  }
+
+  #[test]
+  fn a_step_the_host_names_is_rewritten_with_every_later_one_typing_its_value() {
+    let (shared, seen) = shared();
+    shared.state().secrets = Secrets::Env;
+    shared.on_message(FIRST_PAGE, &fill("#before", "4321", None));
+    shared.on_message(FIRST_PAGE, &fill("#pin", "4321", None));
+    shared.on_message(FIRST_PAGE, &fill("#user", "sashoush", None));
+    shared.on_message(FIRST_PAGE, &fill("#again", "4321", None));
+    let mut state = shared.state();
+    assert!(state.make_secret(1, "2PIN").is_err(), "not a variable name");
+    assert!(state.make_secret(2, "USER").is_ok());
+    assert!(state.make_secret(3, "USER").is_err(), "USER stands for another value");
+    let (rewritten, events) = state.make_secret(1, "PIN").unwrap();
+    assert_eq!(rewritten, [1, 3]);
+    assert!(matches!(&events[0], RecorderEvent::Secret { name, value } if name == "PIN" && value == "4321"));
+    let replaced: Vec<(bool, Option<usize>)> = events[1..]
+      .iter()
+      .map(|event| match event {
+        RecorderEvent::Action {
+          replaces_previous,
+          replaces_index,
+          ..
+        } => (*replaces_previous, *replaces_index),
+        other => panic!("{other:?}"),
+      })
+      .collect();
+    assert_eq!(replaced, [(false, Some(1)), (true, Some(3))]);
+    assert_eq!(
+      state.actions[0].action.typed_value(),
+      Some("4321"),
+      "an earlier step stays"
+    );
+    assert_eq!(state.actions[3].action.secret(), Some("PIN"));
+    assert_eq!(state.make_secret(1, "PIN").unwrap().0, Vec::<usize>::new());
+    drop(state);
+    // A later value typed into the named field is a secret of that name.
+    shared.on_message(FIRST_PAGE, &fill("#pin", "9999", None));
+    assert_eq!(shared.state().actions[4].action.secret(), Some("PIN_2"));
+    drop(seen);
   }
 
   #[test]
