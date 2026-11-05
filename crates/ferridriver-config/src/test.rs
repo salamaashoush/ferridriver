@@ -166,9 +166,10 @@ impl VideoMode {
   }
 }
 
-/// Video recording configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+/// Video recording configuration: a mode (`video = "on"`), or a mode with
+/// the frame size.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoConfig {
   pub mode: VideoMode,
   pub width: u32,
@@ -345,6 +346,33 @@ impl From<TraceFields> for TraceOption {
 mode_or_object!(ScreenshotOption, ScreenshotFields, ScreenshotMode);
 mode_or_object!(VideoOption, VideoFields, VideoMode);
 mode_or_object!(TraceOption, TraceFields, TraceMode);
+
+#[derive(Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct VideoConfigFields {
+  mode: VideoMode,
+  width: u32,
+  height: u32,
+}
+
+impl Default for VideoConfigFields {
+  fn default() -> Self {
+    let VideoConfig { mode, width, height } = VideoConfig::default();
+    Self { mode, width, height }
+  }
+}
+
+impl From<VideoConfigFields> for VideoConfig {
+  fn from(f: VideoConfigFields) -> Self {
+    Self {
+      mode: f.mode,
+      width: f.width,
+      height: f.height,
+    }
+  }
+}
+
+mode_or_object!(VideoConfig, VideoConfigFields, VideoMode);
 
 // ── Expect config ───────────────────────────────────────────────────────────
 
@@ -2070,6 +2098,18 @@ mod expect_config_tests {
     toml::from_str::<TestConfig>(toml_src)
       .expect_err("rejected")
       .to_string()
+  }
+
+  #[test]
+  fn video_takes_a_mode_or_a_mode_with_its_size() {
+    let on = config("video = \"on\"\n").video;
+    assert_eq!((on.mode, on.width, on.height), (super::VideoMode::On, 1280, 720));
+    let sized = config("[video]\nmode = \"retain-on-failure\"\nwidth = 800\n").video;
+    assert_eq!(
+      (sized.mode, sized.width, sized.height),
+      (super::VideoMode::RetainOnFailure, 800, 720)
+    );
+    assert_eq!(config("").video.mode, super::VideoMode::Off);
   }
 
   #[test]
