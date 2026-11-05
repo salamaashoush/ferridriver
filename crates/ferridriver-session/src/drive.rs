@@ -18,11 +18,11 @@ use ferridriver::{Browser, Page};
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 
-use crate::browser_dispatch::{context_key_for, page_for};
+use crate::browser_dispatch::{context_key_for, page_for, page_with_target_id};
 use crate::dispatch::EventSink;
 use crate::protocol::{
-  EventPayload, InputEvent, PageAssertion, RecorderAssertRequest, RecorderModeRequest, RecorderStartRequest,
-  RecordingResult, ScreencastRequest,
+  EventPayload, InputEvent, InputRequest, PageAssertion, RecorderAssertRequest, RecorderModeRequest,
+  RecorderStartRequest, RecordingResult, ScreencastRequest,
 };
 
 type Outcome<T> = std::result::Result<T, String>;
@@ -47,10 +47,14 @@ fn button(name: Option<&str>) -> Outcome<MouseButton> {
 }
 
 /// Dispatch one input event through the page's own input devices, which
-/// speak the backend's input protocol directly (CDP `Input.*` on Chromium).
+/// speak the backend's input protocol directly (CDP `Input.*` on Chromium):
+/// to the page the request names, or else to the context's active page.
 pub(crate) async fn input(browser: &Browser, context: &str, args: serde_json::Value) -> Outcome<()> {
-  let event: InputEvent = parse("input", args)?;
-  let page = page(browser, context).await?;
+  let InputRequest { event, page: target } = parse("input", args)?;
+  let page = match target {
+    Some(target) => page_with_target_id(browser, context, &target).map_err(|e| e.to_string())?,
+    None => page(browser, context).await?,
+  };
   let mouse = page.mouse();
   let keyboard = page.keyboard();
   let result = match event {

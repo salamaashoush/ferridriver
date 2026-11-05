@@ -216,6 +216,29 @@ pub async fn page_for(browser: &Browser, context: &str) -> ferridriver::Result<A
   Box::pin(ctx_ref.new_page()).await
 }
 
+/// The page of `context` whose target id (its main frame id) is
+/// `target_id`.
+///
+/// # Errors
+///
+/// Rejects a context of another bound browser instance, and answers an
+/// invalid argument when no open page of the context has that id.
+pub fn page_with_target_id(browser: &Browser, context: &str, target_id: &str) -> ferridriver::Result<Arc<Page>> {
+  let key = context_key_for(browser, context)?;
+  let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(browser.state()), key.to_composite())
+    .with_browser(browser.clone());
+  ctx_ref
+    .pages()
+    .into_iter()
+    .find(|page| !page.is_closed() && &**page.main_frame().id() == target_id)
+    .ok_or_else(|| {
+      ferridriver::FerriError::invalid_argument(
+        "page",
+        format!("no open page of context '{context}' has target id '{target_id}'"),
+      )
+    })
+}
+
 /// # Errors
 /// Rejects a qualified context that belongs to a different bound browser instance.
 pub fn context_key_for(browser: &Browser, context: &str) -> ferridriver::Result<SessionKey> {

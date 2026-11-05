@@ -68,7 +68,8 @@ pub const CLOSE_VERB: &str = "session.close";
 /// The first command on a connection to a token-protected endpoint; args
 /// `{"token": "..."}`. Any other first command is refused.
 pub const AUTH_VERB: &str = "session.auth";
-/// Dispatch one [`InputEvent`] to the context's page.
+/// Dispatch one [`InputEvent`] to a page of the context; args are an
+/// [`InputRequest`].
 pub const INPUT_VERB: &str = "input";
 /// Stream [`EventPayload::Frame`]s until the client hangs up; args are a
 /// [`ScreencastRequest`].
@@ -140,6 +141,45 @@ pub enum InputEvent {
 
 fn first_click() -> u32 {
   1
+}
+
+/// [`INPUT_VERB`]'s arguments: the event's own fields, and beside them an
+/// optional `page`, the target id of the page the event goes to (the main
+/// frame id, which on Chromium is the CDP target id). Without one the event
+/// goes to the context's active page: the one opened last, popups included.
+///
+/// `{"type": "mouse_down", "x": 10, "y": 20, "page": "8E1A..."}`
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputRequest {
+  pub event: InputEvent,
+  pub page: Option<String>,
+}
+
+impl Serialize for InputRequest {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(&self.event).map_err(serde::ser::Error::custom)?;
+    if let (Some(page), Some(fields)) = (&self.page, value.as_object_mut()) {
+      fields.insert("page".into(), page.clone().into());
+    }
+    value.serialize(serializer)
+  }
+}
+
+// By hand rather than `#[serde(flatten)]`: a flattened float does not
+// decode where `serde_json`'s `arbitrary_precision` is on, and every
+// pointer coordinate is one.
+impl<'de> Deserialize<'de> for InputRequest {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    use serde::de::Error as _;
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    let page = match value.as_object_mut().and_then(|fields| fields.remove("page")) {
+      None | Some(serde_json::Value::Null) => None,
+      Some(serde_json::Value::String(page)) => Some(page),
+      Some(other) => return Err(D::Error::custom(format!("`page` is a target id string, not {other}"))),
+    };
+    let event = InputEvent::deserialize(value).map_err(D::Error::custom)?;
+    Ok(Self { event, page })
+  }
 }
 
 /// [`SCREENCAST_VERB`]'s arguments. Frames are JPEG, scaled down to fit
@@ -582,6 +622,33 @@ mod tests {
     );
     let text: InputEvent = serde_json::from_value(serde_json::json!({"type": "insert_text", "text": "hi"})).unwrap();
     assert_eq!(text, InputEvent::InsertText { text: "hi".into() });
+  }
+
+  #[test]
+  fn an_input_request_names_its_page_beside_the_event() {
+    let targeted: InputRequest = serde_json::from_value(serde_json::json!({
+      "type": "mouse_down", "x": 10.5, "y": 20, "page": "8E1A",
+    }))
+    .unwrap();
+    assert_eq!(targeted.page.as_deref(), Some("8E1A"));
+    assert!(matches!(targeted.event, InputEvent::MouseDown { x, .. } if (x - 10.5).abs() < f64::EPSILON));
+    assert_eq!(
+      serde_json::to_value(&targeted).unwrap(),
+      serde_json::json!({"type": "mouse_down", "x": 10.5, "y": 20.0, "click_count": 1, "page": "8E1A"})
+    );
+
+    let active: InputRequest = serde_json::from_value(serde_json::json!({"type": "key_down", "key": "a"})).unwrap();
+    assert_eq!(active.page, None);
+    assert!(
+      !serde_json::to_value(&active)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("page")
+    );
+
+    let wrong = serde_json::from_value::<InputRequest>(serde_json::json!({"type": "key_up", "key": "a", "page": 3}));
+    assert!(wrong.unwrap_err().to_string().contains("target id"));
   }
 
   #[test]

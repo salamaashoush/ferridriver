@@ -304,3 +304,130 @@ async fn relayed_input_is_recorded_and_the_spec_passes() -> anyhow::Result<()> {
   browser.close().await?;
   Ok(())
 }
+
+// The opener has a link that opens a popup, and both pages keep the keys
+// they were sent.
+const OPENER: &str = "data:text/html,<body style=margin:0>\
+<a href=about:blank target=_blank style=position:absolute;left:10px;top:10px;width:120px;height:30px>open</a>\
+<script>window.keys = []; addEventListener('keydown', e => keys.push(e.key));</script></body>";
+
+async fn keys(page: &ferridriver::Page) -> anyhow::Result<String> {
+  let value = page.inner().evaluate("window.keys.join('')").await?;
+  Ok(value.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default())
+}
+
+async fn press(endpoint: &str, key: &str, target: Option<&str>) -> anyhow::Result<Response> {
+  let mut reply = None;
+  for kind in ["key_down", "key_up"] {
+    let mut args = serde_json::json!({"type": kind, "key": key});
+    if let Some(target) = target {
+      args["page"] = target.into();
+    }
+    reply = Some(call(endpoint, INPUT_VERB, args).await?);
+  }
+  reply.context("no reply")
+}
+
+/// The id a viewer knows the page by: the CDP target id on Chromium, read
+/// from the protocol itself rather than from ferridriver.
+async fn target_id(page: &std::sync::Arc<ferridriver::Page>, cdp: bool) -> anyhow::Result<String> {
+  if !cdp {
+    return Ok(page.main_frame().id().to_string());
+  }
+  let context = page.context().context("a page with a context")?;
+  let session = context.new_cdp_session(page).await?;
+  let info = session.send("Target.getTargetInfo", serde_json::json!({})).await?;
+  info["targetInfo"]["targetId"]
+    .as_str()
+    .map(str::to_string)
+    .context("no target id")
+}
+
+async fn input_reaches_the_page_it_names(browser: ferridriver::Browser, cdp: bool) -> anyhow::Result<()> {
+  let scratch = tempfile::tempdir()?;
+  let registry = Registry::open_at(scratch.path().join("registry"))?;
+  let options = BindOptions {
+    host: Some("127.0.0.1".into()),
+    port: Some(0),
+    ..Default::default()
+  };
+  let session = bind_in(&registry, &browser, "targets", options, None).await?;
+  let endpoint = session.endpoint().to_string();
+  let opener = page_for(&browser, "default").await?;
+  opener.goto(OPENER).await?;
+  let opener_id = target_id(&opener, cdp).await?;
+
+  // A click with no page goes to the active page, and the popup it opens
+  // becomes the active page.
+  let (popup, ()) = opener
+    .expect_popup(|| async {
+      click(&endpoint, (40.0, 20.0))
+        .await
+        .map_err(|error| ferridriver::FerriError::backend(error.to_string()))
+    })
+    .await?;
+  popup
+    .set_content("<script>window.keys = []; addEventListener('keydown', e => keys.push(e.key));</script>")
+    .await?;
+  let active = page_for(&browser, "default").await?;
+  ensure!(
+    active.main_frame().id() == popup.main_frame().id(),
+    "the active page did not follow the popup"
+  );
+  let reply = press(&endpoint, "a", None).await?;
+  ensure!(reply.ok, "{:?}", reply.error);
+
+  // Named, the event goes to that page whichever is active.
+  let reply = press(&endpoint, "b", Some(&opener_id)).await?;
+  ensure!(reply.ok, "{:?}", reply.error);
+  let popup_id = target_id(&popup, cdp).await?;
+  let reply = press(&endpoint, "c", Some(&popup_id)).await?;
+  ensure!(reply.ok, "{:?}", reply.error);
+  assert_eq!(keys(&opener).await?, "b");
+  assert_eq!(keys(&popup).await?, "ac");
+
+  let missing = press(&endpoint, "d", Some("no-such-target")).await?;
+  ensure!(!missing.ok, "an unknown page took the input");
+  ensure!(
+    missing.error.unwrap_or_default().contains("no-such-target"),
+    "the error does not name the page"
+  );
+
+  drop(session);
+  browser.close().await?;
+  Ok(())
+}
+
+async fn launch(browser: ferridriver::BrowserType) -> anyhow::Result<ferridriver::Browser> {
+  Ok(
+    browser
+      .launch(LaunchOptions {
+        headless: Some(true),
+        ..Default::default()
+      })
+      .await?,
+  )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_reaches_the_page_it_names_on_cdp_pipe() -> anyhow::Result<()> {
+  input_reaches_the_page_it_names(launch(ferridriver::chromium()).await?, true).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_reaches_the_page_it_names_on_cdp_raw() -> anyhow::Result<()> {
+  let raw = ferridriver::BrowserType::chromium_with(&ferridriver::options::BrowserTypeOptions {
+    transport: Some(ferridriver::options::ChromiumTransport::Ws),
+  });
+  input_reaches_the_page_it_names(launch(raw).await?, true).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_reaches_the_page_it_names_on_webkit() -> anyhow::Result<()> {
+  input_reaches_the_page_it_names(launch(ferridriver::webkit()).await?, false).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_reaches_the_page_it_names_on_bidi() -> anyhow::Result<()> {
+  input_reaches_the_page_it_names(launch(ferridriver::firefox()).await?, false).await
+}
