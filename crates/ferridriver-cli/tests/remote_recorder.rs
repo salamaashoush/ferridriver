@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, bail, ensure};
-use ferridriver::codegen::Action;
+use ferridriver::codegen::{Action, RecordedAction};
 use ferridriver::options::LaunchOptions;
 use ferridriver_session::{
   BindOptions, Command, EventPayload, INPUT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB,
@@ -115,7 +115,10 @@ async fn record(endpoint: &str, page: &ferridriver::Page) -> anyhow::Result<(Rec
   let (mut events, recording) = stream(endpoint, start).await?;
   let opening = next_event(&mut events, "the opening navigation").await?;
   let EventPayload::Recorded {
-    action: Action::Navigate { url },
+    action: RecordedAction {
+      action: Action::Navigate { url },
+      ..
+    },
     code,
     ..
   } = &opening
@@ -182,7 +185,7 @@ async fn first_frame(
   Ok(())
 }
 
-fn action_kind(action: &Action) -> String {
+fn action_kind(action: &RecordedAction) -> String {
   serde_json::to_value(action)
     .ok()
     .and_then(|value| value["type"].as_str().map(str::to_string))
@@ -226,18 +229,25 @@ async fn relayed_input_is_recorded_and_the_spec_passes() -> anyhow::Result<()> {
   let (result, streamed) = record(&endpoint, &page).await?;
 
   let kinds: Vec<String> = result.actions.iter().map(action_kind).collect();
+  // A click on a text field is recorded before what was typed into it.
   assert_eq!(
     kinds,
-    ["navigate", "fill", "check", "click", "assertText", "assertUrl"],
+    ["navigate", "click", "fill", "check", "click", "assertText", "assertUrl"],
     "{:#?}",
     result.actions
   );
-  assert!(matches!(&result.actions[1], Action::Fill { value, .. } if value == "sashoush@example.com"));
+  assert!(matches!(&result.actions[2].action, Action::Fill { value, .. } if value == "sashoush@example.com"));
   assert!(matches!(
-    &result.actions[4],
+    &result.actions[5].action,
     Action::AssertText { text, substring: true, .. } if text == "Welcome, sashoush"
   ));
-  let recorded: Vec<&Action> = streamed
+  assert!(
+    result
+      .actions
+      .iter()
+      .all(|action| action.page == "page" && action.popup.is_none())
+  );
+  let recorded: Vec<&RecordedAction> = streamed
     .iter()
     .filter_map(|event| match event {
       EventPayload::Recorded { action, .. } => Some(action),
@@ -262,8 +272,9 @@ async fn relayed_input_is_recorded_and_the_spec_passes() -> anyhow::Result<()> {
   assert_eq!(lines[2], "test('signs in', async ({ page }) => {");
   assert!(lines[3].starts_with("  await page.goto('data:text/html,"));
   assert_eq!(
-    lines[4..8],
+    lines[4..9],
     [
+      "  await page.getByRole('textbox', { name: 'Email' }).click();",
       "  await page.getByRole('textbox', { name: 'Email' }).fill('sashoush@example.com');",
       "  await page.getByRole('checkbox', { name: 'Remember me' }).check();",
       "  await page.getByRole('button', { name: 'Sign in' }).click();",
@@ -272,8 +283,8 @@ async fn relayed_input_is_recorded_and_the_spec_passes() -> anyhow::Result<()> {
     "{}",
     result.source
   );
-  assert!(lines[8].starts_with("  await expect(page).toHaveURL('data:text/html,"));
-  assert_eq!(lines[9..], ["});"]);
+  assert!(lines[9].starts_with("  await expect(page).toHaveURL('data:text/html,"));
+  assert_eq!(lines[10..], ["});"]);
 
   // The spec replays the recording against a fresh browser.
   std::fs::write(scratch.path().join("recorded.spec.ts"), &result.source)?;

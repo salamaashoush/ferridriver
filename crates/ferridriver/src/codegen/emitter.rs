@@ -1,13 +1,13 @@
 //! Code emitters: convert recorded actions into test code.
 
-use super::Action;
+use super::{Action, RecordedAction};
 
 /// Emits test code for a specific language.
 pub trait CodeEmitter: Send + Sync {
   /// Opening boilerplate (imports, test function signature, initial navigation).
   fn header(&self, url: &str) -> String;
-  /// A single action line.
-  fn action(&self, action: &Action) -> String;
+  /// The statements for one recorded action, each on its own line.
+  fn action(&self, action: &RecordedAction) -> String;
   /// An already-rendered statement (an echoed action), placed in the body.
   fn line(&self, line: &str) -> String {
     format!("{line}\n")
@@ -19,13 +19,43 @@ pub trait CodeEmitter: Send + Sync {
 /// A whole file: the scaffolding around `actions`, with no opening
 /// navigation of its own because a recording starts with one.
 #[must_use]
-pub fn render(emitter: &dyn CodeEmitter, actions: &[Action]) -> String {
+pub fn render(emitter: &dyn CodeEmitter, actions: &[RecordedAction]) -> String {
   let mut source = emitter.header("");
   for action in actions {
     source.push_str(&emitter.action(action));
   }
   source.push_str(&emitter.footer());
   source
+}
+
+/// The code of a recording written while it happens.
+///
+/// The latest action is held back until the next one shows it is final: a
+/// click can still become a double click, a fill can still grow, and an
+/// action can still turn out to have opened a popup.
+pub struct LiveSource {
+  emitter: std::sync::Arc<dyn CodeEmitter>,
+  pending: Option<RecordedAction>,
+}
+
+impl LiveSource {
+  #[must_use]
+  pub fn new(emitter: std::sync::Arc<dyn CodeEmitter>) -> Self {
+    Self { emitter, pending: None }
+  }
+
+  /// Take the next recorded action; answers the code of the one before it
+  /// once that one can no longer change.
+  pub fn push(&mut self, action: RecordedAction, replaces_previous: bool) -> Option<String> {
+    let finished = if replaces_previous { None } else { self.pending.take() };
+    self.pending = Some(action);
+    finished.map(|action| self.emitter.action(&action))
+  }
+
+  /// The code of the action still held back.
+  pub fn finish(&mut self) -> Option<String> {
+    self.pending.take().map(|action| self.emitter.action(&action))
+  }
 }
 
 /// Escape a string for use in a Rust string literal.
@@ -98,17 +128,18 @@ impl CodeEmitter for RustEmitter {
     )
   }
 
-  fn action(&self, action: &Action) -> String {
-    let locator = |selector: &str| format!("page.locator(\"{}\")", escape_rust(selector));
-    let line = match action {
-      Action::Navigate { url } => format!("page.goto(\"{}\").await?;", escape_rust(url)),
-      Action::Click { selector, .. } => format!("{}.click().await?;", locator(selector)),
-      Action::Dblclick { selector, .. } => format!("{}.dblclick().await?;", locator(selector)),
+  fn action(&self, recorded: &RecordedAction) -> String {
+    let page = recorded.page.as_str();
+    let locator = |selector: &str| format!("{page}.locator(\"{}\")", escape_rust(selector));
+    let call = match &recorded.action {
+      Action::Navigate { url } => format!("{page}.goto(\"{}\")", escape_rust(url)),
+      Action::Click { selector, .. } => format!("{}.click()", locator(selector)),
+      Action::Dblclick { selector, .. } => format!("{}.dblclick()", locator(selector)),
       Action::Fill { selector, value, .. } => {
-        format!("{}.fill(\"{}\").await?;", locator(selector), escape_rust(value))
+        format!("{}.fill(\"{}\")", locator(selector), escape_rust(value))
       },
       Action::Press { selector, key, .. } => {
-        format!("{}.press(\"{}\").await?;", locator(selector), escape_rust(key))
+        format!("{}.press(\"{}\")", locator(selector), escape_rust(key))
       },
       Action::Select { selector, values, .. } => {
         let values = match values.as_slice() {
@@ -122,10 +153,10 @@ impl CodeEmitter for RustEmitter {
               .join(", ")
           ),
         };
-        format!("{}.select_option({values}).await?;", locator(selector))
+        format!("{}.select_option({values})", locator(selector))
       },
-      Action::Check { selector, .. } => format!("{}.check().await?;", locator(selector)),
-      Action::Uncheck { selector, .. } => format!("{}.uncheck().await?;", locator(selector)),
+      Action::Check { selector, .. } => format!("{}.check()", locator(selector)),
+      Action::Uncheck { selector, .. } => format!("{}.uncheck()", locator(selector)),
       Action::Upload { selector, files, .. } => {
         let files = match files.as_slice() {
           [single] => format!("\"{}\"", escape_rust(single)),
@@ -138,9 +169,9 @@ impl CodeEmitter for RustEmitter {
               .join(", ")
           ),
         };
-        format!("{}.set_input_files({files}).await?;", locator(selector))
+        format!("{}.set_input_files({files})", locator(selector))
       },
-      Action::AssertVisible { selector, .. } => format!("expect(&{}).to_be_visible().await?;", locator(selector)),
+      Action::AssertVisible { selector, .. } => format!("expect(&{}).to_be_visible()", locator(selector)),
       Action::AssertText {
         selector,
         text,
@@ -148,28 +179,27 @@ impl CodeEmitter for RustEmitter {
         ..
       } => {
         let matcher = if *substring { "to_contain_text" } else { "to_have_text" };
-        format!(
-          "expect(&{}).{matcher}(\"{}\").await?;",
-          locator(selector),
-          escape_rust(text)
-        )
+        format!("expect(&{}).{matcher}(\"{}\")", locator(selector), escape_rust(text))
       },
       Action::AssertValue { selector, value, .. } if value.is_empty() => {
-        format!("expect(&{}).to_be_empty().await?;", locator(selector))
+        format!("expect(&{}).to_be_empty()", locator(selector))
       },
       Action::AssertValue { selector, value, .. } => format!(
-        "expect(&{}).to_have_value(\"{}\").await?;",
+        "expect(&{}).to_have_value(\"{}\")",
         locator(selector),
         escape_rust(value)
       ),
       Action::AssertChecked { selector, checked, .. } => {
         let not = if *checked { "" } else { ".not()" };
-        format!("expect(&{}){not}.to_be_checked().await?;", locator(selector))
+        format!("expect(&{}){not}.to_be_checked()", locator(selector))
       },
-      Action::AssertUrl { url } => format!("expect(&page).to_have_url(\"{}\").await?;", escape_rust(url)),
-      Action::AssertTitle { title } => format!("expect(&page).to_have_title(\"{}\").await?;", escape_rust(title)),
+      Action::AssertUrl { url } => format!("expect(&{page}).to_have_url(\"{}\")", escape_rust(url)),
+      Action::AssertTitle { title } => format!("expect(&{page}).to_have_title(\"{}\")", escape_rust(title)),
     };
-    format!("  {line}\n")
+    match &recorded.popup {
+      Some(popup) => format!("  let ({popup}, _) = {page}.expect_popup(|| {call}).await?;\n"),
+      None => format!("  {call}.await?;\n"),
+    }
   }
 
   fn line(&self, line: &str) -> String {
@@ -183,24 +213,24 @@ impl CodeEmitter for RustEmitter {
 
 // ─── TypeScript ──────────────────────────────────────────────────────────────
 
-/// One TypeScript statement for `action`, written against plain `page`, the
-/// same vocabulary a script author, the action echo and a test body use.
-fn typescript_statement(action: &Action) -> String {
+/// One TypeScript statement for `action` on the page named `page`, the same
+/// vocabulary a script author, the action echo and a test body use.
+fn typescript_statement(page: &str, action: &Action) -> String {
   match action {
-    Action::Navigate { url } => format!("await page.goto('{}');", escape_js(url)),
-    Action::Click { locator, .. } => format!("await page.{locator}.click();"),
-    Action::Dblclick { locator, .. } => format!("await page.{locator}.dblclick();"),
-    Action::Fill { locator, value, .. } => format!("await page.{locator}.fill('{}');", escape_js(value)),
-    Action::Press { locator, key, .. } => format!("await page.{locator}.press('{}');", escape_js(key)),
+    Action::Navigate { url } => format!("await {page}.goto('{}');", escape_js(url)),
+    Action::Click { locator, .. } => format!("await {page}.{locator}.click();"),
+    Action::Dblclick { locator, .. } => format!("await {page}.{locator}.dblclick();"),
+    Action::Fill { locator, value, .. } => format!("await {page}.{locator}.fill('{}');", escape_js(value)),
+    Action::Press { locator, key, .. } => format!("await {page}.{locator}.press('{}');", escape_js(key)),
     Action::Select { locator, values, .. } => {
-      format!("await page.{locator}.selectOption({});", quote_js_list(values))
+      format!("await {page}.{locator}.selectOption({});", quote_js_list(values))
     },
-    Action::Check { locator, .. } => format!("await page.{locator}.check();"),
-    Action::Uncheck { locator, .. } => format!("await page.{locator}.uncheck();"),
+    Action::Check { locator, .. } => format!("await {page}.{locator}.check();"),
+    Action::Uncheck { locator, .. } => format!("await {page}.{locator}.uncheck();"),
     Action::Upload { locator, files, .. } => {
-      format!("await page.{locator}.setInputFiles({});", quote_js_list(files))
+      format!("await {page}.{locator}.setInputFiles({});", quote_js_list(files))
     },
-    Action::AssertVisible { locator, .. } => format!("await expect(page.{locator}).toBeVisible();"),
+    Action::AssertVisible { locator, .. } => format!("await expect({page}.{locator}).toBeVisible();"),
     Action::AssertText {
       locator,
       text,
@@ -208,21 +238,46 @@ fn typescript_statement(action: &Action) -> String {
       ..
     } => {
       let matcher = if *substring { "toContainText" } else { "toHaveText" };
-      format!("await expect(page.{locator}).{matcher}('{}');", escape_js(text))
+      format!("await expect({page}.{locator}).{matcher}('{}');", escape_js(text))
     },
     Action::AssertValue { locator, value, .. } if value.is_empty() => {
-      format!("await expect(page.{locator}).toBeEmpty();")
+      format!("await expect({page}.{locator}).toBeEmpty();")
     },
     Action::AssertValue { locator, value, .. } => {
-      format!("await expect(page.{locator}).toHaveValue('{}');", escape_js(value))
+      format!("await expect({page}.{locator}).toHaveValue('{}');", escape_js(value))
     },
     Action::AssertChecked { locator, checked, .. } => {
       let not = if *checked { "" } else { ".not" };
-      format!("await expect(page.{locator}){not}.toBeChecked();")
+      format!("await expect({page}.{locator}){not}.toBeChecked();")
     },
-    Action::AssertUrl { url } => format!("await expect(page).toHaveURL('{}');", escape_js(url)),
-    Action::AssertTitle { title } => format!("await expect(page).toHaveTitle('{}');", escape_js(title)),
+    Action::AssertUrl { url } => format!("await expect({page}).toHaveURL('{}');", escape_js(url)),
+    Action::AssertTitle { title } => format!("await expect({page}).toHaveTitle('{}');", escape_js(title)),
   }
+}
+
+/// The statements for `recorded`: the action, and around it the wait for
+/// the popup it opened.
+fn typescript_statements(recorded: &RecordedAction) -> Vec<String> {
+  let page = recorded.page.as_str();
+  let statement = typescript_statement(page, &recorded.action);
+  match &recorded.popup {
+    Some(popup) => vec![
+      format!("const {popup}Promise = {page}.waitForEvent('popup');"),
+      statement,
+      format!("const {popup} = await {popup}Promise;"),
+    ],
+    None => vec![statement],
+  }
+}
+
+fn typescript_lines(recorded: &RecordedAction, indent: &str) -> String {
+  let mut lines = String::new();
+  for statement in typescript_statements(recorded) {
+    lines.push_str(indent);
+    lines.push_str(&statement);
+    lines.push('\n');
+  }
+  lines
 }
 
 pub struct TypeScriptEmitter;
@@ -251,8 +306,8 @@ impl CodeEmitter for TypeScriptEmitter {
     )
   }
 
-  fn action(&self, action: &Action) -> String {
-    format!("{}\n", typescript_statement(action))
+  fn action(&self, action: &RecordedAction) -> String {
+    typescript_lines(action, "")
   }
 
   fn footer(&self) -> String {
@@ -275,8 +330,8 @@ impl CodeEmitter for TypeScriptPlainEmitter {
     }
   }
 
-  fn action(&self, action: &Action) -> String {
-    format!("{}\n", typescript_statement(action))
+  fn action(&self, action: &RecordedAction) -> String {
+    typescript_lines(action, "")
   }
 
   fn footer(&self) -> String {
@@ -317,8 +372,8 @@ impl CodeEmitter for TypeScriptTestEmitter {
     )
   }
 
-  fn action(&self, action: &Action) -> String {
-    format!("  {}\n", typescript_statement(action))
+  fn action(&self, action: &RecordedAction) -> String {
+    typescript_lines(action, "  ")
   }
 
   fn line(&self, line: &str) -> String {
@@ -340,6 +395,8 @@ pub struct GherkinEmitter {
   /// The keyword the previous step opened with, so a run of interactions
   /// reads `When ... And ...` and a run of assertions `Then ... And ...`.
   last_keyword: std::sync::atomic::AtomicU8,
+  /// The tab the previous step acted on.
+  tab: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for GherkinEmitter {
@@ -353,6 +410,7 @@ impl GherkinEmitter {
   pub fn new() -> Self {
     Self {
       last_keyword: std::sync::atomic::AtomicU8::new(KEYWORD_NONE),
+      tab: std::sync::atomic::AtomicUsize::new(0),
     }
   }
 
@@ -379,7 +437,20 @@ impl CodeEmitter for GherkinEmitter {
     format!("Feature: Recorded test\n\n  Scenario: User interaction recording\n{given}")
   }
 
-  fn action(&self, action: &Action) -> String {
+  fn action(&self, recorded: &RecordedAction) -> String {
+    // Pages are tabs in the order they opened, which is the order their
+    // names were given in.
+    let tab = recorded
+      .page
+      .strip_prefix(super::FIRST_PAGE)
+      .and_then(|n| if n.is_empty() { Some(0) } else { n.parse().ok() })
+      .unwrap_or(0);
+    let switch = if self.tab.swap(tab, std::sync::atomic::Ordering::Relaxed) == tab {
+      String::new()
+    } else {
+      format!("    {} I switch to tab {tab}\n", self.keyword(false))
+    };
+    let action = &recorded.action;
     let kw = self.keyword(action.is_assertion());
     let step = match action {
       Action::Navigate { url } => format!("I navigate to \"{url}\""),
@@ -414,7 +485,7 @@ impl CodeEmitter for GherkinEmitter {
       Action::AssertUrl { url } => format!("the URL should be \"{url}\""),
       Action::AssertTitle { title } => format!("the page title should be \"{title}\""),
     };
-    format!("    {kw} {step}\n")
+    format!("{switch}    {kw} {step}\n")
   }
 
   fn line(&self, line: &str) -> String {
@@ -429,6 +500,21 @@ impl CodeEmitter for GherkinEmitter {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Emit an action done on the first page.
+  trait Emit {
+    fn emit(&self, action: &Action) -> String;
+  }
+
+  impl<E: CodeEmitter + ?Sized> Emit for E {
+    fn emit(&self, action: &Action) -> String {
+      self.action(&RecordedAction::on_first_page(action.clone()))
+    }
+  }
+
+  fn on_first_page(actions: &[Action]) -> Vec<RecordedAction> {
+    actions.iter().cloned().map(RecordedAction::on_first_page).collect()
+  }
 
   fn click(locator: &str) -> Action {
     Action::Click {
@@ -452,11 +538,11 @@ mod tests {
     assert!(!header.contains("import { test }"));
 
     assert_eq!(
-      e.action(&click("getByRole('button', { name: 'Go' })")),
+      e.emit(&click("getByRole('button', { name: 'Go' })")),
       "await page.getByRole('button', { name: 'Go' }).click();\n"
     );
 
-    let fill = e.action(&Action::Fill {
+    let fill = e.emit(&Action::Fill {
       selector: "#email".into(),
       locator: "getByLabel('Email')".into(),
       value: "a@b.com".into(),
@@ -500,7 +586,7 @@ mod tests {
         url: "https://example.com/home".into(),
       },
     ];
-    let source = render(&TypeScriptTestEmitter::new("signs in"), &actions);
+    let source = render(&TypeScriptTestEmitter::new("signs in"), &on_first_page(&actions));
     assert_eq!(
       source,
       "import { test, expect } from '@ferridriver/test';\n\
@@ -527,7 +613,7 @@ mod tests {
       },
     ];
     assert_eq!(
-      render(&TypeScriptPlainEmitter, &actions),
+      render(&TypeScriptPlainEmitter, &on_first_page(&actions)),
       "await page.goto('https://example.com/login');\n\
        await page.getByRole('button', { name: 'Sign in' }).click();\n\
        await expect(page).toHaveURL('https://example.com/home');\n"
@@ -607,8 +693,8 @@ mod tests {
       ),
     ];
     for (action, typescript, rust) in cases {
-      assert_eq!(TypeScriptEmitter.action(&action), format!("{typescript}\n"));
-      assert_eq!(RustEmitter.action(&action), format!("  {rust}\n"));
+      assert_eq!(TypeScriptEmitter.emit(&action), format!("{typescript}\n"));
+      assert_eq!(RustEmitter.emit(&action), format!("  {rust}\n"));
     }
   }
 
@@ -620,11 +706,11 @@ mod tests {
       values: vec!["a".into(), "b".into()],
     };
     assert_eq!(
-      TypeScriptEmitter.action(&select),
+      TypeScriptEmitter.emit(&select),
       "await page.locator('#s').selectOption(['a', 'b']);\n"
     );
     assert_eq!(
-      RustEmitter.action(&select),
+      RustEmitter.emit(&select),
       "  page.locator(\"#s\").select_option([\"a\", \"b\"]).await?;\n"
     );
     let upload = Action::Upload {
@@ -633,7 +719,7 @@ mod tests {
       files: vec!["photo.png".into()],
     };
     assert_eq!(
-      TypeScriptEmitter.action(&upload),
+      TypeScriptEmitter.emit(&upload),
       "await page.getByLabel('Avatar').setInputFiles('photo.png');\n"
     );
   }
@@ -646,11 +732,11 @@ mod tests {
       value: "first\nit's\tsecond".into(),
     };
     assert_eq!(
-      TypeScriptEmitter.action(&fill),
+      TypeScriptEmitter.emit(&fill),
       "await page.locator('#notes').fill('first\\nit\\'s\\tsecond');\n"
     );
     assert_eq!(
-      RustEmitter.action(&fill),
+      RustEmitter.emit(&fill),
       "  page.locator(\"#notes\").fill(\"first\\nit's\\tsecond\").await?;\n"
     );
   }
@@ -663,11 +749,11 @@ mod tests {
       locator: "locator('#ok')".into(),
     };
     let lines = [
-      e.action(&click("x")),
-      e.action(&click("x")),
-      e.action(&visible),
-      e.action(&visible),
-      e.action(&click("x")),
+      e.emit(&click("x")),
+      e.emit(&click("x")),
+      e.emit(&visible),
+      e.emit(&visible),
+      e.emit(&click("x")),
     ];
     let keywords: Vec<&str> = lines
       .iter()
@@ -675,6 +761,85 @@ mod tests {
       .collect();
     assert_eq!(keywords, ["When", "And", "Then", "And", "When"]);
     assert_eq!(lines[2], "    Then \"#ok\" should be visible\n");
+  }
+
+  #[test]
+  fn a_popup_is_awaited_around_the_action_that_opened_it() {
+    let opened = RecordedAction {
+      page: "page".into(),
+      action: Action::Click {
+        selector: "internal:role=link[name=\"Details\"i]".into(),
+        locator: "getByRole('link', { name: 'Details' })".into(),
+      },
+      popup: Some("page1".into()),
+    };
+    let typed = RecordedAction {
+      page: "page1".into(),
+      action: Action::Fill {
+        selector: "#email".into(),
+        locator: "getByLabel('Email')".into(),
+        value: "sashoush@example.com".into(),
+      },
+      popup: None,
+    };
+    let back = RecordedAction::on_first_page(Action::AssertTitle { title: "Shop".into() });
+    let actions = [opened, typed, back];
+    assert_eq!(
+      render(&TypeScriptTestEmitter::default(), &actions),
+      "import { test, expect } from '@ferridriver/test';\n\
+       \n\
+       test('test', async ({ page }) => {\n\
+       \x20 const page1Promise = page.waitForEvent('popup');\n\
+       \x20 await page.getByRole('link', { name: 'Details' }).click();\n\
+       \x20 const page1 = await page1Promise;\n\
+       \x20 await page1.getByLabel('Email').fill('sashoush@example.com');\n\
+       \x20 await expect(page).toHaveTitle('Shop');\n\
+       });\n"
+    );
+    assert_eq!(
+      RustEmitter.action(&actions[0]),
+      "  let (page1, _) = page.expect_popup(|| page.locator(\"internal:role=link[name=\\\"Details\\\"i]\").click()).await?;\n"
+    );
+    assert_eq!(
+      RustEmitter.action(&actions[1]),
+      "  page1.locator(\"#email\").fill(\"sashoush@example.com\").await?;\n"
+    );
+    let gherkin = GherkinEmitter::new();
+    let steps: Vec<String> = actions.iter().map(|action| gherkin.action(action)).collect();
+    assert_eq!(
+      steps,
+      [
+        "    When I click \"internal:role=link[name=\"Details\"i]\"\n",
+        "    And I switch to tab 1\n    And I fill \"#email\" with \"sashoush@example.com\"\n",
+        "    And I switch to tab 0\n    Then the page title should be \"Shop\"\n",
+      ]
+    );
+  }
+
+  #[test]
+  fn live_source_writes_an_action_once_it_is_final() {
+    let mut live = LiveSource::new(std::sync::Arc::new(TypeScriptPlainEmitter));
+    let fill = |value: &str| {
+      RecordedAction::on_first_page(Action::Fill {
+        selector: "#q".into(),
+        locator: "locator('#q')".into(),
+        value: value.into(),
+      })
+    };
+    assert_eq!(live.push(fill("a"), false), None);
+    assert_eq!(live.push(fill("ab"), true), None);
+    assert_eq!(
+      live.push(
+        RecordedAction::on_first_page(click("getByRole('button', { name: 'Go' })")),
+        false
+      ),
+      Some("await page.locator('#q').fill('ab');\n".to_string())
+    );
+    assert_eq!(
+      live.finish(),
+      Some("await page.getByRole('button', { name: 'Go' }).click();\n".to_string())
+    );
+    assert_eq!(live.finish(), None);
   }
 
   #[test]

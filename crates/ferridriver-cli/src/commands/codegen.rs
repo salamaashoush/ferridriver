@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use ferridriver::codegen::emitter::{CodeEmitter, TypeScriptTestEmitter};
+use ferridriver::codegen::emitter::{CodeEmitter, LiveSource, TypeScriptTestEmitter};
 use ferridriver::codegen::recorder::{HeadedRecorder, RecorderOptions};
 use ferridriver::codegen::{OutputLanguage, Scaffold};
 use ferridriver_session::{
@@ -200,25 +200,34 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
     let _ = std::io::stdout().flush();
   }
 
-  let recording = client.call_with_events(start, |event| match event.payload {
-    EventPayload::Recorded { action, .. } => {
-      if to_stdout {
-        print!("{}", live.action(&action));
-        let _ = std::io::stdout().flush();
-      } else {
-        ui::note(&format!("recorded {}", action_name(&action)));
-      }
-    },
-    EventPayload::RecorderMode { mode } => ui::note(&format!("mode: {mode}")),
-    _ => {},
-  });
-  tokio::pin!(recording);
-  let reply = tokio::select! {
-    reply = &mut recording => reply,
-    () = until_stopped(session, context) => {
-      control(session, context, RECORDER_STOP_VERB, serde_json::json!({})).await?;
-      recording.await
-    },
+  let mut source = LiveSource::new(Arc::clone(&live));
+  let reply = {
+    let recording = client.call_with_events(start, |event| match event.payload {
+      EventPayload::Recorded {
+        action,
+        replaces_previous,
+        ..
+      } => {
+        if to_stdout {
+          if let Some(code) = source.push(action, replaces_previous) {
+            print!("{code}");
+            let _ = std::io::stdout().flush();
+          }
+        } else if !replaces_previous {
+          ui::note(&format!("recorded {}", action_name(&action.action)));
+        }
+      },
+      EventPayload::RecorderMode { mode } => ui::note(&format!("mode: {mode}")),
+      _ => {},
+    });
+    tokio::pin!(recording);
+    tokio::select! {
+      reply = &mut recording => reply,
+      () = until_stopped(session, context) => {
+        control(session, context, RECORDER_STOP_VERB, serde_json::json!({})).await?;
+        recording.await
+      },
+    }
   }
   .with_context(|| format!("recording on session '{session}'"))?;
   if !reply.ok {
@@ -227,6 +236,9 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
   let result: RecordingResult = serde_json::from_str(&reply.text).context("reading the recording")?;
 
   if to_stdout {
+    if let Some(code) = source.finish() {
+      print!("{code}");
+    }
     print!("{}", live.footer());
     let _ = std::io::stdout().flush();
   }

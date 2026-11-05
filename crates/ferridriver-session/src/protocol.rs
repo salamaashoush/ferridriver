@@ -73,9 +73,10 @@ pub const INPUT_VERB: &str = "input";
 /// Stream [`EventPayload::Frame`]s until the client hangs up; args are a
 /// [`ScreencastRequest`].
 pub const SCREENCAST_VERB: &str = "screencast";
-/// Record the context's page, streaming [`EventPayload::Recorded`] and
-/// [`EventPayload::RecorderMode`] until [`RECORDER_STOP_VERB`] or a hang-up;
-/// args are a [`RecorderStartRequest`], the response a [`RecordingResult`].
+/// Record the context's pages and their frames, streaming
+/// [`EventPayload::Recorded`] and [`EventPayload::RecorderMode`] until
+/// [`RECORDER_STOP_VERB`] or a hang-up; args are a [`RecorderStartRequest`],
+/// the response a [`RecordingResult`].
 pub const RECORDER_START_VERB: &str = "recorder.start";
 /// End the context's recording; answers with its [`RecordingResult`].
 pub const RECORDER_STOP_VERB: &str = "recorder.stop";
@@ -203,7 +204,7 @@ pub struct RecorderAssertRequest {
 pub struct RecordingResult {
   /// The whole file in the requested language and target.
   pub source: String,
-  pub actions: Vec<ferridriver::codegen::Action>,
+  pub actions: Vec<ferridriver::codegen::RecordedAction>,
 }
 
 /// How the host should treat [`ScriptRequest::code`].
@@ -348,11 +349,12 @@ pub enum EventPayload {
     viewport_width: u32,
     viewport_height: u32,
   },
-  /// One recorded action, for [`RECORDER_START_VERB`], with the statement
-  /// that reproduces it. `replaces_previous` marks an action that supersedes
-  /// the one recorded just before it (a click that became a double click).
+  /// One recorded action, for [`RECORDER_START_VERB`], with the statements
+  /// that reproduce it. `replaces_previous` marks an action that supersedes
+  /// the one recorded just before it (a click that became a double click,
+  /// a fill that grew, a click found to have opened a popup).
   Recorded {
-    action: ferridriver::codegen::Action,
+    action: ferridriver::codegen::RecordedAction,
     code: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     replaces_previous: bool,
@@ -587,25 +589,41 @@ mod tests {
     let wire = serde_json::to_value(ServerFrame::Event(Event {
       id: 3,
       payload: EventPayload::Recorded {
-        action: ferridriver::codegen::Action::Click {
-          selector: "#go".into(),
-          locator: "locator('#go')".into(),
+        action: ferridriver::codegen::RecordedAction {
+          page: "page".into(),
+          action: ferridriver::codegen::Action::Click {
+            selector: "#go".into(),
+            locator: "locator('#go')".into(),
+          },
+          popup: Some("page1".into()),
         },
         code: "await page.locator('#go').click();".into(),
         replaces_previous: false,
       },
     }))
     .unwrap();
-    assert_eq!(
-      wire,
-      serde_json::json!({
-        "type": "event",
-        "id": 3,
-        "event": "recorded",
-        "action": {"type": "click", "selector": "#go", "locator": "locator('#go')"},
-        "code": "await page.locator('#go').click();",
-      })
-    );
+    let expected = serde_json::json!({
+      "type": "event",
+      "id": 3,
+      "event": "recorded",
+      "action": {"type": "click", "selector": "#go", "locator": "locator('#go')", "page": "page", "popup": "page1"},
+      "code": "await page.locator('#go').click();",
+    });
+    assert_eq!(wire, expected);
+    // The flattened action decodes back through the flattened payload.
+    let ServerFrame::Event(Event {
+      payload: EventPayload::Recorded { action, .. },
+      ..
+    }) = serde_json::from_value::<ServerFrame>(expected).unwrap()
+    else {
+      panic!("a recorded event decoded as another frame");
+    };
+    assert_eq!(action.popup.as_deref(), Some("page1"));
+    assert!(matches!(action.action, ferridriver::codegen::Action::Click { .. }));
+    // A recording from before pages had names was all on the first page.
+    let older: ferridriver::codegen::RecordedAction =
+      serde_json::from_value(serde_json::json!({"type": "navigate", "url": "https://example.com/"})).unwrap();
+    assert_eq!(older.page, "page");
     let mode = serde_json::to_value(EventPayload::RecorderMode {
       mode: "assertingText".into(),
     })

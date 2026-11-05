@@ -305,7 +305,12 @@ impl Recordings {
         action,
         replaces_previous,
       } => sink_events.send(EventPayload::Recorded {
-        code: line_emitter.action(&action).trim().to_string(),
+        code: line_emitter
+          .action(&action)
+          .lines()
+          .map(str::trim)
+          .collect::<Vec<_>>()
+          .join("\n"),
         action,
         replaces_previous,
       }),
@@ -368,7 +373,7 @@ impl Recordings {
     browser: &Browser,
     context: &str,
     args: serde_json::Value,
-  ) -> Outcome<ferridriver::codegen::Action> {
+  ) -> Outcome<ferridriver::codegen::RecordedAction> {
     let request: RecorderAssertRequest = parse("recorder.assert", args)?;
     let recording = self.get(browser, context)?;
     let recorder = recording.recorder.lock().await;

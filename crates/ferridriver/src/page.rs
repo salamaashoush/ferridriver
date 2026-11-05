@@ -3676,6 +3676,24 @@ impl Page {
     }
   }
 
+  /// [`Self::expect_event`] for `popup`, yielding the page `action` opened.
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::expect_event`].
+  pub async fn expect_popup<F, Fut, R>(&self, action: F) -> Result<(Arc<Page>, R)>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::IntoFuture<Output = Result<R>>,
+  {
+    match self.expect_event("popup", action).await? {
+      (PageEvent::Popup(popup), r) => Ok((popup, r)),
+      _ => Err(crate::error::FerriError::Backend(
+        "expect_popup: waiter resolved with a non-popup event".into(),
+      )),
+    }
+  }
+
   /// [`Self::expect_event`] for `dialog`, yielding the live [`crate::dialog::Dialog`].
   ///
   /// # Errors
