@@ -251,10 +251,14 @@ fn f64_to_u64_saturating(n: f64) -> u64 {
   clamped
 }
 
-/// Insert text where the document's focus is and announce it with an
-/// `input` event, or answer the window of the frame element the focus is
-/// in. A text control takes it at its caret, over its selection; a
-/// contenteditable takes it at its selection, a line break as `<br>`.
+/// Insert text where the document's focus is, or answer the window of the
+/// frame element the focus is in. The editing command inserts it as
+/// typing does: at the caret or over the selection, a line break in a
+/// contenteditable as `<br>`, with a trusted `input` event, as an edit the
+/// page did not make itself (a framework tracking the value it set sees
+/// the change) and one `change` reports when the field is left. Where the
+/// command takes no text in a field that can be typed into, the value is
+/// set and an `input` event sent.
 const INSERT_TEXT: &str = r"(text) => {
   let element = document.activeElement;
   while (element && element.shadowRoot)
@@ -264,7 +268,28 @@ const INSERT_TEXT: &str = r"(text) => {
   const name = element.nodeName.toLowerCase();
   if (name === 'iframe' || name === 'frame')
     return element.contentWindow;
-  if (name === 'input' || name === 'textarea') {
+  const control = name === 'input' || name === 'textarea';
+  const editable = !control && element instanceof HTMLElement && element.isContentEditable;
+  if (!control && !editable)
+    return undefined;
+  let range = null;
+  if (editable) {
+    const selection = window.getSelection();
+    range = selection.rangeCount ? selection.getRangeAt(0) : null;
+    if (!range || !element.contains(range.commonAncestorContainer)) {
+      range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  }
+  if (document.execCommand('insertText', false, text))
+    return undefined;
+  // A field no one can type into takes no text.
+  if (control && (element.readOnly || element.disabled))
+    return undefined;
+  if (control) {
     const start = element.selectionStart;
     if (start === null) {
       element.value += text;
@@ -273,14 +298,7 @@ const INSERT_TEXT: &str = r"(text) => {
       element.value = element.value.slice(0, start) + text + element.value.slice(end);
       element.setSelectionRange(start + text.length, start + text.length);
     }
-  } else if (element instanceof HTMLElement && element.isContentEditable) {
-    const selection = window.getSelection();
-    let range = selection.rangeCount ? selection.getRangeAt(0) : null;
-    if (!range || !element.contains(range.commonAncestorContainer)) {
-      range = document.createRange();
-      range.selectNodeContents(element);
-      range.collapse(true);
-    }
+  } else {
     range.deleteContents();
     const lines = text.split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -289,10 +307,9 @@ const INSERT_TEXT: &str = r"(text) => {
         range.insertNode(document.createElement('br'));
     }
     range.collapse(false);
+    const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
-  } else {
-    return undefined;
   }
   element.dispatchEvent(new InputEvent('input', { data: text, bubbles: true, composed: true }));
   return undefined;

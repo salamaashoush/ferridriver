@@ -1,6 +1,7 @@
 // keyboard.insertText puts text in at the focus with no key events, on
-// every engine. Firefox can only press keys, so there the text goes in from
-// a page script, and the page sees one untrusted `input` event carrying it.
+// every engine, and the page sees one trusted `input` event carrying it.
+// Firefox has no command that types text, so there it goes in through the
+// editing command, which the page cannot tell from typing.
 
 import { test, describe, expect } from '@ferridriver/test';
 
@@ -11,7 +12,7 @@ const LOG =
   '</script>';
 
 describe('keyboard.insertText', () => {
-  test('inserts at the caret and over the selection, with no key events', async ({ page, browserName }) => {
+  test('inserts at the caret and over the selection, with no key events', async ({ page }) => {
     await page.setContent(`<input id=i value=ab><input id=s value=abcd>${LOG}`);
     await page.focus('#i');
     await page.evaluate("document.getElementById('i').setSelectionRange(1, 1); window.log = []");
@@ -25,8 +26,7 @@ describe('keyboard.insertText', () => {
 
     const log = (await page.evaluate('window.log')) as string[];
     expect(log.filter((e) => e.startsWith('key'))).toEqual([]);
-    const trusted = browserName !== 'firefox';
-    expect(log.filter((e) => e.startsWith('input|'))).toEqual([`input|i|${trusted}|héllo`, `input|s|${trusted}|X`]);
+    expect(log.filter((e) => e.startsWith('input|'))).toEqual(['input|i|true|héllo', 'input|s|true|X']);
   });
 
   test('inserts a line break in a contenteditable', async ({ page }) => {
@@ -48,5 +48,28 @@ describe('keyboard.insertText', () => {
     const log = (await inner!.evaluate('window.log')) as string[];
     expect(log.filter((e) => e.startsWith('key'))).toEqual([]);
     expect(log.filter((e) => e.startsWith('input|')).length).toBe(1);
+  });
+});
+
+describe('fill through inserted text', () => {
+  test('reaches a field whose framework tracks the value it set, and commits on leaving', async ({ page }) => {
+    // The way React tracks a controlled input: the element's own `value`
+    // property records each value the code sets, and only a value it did
+    // not set is a change.
+    await page.setContent(
+      '<input id=r><p id=state></p><input id=other><script>' +
+        "const input = document.getElementById('r');" +
+        "const native = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');" +
+        "let tracked = '';" +
+        "Object.defineProperty(input, 'value', { configurable: true, get() { return native.get.call(this); }, set(v) { tracked = String(v); native.set.call(this, v); } });" +
+        "input.addEventListener('input', () => { if (input.value !== tracked) { tracked = input.value; document.getElementById('state').textContent = 'changed:' + input.value; } });" +
+        "window.commits = []; input.addEventListener('change', () => commits.push(input.value));" +
+        '</script>',
+    );
+    await page.locator('#r').fill('sashoush');
+    await expect(page.locator('#state')).toHaveText('changed:sashoush');
+    expect(await page.evaluate('window.commits')).toEqual([]);
+    await page.locator('#other').focus();
+    expect(await page.evaluate('window.commits')).toEqual(['sashoush']);
   });
 });

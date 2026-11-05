@@ -622,7 +622,7 @@ describe('actions', () => {
     expect(await page.evaluate("document.getElementById('count').textContent")).toBe('0');
   });
 
-  test('script_fill_force', async ({ page, browserName }) => {
+  test('script_fill_force', async ({ page }) => {
     // `fill.force` bypasses the ['visible','enabled','editable'] pre-check:
     // without it a readonly input polls error:noteditable until timeout.
     await page.goto(dataUrl("<input id='ro' readonly value=''><input id='z' style='width:0;height:0;border:0;padding:0'>"));
@@ -640,10 +640,8 @@ describe('actions', () => {
 
     // Forced, the text is typed in rather than assigned, and a readonly
     // field takes no typing: the call returns and the value stays empty.
-    // Firefox has no way to type text, only keys, so the text goes in from
-    // a page script, which a readonly field does not stop.
     await page.locator('#ro').fill('bypass', { force: true });
-    expect(await page.evaluate("document.getElementById('ro').value")).toBe(browserName === 'firefox' ? 'bypass' : '');
+    expect(await page.evaluate("document.getElementById('ro').value")).toBe('');
 
     // A field with no size is not visible, so only a forced fill reaches it.
     msg = 'no-throw';
@@ -683,8 +681,8 @@ describe('actions', () => {
     // The value goes in as typing puts it in: the field is focused, its
     // content selected and replaced through the input domain, so the page
     // sees trusted `beforeinput` and `input` events, and emptying it is a
-    // Delete. Firefox can only press keys, so there the text goes in from
-    // a page script: one `input` event carrying it, and no key events.
+    // Delete. Firefox has no command that types text, so there it goes in
+    // through the editing command, which sends no `beforeinput`.
     await page.goto(
       dataUrl(
         "<input id='i' value='old'><label>Named <input id='l'></label><input id='d' type='date'>" +
@@ -700,13 +698,9 @@ describe('actions', () => {
     await page.locator('#i').fill('new');
     expect(await page.locator('#i').inputValue()).toBe('new');
     const typed = await events();
-    if (browserName === 'firefox') {
-      expect(typed).toEqual(['input:i:false:']);
-    } else {
-      expect(typed).toContain('beforeinput:i:true:insertText');
-      expect(typed.filter(e => e.startsWith('input:')).length).toBeGreaterThan(0);
-      expect(typed.every(e => e.split(':')[2] === 'true')).toBe(true);
-    }
+    expect(typed).toContain('input:i:true:insertText');
+    expect(typed.every(e => e.split(':')[2] === 'true')).toBe(true);
+    if (browserName !== 'firefox') expect(typed).toContain('beforeinput:i:true:insertText');
 
     await page.locator('#i').fill('');
     expect(await page.locator('#i').inputValue()).toBe('');
@@ -770,8 +764,7 @@ describe('actions', () => {
     await expect(page.locator('#state')).toHaveText('SASHOUSH');
     await page.locator('#r').fill('');
     await expect(page.locator('#state')).toHaveText('');
-    // Each edit the page saw is a change it did not make itself; Firefox
-    // types the text key by key, so it sees one per character.
+    // Each edit the page saw is a change it did not make itself.
     const changes = (await page.evaluate('window.changes')) as string[];
     expect(changes).toContain('sashoush');
     expect(changes[changes.length - 1]).toBe('');
