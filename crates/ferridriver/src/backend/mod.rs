@@ -1071,6 +1071,18 @@ impl AnyPage {
     }
   }
 
+  /// Let a popup that is not this browser's to drive go: resumed, and on
+  /// CDP detached from, so the auto-attach its claim armed holds none of
+  /// the frames it opens in other processes paused.
+  pub(crate) async fn let_go_of_popup(&self) -> Result<()> {
+    self.resume_popup().await?;
+    match self {
+      AnyPage::CdpPipe(p) => p.detach_session().await,
+      AnyPage::CdpWs(p) => p.detach_session().await,
+      AnyPage::WebKit(_) | AnyPage::Bidi(_) | AnyPage::WebDriver(_) => Ok(()),
+    }
+  }
+
   /// Backend-owned frame cache shared across `Arc<crate::page::Page>`
   /// wrappers. MCP tool handlers construct a fresh wrapper per call,
   /// so storing the cache on the wrapper would reset it between

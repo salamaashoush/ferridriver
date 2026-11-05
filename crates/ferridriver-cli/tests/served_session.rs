@@ -44,9 +44,19 @@ fn serve_pages() -> anyhow::Result<String> {
         let read = stream.read(&mut request).unwrap_or(0);
         let head = String::from_utf8_lossy(&request[..read]);
         let path = head.split_whitespace().nth(1).unwrap_or("/");
+        let port = head
+          .lines()
+          .find_map(|line| line.strip_prefix("Host: "))
+          .and_then(|host| host.trim().rsplit(':').next())
+          .unwrap_or_default()
+          .to_string();
+        // The help page from another site, which site isolation puts in
+        // a process of its own.
+        let framed = format!("<!doctype html><title>Framed</title><iframe src=http://localhost:{port}/help></iframe>");
         let (status, body) = match path {
           "/" => ("200 OK", SHOP),
           "/help" => ("200 OK", HELP),
+          "/framed" => ("200 OK", framed.as_str()),
           _ => ("404 Not Found", ""),
         };
         let _ = write!(
@@ -68,8 +78,13 @@ struct Served {
 
 impl Served {
   fn start() -> anyhow::Result<Self> {
+    Self::start_with(&[])
+  }
+
+  fn start_with(args: &[&str]) -> anyhow::Result<Self> {
     let mut child = Process::new(ferridriver_bin())
       .args(["browser", "serve"])
+      .args(args)
       .env("FERRIDRIVER_NO_INHERIT", "1")
       .stdout(Stdio::piped())
       .stderr(Stdio::null())
@@ -529,5 +544,56 @@ async fn a_session_host_leaves_the_pages_of_another_apps_context_alone() -> anyh
     .find(|info| info["targetId"] == blank["targetId"])
     .context("the other app's blank tab is still open")?;
   assert_eq!(theirs["url"], "about:blank", "the other app's blank tab: {targets}");
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_served_browser_with_site_isolation_loads_a_cross_site_frame() -> anyhow::Result<()> {
+  let origin = serve_pages()?;
+  let served = Served::start_with(&["--arg=--site-per-process"])?;
+  let mut app = Cdp::connect(&served.endpoint).await?;
+  let page = app
+    .send(
+      None,
+      "Target.createTarget",
+      serde_json::json!({"url": format!("{origin}/framed")}),
+    )
+    .await?;
+  let attached = app
+    .send(
+      None,
+      "Target.attachToTarget",
+      serde_json::json!({"targetId": page["targetId"], "flatten": true}),
+    )
+    .await?;
+  let session = attached["sessionId"].as_str().context("a session")?.to_string();
+  // The frame from another site loads in a renderer of its own; nothing
+  // the server holds may keep it waiting.
+  let deadline = std::time::Instant::now() + Duration::from_secs(10);
+  loop {
+    let state = app
+      .send(
+        Some(&session),
+        "Runtime.evaluate",
+        serde_json::json!({"expression": "document.readyState", "returnByValue": true}),
+      )
+      .await?;
+    if state["result"]["value"] == "complete" {
+      break;
+    }
+    ensure!(std::time::Instant::now() < deadline, "the page never loaded: {state}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  let targets = app.send(None, "Target.getTargets", serde_json::json!({})).await?;
+  let frame = targets["targetInfos"]
+    .as_array()
+    .context("the targets")?
+    .iter()
+    .find(|info| info["type"] == "iframe")
+    .with_context(|| format!("no frame of its own: {targets}"))?;
+  ensure!(
+    frame["url"].as_str().is_some_and(|url| url.ends_with("/help")),
+    "{frame}"
+  );
   Ok(())
 }

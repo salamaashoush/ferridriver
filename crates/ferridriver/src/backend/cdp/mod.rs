@@ -2592,6 +2592,23 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// End this page's session, and with it everything the session asked
+  /// of the target: its auto-attach, its waits on the frames it attached.
+  pub(crate) async fn detach_session(&self) -> Result<()> {
+    if let Some(session) = self.session_id.as_deref() {
+      self
+        .transport
+        .send_command(
+          None,
+          "Target.detachFromTarget",
+          &serde_json::json!({ "sessionId": session }),
+        )
+        .await?;
+    }
+    self.dispose_local();
+    Ok(())
+  }
+
   /// Let a paused popup run, and collect the answers its setup left owed.
   async fn release_popup(&self) -> Result<()> {
     let owed = self.setup.resume();

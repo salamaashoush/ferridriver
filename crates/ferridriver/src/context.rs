@@ -2605,9 +2605,9 @@ async fn register_popup(
     s.context_name_for_backend_id(instance, popup.browser_context_id.as_deref())
   };
   let Some(ctx_name) = ctx_name else {
-    // Unknown / already-closed context — let the popup run unmanaged
-    // rather than parked.
-    let _ = popup.page.resume_popup().await;
+    // A context this browser does not manage (another client's, or one
+    // already closed): let the popup run, and let go of it.
+    let _ = popup.page.let_go_of_popup().await;
     return Ok(());
   };
   let composite = if &**instance == "default" && ctx_name == "default" {
