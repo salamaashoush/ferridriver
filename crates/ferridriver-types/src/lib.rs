@@ -1,10 +1,14 @@
 //! What an editor needs to know about this ferridriver build without
 //! linking the browser engine: the TypeScript declarations for the test
 //! and extension APIs, and the device registry `use.device` accepts.
+//! [`keyboard`] is the keyboard layout and state the browser backends
+//! dispatch key events from, for anything else that sends raw input.
 //!
 //! The CLI writes the declarations out for `ferridriver ext check` and
 //! editors; a service that edits scripts and test settings in the browser
 //! serves both to its editor, matching the runtime its runners use.
+
+pub mod keyboard;
 
 /// The version the declarations describe.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
