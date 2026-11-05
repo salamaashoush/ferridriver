@@ -7024,18 +7024,35 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     // A request the renderer answers from its memory cache never reaches
     // the network, so no route would see it.
     let _ = self
-      .cmd("Network.setCacheDisabled", serde_json::json!({ "cacheDisabled": true }))
+      .configure("Network.setCacheDisabled", serde_json::json!({ "cacheDisabled": true }))
       .await;
-    if let Err(error) = self
-      .cmd(
-        "Fetch.enable",
-        serde_json::json!({
-            "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
-            "handleAuthRequests": has_creds,
-        }),
-      )
-      .await
-    {
+    let enable = serde_json::json!({
+        "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
+        "handleAuthRequests": has_creds,
+    });
+    if self.setup.is_paused() {
+      // A popup in a browsing instance of its own (`noopener`) answers
+      // nothing until it runs. Waiting here for the answer resumed it, and
+      // its first request left before interception was on.
+      self.fetch.enabled.store(true, std::sync::atomic::Ordering::SeqCst);
+      let fetch = Arc::clone(&self.fetch);
+      let transport = Arc::clone(&self.transport);
+      let session = self.session_id.clone();
+      return self
+        .setup
+        .write(Box::pin(async move {
+          let answer = transport
+            .send_command(session.as_deref(), "Fetch.enable", &enable)
+            .await;
+          if answer.is_err() {
+            fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+            handle.abort();
+          }
+          answer.map(|_| ())
+        }))
+        .await;
+    }
+    if let Err(error) = self.cmd("Fetch.enable", enable).await {
       self.fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       handle.abort();
       return Err(error);
