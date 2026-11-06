@@ -17,6 +17,8 @@ pub struct WebDriverPage {
   pub events: crate::events::EventEmitter,
   pub(crate) page_backref: crate::backend::PageBackref,
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
+  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
   pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
   pub(crate) frame_listener_started: Arc<AtomicBool>,
   pub(crate) dialog_manager: crate::dialog::DialogManager,
@@ -37,6 +39,7 @@ impl WebDriverPage {
       events: crate::events::EventEmitter::new(),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::default(),
+      media_emulation: crate::backend::SharedMediaEmulation::default(),
       observed: Arc::default(),
       frame_listener_started: Arc::default(),
       dialog_manager: crate::dialog::DialogManager::new(),

@@ -9,7 +9,6 @@ impl WebDriverPage {
   pub async fn apply_context_options(&self, opts: &BrowserContextOptions) -> Result<()> {
     for (requested, name) in [
       (opts.bypass_csp.is_some(), "bypassCSP"),
-      (opts.any_media_override(), "media emulation"),
       (opts.extra_http_headers.is_some(), "extraHTTPHeaders"),
       (opts.geolocation.is_some(), "geolocation"),
       (opts.http_credentials.is_some(), "httpCredentials"),

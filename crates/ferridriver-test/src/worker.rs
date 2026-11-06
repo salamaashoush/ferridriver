@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use rustc_hash::FxHashMap;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{ContextConfig, TestConfig, ViewportConfig};
+use crate::config::{ColorSchemeSetting, ContextConfig, TestConfig, ViewportConfig};
 use crate::dispatcher::{SerialBatch, TestAssignment, WorkItem};
 use crate::fixture::{FixtureDef, FixturePool, FixtureScope};
 use crate::model::{
@@ -438,8 +438,12 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     {
       ctx_config.screen = Some(ViewportConfig { width: w, height: h });
     }
-    if let Some(v) = opts.get("colorScheme").and_then(|v| v.as_str()) {
-      ctx_config.color_scheme = Some(v.to_string());
+    match opts.get("colorScheme") {
+      Some(serde_json::Value::String(scheme)) => {
+        ctx_config.color_scheme = Some(ColorSchemeSetting::Scheme(scheme.clone()));
+      },
+      Some(serde_json::Value::Null) => ctx_config.color_scheme = Some(ColorSchemeSetting::Null),
+      _ => {},
     }
     if let Some(v) = opts.get("timezoneId").and_then(|v| v.as_str()) {
       ctx_config.timezone_id = Some(v.to_string());
@@ -662,7 +666,10 @@ fn build_context_options(
   if ctx_config.has_touch {
     opts.has_touch = Some(true);
   }
-  opts.color_scheme = ctx_config.color_scheme.clone().into();
+  opts.color_scheme = ctx_config.color_scheme.as_ref().map_or(
+    ferridriver::options::MediaOverride::Unchanged,
+    ColorSchemeSetting::media_override,
+  );
   opts.reduced_motion = ctx_config.reduced_motion.clone().into();
   opts.forced_colors = ctx_config.forced_colors.clone().into();
   opts.locale.clone_from(&ctx_config.locale);
@@ -2692,7 +2699,7 @@ async fn capture_screenshot(page: &ferridriver::Page, wanted: &crate::config::Sc
 /// - `"mobile"` — `isMobile` is true
 /// - `"touch"` — `hasTouch` is true
 /// - `"dark"` — `colorScheme` is "dark"
-/// - `"light"` — `colorScheme` is "light"
+/// - `"light"` — `colorScheme` is "light", which it is unless set otherwise
 /// - `"offline"` — offline network mode
 /// - `"bypass-csp"` — CSP bypass enabled
 ///
@@ -2740,8 +2747,8 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
     // Context options (Playwright's use block fixtures).
     "mobile" => browser.use_options.is_mobile,
     "touch" => browser.use_options.has_touch,
-    "dark" => browser.use_options.color_scheme.as_deref() == Some("dark"),
-    "light" => browser.use_options.color_scheme.as_deref() == Some("light"),
+    "dark" => browser.use_options.color_scheme_fixture() == Some("dark"),
+    "light" => browser.use_options.color_scheme_fixture() == Some("light"),
     "offline" => browser.use_options.offline,
     "bypass-csp" => browser.use_options.bypass_csp,
 

@@ -79,12 +79,6 @@ pub struct Page {
   /// Human-readable `reason` passed to the last `close({ reason })` call,
   /// surfaced on subsequent `TargetClosed` errors — Playwright parity.
   close_reason: Mutex<Option<String>>,
-  /// Persistent emulated-media state. Playwright tracks per-field state so
-  /// that `emulateMedia({colorScheme: 'dark'})` followed by
-  /// `emulateMedia({media: 'print'})` keeps both active — each call is a
-  /// partial update, not a replacement. See
-  /// `/tmp/playwright/packages/playwright-core/src/server/page.ts:585`.
-  emulated_media: Mutex<crate::options::EmulateMediaOptions>,
   /// Client-side frame tree cache. Playwright keeps `Page._frames`,
   /// `Frame._parentFrame`, `Frame._url`, `Frame._detached` etc. up to
   /// date via wire-level `frameAttached`/`frameDetached`/`frameNavigated`
@@ -153,7 +147,6 @@ impl Page {
       strict_selectors: std::sync::atomic::AtomicBool::new(false),
       context_ref: None,
       close_reason: Mutex::new(None),
-      emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
@@ -187,7 +180,6 @@ impl Page {
       strict_selectors: std::sync::atomic::AtomicBool::new(false),
       context_ref: Some(context),
       close_reason: Mutex::new(None),
-      emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
@@ -2734,34 +2726,10 @@ impl Page {
     })
   }
 
-  /// Implementation of [`Self::emulate_media`].
+  /// Implementation of [`Self::emulate_media`]. Each call is a partial
+  /// update: `{colorScheme: 'dark'}` then `{media: 'print'}` keeps both.
   pub(crate) async fn emulate_media_impl(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
-    // Merge the incoming partial update with the page's persistent state.
-    // An `Unchanged` field leaves the existing override alone; a `Disabled`
-    // or `Set` field overwrites the stored state for that field.
-    let merged = {
-      let mut state = self
-        .emulated_media
-        .lock()
-        .map_err(|e| crate::error::FerriError::Backend(format!("emulated_media lock poisoned: {e}")))?;
-      if opts.media.is_specified() {
-        state.media = opts.media.clone();
-      }
-      if opts.color_scheme.is_specified() {
-        state.color_scheme = opts.color_scheme.clone();
-      }
-      if opts.reduced_motion.is_specified() {
-        state.reduced_motion = opts.reduced_motion.clone();
-      }
-      if opts.forced_colors.is_specified() {
-        state.forced_colors = opts.forced_colors.clone();
-      }
-      if opts.contrast.is_specified() {
-        state.contrast = opts.contrast.clone();
-      }
-      state.clone()
-    };
-    self.inner.emulate_media(&merged).await
+    self.inner.emulate_media(opts).await
   }
 
   /// Enable or disable JavaScript execution.

@@ -473,6 +473,38 @@ pub enum AnyBrowser {
   WebDriver(webdriver::browser::WebDriverBrowser),
 }
 
+/// The colour scheme a page is emulated with when neither its context
+/// nor `page.emulateMedia` names one. A browser left to itself follows
+/// the host's appearance, so a dark-mode machine would otherwise render
+/// and match `prefers-color-scheme` differently from every other host.
+pub(crate) const DEFAULT_COLOR_SCHEME: &str = "light";
+
+/// A page's media emulation: what its context names, and what
+/// `page.emulateMedia` has layered over that. Kept on the backend page,
+/// which every `Page` wrapper of it shares, so neither a fresh wrapper
+/// nor a context re-applying its options undoes a page's own override.
+#[derive(Debug, Default)]
+pub(crate) struct MediaEmulation {
+  context: crate::options::EmulateMediaOptions,
+  page: crate::options::EmulateMediaOptions,
+}
+
+impl MediaEmulation {
+  /// The state the page should be in, and whether anyone asked for any
+  /// of it. Only the default was asked for when nobody did, and a browser
+  /// that cannot emulate is then simply left as it is.
+  fn effective(&self) -> (crate::options::EmulateMediaOptions, bool) {
+    let mut media = self.page.layered_over(&self.context);
+    let requested = !media.is_empty();
+    if !media.color_scheme.is_specified() {
+      media.color_scheme = crate::options::MediaOverride::Set(DEFAULT_COLOR_SCHEME.to_owned());
+    }
+    (media, requested)
+  }
+}
+
+pub(crate) type SharedMediaEmulation = Arc<tokio::sync::Mutex<MediaEmulation>>;
+
 /// A page the BROWSER created (a `window.open` / `target=_blank`
 /// popup), announced by the backend's popup listener. The state-level
 /// popup pump (see `context::spawn_popup_pump`) registers the page into
@@ -1100,6 +1132,16 @@ impl AnyPage {
     }
   }
 
+  fn media_emulation(&self) -> &SharedMediaEmulation {
+    match self {
+      AnyPage::CdpPipe(p) => &p.media_emulation,
+      AnyPage::CdpWs(p) => &p.media_emulation,
+      AnyPage::WebKit(p) => &p.media_emulation,
+      AnyPage::Bidi(p) => &p.media_emulation,
+      AnyPage::WebDriver(p) => &p.media_emulation,
+    }
+  }
+
   /// Whether `self` and `other` wrap the SAME underlying browser page
   /// (as opposed to being equal-valued clones of different pages).
   /// Compared via the per-backend-page `frame_cache` allocation, which
@@ -1638,15 +1680,56 @@ impl AnyPage {
         )));
       }
     }
-    page_dispatch!(self, apply_context_options(opts))
+    let (applied, media) = tokio::join!(
+      async { page_dispatch!(self, apply_context_options(opts)) },
+      self.emulate_context_media(opts.emulated_media()),
+    );
+    applied.and(media)
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     page_dispatch!(self, emulate_viewport(config))
   }
 
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
-    page_dispatch!(self, emulate_media(opts))
+  /// `page.emulateMedia`: a partial update of the page's own overrides,
+  /// which the context's media is the fallback for.
+  pub async fn emulate_media(&self, update: &crate::options::EmulateMediaOptions) -> Result<()> {
+    let mut emulation = self.media_emulation().lock().await;
+    let updated = update.layered_over(&emulation.page);
+    let previous = std::mem::replace(&mut emulation.page, updated);
+    let sent = self.send_media(&emulation).await;
+    if sent.is_err() {
+      emulation.page = previous;
+    }
+    sent
+  }
+
+  /// Set the media the page's context names, under any override the page
+  /// made itself. A page whose context names nothing still gets the
+  /// default colour scheme from here.
+  pub(crate) async fn emulate_context_media(&self, context: crate::options::EmulateMediaOptions) -> Result<()> {
+    let mut emulation = self.media_emulation().lock().await;
+    let previous = std::mem::replace(&mut emulation.context, context);
+    let sent = self.send_media(&emulation).await;
+    if sent.is_err() {
+      emulation.context = previous;
+    }
+    sent
+  }
+
+  /// Held under the emulation lock, so two updates cannot reach the
+  /// browser in the opposite order to the one they were made in. A
+  /// refused update is undone by the caller, so it does not ride along
+  /// with the next one.
+  async fn send_media(&self, emulation: &MediaEmulation) -> Result<()> {
+    let (media, requested) = emulation.effective();
+    match page_dispatch!(self, emulate_media(&media)) {
+      Err(FerriError::Unsupported(reason)) if !requested => {
+        tracing::debug!(target: "ferridriver::emulation", %reason, "the default colour scheme cannot be emulated here");
+        Ok(())
+      },
+      result => result,
+    }
   }
 
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
@@ -2516,5 +2599,59 @@ mod key_combo_tests {
     assert_eq!(split_key_combo("Control+Shift+T"), ["Control", "Shift", "T"]);
     assert_eq!(split_key_combo("a"), ["a"]);
     assert_eq!(split_key_combo("Control+="), ["Control", "="]);
+  }
+}
+
+#[cfg(test)]
+mod media_emulation_tests {
+  use super::MediaEmulation;
+  use crate::options::{EmulateMediaOptions, MediaOverride};
+
+  fn scheme(value: MediaOverride) -> EmulateMediaOptions {
+    EmulateMediaOptions {
+      color_scheme: value,
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn nobody_naming_a_scheme_gets_light_unasked() {
+    let (media, requested) = MediaEmulation::default().effective();
+    assert_eq!(media.color_scheme, MediaOverride::Set("light".into()));
+    assert!(!requested);
+  }
+
+  #[test]
+  fn the_page_wins_over_its_context_and_null_is_kept() {
+    let emulation = MediaEmulation {
+      context: scheme(MediaOverride::Set("dark".into())),
+      page: EmulateMediaOptions::default(),
+    };
+    assert_eq!(emulation.effective(), (scheme(MediaOverride::Set("dark".into())), true));
+    let emulation = MediaEmulation {
+      page: scheme(MediaOverride::Disabled),
+      ..emulation
+    };
+    assert_eq!(emulation.effective(), (scheme(MediaOverride::Disabled), true));
+    let emulation = MediaEmulation {
+      context: scheme(MediaOverride::Disabled),
+      page: EmulateMediaOptions::default(),
+    };
+    assert_eq!(emulation.effective().0.color_scheme, MediaOverride::Disabled);
+  }
+
+  #[test]
+  fn another_feature_alone_still_gets_light_and_counts_as_asked() {
+    let emulation = MediaEmulation {
+      context: EmulateMediaOptions::default(),
+      page: EmulateMediaOptions {
+        reduced_motion: MediaOverride::Set("reduce".into()),
+        ..Default::default()
+      },
+    };
+    let (media, requested) = emulation.effective();
+    assert_eq!(media.color_scheme, MediaOverride::Set("light".into()));
+    assert_eq!(media.reduced_motion, MediaOverride::Set("reduce".into()));
+    assert!(requested);
   }
 }

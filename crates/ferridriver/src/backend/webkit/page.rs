@@ -357,6 +357,8 @@ pub struct WebKitPage {
   pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
   pub page_backref: crate::backend::PageBackref,
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
+  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
   pub(crate) frame_listener_started: Arc<AtomicBool>,
   /// Console / page-error retention for `page.consoleMessages()` /
   /// `page.pageErrors()` (see `CdpPage::observed`).
@@ -683,6 +685,7 @@ impl WebKitPage {
         screencast_hub: crate::backend::screencast::ScreencastHub::default(),
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+        media_emulation: crate::backend::SharedMediaEmulation::default(),
         frame_listener_started: Arc::new(AtomicBool::new(false)),
         observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
         lifecycle: Arc::new(LifecycleSignals::default()),
@@ -1957,9 +1960,10 @@ impl WebKitPage {
     // JS-disabled, bypassCSP, offline, permissions) are now sent inside
     // [`Self::attach`] from the browser's stashed context options, so
     // they're live BEFORE about:blank becomes scriptable. This call
-    // re-asserts the runtime-mutable subset (viewport, media,
-    // extra headers) plus the geolocation/screen overrides that don't
-    // care about document timing. No reload needed.
+    // re-asserts the runtime-mutable subset (viewport, extra headers)
+    // plus the geolocation/screen overrides that don't care about
+    // document timing; media is layered with the page's own overrides by
+    // `AnyPage::apply_context_options`. No reload needed.
     self.apply_runtime_overrides(opts).await?;
     self.apply_proxy_session_overrides(opts).await;
     grant_permissions(&self.proxy, opts).await?;
@@ -2023,9 +2027,6 @@ impl WebKitPage {
   async fn apply_runtime_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     if let Some(vp) = opts.resolved_viewport() {
       self.emulate_viewport(&vp).await?;
-    }
-    if opts.any_media_override() {
-      self.emulate_media(&opts.as_emulate_media()).await?;
     }
     if let Some(h) = opts.extra_http_headers.as_ref() {
       self.set_extra_http_headers(h).await?;

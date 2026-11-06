@@ -7,9 +7,9 @@
 //! and failure types defined in this crate.
 
 pub use ferridriver_config::test::{
-  BrowserConfig, CliOverrides, ContextConfig, DEFAULT_EXPECT_TIMEOUT_MS, ExpectConfig, GeolocationConfig,
-  GracefulShutdown, HttpCredentialsConfig, ProjectConfig, ProxyConfig, ReportSlowTestsConfig, ReporterConfig,
-  RetryStrategy, ScreenshotMode, ScreenshotOption, ShardArg, StringOrList, TestConfig, TestLocation,
+  BrowserConfig, CliOverrides, ColorSchemeSetting, ContextConfig, DEFAULT_EXPECT_TIMEOUT_MS, ExpectConfig,
+  GeolocationConfig, GracefulShutdown, HttpCredentialsConfig, ProjectConfig, ProxyConfig, ReportSlowTestsConfig,
+  ReporterConfig, RetryStrategy, ScreenshotMode, ScreenshotOption, ShardArg, StringOrList, TestConfig, TestLocation,
   ToHaveScreenshotConfig, ToMatchAriaSnapshotConfig, ToMatchSnapshotConfig, ToPassConfig, TraceMode, TraceOption,
   UpdateSnapshotsMode, VideoConfig, VideoMode, VideoOption, ViewportConfig, ViewportOverride, WebServerConfig,
   expand_device_keys,
@@ -415,7 +415,7 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
     config.browser.use_options.has_touch = t;
   }
   if let Some(ref cs) = overrides.color_scheme {
-    config.browser.use_options.color_scheme = Some(cs.clone());
+    config.browser.use_options.color_scheme = Some(ColorSchemeSetting::Scheme(cs.clone()));
   }
   if let Some(ref l) = overrides.locale {
     config.browser.use_options.locale = Some(l.clone());

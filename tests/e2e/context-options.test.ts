@@ -100,17 +100,19 @@ describe('context options', () => {
     }
   });
 
-  test('context_options_color_scheme', async ({ browser, browserName }) => {
-    if (browserName === 'firefox') {
-      // Firefox's BiDi has no working colorScheme emulation command
-      // (Playwright's BiDi updateEmulateMedia is an empty stub).
-      await expectOptionUnsupportedOnFirefox(browser, { colorScheme: 'dark' }, 'colorScheme');
-      return;
-    }
+  test('context_options_color_scheme', async ({ browser }) => {
     const ctx = await browser.newContext({ colorScheme: 'dark' });
     try {
       const p = await ctx.newPage();
       expect(await p.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)).toBe(true);
+      // A page the browser opens in the context is dark from the start.
+      const [popup] = await Promise.all([
+        ctx.waitForEvent('page') as Promise<Page>,
+        p.evaluate(() => void window.open('about:blank')),
+      ]);
+      await popup.waitForLoadState();
+      await popup.setContent('<p>popup</p>');
+      expect(await popup.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)).toBe(true);
     } finally {
       await ctx.close();
     }

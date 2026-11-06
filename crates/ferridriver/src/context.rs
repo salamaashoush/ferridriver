@@ -513,8 +513,8 @@ impl ContextRef {
     // backend-specific failures funnel up as `FerriError` and fail
     // `new_page`, matching Playwright's "option applies or
     // context.newPage rejects" contract.
+    apply_context_options_or_defaults(&page, ctx_opts.as_ref()).await?;
     if let Some(opts) = ctx_opts.as_ref() {
-      apply_context_options(&page, opts).await?;
       self.install_record_har(opts).await;
 
       Box::pin(self.hydrate_storage_state(opts)).await?;
@@ -2548,6 +2548,23 @@ async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserC
   Box::pin(page.apply_context_options(opts)).await
 }
 
+/// [`apply_context_options`], or for a context without options the
+/// media emulation every page gets regardless.
+async fn apply_context_options_or_defaults(
+  page: &Arc<Page>,
+  opts: Option<&crate::options::BrowserContextOptions>,
+) -> Result<()> {
+  match opts {
+    Some(opts) => apply_context_options(page, opts).await,
+    None => {
+      page
+        .inner()
+        .emulate_context_media(crate::options::EmulateMediaOptions::default())
+        .await
+    },
+  }
+}
+
 /// Start `instance`'s popup pump unless its current browser generation
 /// already has one, so `window.open` popups from any page get registered,
 /// configured, and announced as `'page'` events. The read-lock check keeps
@@ -2646,9 +2663,7 @@ async fn register_popup(
   {
     tracing::debug!("popup proxy: {e}");
   }
-  if let Some(opts) = ctx_opts.as_ref()
-    && let Err(e) = apply_context_options(&page, opts).await
-  {
+  if let Err(e) = apply_context_options_or_defaults(&page, ctx_opts.as_ref()).await {
     tracing::debug!("popup context options: {e}");
   }
   if let Err(e) = ctx_ref.apply_context_callbacks_pre_doc(page.inner()).await {

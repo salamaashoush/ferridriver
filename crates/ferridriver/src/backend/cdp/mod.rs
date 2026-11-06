@@ -879,6 +879,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       downloads_dir: Arc::clone(downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1035,6 +1036,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1230,6 +1232,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -2195,6 +2198,8 @@ pub struct CdpPage<T: CdpTransport> {
   /// `frame.childFrames()` all read this cache synchronously, so
   /// every wrapper hands them the same `Arc<Mutex<FrameCache>>`.
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
+  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
   /// Idempotent latch for the frame-event listener task. The first
   /// `Arc<crate::page::Page>` constructed for this backend page
   /// spawns the listener that subscribes to `FrameAttached` /
@@ -2473,6 +2478,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       downloads_dir: self.downloads_dir.clone(),
       page_backref: self.page_backref.clone(),
       frame_cache: self.frame_cache.clone(),
+      media_emulation: self.media_emulation.clone(),
       frame_listener_started: self.frame_listener_started.clone(),
       observed: self.observed.clone(),
       listener_tasks: self.listener_tasks.clone(),
@@ -5143,21 +5149,13 @@ impl<T: CdpWrap> CdpPage<T> {
       }
     }
 
-    // `viewport` and `media` compose over `EmulateMediaOptions` /
-    // `ViewportConfig` helpers reused elsewhere (`emulate_viewport`,
-    // `emulate_media`) — those methods are also called from
-    // `Page::set_viewport_size` and `Page::emulate_media` (Playwright
-    // public API), so they keep dedicated methods.
+    // `viewport` composes over the `ViewportConfig` helper that
+    // `Page::set_viewport_size` also calls, so it keeps a dedicated
+    // method. Media is layered with the page's own overrides by
+    // `AnyPage::apply_context_options`.
     let viewport_fut: OptionFuture<_> = opts
       .resolved_viewport()
       .map(|vp| async move { self.emulate_viewport(&vp).await })
-      .into();
-    let media_fut: OptionFuture<_> = opts
-      .any_media_override()
-      .then(|| {
-        let m = opts.as_emulate_media();
-        async move { self.emulate_media(&m).await }
-      })
       .into();
 
     // Every remaining field is a direct CDP command — inlined below
@@ -5336,7 +5334,7 @@ impl<T: CdpWrap> CdpPage<T> {
       })
       .into();
 
-    let (r_vp, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_med, r_geo, r_perm, r_net, r_cpu) = tokio::join!(
+    let (r_vp, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_geo, r_perm, r_net, r_cpu) = tokio::join!(
       viewport_fut,
       ua_fut,
       locale_fut,
@@ -5348,7 +5346,6 @@ impl<T: CdpWrap> CdpPage<T> {
       sw_fut,
       dl_fut,
       headers_fut,
-      media_fut,
       geo_fut,
       perms_fut,
       network_fut,
@@ -5369,7 +5366,6 @@ impl<T: CdpWrap> CdpPage<T> {
       ("serviceWorkers", r_sw),
       ("acceptDownloads", r_dl),
       ("extraHTTPHeaders", r_hdr),
-      ("media (colorScheme/reducedMotion/forcedColors/contrast)", r_med),
       ("geolocation", r_geo),
       ("permissions", r_perm),
       ("offline/networkConditions", r_net),

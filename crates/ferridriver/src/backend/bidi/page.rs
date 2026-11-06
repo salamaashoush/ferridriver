@@ -384,6 +384,8 @@ pub struct BidiPage {
   /// `Arc<crate::page::Page>` instances, so the cache lives on the
   /// backend to outlive them).
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
+  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
   /// Idempotent latch for the frame-event listener.
   pub(crate) frame_listener_started: Arc<AtomicBool>,
   /// Console / page-error retention for `page.consoleMessages()` /
@@ -568,6 +570,7 @@ impl BidiPage {
       downloads_dir,
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       route_listener_started: Arc::new(AtomicBool::new(false)),
@@ -1914,13 +1917,31 @@ impl BidiPage {
           .map(|_| ())
       })
       .into();
-    let media_fut: OptionFuture<_> = opts
-      .any_media_override()
-      .then(|| {
-        let m = opts.as_emulate_media();
-        async move { self.emulate_media(&m).await }
-      })
-      .into();
+    // The page's own media, layered over this, is applied by
+    // `AnyPage::apply_context_options`. The context's colour scheme also
+    // goes onto its user context, so a page the browser opens there has
+    // it before its first document rather than once it is registered.
+    let scheme_fut = async move {
+      if &*self.user_context == "default" {
+        return;
+      }
+      let scheme = match &opts.color_scheme {
+        crate::options::MediaOverride::Unchanged => {
+          crate::options::MediaOverride::Set(crate::backend::DEFAULT_COLOR_SCHEME.to_owned())
+        },
+        other => other.clone(),
+      };
+      let Ok(Some(value)) = color_scheme_feature(&scheme) else {
+        return;
+      };
+      let params = json!({
+        "features": { "prefers-color-scheme": value },
+        "userContexts": [&*self.user_context],
+      });
+      if let Err(error) = self.cmd("emulation.setMediaFeaturesOverride", params).await {
+        tracing::debug!("colour scheme for user context {}: {error}", self.user_context);
+      }
+    };
     let ua_fut: OptionFuture<_> = opts
       .user_agent
       .as_deref()
@@ -2020,7 +2041,7 @@ impl BidiPage {
       })
       .into();
 
-    let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, r_med, r_geo, r_off, r_sw, r_perm) = tokio::join!(
+    let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, (), r_geo, r_off, r_sw, r_perm) = tokio::join!(
       viewport_fut,
       screen_fut,
       ua_fut,
@@ -2029,7 +2050,7 @@ impl BidiPage {
       js_fut,
       dl_fut,
       headers_fut,
-      media_fut,
+      scheme_fut,
       geo_fut,
       offline_fut,
       sw_fut,
@@ -2046,7 +2067,6 @@ impl BidiPage {
       ("javaScriptEnabled", r_js),
       ("acceptDownloads", r_dl),
       ("extraHTTPHeaders", r_hdr),
-      ("media (colorScheme/reducedMotion/forcedColors/contrast)", r_med),
       ("geolocation", r_geo),
       ("offline", r_off),
       ("serviceWorkers", r_sw),
@@ -2131,40 +2151,45 @@ impl BidiPage {
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     tokio::task::yield_now().await;
-    // Playwright's own BiDi `updateEmulateMedia` is an empty stub — media,
-    // colorScheme, reducedMotion, forcedColors and contrast have no BiDi
-    // equivalent yet. `emulation.setForcedColorsModeThemeOverride` appears in
-    // Playwright's vendored protocol (bidiProtocolCore.ts:1069) but shipping
-    // Firefox (151) rejects it as `unknown command`, so it cannot back
-    // colorScheme either. Rather than silently pretending an override worked,
-    // error out with a typed Unsupported so the caller knows Firefox can't
-    // honor that knob.
+    // `emulation.setMediaFeaturesOverride` is the only media command
+    // Firefox has, and of the features it lists it overrides
+    // `prefers-color-scheme` alone: the others are refused as an
+    // unsupported operation, and the media type has no command at all.
+    // Each is refused here before anything is sent, so a bag that cannot
+    // be honoured whole changes nothing.
     if opts.media.is_specified() {
       return Err(FerriError::unsupported(
         "BiDi/Firefox does not support `media` emulation — no BiDi protocol command exists for it",
       ));
     }
-    if opts.color_scheme.is_specified() {
-      return Err(FerriError::unsupported(
-        "BiDi/Firefox does not support `colorScheme` emulation — Firefox's BiDi implementation has no working command for it",
-      ));
-    }
     if opts.reduced_motion.is_specified() {
       return Err(FerriError::unsupported(
-        "BiDi/Firefox does not support `reducedMotion` emulation — no BiDi protocol command exists for it",
+        "BiDi/Firefox does not support `reducedMotion` emulation — Firefox refuses the prefers-reduced-motion media feature override",
       ));
     }
     if opts.forced_colors.is_specified() {
       return Err(FerriError::unsupported(
-        "BiDi/Firefox does not support `forcedColors` emulation — no BiDi protocol command exists for it",
+        "BiDi/Firefox does not support `forcedColors` emulation — Firefox refuses the forced-colors media feature override",
       ));
     }
     if opts.contrast.is_specified() {
       return Err(FerriError::unsupported(
-        "BiDi/Firefox does not support `contrast` emulation — no BiDi protocol command exists for it",
+        "BiDi/Firefox does not support `contrast` emulation — Firefox refuses the prefers-contrast media feature override",
       ));
     }
-    Ok(())
+    let Some(value) = color_scheme_feature(&opts.color_scheme)? else {
+      return Ok(());
+    };
+    self
+      .cmd(
+        "emulation.setMediaFeaturesOverride",
+        json!({
+          "features": { "prefers-color-scheme": value },
+          "contexts": [&*self.context_id],
+        }),
+      )
+      .await
+      .map(|_| ())
   }
 
   /// Direct `BiDi` `network.setExtraHeaders` command. Backs
@@ -4883,6 +4908,22 @@ fn parse_bidi_cookie(c: &serde_json::Value) -> CookieData {
     expires,
     same_site,
     url: None,
+  }
+}
+
+/// The `prefers-color-scheme` value for `emulation.setMediaFeaturesOverride`:
+/// the scheme, or `null` for the browser's own appearance (which, unlike
+/// leaving the feature out, also sets aside a user context's override).
+/// `None` when nothing is asked of it.
+fn color_scheme_feature(scheme: &crate::options::MediaOverride) -> Result<Option<serde_json::Value>> {
+  use crate::options::MediaOverride;
+  match scheme {
+    MediaOverride::Unchanged => Ok(None),
+    MediaOverride::Disabled => Ok(Some(serde_json::Value::Null)),
+    MediaOverride::Set(value) if value == "light" || value == "dark" => Ok(Some(json!(value))),
+    MediaOverride::Set(value) => Err(FerriError::unsupported(format!(
+      "BiDi/Firefox emulates `colorScheme` as light or dark only, not `{value}`"
+    ))),
   }
 }
 

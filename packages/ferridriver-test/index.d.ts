@@ -2664,10 +2664,11 @@ export interface BrowserContextOptions {
   networkConditions?: NetworkPreset | NetworkConditions;
   /** ferridriver extension, Chromium only: CPU slowdown factor. */
   cpuThrottling?: number;
-  colorScheme?: 'light' | 'dark' | 'no-preference';
-  reducedMotion?: 'reduce' | 'no-preference';
-  forcedColors?: 'active' | 'none';
-  contrast?: 'more' | 'no-preference';
+  /** Defaults to `'light'`; `null` turns the emulation off, and the page follows the browser. */
+  colorScheme?: 'light' | 'dark' | 'no-preference' | null;
+  reducedMotion?: 'reduce' | 'no-preference' | null;
+  forcedColors?: 'active' | 'none' | null;
+  contrast?: 'more' | 'no-preference' | null;
   /** Record a video of every page into `dir`, scaled to `size`. */
   recordVideo?: { dir: string; size?: { width: number; height: number } };
   isMobile?: boolean;

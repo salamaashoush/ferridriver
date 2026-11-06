@@ -870,7 +870,12 @@ pub struct ContextConfig {
   /// applies only while the engine is still at its default, mirroring
   /// Playwright's `browserName` defaulting from `defaultBrowserType`.
   pub default_browser_type: Option<String>,
-  pub color_scheme: Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "written_color_scheme",
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub color_scheme: Option<ColorSchemeSetting>,
   pub locale: Option<String>,
   pub device_scale_factor: Option<f64>,
   pub offline: bool,
@@ -911,6 +916,59 @@ pub struct ContextConfig {
   /// means moves to where fixtures are known — after collection.
   #[serde(flatten)]
   pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// A written `use.colorScheme`. `null` asks for no emulation, so the page
+/// follows the browser's own appearance; leaving the key out is different
+/// again, and gets `light`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColorSchemeSetting {
+  Scheme(String),
+  Null,
+}
+
+impl ContextConfig {
+  /// The `colorScheme` a test sees as its fixture value: the one written,
+  /// `light` when none is, and `None` for `null`.
+  #[must_use]
+  pub fn color_scheme_fixture(&self) -> Option<&str> {
+    match &self.color_scheme {
+      None => Some("light"),
+      Some(ColorSchemeSetting::Scheme(scheme)) => Some(scheme),
+      Some(ColorSchemeSetting::Null) => None,
+    }
+  }
+}
+
+impl ColorSchemeSetting {
+  #[must_use]
+  pub fn media_override(&self) -> ferridriver::options::MediaOverride {
+    match self {
+      Self::Scheme(scheme) => ferridriver::options::MediaOverride::Set(scheme.clone()),
+      Self::Null => ferridriver::options::MediaOverride::Disabled,
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for ColorSchemeSetting {
+  fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+    Ok(Option::<String>::deserialize(de)?.map_or(Self::Null, Self::Scheme))
+  }
+}
+
+impl Serialize for ColorSchemeSetting {
+  fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+    match self {
+      Self::Scheme(scheme) => ser.serialize_str(scheme),
+      Self::Null => ser.serialize_none(),
+    }
+  }
+}
+
+/// Keep a written `colorScheme: null` apart from an absent key, which
+/// `Option`'s own impl would fold together.
+fn written_color_scheme<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<ColorSchemeSetting>, D::Error> {
+  ColorSchemeSetting::deserialize(de).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2032,6 +2090,43 @@ fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
   // must not drop the config's `use.theme`.
   for (key, value) in &overlay.extra {
     base.extra.insert(key.clone(), value.clone());
+  }
+}
+
+#[cfg(test)]
+mod color_scheme_config_tests {
+  use super::{ColorSchemeSetting, ContextConfig};
+
+  fn parse(json: &str) -> ContextConfig {
+    serde_json::from_str(json).expect("parse")
+  }
+
+  #[test]
+  fn null_is_kept_apart_from_an_absent_key() {
+    assert_eq!(parse("{}").color_scheme, None);
+    assert_eq!(
+      parse(r#"{"colorScheme":null}"#).color_scheme,
+      Some(ColorSchemeSetting::Null)
+    );
+    assert_eq!(
+      parse(r#"{"colorScheme":"dark"}"#).color_scheme,
+      Some(ColorSchemeSetting::Scheme("dark".into()))
+    );
+  }
+
+  #[test]
+  fn an_absent_key_survives_a_round_trip() {
+    let written = serde_json::to_string(&parse("{}")).expect("serialize");
+    assert_eq!(parse(&written).color_scheme, None);
+    let written = serde_json::to_string(&parse(r#"{"colorScheme":null}"#)).expect("serialize");
+    assert_eq!(parse(&written).color_scheme, Some(ColorSchemeSetting::Null));
+  }
+
+  #[test]
+  fn the_fixture_value_is_light_unless_written() {
+    assert_eq!(parse("{}").color_scheme_fixture(), Some("light"));
+    assert_eq!(parse(r#"{"colorScheme":"dark"}"#).color_scheme_fixture(), Some("dark"));
+    assert_eq!(parse(r#"{"colorScheme":null}"#).color_scheme_fixture(), None);
   }
 }
 

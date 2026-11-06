@@ -1685,7 +1685,9 @@ pub struct EmulateMediaOptions {
   pub contrast: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
 }
 
-fn lower_override(v: Option<napi::Either<String, napi::bindgen_prelude::Null>>) -> ferridriver::options::MediaOverride {
+pub(crate) fn lower_override(
+  v: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+) -> ferridriver::options::MediaOverride {
   match v {
     None => ferridriver::options::MediaOverride::Unchanged,
     Some(napi::Either::A(s)) => ferridriver::options::MediaOverride::Set(s),

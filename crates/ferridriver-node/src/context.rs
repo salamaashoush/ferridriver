@@ -1007,10 +1007,12 @@ pub struct VideoSizeJs {
 /// `BrowserContextOptions` —
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
 /// Every field is optional. Fields that must mirror Playwright's
-/// string unions (e.g. `colorScheme: null | "light" | "dark" |
-/// "no-preference"`) use string passthrough here with the exact union
+/// string unions use string passthrough here with the exact union
 /// rendered via `#[napi(ts_args_type = ...)]` on the consuming
-/// `browser.newContext(options)` method.
+/// `browser.newContext(options)` method. The media fields
+/// (`colorScheme`, `contrast`, `forcedColors`, `reducedMotion`) take
+/// `null` too, which is not the same as leaving them out: `null` turns
+/// the emulation off.
 #[napi(object)]
 pub struct NapiBrowserContextOptions {
   pub accept_downloads: Option<bool>,
@@ -1023,12 +1025,15 @@ pub struct NapiBrowserContextOptions {
   pub base_url: Option<String>,
   #[napi(js_name = "bypassCSP")]
   pub bypass_csp: Option<bool>,
-  pub color_scheme: Option<String>,
-  pub contrast: Option<String>,
+  #[napi(ts_type = "null | 'light' | 'dark' | 'no-preference'")]
+  pub color_scheme: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+  #[napi(ts_type = "null | 'no-preference' | 'more'")]
+  pub contrast: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
   pub device_scale_factor: Option<f64>,
   #[napi(js_name = "extraHTTPHeaders")]
   pub extra_http_headers: Option<HashMap<String, String>>,
-  pub forced_colors: Option<String>,
+  #[napi(ts_type = "null | 'active' | 'none'")]
+  pub forced_colors: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
   pub geolocation: Option<NapiGeolocation>,
   pub has_touch: Option<bool>,
   #[napi(
@@ -1050,7 +1055,8 @@ pub struct NapiBrowserContextOptions {
   pub proxy: Option<NapiProxyConfig>,
   pub record_har: Option<RecordHarOptionsJs>,
   pub record_video: Option<RecordVideoOptionsJs>,
-  pub reduced_motion: Option<String>,
+  #[napi(ts_type = "null | 'reduce' | 'no-preference'")]
+  pub reduced_motion: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
   pub screen: Option<NapiScreenSize>,
   pub service_workers: Option<String>,
   /// Playwright: `storageState?: string | StorageState`. Either a path to
@@ -1248,30 +1254,10 @@ impl NapiBrowserContextOptions {
       .map(serde_json::from_value::<fo::NetworkConditions>)
       .transpose()
       .map_err(|e| napi::Error::from_reason(format!("networkConditions: {e}")))?;
-    let color_scheme = self
-      .color_scheme
-      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
-        "null" => fo::MediaOverride::Disabled,
-        other => fo::MediaOverride::Set(other.to_string()),
-      });
-    let contrast = self
-      .contrast
-      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
-        "null" => fo::MediaOverride::Disabled,
-        other => fo::MediaOverride::Set(other.to_string()),
-      });
-    let forced_colors = self
-      .forced_colors
-      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
-        "null" => fo::MediaOverride::Disabled,
-        other => fo::MediaOverride::Set(other.to_string()),
-      });
-    let reduced_motion = self
-      .reduced_motion
-      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
-        "null" => fo::MediaOverride::Disabled,
-        other => fo::MediaOverride::Set(other.to_string()),
-      });
+    let color_scheme = crate::types::lower_override(self.color_scheme);
+    let contrast = crate::types::lower_override(self.contrast);
+    let forced_colors = crate::types::lower_override(self.forced_colors);
+    let reduced_motion = crate::types::lower_override(self.reduced_motion);
     let viewport = if self.disable_viewport == Some(true) {
       fo::ViewportOption::Null
     } else if let Some(vp) = self.viewport {

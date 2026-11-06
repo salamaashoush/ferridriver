@@ -286,14 +286,12 @@ describe('actions', () => {
   test('script_emulate_media_all_fields', async ({ page, browserName }) => {
     await page.goto(dataUrl("<div id='x'></div>"));
     if (browserName === 'firefox') {
-      // Firefox's BiDi implementation has no working command for any of
-      // the five media knobs (Playwright's own BiDi updateEmulateMedia
-      // is an empty stub; emulation.setForcedColorsModeThemeOverride is
-      // rejected by shipping Firefox). Each field surfaces a typed
-      // Unsupported instead of silently pretending the override worked.
+      // Firefox overrides prefers-color-scheme and refuses every other
+      // media feature, and has no command for the media type. Each of
+      // those surfaces a typed Unsupported instead of silently
+      // pretending the override worked.
       for (const bag of [
         { media: 'print' as const },
-        { colorScheme: 'dark' as const },
         { reducedMotion: 'reduce' as const },
         { forcedColors: 'active' as const },
         { contrast: 'more' as const },
@@ -306,6 +304,8 @@ describe('actions', () => {
         }
         expect(msg.toLowerCase().includes('does not support')).toBe(true);
       }
+      await page.emulateMedia({ colorScheme: 'dark' });
+      expect(await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches)).toBe(true);
       return;
     }
     await page.emulateMedia({
@@ -338,33 +338,32 @@ describe('actions', () => {
     expect(result.contrast).toBe(true);
   });
 
-  test('script_emulate_media_null_disables_single_field', async ({ page, browserName }) => {
-    await page.goto(dataUrl('<html><body>init</body></html>'));
-    if (browserName === 'firefox') {
-      // See script_emulate_media_all_fields — every knob is typed
-      // Unsupported on Firefox/BiDi, including the null-reset form.
-      let msg = 'no-throw';
-      try {
-        await page.emulateMedia({ colorScheme: null });
-      } catch (e) {
-        msg = String((e as Error).message ?? e);
-      }
-      expect(msg.toLowerCase().includes('does not support')).toBe(true);
-      return;
+  test('script_emulate_media_null_disables_single_field', async ({ page, browser, browserName }) => {
+    // Removal hands the scheme back to the browser, which follows whatever
+    // the host runs (WebKit reads the real macOS appearance). Take that
+    // from a context that emulates no scheme at all, so the assertion
+    // holds on any host.
+    const own = await browser.newContext({ colorScheme: null });
+    let ownDark: boolean;
+    try {
+      const probe = await own.newPage();
+      await probe.goto(dataUrl('<html><body>probe</body></html>'));
+      ownDark = (await probe.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")) as boolean;
+    } finally {
+      await own.close();
     }
-    // Removal restores the SYSTEM preference, which is whatever the host
-    // runs (WebKit reads the real macOS appearance; headless Chromium
-    // defaults to light). Capture the baseline so the assertion is
-    // environment-independent: override to the opposite of the baseline,
-    // remove, and expect the baseline back.
-    const baselineDark = (await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")) as boolean;
-    const override = baselineDark ? ('light' as const) : ('dark' as const);
-    await page.emulateMedia({ colorScheme: override, reducedMotion: 'reduce' });
-    expect(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")).toBe(!baselineDark);
+    await page.goto(dataUrl('<html><body>init</body></html>'));
+    const override = ownDark ? ('light' as const) : ('dark' as const);
+    // Firefox emulates no other media feature, so it has no sibling to keep.
+    const sibling = browserName === 'firefox' ? {} : { reducedMotion: 'reduce' as const };
+    await page.emulateMedia({ colorScheme: override, ...sibling });
+    expect(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")).toBe(!ownDark);
     await page.emulateMedia({ colorScheme: null });
-    expect(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")).toBe(baselineDark);
-    // A sibling reset must not disturb the surviving override.
-    expect(await page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches")).toBe(true);
+    expect(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")).toBe(ownDark);
+    if (browserName !== 'firefox') {
+      // A sibling reset must not disturb the surviving override.
+      expect(await page.evaluate("matchMedia('(prefers-reduced-motion: reduce)').matches")).toBe(true);
+    }
   });
 
   test('script_drag_and_drop_trial', async ({ page }) => {

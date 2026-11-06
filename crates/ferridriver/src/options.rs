@@ -1671,7 +1671,7 @@ impl From<Option<String>> for MediaOverride {
 /// uses [`MediaOverride`] to distinguish *unspecified* (leave current
 /// state alone) from *null* (clear any existing override) from a
 /// *concrete value*.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmulateMediaOptions {
   /// CSS media type: `"screen"` or `"print"`.
   pub media: MediaOverride,
@@ -1683,6 +1683,37 @@ pub struct EmulateMediaOptions {
   pub forced_colors: MediaOverride,
   /// Prefers-contrast: `"more"`, `"less"`, or `"no-preference"`.
   pub contrast: MediaOverride,
+}
+
+impl EmulateMediaOptions {
+  /// The fields `self` specifies, falling back to `base` for the rest.
+  #[must_use]
+  pub fn layered_over(&self, base: &Self) -> Self {
+    let pick = |own: &MediaOverride, base: &MediaOverride| {
+      if own.is_specified() { own.clone() } else { base.clone() }
+    };
+    Self {
+      media: pick(&self.media, &base.media),
+      color_scheme: pick(&self.color_scheme, &base.color_scheme),
+      reduced_motion: pick(&self.reduced_motion, &base.reduced_motion),
+      forced_colors: pick(&self.forced_colors, &base.forced_colors),
+      contrast: pick(&self.contrast, &base.contrast),
+    }
+  }
+
+  /// `true` when no field is specified.
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    [
+      &self.media,
+      &self.color_scheme,
+      &self.reduced_motion,
+      &self.forced_colors,
+      &self.contrast,
+    ]
+    .iter()
+    .all(|field| !field.is_specified())
+  }
 }
 
 /// PDF page-size dimension as accepted by `PDFOptions.width`,
@@ -3119,9 +3150,9 @@ pub struct BrowserContextOptions {
   pub test_id_attribute: Option<String>,
   pub base_url: Option<String>,
   pub bypass_csp: Option<bool>,
-  /// `null` → disable media emulation; `Some(value)` → apply; absent →
-  /// leave backend default. Use [`MediaOverride`] for the null/value
-  /// distinction.
+  /// `null` → no emulation, the page follows the browser's own
+  /// appearance; a value → apply it; absent → `light`, whatever the
+  /// host's appearance, as in Playwright.
   pub color_scheme: MediaOverride,
   pub contrast: MediaOverride,
   pub device_scale_factor: Option<f64>,
@@ -3185,19 +3216,10 @@ impl BrowserContextOptions {
     })
   }
 
-  /// `true` iff any emulated-media field needs to be applied.
+  /// The media features this context names for its pages, which a
+  /// page's own `emulateMedia` calls are layered over.
   #[must_use]
-  pub fn any_media_override(&self) -> bool {
-    self.color_scheme.is_specified()
-      || self.reduced_motion.is_specified()
-      || self.forced_colors.is_specified()
-      || self.contrast.is_specified()
-  }
-
-  /// Collect the media fields into an [`EmulateMediaOptions`] bag for
-  /// `page.emulate_media`.
-  #[must_use]
-  pub fn as_emulate_media(&self) -> EmulateMediaOptions {
+  pub fn emulated_media(&self) -> EmulateMediaOptions {
     EmulateMediaOptions {
       media: MediaOverride::Unchanged,
       color_scheme: self.color_scheme.clone(),
@@ -3516,6 +3538,30 @@ mod media_override_tests {
     assert_eq!(set, MediaOverride::Set("dark".into()));
     let unch: MediaOverride = None.into();
     assert_eq!(unch, MediaOverride::Unchanged);
+  }
+
+  #[test]
+  fn an_update_layers_over_what_it_leaves_out() {
+    let dark = EmulateMediaOptions {
+      color_scheme: MediaOverride::Set("dark".into()),
+      ..Default::default()
+    };
+    let print = EmulateMediaOptions {
+      media: MediaOverride::Set("print".into()),
+      ..Default::default()
+    };
+    let both = print.layered_over(&dark);
+    assert_eq!(both.media, MediaOverride::Set("print".into()));
+    assert_eq!(both.color_scheme, MediaOverride::Set("dark".into()));
+    let cleared = EmulateMediaOptions {
+      color_scheme: MediaOverride::Disabled,
+      ..Default::default()
+    }
+    .layered_over(&both);
+    assert_eq!(cleared.color_scheme, MediaOverride::Disabled);
+    assert_eq!(cleared.media, MediaOverride::Set("print".into()));
+    assert!(EmulateMediaOptions::default().is_empty());
+    assert!(!cleared.is_empty());
   }
 
   #[test]
