@@ -226,7 +226,7 @@ pub async fn page_for(browser: &Browser, context: &str) -> ferridriver::Result<A
 const ADOPTION_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The page of `context` whose target id (its main frame id) is
-/// `target_id`, waiting [`ADOPTION_GRACE`] for one the context is still
+/// `target_id`, waiting `ADOPTION_GRACE` for one the context is still
 /// adopting.
 ///
 /// # Errors

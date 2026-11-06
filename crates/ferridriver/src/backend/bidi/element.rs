@@ -59,7 +59,7 @@ impl BidiElement {
     Self::value_of(result)
   }
 
-  /// [`Self::call_fn_value`] in the frame's utility sandbox, where the
+  /// `Self::call_fn_value` in the frame's utility sandbox, where the
   /// element is the browser's own and nothing the page put on it (a
   /// framework's own `value` property) is seen.
   pub async fn call_js_fn_value_in_utility(&self, func: &str) -> Result<Option<serde_json::Value>> {
