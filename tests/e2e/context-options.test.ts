@@ -77,6 +77,18 @@ describe('context options', () => {
     }
   });
 
+  test('context_options_viewport_null', async ({ browser }) => {
+    // `null` is not a missing key: it asks for no viewport emulation, and
+    // the page reports none rather than the 1280x720 default.
+    const ctx = await browser.newContext({ viewport: null });
+    try {
+      const p = await ctx.newPage();
+      expect(p.viewportSize()).toBe(null);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('context_options_timezone', async ({ browser }) => {
     const ctx = await browser.newContext({ timezoneId: 'America/New_York' });
     try {

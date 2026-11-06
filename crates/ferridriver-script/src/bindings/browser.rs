@@ -422,11 +422,14 @@ pub(crate) struct JsBrowserContextOptions {
   base_url: Option<String>,
   #[serde(rename = "bypassCSP")]
   bypass_csp: Option<bool>,
+  #[serde(deserialize_with = "written")]
   color_scheme: Option<serde_json::Value>,
+  #[serde(deserialize_with = "written")]
   contrast: Option<serde_json::Value>,
   device_scale_factor: Option<f64>,
   #[serde(rename = "extraHTTPHeaders")]
   extra_http_headers: Option<rustc_hash::FxHashMap<String, String>>,
+  #[serde(deserialize_with = "written")]
   forced_colors: Option<serde_json::Value>,
   geolocation: Option<JsGeolocation>,
   has_touch: Option<bool>,
@@ -443,6 +446,7 @@ pub(crate) struct JsBrowserContextOptions {
   proxy: Option<JsProxyConfig>,
   record_har: Option<JsRecordHarOptions>,
   record_video: Option<JsRecordVideoOptions>,
+  #[serde(deserialize_with = "written")]
   reduced_motion: Option<serde_json::Value>,
   screen: Option<JsScreenSize>,
   service_workers: Option<String>,
@@ -453,6 +457,7 @@ pub(crate) struct JsBrowserContextOptions {
   timezone_id: Option<String>,
   user_agent: Option<String>,
   /// JS `null` → explicit opt-out; omitted → browser default.
+  #[serde(deserialize_with = "written")]
   viewport: Option<serde_json::Value>,
 }
 
@@ -547,6 +552,13 @@ struct JsVideoSize {
 struct JsViewportSize {
   width: i64,
   height: i64,
+}
+
+/// A key written as `null` is `Some(Value::Null)`, where `Option`'s own
+/// impl would fold it into `None`, the state that means "not written".
+/// For these options the two differ: `null` turns the emulation off.
+fn written<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<serde_json::Value>, D::Error> {
+  <serde_json::Value as serde::Deserialize>::deserialize(de).map(Some)
 }
 
 fn lower_media(v: Option<serde_json::Value>) -> ferridriver::options::MediaOverride {
