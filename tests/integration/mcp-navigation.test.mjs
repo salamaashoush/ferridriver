@@ -74,6 +74,35 @@ for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
     } finally { await client.close(); }
   });
 
+  test(`${backend}: MCP page.url() reads a client-side navigation at once, and a glob wait keeps its timeout`, async () => {
+    const client = await McpClient.launch(backend);
+    try {
+      const result = await client.script(`
+        await page.route('http://example.test/**', route => route.fulfill({
+          status: 200, contentType: 'text/html', body: '<a id="spa" href="/spa">go</a>'
+        }));
+        await page.goto('http://example.test/home');
+        await page.evaluate("history.pushState({}, '', '/pushed')");
+        const pushed = page.url();
+        await page.evaluate(\`document.getElementById('spa').addEventListener('click', event => {
+          event.preventDefault();
+          history.pushState({}, '', event.currentTarget.getAttribute('href'));
+        })\`);
+        await page.click('#spa');
+        const clicked = page.url();
+        const start = Date.now();
+        let message = '';
+        try { await page.waitForURL('**/never', { timeout: 400 }); }
+        catch (error) { message = String(error.message); }
+        return { pushed, clicked, message, elapsed: Date.now() - start };
+      `);
+      assert.equal(result.pushed, 'http://example.test/pushed');
+      assert.equal(result.clicked, 'http://example.test/spa');
+      assert.match(result.message, /400/);
+      assert.ok(result.elapsed < 3000, JSON.stringify(result));
+    } finally { await client.close(); }
+  });
+
   test(`${backend}: MCP tracks pushState, replaceState and fragment navigation`, async () => {
     const client = await McpClient.launch(backend);
     try {
