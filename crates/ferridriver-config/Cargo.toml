@@ -18,7 +18,7 @@ ferridriver = { workspace = true }
 ferrijs-permissions = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "1.1"
+toml = "1.2"
 serde-saphyr = "2"
 anyhow = { workspace = true }
 dirs = { workspace = true }

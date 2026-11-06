@@ -40,7 +40,7 @@ async-channel = "2"
 dashmap = { workspace = true }
 inventory = "0.3"
 rustc-hash = "2"
-toml = "1.1"
+toml = "1.2"
 glob = "0.3"
 console = "0.16"
 similar = "3"

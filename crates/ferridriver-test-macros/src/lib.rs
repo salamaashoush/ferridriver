@@ -32,6 +32,7 @@ use syn::{Expr, FnArg, ItemFn, ItemMod, Lit, Meta, Pat, Token, Type, parse_macro
 /// `retries`, `timeout`, `tag`, `skip`/`slow`/`fixme`/`fail`, `only`,
 /// `info`, plus context overrides (`viewport`, `locale`, ... or raw
 /// `use_options` JSON).
+#[derive(Default)]
 struct FerritestArgs {
   retries: Option<u32>,
   timeout_ms: Option<u64>,
@@ -53,24 +54,6 @@ struct FerritestArgs {
   /// Context overrides from structured attribute keys (`viewport`,
   /// `locale`, ...), stored under their camelCase wire names.
   use_structured: serde_json::Map<String, serde_json::Value>,
-}
-
-impl Default for FerritestArgs {
-  fn default() -> Self {
-    Self {
-      retries: None,
-      timeout_ms: None,
-      tags: Vec::new(),
-      skip: None,
-      slow: None,
-      fixme: None,
-      fail: None,
-      only: false,
-      infos: Vec::new(),
-      use_raw: None,
-      use_structured: serde_json::Map::new(),
-    }
-  }
 }
 
 fn lit_str(nv: &syn::MetaNameValue) -> syn::Result<String> {

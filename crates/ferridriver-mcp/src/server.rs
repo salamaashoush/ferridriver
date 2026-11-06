@@ -15,7 +15,7 @@ use rmcp::{
     CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
     ListPromptsResult, ListResourcesResult, PaginatedRequestParams, Prompt, PromptArgument, PromptMessage,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role,
-    ServerCapabilities, ServerInfo,
+    ServerCapabilities, ServerConfig,
   },
   service::RequestContext,
   tool_handler,
@@ -1991,8 +1991,8 @@ fn supports_cache_hints(context: &RequestContext<RoleServer>) -> bool {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
-  fn get_info(&self) -> ServerInfo {
-    ServerInfo::new(
+  fn get_info(&self) -> ServerConfig {
+    ServerConfig::new(
       // Logging capability dropped: deprecated by MCP SEP-2577 (rmcp
       // deprecates `enable_logging` and will remove it); the server
       // never emitted `notifications/message` anyway.
