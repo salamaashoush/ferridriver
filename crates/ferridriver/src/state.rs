@@ -3031,26 +3031,19 @@ pub fn chrome_flags_with(
   // builds the headless switches inside `defaultArgs()`, so
   // `ignoreDefaultArgs: true` drops them there too. Gating only sections
   // 1/2/4 left the caller with a browser that was still forced headless
-  // (and still colour-scheme-pinned) after asking for no defaults at all.
+  // after asking for no defaults at all.
   if headless && !drop_all {
     for f in ["--headless", "--hide-scrollbars", "--mute-audio"] {
       if !is_dropped(f) {
         flags.push(f.into());
       }
     }
-    // `preferredColorScheme=1` pins Blink's "no override" baseline to
-    // light. Without it, headless Chrome inherits the host's GTK / KDE
-    // dark-mode setting, which causes `matchMedia('(prefers-color-scheme:
-    // dark)').matches` to stay `true` even after
-    // `page.emulateMedia({colorScheme: null})` clears the override —
-    // the override is gone but the system fallback is still dark.
-    // Tests that rely on "null reset returns to light" only pass on
-    // light-mode hosts otherwise. Playwright's own chromiumSwitches
-    // skip this because their CI runs on light-mode hosts; we cover
-    // both.
+    // No colour scheme is pinned here: a page is emulated light unless
+    // asked otherwise, and `colorScheme: null` hands it back to whatever
+    // the browser does on this host, as it does in Playwright.
     if !is_dropped("--blink-settings") {
       flags.push(
-        "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4,preferredColorScheme=1".into(),
+        "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4".into(),
       );
     }
   }

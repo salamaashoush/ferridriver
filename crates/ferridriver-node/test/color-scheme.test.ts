@@ -17,6 +17,28 @@ async function scheme(page: Page): Promise<{ light: boolean; dark: boolean }> {
   };
 }
 
+// What a browser does with no scheme emulated, launched as Playwright
+// launches it: Firefox is set light; WebKit follows the desktop; headless
+// Chromium draws light on macOS and follows the desktop elsewhere.
+function desktopPrefersDark(): boolean {
+  try {
+    if (process.platform === "darwin") {
+      const style = Bun.spawnSync(["defaults", "read", "-g", "AppleInterfaceStyle"]);
+      return style.stdout.toString().trim() === "Dark";
+    }
+    const scheme = Bun.spawnSync(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"]);
+    return scheme.success && scheme.stdout.toString().includes("prefer-dark");
+  } catch {
+    return false;
+  }
+}
+
+function ownSchemeIsDark(backend: string): boolean {
+  if (backend === "bidi") return false;
+  if (backend === "webkit") return desktopPrefersDark();
+  return process.platform !== "darwin" && desktopPrefersDark();
+}
+
 for (const backend of BACKENDS) {
   describe(`colorScheme [${backend}]`, () => {
     let browser: Browser;
@@ -32,7 +54,9 @@ for (const backend of BACKENDS) {
     async function inContext<T>(options: Parameters<Browser["newContext"]>[0], body: (page: Page) => Promise<T>) {
       const ctx = browser.newContext(options);
       try {
-        return await body(await ctx.newPage());
+        const page = await ctx.newPage();
+        await page.setContent("<p>text</p>");
+        return await body(page);
       } finally {
         await ctx.close();
       }
@@ -49,9 +73,9 @@ for (const backend of BACKENDS) {
     });
 
     it("null leaves the page to the browser", async () => {
-      // The browser's own scheme depends on the host, so null is held to
-      // agreeing with a page that cleared its own override.
+      const dark = ownSchemeIsDark(backend);
       const own = await inContext({ colorScheme: null }, scheme);
+      expect(own).toEqual({ light: !dark, dark });
       const cleared = await inContext({}, async (page) => {
         await page.emulateMedia({ colorScheme: null });
         return scheme(page);
