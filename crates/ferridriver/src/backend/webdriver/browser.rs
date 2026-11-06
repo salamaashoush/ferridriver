@@ -121,14 +121,7 @@ impl WebDriverBrowser {
   }
 
   pub async fn pages(&self) -> Result<Vec<WebDriverPage>> {
-    list_windows(
-      &self.session,
-      &self.windows,
-      &self.capabilities,
-      self.timeout_ms,
-      &self.popup_taps,
-    )
-    .await
+    list_windows(&self.session, &self.windows, &self.capabilities, self.timeout_ms, None).await
   }
 
   /// Classic `WebDriver` announces nothing, so a window the page opened is
@@ -150,7 +143,7 @@ impl WebDriverBrowser {
           if session.is_closed() {
             return;
           }
-          if let Err(error) = list_windows(&session, &windows, &capabilities, timeout_ms, &taps).await {
+          if let Err(error) = list_windows(&session, &windows, &capabilities, timeout_ms, Some(&taps)).await {
             tracing::debug!(target: "ferridriver::webdriver", %error, "listing windows for popups failed");
           }
         }
@@ -253,15 +246,19 @@ fn window_page(session: &Arc<WebDriverSession>, capabilities: &Value, timeout_ms
   page
 }
 
-/// The session's windows, less the ones a popup listener was handed. A
-/// window nobody here opened goes to that listener when there is one, with
-/// the window the session last drove as its opener.
+/// The session's windows, less the ones a popup listener was handed. While
+/// polling for popups, a window nobody here opened goes to that listener
+/// when there is one, with the window the session last drove as its
+/// opener. A caller asking for the windows itself (`popup_taps` is `None`)
+/// gets every new one back: it is about to adopt them, and handing one to
+/// the listener instead would leave it out of the answer while the
+/// listener registers it.
 async fn list_windows(
   session: &Arc<WebDriverSession>,
   windows: &tokio::sync::Mutex<Windows>,
   capabilities: &Value,
   timeout_ms: u64,
-  popup_taps: &crate::backend::PopupTaps,
+  popup_taps: Option<&crate::backend::PopupTaps>,
 ) -> Result<Vec<WebDriverPage>> {
   let mut windows = windows.lock().await;
   let opener = session.selected_window();
@@ -298,14 +295,16 @@ async fn list_windows(
     let page = window_page(session, capabilities, timeout_ms, handle);
     windows.pages.insert(handle.to_owned(), page.clone());
     let announced = opened_here
-      && crate::backend::push_popup(
-        popup_taps,
-        crate::backend::PopupInfo {
-          page: crate::backend::AnyPage::WebDriver(page.clone()),
-          browser_context_id: None,
-          opener_target_id: opener.clone(),
-        },
-      );
+      && popup_taps.is_some_and(|popup_taps| {
+        crate::backend::push_popup(
+          popup_taps,
+          crate::backend::PopupInfo {
+            page: crate::backend::AnyPage::WebDriver(page.clone()),
+            browser_context_id: None,
+            opener_target_id: opener.clone(),
+          },
+        )
+      });
     if announced {
       windows.announced.insert(handle.to_owned());
     } else {
@@ -717,7 +716,7 @@ mod tests {
       .await
       .unwrap();
     // Subscribed without `popup_taps()`, whose polling would ask for handles
-    // this server does not expect.
+    // this server does not expect; the test lists for popups itself instead.
     let (tap, mut popups) = tokio::sync::mpsc::unbounded_channel();
     browser.popup_taps.lock().unwrap().push(tap);
 
@@ -727,7 +726,15 @@ mod tests {
     assert!(popups.try_recv().is_err());
 
     assert_eq!(initial[0].title().await.unwrap().as_deref(), Some("Opener"));
-    let listed = browser.pages().await.unwrap();
+    let listed = list_windows(
+      &browser.session,
+      &browser.windows,
+      &browser.capabilities,
+      browser.timeout_ms,
+      Some(&browser.popup_taps),
+    )
+    .await
+    .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].page_guid(), "first");
     let popup = popups.try_recv().unwrap();
@@ -736,6 +743,41 @@ mod tests {
 
     // The listener registers it; listing it again would register it twice.
     assert_eq!(browser.pages().await.unwrap().len(), 1);
+    assert!(popups.try_recv().is_err());
+    browser.close().await.unwrap();
+    server.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn asking_for_the_windows_adopts_one_nobody_here_opened() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+      for value in [
+        json!({"sessionId":"asked","capabilities":{"browserName":"safari","browserVersion":"26.6.1"}}),
+        json!(["first"]),
+        json!(["second", "first"]),
+        Value::Null,
+      ] {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        super::super::session::tests::request(&mut socket).await;
+        let body = json!({"value":value}).to_string();
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+      }
+    });
+    let browser = WebDriverBrowser::connect(&endpoint, "safari", None, None, Some(1000))
+      .await
+      .unwrap();
+    let (tap, mut popups) = tokio::sync::mpsc::unbounded_channel();
+    browser.popup_taps.lock().unwrap().push(tap);
+
+    assert_eq!(browser.pages().await.unwrap().len(), 1);
+    // `discoverPages` asks this way, and must answer with the window it
+    // found rather than hand it to the listener and answer without it.
+    let listed = browser.pages().await.unwrap();
+    let mut handles: Vec<String> = listed.iter().map(WebDriverPage::page_guid).collect();
+    handles.sort();
+    assert_eq!(handles, ["first", "second"]);
     assert!(popups.try_recv().is_err());
     browser.close().await.unwrap();
     server.await.unwrap();
