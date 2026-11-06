@@ -72,3 +72,32 @@ test('an attached existing tab has a main frame and completes navigation', async
     await owner.close();
   }
 });
+
+test('an attached existing tab gets the media emulation a new page would', async () => {
+  runOnceAcrossProjects();
+  // The switch makes Chromium report a host that prefers reduced motion,
+  // which the owner's page shows once its own emulation is cleared.
+  const owner = await chromium({ transport: 'ws' }).launch({ headless: true, args: ['--force-prefers-reduced-motion'] });
+  try {
+    const existing = await owner.newPage();
+    await existing.emulateMedia({ reducedMotion: null });
+    await existing.setContent('<p>existing</p>');
+    const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+    expect(await existing.evaluate(reduced)).toBe(true);
+    const protocol = await owner.newBrowserCDPSession();
+    const commandLine = await protocol.send('Browser.getBrowserCommandLine') as { arguments: string[] };
+    const profile = commandLine.arguments.find(arg => arg.startsWith('--user-data-dir='))!.slice('--user-data-dir='.length);
+    const [port] = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n');
+    await protocol.detach();
+    const attached = await chromium().connectOverCDP(`http://127.0.0.1:${port}`);
+    try {
+      const [page] = await attached.contexts()[0].pages();
+      expect(await page.evaluate(reduced)).toBe(false);
+      expect(await page.evaluate(() => matchMedia('(prefers-color-scheme: light)').matches)).toBe(true);
+    } finally {
+      await attached.close();
+    }
+  } finally {
+    await owner.close();
+  }
+});

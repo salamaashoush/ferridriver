@@ -1318,6 +1318,8 @@ impl BrowserState {
     // default context's pages. Only those pages are adopted: a page of a
     // context another client made is that client's, so it is neither
     // emulated, listed by `context.pages()`, nor taken over as a blank page.
+    // Without such options a page still gets the media emulation every page
+    // gets, as Playwright's `connectOverCDP` gives the pages it attaches to.
     let existing_pages = Box::pin(inst.browser.pages()).await?;
     let ctx = inst.context_mut("default");
     for page in existing_pages {
@@ -1340,14 +1342,27 @@ impl BrowserState {
           );
         }
       }
-    } else if let Some(vp) = viewport {
+    } else {
       for page in &inst.context_mut("default").pages {
-        if let Err(e) = page.emulate_viewport(vp).await {
+        if let Some(vp) = viewport
+          && let Err(e) = page.emulate_viewport(vp).await
+        {
           tracing::warn!(
             target: "ferridriver::state",
             instance = instance_name,
             error = %e,
             "could not emulate the configured viewport on an adopted page",
+          );
+        }
+        if let Err(e) = page
+          .emulate_context_media(crate::options::EmulateMediaOptions::default())
+          .await
+        {
+          tracing::warn!(
+            target: "ferridriver::state",
+            instance = instance_name,
+            error = %e,
+            "could not emulate the default media features on an adopted page",
           );
         }
       }
