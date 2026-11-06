@@ -92,6 +92,44 @@ describe('colour scheme', () => {
       expect(await scheme(popup)).toEqual({ light: true, dark: false });
     });
   });
+
+  test("a popup's first document already has its context's scheme", async ({ browser, baseURL }) => {
+    // The popup's own script records what it matches while it parses,
+    // before the popup can have been registered and configured.
+    await inContext(browser, { colorScheme: 'dark' }, async page => {
+      await page.goto(`${baseURL}/empty.html`);
+      const [popup] = await Promise.all([
+        page.context().waitForEvent('page') as Promise<Page>,
+        page.evaluate(() => void window.open('/early-media.html')),
+      ]);
+      await popup.waitForLoadState();
+      expect(await popup.evaluate(() => (window as unknown as { __early: unknown }).__early)).toEqual({
+        dark: true,
+        reduce: false,
+      });
+    });
+    // A blank popup has no request to hold back until it is configured;
+    // the opener reads it the moment it exists.
+    await inContext(browser, { colorScheme: 'dark' }, async page => {
+      await page.goto(`${baseURL}/empty.html`);
+      const dark = await page.evaluate(() => window.open('')!.matchMedia('(prefers-color-scheme: dark)').matches);
+      expect(dark).toBe(true);
+    });
+    // The context's, not the opener's own override.
+    await inContext(browser, {}, async page => {
+      await page.goto(`${baseURL}/empty.html`);
+      await page.emulateMedia({ colorScheme: 'dark' });
+      const [popup] = await Promise.all([
+        page.context().waitForEvent('page') as Promise<Page>,
+        page.evaluate(() => void window.open('/early-media.html')),
+      ]);
+      await popup.waitForLoadState();
+      expect(await popup.evaluate(() => (window as unknown as { __early: unknown }).__early)).toEqual({
+        dark: false,
+        reduce: false,
+      });
+    });
+  });
 });
 
 describe('use({ colorScheme: null })', () => {
