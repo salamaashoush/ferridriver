@@ -270,6 +270,10 @@ async fn drive(
     }
   };
 
+  // A person clicks the page they see: input that reaches the popup
+  // before its document does lands on nothing.
+  until_shown(&served.endpoint, &help, "Help").await?;
+
   // Named, the click lands in the popup. Unnamed, the text follows it
   // there too: the popup is the active page.
   click(&endpoint, (150.0, 20.0), Some(&help)).await?;
@@ -288,6 +292,35 @@ async fn drive(
     other => bail!("recorder.start ended with {other:?}"),
   }
   Ok((result.source, result.actions))
+}
+
+/// Wait until the page `target` shows the document titled `title`, as the
+/// app's own client sees it.
+async fn until_shown(endpoint: &str, target: &str, title: &str) -> anyhow::Result<()> {
+  let mut cdp = Cdp::connect(endpoint).await?;
+  let attached = cdp
+    .send(
+      None,
+      "Target.attachToTarget",
+      serde_json::json!({"targetId": target, "flatten": true}),
+    )
+    .await?;
+  let session = attached["sessionId"].as_str().context("a session")?.to_string();
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+  loop {
+    let shown = cdp
+      .send(
+        Some(&session),
+        "Runtime.evaluate",
+        serde_json::json!({"expression": "document.readyState === 'complete' ? document.title : ''", "returnByValue": true}),
+      )
+      .await?;
+    if shown["result"]["value"] == title {
+      return Ok(());
+    }
+    ensure!(tokio::time::Instant::now() < deadline, "{target} never showed {title}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
 }
 
 /// A CDP client of another app's: one command at a time, answers matched by id.
