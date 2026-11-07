@@ -59,6 +59,31 @@ describe('events', () => {
     expect(typeof loc.columnNumber).toBe('number');
   });
 
+  // The script does not yield between the call and the event, so nothing
+  // polls the returned promise before the event fires: the wait has to be
+  // listening from the call itself, as Playwright's is.
+  for (const form of ['plain', 'predicate'] as const) {
+    test(`waitForEvent listens from the call, before anything awaits it (${form})`, async ({ page }) => {
+      await page.goto(dataUrl(BLANK_HTML));
+      await page.evaluate(() => {
+        setTimeout(() => console.log('while busy'), 50);
+      });
+      const waiter =
+        form === 'plain'
+          ? page.waitForEvent('console', { timeout: 5000 })
+          : page.waitForEvent('console', {
+              predicate: (message) => (message as ConsoleMessage).text() === 'while busy',
+              timeout: 5000,
+            });
+      const until = Date.now() + 1000;
+      while (Date.now() < until) {
+        // Busy, so the event arrives while the promise is still unpolled.
+      }
+      const msg = (await waiter) as ConsoleMessage;
+      expect(msg.text()).toBe('while busy');
+    });
+  }
+
   test('page_error_is_native_error', async ({ page }) => {
     await page.goto(dataUrl('<!doctype html><html><body><h1>wait-pageerror</h1></body></html>'));
     const waiter = page.waitForEvent('pageerror', {

@@ -3039,104 +3039,108 @@ impl PageJs {
   /// `page.on` listener would and the wait resolves on the first event
   /// for which it returns truthy.
   #[qjs(rename = "waitForEvent")]
-  pub async fn wait_for_event<'js>(
+  pub fn wait_for_event<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     event: String,
     options_or_predicate: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        use rquickjs::class::Class;
-        let mut timeout_ms: Option<f64> = None;
-        let mut predicate: Option<rquickjs::Function<'js>> = None;
-        if let Some(v) = options_or_predicate.0 {
-          if let Some(n) = v.as_number() {
-            timeout_ms = Some(n);
-          } else if let Some(f) = v.as_function() {
-            predicate = Some(f.clone());
-          } else if let Some(obj) = v.as_object() {
-            let t: rquickjs::Value<'js> = obj.get("timeout")?;
-            timeout_ms = t.as_number();
-            let p: rquickjs::Value<'js> = obj.get("predicate")?;
-            predicate = p.as_function().cloned();
-          }
-        }
-        let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
-        let event_lc = event.to_ascii_lowercase();
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js>,
+  > {
+    use rquickjs::class::Class;
+    let mut timeout_ms: Option<f64> = None;
+    let mut predicate: Option<rquickjs::Function<'js>> = None;
+    if let Some(v) = options_or_predicate.0 {
+      if let Some(n) = v.as_number() {
+        timeout_ms = Some(n);
+      } else if let Some(f) = v.as_function() {
+        predicate = Some(f.clone());
+      } else if let Some(obj) = v.as_object() {
+        let t: rquickjs::Value<'js> = obj.get("timeout")?;
+        timeout_ms = t.as_number();
+        let p: rquickjs::Value<'js> = obj.get("predicate")?;
+        predicate = p.as_function().cloned();
+      }
+    }
+    let page = self.inner.clone();
+    let timeout = timeout_ms.map_or_else(|| page.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+    let event_lc = event.to_ascii_lowercase();
+    // `dialog`, `filechooser` and `download` without a predicate claim the
+    // live handle through a one-shot handler on the page's manager instead.
+    let managed = predicate.is_none() && matches!(event_lc.as_str(), "dialog" | "filechooser" | "download");
+    // Listening starts here, not at the promise's first poll: the caller's
+    // next statement can fire the event while nothing has polled it yet (a
+    // script that ends without awaiting, a run of synchronous code).
+    let mut rx = (!managed).then(|| page.events().subscribe());
 
+    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
+      if let Some(rx) = rx.as_mut() {
+        let Some(pred) = predicate else {
+          let name = event_lc.clone();
+          let ev = rx
+            .drain_until(move |e| match_event_name(&name, e), timeout)
+            .await
+            .into_js_with(&ctx)?;
+          return page_event_to_js(&ctx, &page, ev);
+        };
         // Predicate waits drain the broadcast for every event type — the
         // emitter bridge claims dialog / filechooser / download live
         // handles on behalf of broadcast listeners, so the predicate sees
         // the same live object a `page.on` listener would.
-        if let Some(pred) = predicate {
-          let mut rx = self.inner.events().subscribe();
-          let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-          loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-              return Err(crate::bindings::convert::throw_named(
-                &ctx,
-                "TimeoutError",
-                format!("Timeout {timeout}ms exceeded while waiting for event '{event}'"),
-              ));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+        loop {
+          let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+          if remaining.is_zero() {
+            return Err(crate::bindings::convert::throw_named(
+              &ctx,
+              "TimeoutError",
+              format!("Timeout {timeout}ms exceeded while waiting for event '{event}'"),
+            ));
+          }
+          let recv = tokio::time::timeout(remaining, crate::bindings::page::recv_matching(rx, &event_lc)).await;
+          let Ok(Some(ev)) = recv else {
+            if recv.is_err() {
+              continue; // deadline check at loop top surfaces the timeout
             }
-            let recv = tokio::time::timeout(remaining, crate::bindings::page::recv_matching(&mut rx, &event_lc)).await;
-            let Ok(Some(ev)) = recv else {
-              if recv.is_err() {
-                continue; // deadline check at loop top surfaces the timeout
-              }
-              return Err(crate::bindings::convert::throw_named(
-                &ctx,
-                "Error",
-                "page closed while waiting for event",
-              ));
-            };
-            let arg = page_event_to_js(&ctx, &self.inner, ev.clone())?;
-            if call_predicate_truthy(&pred, arg, &ctx).await? {
-              return page_event_to_js(&ctx, &self.inner, ev);
-            }
+            return Err(crate::bindings::convert::throw_named(
+              &ctx,
+              "Error",
+              "page closed while waiting for event",
+            ));
+          };
+          let arg = page_event_to_js(&ctx, &page, ev.clone())?;
+          if call_predicate_truthy(&pred, arg, &ctx).await? {
+            return page_event_to_js(&ctx, &page, ev);
           }
         }
+      }
 
-        // `dialog` bypasses the broadcast — it registers a one-shot
-        // handler on the per-page `DialogManager` so the claim is
-        // synchronous at `did_open` time (mirrors Playwright's
-        // `addDialogHandler` + `dialogDidOpen` flow exactly).
-        if event_lc == "dialog" {
-          let dialog = self.inner.wait_for_dialog(timeout).await.into_js_with(&ctx)?;
-          let instance = crate::bindings::identity::dialog_object(&ctx, dialog)?;
-          return rquickjs::IntoJs::into_js(instance, &ctx);
-        }
-        // Same pattern for `filechooser` — one-shot handler on the
-        // per-page `FileChooserManager` so the claim is synchronous with
-        // the backend event arrival.
-        if event_lc == "filechooser" {
-          let chooser = self.inner.wait_for_file_chooser(timeout).await.into_js_with(&ctx)?;
-          let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
-          let instance = Class::instance(ctx.clone(), wrapper)?;
-          return rquickjs::IntoJs::into_js(instance, &ctx);
-        }
-        // And for `download` — same one-shot handler pattern via the
-        // per-page `DownloadManager`.
-        if event_lc == "download" {
-          let download = self.inner.wait_for_download(timeout).await.into_js_with(&ctx)?;
-          let wrapper = crate::bindings::download::DownloadJs::new(download);
-          let instance = Class::instance(ctx.clone(), wrapper)?;
-          return rquickjs::IntoJs::into_js(instance, &ctx);
-        }
-
-        let name = event_lc.clone();
-        let ev = self
-          .inner
-          .events()
-          .wait_for(move |e| match_event_name(&name, e), timeout)
-          .await
-          .into_js_with(&ctx)?;
-        page_event_to_js(&ctx, &self.inner, ev)
-      })
-      .await
+      // `dialog` bypasses the broadcast — it registers a one-shot
+      // handler on the per-page `DialogManager` so the claim is
+      // synchronous at `did_open` time (mirrors Playwright's
+      // `addDialogHandler` + `dialogDidOpen` flow exactly).
+      if event_lc == "dialog" {
+        let dialog = page.wait_for_dialog(timeout).await.into_js_with(&ctx)?;
+        let instance = crate::bindings::identity::dialog_object(&ctx, dialog)?;
+        return rquickjs::IntoJs::into_js(instance, &ctx);
+      }
+      // Same pattern for `filechooser` — one-shot handler on the
+      // per-page `FileChooserManager` so the claim is synchronous with
+      // the backend event arrival.
+      if event_lc == "filechooser" {
+        let chooser = page.wait_for_file_chooser(timeout).await.into_js_with(&ctx)?;
+        let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        return rquickjs::IntoJs::into_js(instance, &ctx);
+      }
+      // And for `download` — same one-shot handler pattern via the
+      // per-page `DownloadManager`.
+      let download = page.wait_for_download(timeout).await.into_js_with(&ctx)?;
+      let wrapper = crate::bindings::download::DownloadJs::new(download);
+      let instance = Class::instance(ctx.clone(), wrapper)?;
+      rquickjs::IntoJs::into_js(instance, &ctx)
+    })))
   }
 
   // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
