@@ -2,7 +2,7 @@ Feature: TodoMVC
   Test a full TodoMVC application workflow.
 
   Background:
-    Given I navigate to "https://demo.playwright.dev/todomvc/#/"
+    Given I navigate to "/todomvc.html#/"
 
   Scenario: Add a todo item
     When I fill ".new-todo" with "Buy groceries"

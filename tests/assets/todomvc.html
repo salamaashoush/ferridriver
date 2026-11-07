@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TodoMVC</title>
+<!--
+  A TodoMVC app served by the fixture server, so the specs that drive one
+  do not depend on a site on the internet. Same markup, classes, routes and
+  storage behaviour as the TodoMVC reference apps.
+-->
+<style>
+  body { font: 14px sans-serif; margin: 0 auto; max-width: 550px; }
+  .new-todo, .edit { box-sizing: border-box; font-size: 24px; padding: 6px; width: 100%; }
+  .todo-list { list-style: none; margin: 0; padding: 0; }
+  .todo-list li { border-bottom: 1px solid #ededed; font-size: 24px; position: relative; }
+  .todo-list li .view { align-items: center; display: flex; gap: 12px; padding: 12px; }
+  .todo-list li label { flex: 1; }
+  .todo-list li.completed label { color: #949494; text-decoration: line-through; }
+  .todo-list li .destroy { display: none; }
+  .todo-list li:hover .destroy { display: block; }
+  .todo-list li .edit { display: none; }
+  .todo-list li.editing .edit { display: block; }
+  .todo-list li.editing .view { display: none; }
+  .footer { display: flex; gap: 16px; justify-content: space-between; padding: 10px 15px; }
+  .filters { display: flex; gap: 8px; list-style: none; margin: 0; padding: 0; }
+  .filters a.selected { font-weight: bold; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<section class="todoapp">
+  <header class="header">
+    <h1>todos</h1>
+    <input class="new-todo" placeholder="What needs to be done?" autofocus>
+  </header>
+  <section class="main" hidden>
+    <input id="toggle-all" class="toggle-all" type="checkbox">
+    <label for="toggle-all">Mark all as complete</label>
+    <ul class="todo-list"></ul>
+  </section>
+  <footer class="footer" hidden>
+    <span class="todo-count"></span>
+    <ul class="filters">
+      <li><a href="#/">All</a></li>
+      <li><a href="#/active">Active</a></li>
+      <li><a href="#/completed">Completed</a></li>
+    </ul>
+    <button class="clear-completed">Clear completed</button>
+  </footer>
+</section>
+<script>
+(() => {
+  const KEY = 'react-todos';
+  let todos = JSON.parse(localStorage.getItem(KEY) || '[]');
+  let editing = null;
+  const $ = selector => document.querySelector(selector);
+  const list = $('.todo-list');
+
+  const save = () => localStorage.setItem(KEY, JSON.stringify(todos));
+  const route = () => (location.hash.replace(/^#\/?/, '') || 'all');
+  const shown = () => todos.filter(todo => route() === 'all' || (route() === 'active' ? !todo.completed : todo.completed));
+  const uuid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+  function item(todo) {
+    const li = document.createElement('li');
+    li.dataset.id = todo.id;
+    if (todo.completed) li.classList.add('completed');
+    if (editing === todo.id) li.classList.add('editing');
+    const view = document.createElement('div');
+    view.className = 'view';
+    const toggle = document.createElement('input');
+    toggle.className = 'toggle';
+    toggle.type = 'checkbox';
+    toggle.checked = todo.completed;
+    toggle.addEventListener('change', () => update(todo.id, { completed: toggle.checked }));
+    const label = document.createElement('label');
+    label.textContent = todo.title;
+    label.addEventListener('dblclick', () => {
+      editing = todo.id;
+      render();
+      const edit = list.querySelector(`li[data-id="${todo.id}"] .edit`);
+      edit.focus();
+      edit.setSelectionRange(edit.value.length, edit.value.length);
+    });
+    const destroy = document.createElement('button');
+    destroy.className = 'destroy';
+    destroy.setAttribute('aria-label', 'Delete');
+    destroy.addEventListener('click', () => remove(todo.id));
+    view.append(toggle, label, destroy);
+    const edit = document.createElement('input');
+    edit.className = 'edit';
+    edit.value = todo.title;
+    const finish = keep => {
+      if (editing !== todo.id) return;
+      editing = null;
+      if (!keep) return render();
+      const title = edit.value.trim();
+      if (title) update(todo.id, { title });
+      else remove(todo.id);
+    };
+    edit.addEventListener('keydown', event => {
+      if (event.key === 'Enter') finish(true);
+      if (event.key === 'Escape') finish(false);
+    });
+    edit.addEventListener('blur', () => finish(true));
+    li.append(view, edit);
+    return li;
+  }
+
+  function update(id, change) {
+    todos = todos.map(todo => (todo.id === id ? { ...todo, ...change } : todo));
+    save();
+    render();
+  }
+
+  function remove(id) {
+    todos = todos.filter(todo => todo.id !== id);
+    save();
+    render();
+  }
+
+  function render() {
+    list.replaceChildren(...shown().map(item));
+    const left = todos.filter(todo => !todo.completed).length;
+    const count = $('.todo-count');
+    count.replaceChildren();
+    const strong = document.createElement('strong');
+    strong.textContent = String(left);
+    count.append(strong, ` ${left === 1 ? 'item' : 'items'} left`);
+    $('.main').hidden = todos.length === 0;
+    $('.footer').hidden = todos.length === 0;
+    $('.clear-completed').hidden = !todos.some(todo => todo.completed);
+    $('.toggle-all').checked = todos.length > 0 && left === 0;
+    for (const link of document.querySelectorAll('.filters a')) {
+      link.classList.toggle('selected', link.getAttribute('href') === `#/${route() === 'all' ? '' : route()}`);
+    }
+  }
+
+  $('.new-todo').addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    const title = event.target.value.trim();
+    if (!title) return;
+    todos = [...todos, { id: uuid(), title, completed: false }];
+    event.target.value = '';
+    save();
+    render();
+  });
+  $('.toggle-all').addEventListener('change', event => {
+    todos = todos.map(todo => ({ ...todo, completed: event.target.checked }));
+    save();
+    render();
+  });
+  $('.clear-completed').addEventListener('click', () => {
+    todos = todos.filter(todo => !todo.completed);
+    save();
+    render();
+  });
+  window.addEventListener('hashchange', render);
+  render();
+})();
+</script>
+</body>
+</html>

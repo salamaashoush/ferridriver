@@ -2,7 +2,7 @@ Feature: Form Interaction
   Complex form interactions on a real form page.
 
   Background:
-    Given I navigate to "https://demo.playwright.dev/todomvc/#/"
+    Given I navigate to "/todomvc.html#/"
 
   Scenario: Type text character by character
     When I type "Hello World" into ".new-todo"

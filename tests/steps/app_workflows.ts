@@ -31,7 +31,7 @@ Then('the registration is blocked by {string}', async ({ page }, field: string) 
 });
 
 Given('my task list contains:', async ({ page }, table: DataTable) => {
-  await page.goto('https://demo.playwright.dev/todomvc/#/');
+  await page.goto('/todomvc.html#/');
   for (const [title] of table.raw()) {
     await page.getByPlaceholder('What needs to be done?').fill(title);
     await page.getByPlaceholder('What needs to be done?').press('Enter');
