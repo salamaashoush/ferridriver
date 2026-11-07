@@ -3275,7 +3275,7 @@ impl Page {
       return;
     }
     let inner_for_task: AnyPage = self.inner.clone();
-    tokio::spawn(async move {
+    self.inner.events().spawn(async move {
       if needs_filechooser {
         let _ = inner_for_task.enable_file_chooser_intercept().await;
       }

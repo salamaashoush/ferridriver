@@ -587,6 +587,20 @@ impl<E: EmitterEvent> Emitter<E> {
     self.inner.dispatcher_running.store(true, Ordering::Release);
   }
 
+  /// Run `task` on the runtime this emitter dispatches on: the current
+  /// one, else the one it was made on, so a caller outside any runtime
+  /// (a binding's synchronous call on the JavaScript thread) still has it
+  /// run.
+  pub(crate) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+      handle.spawn(task);
+    } else if let Some(handle) = lock_or_recover(&self.inner.runtime_handle).as_ref() {
+      handle.spawn(task);
+    } else {
+      tracing::debug!(target: "ferridriver::events", "no runtime to run an emitter task on");
+    }
+  }
+
   /// Emit an event. Never blocks and never drops: the event is queued
   /// for the dispatcher task.
   pub fn emit(&self, event: E) {
