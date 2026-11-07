@@ -1085,12 +1085,14 @@ impl BrowserContextJs {
   /// Playwright: `browserContext.waitForEvent(event, optionsOrPredicate?)`,
   /// resolving with the live class instance the event carries.
   #[qjs(rename = "waitForEvent")]
-  pub async fn wait_for_event<'js>(
+  pub fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
     event: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
+  > {
     use ferridriver::events::EmitterEvent;
     let mut timeout_ms: Option<f64> = None;
     let mut predicate: Option<rquickjs::Function<'js>> = None;
@@ -1107,40 +1109,60 @@ impl BrowserContextJs {
       }
     }
     let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
-    let Some(predicate) = predicate else {
-      let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
-      return context_event_to_js(&ctx, ev);
+    // Listening from the call, before the promise is first awaited.
+    let armed = match predicate {
+      None => ContextWait::Next(Box::pin(self.inner.wait_for_event(&event, timeout))),
+      Some(predicate) => ContextWait::Matching(self.inner.events().subscribe(), predicate),
     };
-    let mut rx = self.inner.events().subscribe();
-    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
-    loop {
-      let next = match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, rx.recv()).await.ok(),
-        None => Some(rx.recv().await),
+    Ok(rquickjs::promise::Promised::from(async move {
+      let (mut rx, predicate) = match armed {
+        ContextWait::Next(next) => {
+          let ev = next.await.into_js_with(&ctx)?;
+          return context_event_to_js(&ctx, ev);
+        },
+        ContextWait::Matching(rx, predicate) => (rx, predicate),
       };
-      let Some(next) = next else {
-        return Err(crate::bindings::convert::throw_named(
-          &ctx,
-          "TimeoutError",
-          format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
-        ));
-      };
-      let Some(ev) = next else {
-        return Err(crate::bindings::convert::throw_named(
-          &ctx,
-          "Error",
-          "context closed while waiting for event",
-        ));
-      };
-      if !ferridriver::events::ContextEvent::matches_name(&event, &ev) {
-        continue;
+      let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+      loop {
+        let next = match deadline {
+          Some(deadline) => tokio::time::timeout_at(deadline, rx.recv()).await.ok(),
+          None => Some(rx.recv().await),
+        };
+        let Some(next) = next else {
+          return Err(crate::bindings::convert::throw_named(
+            &ctx,
+            "TimeoutError",
+            format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
+          ));
+        };
+        let Some(ev) = next else {
+          return Err(crate::bindings::convert::throw_named(
+            &ctx,
+            "Error",
+            "context closed while waiting for event",
+          ));
+        };
+        if !ferridriver::events::ContextEvent::matches_name(&event, &ev) {
+          continue;
+        }
+        let arg = context_event_to_js(&ctx, ev.clone())?;
+        if crate::bindings::page::call_predicate_truthy(&predicate, arg, &ctx).await? {
+          return context_event_to_js(&ctx, ev);
+        }
       }
-      let arg = context_event_to_js(&ctx, ev.clone())?;
-      if crate::bindings::page::call_predicate_truthy(&predicate, arg, &ctx).await? {
-        return context_event_to_js(&ctx, ev);
-      }
-    }
+    }))
   }
+}
+
+/// What a `context.waitForEvent` listens with, armed at the call.
+enum ContextWait<'js> {
+  Next(
+    std::pin::Pin<Box<dyn std::future::Future<Output = ferridriver::Result<ferridriver::events::ContextEvent>> + Send>>,
+  ),
+  Matching(
+    ferridriver::EventSubscription<ferridriver::events::ContextEvent>,
+    rquickjs::Function<'js>,
+  ),
 }
 
 /// Pages as the objects that already stand for them.

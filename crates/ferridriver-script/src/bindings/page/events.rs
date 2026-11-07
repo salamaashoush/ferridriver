@@ -182,12 +182,12 @@ where
 pub(crate) async fn wait_request_predicate<'js>(
   ctx: rquickjs::Ctx<'js>,
   page: Arc<Page>,
+  mut rx: ferridriver::EventSubscription<ferridriver::events::PageEvent>,
   pred: rquickjs::Function<'js>,
   timeout_ms: u64,
 ) -> rquickjs::Result<crate::bindings::network::RequestJs> {
   use ferridriver::events::PageEvent;
   use rquickjs::class::Class;
-  let mut rx = page.events().subscribe();
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   loop {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -229,12 +229,12 @@ pub(crate) async fn wait_request_predicate<'js>(
 pub(crate) async fn wait_response_predicate<'js>(
   ctx: rquickjs::Ctx<'js>,
   page: Arc<Page>,
+  mut rx: ferridriver::EventSubscription<ferridriver::events::PageEvent>,
   pred: rquickjs::Function<'js>,
   timeout_ms: u64,
 ) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
   use ferridriver::events::PageEvent;
   use rquickjs::class::Class;
-  let mut rx = page.events().subscribe();
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   loop {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

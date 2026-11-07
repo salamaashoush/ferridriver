@@ -1716,12 +1716,18 @@ impl ContextRef {
   /// Wait for the next context-level event matching `event_name`, with
   /// `timeout_ms`. Mirrors Playwright's
   /// `browserContext.waitForEvent(event, options?)`.
+  /// Listens from the call, so an event the caller triggers before
+  /// awaiting is not missed.
   ///
   /// # Errors
   ///
   /// Returns an error if the timeout elapses or the event channel is closed.
-  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> Result<crate::events::ContextEvent> {
-    self.events.wait_for_event(event_name, timeout_ms).await
+  pub fn wait_for_event(
+    &self,
+    event_name: &str,
+    timeout_ms: u64,
+  ) -> impl std::future::Future<Output = Result<crate::events::ContextEvent>> + Send + use<> {
+    self.events.wait_for_event(event_name, timeout_ms)
   }
 
   // ── Context-level APIs (apply to all pages) ────────────────────────────

@@ -596,12 +596,14 @@ impl WebSocketJs {
   /// the next `event` the predicate accepts, in the shape a listener
   /// gets. Waiting for anything but `close` fails once the socket closes.
   #[qjs(rename = "waitForEvent")]
-  pub async fn wait_for_event<'js>(
+  pub fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
     event: String,
     options: rquickjs::function::Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
+  > {
     use ferridriver::events::EmitterEvent;
     let mut timeout_ms: Option<f64> = None;
     let mut predicate: Option<rquickjs::Function<'js>> = None;
@@ -618,38 +620,42 @@ impl WebSocketJs {
       }
     }
     let timeout = timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64);
+    // Listening from the call, before the promise is first awaited.
     let mut events = self.inner.subscribe();
     if event != "close" && self.inner.is_closed() {
       return Err(throw_named(&ctx, "Error", "Socket closed"));
     }
-    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
-    loop {
-      let next = match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, events.recv()).await.ok(),
-        None => Some(events.recv().await),
-      };
-      let Some(Some(ev)) = next else {
-        return Err(throw_named(
-          &ctx,
-          "TimeoutError",
-          format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
-        ));
-      };
-      if !WebSocketEvent::matches_name(&event, &ev) {
-        if matches!(ev, WebSocketEvent::Close) {
-          return Err(throw_named(&ctx, "Error", "Socket closed"));
+    let socket = self.inner.clone();
+    Ok(rquickjs::promise::Promised::from(async move {
+      let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+      loop {
+        let next = match deadline {
+          Some(deadline) => tokio::time::timeout_at(deadline, events.recv()).await.ok(),
+          None => Some(events.recv().await),
+        };
+        let Some(Some(ev)) = next else {
+          return Err(throw_named(
+            &ctx,
+            "TimeoutError",
+            format!("Timeout {timeout}ms exceeded while waiting for event \"{event}\""),
+          ));
+        };
+        if !WebSocketEvent::matches_name(&event, &ev) {
+          if matches!(ev, WebSocketEvent::Close) {
+            return Err(throw_named(&ctx, "Error", "Socket closed"));
+          }
+          continue;
         }
-        continue;
+        let arg = socket_event_to_js(&ctx, ev.clone(), socket.clone())?;
+        let accepted = match &predicate {
+          None => true,
+          Some(predicate) => crate::bindings::page::call_predicate_truthy(predicate, arg.clone(), &ctx).await?,
+        };
+        if accepted {
+          return Ok(arg);
+        }
       }
-      let arg = socket_event_to_js(&ctx, ev.clone(), self.inner.clone())?;
-      let accepted = match &predicate {
-        None => true,
-        Some(predicate) => crate::bindings::page::call_predicate_truthy(predicate, arg.clone(), &ctx).await?,
-      };
-      if accepted {
-        return Ok(arg);
-      }
-    }
+    }))
   }
 }
 

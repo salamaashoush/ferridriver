@@ -991,31 +991,43 @@ impl Page {
 
     // `dialog` / `filechooser` / `download` bypass the broadcast when
     // there is no predicate — they register a one-shot handler on the
-    // per-page manager. With a predicate they go through the broadcast
+    // per-page manager, at the call so the caller's next line cannot
+    // race past it. With a predicate they go through the broadcast
     // like every other event (the emitter bridge claims the live
     // handles on behalf of broadcast listeners).
-    if predicate.is_none() && matches!(event_lc.as_str(), "dialog" | "filechooser" | "download") {
-      return napi::bindgen_prelude::AsyncBlockBuilder::new(crate::abort::race(signal, async move {
+    if predicate.is_none() {
+      let claimed: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<PageWaitForEventResult>> + Send>>> =
         match event_lc.as_str() {
           "dialog" => {
-            let d = page.wait_for_dialog(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either11::D(crate::identity::DialogObject(d)))
+            let dialog = page.wait_for_dialog(timeout);
+            Some(Box::pin(async move {
+              let d = dialog.await.into_napi()?;
+              Ok(napi::bindgen_prelude::Either11::D(crate::identity::DialogObject(d)))
+            }))
           },
           "filechooser" => {
-            let fc = page.wait_for_file_chooser(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either11::E(
-              crate::file_chooser::FileChooser::from_core(fc),
-            ))
+            let chooser = page.wait_for_file_chooser(timeout);
+            Some(Box::pin(async move {
+              let fc = chooser.await.into_napi()?;
+              Ok(napi::bindgen_prelude::Either11::E(
+                crate::file_chooser::FileChooser::from_core(fc),
+              ))
+            }))
           },
-          _ => {
-            let d = page.wait_for_download(timeout).await.into_napi()?;
-            Ok(napi::bindgen_prelude::Either11::F(
-              crate::download::Download::from_core(d),
-            ))
+          "download" => {
+            let download = page.wait_for_download(timeout);
+            Some(Box::pin(async move {
+              let d = download.await.into_napi()?;
+              Ok(napi::bindgen_prelude::Either11::F(
+                crate::download::Download::from_core(d),
+              ))
+            }))
           },
-        }
-      }))
-      .build(env);
+          _ => None,
+        };
+      if let Some(claimed) = claimed {
+        return napi::bindgen_prelude::AsyncBlockBuilder::new(crate::abort::race(signal, claimed)).build(env);
+      }
     }
 
     // Broadcast-backed events: subscribe synchronously so the JS
@@ -1606,17 +1618,20 @@ impl Page {
     ts_args_type = "options?: { timeout?: number, signal?: AbortSignal, url?: string | RegExp, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }",
     ts_return_type = "Promise<Response | null>"
   )]
-  pub async fn wait_for_navigation(
+  pub fn wait_for_navigation(
     &self,
+    env: napi::Env,
     options: Option<crate::types::WaitForNavigationOptions>,
-  ) -> Result<Option<crate::network::Response>> {
-    let resp = self
-      .inner
-      .wait_for_navigation()
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)?;
-    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<Option<crate::network::Response>>> {
+    // Listening from the call: the navigation is usually started before
+    // the promise is awaited.
+    let navigation = self.inner.wait_for_navigation().bag(options)?;
+    let page = self.inner.clone();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let resp = navigation.await.map_err(crate::error::to_napi)?;
+      Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
+    })
+    .build(&env)
   }
 
   // ── Accessibility ───────────────────────────────────────────────────────

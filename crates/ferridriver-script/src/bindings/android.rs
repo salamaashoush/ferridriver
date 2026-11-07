@@ -442,12 +442,14 @@ impl AndroidDeviceJs {
   /// Playwright: `androidDevice.waitForEvent(event, optionsOrPredicate?)`.
   /// `webview` resolves to the `AndroidWebView`, `close` to the device.
   #[qjs(rename = "waitForEvent")]
-  pub async fn wait_for_event<'js>(
+  pub fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
     event: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
+  > {
     if event != "webview" && event != "close" {
       return Err(type_error(&ctx, format!("waitForEvent: unknown event \"{event}\"")));
     }
@@ -462,56 +464,61 @@ impl AndroidDeviceJs {
       _ => (None, None),
     };
     let timeout_ms = timeout.map_or_else(|| self.inner.default_timeout(), ms_f64_to_u64);
-    // Subscribed before anything is awaited, so no event in between is missed.
+    // Listening from the call, before the promise is first awaited, so no
+    // event in between is missed.
     let mut events = self.inner.subscribe();
-    let accepted = |candidate: &Value<'js>| -> rquickjs::Result<bool> {
-      match &predicate {
-        Some(predicate) => truthy(&ctx, predicate.call((candidate.clone(),))?),
-        None => Ok(true),
-      }
-    };
-    let closed = || {
+    let device = self.inner.clone();
+    let views = Rc::clone(&self.views);
+    let closed = |ctx: &Ctx<'js>| {
       crate::bindings::convert::ferri_throw(
-        &ctx,
+        ctx,
         &ferridriver::FerriError::target_closed(Some("Device is closed".into())),
       )
     };
     // A closed device shows no more web views; say so now, not at the timeout.
-    if event == "webview" && self.inner.is_closed() {
-      return Err(closed());
+    if event == "webview" && device.is_closed() {
+      return Err(closed(&ctx));
     }
-    let happened = async {
-      loop {
-        match events.recv().await {
-          Ok(AndroidDeviceEvent::WebView(view)) if event == "webview" => {
-            let object = view_object(&ctx, &self.views, view)?.into_value();
-            if accepted(&object)? {
-              return Ok(object);
-            }
-          },
-          Ok(AndroidDeviceEvent::WebView(_)) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
-          Ok(AndroidDeviceEvent::Close) if event == "close" => {
-            let this = crate::bindings::identity::android_device_object(&ctx, self.inner.clone())?.into_value();
-            if accepted(&this)? {
-              return Ok(this);
-            }
-          },
-          Ok(AndroidDeviceEvent::Close) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-            return Err(closed());
-          },
+    Ok(rquickjs::promise::Promised::from(async move {
+      let accepted = |candidate: &Value<'js>| -> rquickjs::Result<bool> {
+        match &predicate {
+          Some(predicate) => truthy(&ctx, predicate.call((candidate.clone(),))?),
+          None => Ok(true),
         }
+      };
+      let happened = async {
+        loop {
+          match events.recv().await {
+            Ok(AndroidDeviceEvent::WebView(view)) if event == "webview" => {
+              let object = view_object(&ctx, &views, view)?.into_value();
+              if accepted(&object)? {
+                return Ok(object);
+              }
+            },
+            Ok(AndroidDeviceEvent::WebView(_)) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+            Ok(AndroidDeviceEvent::Close) if event == "close" => {
+              let this = crate::bindings::identity::android_device_object(&ctx, device.clone())?.into_value();
+              if accepted(&this)? {
+                return Ok(this);
+              }
+            },
+            Ok(AndroidDeviceEvent::Close) | Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+              return Err(closed(&ctx));
+            },
+          }
+        }
+      };
+      if timeout_ms == 0 {
+        return happened.await;
       }
-    };
-    if timeout_ms == 0 {
-      return happened.await;
-    }
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), happened).await {
-      Ok(outcome) => outcome,
-      Err(_) => Err(crate::bindings::convert::ferri_throw(
-        &ctx,
-        &ferridriver::FerriError::timeout(format!("waiting for event \"{event}\""), timeout_ms),
-      )),
-    }
+      match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), happened).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(crate::bindings::convert::ferri_throw(
+          &ctx,
+          &ferridriver::FerriError::timeout(format!("waiting for event \"{event}\""), timeout_ms),
+        )),
+      }
+    }))
   }
 
   /// Playwright: `androidDevice.webViews(): AndroidWebView[]`.

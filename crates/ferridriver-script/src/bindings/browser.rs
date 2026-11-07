@@ -282,15 +282,21 @@ impl BrowserJs {
   /// `'context'` — resolves with the live `BrowserContext` created by
   /// the next `browser.newContext(...)`.
   #[qjs(rename = "waitForEvent")]
-  pub async fn wait_for_event<'js>(
+  pub fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
     event: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
+  > {
     let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?.unwrap_or(30000);
-    let ev = self.inner.wait_for_event(&event, timeout).await.into_js_with(&ctx)?;
-    browser_event_to_js(&ctx, ev)
+    // Listening from the call, before the promise is first awaited.
+    let next = self.inner.wait_for_event(&event, timeout);
+    Ok(rquickjs::promise::Promised::from(async move {
+      let ev = next.await.into_js_with(&ctx)?;
+      browser_event_to_js(&ctx, ev)
+    }))
   }
 
   /// Playwright: `browser.contexts()`. Returns the list of contexts as

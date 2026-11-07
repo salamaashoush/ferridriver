@@ -700,12 +700,18 @@ impl Browser {
 
   /// Wait for the next browser-level event matching `event_name`.
   /// Playwright: `browser.waitForEvent(event, options?)`.
+  /// Listens from the call, so an event the caller triggers before
+  /// awaiting is not missed.
   ///
   /// # Errors
   ///
   /// Returns an error if the timeout elapses or the browser closes.
-  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> Result<crate::events::BrowserEvent> {
-    self.events.wait_for_event(event_name, timeout_ms).await
+  pub fn wait_for_event(
+    &self,
+    event_name: &str,
+    timeout_ms: u64,
+  ) -> impl std::future::Future<Output = Result<crate::events::BrowserEvent>> + Send + use<> {
+    self.events.wait_for_event(event_name, timeout_ms)
   }
 
   /// Get the default browser context.

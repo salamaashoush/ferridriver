@@ -264,13 +264,20 @@ impl Frame {
     ts_args_type = "options?: { timeout?: number, signal?: AbortSignal, url?: string | RegExp, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }",
     ts_return_type = "Promise<Response | null>"
   )]
-  pub async fn wait_for_navigation(
+  pub fn wait_for_navigation(
     &self,
+    env: napi::Env,
     options: Option<crate::types::WaitForNavigationOptions>,
-  ) -> Result<Option<crate::network::Response>> {
-    let resp = self.inner.wait_for_navigation().bag(options)?.await.into_napi()?;
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<Option<crate::network::Response>>> {
+    // Listening from the call: the navigation is usually started before
+    // the promise is awaited.
+    let navigation = self.inner.wait_for_navigation().bag(options)?;
     let page = self.inner.page_arc().clone();
-    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let resp = navigation.await.into_napi()?;
+      Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
+    })
+    .build(&env)
   }
 
   /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?: {

@@ -655,7 +655,11 @@ impl<E: EmitterEvent> Emitter<E> {
   /// # Errors
   ///
   /// Returns an error if the timeout elapses or the emitter is dropped.
-  pub fn wait_for<F>(&self, predicate: F, timeout_ms: u64) -> impl Future<Output = crate::error::Result<E>> + Send
+  pub fn wait_for<F>(
+    &self,
+    predicate: F,
+    timeout_ms: u64,
+  ) -> impl Future<Output = crate::error::Result<E>> + Send + use<E, F>
   where
     F: Fn(&E) -> bool + Send,
   {
@@ -673,7 +677,7 @@ impl<E: EmitterEvent> Emitter<E> {
     &self,
     event_name: &str,
     timeout_ms: u64,
-  ) -> impl Future<Output = crate::error::Result<E>> + Send {
+  ) -> impl Future<Output = crate::error::Result<E>> + Send + use<E> {
     let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
     lock_or_recover(&self.inner.shared.waiters).push((id, event_name.to_string()));
     let guard = WaiterGuard {

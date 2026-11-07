@@ -697,11 +697,11 @@ impl Frame {
     &self,
   ) -> crate::action::Action<'static, crate::options::WaitForNavigationOptions, Option<crate::network::Response>> {
     let frame = self.clone();
+    // At the call, not when the action is awaited: the navigation this
+    // waits for is usually started before then.
+    let events = frame.page.events().subscribe();
     crate::action::Action::new(move |opts| {
       Box::pin(async move {
-        // Before the trace span opens: opening one can take a round trip,
-        // and the navigation this waits for is usually started alongside.
-        let events = frame.page.events().subscribe();
         frame
           .page
           .traced_as(

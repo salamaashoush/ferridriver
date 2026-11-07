@@ -327,19 +327,26 @@ impl SidecarJs {
   /// event's params, then auto-unsubscribes (its dedicated receiver is
   /// dropped). Independent of `on`'s listener registry.
   #[qjs(rename = "once")]
-  pub async fn once<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Value<'js>> {
+  pub fn once<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    event: String,
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
+    // Listening from the call, before the promise is first awaited.
     let mut rx = self.inner.subscribe();
-    loop {
-      match rx.recv().await {
-        Ok((method, params)) if method == event => {
-          return crate::bindings::convert::json_to_js(&ctx, &params);
-        },
-        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
-        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-          return Err(throw(&ctx, "sidecar closed while waiting for event"));
-        },
+    rquickjs::promise::Promised::from(async move {
+      loop {
+        match rx.recv().await {
+          Ok((method, params)) if method == event => {
+            return crate::bindings::convert::json_to_js(&ctx, &params);
+          },
+          Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            return Err(throw(&ctx, "sidecar closed while waiting for event"));
+          },
+        }
       }
-    }
+    })
   }
 
   /// `off(event, cb?)`. With `cb`, drops that one listener (by `===`

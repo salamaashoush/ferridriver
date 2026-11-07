@@ -3575,28 +3575,33 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation event does not occur within the timeout.
-  pub fn expect_navigation(&self, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<()>> + '_ {
+  pub fn expect_navigation(&self, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<()>> + use<> {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
-    let events = self.inner.events().clone();
+    let loaded = self
+      .inner
+      .events()
+      .wait_for(|e| matches!(e, PageEvent::Load | PageEvent::DomContentLoaded), timeout);
     async move {
-      events
-        .wait_for(|e| matches!(e, PageEvent::Load | PageEvent::DomContentLoaded), timeout)
-        .await?;
+      loaded.await?;
       Ok(())
     }
   }
 
-  /// Wait for a specific event (by name) with timeout.
+  /// Wait for a specific event (by name) with timeout. Listens from the
+  /// call, so an event the caller triggers before awaiting is not missed.
   ///
   /// # Errors
   ///
   /// Returns an error if the event does not occur within the timeout.
-  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: Option<u64>) -> Result<PageEvent> {
+  pub fn wait_for_event(
+    &self,
+    event_name: &str,
+    timeout_ms: Option<u64>,
+  ) -> impl std::future::Future<Output = Result<PageEvent>> + Send + use<> {
     self
       .inner
       .events()
       .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
-      .await
   }
 
   /// Arm a waiter for `event_name`, run `action`, then resolve with the
@@ -3790,55 +3795,53 @@ impl Page {
     }
   }
 
-  /// Wait for a network request matching a URL pattern.
+  /// Wait for a network request matching a URL pattern. Listens from the
+  /// call, so a request the caller triggers before awaiting is not missed.
   ///
   /// # Errors
   ///
   /// Returns an error if no matching request occurs within the timeout.
-  pub async fn wait_for_request(
+  pub fn wait_for_request(
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::network::Request> {
-    let event = self
-      .inner
-      .events()
-      .wait_for(
-        move |e| matches!(e, PageEvent::Request(r) if matcher.matches(r.url())),
-        timeout_ms.unwrap_or(self.default_timeout()),
-      )
-      .await?;
-    match event {
-      PageEvent::Request(r) => Ok(r),
-      _ => Err(crate::error::FerriError::backend(
-        "event wait returned unexpected event type",
-      )),
+  ) -> impl std::future::Future<Output = Result<crate::network::Request>> + Send + use<> {
+    let event = self.inner.events().wait_for(
+      move |e| matches!(e, PageEvent::Request(r) if matcher.matches(r.url())),
+      timeout_ms.unwrap_or(self.default_timeout()),
+    );
+    async move {
+      match event.await? {
+        PageEvent::Request(r) => Ok(r),
+        _ => Err(crate::error::FerriError::backend(
+          "event wait returned unexpected event type",
+        )),
+      }
     }
   }
 
-  /// Wait for a network response matching a URL pattern.
+  /// Wait for a network response matching a URL pattern. Listens from the
+  /// call, so a response the caller triggers before awaiting is not missed.
   ///
   /// # Errors
   ///
   /// Returns an error if no matching response occurs within the timeout.
-  pub async fn wait_for_response(
+  pub fn wait_for_response(
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::network::Response> {
-    let event = self
-      .inner
-      .events()
-      .wait_for(
-        move |e| matches!(e, PageEvent::Response(r) if matcher.matches(r.url())),
-        timeout_ms.unwrap_or(self.default_timeout()),
-      )
-      .await?;
-    match event {
-      PageEvent::Response(r) => Ok(r),
-      _ => Err(crate::error::FerriError::backend(
-        "event wait returned unexpected event type",
-      )),
+  ) -> impl std::future::Future<Output = Result<crate::network::Response>> + Send + use<> {
+    let event = self.inner.events().wait_for(
+      move |e| matches!(e, PageEvent::Response(r) if matcher.matches(r.url())),
+      timeout_ms.unwrap_or(self.default_timeout()),
+    );
+    async move {
+      match event.await? {
+        PageEvent::Response(r) => Ok(r),
+        _ => Err(crate::error::FerriError::backend(
+          "event wait returned unexpected event type",
+        )),
+      }
     }
   }
 
@@ -4371,11 +4374,16 @@ impl Page {
   /// Returns [`crate::error::FerriError::Timeout`] if no dialog opens
   /// within `timeout_ms`. Returns [`crate::error::FerriError::TargetClosed`]
   /// if the page closes before a dialog arrives.
-  pub async fn wait_for_dialog(&self, timeout_ms: u64) -> Result<crate::dialog::Dialog> {
+  pub fn wait_for_dialog(
+    &self,
+    timeout_ms: u64,
+  ) -> impl std::future::Future<Output = Result<crate::dialog::Dialog>> + Send + use<> {
     use std::sync::Mutex;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::dialog::Dialog>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
+    // Claimed from the call, so one the caller triggers before awaiting
+    // is not missed.
     let id = self.inner.dialog_manager().add_handler(Arc::new(move |dialog| {
       let mut guard = match tx_clone.lock() {
         Ok(g) => g,
@@ -4389,14 +4397,18 @@ impl Page {
         None => false,
       }
     }));
-    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
-    self.inner.dialog_manager().remove_handler(id);
-    match result {
-      Ok(Ok(dialog)) => Ok(dialog),
-      Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
-        "page closed while waiting for dialog".into(),
-      ))),
-      Err(_) => Err(crate::error::FerriError::timeout("waiting for dialog", timeout_ms)),
+    let inner = self.inner.clone();
+    let claim = Unregister::new(move || inner.dialog_manager().remove_handler(id));
+    async move {
+      let _claim = claim;
+      let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
+      match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
+          "page closed while waiting for dialog".into(),
+        ))),
+        Err(_) => Err(crate::error::FerriError::timeout("waiting for dialog", timeout_ms)),
+      }
     }
   }
 
@@ -4436,15 +4448,16 @@ impl Page {
   /// opens within `timeout_ms`. Returns
   /// [`crate::error::FerriError::TargetClosed`] if the page closes
   /// before a chooser arrives.
-  pub async fn wait_for_file_chooser(&self, timeout_ms: u64) -> Result<crate::file_chooser::FileChooser> {
+  pub fn wait_for_file_chooser(
+    &self,
+    timeout_ms: u64,
+  ) -> impl std::future::Future<Output = Result<crate::file_chooser::FileChooser>> + Send + use<> {
     use std::sync::Mutex;
-    // Lazy-enable file chooser interception. Idempotent — first
-    // call fires `Page.setInterceptFileChooserDialog`, subsequent
-    // are no-ops.
-    self.inner.enable_file_chooser_intercept().await?;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::file_chooser::FileChooser>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
+    // Claimed from the call, so one the caller triggers before awaiting
+    // is not missed.
     let id = self.inner.file_chooser_manager().add_handler(Arc::new(move |chooser| {
       let mut guard = match tx_clone.lock() {
         Ok(g) => g,
@@ -4457,14 +4470,26 @@ impl Page {
         None => false,
       }
     }));
-    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
-    self.inner.file_chooser_manager().remove_handler(id);
-    match result {
-      Ok(Ok(chooser)) => Ok(chooser),
-      Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
-        "page closed while waiting for filechooser".into(),
-      ))),
-      Err(_) => Err(crate::error::FerriError::timeout("waiting for filechooser", timeout_ms)),
+    // Sent now, as `on("filechooser")` sends it, so the browser reports the
+    // event before the wait is first awaited.
+    self.lazy_enable_for_event("filechooser");
+    let inner = self.inner.clone();
+    let claim = Unregister::new({
+      let inner = inner.clone();
+      move || inner.file_chooser_manager().remove_handler(id)
+    });
+    async move {
+      let _claim = claim;
+      // Idempotent: answers at once when the call above already sent it.
+      inner.enable_file_chooser_intercept().await?;
+      let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
+      match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
+          "page closed while waiting for filechooser".into(),
+        ))),
+        Err(_) => Err(crate::error::FerriError::timeout("waiting for filechooser", timeout_ms)),
+      }
     }
   }
 
@@ -4503,14 +4528,16 @@ impl Page {
   /// begins within `timeout_ms`. Returns
   /// [`crate::error::FerriError::TargetClosed`] if the page closes
   /// before a download begins.
-  pub async fn wait_for_download(&self, timeout_ms: u64) -> Result<crate::download::Download> {
+  pub fn wait_for_download(
+    &self,
+    timeout_ms: u64,
+  ) -> impl std::future::Future<Output = Result<crate::download::Download>> + Send + use<> {
     use std::sync::Mutex;
-    // Lazy-enable download behaviour. Idempotent — first call fires
-    // `Browser.setDownloadBehavior`, subsequent are no-ops.
-    self.inner.enable_download_behavior().await?;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::download::Download>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
+    // Claimed from the call, so one the caller triggers before awaiting
+    // is not missed.
     let id = self.inner.download_manager().add_handler(Arc::new(move |download| {
       let mut guard = match tx_clone.lock() {
         Ok(g) => g,
@@ -4523,14 +4550,26 @@ impl Page {
         None => false,
       }
     }));
-    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
-    self.inner.download_manager().remove_handler(id);
-    match result {
-      Ok(Ok(download)) => Ok(download),
-      Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
-        "page closed while waiting for download".into(),
-      ))),
-      Err(_) => Err(crate::error::FerriError::timeout("waiting for download", timeout_ms)),
+    // Sent now, as `on("download")` sends it, so the browser reports the
+    // event before the wait is first awaited.
+    self.lazy_enable_for_event("download");
+    let inner = self.inner.clone();
+    let claim = Unregister::new({
+      let inner = inner.clone();
+      move || inner.download_manager().remove_handler(id)
+    });
+    async move {
+      let _claim = claim;
+      // Idempotent: answers at once when the call above already sent it.
+      inner.enable_download_behavior().await?;
+      let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
+      match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
+          "page closed while waiting for download".into(),
+        ))),
+        Err(_) => Err(crate::error::FerriError::timeout("waiting for download", timeout_ms)),
+      }
     }
   }
 
@@ -5399,6 +5438,24 @@ pub(crate) fn page_state_observer(
         }
       },
       _ => {},
+    }
+  }
+}
+
+/// Runs its closure once when dropped: takes a one-shot handler off its
+/// manager when the wait ends, and when the wait is dropped unawaited.
+struct Unregister(Option<Box<dyn FnOnce() + Send>>);
+
+impl Unregister {
+  fn new(remove: impl FnOnce() + Send + 'static) -> Self {
+    Self(Some(Box::new(remove)))
+  }
+}
+
+impl Drop for Unregister {
+  fn drop(&mut self) {
+    if let Some(remove) = self.0.take() {
+      remove();
     }
   }
 }

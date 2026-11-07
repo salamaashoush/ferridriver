@@ -434,27 +434,29 @@ impl FrameJs {
   /// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,
   /// waitUntil? }): Promise<Response | null>`.
   #[qjs(rename = "waitForNavigation")]
-  pub async fn wait_for_navigation<'js>(
+  pub fn wait_for_navigation<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>> {
-    // Built before the first await, so that the navigation a sibling call
-    // starts in the same tick is one this hears.
-    let opts = crate::bindings::page::parse_wait_for_navigation_options(&ctx, &options);
-    call_site
-      .scope(async move {
-        let response = self
-          .inner
-          .wait_for_navigation()
-          .options(opts?)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.page_arc().clone())))
-      })
-      .await
-      .map(crate::bindings::convert::Null)
+  ) -> rquickjs::Result<
+    rquickjs::promise::Promised<
+      impl std::future::Future<
+        Output = rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>>,
+      > + 'js,
+    >,
+  > {
+    let opts = crate::bindings::page::parse_wait_for_navigation_options(&ctx, &options)?;
+    // Listening from the call: the navigation is usually started before
+    // the promise is first awaited.
+    let navigation = self.inner.wait_for_navigation().options(opts);
+    let page = self.inner.page_arc().clone();
+    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
+      let response = navigation.await.into_js_with(&ctx)?;
+      Ok(crate::bindings::convert::Null(
+        response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, page)),
+      ))
+    })))
   }
 
   /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?: {

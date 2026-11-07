@@ -411,10 +411,19 @@ impl Browser {
     ts_args_type = "event: 'context' | 'disconnected', timeoutMs?: number",
     ts_return_type = "Promise<BrowserContext | Browser>"
   )]
-  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<BrowserEventArg> {
+  pub fn wait_for_event(
+    &self,
+    env: napi::Env,
+    event: String,
+    timeout_ms: Option<f64>,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<BrowserEventArg>> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
-    let ev = self.inner.wait_for_event(&event, timeout).await.into_napi()?;
-    Ok(BrowserEventArg::from_event(ev))
+    // Listening from the call, before the promise is returned.
+    let next = self.inner.wait_for_event(&event, timeout);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(
+      async move { Ok(BrowserEventArg::from_event(next.await.into_napi()?)) },
+    )
+    .build(&env)
   }
 
   /// Close the browser. Accepts Playwright's `{ reason? }` options shape;
