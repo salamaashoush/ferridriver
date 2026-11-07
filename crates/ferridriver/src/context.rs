@@ -580,6 +580,17 @@ impl ContextRef {
     Ok(page)
   }
 
+  /// A new wrapper of this context's open page whose wrappers share
+  /// `slot`.
+  pub(crate) fn page_sharing(&self, slot: &crate::backend::PageBackref) -> Option<Arc<Page>> {
+    self
+      .page_registry()?
+      .open(&self.key.to_composite())
+      .into_iter()
+      .find(|page| page.page_backref_handle().same_page(slot))
+      .map(|page| Page::with_context(page, self.clone()))
+  }
+
   /// The proxy was fixed when the context was made; a page still has to
   /// answer its challenges, and `BiDi` re-issues rewritten routes through it.
   async fn apply_effective_proxy(&self, page: &Page) -> Result<()> {
@@ -2719,10 +2730,7 @@ async fn register_popup(
   }
   ctx_ref.emit_page_created(Arc::clone(&page));
   if let Some(opener) = opener {
-    opener
-      .inner()
-      .events()
-      .emit(crate::events::PageEvent::Popup(Arc::clone(&page)));
+    opener.events().emit(crate::events::PageEvent::Popup(Arc::clone(&page)));
   }
 
   // WebSocket-route install evaluates into the live document, so it runs

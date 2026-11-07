@@ -99,12 +99,6 @@ pub struct Page {
   /// Registered `addLocatorHandler` callbacks. Consulted before every
   /// actionability retry (see [`crate::locator_handler::perform_checkpoint`]).
   locator_handlers: crate::locator_handler::LocatorHandlerRegistry,
-  /// Weak reference to the page that opened this one (`window.open` /
-  /// `target=_blank` popups). Set once by the popup pump; empty for
-  /// pages created via `newPage`. Backs [`Self::opener`] — Playwright's
-  /// `page.opener(): Promise<null | Page>`, which resolves `null` once
-  /// the opener has closed.
-  opener: std::sync::OnceLock<std::sync::Weak<Page>>,
   /// `page.coverage`'s runs, one of each kind at a time.
   coverage_state: AsyncMutex<crate::coverage::CoverageState>,
 }
@@ -150,7 +144,6 @@ impl Page {
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
-      opener: std::sync::OnceLock::new(),
       coverage_state: AsyncMutex::new(crate::coverage::CoverageState::default()),
     });
     // Wire the backend's weak back-reference before the frame cache
@@ -183,7 +176,6 @@ impl Page {
       frame_cache,
       video: Mutex::new(None),
       locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
-      opener: std::sync::OnceLock::new(),
       coverage_state: AsyncMutex::new(crate::coverage::CoverageState::default()),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
@@ -340,19 +332,25 @@ impl Page {
   /// The page that opened this popup via `window.open` /
   /// `target=_blank`; `None` for non-popup pages and once the opener
   /// has closed.
+  ///
+  /// Any wrapper of the popup answers, with a live wrapper of the opener,
+  /// or a new one when every wrapper of it has been dropped.
   #[must_use]
   pub fn opener(&self) -> Option<Arc<Page>> {
-    self
-      .opener
-      .get()
-      .and_then(std::sync::Weak::upgrade)
-      .filter(|opener| !opener.is_closed())
+    let slot = self.inner.page_backref_handle().opener()?;
+    let opener = slot
+      .upgrade()
+      .or_else(|| self.context_ref.as_ref()?.page_sharing(&slot))?;
+    (!opener.is_closed()).then_some(opener)
   }
 
   /// Record the opener relationship — called once by the popup pump
   /// right after the popup's wrapper is built.
-  pub(crate) fn set_opener(&self, opener: &Arc<Page>) {
-    let _ = self.opener.set(Arc::downgrade(opener));
+  pub(crate) fn set_opener(&self, opener: &AnyPage) {
+    self
+      .inner
+      .page_backref_handle()
+      .set_opener(opener.page_backref_handle());
   }
 
   /// `page.clock` — the owning context's fake-time controller

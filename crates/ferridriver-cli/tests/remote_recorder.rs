@@ -433,6 +433,80 @@ async fn input_reaches_the_page_it_names_on_bidi() -> anyhow::Result<()> {
   input_reaches_the_page_it_names(launch(ferridriver::firefox()).await?, false).await
 }
 
+/// A popup opened by a click dispatched through a passing handle to its
+/// opener, as a session host dispatches every input, keeps its opener
+/// once that handle is gone, on every wrapper of the popup; and the
+/// recording waits for the popup around the click that opened it.
+async fn a_popup_keeps_its_opener_past_the_handle_that_opened_it(browser: ferridriver::Browser) -> anyhow::Result<()> {
+  let opener = page_for(&browser, "default").await?;
+  opener.goto(OPENER).await?;
+  let context = opener.context().context("a page with a context")?.clone();
+  let recorder = ferridriver::codegen::recorder::Recorder::attach(&opener, |_| {}).await?;
+
+  let passing = context.pages();
+  let through = passing
+    .iter()
+    .find(|page| page.backend_page_id() == opener.backend_page_id())
+    .context("the opener among the context's pages")?;
+  let (popup, ()) = opener.expect_popup(|| through.mouse().click(40.0, 20.0)).await?;
+  drop(passing);
+
+  let found = popup.opener().context("the popup lost its opener")?;
+  ensure!(
+    found.backend_page_id() == opener.backend_page_id(),
+    "another page is the opener"
+  );
+  let again = context
+    .pages()
+    .into_iter()
+    .find(|page| page.backend_page_id() == popup.backend_page_id())
+    .context("the popup among the context's pages")?;
+  ensure!(
+    again.opener().map(|page| page.backend_page_id()) == Some(opener.backend_page_id()),
+    "another wrapper of the popup has no opener"
+  );
+
+  let actions = recorder.finish().await.actions;
+  let clicked = actions
+    .iter()
+    .find(|action| matches!(action.action, Action::Click { .. }))
+    .with_context(|| format!("no click recorded: {actions:#?}"))?;
+  ensure!(clicked.popup.as_deref() == Some("page1"), "{actions:#?}");
+
+  // With every handle to the opener gone, the popup still has one.
+  let opener_id = opener.backend_page_id();
+  drop((found, again, opener));
+  ensure!(
+    popup.opener().map(|page| page.backend_page_id()) == Some(opener_id),
+    "the popup lost its opener with its handles"
+  );
+  browser.close().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_popup_keeps_its_opener_past_the_handle_that_opened_it_on_cdp_pipe() -> anyhow::Result<()> {
+  a_popup_keeps_its_opener_past_the_handle_that_opened_it(launch(ferridriver::chromium()).await?).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_popup_keeps_its_opener_past_the_handle_that_opened_it_on_cdp_raw() -> anyhow::Result<()> {
+  let raw = ferridriver::BrowserType::chromium_with(&ferridriver::options::BrowserTypeOptions {
+    transport: Some(ferridriver::options::ChromiumTransport::Ws),
+  });
+  a_popup_keeps_its_opener_past_the_handle_that_opened_it(launch(raw).await?).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_popup_keeps_its_opener_past_the_handle_that_opened_it_on_webkit() -> anyhow::Result<()> {
+  a_popup_keeps_its_opener_past_the_handle_that_opened_it(launch(ferridriver::webkit()).await?).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_popup_keeps_its_opener_past_the_handle_that_opened_it_on_bidi() -> anyhow::Result<()> {
+  a_popup_keeps_its_opener_past_the_handle_that_opened_it(launch(ferridriver::firefox()).await?).await
+}
+
 /// The list a watcher keeps from the recorded events: each one appended,
 /// or put in the place of the entry it replaces.
 fn watched_steps(events: &[EventPayload]) -> Vec<RecordedAction> {

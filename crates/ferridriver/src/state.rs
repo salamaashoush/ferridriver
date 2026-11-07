@@ -675,10 +675,10 @@ impl BrowserState {
     }
   }
 
-  /// Find the public wrapper of an open page in `instance` by its
-  /// backend target id (CDP targetId / `BiDi` context id / `WebKit`
-  /// pageProxyId). Used to wire `page.opener()` for popups.
-  pub(crate) fn find_page_by_backend_id(&self, instance: &str, backend_id: &str) -> Option<Arc<crate::page::Page>> {
+  /// Find an open page in `instance` by its backend target id (CDP
+  /// targetId / `BiDi` context id / `WebKit` pageProxyId). Used to wire
+  /// `page.opener()` for popups.
+  pub(crate) fn find_page_by_backend_id(&self, instance: &str, backend_id: &str) -> Option<AnyPage> {
     let inst = self.instances.get(instance)?;
     let pages = || inst.contexts.values().flat_map(|ctx| ctx.pages.iter());
     pages()
@@ -693,7 +693,7 @@ impl BrowserState {
             .is_ok_and(|cache| cache.record(backend_id).is_some())
         })
       })
-      .and_then(|page| page.page_backref_handle().upgrade())
+      .cloned()
   }
 
   /// The backend kind this state was constructed with. Cached at

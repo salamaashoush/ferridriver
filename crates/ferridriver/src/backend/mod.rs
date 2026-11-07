@@ -55,6 +55,12 @@ use tokio::sync::RwLock;
 #[derive(Clone, Default)]
 pub struct PageBackref {
   inner: Arc<std::sync::Mutex<Vec<std::sync::Weak<crate::page::Page>>>>,
+  /// The page that opened this one, kept here rather than on a wrapper:
+  /// every wrapper of a popup has to answer `opener()`, and the opener's
+  /// wrapper found when the popup appeared is often a passing one (an
+  /// input dispatched through `context.pages()`) that is gone a moment
+  /// later. Held as the opener's own slot, so nothing pins its page.
+  opener: Arc<std::sync::OnceLock<PageBackref>>,
 }
 
 impl PageBackref {
@@ -85,6 +91,23 @@ impl PageBackref {
   #[must_use]
   pub fn weak(&self) -> std::sync::Weak<crate::page::Page> {
     self.upgrade().as_ref().map(Arc::downgrade).unwrap_or_default()
+  }
+
+  /// Whether `other` is the slot of the same page.
+  #[must_use]
+  pub(crate) fn same_page(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.inner, &other.inner)
+  }
+
+  /// Record the page that opened this one; the first call wins.
+  pub(crate) fn set_opener(&self, opener: Self) {
+    let _ = self.opener.set(opener);
+  }
+
+  /// The slot of the page that opened this one.
+  #[must_use]
+  pub(crate) fn opener(&self) -> Option<Self> {
+    self.opener.get().cloned()
   }
 }
 
