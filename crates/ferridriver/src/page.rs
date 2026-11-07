@@ -2132,7 +2132,9 @@ impl Page {
 
   /// Wait for the page URL to match the given matcher.
   ///
-  /// Accepts glob, regex, or predicate via [`crate::url_matcher::UrlMatcher`].
+  /// Accepts a [`crate::url_matcher::UrlMatcher`] (glob, regex or sync
+  /// predicate) or a [`crate::url_matcher::UrlCondition`] whose predicate
+  /// answers asynchronously.
   /// Playwright: `page.waitForURL(url: string | RegExp | ((url: URL) => boolean),
   /// options?: { timeout?, waitUntil? })` — once the URL matches, the
   /// `waitUntil` lifecycle state (default `load`) is awaited within the
@@ -2140,20 +2142,21 @@ impl Page {
   ///
   /// # Errors
   ///
-  /// Returns an error if the wait times out.
+  /// Returns an error if the wait times out or the predicate fails.
   #[track_caller]
   pub fn wait_for_url(
     self: &Arc<Self>,
-    matcher: crate::url_matcher::UrlMatcher,
+    url: impl Into<crate::url_matcher::UrlCondition>,
   ) -> crate::action::Action<'static, crate::options::WaitForUrlOptions, ()> {
     let page = Arc::clone(self);
+    let condition = url.into();
     crate::action::Action::new(move |opts| {
       Box::pin(async move {
         page
           .traced(
             "waitForURL",
-            serde_json::json!({ "url": matcher.describe() }),
-            page.wait_for_url_impl(&matcher, opts),
+            serde_json::json!({ "url": condition.describe() }),
+            page.wait_for_url_impl(&condition, opts),
           )
           .await
       })
@@ -2163,10 +2166,10 @@ impl Page {
   /// Implementation of [`Self::wait_for_url`], which is the main frame's.
   pub(crate) async fn wait_for_url_impl(
     self: &Arc<Self>,
-    matcher: &crate::url_matcher::UrlMatcher,
+    condition: &crate::url_matcher::UrlCondition,
     opts: crate::options::WaitForUrlOptions,
   ) -> Result<()> {
-    self.main_frame().wait_for_url_impl(matcher, opts).await
+    self.main_frame().wait_for_url_impl(condition, opts).await
   }
 
   pub async fn wait_for_timeout(&self, ms: u64) {

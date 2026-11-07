@@ -169,6 +169,41 @@ impl MatcherSpec {
   }
 }
 
+/// `waitForURL`'s `url`: a glob, a `RegExp`, or a `(url: URL) => boolean |
+/// Promise<boolean>` that is called back on the JS thread for each URL.
+pub(crate) type UrlArg<'a> = napi::bindgen_prelude::Either3<
+  String,
+  crate::types::JsRegExpLike,
+  napi::bindgen_prelude::Function<'a, JsUrl, PredReturn>,
+>;
+
+pub(crate) fn url_condition(url: UrlArg<'_>) -> Result<ferridriver::url_matcher::UrlCondition> {
+  use napi::bindgen_prelude::Either3;
+  let predicate = match url {
+    Either3::A(glob) => return Ok(crate::types::string_or_regex_to_rust(napi::Either::A(glob))?.into()),
+    Either3::B(regex) => return Ok(crate::types::string_or_regex_to_rust(napi::Either::B(regex))?.into()),
+    Either3::C(predicate) => predicate,
+  };
+  let predicate = Arc::new(
+    predicate
+      .build_threadsafe_function::<JsUrl>()
+      .callee_handled::<false>()
+      .weak::<false>()
+      .max_queue_size::<0>()
+      .build()?,
+  );
+  Ok(ferridriver::url_matcher::UrlCondition::predicate(move |url| {
+    let predicate = Arc::clone(&predicate);
+    async move {
+      let rejected = |e: napi::Error| ferridriver::FerriError::backend(e.reason.clone());
+      match predicate.call_async_catch(JsUrl::new(url)).await.map_err(rejected)? {
+        napi::Either::A(matched) => Ok(matched),
+        napi::Either::B(promise) => promise.await.map_err(rejected),
+      }
+    }
+  }))
+}
+
 /// Resolve a predicate's `boolean | Promise<boolean>` return.
 pub(crate) async fn resolve_pred(r: PredReturn) -> bool {
   match r {
@@ -1499,24 +1534,22 @@ impl Page {
     Ok(handle.map(crate::element_handle::ElementHandle::wrap))
   }
 
-  /// Wait for the page URL to match. Accepts a glob string or a native JS `RegExp`.
-  /// Playwright API: `page.waitForURL(url, options?: { timeout?, waitUntil? })`.
+  /// Wait for the page URL to match a glob, a native JS `RegExp`, or a
+  /// predicate. Playwright API: `page.waitForURL(url, options?: { timeout?,
+  /// waitUntil? })`.
   #[napi(
     js_name = "waitForURL",
-    ts_args_type = "url: string | RegExp, options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+    ts_args_type = "url: string | RegExp | ((url: URL) => boolean | Promise<boolean>), options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }",
+    ts_return_type = "Promise<void>"
   )]
-  pub async fn wait_for_url(
+  pub fn wait_for_url(
     &self,
-    url: napi::Either<String, crate::types::JsRegExpLike>,
+    env: napi::Env,
+    url: UrlArg<'_>,
     options: Option<crate::types::WaitForUrlOptions>,
-  ) -> Result<()> {
-    let matcher = crate::types::string_or_regex_to_rust(url)?;
-    self
-      .inner
-      .wait_for_url(matcher)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    let wait = self.inner.wait_for_url(url_condition(url)?).bag(options)?;
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move { wait.await.map_err(crate::error::to_napi) }).build(&env)
   }
 
   #[napi]

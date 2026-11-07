@@ -2977,11 +2977,9 @@ impl PageJs {
       .await
   }
 
-  /// Playwright: `page.waitForURL(url: string | RegExp | (url:URL) =>
-  /// boolean, options?: { timeout?, waitUntil? })`. Thin delegator to
-  /// `Page::wait_for_url` (a function predicate is reduced to an
-  /// always-true matcher; the function check is enforced by the core
-  /// polling against the current URL).
+  /// Playwright: `page.waitForURL(url: string | RegExp | ((url: URL) =>
+  /// boolean), options?: { timeout?, waitUntil? })`. A predicate gets a
+  /// `URL` and may return a promise of its answer.
   #[qjs(rename = "waitForURL")]
   pub async fn wait_for_url<'js>(
     &self,
@@ -2992,15 +2990,12 @@ impl PageJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        let matcher = url_value_to_matcher(&ctx, url)?;
         let opts: Option<ferridriver::options::WaitForUrlOptions> =
           crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        self
-          .inner
-          .wait_for_url(matcher)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
+        wait_for_url_condition(&ctx, url, |condition| {
+          self.inner.wait_for_url(condition).maybe_options(opts).into_future()
+        })
+        .await
       })
       .await
   }

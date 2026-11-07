@@ -109,6 +109,73 @@ pub(crate) async fn call_predicate_truthy<'js>(
   Ok(js_truthy(&v))
 }
 
+/// Run a URL wait whose condition is `url`: a glob, a `RegExp`, or the
+/// caller's `(url: URL) => boolean | Promise<boolean>`. The wait asks a
+/// predicate about each URL through a channel, and this future answers on
+/// the script's own thread while the wait runs, so the predicate is
+/// called like any other callback in the script's turn. What it throws
+/// rejects the wait as it was thrown.
+pub(crate) async fn wait_for_url_condition<'js, W, F>(
+  ctx: &rquickjs::Ctx<'js>,
+  url: rquickjs::Value<'js>,
+  wait: W,
+) -> rquickjs::Result<()>
+where
+  W: FnOnce(ferridriver::url_matcher::UrlCondition) -> F,
+  F: std::future::Future<Output = ferridriver::error::Result<()>>,
+{
+  use crate::bindings::convert::FerriResultCtxExt;
+  use ferridriver::error::FerriError;
+  type Question = (String, tokio::sync::oneshot::Sender<ferridriver::error::Result<bool>>);
+
+  let Some(predicate) = url.as_function().cloned() else {
+    let matcher = super::url_value_to_matcher(ctx, url)?;
+    return wait(matcher.into()).await.into_js_with(ctx);
+  };
+  let (asks, mut questions) = tokio::sync::mpsc::unbounded_channel::<Question>();
+  let condition = ferridriver::url_matcher::UrlCondition::predicate(move |url| {
+    let asks = asks.clone();
+    async move {
+      let gone = || FerriError::backend("waitForURL: the script stopped answering its predicate");
+      let (answer, answered) = tokio::sync::oneshot::channel();
+      asks.send((url, answer)).map_err(|_| gone())?;
+      answered.await.map_err(|_| gone())?
+    }
+  });
+  let thrown: std::cell::RefCell<Option<rquickjs::Value<'js>>> = std::cell::RefCell::new(None);
+  let answering = async {
+    while let Some((url, answer)) = questions.recv().await {
+      let asked = async {
+        let url_ctor: rquickjs::function::Constructor<'js> = ctx.globals().get("URL")?;
+        let url_obj: rquickjs::Value<'js> = url_ctor.construct((url,))?;
+        call_predicate_truthy(&predicate, url_obj, ctx).await
+      };
+      let reply = match asked.await {
+        Ok(matched) => Ok(matched),
+        Err(rquickjs::Error::Exception) => {
+          *thrown.borrow_mut() = Some(ctx.catch());
+          Err(FerriError::backend("waitForURL: the predicate threw"))
+        },
+        Err(error) => Err(FerriError::backend(format!("waitForURL: {error}"))),
+      };
+      let _ = answer.send(reply);
+    }
+  };
+  let waited = {
+    let waiting = wait(condition);
+    tokio::pin!(answering, waiting);
+    tokio::select! {
+      biased;
+      waited = &mut waiting => waited,
+      () = &mut answering => waiting.await,
+    }
+  };
+  match (waited, thrown.into_inner()) {
+    (Err(_), Some(exception)) => Err(ctx.throw(exception)),
+    (waited, _) => waited.into_js_with(ctx),
+  }
+}
+
 /// Binding-side wait loop for a `(Request) => boolean` predicate: the
 /// predicate needs a live `RequestJs`, so it runs in the JS runtime
 /// while the loop drains the page event broadcast.

@@ -39,6 +39,62 @@ use crate::error::{FerriError, Result};
 /// boundaries in the backend route dispatcher.
 pub type UrlPredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// A URL test answered asynchronously, by calling back into the runtime
+/// that passed it: `waitForURL`'s `(url: URL) => boolean |
+/// Promise<boolean>`. Its error rejects the wait.
+pub type AsyncUrlPredicate = Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, Result<bool>> + Send + Sync>;
+
+/// What `waitForURL` waits for: a URL [`UrlMatcher`], or a predicate that
+/// may answer asynchronously.
+#[derive(Clone)]
+pub enum UrlCondition {
+  Matcher(UrlMatcher),
+  Predicate(AsyncUrlPredicate),
+}
+
+impl UrlCondition {
+  pub fn predicate<F, Fut>(f: F) -> Self
+  where
+    F: Fn(String) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<bool>> + Send + 'static,
+  {
+    Self::Predicate(Arc::new(move |url| Box::pin(f(url))))
+  }
+
+  /// Whether `url` satisfies the condition.
+  ///
+  /// # Errors
+  ///
+  /// Returns the predicate's own error.
+  pub async fn test(&self, url: &str) -> Result<bool> {
+    match self {
+      Self::Matcher(matcher) => Ok(matcher.matches(url)),
+      Self::Predicate(predicate) => predicate(url.to_owned()).await,
+    }
+  }
+
+  /// See [`UrlMatcher::describe`].
+  #[must_use]
+  pub fn describe(&self) -> String {
+    match self {
+      Self::Matcher(matcher) => matcher.describe(),
+      Self::Predicate(_) => "<predicate>".to_string(),
+    }
+  }
+}
+
+impl From<UrlMatcher> for UrlCondition {
+  fn from(matcher: UrlMatcher) -> Self {
+    Self::Matcher(matcher)
+  }
+}
+
+impl fmt::Debug for UrlCondition {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(&self.describe())
+  }
+}
+
 /// Playwright-compatible URL matcher.
 ///
 /// Construct with [`UrlMatcher::glob`], [`UrlMatcher::regex`],

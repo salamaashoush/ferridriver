@@ -822,9 +822,10 @@ impl Frame {
   #[track_caller]
   pub fn wait_for_url(
     &self,
-    matcher: crate::url_matcher::UrlMatcher,
+    url: impl Into<crate::url_matcher::UrlCondition>,
   ) -> crate::action::Action<'static, crate::options::WaitForUrlOptions, ()> {
     let frame = self.clone();
+    let condition = url.into();
     crate::action::Action::new(move |opts| {
       Box::pin(async move {
         frame
@@ -832,8 +833,8 @@ impl Frame {
           .traced_as(
             "Frame",
             "waitForURL",
-            serde_json::json!({ "url": matcher.describe() }),
-            frame.wait_for_url_impl(&matcher, opts),
+            serde_json::json!({ "url": condition.describe() }),
+            frame.wait_for_url_impl(&condition, opts),
           )
           .await
       })
@@ -843,25 +844,37 @@ impl Frame {
   /// Implementation of [`Self::wait_for_url`]. The URL is tracked
   /// locally (no wire cost to read), so the loop parks on the page
   /// event stream and re-checks on each event, with a coarse fallback
-  /// tick for anything the stream misses.
+  /// tick for anything the stream misses. A URL is tested once, so a
+  /// predicate is called for each URL the frame reaches, not per tick.
   pub(crate) async fn wait_for_url_impl(
     &self,
-    matcher: &crate::url_matcher::UrlMatcher,
+    condition: &crate::url_matcher::UrlCondition,
     opts: crate::options::WaitForUrlOptions,
   ) -> Result<()> {
     let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let timed_out = || {
+      crate::error::FerriError::timeout(
+        format!("waiting for URL matching {:?}", condition.describe()),
+        timeout_ms,
+      )
+    };
     let mut events = self.page.events().subscribe();
+    let mut tested: Option<String> = None;
     loop {
-      if matcher.matches(&self.url()) {
-        break;
+      let url = self.url();
+      if tested.as_deref() != Some(url.as_str()) {
+        let matched = tokio::time::timeout_at(deadline, condition.test(&url))
+          .await
+          .map_err(|_| timed_out())??;
+        if matched {
+          break;
+        }
+        tested = Some(url);
       }
       let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
       if remaining.is_zero() {
-        return Err(crate::error::FerriError::timeout(
-          format!("waiting for URL matching {:?}", matcher.identifier()),
-          timeout_ms,
-        ));
+        return Err(timed_out());
       }
       let tick = remaining.min(std::time::Duration::from_millis(250));
       tokio::select! {

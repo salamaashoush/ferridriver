@@ -245,15 +245,17 @@ impl Frame {
   /// Playwright: `frame.waitForURL(url, options?: { timeout?, waitUntil? })`.
   #[napi(
     js_name = "waitForURL",
-    ts_args_type = "url: string | RegExp, options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }"
+    ts_args_type = "url: string | RegExp | ((url: URL) => boolean | Promise<boolean>), options?: { timeout?: number, signal?: AbortSignal, waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }",
+    ts_return_type = "Promise<void>"
   )]
-  pub async fn wait_for_url(
+  pub fn wait_for_url(
     &self,
-    url: napi::Either<String, crate::types::JsRegExpLike>,
+    env: napi::Env,
+    url: crate::page::UrlArg<'_>,
     options: Option<crate::types::WaitForUrlOptions>,
-  ) -> Result<()> {
-    let matcher = crate::types::string_or_regex_to_rust(url)?;
-    self.inner.wait_for_url(matcher).bag(options)?.await.into_napi()
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    let wait = self.inner.wait_for_url(crate::page::url_condition(url)?).bag(options)?;
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move { wait.await.into_napi() }).build(&env)
   }
 
   /// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,

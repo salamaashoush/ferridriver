@@ -409,8 +409,8 @@ impl FrameJs {
       .await
   }
 
-  /// Playwright: `frame.waitForURL(url: string | RegExp, options?: {
-  /// timeout?, waitUntil? })`.
+  /// Playwright: `frame.waitForURL(url: string | RegExp | ((url: URL) =>
+  /// boolean), options?: { timeout?, waitUntil? })`.
   #[qjs(rename = "waitForURL")]
   pub async fn wait_for_url<'js>(
     &self,
@@ -421,15 +421,12 @@ impl FrameJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        let matcher = crate::bindings::page::url_value_to_matcher(&ctx, url)?;
         let opts: Option<ferridriver::options::WaitForUrlOptions> =
           crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        self
-          .inner
-          .wait_for_url(matcher)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
+        crate::bindings::page::wait_for_url_condition(&ctx, url, |condition| {
+          self.inner.wait_for_url(condition).maybe_options(opts).into_future()
+        })
+        .await
       })
       .await
   }

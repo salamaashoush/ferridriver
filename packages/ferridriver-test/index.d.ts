@@ -1961,7 +1961,7 @@ export interface Frame {
   waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
   waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', options?: TimeoutOption): Promise<void>;
-  waitForURL(url: string | RegExp, options?: TimeoutOption & { waitUntil?: LoadState }): Promise<void>;
+  waitForURL(url: string | RegExp | ((url: URL) => boolean | Promise<boolean>), options?: TimeoutOption & { waitUntil?: LoadState }): Promise<void>;
   waitForNavigation(options?: WaitForNavigationOptions): Promise<Response | null>;
   waitForTimeout(timeout: number): Promise<void>;
 
@@ -2300,7 +2300,7 @@ export interface Page {
   waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
   waitForLoadState(state?: 'load' | 'domcontentloaded' | 'networkidle', options?: TimeoutOption): Promise<void>;
-  waitForURL(url: string | RegExp | ((url: URL) => boolean), options?: TimeoutOption & { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }): Promise<void>;
+  waitForURL(url: string | RegExp | ((url: URL) => boolean | Promise<boolean>), options?: TimeoutOption & { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }): Promise<void>;
   waitForNavigation(options?: WaitForNavigationOptions): Promise<Response | null>;
   waitForTimeout(timeout: number): Promise<void>;
   waitForEvent(event: PageEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
