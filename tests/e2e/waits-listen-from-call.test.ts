@@ -1,10 +1,7 @@
-// Every wait listens from the moment it is called, as Playwright's do. In
-// each test the page fires the event on a timer while the script keeps
-// the VM busy, so nothing polls the wait's promise before the event:
-// a wait that only listened once polled would miss it and time out.
+// Every wait listens from the moment it is called, as Playwright's do.
 //
 // The tests share a lock. A busy script blocks the runtime thread it runs
-// on, and a task woken onto that thread waits for it, so two of these at
+// on, and a task parked on that thread waits for it, so two of these at
 // once could hold up each other's setup past the page's timer.
 import { test, describe, expect } from '@ferridriver/test';
 import type { ConsoleMessage, Dialog, Download, Page, Request, Response, WebSocket } from '@ferridriver/test';
@@ -18,11 +15,26 @@ function busy(ms: number): void {
 }
 
 /**
- * Runs `source` in the page 400 ms from now: after the wait the test
- * creates next, and well inside the two seconds `busy` holds the VM.
+ * Has the page run `source` at a moment just ahead, makes the waits with
+ * `arm` before that moment, and keeps the script busy until shortly after
+ * it, so nothing polls the waits' promises before the page's event: a
+ * wait that only listened once polled misses it and times out. A round in
+ * which the page set its timer too late for the waits to come first is run
+ * again.
  */
-async function later(page: Page, source: string): Promise<void> {
-  await page.evaluate(`setTimeout(() => { ${source} }, 400); null`);
+async function whileBusy<T>(page: Page, source: string, arm: () => T): Promise<T> {
+  for (let round = 0; round < 5; round++) {
+    const due = Date.now() + 250;
+    await page.evaluate(`window.__later = setTimeout(() => { ${source} }, ${due} - Date.now()); null`);
+    if (Date.now() >= due - 50) {
+      await page.evaluate('clearTimeout(window.__later); null');
+      continue;
+    }
+    const armed = arm();
+    busy(due + 400 - Date.now());
+    return armed;
+  }
+  throw new Error('the page never set its timer ahead of the waits');
 }
 
 describe('waits listen from the call', () => {
@@ -31,66 +43,67 @@ describe('waits listen from the call', () => {
   for (const form of ['plain', 'predicate'] as const) {
     test(`page.waitForEvent (${form})`, async ({ page }) => {
       await page.goto('/fx/landed');
-      await later(page, "console.log('while busy');");
-      const waiter =
+      const waiter = await whileBusy(page, "console.log('while busy');", () =>
         form === 'plain'
           ? page.waitForEvent('console', { timeout: 5000 })
           : page.waitForEvent('console', {
               predicate: (message) => (message as ConsoleMessage).text() === 'while busy',
               timeout: 5000,
-            });
-      busy(2000);
+            }),
+      );
       expect(((await waiter) as ConsoleMessage).text()).toBe('while busy');
     });
   }
 
   test('page.waitForRequest, by URL and by predicate', async ({ page }) => {
     await page.goto('/fx/landed');
-    await later(page, "fetch('/fx/echo?by=url'); fetch('/fx/echo?by=predicate');");
-    const byUrl = page.waitForRequest('**/fx/echo?by=url', { timeout: 5000 });
-    const byPredicate = page.waitForRequest((request: Request) => request.url().endsWith('by=predicate'), {
-      timeout: 5000,
-    });
-    busy(2000);
+    const [byUrl, byPredicate] = await whileBusy(
+      page,
+      "fetch('/fx/echo?by=url'); fetch('/fx/echo?by=predicate');",
+      () => [
+        page.waitForRequest('**/fx/echo?by=url', { timeout: 5000 }),
+        page.waitForRequest((request: Request) => request.url().endsWith('by=predicate'), { timeout: 5000 }),
+      ],
+    );
     expect((await byUrl).url()).toContain('by=url');
     expect((await byPredicate).url()).toContain('by=predicate');
   });
 
   test('page.waitForResponse, by URL and by predicate', async ({ page }) => {
     await page.goto('/fx/landed');
-    await later(page, "fetch('/fx/echo?by=url'); fetch('/fx/echo?by=predicate');");
-    const byUrl = page.waitForResponse('**/fx/echo?by=url', { timeout: 5000 });
-    const byPredicate = page.waitForResponse((response: Response) => response.url().endsWith('by=predicate'), {
-      timeout: 5000,
-    });
-    busy(2000);
+    const [byUrl, byPredicate] = await whileBusy(
+      page,
+      "fetch('/fx/echo?by=url'); fetch('/fx/echo?by=predicate');",
+      () => [
+        page.waitForResponse('**/fx/echo?by=url', { timeout: 5000 }),
+        page.waitForResponse((response: Response) => response.url().endsWith('by=predicate'), { timeout: 5000 }),
+      ],
+    );
     expect((await byUrl).status()).toBe(200);
     expect((await byPredicate).status()).toBe(200);
   });
 
   test('page.waitForNavigation', async ({ page }) => {
     await page.goto('/fx/landed');
-    await later(page, "location.href = '/fx/landed?next';");
-    const navigation = page.waitForNavigation({ timeout: 5000 });
-    busy(2000);
+    const navigation = await whileBusy(page, "location.href = '/fx/landed?next';", () =>
+      page.waitForNavigation({ timeout: 5000 }),
+    );
     await navigation;
     expect(page.url()).toContain('?next');
   });
 
   test('frame.waitForNavigation', async ({ page }) => {
     await page.goto('/fx/landed');
-    await later(page, "location.href = '/fx/landed?frame';");
-    const navigation = page.mainFrame().waitForNavigation({ timeout: 5000 });
-    busy(2000);
+    const navigation = await whileBusy(page, "location.href = '/fx/landed?frame';", () =>
+      page.mainFrame().waitForNavigation({ timeout: 5000 }),
+    );
     await navigation;
     expect(page.url()).toContain('?frame');
   });
 
   test("page.waitForEvent('dialog') claims the dialog", async ({ page }) => {
     await page.goto('/fx/landed');
-    await later(page, "alert('later');");
-    const dialog = page.waitForEvent('dialog', { timeout: 5000 });
-    busy(2000);
+    const dialog = await whileBusy(page, "alert('later');", () => page.waitForEvent('dialog', { timeout: 5000 }));
     const opened = (await dialog) as Dialog;
     expect(opened.message()).toBe('later');
     await opened.dismiss();
@@ -106,18 +119,18 @@ describe('waits listen from the call', () => {
     const first = page.waitForEvent('download', { timeout: 15000 });
     await page.click('#dl');
     await first;
-    await later(page, "document.getElementById('dl').click();");
-    const download = page.waitForEvent('download', { timeout: 15000 });
-    busy(2000);
+    const download = await whileBusy(page, "document.getElementById('dl').click();", () =>
+      page.waitForEvent('download', { timeout: 15000 }),
+    );
     expect(((await download) as Download).url()).toMatch(/\/fx\/download$/);
   });
 
   test('context.waitForEvent, plain and with a predicate', async ({ page, context }) => {
     await page.goto('/fx/landed');
-    await later(page, "window.open('/fx/landed?popup');");
-    const plain = context.waitForEvent('page', { timeout: 5000 });
-    const matching = context.waitForEvent('page', { predicate: () => true, timeout: 5000 });
-    busy(2000);
+    const [plain, matching] = await whileBusy(page, "window.open('/fx/landed?popup');", () => [
+      context.waitForEvent('page', { timeout: 5000 }),
+      context.waitForEvent('page', { predicate: () => true, timeout: 5000 }),
+    ]);
     const [first, second] = [(await plain) as Page, (await matching) as Page];
     expect(first).toBe(second);
     await first.close();
@@ -138,9 +151,9 @@ describe('waits listen from the call', () => {
     }, fxWsUrl(baseURL));
     await page.evaluate(() => (window as any).__opened);
     const ws = (await opened) as WebSocket;
-    await later(page, "window.__ws.send('later');");
-    const frame = ws.waitForEvent('framereceived', { timeout: 5000 });
-    busy(2000);
+    const frame = await whileBusy(page, "window.__ws.send('later');", () =>
+      ws.waitForEvent('framereceived', { timeout: 5000 }),
+    );
     expect((await frame).payload).toBe('later');
   });
 });
