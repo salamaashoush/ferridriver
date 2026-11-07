@@ -498,19 +498,23 @@ impl MediaEmulation {
   fn effective(&self, features: MediaFeatures) -> (crate::options::EmulateMediaOptions, bool) {
     let mut media = self.page.layered_over(&self.context);
     let requested = !media.is_empty();
-    resolve_feature(&mut media.media, features.media, None);
-    resolve_feature(
-      &mut media.color_scheme,
-      features.color_scheme,
-      Some(DEFAULT_COLOR_SCHEME),
-    );
-    resolve_feature(
-      &mut media.reduced_motion,
-      features.reduced_motion,
-      Some("no-preference"),
-    );
-    resolve_feature(&mut media.forced_colors, features.forced_colors, Some("none"));
-    resolve_feature(&mut media.contrast, features.contrast, Some("no-preference"));
+    for (field, feature, default) in [
+      (&mut media.media, MediaFeature::Media, None),
+      (
+        &mut media.color_scheme,
+        MediaFeature::ColorScheme,
+        Some(DEFAULT_COLOR_SCHEME),
+      ),
+      (
+        &mut media.reduced_motion,
+        MediaFeature::ReducedMotion,
+        Some("no-preference"),
+      ),
+      (&mut media.forced_colors, MediaFeature::ForcedColors, Some("none")),
+      (&mut media.contrast, MediaFeature::Contrast, Some("no-preference")),
+    ] {
+      resolve_feature(field, features.emulates(feature), default);
+    }
     (media, requested)
   }
 }
@@ -524,31 +528,32 @@ fn resolve_feature(field: &mut crate::options::MediaOverride, emulated: bool, de
   }
 }
 
-/// The media features a backend emulates for one page.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct MediaFeatures {
-  media: bool,
-  color_scheme: bool,
-  reduced_motion: bool,
-  forced_colors: bool,
-  contrast: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaFeature {
+  Media,
+  ColorScheme,
+  ReducedMotion,
+  ForcedColors,
+  Contrast,
 }
 
+/// The media features a backend emulates for one page.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaFeatures(&'static [MediaFeature]);
+
 impl MediaFeatures {
-  const ALL: Self = Self {
-    media: true,
-    color_scheme: true,
-    reduced_motion: true,
-    forced_colors: true,
-    contrast: true,
-  };
-  const NONE: Self = Self {
-    media: false,
-    color_scheme: false,
-    reduced_motion: false,
-    forced_colors: false,
-    contrast: false,
-  };
+  const ALL: Self = Self(&[
+    MediaFeature::Media,
+    MediaFeature::ColorScheme,
+    MediaFeature::ReducedMotion,
+    MediaFeature::ForcedColors,
+    MediaFeature::Contrast,
+  ]);
+  const NONE: Self = Self(&[]);
+
+  fn emulates(self, feature: MediaFeature) -> bool {
+    self.0.contains(&feature)
+  }
 }
 
 pub(crate) type SharedMediaEmulation = Arc<tokio::sync::Mutex<MediaEmulation>>;
@@ -1185,10 +1190,7 @@ impl AnyPage {
   fn emulated_media_features(&self) -> MediaFeatures {
     match self {
       AnyPage::CdpPipe(_) | AnyPage::CdpWs(_) | AnyPage::WebKit(_) => MediaFeatures::ALL,
-      AnyPage::Bidi(_) => MediaFeatures {
-        color_scheme: true,
-        ..MediaFeatures::NONE
-      },
+      AnyPage::Bidi(_) => MediaFeatures(&[MediaFeature::ColorScheme]),
       AnyPage::WebDriver(_) => MediaFeatures::NONE,
     }
   }
@@ -2668,7 +2670,7 @@ mod key_combo_tests {
 
 #[cfg(test)]
 mod media_emulation_tests {
-  use super::{MediaEmulation, MediaFeatures};
+  use super::{MediaEmulation, MediaFeature, MediaFeatures};
   use crate::options::{EmulateMediaOptions, MediaOverride};
 
   fn scheme(value: MediaOverride) -> EmulateMediaOptions {
@@ -2736,10 +2738,7 @@ mod media_emulation_tests {
 
   #[test]
   fn a_feature_the_backend_cannot_emulate_gets_no_default_and_null_is_a_no_op() {
-    let only_scheme = MediaFeatures {
-      color_scheme: true,
-      ..MediaFeatures::NONE
-    };
+    let only_scheme = MediaFeatures(&[MediaFeature::ColorScheme]);
     let (media, _) = MediaEmulation::default().effective(only_scheme);
     assert_eq!(media.color_scheme, MediaOverride::Set("light".into()));
     assert_eq!(media.reduced_motion, MediaOverride::Unchanged);
