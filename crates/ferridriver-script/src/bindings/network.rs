@@ -601,32 +601,36 @@ impl WebSocketJs {
     ctx: Ctx<'js>,
     event: String,
     options: rquickjs::function::Opt<Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
-  > {
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
     use ferridriver::events::EmitterEvent;
-    let mut timeout_ms: Option<f64> = None;
-    let mut predicate: Option<rquickjs::Function<'js>> = None;
-    if let Some(value) = options.0 {
-      if let Some(n) = value.as_number() {
-        timeout_ms = Some(n);
-      } else if let Some(f) = value.as_function() {
-        predicate = Some(f.clone());
-      } else if let Some(bag) = value.as_object() {
-        let timeout: Value<'js> = bag.get("timeout")?;
-        timeout_ms = timeout.as_number();
-        let found: Value<'js> = bag.get("predicate")?;
-        predicate = found.as_function().cloned();
-      }
-    }
-    let timeout = timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64);
     // Listening from the call, before the promise is first awaited.
     let mut events = self.inner.subscribe();
-    if event != "close" && self.inner.is_closed() {
-      return Err(throw_named(&ctx, "Error", "Socket closed"));
-    }
     let socket = self.inner.clone();
-    Ok(rquickjs::promise::Promised::from(async move {
+    let options = crate::bindings::convert::arm_now(&ctx, || {
+      let mut timeout_ms: Option<f64> = None;
+      let mut predicate: Option<rquickjs::Function<'js>> = None;
+      if let Some(value) = options.0 {
+        if let Some(n) = value.as_number() {
+          timeout_ms = Some(n);
+        } else if let Some(f) = value.as_function() {
+          predicate = Some(f.clone());
+        } else if let Some(bag) = value.as_object() {
+          let timeout: Value<'js> = bag.get("timeout")?;
+          timeout_ms = timeout.as_number();
+          let found: Value<'js> = bag.get("predicate")?;
+          predicate = found.as_function().cloned();
+        }
+      }
+      Ok((
+        timeout_ms.map_or(30_000, crate::bindings::convert::ms_f64_to_u64),
+        predicate,
+      ))
+    });
+    rquickjs::promise::Promised::from(async move {
+      let (timeout, predicate) = options.map_err(|deferred| deferred.raise(&ctx))?;
+      if event != "close" && socket.is_closed() {
+        return Err(throw_named(&ctx, "Error", "Socket closed"));
+      }
       let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
       loop {
         let next = match deadline {
@@ -655,7 +659,7 @@ impl WebSocketJs {
           return Ok(arg);
         }
       }
-    }))
+    })
   }
 }
 

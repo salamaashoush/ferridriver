@@ -1650,24 +1650,23 @@ impl PageJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<
-      impl std::future::Future<
-        Output = rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>>,
-      > + 'js,
-    >,
+  ) -> rquickjs::promise::Promised<
+    impl std::future::Future<
+      Output = rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>>,
+    > + 'js,
   > {
-    let opts = parse_wait_for_navigation_options(&ctx, &options)?;
     // Listening from the call: the navigation is usually started before
     // the promise is first awaited.
-    let navigation = self.inner.wait_for_navigation().options(opts);
+    let navigation = self.inner.wait_for_navigation();
+    let opts = crate::bindings::convert::arm_now(&ctx, || parse_wait_for_navigation_options(&ctx, &options));
     let page = self.inner.clone();
-    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
-      let response = navigation.await.into_js_with(&ctx)?;
+    rquickjs::promise::Promised::from(call_site.scope(async move {
+      let opts = opts.map_err(|deferred| deferred.raise(&ctx))?;
+      let response = navigation.options(opts).await.into_js_with(&ctx)?;
       Ok(crate::bindings::convert::Null(
         response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, page)),
       ))
-    })))
+    }))
   }
 
   /// Playwright: `page.addScriptTag(options?: { content?, path?, type?,
@@ -2901,22 +2900,24 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<
-      impl std::future::Future<Output = rquickjs::Result<crate::bindings::network::RequestJs>> + 'js,
-    >,
+  ) -> rquickjs::promise::Promised<
+    impl std::future::Future<Output = rquickjs::Result<crate::bindings::network::RequestJs>> + 'js,
   > {
-    let timeout = parse_wait_timeout(&ctx, options)?;
     let page = self.inner.clone();
     // Listening starts here, before the promise is returned: the caller's
     // next statement may already send the request.
-    let wait = match url.as_function() {
-      Some(pred) => NetworkWait::Predicate(page.events().subscribe(), pred.clone()),
-      None => NetworkWait::Matched(Box::pin(
-        page.wait_for_request(url_value_to_matcher(&ctx, url)?, timeout),
-      )),
-    };
-    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
+    let wait = crate::bindings::convert::arm_now(&ctx, || {
+      let timeout = parse_wait_timeout(&ctx, options)?;
+      let wait = match url.as_function() {
+        Some(pred) => NetworkWait::Predicate(page.events().subscribe(), pred.clone()),
+        None => NetworkWait::Matched(Box::pin(
+          page.wait_for_request(url_value_to_matcher(&ctx, url)?, timeout),
+        )),
+      };
+      Ok((timeout, wait))
+    });
+    rquickjs::promise::Promised::from(call_site.scope(async move {
+      let (timeout, wait) = wait.map_err(|deferred| deferred.raise(&ctx))?;
       match wait {
         NetworkWait::Predicate(rx, pred) => {
           let t = timeout.unwrap_or_else(|| page.default_timeout());
@@ -2927,7 +2928,7 @@ impl PageJs {
           page,
         )),
       }
-    })))
+    }))
   }
 
   /// `page.waitForResponse(string | RegExp | ((r: Response) => boolean |
@@ -2939,20 +2940,22 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<
-      impl std::future::Future<Output = rquickjs::Result<crate::bindings::network::ResponseJs>> + 'js,
-    >,
+  ) -> rquickjs::promise::Promised<
+    impl std::future::Future<Output = rquickjs::Result<crate::bindings::network::ResponseJs>> + 'js,
   > {
-    let timeout = parse_wait_timeout(&ctx, options)?;
     let page = self.inner.clone();
-    let wait = match url.as_function() {
-      Some(pred) => NetworkWait::Predicate(page.events().subscribe(), pred.clone()),
-      None => NetworkWait::Matched(Box::pin(
-        page.wait_for_response(url_value_to_matcher(&ctx, url)?, timeout),
-      )),
-    };
-    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
+    let wait = crate::bindings::convert::arm_now(&ctx, || {
+      let timeout = parse_wait_timeout(&ctx, options)?;
+      let wait = match url.as_function() {
+        Some(pred) => NetworkWait::Predicate(page.events().subscribe(), pred.clone()),
+        None => NetworkWait::Matched(Box::pin(
+          page.wait_for_response(url_value_to_matcher(&ctx, url)?, timeout),
+        )),
+      };
+      Ok((timeout, wait))
+    });
+    rquickjs::promise::Promised::from(call_site.scope(async move {
+      let (timeout, wait) = wait.map_err(|deferred| deferred.raise(&ctx))?;
       match wait {
         NetworkWait::Predicate(rx, pred) => {
           let t = timeout.unwrap_or_else(|| page.default_timeout());
@@ -2963,7 +2966,7 @@ impl PageJs {
           page,
         )),
       }
-    })))
+    }))
   }
 
   /// Mirrors Playwright `page.waitForEvent(event, options?)`. Dispatches
@@ -3065,27 +3068,27 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     event: String,
     options_or_predicate: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js>,
-  > {
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js> {
     use rquickjs::class::Class;
-    let mut timeout_ms: Option<f64> = None;
-    let mut predicate: Option<rquickjs::Function<'js>> = None;
-    if let Some(v) = options_or_predicate.0 {
-      if let Some(n) = v.as_number() {
-        timeout_ms = Some(n);
-      } else if let Some(f) = v.as_function() {
-        predicate = Some(f.clone());
-      } else if let Some(obj) = v.as_object() {
-        let t: rquickjs::Value<'js> = obj.get("timeout")?;
-        timeout_ms = t.as_number();
-        let p: rquickjs::Value<'js> = obj.get("predicate")?;
-        predicate = p.as_function().cloned();
-      }
-    }
     let page = self.inner.clone();
-    let timeout = timeout_ms.map_or_else(|| page.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
     let event_lc = event.to_ascii_lowercase();
+    let options = crate::bindings::convert::arm_now(&ctx, || {
+      let mut timeout_ms: Option<f64> = None;
+      let mut predicate: Option<rquickjs::Function<'js>> = None;
+      if let Some(v) = options_or_predicate.0 {
+        if let Some(n) = v.as_number() {
+          timeout_ms = Some(n);
+        } else if let Some(f) = v.as_function() {
+          predicate = Some(f.clone());
+        } else if let Some(obj) = v.as_object() {
+          let t: rquickjs::Value<'js> = obj.get("timeout")?;
+          timeout_ms = t.as_number();
+          let p: rquickjs::Value<'js> = obj.get("predicate")?;
+          predicate = p.as_function().cloned();
+        }
+      }
+      Ok((timeout_ms, predicate))
+    });
     // Listening starts here, not at the promise's first poll: the caller's
     // next statement can fire the event while nothing has polled it yet (a
     // script that ends without awaiting, a run of synchronous code).
@@ -3093,14 +3096,19 @@ impl PageJs {
     // live handle through a one-shot handler on the page's manager, which
     // takes it synchronously with the backend event (Playwright's
     // `addDialogHandler` + `dialogDidOpen` flow).
-    let armed = match (predicate.is_none(), event_lc.as_str()) {
-      (true, "dialog") => Armed::Dialog(Box::pin(page.wait_for_dialog(timeout))),
-      (true, "filechooser") => Armed::FileChooser(Box::pin(page.wait_for_file_chooser(timeout))),
-      (true, "download") => Armed::Download(Box::pin(page.wait_for_download(timeout))),
-      _ => Armed::Events(page.events().subscribe()),
-    };
+    let armed = options.map(|(timeout_ms, predicate)| {
+      let timeout = timeout_ms.map_or_else(|| page.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+      let armed = match (predicate.is_none(), event_lc.as_str()) {
+        (true, "dialog") => Armed::Dialog(Box::pin(page.wait_for_dialog(timeout))),
+        (true, "filechooser") => Armed::FileChooser(Box::pin(page.wait_for_file_chooser(timeout))),
+        (true, "download") => Armed::Download(Box::pin(page.wait_for_download(timeout))),
+        _ => Armed::Events(page.events().subscribe()),
+      };
+      (timeout, predicate, armed)
+    });
 
-    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
+    rquickjs::promise::Promised::from(call_site.scope(async move {
+      let (timeout, predicate, armed) = armed.map_err(|deferred| deferred.raise(&ctx))?;
       let mut rx = match armed {
         Armed::Events(rx) => rx,
         Armed::Dialog(dialog) => {
@@ -3157,7 +3165,7 @@ impl PageJs {
           return page_event_to_js(&ctx, &page, ev);
         }
       }
-    })))
+    }))
   }
 
   // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────

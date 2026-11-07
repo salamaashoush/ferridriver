@@ -41,6 +41,40 @@ pub fn type_error(ctx: &Ctx<'_>, message: impl Into<String>) -> rquickjs::Error 
   }
 }
 
+/// A failure in the synchronous part of a promise-returning binding (its
+/// arguments read, its wait armed), held for the promise: the promise
+/// rejects with it, as an async method's does, rather than the call
+/// throwing past a `.then` / `.catch` the caller chained onto it.
+pub enum Deferred<'js> {
+  Thrown(Value<'js>),
+  Error(rquickjs::Error),
+}
+
+impl<'js> Deferred<'js> {
+  /// The failure, taken off the context when it is a thrown exception.
+  pub fn hold(ctx: &Ctx<'js>, error: rquickjs::Error) -> Self {
+    if error.is_exception() {
+      Self::Thrown(ctx.catch())
+    } else {
+      Self::Error(error)
+    }
+  }
+
+  /// Throw it again, from the promise.
+  pub fn raise(self, ctx: &Ctx<'js>) -> rquickjs::Error {
+    match self {
+      Self::Thrown(value) => ctx.throw(value),
+      Self::Error(error) => error,
+    }
+  }
+}
+
+/// Run a binding's synchronous part now, holding a failure for its
+/// promise (see [`Deferred`]).
+pub fn arm_now<'js, T>(ctx: &Ctx<'js>, arm: impl FnOnce() -> rquickjs::Result<T>) -> Result<T, Deferred<'js>> {
+  arm().map_err(|error| Deferred::hold(ctx, error))
+}
+
 /// [`throw_named`] with the `stack` the thrower decided on, rather than
 /// the one the engine captured at the `Error` construction site.
 ///

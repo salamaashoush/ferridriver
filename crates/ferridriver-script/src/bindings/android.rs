@@ -447,39 +447,43 @@ impl AndroidDeviceJs {
     ctx: Ctx<'js>,
     event: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
-  > {
-    if event != "webview" && event != "close" {
-      return Err(type_error(&ctx, format!("waitForEvent: unknown event \"{event}\"")));
-    }
-    let (predicate, timeout): (Option<Function<'js>>, Option<f64>) = match options.0 {
-      Some(value) if value.is_function() => (value.into_function(), None),
-      Some(value) if value.is_object() => {
-        let bag = value.as_object().cloned();
-        let predicate: Option<Function<'js>> = bag.as_ref().map(|bag| bag.get("predicate")).transpose()?.flatten();
-        let timeout: Option<f64> = bag.as_ref().map(|bag| bag.get("timeout")).transpose()?.flatten();
-        (predicate, timeout)
-      },
-      _ => (None, None),
-    };
-    let timeout_ms = timeout.map_or_else(|| self.inner.default_timeout(), ms_f64_to_u64);
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
     // Listening from the call, before the promise is first awaited, so no
     // event in between is missed.
     let mut events = self.inner.subscribe();
     let device = self.inner.clone();
     let views = Rc::clone(&self.views);
+    let options = crate::bindings::convert::arm_now(&ctx, || {
+      if event != "webview" && event != "close" {
+        return Err(type_error(&ctx, format!("waitForEvent: unknown event \"{event}\"")));
+      }
+      let (predicate, timeout): (Option<Function<'js>>, Option<f64>) = match options.0 {
+        Some(value) if value.is_function() => (value.into_function(), None),
+        Some(value) if value.is_object() => {
+          let bag = value.as_object().cloned();
+          let predicate: Option<Function<'js>> = bag.as_ref().map(|bag| bag.get("predicate")).transpose()?.flatten();
+          let timeout: Option<f64> = bag.as_ref().map(|bag| bag.get("timeout")).transpose()?.flatten();
+          (predicate, timeout)
+        },
+        _ => (None, None),
+      };
+      Ok((
+        predicate,
+        timeout.map_or_else(|| device.default_timeout(), ms_f64_to_u64),
+      ))
+    });
     let closed = |ctx: &Ctx<'js>| {
       crate::bindings::convert::ferri_throw(
         ctx,
         &ferridriver::FerriError::target_closed(Some("Device is closed".into())),
       )
     };
-    // A closed device shows no more web views; say so now, not at the timeout.
-    if event == "webview" && device.is_closed() {
-      return Err(closed(&ctx));
-    }
-    Ok(rquickjs::promise::Promised::from(async move {
+    rquickjs::promise::Promised::from(async move {
+      let (predicate, timeout_ms) = options.map_err(|deferred| deferred.raise(&ctx))?;
+      // A closed device shows no more web views; say so now, not at the timeout.
+      if event == "webview" && device.is_closed() {
+        return Err(closed(&ctx));
+      }
       let accepted = |candidate: &Value<'js>| -> rquickjs::Result<bool> {
         match &predicate {
           Some(predicate) => truthy(&ctx, predicate.call((candidate.clone(),))?),
@@ -518,7 +522,7 @@ impl AndroidDeviceJs {
           &ferridriver::FerriError::timeout(format!("waiting for event \"{event}\""), timeout_ms),
         )),
       }
-    }))
+    })
   }
 
   /// Playwright: `androidDevice.webViews(): AndroidWebView[]`.

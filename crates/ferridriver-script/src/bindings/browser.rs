@@ -287,16 +287,17 @@ impl BrowserJs {
     ctx: Ctx<'js>,
     event: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
-  > {
-    let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?.unwrap_or(30000);
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
     // Listening from the call, before the promise is first awaited.
-    let next = self.inner.wait_for_event(&event, timeout);
-    Ok(rquickjs::promise::Promised::from(async move {
+    let next = crate::bindings::convert::arm_now(&ctx, || {
+      let timeout = crate::bindings::convert::parse_timeout_number_or_bag(&ctx, options)?.unwrap_or(30000);
+      Ok(self.inner.wait_for_event(&event, timeout))
+    });
+    rquickjs::promise::Promised::from(async move {
+      let next = next.map_err(|deferred| deferred.raise(&ctx))?;
       let ev = next.await.into_js_with(&ctx)?;
       browser_event_to_js(&ctx, ev)
-    }))
+    })
   }
 
   /// Playwright: `browser.contexts()`. Returns the list of contexts as

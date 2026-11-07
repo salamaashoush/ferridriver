@@ -1090,31 +1090,33 @@ impl BrowserContextJs {
     ctx: Ctx<'js>,
     event: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
-  > {
+  ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
     use ferridriver::events::EmitterEvent;
-    let mut timeout_ms: Option<f64> = None;
-    let mut predicate: Option<rquickjs::Function<'js>> = None;
-    if let Some(value) = options.0 {
-      if let Some(n) = value.as_number() {
-        timeout_ms = Some(n);
-      } else if let Some(f) = value.as_function() {
-        predicate = Some(f.clone());
-      } else if let Some(bag) = value.as_object() {
-        let timeout: Value<'js> = bag.get("timeout")?;
-        timeout_ms = timeout.as_number();
-        let found: Value<'js> = bag.get("predicate")?;
-        predicate = found.as_function().cloned();
-      }
-    }
-    let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
     // Listening from the call, before the promise is first awaited.
-    let armed = match predicate {
-      None => ContextWait::Next(Box::pin(self.inner.wait_for_event(&event, timeout))),
-      Some(predicate) => ContextWait::Matching(self.inner.events().subscribe(), predicate),
-    };
-    Ok(rquickjs::promise::Promised::from(async move {
+    let armed = crate::bindings::convert::arm_now(&ctx, || {
+      let mut timeout_ms: Option<f64> = None;
+      let mut predicate: Option<rquickjs::Function<'js>> = None;
+      if let Some(value) = options.0 {
+        if let Some(n) = value.as_number() {
+          timeout_ms = Some(n);
+        } else if let Some(f) = value.as_function() {
+          predicate = Some(f.clone());
+        } else if let Some(bag) = value.as_object() {
+          let timeout: Value<'js> = bag.get("timeout")?;
+          timeout_ms = timeout.as_number();
+          let found: Value<'js> = bag.get("predicate")?;
+          predicate = found.as_function().cloned();
+        }
+      }
+      let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::bindings::convert::ms_f64_to_u64);
+      let armed = match predicate {
+        None => ContextWait::Next(Box::pin(self.inner.wait_for_event(&event, timeout))),
+        Some(predicate) => ContextWait::Matching(self.inner.events().subscribe(), predicate),
+      };
+      Ok((timeout, armed))
+    });
+    rquickjs::promise::Promised::from(async move {
+      let (timeout, armed) = armed.map_err(|deferred| deferred.raise(&ctx))?;
       let (mut rx, predicate) = match armed {
         ContextWait::Next(next) => {
           let ev = next.await.into_js_with(&ctx)?;
@@ -1150,7 +1152,7 @@ impl BrowserContextJs {
           return context_event_to_js(&ctx, ev);
         }
       }
-    }))
+    })
   }
 }
 

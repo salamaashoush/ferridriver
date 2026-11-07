@@ -439,24 +439,25 @@ impl FrameJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<
-    rquickjs::promise::Promised<
-      impl std::future::Future<
-        Output = rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>>,
-      > + 'js,
-    >,
+  ) -> rquickjs::promise::Promised<
+    impl std::future::Future<
+      Output = rquickjs::Result<crate::bindings::convert::Null<crate::bindings::network::ResponseJs>>,
+    > + 'js,
   > {
-    let opts = crate::bindings::page::parse_wait_for_navigation_options(&ctx, &options)?;
     // Listening from the call: the navigation is usually started before
     // the promise is first awaited.
-    let navigation = self.inner.wait_for_navigation().options(opts);
+    let navigation = self.inner.wait_for_navigation();
+    let opts = crate::bindings::convert::arm_now(&ctx, || {
+      crate::bindings::page::parse_wait_for_navigation_options(&ctx, &options)
+    });
     let page = self.inner.page_arc().clone();
-    Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
-      let response = navigation.await.into_js_with(&ctx)?;
+    rquickjs::promise::Promised::from(call_site.scope(async move {
+      let opts = opts.map_err(|deferred| deferred.raise(&ctx))?;
+      let response = navigation.options(opts).await.into_js_with(&ctx)?;
       Ok(crate::bindings::convert::Null(
         response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, page)),
       ))
-    })))
+    }))
   }
 
   /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?: {

@@ -271,10 +271,10 @@ impl Frame {
   ) -> Result<napi::bindgen_prelude::AsyncBlock<Option<crate::network::Response>>> {
     // Listening from the call: the navigation is usually started before
     // the promise is awaited.
-    let navigation = self.inner.wait_for_navigation().bag(options)?;
+    let navigation = self.inner.wait_for_navigation().bag(options);
     let page = self.inner.page_arc().clone();
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      let resp = navigation.await.into_napi()?;
+      let resp = navigation?.await.into_napi()?;
       Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
     })
     .build(&env)
