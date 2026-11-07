@@ -97,10 +97,45 @@ const AXE_CORE_SHA256: &str = "66a8aaa95a8b044a7fd74a5435873bf04ff65a1ca75567c92
 /// Download retry count (matches Playwright's 5 attempts).
 const DOWNLOAD_RETRIES: u32 = 5;
 
-/// Playwright's `browsers.json` on main — single source of truth for the
-/// `WebKit` build revision.
-const PW_BROWSERS_JSON_URL: &str =
-  "https://raw.githubusercontent.com/microsoft/playwright/main/packages/playwright-core/browsers.json";
+/// The latest released `playwright-core`. Its `browsers.json` names the
+/// `WebKit` and Android driver builds that release ships, the way Chrome
+/// for Testing and Mozilla name their current stable release. Main's names
+/// builds no release has shipped yet.
+const PW_LATEST_RELEASE_URL: &str = "https://registry.npmjs.org/playwright-core/latest";
+
+#[derive(Debug, Deserialize)]
+struct NpmRelease {
+  version: String,
+}
+
+/// `browsers.json` as tagged for `release`.
+fn released_browsers_json_url(release: &NpmRelease) -> Result<String> {
+  let version = release.version.trim();
+  let plain = !version.is_empty()
+    && version.split('.').count() == 3
+    && version
+      .split('.')
+      .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+  if !plain {
+    return Err(backend_err(format!(
+      "the latest playwright-core is '{version}', which is not a release version"
+    )));
+  }
+  Ok(format!(
+    "https://raw.githubusercontent.com/microsoft/playwright/v{version}/packages/playwright-core/browsers.json"
+  ))
+}
+
+/// The build revision `browsers` names for `name`, taking the override
+/// for `platform` when there is one.
+fn browser_revision(browsers: PwBrowsersJson, name: &str, platform: &str) -> Result<String> {
+  browsers
+    .browsers
+    .into_iter()
+    .find(|b| b.name == name)
+    .map(|mut b| b.revision_overrides.remove(platform).unwrap_or(b.revision))
+    .ok_or_else(|| backend_err(format!("Playwright browsers.json missing {name} entry")))
+}
 
 /// Playwright CDN mirrors. Try in order; on connection failure, fall over.
 const PW_CDN_MIRRORS: &[&str] = &[
@@ -1025,11 +1060,50 @@ impl BrowserInstaller {
     Ok(path)
   }
 
+  async fn released_browsers_json(&self) -> Result<PwBrowsersJson> {
+    let release: NpmRelease = self
+      .client
+      .get(PW_LATEST_RELEASE_URL)
+      .send()
+      .await
+      .map_err(|e| backend_err(format!("failed to resolve the latest Playwright release: {e}")))?
+      .json()
+      .await
+      .map_err(|e| backend_err(format!("failed to parse the latest Playwright release: {e}")))?;
+    self
+      .client
+      .get(released_browsers_json_url(&release)?)
+      .send()
+      .await
+      .map_err(|e| {
+        backend_err(format!(
+          "failed to fetch Playwright {} browsers.json: {e}",
+          release.version
+        ))
+      })?
+      .error_for_status()
+      .map_err(|e| {
+        backend_err(format!(
+          "failed to fetch Playwright {} browsers.json: {e}",
+          release.version
+        ))
+      })?
+      .json()
+      .await
+      .map_err(|e| {
+        backend_err(format!(
+          "failed to parse Playwright {} browsers.json: {e}",
+          release.version
+        ))
+      })
+  }
+
   /// Install the Playwright `WebKit` binary.
   ///
-  /// Reads the current `WebKit` revision from Playwright's `browsers.json`
-  /// (latest main), downloads the matching archive from the Playwright
-  /// CDN, and extracts it to `~/.cache/ferridriver/webkit/webkit-<rev>/`.
+  /// Reads the `WebKit` revision from the `browsers.json` of the latest
+  /// released Playwright, downloads the matching archive from the
+  /// Playwright CDN, and extracts it to
+  /// `~/.cache/ferridriver/webkit/webkit-<rev>/`.
   ///
   /// The launcher search order picks this up automatically. Override
   /// with the `FERRIDRIVER_WEBKIT` environment variable when needed.
@@ -1045,25 +1119,12 @@ impl BrowserInstaller {
   {
     progress(InstallProgress::Resolving);
 
-    let browsers: PwBrowsersJson = self
-      .client
-      .get(PW_BROWSERS_JSON_URL)
-      .send()
-      .await
-      .map_err(|e| backend_err(format!("failed to fetch Playwright browsers.json: {e}")))?
-      .json()
-      .await
-      .map_err(|e| backend_err(format!("failed to parse Playwright browsers.json: {e}")))?;
+    let browsers = self.released_browsers_json().await?;
 
     let platform = webkit_platform_for_host()?;
     let archive = webkit_archive(&platform)
       .ok_or_else(|| FerriError::unsupported(format!("no Playwright WebKit build for {platform}")))?;
-    let revision = browsers
-      .browsers
-      .into_iter()
-      .find(|b| b.name == "webkit")
-      .map(|mut b| b.revision_overrides.remove(&platform).unwrap_or(b.revision))
-      .ok_or_else(|| backend_err("Playwright browsers.json missing webkit entry"))?;
+    let revision = browser_revision(browsers, "webkit", &platform)?;
 
     let webkit_root = self.cache_dir.join("webkit");
     let install_dir = webkit_root.join(format!("webkit-{revision}"));
@@ -1164,21 +1225,8 @@ impl BrowserInstaller {
     F: Fn(InstallProgress),
   {
     progress(InstallProgress::Resolving);
-    let browsers: PwBrowsersJson = self
-      .client
-      .get(PW_BROWSERS_JSON_URL)
-      .send()
-      .await
-      .map_err(|e| backend_err(format!("failed to fetch Playwright browsers.json: {e}")))?
-      .json()
-      .await
-      .map_err(|e| backend_err(format!("failed to parse Playwright browsers.json: {e}")))?;
-    let revision = browsers
-      .browsers
-      .into_iter()
-      .find(|b| b.name == "android")
-      .map(|b| b.revision)
-      .ok_or_else(|| backend_err("Playwright browsers.json missing android entry"))?;
+    let browsers = self.released_browsers_json().await?;
+    let revision = browser_revision(browsers, "android", "")?;
 
     let install_dir = self.cache_dir.join(format!("android-driver-{revision}"));
     let marker_file = install_dir.join(".downloaded");
@@ -1877,7 +1925,9 @@ mod extraction_tests {
 
 #[cfg(test)]
 mod webkit_platform_tests {
-  use super::{PwBrowsersJson, mac_host_platform, webkit_archive};
+  use super::{
+    NpmRelease, PwBrowsersJson, browser_revision, mac_host_platform, released_browsers_json_url, webkit_archive,
+  };
 
   #[test]
   fn darwin_releases_map_to_mac_platforms() {
@@ -1901,6 +1951,31 @@ mod webkit_platform_tests {
     assert_eq!(webkit_archive("mac15"), Some("webkit-mac-15.zip"));
     assert_eq!(webkit_archive("mac26-arm64"), Some("webkit-mac-26-arm64.zip"));
     assert_eq!(webkit_archive("mac13-arm64"), None);
+  }
+
+  #[test]
+  fn browser_builds_come_from_the_latest_release_tag_not_main() {
+    let release: NpmRelease = serde_json::from_str(r#"{"name":"playwright-core","version":"1.65.0"}"#).unwrap();
+    assert_eq!(
+      released_browsers_json_url(&release).unwrap(),
+      "https://raw.githubusercontent.com/microsoft/playwright/v1.65.0/packages/playwright-core/browsers.json"
+    );
+    for unreleased in ["1.66.0-alpha-2026-11-06", "1.65.0-beta-1793921730000", "main", ""] {
+      let release = NpmRelease {
+        version: unreleased.to_string(),
+      };
+      assert!(released_browsers_json_url(&release).is_err(), "{unreleased}");
+    }
+  }
+
+  #[test]
+  fn a_revision_is_the_platform_override_or_the_default() {
+    let json = r#"{"browsers":[{"name":"webkit","revision":"2388","revisionOverrides":{"mac14-arm64":"2251"}},{"name":"android","revision":"1001"}]}"#;
+    let parse = || serde_json::from_str::<PwBrowsersJson>(json).unwrap();
+    assert_eq!(browser_revision(parse(), "webkit", "mac14-arm64").unwrap(), "2251");
+    assert_eq!(browser_revision(parse(), "webkit", "mac26-arm64").unwrap(), "2388");
+    assert_eq!(browser_revision(parse(), "android", "").unwrap(), "1001");
+    assert!(browser_revision(parse(), "chromium", "mac26-arm64").is_err());
   }
 
   #[test]
