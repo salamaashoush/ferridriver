@@ -6,7 +6,7 @@ import { test, describe, expect } from '@ferridriver/test';
 import type { Page } from '@ferridriver/test';
 
 async function pushSoon(page: Page, path: string): Promise<void> {
-  await page.evaluate(target => {
+  await page.evaluate((target: string) => {
     setTimeout(() => history.pushState({}, '', target), 100);
   }, path);
 }
