@@ -76,6 +76,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 const CFT_VERSIONS_URL: &str =
   "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
+/// Where Chrome for Testing publishes every version's builds, by version
+/// and platform.
+const CFT_DOWNLOADS_URL: &str = "https://storage.googleapis.com/chrome-for-testing-public";
+
+/// Numbers this process's `ChromeDriver` staging directories apart.
+static CHROMEDRIVER_STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Mozilla product-details API for resolving Firefox versions.
 const FIREFOX_VERSIONS_URL: &str = "https://product-details.mozilla.org/1.0/firefox_versions.json";
 
@@ -221,6 +228,7 @@ pub enum InstallProgress {
 pub enum CacheFamily {
   Chromium,
   ChromiumHeadlessShell,
+  ChromeDriver,
   Firefox,
   WebKit,
   AxeCore,
@@ -234,6 +242,7 @@ impl CacheFamily {
     Some(match target {
       "chromium" => Self::Chromium,
       "chromium-headless-shell" => Self::ChromiumHeadlessShell,
+      "chromedriver" => Self::ChromeDriver,
       "firefox" => Self::Firefox,
       "webkit" => Self::WebKit,
       "axe" => Self::AxeCore,
@@ -252,6 +261,7 @@ impl CacheFamily {
     match self {
       Self::Chromium => "chromium-",
       Self::ChromiumHeadlessShell => "chromium-headless-shell-",
+      Self::ChromeDriver => "chromedriver-",
       Self::Firefox => "firefox-",
       Self::WebKit => "webkit-",
       Self::AxeCore => "axe-core-",
@@ -930,6 +940,147 @@ impl BrowserInstaller {
     None
   }
 
+  /// Install the `ChromeDriver` built for the newest Chromium in the cache,
+  /// from the Chrome for Testing CDN, and answer its path. A driver only
+  /// starts the browser of its own version, so it follows the installed
+  /// Chromium rather than the latest stable release; installing that
+  /// Chromium first is what `chromium chromedriver` in one command does.
+  /// Installs to `{cache}/chromedriver-{version}/`.
+  ///
+  /// # Errors
+  ///
+  /// Fails when no Chromium is installed, the download fails after all
+  /// retries, or extraction leaves no executable.
+  pub async fn install_chromedriver<F>(&self, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    progress(InstallProgress::Resolving);
+    let version = self.installed_chromium_version().ok_or_else(|| {
+      FerriError::invalid_argument(
+        "chromedriver",
+        "no Chromium is installed to pair it with: run `ferridriver install chromium chromedriver`",
+      )
+    })?;
+    let platform = current_platform();
+    let install_dir = self.cache_dir.join(format!("chromedriver-{version}"));
+    let marker_file = install_dir.join(".downloaded");
+    let executable = chromedriver_executable_path(&install_dir, &platform);
+    if marker_file.exists() && executable.exists() {
+      let path = executable.to_string_lossy().to_string();
+      progress(InstallProgress::AlreadyInstalled {
+        version,
+        path: path.clone(),
+      });
+      return Ok(path);
+    }
+    // Two installs of the same driver can run at once (test workers that
+    // each provision it): each downloads and extracts beside the cache
+    // under a name of its own, and the finished directory is renamed into
+    // place, so neither ever sees, or removes, the other's half-done work.
+    let tmp_dir = self.cache_dir.join(".tmp");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+    let own = format!(
+      "chromedriver-{version}-{platform}-{}-{}",
+      std::process::id(),
+      CHROMEDRIVER_STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let zip_path = tmp_dir.join(format!("{own}.zip"));
+    let staging = tmp_dir.join(&own);
+    let url = format!("{CFT_DOWNLOADS_URL}/{version}/{platform}/chromedriver-{platform}.zip");
+    for attempt in 1..=DOWNLOAD_RETRIES {
+      progress(InstallProgress::Downloading {
+        bytes_downloaded: 0,
+        total_bytes: None,
+      });
+      match self.download_file(&url, &zip_path, &progress).await {
+        Ok(()) => break,
+        Err(e) => {
+          let _ = tokio::fs::remove_file(&zip_path).await;
+          if attempt == DOWNLOAD_RETRIES {
+            return Err(backend_err(format!(
+              "download failed after {DOWNLOAD_RETRIES} attempts: attempt {attempt}/{DOWNLOAD_RETRIES}: {e}"
+            )));
+          }
+        },
+      }
+    }
+
+    progress(InstallProgress::Extracting);
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    tokio::fs::create_dir_all(&staging).await?;
+    let staging_clone = staging.clone();
+    let zip_path_clone = zip_path.clone();
+    let extracted = tokio::task::spawn_blocking(move || extract_zip(&zip_path_clone, &staging_clone))
+      .await
+      .map_err(|e| backend_err(format!("extract task failed: {e}")));
+    let _ = tokio::fs::remove_file(&zip_path).await;
+    if let Err(error) = extracted.and_then(|extracted| extracted) {
+      let _ = tokio::fs::remove_dir_all(&staging).await;
+      return Err(error);
+    }
+    let staged = chromedriver_executable_path(&staging, &platform);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      if staged.exists() {
+        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+      }
+    }
+    if !staged.exists() {
+      let _ = tokio::fs::remove_dir_all(&staging).await;
+      return Err(backend_err(format!(
+        "extraction completed but chromedriver executable not found at: {}",
+        staged.display()
+      )));
+    }
+    tokio::fs::write(staging.join(".downloaded"), version.as_bytes()).await?;
+    // A directory left without its marker by an install that died is
+    // replaced; one another install just finished is kept.
+    if install_dir.exists() && !marker_file.exists() {
+      let _ = tokio::fs::remove_dir_all(&install_dir).await;
+    }
+    if tokio::fs::rename(&staging, &install_dir).await.is_err() {
+      let _ = tokio::fs::remove_dir_all(&staging).await;
+    }
+    let path = executable.to_string_lossy().to_string();
+    if !(marker_file.exists() && executable.exists()) {
+      return Err(backend_err(format!("chromedriver was not installed at: {path}")));
+    }
+    progress(InstallProgress::Complete {
+      version,
+      path: path.clone(),
+    });
+    Ok(path)
+  }
+
+  /// The version of the newest Chromium installed in the cache.
+  fn installed_chromium_version(&self) -> Option<String> {
+    let chromium = PathBuf::from(self.find_installed_chromium()?);
+    let platform = current_platform();
+    self
+      .cache_dir
+      .read_dir()
+      .ok()?
+      .filter_map(std::result::Result::ok)
+      .find(|entry| chrome_executable_path(&entry.path(), &platform) == chromium)
+      .and_then(|entry| {
+        CacheFamily::Chromium
+          .version_of(&entry.file_name().to_string_lossy())
+          .map(str::to_string)
+      })
+  }
+
+  /// The `ChromeDriver` installed for the newest installed Chromium, if
+  /// there is one.
+  #[must_use]
+  pub fn find_installed_chromedriver(&self) -> Option<String> {
+    let version = self.installed_chromium_version()?;
+    let install_dir = self.cache_dir.join(format!("chromedriver-{version}"));
+    let executable = chromedriver_executable_path(&install_dir, &current_platform());
+    (install_dir.join(".downloaded").exists() && executable.exists()).then(|| executable.to_string_lossy().to_string())
+  }
+
   /// Install the latest stable Firefox.
   ///
   /// Downloads from Mozilla's official archive, extracts to the cache directory,
@@ -1474,6 +1625,15 @@ fn chrome_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
     "win32" => install_dir.join("chrome-win32/chrome.exe"),
     _ => install_dir.join("chrome"),
   }
+}
+
+fn chromedriver_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
+  let name = if platform.starts_with("win") {
+    "chromedriver.exe"
+  } else {
+    "chromedriver"
+  };
+  install_dir.join(format!("chromedriver-{platform}")).join(name)
 }
 
 fn headless_shell_executable_path(install_dir: &Path, platform: &str) -> PathBuf {

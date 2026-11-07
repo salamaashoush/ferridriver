@@ -12,7 +12,7 @@ allowEnv = ["FERRIDRIVER_BIN", "FERRIDRIVER_CHROMEDRIVER", "FERRIDRIVER_WEBDRIVE
 [scripting.allow.commands.probe]
 run = ["sh", "-c", "${command}"]
 timeoutMs = 25000
-env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "TOKIO_WORKER_THREADS"]
+env = ["HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY", "LD_LIBRARY_PATH", "CHROMIUM_PATH", "CHROMIUM_HEADLESS_SHELL_PATH", "FERRIDRIVER_BROWSERS_PATH", "TOKIO_WORKER_THREADS"]
 
 [scripting.allow.commands.mcp]
 run = ["env", "FERRIDRIVER_NO_INHERIT=1", "FERRIDRIVER_SESSION_DIR=${registry}", "RUST_LOG=${log}", "${binary}", "mcp", "--backend", "${backend}", "--headless", "--config", "${config}"]

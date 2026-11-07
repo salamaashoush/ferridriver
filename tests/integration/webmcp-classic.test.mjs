@@ -2,21 +2,25 @@ import assert from 'node:assert/strict';
 import {existsSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {test} from '@ferridriver/test';
-import {fixtureServer, passed, quote, repo, run, workspace} from './support.mjs';
+import {binary, fixtureServer, passed, quote, repo, run, workspace} from './support.mjs';
 
 for (const bidi of [false, true]) {
 test(`WebDriver native WebMCP concurrency, results and traces, bidi=${bidi}`, async () => {
   // ChromeDriver cold-starts its own Chromium while the rest of the suite
   // runs browsers in parallel; on CI that launch alone has taken 8s.
   test.slow();
-  const driver = process.env.FERRIDRIVER_CHROMEDRIVER ?? 'chromedriver';
-  let browserBinary = process.env.FERRIDRIVER_WEBDRIVER_CHROME;
-  if (!browserBinary) {
-    const found = await commands.exec('probe', {command:'command -v chromium || command -v chromium-browser || command -v google-chrome'});
-    if (found.exitCode === 0) browserBinary = found.stdout.trim();
+  // A driver starts only the browser of its own version, so the pair is
+  // the installed Chromium and the ChromeDriver installed for it, unless
+  // both are named. Installing the driver is a no-op once it is there.
+  let driver = process.env.FERRIDRIVER_CHROMEDRIVER;
+  if (!driver) {
+    const installed = await commands.exec('probe', {command:`${quote(binary)} install chromedriver --no-remove --format json`});
+    assert.equal(installed.exitCode, 0, `installing chromedriver: ${installed.stdout}${installed.stderr}`);
+    driver = JSON.parse(installed.stdout).find(entry => entry.browser === 'chromedriver').path;
   }
+  const browserBinary = process.env.FERRIDRIVER_WEBDRIVER_CHROME ?? chromium().executablePath();
   const chromeOptions = {
-    ...(browserBinary ? {binary:browserBinary} : {}),
+    binary:browserBinary,
     args:['--headless=new','--no-sandbox','--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport'],
   };
   // ChromeDriver's own log is the only record of why a session did not

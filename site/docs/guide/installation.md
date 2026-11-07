@@ -60,14 +60,18 @@ The platform binary is pulled in via `optionalDependencies`:
 ## Browsers
 
 Download browser binaries into the local cache. Supported targets:
-`chromium`, `chromium-headless-shell`, `firefox`, `webkit`.
+`chromium`, `chromium-headless-shell`, `chromedriver`, `firefox`, `webkit`.
 
 ```bash
 ferridriver install chromium                          # default
 ferridriver install --with-deps chromium              # Linux: also install system libs
 ferridriver install firefox chromium-headless-shell
 ferridriver install webkit                            # Playwright WebKit build
+ferridriver install chromium chromedriver             # ChromeDriver of that Chromium's version
 ```
+
+`chromedriver` follows the newest Chromium in the cache, since a driver
+only starts the browser of its own version.
 
 Override the cache location with `FERRIDRIVER_BROWSERS_PATH`. Defaults:
 

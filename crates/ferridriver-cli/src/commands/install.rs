@@ -17,9 +17,10 @@ use crate::ui;
 /// them. `axe` is not a browser; it is the accessibility engine, and it
 /// is here because it is provisioned the same way and to the same
 /// place, rather than vendored into the repository.
-const KNOWN: [&str; 9] = [
+const KNOWN: [&str; 10] = [
   "chromium",
   "chromium-headless-shell",
+  "chromedriver",
   "firefox",
   "webkit",
   "safari",
@@ -53,6 +54,7 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
     let outcome = match browser.as_str() {
       "chromium" => installer.install_chromium(phase.callback()).await,
       "chromium-headless-shell" => installer.install_chromium_headless_shell(phase.callback()).await,
+      "chromedriver" => installer.install_chromedriver(phase.callback()).await,
       "firefox" => installer.install_firefox(phase.callback()).await,
       "webkit" => installer.install_webkit(phase.callback()).await,
       "safari" => installer.install_safari(phase.callback()).await,
