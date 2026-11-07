@@ -579,23 +579,78 @@ mod tests {
     }
   }
 
-  async fn request(stream: &mut tokio::net::TcpStream) -> String {
+  /// The request line of the request on `stream`, its body read; `None`
+  /// for a connection that closed first.
+  async fn request(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut reader = tokio::io::BufReader::new(stream);
     let mut first = String::new();
-    assert!(reader.read_line(&mut first).await.unwrap() > 0);
+    if reader.read_line(&mut first).await.ok()? == 0 {
+      return None;
+    }
     let mut length = 0;
     loop {
       let mut line = String::new();
-      assert!(reader.read_line(&mut line).await.unwrap() > 0);
+      if reader.read_line(&mut line).await.ok()? == 0 {
+        return None;
+      }
       if line == "\r\n" {
         break;
       }
       if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-        length = value.trim().parse().unwrap();
+        length = value.trim().parse().ok()?;
       }
     }
-    reader.read_exact(&mut vec![0; length]).await.unwrap();
-    first.trim().to_owned()
+    reader.read_exact(&mut vec![0; length]).await.ok()?;
+    Some(first.trim().to_owned())
+  }
+
+  /// A `WebDriver` server for a connected session. The session lists its
+  /// windows when it connects and again every 250 ms after, looking for
+  /// popups; those lists are answered whenever they come and counted in
+  /// `polls`. Every other request is handed to the test in arrival order
+  /// with its connection, to answer when it chooses.
+  struct WebDriverServer {
+    requests: tokio::sync::mpsc::UnboundedReceiver<(String, tokio::net::TcpStream)>,
+    polls: tokio::sync::watch::Receiver<usize>,
+  }
+
+  fn serve_webdriver(listener: tokio::net::TcpListener) -> WebDriverServer {
+    let (handed, requests) = tokio::sync::mpsc::unbounded_channel();
+    let (counted, polls) = tokio::sync::watch::channel(0);
+    let counted = Arc::new(counted);
+    tokio::spawn(async move {
+      while let Ok((mut stream, _)) = listener.accept().await {
+        let handed = handed.clone();
+        let counted = Arc::clone(&counted);
+        tokio::spawn(async move {
+          let Some(line) = request(&mut stream).await else { return };
+          if line.starts_with("GET ") && line.contains("/window/handles ") {
+            reply(&mut stream, "200 OK", serde_json::json!([])).await;
+            counted.send_modify(|polls| *polls += 1);
+          } else {
+            let _ = handed.send((line, stream));
+          }
+        });
+      }
+    });
+    WebDriverServer { requests, polls }
+  }
+
+  impl WebDriverServer {
+    async fn next(&mut self) -> (String, tokio::net::TcpStream) {
+      self.requests.recv().await.expect("the server stopped")
+    }
+
+    /// Waits until the session has listed its windows on its own timer,
+    /// past the list it makes when it connects: what a loaded machine
+    /// always gets to before the session is closed.
+    async fn polled(&mut self) {
+      self
+        .polls
+        .wait_for(|polls| *polls >= 2)
+        .await
+        .expect("the server stopped");
+    }
   }
 
   #[tokio::test(flavor = "multi_thread")]
@@ -605,22 +660,25 @@ mod tests {
       let endpoint = format!("http://{}", listener.local_addr().unwrap());
       let (deleting, deletion) = tokio::sync::oneshot::channel();
       let (release, released) = tokio::sync::oneshot::channel();
+      let mut webdriver = serve_webdriver(listener);
+      let (connected, polled) = tokio::sync::oneshot::channel();
       let server = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for value in [
+        let (line, mut stream) = webdriver.next().await;
+        requests.push(line);
+        reply(
+          &mut stream,
+          "200 OK",
           serde_json::json!({"sessionId":"owned","capabilities":{"browserName":"safari","browserVersion":"contract"}}),
-          serde_json::json!([]),
-        ] {
-          let (mut stream, _) = listener.accept().await.unwrap();
-          requests.push(request(&mut stream).await);
-          let body = serde_json::json!({"value":value}).to_string();
-          stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-        }
-        let (mut stream, _) = listener.accept().await.unwrap();
-        requests.push(request(&mut stream).await);
+        )
+        .await;
+        webdriver.polled().await;
+        let _ = connected.send(());
+        let (line, mut stream) = webdriver.next().await;
+        requests.push(line);
         deleting.send(()).unwrap();
         released.await.unwrap();
-        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"value\":null}").await.unwrap();
+        reply(&mut stream, "200 OK", serde_json::Value::Null).await;
         requests
       });
       let table = SessionTable::new(1, None);
@@ -636,6 +694,7 @@ mod tests {
         .await,
         serde_json::json!("safari/contract"),
       );
+      polled.await.unwrap();
       if poison {
         let mut session = slot.lock().await;
         let (_root, context) = ctx_with(session.vars());
@@ -676,11 +735,7 @@ mod tests {
       closing.await.unwrap();
       assert_eq!(
         server.await.unwrap(),
-        [
-          "POST /session HTTP/1.1",
-          "GET /session/owned/window/handles HTTP/1.1",
-          "DELETE /session/owned HTTP/1.1",
-        ]
+        ["POST /session HTTP/1.1", "DELETE /session/owned HTTP/1.1"]
       );
     }
   }
@@ -872,6 +927,8 @@ mod tests {
   struct OwnedBrowserFixture {
     endpoint: String,
     server: tokio::task::JoinHandle<Vec<String>>,
+    /// Fires once the session has listed its windows on its own timer.
+    polled: tokio::sync::oneshot::Receiver<()>,
     deleting: tokio::sync::oneshot::Receiver<()>,
     release: tokio::sync::oneshot::Sender<()>,
   }
@@ -881,18 +938,22 @@ mod tests {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (deleting, deletion) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
+    let (connected, polled) = tokio::sync::oneshot::channel();
+    let mut webdriver = serve_webdriver(listener);
     let server = tokio::spawn(async move {
       let mut requests = Vec::new();
-      for value in [
+      let (line, mut stream) = webdriver.next().await;
+      requests.push(line);
+      reply(
+        &mut stream,
+        "200 OK",
         serde_json::json!({"sessionId":"owned","capabilities":{"browserName":"safari","browserVersion":"contract"}}),
-        serde_json::json!([]),
-      ] {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        requests.push(request(&mut stream).await);
-        reply(&mut stream, "200 OK", value).await;
-      }
-      let (mut stream, _) = listener.accept().await.unwrap();
-      requests.push(request(&mut stream).await);
+      )
+      .await;
+      webdriver.polled().await;
+      let _ = connected.send(());
+      let (line, mut stream) = webdriver.next().await;
+      requests.push(line);
       let _ = deleting.send(());
       released.await.unwrap();
       if fail_first_delete {
@@ -902,8 +963,8 @@ mod tests {
           serde_json::json!({"error":"unknown error","message":"sashoush cleanup unavailable"}),
         )
         .await;
-        let (mut retry, _) = listener.accept().await.unwrap();
-        requests.push(request(&mut retry).await);
+        let (line, mut retry) = webdriver.next().await;
+        requests.push(line);
         reply(&mut retry, "200 OK", serde_json::Value::Null).await;
       } else {
         reply(&mut stream, "200 OK", serde_json::Value::Null).await;
@@ -913,6 +974,7 @@ mod tests {
     OwnedBrowserFixture {
       endpoint,
       server,
+      polled,
       deleting: deletion,
       release,
     }
@@ -961,9 +1023,10 @@ mod tests {
 
   #[tokio::test]
   async fn failed_logical_close_retains_the_session_for_retry_without_recreating_its_browser() {
-    let fixture = owned_browser_fixture(true).await;
+    let mut fixture = owned_browser_fixture(true).await;
     let table = SessionTable::new(1, None);
     let slot = connect_owned(&table, &fixture.endpoint).await;
+    (&mut fixture.polled).await.unwrap();
     let resources = start_owned_process(&slot).await;
     fixture.release.send(()).unwrap();
     let error = table.remove("sashoush").await.unwrap_err();
@@ -987,7 +1050,6 @@ mod tests {
       fixture.server.await.unwrap(),
       [
         "POST /session HTTP/1.1",
-        "GET /session/owned/window/handles HTTP/1.1",
         "DELETE /session/owned HTTP/1.1",
         "DELETE /session/owned HTTP/1.1"
       ]
@@ -996,9 +1058,10 @@ mod tests {
 
   #[tokio::test]
   async fn logical_close_preserves_process_dependencies_until_browser_acknowledgement() {
-    let fixture = owned_browser_fixture(false).await;
+    let mut fixture = owned_browser_fixture(false).await;
     let table = SessionTable::new(1, None);
     let slot = connect_owned(&table, &fixture.endpoint).await;
+    (&mut fixture.polled).await.unwrap();
     let resources = start_owned_process(&slot).await;
     let mut closing = Box::pin(table.remove("sashoush"));
     tokio::select! {
@@ -1012,14 +1075,15 @@ mod tests {
     closing.await.unwrap();
     assert!(resources.procs.status("sashoush").is_err());
     assert!(!table.contains("sashoush"));
-    assert_eq!(fixture.server.await.unwrap().len(), 3);
+    assert_eq!(fixture.server.await.unwrap().len(), 2);
   }
 
   #[tokio::test]
   async fn acquisition_started_before_clear_cannot_create_a_session_after_clear() {
-    let fixture = owned_browser_fixture(false).await;
+    let mut fixture = owned_browser_fixture(false).await;
     let table = SessionTable::new(1, Some(Duration::from_secs(1)));
     let slot = connect_owned(&table, &fixture.endpoint).await;
+    (&mut fixture.polled).await.unwrap();
     slot.lock().await.last_used = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
     let mut acquiring = Box::pin(table.acquire("another"));
     tokio::select! {
@@ -1034,7 +1098,7 @@ mod tests {
     assert!(!table.contains("another"));
     table.acquire("another").await.unwrap();
     table.close().await.unwrap();
-    assert_eq!(fixture.server.await.unwrap().len(), 3);
+    assert_eq!(fixture.server.await.unwrap().len(), 2);
   }
 
   #[tokio::test]
