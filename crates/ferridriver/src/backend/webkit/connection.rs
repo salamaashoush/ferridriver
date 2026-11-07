@@ -59,6 +59,14 @@ impl From<ConnectionError> for crate::error::FerriError {
 
 type ResponseSlot = oneshot::Sender<Result<Value, ErrorPayload>>;
 
+/// Run by the reader on each event of a route, in wire order, before the
+/// event is queued and before any later frame is routed or answered. For
+/// state a reply must already reflect (the frame tree after a
+/// `history.pushState` the caller just evaluated): a listener task
+/// draining the queue can lag the reply that follows the event. Must not
+/// block.
+pub(crate) type RouteObserver = Arc<dyn Fn(&Envelope) + Send + Sync>;
+
 /// Routing key for inbound events. Responses do not need this — they
 /// route by global id — but a pending callback is tagged with it so
 /// closing a route can reject the calls still waiting on it.
@@ -101,6 +109,7 @@ pub struct Connection {
   next_id: AtomicI64,
   callbacks: Mutex<FxHashMap<i64, (RouteKey, ResponseSlot)>>,
   routes: Mutex<FxHashMap<RouteKey, Route>>,
+  observers: Mutex<FxHashMap<RouteKey, Vec<RouteObserver>>>,
   closed: AtomicBool,
   tasks: crate::backend::transport_tasks::TransportTasks,
 }
@@ -126,6 +135,7 @@ impl Connection {
       next_id: AtomicI64::new(1),
       callbacks: Mutex::new(FxHashMap::default()),
       routes: Mutex::new(FxHashMap::default()),
+      observers: Mutex::new(FxHashMap::default()),
       closed: AtomicBool::new(false),
       tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, tasks),
     });
@@ -220,6 +230,11 @@ impl Connection {
       let _ = slot.send(Err(closed_error()));
     }
     self.routes.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
+    self
+      .observers
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .remove(&key);
   }
 
   /// Fire a raw envelope onto the wire without expecting a response.
@@ -269,6 +284,20 @@ impl Connection {
   /// Deliver an event to its route, creating a `Buffering` entry if no
   /// subscriber has claimed the route yet.
   fn route_event(&self, key: RouteKey, env: Envelope) {
+    if self.closed.load(Ordering::Acquire) {
+      return;
+    }
+    // Cloned out so an observer may register another (a provisional
+    // target's, from the page proxy's `Target.targetCreated`).
+    let observers = self
+      .observers
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .get(&key)
+      .cloned();
+    for observer in observers.iter().flatten() {
+      observer(&env);
+    }
     let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
     if self.closed.load(Ordering::Acquire) {
       return;
@@ -322,6 +351,7 @@ impl Connection {
       let _ = slot.send(Err(closed_error()));
     }
     self.routes.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    self.observers.lock().unwrap_or_else(PoisonError::into_inner).clear();
   }
 }
 
@@ -542,6 +572,19 @@ impl Session {
     self.conn.subscribe(self.route_key())
   }
 
+  /// Run `observer` on each of this session's events in wire order, from
+  /// the reader, until the route closes. See [`RouteObserver`].
+  pub(crate) fn observe(&self, observer: RouteObserver) {
+    self
+      .conn
+      .observers
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .entry(self.route_key())
+      .or_default()
+      .push(observer);
+  }
+
   fn route_key(&self) -> RouteKey {
     match &self.kind {
       SessionKind::Browser => RouteKey::Browser,
@@ -632,6 +675,7 @@ mod tests {
         next_id: AtomicI64::new(1),
         callbacks: Mutex::new(FxHashMap::default()),
         routes: Mutex::new(FxHashMap::default()),
+        observers: Mutex::new(FxHashMap::default()),
         closed: AtomicBool::new(false),
         tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
       }),

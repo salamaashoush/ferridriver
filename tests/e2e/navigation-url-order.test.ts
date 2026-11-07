@@ -122,3 +122,21 @@ test('a history step across documents still waits for the document it lands on',
   expect((await page.goForward())!.url()).toBe(framed);
   expect(page.frames().length).toBe(2);
 });
+
+// The URL moves with the frame events in wire order. Thousands of console
+// messages ahead of the pushState keep the page's event listener busy
+// well after the evaluate returns, so a URL updated by that listener is
+// still the old one when it is read.
+test('page.url() reads a pushState the moment the evaluate that made it returns', async ({ page, baseURL }) => {
+  await page.goto('/fx/landed');
+  await page.evaluate(() => {
+    for (let i = 0; i < 3000; i++) console.log(i);
+    history.pushState({}, '', '/pushed');
+  });
+  expect(page.url()).toBe(`${baseURL}/pushed`);
+  await page.evaluate(() => {
+    for (let i = 0; i < 3000; i++) console.log(i);
+    location.hash = 'after';
+  });
+  expect(page.mainFrame().url()).toBe(`${baseURL}/pushed#after`);
+});

@@ -174,7 +174,6 @@ pub fn attach_listeners(
   let routes = page.routes.clone();
   let frame_contexts = page.frame_contexts.clone();
   let utility_contexts = page.utility_contexts.clone();
-  let frame_cache = page.frame_cache.clone();
   let websockets = page.websockets.clone();
   let emitter_frame = emitter.clone();
   let _ = dialog_manager.register_emitter_bridge(emitter.clone());
@@ -198,7 +197,6 @@ pub fn attach_listeners(
     routes,
     frame_contexts,
     utility_contexts,
-    frame_cache,
     websockets,
     workers: page.workers.clone(),
     console_log: Arc::clone(&page.console_log),
@@ -456,7 +454,6 @@ struct TargetListenerCtx {
   routes: Routes,
   frame_contexts: FrameContexts,
   utility_contexts: FrameContexts,
-  frame_cache: FrameCache,
   websockets: WebSockets,
   workers: super::worker::Workers,
   /// Sinks for captured events. Swapped in by
@@ -662,11 +659,11 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_exec_context_created(&env.params, &ctx.frame_contexts, &ctx.utility_contexts).await;
     },
     Some("Page.frameAttached") => {
-      handle_frame_attached(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+      handle_frame_attached(&env.params, &ctx.emitter_frame);
     },
     Some("Page.frameNavigated") => {
       handle_main_frame_commit(ctx, &env.params);
-      handle_frame_navigated(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+      handle_frame_navigated(&env.params, &ctx.emitter_frame);
     },
     Some("Page.frameDetached") => {
       handle_frame_detached(&env.params, ctx).await;
@@ -678,7 +675,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-      handle_frame_navigated_within(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+      handle_frame_navigated_within(&env.params, &ctx.emitter_frame);
       if main_frame.is_none() || main_frame.as_deref() == frame_id {
         ctx.lifecycle.mark_same_document();
       }
@@ -1071,7 +1068,147 @@ async fn handle_exec_context_created(params: &Value, frame_contexts: &FrameConte
   frame_contexts.write().await.insert(frame_id.to_string(), id);
 }
 
-fn handle_frame_attached(params: &Value, frame_cache: &FrameCache, emitter: &crate::events::EventEmitter) {
+/// Keeps a page's frame cache in wire order, from the connection's
+/// reader (see [`super::connection::RouteObserver`]), as the CDP
+/// transport does. A reply that follows a frame event on the wire must
+/// find the cache already moved: `page.url()` read the moment an evaluate
+/// that ran `history.pushState` returns has to be the pushed URL, and the
+/// listener that emits the page's events can lag that reply by however
+/// many events it still has queued. A provisional target's frame events
+/// wait for its commit, which first empties the cache for the new process.
+#[derive(Clone)]
+pub(crate) struct FrameTracker {
+  cache: FrameCache,
+  provisional: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Vec<super::protocol::Envelope>>>>,
+}
+
+impl FrameTracker {
+  pub(crate) fn new(cache: FrameCache) -> Self {
+    Self {
+      cache,
+      provisional: Arc::default(),
+    }
+  }
+
+  /// Track the frames of the committed target `target`.
+  pub(crate) fn track_target(&self, target: &Session) {
+    let cache = Arc::clone(&self.cache);
+    target.observe(Arc::new(move |env| {
+      apply_frame_event(&mut lock_cache(&cache), env);
+    }));
+  }
+
+  /// Track the provisional targets `proxy` announces and their commits.
+  pub(crate) fn track_proxy(&self, proxy: &Session) {
+    let tracker = self.clone();
+    let session = proxy.clone();
+    proxy.observe(Arc::new(move |env| match env.method.as_deref() {
+      Some("Target.targetCreated") => {
+        let Some(info) = env.params.get("targetInfo") else {
+          return;
+        };
+        let provisional = info.get("isProvisional").and_then(Value::as_bool).unwrap_or(false);
+        let Some(target_id) = info.get("targetId").and_then(Value::as_str) else {
+          return;
+        };
+        if !provisional || info.get("type").and_then(Value::as_str) != Some("page") {
+          return;
+        }
+        tracker.provisional_target(&session, target_id);
+      },
+      Some("Target.didCommitProvisionalTarget") => {
+        if let Some(target_id) = env.params.get("newTargetId").and_then(Value::as_str) {
+          tracker.commit(target_id);
+        }
+      },
+      _ => {},
+    }));
+  }
+
+  fn provisional_target(&self, proxy: &Session, target_id: &str) {
+    lock_provisional(&self.provisional).insert(target_id.to_string(), Vec::new());
+    let target = proxy
+      .connection_handle()
+      .target_session(proxy.page_proxy_id().unwrap_or_default(), target_id);
+    let tracker = self.clone();
+    let target_id = target_id.to_string();
+    target.observe(Arc::new(move |env| {
+      if !is_frame_event(env) {
+        return;
+      }
+      if let Some(held) = lock_provisional(&tracker.provisional).get_mut(&target_id) {
+        held.push(env.clone());
+        return;
+      }
+      apply_frame_event(&mut lock_cache(&tracker.cache), env);
+    }));
+  }
+
+  /// The committed target lives in a fresh process: the frames of the old
+  /// one are gone, and what the new one reported so far applies now.
+  fn commit(&self, target_id: &str) {
+    let held = lock_provisional(&self.provisional)
+      .remove(target_id)
+      .unwrap_or_default();
+    let mut cache = lock_cache(&self.cache);
+    *cache = crate::frame_cache::FrameCache::default();
+    for env in &held {
+      apply_frame_event(&mut cache, env);
+    }
+  }
+}
+
+fn lock_cache(cache: &FrameCache) -> std::sync::MutexGuard<'_, crate::frame_cache::FrameCache> {
+  cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+type Held = rustc_hash::FxHashMap<String, Vec<super::protocol::Envelope>>;
+
+fn lock_provisional(provisional: &std::sync::Mutex<Held>) -> std::sync::MutexGuard<'_, Held> {
+  provisional.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn is_frame_event(env: &super::protocol::Envelope) -> bool {
+  matches!(
+    env.method.as_deref(),
+    Some("Page.frameAttached" | "Page.frameNavigated" | "Page.navigatedWithinDocument" | "Page.frameDetached")
+  )
+}
+
+fn apply_frame_event(cache: &mut crate::frame_cache::FrameCache, env: &super::protocol::Envelope) {
+  let params = &env.params;
+  let frame_id = || params.get("frameId").and_then(Value::as_str);
+  match env.method.as_deref() {
+    Some("Page.frameAttached") => {
+      if let Some(frame_id) = frame_id() {
+        cache.attach(crate::backend::FrameInfo {
+          frame_id: frame_id.to_string(),
+          parent_frame_id: params.get("parentFrameId").and_then(Value::as_str).map(str::to_string),
+          name: String::new(),
+          url: String::new(),
+        });
+      }
+    },
+    Some("Page.frameNavigated") => {
+      if let Some(info) = navigated_frame(params) {
+        cache.navigated(info);
+      }
+    },
+    Some("Page.navigatedWithinDocument") => {
+      if let Some(frame_id) = frame_id() {
+        cache.navigated_within(frame_id, params.get("url").and_then(Value::as_str).unwrap_or(""));
+      }
+    },
+    Some("Page.frameDetached") => {
+      if let Some(frame_id) = frame_id() {
+        cache.detach(frame_id);
+      }
+    },
+    _ => {},
+  }
+}
+
+fn handle_frame_attached(params: &Value, emitter: &crate::events::EventEmitter) {
   let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
     return;
   };
@@ -1079,14 +1216,6 @@ fn handle_frame_attached(params: &Value, frame_cache: &FrameCache, emitter: &cra
     .get("parentFrameId")
     .and_then(Value::as_str)
     .map(std::string::ToString::to_string);
-  if let Ok(mut cache) = frame_cache.lock() {
-    cache.attach(crate::backend::FrameInfo {
-      frame_id: frame_id.to_string(),
-      parent_frame_id: parent_id.clone(),
-      name: String::new(),
-      url: String::new(),
-    });
-  }
   emitter.emit(crate::events::PageEvent::FrameAttached(crate::backend::FrameInfo {
     frame_id: frame_id.to_string(),
     parent_frame_id: parent_id,
@@ -1095,11 +1224,16 @@ fn handle_frame_attached(params: &Value, frame_cache: &FrameCache, emitter: &cra
   }));
 }
 
-fn handle_frame_navigated(params: &Value, frame_cache: &FrameCache, emitter: &crate::events::EventEmitter) {
-  let Some(frame) = params.get("frame") else {
-    return;
-  };
-  let info = crate::backend::FrameInfo {
+fn handle_frame_navigated(params: &Value, emitter: &crate::events::EventEmitter) {
+  if let Some(info) = navigated_frame(params) {
+    emitter.emit(crate::events::PageEvent::FrameNavigated(info));
+  }
+}
+
+/// The frame a `Page.frameNavigated` describes.
+fn navigated_frame(params: &Value) -> Option<crate::backend::FrameInfo> {
+  let frame = params.get("frame")?;
+  Some(crate::backend::FrameInfo {
     frame_id: frame.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
     parent_frame_id: frame
       .get("parentId")
@@ -1107,25 +1241,18 @@ fn handle_frame_navigated(params: &Value, frame_cache: &FrameCache, emitter: &cr
       .map(std::string::ToString::to_string),
     name: frame.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
     url: frame.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
-  };
-  if let Ok(mut cache) = frame_cache.lock() {
-    cache.navigated(info.clone());
-  }
-  emitter.emit(crate::events::PageEvent::FrameNavigated(info));
+  })
 }
 
 /// Same-document navigation (`history.pushState` / `replaceState` /
 /// fragment): `WebKit` sends `{ frameId, url }`. URL-only cache update —
 /// the document (and any child frames) persists. Mirrors Playwright's
 /// `wkPage.ts::_onFrameNavigatedWithinDocument`.
-fn handle_frame_navigated_within(params: &Value, frame_cache: &FrameCache, emitter: &crate::events::EventEmitter) {
+fn handle_frame_navigated_within(params: &Value, emitter: &crate::events::EventEmitter) {
   let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
     return;
   };
   let url = params.get("url").and_then(Value::as_str).unwrap_or("");
-  if let Ok(mut cache) = frame_cache.lock() {
-    cache.navigated_within(frame_id, url);
-  }
   emitter.emit(crate::events::PageEvent::FrameNavigatedWithinDocument(
     crate::backend::FrameInfo {
       frame_id: frame_id.to_string(),
@@ -1140,9 +1267,6 @@ async fn handle_frame_detached(params: &Value, ctx: &TargetListenerCtx) {
   let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
     return;
   };
-  if let Ok(mut cache) = ctx.frame_cache.lock() {
-    cache.detach(frame_id);
-  }
   ctx.frame_contexts.write().await.remove(frame_id);
   ctx.utility_contexts.write().await.remove(frame_id);
   ctx.emitter_frame.emit(crate::events::PageEvent::FrameDetached {
@@ -1629,11 +1753,16 @@ mod frame_event_tests {
       name: String::new(),
       url: "https://example.com/restored".into(),
     };
-    handle_frame_navigated(
-      &serde_json::json!({"frame": {"id": root.frame_id, "url": root.url}}),
-      &cache,
-      &emitter,
-    );
+    let navigated = super::super::protocol::Envelope {
+      id: None,
+      method: Some("Page.frameNavigated".into()),
+      params: serde_json::json!({"frame": {"id": root.frame_id, "url": root.url}}),
+      result: None,
+      error: None,
+      page_proxy_id: None,
+    };
+    apply_frame_event(&mut lock_cache(&cache), &navigated);
+    handle_frame_navigated(&navigated.params, &emitter);
     cache.lock().unwrap().seed(vec![
       root,
       crate::backend::FrameInfo {

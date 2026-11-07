@@ -591,6 +591,13 @@ impl WebKitPage {
       // `attach_listeners` is awaited protocol work, and the events are
       // buffered until the loop starts.
       let target_rx = target.events();
+      // The frame cache moves with the frame events in wire order, from
+      // the connection's reader; set up before `Page.enable` sends the
+      // first of them.
+      let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default()));
+      let frames = super::events::FrameTracker::new(Arc::clone(&frame_cache));
+      frames.track_target(&target);
+      frames.track_proxy(&proxy);
 
       // Page agent before Runtime so executionContextCreated ordering holds.
       target.send("Page.enable", json!({})).await?;
@@ -684,7 +691,7 @@ impl WebKitPage {
         download_manager: crate::download::DownloadManager::new(),
         screencast_hub: crate::backend::screencast::ScreencastHub::default(),
         page_backref: crate::backend::PageBackref::new(),
-        frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+        frame_cache,
         media_emulation: crate::backend::SharedMediaEmulation::default(),
         frame_listener_started: Arc::new(AtomicBool::new(false)),
         observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
@@ -805,10 +812,8 @@ impl WebKitPage {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     self.engine_injected.target_replaced();
-    *self
-      .frame_cache
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner) = crate::frame_cache::FrameCache::default();
+    // The frame cache was emptied for the new process in wire order, by
+    // the page's `FrameTracker`, when the commit arrived.
     self.main_frame_id_cache_clear();
   }
 
