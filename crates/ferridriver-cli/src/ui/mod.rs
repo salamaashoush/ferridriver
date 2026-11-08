@@ -238,10 +238,44 @@ pub fn badge(text: &str, style: &Style) -> String {
 
 // ── printing ────────────────────────────────────────────────────────────
 
+// `println!` and `eprintln!` panic when the write fails, which it does once
+// nobody reads the stream: a supervisor that died, a pipe into `head`. With
+// `panic = "abort"` that ends a server before it closes its browser, which
+// then outlives it. These macros drop the output instead; the crate denies
+// the standard ones so every write comes through here.
+
+pub fn write_stdout(args: std::fmt::Arguments<'_>) {
+  let _ = std::io::Write::write_fmt(&mut std::io::stdout().lock(), args);
+}
+
+pub fn write_stderr(args: std::fmt::Arguments<'_>) {
+  let _ = std::io::Write::write_fmt(&mut std::io::stderr().lock(), args);
+}
+
+macro_rules! stdout {
+  ($($arg:tt)*) => { $crate::ui::write_stdout(format_args!($($arg)*)) };
+}
+
+macro_rules! stdoutln {
+  () => { $crate::ui::write_stdout(format_args!("\n")) };
+  ($($arg:tt)*) => { $crate::ui::write_stdout(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
+macro_rules! stderr {
+  ($($arg:tt)*) => { $crate::ui::write_stderr(format_args!($($arg)*)) };
+}
+
+macro_rules! stderrln {
+  () => { $crate::ui::write_stderr(format_args!("\n")) };
+  ($($arg:tt)*) => { $crate::ui::write_stderr(format_args!("{}\n", format_args!($($arg)*))) };
+}
+
+pub(crate) use {stderr, stderrln, stdout, stdoutln};
+
 /// Incidental progress, suppressed by `--quiet` and by `--format json`.
 pub fn say(line: &str) {
   if !quiet() && !json() {
-    println!("{line}");
+    stdoutln!("{line}");
   }
 }
 
@@ -249,7 +283,7 @@ pub fn say(line: &str) {
 /// the protocol channel (`mcp --transport stdio`) or the run's document.
 pub fn note(line: &str) {
   if !quiet() && !json() {
-    eprintln!("{} {line}", Style::new().dim().apply_to("-"));
+    stderrln!("{} {line}", Style::new().dim().apply_to("-"));
   }
 }
 
@@ -257,7 +291,7 @@ pub fn note(line: &str) {
 /// separates one section from the last.
 pub fn section(title: &str) {
   if !quiet() && !json() {
-    println!("\n{}", header(title));
+    stdoutln!("\n{}", header(title));
   }
 }
 
@@ -276,9 +310,9 @@ pub fn next_steps(steps: &[(&str, String)]) {
   if quiet() || json() || steps.is_empty() {
     return;
   }
-  println!("\n{}", header("Next"));
+  stdoutln!("\n{}", header("Next"));
   for (what, cmd) in steps {
-    println!("  {} {}", Style::new().dim().apply_to(format!("{what}:")), code(cmd));
+    stdoutln!("  {} {}", Style::new().dim().apply_to(format!("{what}:")), code(cmd));
   }
 }
 

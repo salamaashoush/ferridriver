@@ -382,8 +382,8 @@ async fn attach(args: SessionTargetArgs) -> anyhow::Result<()> {
   match result.outcome {
     ferridriver_script::Outcome::Ok { success } => {
       match success.value {
-        serde_json::Value::String(text) => println!("{text}"),
-        other => println!("{other}"),
+        serde_json::Value::String(text) => ui::stdoutln!("{text}"),
+        other => ui::stdoutln!("{other}"),
       }
       Ok(())
     },
@@ -451,7 +451,7 @@ pub async fn run_on_session(
       },
       ferridriver_session::EventPayload::Code { line } => {
         if sinks.echo_code {
-          eprintln!("{line}");
+          ui::stderrln!("{line}");
         }
         if let Ok(mut code) = sinks.code.lock() {
           code.push(line);

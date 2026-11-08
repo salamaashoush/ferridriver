@@ -134,6 +134,7 @@ impl RttStats {
   }
 
   fn dump(&self) {
+    use std::fmt::Write as _;
     if self.buckets.is_empty() {
       return;
     }
@@ -141,16 +142,18 @@ impl RttStats {
     rows.sort_by_key(|r| std::cmp::Reverse(r.1.total_ns));
     let total_count: u64 = self.buckets.values().map(|b| b.count).sum();
     let total_ns: u128 = self.buckets.values().map(|b| b.total_ns).sum();
-    eprintln!(
-      "─── ferridriver CDP RTT stats ─── total_calls={total_count}  total_time={}ms",
+    let mut report = format!(
+      "─── ferridriver CDP RTT stats ─── total_calls={total_count}  total_time={}ms\n",
       fmt_ms2(total_ns)
     );
-    eprintln!(
+    let _ = writeln!(
+      report,
       "  {:<48}  {:>7}  {:>10}  {:>10}  {:>10}",
       "method", "count", "total_ms", "avg_us", "max_us"
     );
     for (method, bucket) in rows {
-      eprintln!(
+      let _ = writeln!(
+        report,
         "  {:<48}  {:>7}  {:>10}  {:>10}  {:>10}",
         method,
         bucket.count,
@@ -159,6 +162,9 @@ impl RttStats {
         fmt_us1(bucket.max_ns),
       );
     }
+    // From an atexit hook too, where stderr may already be closed: a
+    // failed write is dropped rather than panicking as `eprintln!` would.
+    let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), report.as_bytes());
   }
 }
 

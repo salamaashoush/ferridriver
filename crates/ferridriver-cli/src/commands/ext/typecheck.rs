@@ -210,7 +210,9 @@ pub fn run(
   if checker.fetches {
     // The first run downloads the compiler; without a line here it just
     // looks like the check hung.
-    eprintln!("[ext] fetching {TS_PACKAGE} from {PUBLIC_REGISTRY} to type-check (first run only; cached afterwards)");
+    crate::ui::stderrln!(
+      "[ext] fetching {TS_PACKAGE} from {PUBLIC_REGISTRY} to type-check (first run only; cached afterwards)"
+    );
   }
 
   let types_root = scratch.join("types");

@@ -320,7 +320,7 @@ fn finish_code(
     .clone();
   let file = wrap_code(&lines, language, args.as_test);
   std::fs::write(path, file).map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
-  eprintln!("wrote {} ({} action(s))", path.display(), lines.len());
+  ui::stderrln!("wrote {} ({} action(s))", path.display(), lines.len());
   Ok(())
 }
 
@@ -494,14 +494,14 @@ fn report_code_result(
         }
         object.insert("report".to_string(), response.to_json());
       }
-      println!("{}", serde_json::to_string_pretty(&document)?);
+      ui::stdoutln!("{}", serde_json::to_string_pretty(&document)?);
     } else {
       // Console already streamed while the script ran; the sections are what
       // is left to say about it.
-      print!("{}", response.render());
+      ui::stdout!("{}", response.render());
     }
     if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
-      eprintln!(
+      ui::stderrln!(
         "{}",
         ui::failure(&format!("{}: {} ({}ms)", error.kind, error.message, result.duration_ms))
       );
@@ -517,9 +517,9 @@ fn report_code_result(
   if let Some(object) = document.as_object_mut() {
     object.insert("code".to_string(), serde_json::json!(lines));
   }
-  println!("{}", serde_json::to_string_pretty(&document)?);
+  ui::stdoutln!("{}", serde_json::to_string_pretty(&document)?);
   if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
-    eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+    ui::stderrln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
     std::process::exit(1);
   }
   Ok(())
@@ -528,9 +528,9 @@ fn report_code_result(
 /// Print a run's result and exit non-zero when the script failed.
 fn report_result(result: &ferridriver_script::ScriptResult) -> anyhow::Result<()> {
   if ui::json() {
-    println!("{}", serde_json::to_string_pretty(result)?);
+    ui::stdoutln!("{}", serde_json::to_string_pretty(result)?);
     if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
-      eprintln!(
+      ui::stderrln!(
         "{}",
         ui::failure(&format!("{}: {} ({}ms)", error.kind, error.message, result.duration_ms))
       );

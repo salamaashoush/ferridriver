@@ -192,8 +192,8 @@ pub fn print_result(result: &ScriptResult) {
   match &result.outcome {
     Outcome::Ok { success } => match &success.value {
       serde_json::Value::Null => {},
-      serde_json::Value::String(s) => println!("{s}"),
-      value => println!(
+      serde_json::Value::String(s) => crate::ui::stdoutln!("{s}"),
+      value => crate::ui::stdoutln!(
         "{}",
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
       ),
@@ -202,17 +202,17 @@ pub fn print_result(result: &ScriptResult) {
       let red = Style::new().for_stderr().red();
       let dim = Style::new().for_stderr().dim();
       let name = error.name.as_deref().unwrap_or_else(|| error_name(error.kind));
-      eprintln!("{}", red.apply_to(format!("{name}: {}", error.message)));
+      crate::ui::stderrln!("{}", red.apply_to(format!("{name}: {}", error.message)));
       // The code frame the engine already builds around the throwing line —
       // Node prints the offending source above the stack, so do the same.
       if let Some(snippet) = &error.source_snippet {
-        eprintln!();
-        eprint!("{}", dim.apply_to(snippet));
+        crate::ui::stderrln!();
+        crate::ui::stderr!("{}", dim.apply_to(snippet));
       }
       if let Some(stack) = error.stack.as_deref().map(str::trim_end).filter(|s| !s.is_empty()) {
-        eprintln!("{}", dim.apply_to(stack));
+        crate::ui::stderrln!("{}", dim.apply_to(stack));
       }
-      eprintln!("{}", dim.apply_to(format!("({}ms)", result.duration_ms)));
+      crate::ui::stderrln!("{}", dim.apply_to(format!("({}ms)", result.duration_ms)));
     },
   }
 }

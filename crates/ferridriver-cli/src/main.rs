@@ -6,6 +6,10 @@
 //! `commands/`, its arguments in `cli/`, and everything it prints goes
 //! through `ui/`.
 
+// A failed write to stdout or stderr must not end the process; ui's macros
+// take every write instead (see ui/mod.rs).
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
 // mimalloc as the global allocator. ~10–20% faster than system malloc
 // on small thread-local allocs (the dominant per-RTT pattern in CDP dispatch).
 #[global_allocator]

@@ -427,7 +427,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
     state,
     mut commands,
   } = server;
-  println!("\n  ferridriver UI mode\n\n  http://{addr}\n");
+  crate::ui::stdoutln!("\n  ferridriver UI mode\n\n  http://{addr}\n");
 
   let sock_path = std::env::temp_dir().join(format!("ferridriver-ui-{}.sock", std::process::id()));
   let ids_path = std::env::temp_dir().join(format!("ferridriver-ui-{}.ids", std::process::id()));
@@ -483,7 +483,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
           match spawner.spawn(CycleKind::Run, Some(scope)) {
             Ok(started) => cycle = Some(started),
             Err(e) => {
-              eprintln!("Failed to spawn test cycle: {e}");
+              crate::ui::stderrln!("Failed to spawn test cycle: {e}");
               state.set_watch_status("idle");
             },
           }
@@ -497,7 +497,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
         match spawner.spawn(CycleKind::List, None) {
           Ok(started) => cycle = Some(started),
           Err(e) => {
-            eprintln!("Failed to spawn list cycle: {e}");
+            crate::ui::stderrln!("Failed to spawn list cycle: {e}");
             state.set_watch_status("idle");
           },
         }

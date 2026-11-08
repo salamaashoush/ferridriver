@@ -67,7 +67,8 @@ pub fn init(verbose: u8) {
 
       let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .with_ansi(use_ansi);
+        .with_ansi(use_ansi)
+        .log_internal_errors(false);
 
       let _ = tracing_subscriber::registry()
         .with(filter)
@@ -77,11 +78,14 @@ pub fn init(verbose: u8) {
       return;
     }
 
-    // Default: fmt subscriber only.
+    // Default: fmt subscriber only. A write to a closed stderr (the process
+    // that read it is gone) is dropped: reporting it means `eprintln!`,
+    // which panics on the same closed stream and aborts the process.
     let _ = tracing_subscriber::fmt()
       .with_env_filter(filter)
       .with_writer(std::io::stderr)
       .with_ansi(use_ansi)
+      .log_internal_errors(false)
       .try_init();
   });
 }

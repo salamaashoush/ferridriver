@@ -43,7 +43,7 @@ pub async fn run(args: cli::CodegenArgs) -> anyhow::Result<()> {
       .map_err(|e| anyhow::anyhow!("codegen: {e}"))?;
     // The selector alone on stdout, so it pipes; everything a reader
     // needs to see is on stderr already.
-    println!("{selector}");
+    ui::stdoutln!("{selector}");
     return Ok(());
   }
 
@@ -195,7 +195,7 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
 
   ui::note(&format!("starting to record on session {}", ui::bold(session)));
   if to_stdout {
-    print!("{}", live.header(""));
+    ui::stdout!("{}", live.header(""));
     let _ = std::io::stdout().flush();
   }
 
@@ -213,7 +213,7 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
       } => {
         if to_stdout {
           if let Some(code) = source.push(action, replaces_previous, replaces_index) {
-            print!("{code}");
+            ui::stdout!("{code}");
             let _ = std::io::stdout().flush();
           }
         } else if replaces_index.is_none() {
@@ -246,9 +246,9 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
 
   if to_stdout {
     if let Some(code) = source.finish() {
-      print!("{code}");
+      ui::stdout!("{code}");
     }
-    print!("{}", live.footer());
+    ui::stdout!("{}", live.footer());
     let _ = std::io::stdout().flush();
   }
   if let Some(path) = &args.output {

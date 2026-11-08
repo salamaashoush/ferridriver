@@ -96,7 +96,7 @@ impl Table {
     if self.rows.is_empty() {
       return;
     }
-    print!("{}", self.render(available));
+    crate::ui::stdout!("{}", self.render(available));
   }
 
   /// Natural width of every column, then the shrink pass that makes the whole

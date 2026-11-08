@@ -253,3 +253,41 @@ test('MCP over HTTP with --exit-with-stdin stops when the supervisor goes', asyn
     await stopEach('stdio', 'ui');
   }
 });
+
+// A supervisor reads its servers' stderr as well, so when it dies the stream
+// a server reports its shutdown on is closed too. Writing there must not end
+// the server before it has closed its browser.
+async function heldInputAndError() {
+  const input = await heldInput();
+  const error = join(await workspace({}), 'stderr');
+  const made = await commands.exec('probe', { command: `mkfifo ${quote(error)}` });
+  assert.equal(made.exitCode, 0, made.stderr);
+  return { input, error };
+}
+
+test('browser serve --exit-with-stdin closes its browser when the supervisor reading its stderr goes', async () => {
+  test.setTimeout(120000);
+  const { input, error } = await heldInputAndError();
+  await commands.start('ui', {
+    command: `exec ${quote(binary)} browser serve --exit-with-stdin < ${quote(input)} 2> ${quote(error)}`,
+  });
+  await commands.start('stdio', { command: `exec sleep 600 > ${quote(input)} 3< ${quote(error)}` });
+  try {
+    const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+    const response = await script(`
+      const browser = await chromium().connectOverCDP(${JSON.stringify(endpoint)});
+      const cdp = await browser.newBrowserCDPSession();
+      const info = await cdp.send('SystemInfo.getProcessInfo');
+      return info.processInfo.find((process) => process.type === 'browser').id;
+    `);
+    const pid = response.value;
+    assert.ok(await running(pid), 'the browser runs while the supervisor does');
+
+    await commands.stop('stdio');
+    await until(async () => !commands.status('ui').running, 'the server stops once its input ends');
+    assert.equal(commands.status('ui').exitCode, 0, 'the server stops cleanly, not on a failed write');
+    await until(async () => !(await running(pid)), 'the browser ends with the server');
+  } finally {
+    await stopEach('stdio', 'ui');
+  }
+});

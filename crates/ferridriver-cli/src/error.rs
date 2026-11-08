@@ -74,23 +74,23 @@ pub fn report(err: &anyhow::Error) -> i32 {
     // The document is the failure report; a parser reading stdout gets the
     // same shape whether the run succeeded or not.
     if let Ok(text) = serde_json::to_string_pretty(&payload) {
-      println!("{text}");
+      ui::stdoutln!("{text}");
     }
     return status(err);
   }
 
-  eprintln!("\n{}", ui::failure(&err.to_string()));
+  ui::stderrln!("\n{}", ui::failure(&err.to_string()));
   for cause in err.chain().skip(1) {
-    eprintln!("  {} {}", ui::dim("caused by"), cause);
+    ui::stderrln!("  {} {}", ui::dim("caused by"), cause);
   }
   let hints = hints(err);
   if !hints.is_empty() {
-    eprintln!("\n{}", ui::header("Try"));
+    ui::stderrln!("\n{}", ui::header("Try"));
     for (what, cmd) in hints {
-      eprintln!("  {} {}", ui::dim(&format!("{what}:")), ui::code(&cmd));
+      ui::stderrln!("  {} {}", ui::dim(&format!("{what}:")), ui::code(&cmd));
     }
   }
-  eprintln!();
+  ui::stderrln!();
   status(err)
 }
 

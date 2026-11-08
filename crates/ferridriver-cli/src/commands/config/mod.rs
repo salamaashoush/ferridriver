@@ -55,7 +55,7 @@ pub fn run_config(
       (false, Ok(text)) => text,
       _ => serde_json::to_string_pretty(&resolved.document)?,
     };
-    println!("{out}");
+    ui::stdoutln!("{out}");
     return Ok(());
   }
 
@@ -91,7 +91,7 @@ pub fn run_config(
       "extensions": specs,
       "document": resolved.document,
     });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    ui::stdoutln!("{}", serde_json::to_string_pretty(&payload)?);
     return Ok(());
   }
 

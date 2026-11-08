@@ -165,7 +165,7 @@ fn show_trace(config: &FerridriverConfig, args: &cli::TraceShowArgs) -> anyhow::
   let model = load(&path)?;
 
   if ui::json() {
-    println!("{}", serde_json::to_string_pretty(&dump::to_json(&model))?);
+    ui::stdoutln!("{}", serde_json::to_string_pretty(&dump::to_json(&model))?);
     return Ok(());
   }
 
@@ -185,7 +185,7 @@ fn show_trace(config: &FerridriverConfig, args: &cli::TraceShowArgs) -> anyhow::
     // dump is not a place to re-derive it from a second flag.
     color: console::colors_enabled(),
   };
-  print!("{}", dump::render(&model, &options));
+  ui::stdout!("{}", dump::render(&model, &options));
   Ok(())
 }
 
@@ -199,7 +199,7 @@ fn list_traces(config: &FerridriverConfig, args: &cli::TraceLsArgs) -> anyhow::R
   let traces = collect_traces(&dir);
   if traces.is_empty() {
     if ui::json() {
-      println!("[]");
+      ui::stdoutln!("[]");
     } else {
       ui::say(&ui::info(&format!(
         "no traces under {}",
@@ -229,7 +229,7 @@ fn list_traces(config: &FerridriverConfig, args: &cli::TraceLsArgs) -> anyhow::R
         })
       })
       .collect();
-    println!("{}", serde_json::to_string_pretty(&entries)?);
+    ui::stdoutln!("{}", serde_json::to_string_pretty(&entries)?);
     return Ok(());
   }
 
