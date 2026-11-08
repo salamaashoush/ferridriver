@@ -1,0 +1,122 @@
+name: Linux binaries
+
+# The CLI for every commit on main, built once and published as
+# ghcr.io/<owner>/ferridriver-cli:<sha>: an image holding /ferridriver and
+# nothing else, for linux/amd64 and linux/arm64. Projects pinning a commit
+# copy the binary out of it (`COPY --from=`, `docker cp`) rather than
+# compiling ferridriver themselves, which takes most of an hour on a hosted
+# runner. Built on Ubuntu 24.04 against its glibc, so it runs there and on
+# anything newer. A revision published before this workflow existed is
+# built by running it by hand with that revision.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: "The full commit SHA to build"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.rev || github.sha }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  REV: ${{ inputs.rev || github.sha }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: The revision is a full commit SHA
+        run: |
+          [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$REV is not a full commit SHA"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REV }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      # Dependencies change far less often than the workspace, so a commit
+      # mostly rebuilds ferridriver's own crates.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-binaries-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev pkg-config
+      # release-fast is the thin-LTO profile: the release profile's fat LTO
+      # with one codegen unit needs more memory and time than a hosted
+      # runner gives a build.
+      - run: cargo build --locked --profile release-fast -p ferridriver-cli
+      - name: Check the binary
+        run: |
+          mkdir out
+          cp target/release-fast/ferridriver out/ferridriver-${{ matrix.arch }}
+          out/ferridriver-${{ matrix.arch }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferridriver-${{ matrix.arch }}
+          path: out
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ferridriver-*
+          merge-multiple: true
+          path: bin
+      # The image only copies a file in, so neither architecture runs
+      # anything under emulation.
+      - name: The image's Dockerfile
+        run: |
+          chmod +x bin/ferridriver-*
+          cat > Dockerfile <<'EOF'
+          FROM scratch
+          ARG TARGETARCH
+          COPY bin/ferridriver-${TARGETARCH} /ferridriver
+          EOF
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ferridriver-cli" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ env.REV }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.REV }}
+            org.opencontainers.image.description=The ferridriver CLI for Linux, at /ferridriver
+          annotations: |
+            index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            index:org.opencontainers.image.revision=${{ env.REV }}
+            index:org.opencontainers.image.description=The ferridriver CLI for Linux, at /ferridriver
+      - run: docker buildx imagetools inspect "${{ steps.image.outputs.name }}:$REV"
