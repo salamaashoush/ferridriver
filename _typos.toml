@@ -28,6 +28,8 @@ bui = "bui"
 mis = "mis"
 # `Box::pin`ned — `pin` + `ned` participle, not the word "ned"
 ned = "ned"
+# The DevTools Protocol's own spelling of Page.createIsolatedWorld's parameter
+Univeral = "Univeral"
 # "Nin" is a CSS unit identifier — "inches" abbreviation per spec
 Nin = "Nin"
 # "Paeth" is the name of a PNG image filter algorithm
