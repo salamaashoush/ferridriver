@@ -834,3 +834,25 @@ async fn a_typed_secret_reaches_only_the_host_and_the_code_reads_it_from_the_env
   browser.close().await?;
   Ok(())
 }
+
+/// Every browser's first context has the same name, so two browsers in one
+/// process, as a server running several sessions has, are two contexts each
+/// free to be recorded; one context still takes one recorder.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_browser_in_a_process_records_its_own_default_context() -> anyhow::Result<()> {
+  use ferridriver::codegen::recorder::Recorder;
+  let (first, second) = tokio::try_join!(launch(ferridriver::chromium()), launch(ferridriver::chromium()))?;
+  let (first_page, second_page) = tokio::try_join!(first.new_page(), second.new_page())?;
+  let (sink, _events) = mpsc::unbounded_channel();
+  let recording_first = Recorder::attach(&first_page, sink.clone()).await?;
+  let recording_second = Recorder::attach(&second_page, sink.clone()).await?;
+  let Err(again) = Recorder::attach(&first_page, sink).await else {
+    bail!("a second recorder attached to a context that has one");
+  };
+  ensure!(again.to_string().contains("already attached"), "{again}");
+  recording_first.detach().await;
+  recording_second.detach().await;
+  first.close().await?;
+  second.close().await?;
+  Ok(())
+}

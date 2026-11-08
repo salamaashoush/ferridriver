@@ -210,12 +210,30 @@ impl RecorderSink for tokio::sync::mpsc::UnboundedSender<RecorderEvent> {
   }
 }
 
-/// Contexts that already have a recorder, by composite key. The page-side
-/// binding has one name, so two recorders on one context would steal each
-/// other's actions.
-fn attached_contexts() -> &'static Mutex<rustc_hash::FxHashSet<String>> {
-  static CONTEXTS: std::sync::OnceLock<Mutex<rustc_hash::FxHashSet<String>>> = std::sync::OnceLock::new();
+/// Contexts that already have a recorder. The page-side binding has one
+/// name, so two recorders on one context would steal each other's actions.
+fn attached_contexts() -> &'static Mutex<rustc_hash::FxHashSet<AttachedContext>> {
+  static CONTEXTS: std::sync::OnceLock<Mutex<rustc_hash::FxHashSet<AttachedContext>>> = std::sync::OnceLock::new();
   CONTEXTS.get_or_init(Mutex::default)
+}
+
+/// A context as the registry knows it: the composite key names it only
+/// within its browser (every browser's first context is `default:default`),
+/// so the browser state it lives in comes with it. The recorder holds that
+/// state while registered, so its address cannot name another meanwhile.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct AttachedContext {
+  state: usize,
+  key: String,
+}
+
+impl AttachedContext {
+  fn of(context: &crate::context::ContextRef) -> Self {
+    Self {
+      state: Arc::as_ptr(&context.state) as usize,
+      key: context.composite(),
+    }
+  }
 }
 
 /// A recorded page and the name the code gives it.
@@ -794,7 +812,7 @@ pub struct Recorder {
   init_script: Option<Disposable>,
   binding: Option<Disposable>,
   page_listener: Option<ListenerId>,
-  key: String,
+  key: AttachedContext,
 }
 
 impl Recorder {
@@ -825,7 +843,7 @@ impl Recorder {
       .context()
       .cloned()
       .ok_or_else(|| FerriError::invalid_argument("page", "a page outside any browser context cannot be recorded"))?;
-    let key = context.composite();
+    let key = AttachedContext::of(&context);
     if !attached_contexts()
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
