@@ -1905,7 +1905,7 @@ fn extract_tar_bz2(archive_path: &Path, dest: &Path) -> Result<()> {
 /// Extract a .tar.xz archive.
 fn extract_tar_xz(archive_path: &Path, dest: &Path) -> Result<()> {
   let file = std::fs::File::open(archive_path)?;
-  let decoder = xz2::read::XzDecoder::new(file);
+  let decoder = liblzma::read::XzDecoder::new(file);
   let mut archive = tar::Archive::new(decoder);
   archive.unpack(dest)?;
   Ok(())
@@ -2194,7 +2194,7 @@ mod removal_tests {
 mod extraction_tests {
   use std::path::Path;
 
-  use super::{extract_zip, link_stays_inside};
+  use super::{extract_tar_xz, extract_zip, link_stays_inside};
 
   fn write_zip(path: &Path, build: impl FnOnce(&mut zip::ZipWriter<std::fs::File>)) {
     let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
@@ -2218,6 +2218,26 @@ mod extraction_tests {
       Path::new("../../etc/passwd")
     ));
     assert!(!link_stays_inside(Path::new("libfoo.so"), Path::new("/etc/passwd")));
+  }
+
+  #[test]
+  fn an_xz_compressed_tarball_unpacks_its_files() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("firefox.tar.xz");
+    let encoder = liblzma::write::XzEncoder::new(std::fs::File::create(&archive).unwrap(), 6);
+    let mut tarball = tar::Builder::new(encoder);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(7);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tarball
+      .append_data(&mut header, "firefox/application.ini", &b"Version"[..])
+      .unwrap();
+    tarball.into_inner().unwrap().finish().unwrap();
+    let dest = root.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    extract_tar_xz(&archive, &dest).unwrap();
+    assert_eq!(std::fs::read(dest.join("firefox/application.ini")).unwrap(), b"Version");
   }
 
   #[test]
