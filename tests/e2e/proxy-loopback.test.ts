@@ -8,9 +8,19 @@
 
 import { test, describe, expect } from '@ferridriver/test';
 import type { APIRequestContext, Browser } from '@ferridriver/test';
+import { release } from 'node:os';
 import { fxUrl } from './helpers/server';
 
 const HTTP_PROXY = 'http://127.0.0.1:47832';
+
+// WebKit on macOS 26 and later (Darwin 25+) sends loopback straight to the
+// host whatever the proxy says. Playwright's WebKit build overrides the
+// connection host so loopback goes through the proxy, and there it works
+// only now and then; Playwright itself fails the same way on those builds.
+const MAC_WEBKIT_SENDS_LOOPBACK_DIRECT = 'macOS 26+ WebKit sends loopback direct, past the proxy';
+function macWebKitSendsLoopbackDirect(browserName: string): boolean {
+  return browserName === 'webkit' && process.platform === 'darwin' && Number(release().split('.')[0]) >= 25;
+}
 const CREDENTIALS = { username: 'fixture-user', password: 'fixture-pass' };
 
 function loopback(baseURL: string | undefined, host: string, key: string): string {
@@ -41,7 +51,8 @@ async function visit(browser: Browser, bypass: string | undefined, url: string):
 
 describe('loopback and a context proxy', () => {
   for (const host of ['127.0.0.1', 'localhost']) {
-    test(`${host} goes through the proxy`, async ({ browser, baseURL, request }) => {
+    test(`${host} goes through the proxy`, async ({ browser, browserName, baseURL, request }) => {
+      test.skip(macWebKitSendsLoopbackDirect(browserName), MAC_WEBKIT_SENDS_LOOPBACK_DIRECT);
       const key = crypto.randomUUID();
       try {
         await visit(browser, undefined, loopback(baseURL, host, key));
@@ -77,7 +88,8 @@ describe('loopback and a context proxy', () => {
 describe('loopback and test.use({ proxy })', () => {
   test.use({ proxy: { server: HTTP_PROXY, ...CREDENTIALS } });
 
-  test('the test context sends loopback through the proxy', async ({ page, baseURL, request }) => {
+  test('the test context sends loopback through the proxy', async ({ page, browserName, baseURL, request }) => {
+    test.skip(macWebKitSendsLoopbackDirect(browserName), MAC_WEBKIT_SENDS_LOOPBACK_DIRECT);
     const key = crypto.randomUUID();
     try {
       await page.goto(loopback(baseURL, '127.0.0.1', key));

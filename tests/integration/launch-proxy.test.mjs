@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { release } from 'node:os';
 import { join } from 'node:path';
 import { test } from '@ferridriver/test';
 import { observation, repo, runtimeProbe } from './support.mjs';
@@ -107,6 +108,9 @@ for (const [backend, browserType] of [
     const proxied = bypass !== '127.0.0.1';
     test(`${backend}: a launch proxy ${proxied ? 'carries' : 'bypassed for'} loopback${bypass ? ` (bypass ${bypass})` : ''}`, async ({ request }) => {
       test.skip(proxied && bypass !== undefined && backend === 'webkit' && process.platform === 'darwin', 'macOS WebKit does not proxy loopback when bypass rules are set');
+      // WebKit on macOS 26 and later (Darwin 25+) sends loopback direct even
+      // without bypass rules; Playwright's WebKit build fails the same way.
+      test.skip(proxied && backend === 'webkit' && process.platform === 'darwin' && Number(release().split('.')[0]) >= 25, 'macOS 26+ WebKit sends loopback direct, past the proxy');
       await recordingProxy(async ({ baseURL }) => {
         const endpoints = await (await request.get(`${baseURL}/fx/endpoints`)).json();
         const browser = await browserType().launch({

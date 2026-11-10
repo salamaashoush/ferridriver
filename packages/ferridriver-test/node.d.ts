@@ -14,6 +14,11 @@ declare module 'node:fs/promises' {
   export = promises;
 }
 
+declare module 'node:os' {
+  /** The operating system's release, as `uname -r` prints it. */
+  export function release(): string;
+}
+
 declare module 'node:path' {
   export function dirname(path: string): string;
   export function join(...paths: string[]): string;
