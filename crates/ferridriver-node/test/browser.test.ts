@@ -895,12 +895,12 @@ for (const backend of BACKENDS) {
       expect(await page.locator("#cb").isChecked()).toBe(false);
     });
 
-    // Task 1.5 phase 4a: `fill.force` bypasses Playwright's
-    // ['visible','enabled','editable'] pre-check. Without force, fill
-    // on a `readonly` input surfaces `error:noteditable` → retry loop
-    // keeps polling → deadline fires. With force:true, the pre-check
-    // is skipped and `.value = 'x'` sticks.
-    it("fill with force:true writes through a readonly input", async () => {
+    // `fill.force` bypasses Playwright's ['visible','enabled','editable']
+    // pre-check. Without force, fill on a `readonly` input surfaces
+    // `error:noteditable` → retry loop keeps polling → deadline fires.
+    // With force:true the wait is skipped and the text is typed in, as
+    // Playwright's `insertText` does, which a readonly field refuses.
+    it("fill with force:true skips the editable wait, and a readonly input keeps its value", async () => {
       await page.setContent('<input id="ro" readonly value="" />');
       await page.waitForSelector("#ro");
 
@@ -917,9 +917,11 @@ for (const backend of BACKENDS) {
       expect(elapsed, `fill should fail fast; got ${elapsed}ms`).toBeLessThan(1500);
       expect(await page.locator("#ro").inputValue()).toBe("");
 
-      // With force:true → succeeds, value is written.
+      // With force:true → returns at once, and the field stays as it was.
+      const t1 = Date.now();
       await page.locator("#ro").fill("bypass", { force: true });
-      expect(await page.locator("#ro").inputValue()).toBe("bypass");
+      expect(Date.now() - t1).toBeLessThan(1500);
+      expect(await page.locator("#ro").inputValue()).toBe("");
     });
 
     // tap uses the backend's native touch input: CDP via
