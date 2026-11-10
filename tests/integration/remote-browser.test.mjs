@@ -291,3 +291,63 @@ test('browser serve --exit-with-stdin closes its browser when the supervisor rea
     await stopEach('stdio', 'ui');
   }
 });
+
+/** One JSON-RPC message to an MCP endpoint over streamable HTTP: the answer to it, and the session id it names. */
+async function mcpCall(url, token, session, message) {
+  const headers = {
+    'content-type': 'application/json',
+    accept: 'application/json, text/event-stream',
+    authorization: `Bearer ${token}`,
+  };
+  if (session) headers['mcp-session-id'] = session;
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(message) });
+  const text = await response.text();
+  assert.ok(response.ok, `${response.status} ${text}`);
+  const answer = text.startsWith('{')
+    ? JSON.parse(text)
+    : text.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim())
+      .filter((data) => data.startsWith('{')).map((data) => JSON.parse(data)).find((value) => value.id === message.id);
+  return { answer, session: response.headers.get('mcp-session-id') ?? session };
+}
+
+// A remote browser session hands an agent a browser already on a page; the
+// MCP server connected to it starts there, not on a blank page of its own.
+test('MCP connected to a running browser starts on the page it shows', async () => {
+  test.setTimeout(120000);
+  await commands.start('ui', { command: `exec ${quote(binary)} browser serve` });
+  try {
+    const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+    await script(`
+      const browser = await chromium().connectOverCDP(${JSON.stringify(endpoint)});
+      const cdp = await browser.newBrowserCDPSession();
+      for (const target of (await cdp.send('Target.getTargets')).targetInfos) {
+        if (target.type === 'page') await cdp.send('Target.closeTarget', { targetId: target.targetId });
+      }
+      await cdp.send('Target.createTarget', { url: 'data:text/html,<title>opened by the session</title>' });
+    `);
+    const cwd = await workspace({});
+    const command = [binary, 'mcp', '--no-inherit', '--transport', 'http', '--port', '0', '--headless',
+      '--token', 'sashoush-connect', '--connect', endpoint].map(quote).join(' ');
+    await commands.start('stdio', { command: `cd ${quote(cwd)} && exec ${command} 2>&1` });
+    const output = await commands.waitForOutput('stdio', '/mcp\n', 30000);
+    const url = output.match(/listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/)?.[1];
+    assert.ok(url, output);
+    const token = 'sashoush-connect';
+    const { session } = await mcpCall(url, token, undefined, {
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'integration', version: '1' } },
+    });
+    await mcpCall(url, token, session, { jsonrpc: '2.0', method: 'notifications/initialized' });
+    const { answer } = await mcpCall(url, token, session, {
+      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'snapshot', arguments: {} },
+    });
+    const text = answer.result.content[0].text;
+    assert.match(text, /Title: opened by the session/, text);
+    const { answer: pages } = await mcpCall(url, token, session, {
+      jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'page', arguments: { action: 'list' } },
+    });
+    assert.doesNotMatch(pages.result.content[0].text, /about:blank/, pages.result.content[0].text);
+  } finally {
+    await stopEach('stdio', 'ui');
+  }
+});

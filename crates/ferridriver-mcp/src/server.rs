@@ -1615,9 +1615,9 @@ impl McpServer {
       .map_err(|e| Self::err(format!("instance health check failed: {e}")))?
       .map_err(Self::err)?;
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
-    let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
+    let page = Box::pin(ctx_ref.active_or_new_page()).await.map_err(Self::err)?;
     self.invalidate_context(context);
-    Ok(page.inner().clone())
+    Ok(page)
   }
 
   /// Get a `Page` for a context, ensuring the required browser instance exists.

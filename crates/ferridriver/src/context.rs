@@ -426,6 +426,28 @@ impl ContextRef {
     &self.name
   }
 
+  /// The context's active page, opening one only when it has none. A
+  /// browser this instance connects to brings the pages already open in
+  /// it, which connecting adopts, so a client attaching to a running
+  /// browser starts on the page that browser shows, as Playwright's
+  /// `connectOverCDP` hands back the pages already there.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser cannot be reached or a page cannot be
+  /// opened.
+  pub async fn active_or_new_page(&self) -> Result<AnyPage> {
+    Box::pin(BrowserState::ensure_instance_shared(&self.state, &self.key.instance)).await?;
+    ensure_popup_pump(&self.state, &self.key.instance).await;
+    {
+      let state = self.state.read().await;
+      if let Ok(page) = state.active_page(&self.key.to_composite()) {
+        return Ok(page.clone());
+      }
+    }
+    Ok(Box::pin(self.new_page()).await?.inner().clone())
+  }
+
   /// Create a new page in this context.
   ///
   /// # Errors
