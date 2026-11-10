@@ -2813,9 +2813,9 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
   // Compose the output filename: `<dir>/<timestamp>-<page-id>.<ext>`.
   // Playwright derives its name from the page's GUID; ferridriver uses
   // millisecond-since-epoch + an atomic counter — unique across pages
-  // within the same context and the same second. The extension comes
-  // from `crate::video::video_extension()` so changes to the encoder
-  // format propagate without a filename rewrite.
+  // within the same context and the same second. The extension is the
+  // ffmpeg encoder's; the browser's own recorder writes `.mp4` beside it,
+  // and the path `stop` answers is the one the video handle reports.
   static VIDEO_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
   let (video, sink) = crate::video::Video::new();

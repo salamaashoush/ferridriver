@@ -11,6 +11,7 @@
 
 mod paused;
 pub mod pipe;
+pub(crate) mod recording;
 mod renderer;
 mod screenshot;
 pub mod transport;
@@ -874,6 +875,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
+      screen_recorder: recording::ScreenRecorder::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(downloads_dir),
@@ -1031,6 +1033,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
+      screen_recorder: recording::ScreenRecorder::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
@@ -1227,6 +1230,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
+      screen_recorder: recording::ScreenRecorder::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
@@ -2150,6 +2154,8 @@ pub struct CdpPage<T: CdpTransport> {
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::_onDownloadWillBegin`.
   pub download_manager: crate::download::DownloadManager,
   pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
+  /// The page's native recording; see [`recording`].
+  pub(crate) screen_recorder: recording::ScreenRecorder,
   /// Idempotency latch for `Browser.setDownloadBehavior`. Lazy
   /// enabling: the CDP command fires once, the first time a user
   /// shows interest in downloads (`page.on('download', ...)`,
@@ -2473,6 +2479,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       file_chooser_intercept_enabled: self.file_chooser_intercept_enabled.clone(),
       download_manager: self.download_manager.clone(),
       screencast_hub: self.screencast_hub.clone(),
+      screen_recorder: self.screen_recorder.clone(),
       download_behavior_enabled: self.download_behavior_enabled.clone(),
       accept_downloads: self.accept_downloads.clone(),
       downloads_dir: self.downloads_dir.clone(),
@@ -5723,27 +5730,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(serde_json::Value::as_str)
       .ok_or_else(|| FerriError::protocol("Tracing.tracingComplete", "missing stream handle"))?;
 
-    let mut trace = Vec::new();
-    let mut eof = false;
-    while !eof {
-      let chunk = self.cmd("IO.read", serde_json::json!({ "handle": stream })).await?;
-      let data = chunk.get("data").and_then(serde_json::Value::as_str).unwrap_or("");
-      if chunk
-        .get("base64Encoded")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-      {
-        trace.extend(
-          base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .map_err(|error| FerriError::protocol("IO.read", format!("invalid base64 trace chunk: {error}")))?,
-        );
-      } else {
-        trace.extend_from_slice(data.as_bytes());
-      }
-      eof = chunk.get("eof").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    }
-    let _ = self.cmd("IO.close", serde_json::json!({ "handle": stream })).await;
+    let trace = recording::read_stream(&*self.transport, self.session_id.as_deref(), stream).await?;
     Self::parse_trace_events(&trace)
   }
 
@@ -6942,6 +6929,30 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
+  // ---- Native recording ----
+
+  /// Starts Chromium's own recorder on this page; `None` sends the caller
+  /// to the screencast instead.
+  pub(crate) async fn start_screen_recording(
+    &self,
+    params: recording::RecordingParams,
+  ) -> Option<tokio::sync::watch::Receiver<Option<recording::Recorded>>> {
+    if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+      return None;
+    }
+    self
+      .screen_recorder
+      .start(&*self.transport, &self.target_id, params)
+      .await
+  }
+
+  /// Stops this page's native recording and hands over its MP4. Called
+  /// before anything closes the page's target, which takes the recording
+  /// with it.
+  pub(crate) async fn finish_screen_recording(&self) {
+    self.screen_recorder.finish(&*self.transport).await;
+  }
+
   // ---- Lifecycle ----
 
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
@@ -6949,6 +6960,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       self.dispose_local();
       return Ok(());
     }
+    self.finish_screen_recording().await;
     // Two CDP paths, matching Playwright's crPage.ts:
     // * runBeforeUnload=true  → `Page.close` — fires beforeunload handlers.
     // * runBeforeUnload=false → `Target.closeTarget` — force-close.

@@ -487,6 +487,7 @@ fn mime_to_ext(content_type: &str) -> &str {
     "text/html" => "html",
     "application/json" => "json",
     "video/webm" => "webm",
+    "video/mp4" => "mp4",
     "application/zip" => "zip",
     _ => "bin",
   }

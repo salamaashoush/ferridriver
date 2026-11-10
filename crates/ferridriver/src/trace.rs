@@ -892,7 +892,7 @@ fn resource_is_precompressed(name: &str) -> bool {
   std::path::Path::new(name)
     .extension()
     .and_then(|e| e.to_str())
-    .is_some_and(|ext| matches!(ext, "jpeg" | "jpg" | "png" | "webp" | "zip" | "webm"))
+    .is_some_and(|ext| matches!(ext, "jpeg" | "jpg" | "png" | "webp" | "zip" | "webm" | "mp4"))
 }
 
 fn write_trace_zip<W: std::io::Write + std::io::Seek>(
@@ -2159,6 +2159,7 @@ fn attachment_extension(content_type: &str) -> &'static str {
     "application/json" => "json",
     "application/zip" => "zip",
     "video/webm" => "webm",
+    "video/mp4" => "mp4",
     _ => "dat",
   }
 }

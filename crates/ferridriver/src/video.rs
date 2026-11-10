@@ -1,4 +1,7 @@
-//! Video recording via the page's shared screencast + ffmpeg encoding.
+//! Video recording: with the browser's own recorder where it has one
+//! (Chromium's `Page.startScreenRecording`, AV1 in MP4, in the CDP
+//! backend's `recording` module), otherwise via the page's shared
+//! screencast + ffmpeg encoding, as described below.
 //!
 //! Architecture: encoding runs on a blocking thread CONCURRENTLY with the test,
 //! driven by a bounded channel from a pump subscribed to the page's
@@ -64,20 +67,78 @@ async fn subscribe(
     .await
 }
 
+/// Chromium's own recorder, where the browser has one: the MP4 is encoded
+/// inside the browser, so nothing is encoded here.
+struct Native {
+  page: crate::backend::AnyPage,
+  recorded: watch::Receiver<Option<crate::backend::cdp::recording::Recorded>>,
+}
+
+impl Native {
+  async fn start(page: &Page, width: u32, height: u32) -> Option<Self> {
+    let params = crate::backend::cdp::recording::RecordingParams {
+      max_width: width,
+      max_height: height,
+      frame_rate: FPS,
+    };
+    let recorded = page.inner().start_screen_recording(params).await?;
+    Some(Self {
+      page: page.inner().clone(),
+      recorded,
+    })
+  }
+
+  /// Stops the recording, unless closing the page already did, and
+  /// answers its MP4.
+  async fn finish(mut self) -> crate::error::Result<Arc<Vec<u8>>> {
+    self.page.finish_screen_recording().await;
+    let recorded = self
+      .recorded
+      .wait_for(Option::is_some)
+      .await
+      .map_err(|_| FerriError::backend("the recording ended without a file"))?
+      .clone();
+    recorded
+      .unwrap_or_else(|| Err("the recording ended without a file".to_owned()))
+      .map_err(FerriError::backend)
+  }
+
+  /// Writes the MP4 beside `output_path`, as `.mp4`.
+  async fn save(self, output_path: &Path) -> crate::error::Result<PathBuf> {
+    let mp4 = self.finish().await?;
+    let path = output_path.with_extension(NATIVE_EXTENSION);
+    tokio::fs::write(&path, mp4.as_slice())
+      .await
+      .map_err(|e| FerriError::backend(format!("writing {}: {e}", path.display())))?;
+    Ok(path)
+  }
+}
+
+const NATIVE_EXTENSION: &str = "mp4";
+
 // ── Eager recording: encode concurrently with the test ──
 
 pub struct VideoRecordingHandle {
-  subscription: ScreencastSubscription,
-  started: Instant,
-  /// Pump task: screencast -> encoder channel. Returns the channel so
-  /// `stop` can send the stop time after the last frame.
-  pump_task: tokio::task::JoinHandle<mpsc::Sender<EncoderInput>>,
-  /// Encoder task: channel -> ffmpeg encode (blocking thread).
-  encoder_task: tokio::task::JoinHandle<crate::error::Result<()>>,
+  engine: Eager,
   output_path: PathBuf,
 }
 
-/// Start recording. Encoding runs concurrently on a blocking thread.
+enum Eager {
+  Native(Box<Native>),
+  Screencast {
+    subscription: ScreencastSubscription,
+    started: Instant,
+    /// Pump task: screencast -> encoder channel. Returns the channel so
+    /// `stop` can send the stop time after the last frame.
+    pump_task: tokio::task::JoinHandle<mpsc::Sender<EncoderInput>>,
+    /// Encoder task: channel -> ffmpeg encode (blocking thread).
+    encoder_task: tokio::task::JoinHandle<crate::error::Result<()>>,
+  },
+}
+
+/// Start recording: with the browser's own recorder where it has one,
+/// into an `.mp4` beside `output_path`, otherwise from the screencast,
+/// encoded concurrently on a blocking thread.
 ///
 /// # Errors
 ///
@@ -91,6 +152,12 @@ pub async fn start_recording(
 ) -> crate::error::Result<VideoRecordingHandle> {
   let w = width & !1;
   let h = height & !1;
+  if let Some(native) = Native::start(page, w, h).await {
+    return Ok(VideoRecordingHandle {
+      engine: Eager::Native(Box::new(native)),
+      output_path,
+    });
+  }
   let started = Instant::now();
 
   // Bounded channel: pump -> encoder. Backpressure prevents unbounded buffering.
@@ -115,32 +182,42 @@ pub async fn start_recording(
   let encoder_task = tokio::task::spawn_blocking(move || crate::ffmpeg::encode_stream(frame_rx, &path, w, h, FPS));
 
   Ok(VideoRecordingHandle {
-    subscription,
-    started,
-    pump_task,
-    encoder_task,
+    engine: Eager::Screencast {
+      subscription,
+      started,
+      pump_task,
+      encoder_task,
+    },
     output_path,
   })
 }
 
 impl VideoRecordingHandle {
-  /// Stop recording and wait for the encoder to finish. The video ends
-  /// now, however long ago the page last changed.
+  /// Stop recording and wait for the file. The video ends now, however
+  /// long ago the page last changed. Answers where the file is, which for
+  /// the browser's own recorder has the `.mp4` extension.
   ///
   /// # Errors
   ///
   /// Returns an error if the encoder fails or the join handle panics.
   pub async fn stop(self) -> crate::error::Result<PathBuf> {
-    let end = self.started.elapsed().as_secs_f64();
-    self.subscription.stop().await;
-    let frame_tx = self
-      .pump_task
+    let (subscription, started, pump_task, encoder_task) = match self.engine {
+      Eager::Native(native) => return native.save(&self.output_path).await,
+      Eager::Screencast {
+        subscription,
+        started,
+        pump_task,
+        encoder_task,
+      } => (subscription, started, pump_task, encoder_task),
+    };
+    let end = started.elapsed().as_secs_f64();
+    subscription.stop().await;
+    let frame_tx = pump_task
       .await
       .map_err(|e| FerriError::Backend(format!("video pump join: {e}")))?;
     let _ = frame_tx.send(EncoderInput::End { at: end }).await;
     drop(frame_tx);
-    self
-      .encoder_task
+    encoder_task
       .await
       .map_err(|e| FerriError::Backend(format!("encoder join: {e}")))??;
 
@@ -155,14 +232,23 @@ impl VideoRecordingHandle {
 type FrameBuffer = Vec<(Vec<u8>, f64)>;
 
 pub struct BufferedRecordingHandle {
-  subscription: ScreencastSubscription,
-  started: Instant,
-  pump_task: tokio::task::JoinHandle<FrameBuffer>,
-  width: u32,
-  height: u32,
+  engine: Buffered,
 }
 
-/// Start buffered recording: buffer frames in memory, no encoding until requested.
+enum Buffered {
+  /// The browser encodes as it records; keeping the file is only writing it.
+  Native(Box<Native>),
+  Screencast {
+    subscription: ScreencastSubscription,
+    started: Instant,
+    pump_task: tokio::task::JoinHandle<FrameBuffer>,
+    width: u32,
+    height: u32,
+  },
+}
+
+/// Start buffered recording: the browser's own recorder where it has one,
+/// otherwise screencast frames buffered in memory, encoded only if asked.
 ///
 /// # Errors
 ///
@@ -175,6 +261,11 @@ pub async fn start_buffered_recording(
 ) -> crate::error::Result<BufferedRecordingHandle> {
   let w = width & !1;
   let h = height & !1;
+  if let Some(native) = Native::start(page, w, h).await {
+    return Ok(BufferedRecordingHandle {
+      engine: Buffered::Native(Box::new(native)),
+    });
+  }
   let started = Instant::now();
   let (subscription, mut frames) = subscribe(page, w, h, quality).await?;
 
@@ -188,33 +279,44 @@ pub async fn start_buffered_recording(
   });
 
   Ok(BufferedRecordingHandle {
-    subscription,
-    started,
-    pump_task,
-    width: w,
-    height: h,
+    engine: Buffered::Screencast {
+      subscription,
+      started,
+      pump_task,
+      width: w,
+      height: h,
+    },
   })
 }
 
 impl BufferedRecordingHandle {
-  /// Stop capturing and encode buffered frames to video.
+  /// Stop capturing and write the video, answering where it went: the
+  /// browser's own recording beside `output_path` as `.mp4`, or the
+  /// buffered frames encoded into `output_path`.
   ///
   /// # Errors
   ///
   /// Returns an error if no frames were captured, encoding fails, or the join handle panics.
   pub async fn encode(self, output_path: PathBuf) -> crate::error::Result<PathBuf> {
-    let end = self.started.elapsed().as_secs_f64();
-    self.subscription.stop().await;
-    let frames = self
-      .pump_task
+    let (subscription, started, pump_task, w, h) = match self.engine {
+      Buffered::Native(native) => return native.save(&output_path).await,
+      Buffered::Screencast {
+        subscription,
+        started,
+        pump_task,
+        width,
+        height,
+      } => (subscription, started, pump_task, width, height),
+    };
+    let end = started.elapsed().as_secs_f64();
+    subscription.stop().await;
+    let frames = pump_task
       .await
       .map_err(|e| FerriError::backend(format!("video pump join: {e}")))?;
     if frames.is_empty() {
       return Err(FerriError::backend("no frames captured"));
     }
 
-    let w = self.width;
-    let h = self.height;
     let path = output_path.clone();
     tokio::task::spawn_blocking(move || crate::ffmpeg::encode_frames(frames, end, &path, w, h, FPS))
       .await
@@ -223,10 +325,31 @@ impl BufferedRecordingHandle {
     Ok(output_path)
   }
 
-  /// Stop capturing and discard frames. Zero encoding cost.
+  /// Stop capturing and keep nothing. Zero encoding cost.
   pub async fn discard(self) {
-    self.subscription.stop().await;
-    let _ = self.pump_task.await;
+    match self.engine {
+      Buffered::Native(native) => {
+        let _ = native.finish().await;
+      },
+      Buffered::Screencast {
+        subscription,
+        pump_task,
+        ..
+      } => {
+        subscription.stop().await;
+        let _ = pump_task.await;
+      },
+    }
+  }
+}
+
+/// The MIME type of a recorded video, from its extension.
+#[must_use]
+pub fn video_content_type_of(path: &Path) -> &'static str {
+  match path.extension().and_then(|ext| ext.to_str()) {
+    Some("mp4") => "video/mp4",
+    Some("webm") => "video/webm",
+    _ => video_content_type(),
   }
 }
 

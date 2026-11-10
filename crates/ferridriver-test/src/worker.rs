@@ -2066,7 +2066,7 @@ impl Worker {
     } else {
       None
     };
-    let video = async {
+    let video = Box::pin(async {
       match video_handle {
         Some(VideoHandle::Eager(handle)) => match handle.stop().await {
           Ok(path) => Some(path),
@@ -2097,7 +2097,7 @@ impl Worker {
         },
         None => None,
       }
-    };
+    });
     let video_path = after_hooks_step(
       after_budget,
       &after_limit_rx,
@@ -2454,7 +2454,7 @@ impl Worker {
       if keep && path.exists() {
         attachments.push(Attachment {
           name: "video".into(),
-          content_type: ferridriver::video::video_content_type().into(),
+          content_type: ferridriver::video::video_content_type_of(path).into(),
           body: AttachmentBody::Path(path.clone()),
           step_id: None,
         });

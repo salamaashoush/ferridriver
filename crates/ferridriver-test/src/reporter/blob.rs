@@ -846,6 +846,7 @@ pub(crate) fn extension_for(content_type: &str) -> &'static str {
     "image/png" => ".png",
     "image/jpeg" => ".jpg",
     "video/webm" => ".webm",
+    "video/mp4" => ".mp4",
     "application/zip" => ".zip",
     "text/plain" => ".txt",
     "application/json" => ".json",

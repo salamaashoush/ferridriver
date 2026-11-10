@@ -1404,6 +1404,7 @@ impl BrowserState {
         composites.extend(instance.contexts.keys().map(|context| format!("{name}:{context}")));
         for context in instance.contexts.values() {
           for page in &context.pages {
+            page.finish_screen_recording().await;
             page.dispose_local();
           }
         }
@@ -2478,6 +2479,10 @@ impl BrowserState {
     let key = self.session_key(context);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
       let ctx_id = inst.context(&key.context).ok().and_then(|c| c.cdp_context_id.clone());
+      // A page's native recording goes with its target; write it first.
+      for page in inst.context(&key.context).map(|c| c.pages.clone()).unwrap_or_default() {
+        page.finish_screen_recording().await;
+      }
       // One call kills a real browser context and all its pages
       // (Playwright's doClose). The default context has no backend
       // context of its own, so its tabs have to be closed one by one —

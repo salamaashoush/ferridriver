@@ -11,15 +11,14 @@
  * - `video.saveAs(path): Promise<void>` — copies the finalised file.
  * - `video.delete(): Promise<void>` — removes the finalised file.
  *
- * Recording requires a working CDP `Page.startScreencast` path, so
- * these tests are gated to the CDP backends. BiDi's polyfill is
- * covered by the Rust integration suite; WebKit's typed `Unsupported`
- * is covered there too.
+ * Recording is gated to the CDP backends here. Chromium records with
+ * its own encoder (`Page.startScreenRecording`, AV1 in MP4); browsers
+ * without it fall back to the screencast and ffmpeg.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { existsSync, mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { type Browser, type BrowserContext } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
 
@@ -81,19 +80,90 @@ for (const backend of BACKENDS) {
         await new Promise((r) => setTimeout(r, 500));
         await page.close(null);
 
-        const copyPath = join(recordDir, "copy.webm");
+        const copyPath = join(recordDir, `copy${extname(await video!.path())}`);
         await video!.saveAs(copyPath);
         expect(existsSync(copyPath)).toBe(true);
         expect(statSync(copyPath).size).toBeGreaterThan(0);
 
-        // Delete removes the ORIGINAL file; saveAs copied to `copy.webm`
-        // which survives.
+        // Delete removes the ORIGINAL file; the copy survives.
         await video!.delete();
         const origPath = await video!.path();
         expect(existsSync(origPath)).toBe(false);
         expect(existsSync(copyPath)).toBe(true);
       },
       20_000,
+    );
+    /** A page that repaints every animation frame, so a recording has frames to hold. */
+    const ANIMATED =
+      "data:text/html," +
+      encodeURIComponent(
+        `<body style="margin:0"><div id=d style="width:100vw;height:100vh"></div>` +
+          `<script>let i=0;(function f(){d.style.background=\`hsl(\${i++%360},80%,50%)\`;requestAnimationFrame(f)})()</script>`,
+      );
+
+    /** The MP4 brand and the AV1 sample entry Chromium's recorder writes. */
+    function expectAv1Mp4(file: string) {
+      const bytes = readFileSync(file);
+      expect(extname(file)).toBe(".mp4");
+      expect(bytes.subarray(4, 8).toString()).toBe("ftyp");
+      expect(bytes.includes(Buffer.from("av01"))).toBe(true);
+      return bytes;
+    }
+
+    it(
+      "Chromium records with its own encoder, into an AV1 MP4 that holds the page's frames",
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), "ferridriver-native-"));
+        const ctx = browser.newContext({ recordVideo: { dir, size: { width: 640, height: 360 } } });
+        const page = await ctx.newPage();
+        const video = page.video()!;
+        await page.goto(ANIMATED, null);
+        await new Promise((r) => setTimeout(r, 1500));
+        await page.close(null);
+        const bytes = expectAv1Mp4(await video.path());
+        // An empty recording is about 1 KB; a second and a half of
+        // colour changes is many times that.
+        expect(bytes.length).toBeGreaterThan(8_000);
+        await ctx.close();
+      },
+      30_000,
+    );
+
+    it(
+      "closing the context, not the page, still keeps the recording",
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), "ferridriver-native-"));
+        const ctx = browser.newContext({ recordVideo: { dir } });
+        const page = await ctx.newPage();
+        const video = page.video()!;
+        await page.goto(ANIMATED, null);
+        await new Promise((r) => setTimeout(r, 800));
+        await ctx.close();
+        expect(expectAv1Mp4(await video.path()).length).toBeGreaterThan(4_000);
+      },
+      30_000,
+    );
+
+    it(
+      "the screencast's frames keep coming while the page records",
+      async () => {
+        const dir = mkdtempSync(join(tmpdir(), "ferridriver-native-"));
+        const ctx = browser.newContext({ recordVideo: { dir } });
+        const page = await ctx.newPage();
+        const video = page.video()!;
+        await page.goto(ANIMATED, null);
+        let frames = 0;
+        await page.startScreencast(60, 320, 180, () => {
+          frames += 1;
+        });
+        await new Promise((r) => setTimeout(r, 1000));
+        await page.stopScreencast();
+        await page.close(null);
+        expect(frames).toBeGreaterThan(5);
+        expectAv1Mp4(await video.path());
+        await ctx.close();
+      },
+      30_000,
     );
   });
 }

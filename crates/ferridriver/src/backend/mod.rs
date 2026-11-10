@@ -1946,6 +1946,30 @@ impl AnyPage {
     self.screencast_hub()?.subscribe(self, params).await
   }
 
+  /// Starts the browser's own recorder (Chromium's
+  /// `Page.startScreenRecording`); `None` where the backend or browser
+  /// has none, and the caller records from the screencast instead.
+  pub(crate) async fn start_screen_recording(
+    &self,
+    params: cdp::recording::RecordingParams,
+  ) -> Option<tokio::sync::watch::Receiver<Option<cdp::recording::Recorded>>> {
+    match self {
+      AnyPage::CdpPipe(p) => p.start_screen_recording(params).await,
+      AnyPage::CdpWs(p) => p.start_screen_recording(params).await,
+      AnyPage::WebKit(_) | AnyPage::Bidi(_) | AnyPage::WebDriver(_) => None,
+    }
+  }
+
+  /// Stops the page's native recording, if one runs, so its file is
+  /// written before the page's target closes.
+  pub(crate) async fn finish_screen_recording(&self) {
+    match self {
+      AnyPage::CdpPipe(p) => p.finish_screen_recording().await,
+      AnyPage::CdpWs(p) => p.finish_screen_recording().await,
+      AnyPage::WebKit(_) | AnyPage::Bidi(_) | AnyPage::WebDriver(_) => {},
+    }
+  }
+
   async fn start_screencast_stream(&self, params: screencast::ScreencastParams) -> Result<screencast::RawScreencast> {
     let screencast::ScreencastParams {
       quality,
