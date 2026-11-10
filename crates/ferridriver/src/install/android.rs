@@ -137,7 +137,7 @@ impl BrowserInstaller {
       "https://api.adoptium.net/v3/assets/latest/21/hotspot?architecture={arch}&image_type=jre&os={os}&vendor=eclipse"
     );
     let assets: serde_json::Value = self
-      .client
+      .client()?
       .get(url)
       .send()
       .await

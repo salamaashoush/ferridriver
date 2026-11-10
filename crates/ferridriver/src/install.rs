@@ -331,7 +331,7 @@ fn version_order(name: &str) -> (Vec<u64>, String) {
 /// Browser installer that downloads Chrome for Testing from Google's CDN.
 pub struct BrowserInstaller {
   cache_dir: PathBuf,
-  client: Client,
+  client: std::sync::OnceLock<Client>,
 }
 
 impl BrowserInstaller {
@@ -388,7 +388,7 @@ impl BrowserInstaller {
   pub fn new() -> Self {
     Self {
       cache_dir: default_cache_dir(),
-      client: Client::new(),
+      client: std::sync::OnceLock::new(),
     }
   }
 
@@ -397,8 +397,21 @@ impl BrowserInstaller {
   pub fn with_cache_dir(cache_dir: PathBuf) -> Self {
     Self {
       cache_dir,
-      client: Client::new(),
+      client: std::sync::OnceLock::new(),
     }
+  }
+
+  /// The HTTP client, built on first use. Building it loads the system's CA
+  /// certificates, which a bare image only gains from
+  /// [`Self::install_system_deps`], so it waits until a download needs it.
+  fn client(&self) -> Result<&Client> {
+    if let Some(client) = self.client.get() {
+      return Ok(client);
+    }
+    let built = Client::builder()
+      .build()
+      .map_err(|e| backend_err(format!("no HTTP client for downloads: {e}")))?;
+    Ok(self.client.get_or_init(|| built))
   }
 
   /// Return the cache directory path.
@@ -469,7 +482,7 @@ impl BrowserInstaller {
 
     // Fetch the latest stable version info
     let cft: CftResponse = self
-      .client
+      .client()?
       .get(CFT_VERSIONS_URL)
       .send()
       .await
@@ -657,7 +670,7 @@ impl BrowserInstaller {
     F: Fn(InstallProgress),
   {
     let response = self
-      .client
+      .client()?
       .get(url)
       .send()
       .await
@@ -818,7 +831,7 @@ impl BrowserInstaller {
     progress(InstallProgress::Resolving);
 
     let cft: CftResponse = self
-      .client
+      .client()?
       .get(CFT_VERSIONS_URL)
       .send()
       .await
@@ -1104,7 +1117,7 @@ impl BrowserInstaller {
 
     // Fetch the latest stable Firefox version from Mozilla's API
     let versions: std::collections::HashMap<String, String> = self
-      .client
+      .client()?
       .get(FIREFOX_VERSIONS_URL)
       .send()
       .await
@@ -1216,7 +1229,7 @@ impl BrowserInstaller {
 
   async fn released_browsers_json(&self) -> Result<PwBrowsersJson> {
     let release: NpmRelease = self
-      .client
+      .client()?
       .get(PW_LATEST_RELEASE_URL)
       .send()
       .await
@@ -1225,7 +1238,7 @@ impl BrowserInstaller {
       .await
       .map_err(|e| backend_err(format!("failed to parse the latest Playwright release: {e}")))?;
     self
-      .client
+      .client()?
       .get(released_browsers_json_url(&release)?)
       .send()
       .await
@@ -2349,5 +2362,21 @@ mod webkit_platform_tests {
     let mut webkit = browsers.browsers.remove(0);
     assert_eq!(webkit.revision_overrides.remove("mac14-arm64").as_deref(), Some("2251"));
     assert_eq!(webkit.revision, "2387");
+  }
+}
+
+#[cfg(test)]
+mod client_tests {
+  use std::path::PathBuf;
+
+  use super::BrowserInstaller;
+
+  #[test]
+  fn an_installer_builds_its_client_only_when_a_download_needs_it() {
+    let installer = BrowserInstaller::with_cache_dir(PathBuf::from("/cache"));
+    assert!(installer.client.get().is_none());
+    let first: *const reqwest::Client = installer.client().expect("client");
+    let second: *const reqwest::Client = installer.client().expect("client");
+    assert!(std::ptr::eq(first, second));
   }
 }

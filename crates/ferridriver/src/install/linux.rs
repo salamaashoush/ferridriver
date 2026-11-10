@@ -114,10 +114,19 @@ pub(super) fn packages(platform: &str, groups: &[DependencyGroup]) -> Result<(Pa
     },
   };
   let mut packages: Vec<&'static str> = groups.iter().flat_map(|group| table.group(*group)).copied().collect();
+  if groups.contains(&DependencyGroup::Tools) {
+    packages.push(CA_CERTIFICATES);
+  }
   packages.sort_unstable();
   packages.dedup();
   Ok((manager, packages))
 }
+
+/// The system's CA certificates, which ferridriver's downloads verify
+/// against. Playwright needs none, because Node bundles its own, so its
+/// lists leave them out and a bare image has none. The package has this name
+/// for apt and pacman alike.
+const CA_CERTIFICATES: &str = "ca-certificates";
 
 struct AptTable {
   tools: &'static [&'static str],
@@ -929,6 +938,29 @@ mod tests {
     assert_eq!(ffmpeg_archive("debian13-arm64"), Some("ffmpeg-linux-arm64.zip"));
     assert_eq!(ffmpeg_archive("arch-x64"), Some("ffmpeg-linux.zip"));
     assert_eq!(ffmpeg_archive("ubuntu20.04-x64"), None);
+  }
+
+  #[test]
+  fn every_list_brings_the_certificates_downloads_are_verified_against() {
+    for platform in [
+      "ubuntu22.04-x64",
+      "ubuntu24.04-arm64",
+      "ubuntu26.04-x64",
+      "debian12-x64",
+      "debian13-arm64",
+      "arch-x64",
+    ] {
+      let (_, tools) = packages(platform, &[DependencyGroup::Tools]).unwrap();
+      assert!(tools.contains(&"ca-certificates"), "{platform}: {tools:?}");
+      let (_, webkit) = packages(platform, &[DependencyGroup::Tools, DependencyGroup::WebKit]).unwrap();
+      assert_eq!(
+        webkit.iter().filter(|package| **package == "ca-certificates").count(),
+        1,
+        "{platform}"
+      );
+      let (_, without_tools) = packages(platform, &[DependencyGroup::WebKit]).unwrap();
+      assert!(!without_tools.contains(&"ca-certificates"), "{platform}");
+    }
   }
 
   #[test]
