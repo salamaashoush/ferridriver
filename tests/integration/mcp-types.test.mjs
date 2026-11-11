@@ -37,7 +37,7 @@ for (const [path, rust, types] of [
     const implementation = body(await source(path), `pub struct ${rust}`);
     assert.doesNotMatch(implementation, /#\[serde\([^\]]*\b(rename|flatten)\s*=/, 'update field-name extraction for explicit serde renames');
     const fields = [...implementation.matchAll(/\bpub\s+(\w+)\s*:/g)].map(match => match[1].replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()));
-    const declarations = await source('packages/ferridriver-extension/index.d.ts');
+    const declarations = await source('crates/ferridriver-types/packages/extension/index.d.ts');
     const type = types === 'CommandSpec' ? body(declarations, 'export type CommandSpec') : body(declarations, `interface ${types}`);
     declares(type, types, fields);
     if (rust === 'ToolManifest') declares(type, types, ['handler']);
@@ -48,7 +48,7 @@ test('extension host declarations cover every runtime host and contain no any es
   const runtime = body(await source('crates/ferridriver-script/src/engine.rs'), 'pub fn as_str(self)');
   const hosts = [...runtime.matchAll(/Self::\w+\s*=>\s*"([^"]+)"/g)].map(match => match[1]);
   assert.ok(hosts.length > 0);
-  const declarations = await source('packages/ferridriver-extension/index.d.ts');
+  const declarations = await source('crates/ferridriver-types/packages/extension/index.d.ts');
   const union = declarations.match(/type ExtensionHost\s*=([^;]+);/)?.[1];
   assert.ok(union);
   for (const host of hosts) assert.ok(union.includes(`'${host}'`), host);
@@ -67,7 +67,7 @@ test('extension context declarations cover every installed key and forwarded cap
     const response = ok(await client.call('context_keys'));
     const result = JSON.parse(response.result.content.at(-1).text);
     const keys = result.value ?? result;
-    const declaration = body(await source('packages/ferridriver-extension/index.d.ts'), 'interface ToolContext<');
+    const declaration = body(await source('crates/ferridriver-types/packages/extension/index.d.ts'), 'interface ToolContext<');
     declares(declaration, 'ToolContext', keys);
     const implementation = await source('crates/ferridriver-script/src/bindings/extensions.rs');
     const constant = name => {

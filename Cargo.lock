@@ -2091,6 +2091,10 @@ dependencies = [
 [[package]]
 name = "ferridriver-types"
 version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "ferridriver-viewer"
@@ -2114,8 +2118,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs"
-version = "0.8.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=735c929b95e8b33271b542508fa3061e5a66411c#735c929b95e8b33271b542508fa3061e5a66411c"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e11fc83d49eda7ed82fab6fe186eb800f35e304db752bbf84a3176726260695a"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -2137,8 +2142,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-bundle"
-version = "0.8.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=735c929b95e8b33271b542508fa3061e5a66411c#735c929b95e8b33271b542508fa3061e5a66411c"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68ee1aa034c07b13471392574697aaee04c1076b89539d15c901a9cba998d4f5"
 dependencies = [
  "dunce",
  "ferrijs",
@@ -2156,8 +2162,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-fetch"
-version = "0.8.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=735c929b95e8b33271b542508fa3061e5a66411c#735c929b95e8b33271b542508fa3061e5a66411c"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00f852fb02f2542cec1df452bf16c498b0cd2cb86738dfd7fbc650f7c8a527cd"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -2175,16 +2182,18 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-permissions"
-version = "0.8.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=735c929b95e8b33271b542508fa3061e5a66411c#735c929b95e8b33271b542508fa3061e5a66411c"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2858ca3725785ed648421fc1e0c66f19106fe3ce35866ca41f1d5ac2f9dbd712"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ferrijs-serde"
-version = "0.8.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=735c929b95e8b33271b542508fa3061e5a66411c#735c929b95e8b33271b542508fa3061e5a66411c"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9048e4c2448830cebaf9692568781987523a731d53862ada7f883190f0b0500"
 dependencies = [
  "rquickjs",
  "serde",
@@ -2192,8 +2201,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-std"
-version = "0.8.0"
-source = "git+https://github.com/salamaashoush/ferrijs?rev=735c929b95e8b33271b542508fa3061e5a66411c#735c929b95e8b33271b542508fa3061e5a66411c"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44deae27c9a4fe1347d374ce151ebd3d8deea3aeda36c8fcc45a9b31f98d3245"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",

@@ -37,7 +37,7 @@ pub mod console_message;
 pub mod context;
 pub mod coverage;
 pub mod credentials;
-pub mod devices;
+pub use ferridriver_types::devices;
 pub mod dialog;
 pub mod disposable;
 pub mod download;

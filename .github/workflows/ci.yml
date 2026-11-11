@@ -58,7 +58,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
-      # The specs are typed against `packages/ferridriver-test`, which is
+      # The specs are typed against `crates/ferridriver-types/packages/test`, which is
       # written by hand rather than generated. A binding can ship with no
       # declaration and nothing else notices — `checkAccessibility` and
       # `strictSelectors` both did.

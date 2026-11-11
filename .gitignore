@@ -8,8 +8,8 @@ test-results/
 bench/pw-bench/node_modules/
 bench/pw-bench/package-lock.json
 bench/pw-bench/test-results/
-packages/*/node_modules/
-packages/*/bun.lock
+crates/ferridriver-types/packages/*/node_modules/
+crates/ferridriver-types/packages/*/bun.lock
 
 # Component testing build artifacts
 examples/*/dist/
@@ -25,7 +25,7 @@ __ferri_ct_*
 target/dx/
 
 # Build artifacts
-packages/*/dist/
+crates/ferridriver-types/packages/*/dist/
 bench/results/
 rust_out
 trace-*.json

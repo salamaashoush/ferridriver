@@ -455,18 +455,22 @@ release version:
   sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
   sed -i.bak "s/\(ferridriver[a-z-]* = { path = \"[^\"]*\", version = \)\"[^\"]*\"/\1\"$VERSION\"/" Cargo.toml
   rm -f Cargo.toml.bak
-  cargo generate-lockfile 2>/dev/null || true
-  # npm: the @ferridriver/node package.json -- replace the "version" field
-  f=crates/ferridriver-node/package.json
-  node -e "const f='$f';const p=JSON.parse(require('fs').readFileSync(f));p.version='$VERSION';require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+  cargo update --workspace --quiet
+  # npm: the NAPI package and the two declaration packages. The extension
+  # declarations import the test ones, so their peer range moves too.
+  for f in crates/ferridriver-node/package.json crates/ferridriver-types/packages/test/package.json crates/ferridriver-types/packages/extension/package.json; do
+    node -e "const fs=require('fs');const f='$f';const p=JSON.parse(fs.readFileSync(f));p.version='$VERSION';if(p.peerDependencies&&p.peerDependencies['@ferridriver/test'])p.peerDependencies['@ferridriver/test']='$VERSION';fs.writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+  done
   # Verify
   echo "Rust:  $(grep '^version' Cargo.toml)"
   echo "NAPI:  $(grep '\"version\"' crates/ferridriver-node/package.json | head -1 | xargs)"
-  # Commit, tag, push
-  git add -A
+  # Commit, tag, push. Only the files bumped above, and only this tag:
+  # `git push --tags` would also push every stale local tag.
+  git add Cargo.toml Cargo.lock crates/ferridriver-node/package.json crates/ferridriver-types/packages/test/package.json crates/ferridriver-types/packages/extension/package.json
   git commit -m "release: v$VERSION"
   git tag "v$VERSION"
-  git push && git push --tags
+  git push origin HEAD
+  git push origin "v$VERSION"
   echo ""
   echo "Pushed v$VERSION -- release CI triggered."
 
@@ -484,7 +488,7 @@ release-retry version:
   gh release delete "$TAG" --yes 2>/dev/null || true
   echo "Re-tagging $TAG at HEAD..."
   git tag "$TAG"
-  git push --tags
+  git push origin "$TAG"
   echo ""
   echo "Re-pushed $TAG -- release CI re-triggered."
 

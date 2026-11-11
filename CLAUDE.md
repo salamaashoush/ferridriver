@@ -66,7 +66,7 @@ There is no TypeScript CLI. JavaScript/TypeScript test files
 (`tests/e2e/*.test.ts` via `ferridriver test`) and BDD step files (via
 `ferridriver bdd --steps`) run natively — rolldown bundle -> QuickJS
 bytecode -> core `TestRunner`. No Node/Bun in the run path.
-`packages/ferridriver-test` is a types-only package (`@ferridriver/test`)
+`crates/ferridriver-types/packages/test` is a types-only package (`@ferridriver/test`)
 backing the native `import { test, expect } from '@ferridriver/test'`
 module.
 
@@ -168,7 +168,7 @@ suite (`./target/debug/ferridriver test`, `tests/e2e/*.test.ts` across
 the 4 backend projects in `ferridriver.toml`), the BDD feature suite,
 and then `test-node`: the NAPI addon build with its `bun test` suite,
 and the typecheck of the e2e specs against
-`packages/ferridriver-test`. Tests require a Chrome/Chromium binary
+`crates/ferridriver-types/packages/test`. Tests require a Chrome/Chromium binary
 (install with `ferridriver install --with-deps chromium axe`, where
 `axe` backs `page.checkAccessibility()`) plus the Firefox/WebKit builds
 for the non-CDP projects, and the fixture web server binary
@@ -196,7 +196,7 @@ The slimmed NAPI addon still has core-binding bun tests under
 `cd crates/ferridriver-node && bun run build:debug` and run `bun test`.
 Type-check the e2e specs with `cd tests && bun x tsc --noEmit -p
 tsconfig.json`; the spec-facing types live in
-`packages/ferridriver-test/index.d.ts` and must be extended alongside
+`crates/ferridriver-types/packages/test/index.d.ts` and must be extended alongside
 any new binding surface.
 
 ## Git Commits
@@ -469,7 +469,7 @@ just test      # Rust + CLI serial + e2e + BDD, then NAPI + the e2e typecheck
 `just test` is `test-rust` then `test-node`; run either alone for a
 shorter loop. The NAPI suite and the typecheck used to be in neither
 that recipe nor CI, so a Node regression, or a binding shipped with no
-declaration in `packages/ferridriver-test`, failed nothing. Both are now
+declaration in `crates/ferridriver-types/packages/test`, failed nothing. Both are now
 in both places.
 
 If a pre-existing test is failing, fix it in the same commit. "Pre-existing failure unrelated to this task" / "flagging for follow-up" is the pattern to kill.

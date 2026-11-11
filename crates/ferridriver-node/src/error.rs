@@ -4,7 +4,7 @@
 //! an arbitrary `error.code` on the JS side. Instead we follow the same
 //! convention Playwright uses for its TypeScript errors: prefix the message
 //! with `"<ErrorName>: "` for the distinguishable variants. A small TS
-//! wrapper in `packages/ferridriver-test` then parses the prefix and
+//! wrapper in `crates/ferridriver-types/packages/test` then parses the prefix and
 //! rethrows a real class instance (`class TimeoutError extends Error`),
 //! giving JS consumers both `err instanceof TimeoutError` and
 //! `err.name === 'TimeoutError'` — parity with Playwright.

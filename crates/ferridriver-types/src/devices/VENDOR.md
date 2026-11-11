@@ -2,9 +2,9 @@
 
 `deviceDescriptorsSource.json` is a **verbatim copy** of
 `packages/isomorphic/deviceDescriptorsSource.json`. Like the vendored
-sources under `src/injected/`, it must stay byte-identical to upstream:
-a re-sync is `cp`, never a merge. Anything ferridriver needs that the
-file does not carry belongs in `mod.rs`.
+sources under `crates/ferridriver/src/injected/`, it must stay
+byte-identical to upstream: a re-sync is `cp`, never a merge. Anything
+ferridriver needs that the file does not carry belongs in `mod.rs`.
 
 ## Current revision
 
@@ -21,7 +21,7 @@ file does not carry belongs in `mod.rs`.
 
 Copyright (c) Microsoft Corporation, licensed under the Apache License,
 Version 2.0 — the license the rest of the vendored Playwright sources in
-this crate carry (`src/injected/VENDOR.md`).
+ferridriver carry (`crates/ferridriver/src/injected/VENDOR.md`).
 
 ## Re-sync recipe
 
@@ -31,12 +31,12 @@ git -C /tmp/playwright fetch --all && git -C /tmp/playwright checkout <rev>
 
 # 2. copy the file and record what arrived
 cp /tmp/playwright/packages/isomorphic/deviceDescriptorsSource.json \
-   crates/ferridriver/src/devices/deviceDescriptorsSource.json
-shasum -a 256 crates/ferridriver/src/devices/deviceDescriptorsSource.json
+   crates/ferridriver-types/src/devices/deviceDescriptorsSource.json
+shasum -a 256 crates/ferridriver-types/src/devices/deviceDescriptorsSource.json
 
 # 3. rebuild — build.rs re-parses the file, so a descriptor that gained
 #    or lost a field fails HERE rather than at run time
-cargo test -p ferridriver --lib devices::
+cargo test -p ferridriver-types --lib devices::
 ```
 
 Step 3 is the point of generating the table in `build.rs`: the parse is

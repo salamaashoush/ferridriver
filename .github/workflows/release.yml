@@ -305,6 +305,25 @@ jobs:
             npm publish --access public --ignore-scripts --registry=https://registry.npmjs.org
           fi
 
+      - name: Publish @ferridriver/test and @ferridriver/extension
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+        run: |
+          set -euo pipefail
+          # The extension declarations import the test ones, so test goes first.
+          for dir in crates/ferridriver-types/packages/test crates/ferridriver-types/packages/extension; do
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
+            existing=$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)
+            if [ "${existing}" = "${version}" ]; then
+              echo "SKIP ${name}@${version} — already on registry"
+            else
+              echo "PUBLISH ${name}@${version}"
+              (cd "${dir}" && npm publish --access public --registry=https://registry.npmjs.org)
+            fi
+          done
+
   # ---------------------------------------------------------------------------
   # Publish to crates.io (ordered by dependency graph)
   # ---------------------------------------------------------------------------
@@ -321,170 +340,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libclang-dev pkg-config
 
-      # Layer 1: proc-macro crates (no internal deps)
-      - name: Publish ferridriver-test-macros
+      - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-test-macros 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-test-macros already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Publish ferridriver-bdd-macros
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-bdd-macros 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-bdd-macros already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      # Layer 2: core library
-      - name: Publish ferridriver
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      # Layer 2b: crates that depend only on ferridriver
-      - name: Publish ferridriver-config
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-config 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-config already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      # ferridriver-expect depends on ferridriver — must publish before
-      # ferridriver-script (which depends on -expect).
-      - name: Publish ferridriver-expect
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-expect 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-expect already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      # ferridriver-session depends on ferridriver — must publish before
-      # ferridriver-script (which depends on -session).
-      - name: Publish ferridriver-session
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-session 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-session already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish ferridriver-script
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-script 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-script already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      # Layer 3: test runner (depends on ferridriver, ferridriver-config)
-      - name: Publish ferridriver-test
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-test 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-test already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      # Layer 4: BDD framework (depends on ferridriver, ferridriver-test, ferridriver-bdd-macros)
-      - name: Publish ferridriver-bdd
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-bdd 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-bdd already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      # Layer 5: MCP server (depends on ferridriver, ferridriver-bdd)
-      - name: Publish ferridriver-mcp
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-mcp 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-mcp already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      # Layer 6: CLI binary (depends on all)
-      - name: Publish ferridriver-cli
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          output=$(cargo publish -p ferridriver-cli 2>&1) && exit 0
-          if echo "$output" | grep -qE "already exists|already uploaded"; then
-            echo "ferridriver-cli already published, skipping"
-          else
-            echo "$output"; exit 1
-          fi
+        run: scripts/publish-crates.sh
 
   # ---------------------------------------------------------------------------
   # Publish the release (un-draft after all builds succeed)
   # ---------------------------------------------------------------------------
   publish-release:
     name: Publish release
-    # crates.io publish is decoupled: ferridriver-script depends on
-    # rolldown via a git rev, which `cargo publish` categorically
-    # rejects, so script/bdd/mcp/cli are unpublishable to crates.io
-    # until rolldown is vendored or released. The GitHub binary + npm
-    # release does not block on it (tracked follow-up).
-    needs: [build-cli, publish-npm]
+    needs: [build-cli, publish-npm, publish-crates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

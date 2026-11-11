@@ -9,6 +9,6 @@ test('exported test declarations include the native module declarations they ref
   passed(await run(['ext', 'types', '--no-inherit', '--out', root]));
   for (const name of ['index.d.ts', 'node.d.ts']) {
     assert.equal(await readFile(join(root, '@ferridriver/test', name), 'utf8'),
-      await readFile(join(repo, 'packages/ferridriver-test', name), 'utf8'));
+      await readFile(join(repo, 'crates/ferridriver-types/packages/test', name), 'utf8'));
   }
 });

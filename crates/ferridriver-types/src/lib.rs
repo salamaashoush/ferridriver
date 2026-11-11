@@ -8,6 +8,7 @@
 //! editors; a service that edits scripts and test settings in the browser
 //! serves both to its editor, matching the runtime its runners use.
 
+pub mod devices;
 pub mod keyboard;
 
 /// The version the declarations describe.
@@ -15,25 +16,25 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `@ferridriver/extension` — `defineTool`, the handler context, the
 /// package manifest.
-pub const EXTENSION_DTS: &str = include_str!("../../../packages/ferridriver-extension/index.d.ts");
+pub const EXTENSION_DTS: &str = include_str!("../packages/extension/index.d.ts");
 
 /// `@ferridriver/test` — the browser bindings (`Page`, `BrowserContext`,
 /// `Locator`, ...) the extension declarations build on.
-pub const TEST_DTS: &str = include_str!("../../../packages/ferridriver-test/index.d.ts");
+pub const TEST_DTS: &str = include_str!("../packages/test/index.d.ts");
 
 /// The Node globals (`process`, `Buffer`, ...) scripts may use, referenced
 /// from `TEST_DTS`.
-pub const TEST_NODE_DTS: &str = include_str!("../../../packages/ferridriver-test/node.d.ts");
+pub const TEST_NODE_DTS: &str = include_str!("../packages/test/node.d.ts");
 
 /// The globals of a plain script (`[test] scriptMatch`): `page`,
 /// `context`, `browser`, `request`, `expect` and `test`. Only a script sees
 /// them, so an editor of test files leaves this out.
-pub const TEST_SCRIPT_DTS: &str = include_str!("../../../packages/ferridriver-test/script.d.ts");
+pub const TEST_SCRIPT_DTS: &str = include_str!("../packages/test/script.d.ts");
 
 /// Playwright's device registry as JSON, keyed by device name: the same
-/// file `ferridriver::devices` compiles in, so a name listed here is one
+/// file [`devices`] compiles in, so a name listed here is one
 /// `use.device` resolves.
-pub const DEVICES_JSON: &str = include_str!("../../ferridriver/src/devices/deviceDescriptorsSource.json");
+pub const DEVICES_JSON: &str = devices::SOURCE;
 
 /// One declaration package.
 pub struct TypesPackage {

@@ -434,8 +434,8 @@ function declaredKeys(source, name) {
 test('extension and config-module authoring types declare exactly their allowed schema keys', async () => {
   const { results } = await runtimeProbe([{ op: 'config-contracts', modes: [] }]);
   const r = observation(results[0]);
-  const extension = await readFile(join(repo, 'packages/ferridriver-extension/index.d.ts'), 'utf8');
-  const config = await readFile(join(repo, 'packages/ferridriver-test/index.d.ts'), 'utf8');
+  const extension = await readFile(join(repo, 'crates/ferridriver-types/packages/extension/index.d.ts'), 'utf8');
+  const config = await readFile(join(repo, 'crates/ferridriver-types/packages/test/index.d.ts'), 'utf8');
   const testKeys = Object.keys(r.defaults.test).filter(key => key !== 'moduleAliases').sort();
   assert.deepEqual(declaredKeys(extension, 'TestConfigDefaults'), testKeys);
   assert.deepEqual(declaredKeys(extension, 'McpConfigDefaults'), Object.keys(r.defaults.mcp).sort());
