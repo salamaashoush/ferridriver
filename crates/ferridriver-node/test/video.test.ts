@@ -101,13 +101,32 @@ for (const backend of BACKENDS) {
           `<script>let i=0;(function f(){d.style.background=\`hsl(\${i++%360},80%,50%)\`;requestAnimationFrame(f)})()</script>`,
       );
 
-    /** The MP4 brand and the AV1 sample entry Chromium's recorder writes. */
-    function expectAv1Mp4(file: string) {
+    /**
+     * The MP4 brand and the AV1 sample entry Chromium's recorder writes,
+     * answering how many frames the file holds. The recorder writes a
+     * fragmented MP4, so the frames are the `trun` sample counts of each
+     * `moof`; the encoder's bitrate decides the byte size, not the frames.
+     */
+    function av1Mp4Frames(file: string): number {
       const bytes = readFileSync(file);
       expect(extname(file)).toBe(".mp4");
       expect(bytes.subarray(4, 8).toString()).toBe("ftyp");
       expect(bytes.includes(Buffer.from("av01"))).toBe(true);
-      return bytes;
+      const CONTAINERS = new Set(["moof", "traf"]);
+      let frames = 0;
+      const walk = (start: number, end: number) => {
+        let at = start;
+        while (at + 8 <= end) {
+          const size = bytes.readUInt32BE(at);
+          const type = bytes.subarray(at + 4, at + 8).toString("latin1");
+          if (size < 8) break;
+          if (type === "trun") frames += bytes.readUInt32BE(at + 12);
+          if (CONTAINERS.has(type)) walk(at + 8, at + size);
+          at += size;
+        }
+      };
+      walk(0, bytes.length);
+      return frames;
     }
 
     it(
@@ -120,10 +139,10 @@ for (const backend of BACKENDS) {
         await page.goto(ANIMATED, null);
         await new Promise((r) => setTimeout(r, 1500));
         await page.close(null);
-        const bytes = expectAv1Mp4(await video.path());
-        // An empty recording is about 1 KB; a second and a half of
-        // colour changes is many times that.
-        expect(bytes.length).toBeGreaterThan(8_000);
+        // The page repaints every animation frame, so a second and a half
+        // is dozens of frames at the recorder's 25 a second; a recorder
+        // that stalled or stopped early writes a handful.
+        expect(av1Mp4Frames(await video.path())).toBeGreaterThanOrEqual(10);
         await ctx.close();
       },
       30_000,
@@ -139,7 +158,7 @@ for (const backend of BACKENDS) {
         await page.goto(ANIMATED, null);
         await new Promise((r) => setTimeout(r, 800));
         await ctx.close();
-        expect(expectAv1Mp4(await video.path()).length).toBeGreaterThan(4_000);
+        expect(av1Mp4Frames(await video.path())).toBeGreaterThanOrEqual(5);
       },
       30_000,
     );
@@ -160,7 +179,7 @@ for (const backend of BACKENDS) {
         await page.stopScreencast();
         await page.close(null);
         expect(frames).toBeGreaterThan(5);
-        expectAv1Mp4(await video.path());
+        av1Mp4Frames(await video.path());
         await ctx.close();
       },
       30_000,

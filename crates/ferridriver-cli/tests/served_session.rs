@@ -43,7 +43,10 @@ fn serve_pages() -> anyhow::Result<String> {
         let mut request = [0_u8; 4096];
         let read = stream.read(&mut request).unwrap_or(0);
         let head = String::from_utf8_lossy(&request[..read]);
-        let path = head.split_whitespace().nth(1).unwrap_or("/");
+        // A query only tells pages apart; full Chromium fails a navigation
+        // to an empty 404 where the headless shell renders it.
+        let target = head.split_whitespace().nth(1).unwrap_or("/");
+        let path = target.split('?').next().unwrap_or(target);
         let port = head
           .lines()
           .find_map(|line| line.strip_prefix("Host: "))
