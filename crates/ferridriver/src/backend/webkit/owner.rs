@@ -179,9 +179,7 @@ mod tests {
   fn owner() -> (Arc<WebKitOwner>, std::path::PathBuf) {
     let downloads = tempfile::tempdir().unwrap();
     let path = downloads.path().to_owned();
-    let child = tokio::process::Command::new("sh")
-      .args(["-c", "exec sleep 30"])
-      .process_group(0)
+    let child = tokio::process::Command::from(crate::backend::process::test_sleeper(30))
       .kill_on_drop(true)
       .spawn()
       .unwrap();

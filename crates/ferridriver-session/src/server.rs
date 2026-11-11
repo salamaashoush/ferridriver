@@ -73,7 +73,7 @@ pub fn endpoint_token(endpoint: &str) -> Option<&str> {
 }
 
 /// A fresh random token, URL-safe so it can sit in an endpoint string.
-fn generate_token() -> Result<String> {
+pub(crate) fn generate_token() -> Result<String> {
   use base64::Engine as _;
   let mut bytes = [0; 32];
   getrandom::fill(&mut bytes)

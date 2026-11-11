@@ -65,14 +65,18 @@ impl ProfileGuard {
     })
   }
 
+  #[cfg(unix)]
   pub(super) fn allow_firefox_start(&mut self) -> Result<()> {
-    #[cfg(unix)]
     if let Some(file) = &self.file {
       rustix::fs::fcntl_lock(file, rustix::fs::FlockOperation::Unlock).map_err(std::io::Error::from)?;
     }
-    #[cfg(not(unix))]
-    self.file.take();
     Ok(())
+  }
+
+  /// Firefox opens its lock file unshared on Windows, so ours is closed.
+  #[cfg(windows)]
+  pub(super) fn allow_firefox_start(&mut self) {
+    self.file.take();
   }
 }
 

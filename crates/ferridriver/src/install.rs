@@ -1551,11 +1551,13 @@ fn webkit_platform_for_host() -> Result<String> {
 
 /// The newest macOS major a `WebKit` build is published for. A newer
 /// Darwin, a beta say, takes this one's build.
+#[cfg(any(unix, test))]
 const LAST_STABLE_MACOS_MAJOR: u32 = 26;
 
 /// The macOS platform name from the Darwin kernel release
 /// (`uname -r`). Darwin 20 to 24 are macOS 11 to 15; Apple then jumped to
 /// macOS 26 for Darwin 25.
+#[cfg(any(unix, test))]
 fn mac_host_platform(darwin_release: &str, arch: &str) -> String {
   let darwin = darwin_release
     .split('.')
@@ -1795,6 +1797,7 @@ pub(crate) const ANDROID_DRIVER_APKS: [&str; 2] = ["android-driver.apk", "androi
 
 /// Whether a symlink at `link` (relative to the archive root) pointing at
 /// `target` resolves inside the archive.
+#[cfg(any(unix, test))]
 fn link_stays_inside(link: &Path, target: &Path) -> bool {
   use std::path::Component;
   if target.is_absolute() {

@@ -15,11 +15,14 @@ pub mod cdp;
 pub(crate) mod json_scan;
 pub(crate) mod keyboard;
 pub mod process;
+#[cfg(unix)]
 pub mod reaper;
 pub(crate) mod screencast;
 mod transport_tasks;
 pub mod webdriver;
 pub mod webkit;
+#[cfg(windows)]
+pub mod windows_spawn;
 
 pub mod bidi;
 

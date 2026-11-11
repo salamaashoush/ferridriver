@@ -43,6 +43,7 @@ impl FixtureServer {
       .stdout(Stdio::piped())
       .stderr(File::create(logs.join("fixtures.log"))?)
       .kill_on_drop(true);
+    #[cfg(unix)]
     command.as_std_mut().process_group(0);
     let mut child = command.spawn().context("start shared fixture server")?;
     let group = ProcessGroup(child.id().context("fixture server has no PID")?);
@@ -79,9 +80,11 @@ fn runtime_workers(parallelism: usize) -> std::ffi::OsString {
 }
 
 impl ProcessGroup {
+  #[cfg(unix)]
   fn signal(&self, signal: i32) {
     if let Ok(pid) = i32::try_from(self.0) {
-      // This PID belongs to the process-group leader spawned by this job.
+      // The child is a new process-group leader; this cannot signal the gate's
+      // own group.
       #[allow(unsafe_code)]
       unsafe {
         libc::kill(-pid, signal);
@@ -89,23 +92,44 @@ impl ProcessGroup {
     }
   }
 
-  async fn terminate(&self, child: &mut tokio::process::Child) {
-    self.signal(libc::SIGTERM);
-    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+  #[cfg(unix)]
+  fn kill(&self) {
     self.signal(libc::SIGKILL);
+  }
+
+  /// Windows has no process groups to signal; `taskkill /T` walks the tree
+  /// from the job's PID, as Playwright's `killProcessTree` does.
+  #[cfg(windows)]
+  fn kill(&self) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("taskkill")
+      .args(["/pid", &self.0.to_string(), "/T", "/F"])
+      .creation_flags(CREATE_NO_WINDOW)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status();
+  }
+
+  /// Ask the job to stop, give it two seconds, then kill what is left.
+  /// Windows has no stop to ask for, so the tree is killed and the two
+  /// seconds go to seeing it gone.
+  async fn terminate(&self, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    self.signal(libc::SIGTERM);
+    #[cfg(windows)]
+    self.kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    #[cfg(unix)]
+    self.kill();
   }
 }
 
 impl Drop for ProcessGroup {
   fn drop(&mut self) {
-    if let Ok(pid) = i32::try_from(self.0) {
-      // The child is a new process-group leader; this cannot signal the gate's
-      // own group. Drop also runs when a timeout or cancellation drops wait().
-      #[allow(unsafe_code)]
-      unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-      }
-    }
+    // Also runs when a timeout or cancellation drops wait().
+    self.kill();
   }
 }
 
@@ -150,6 +174,7 @@ pub async fn run(
     .stdout(file.try_clone()?)
     .stderr(file)
     .kill_on_drop(true);
+  #[cfg(unix)]
   command.as_std_mut().process_group(0);
   let started = Instant::now();
   let mut child = command.spawn().with_context(|| format!("start {}", job.name))?;
@@ -196,4 +221,5 @@ async fn sample_stacks(pid: u32, logs: &Path, name: &str) {
   }
 }
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;

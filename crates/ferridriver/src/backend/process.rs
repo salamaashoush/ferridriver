@@ -153,6 +153,17 @@ pub(crate) fn drain_child_output(child: &mut tokio::process::Child) -> StderrTai
   tail
 }
 
+/// [`drain_child_output`] for a child that writes its output to the
+/// write end of `reader`'s pipe rather than to tokio's.
+#[cfg(windows)]
+#[must_use]
+pub fn drain_pipe(reader: std::io::PipeReader) -> StderrTail {
+  let tail = StderrTail::default();
+  let file = std::fs::File::from(std::os::windows::io::OwnedHandle::from(reader));
+  drain_stream(tokio::fs::File::from_std(file), tail.clone(), "output");
+  tail
+}
+
 fn drain_stream(stream: impl tokio::io::AsyncRead + Unpin + Send + 'static, tail: StderrTail, name: &'static str) {
   let sink = tail;
   tokio::spawn(async move {
@@ -237,11 +248,20 @@ pub fn kill_process_group(pid: u32) {
   }
 }
 
-#[cfg(not(unix))]
-pub fn kill_process_group(_pid: u32) {
-  // Windows: process groups are a different concept (Job Objects).
-  // `tokio::process::Child::kill_on_drop` already terminates the
-  // parent; subprocess cleanup on Windows is handled by Chrome itself.
+/// Windows has no process groups to signal: `taskkill /T` walks the tree
+/// from `pid`, as Playwright's `killProcessTree` does, so a browser's
+/// renderer and GPU processes go with it.
+#[cfg(windows)]
+pub fn kill_process_group(pid: u32) {
+  use std::os::windows::process::CommandExt as _;
+  const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+  let _ = std::process::Command::new("taskkill")
+    .args(["/pid", &pid.to_string(), "/T", "/F"])
+    .creation_flags(CREATE_NO_WINDOW)
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status();
 }
 
 /// `tokio::process::Child` wrapper that kills the entire process group
@@ -257,7 +277,7 @@ pub fn kill_process_group(_pid: u32) {
 /// runs first because fields drop in declaration order.
 pub struct ChildGroup {
   pid: u32,
-  child: tokio::process::Child,
+  child: OwnedChild,
   registered: bool,
   directory_cleanup: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
   /// On-disk record of this browser, removed once the process is
@@ -265,6 +285,73 @@ pub struct ChildGroup {
   /// `Drop` (SIGKILL, panic-abort) — exactly the case
   /// [`sweep_stale_browsers`] reclaims on the next start.
   record: Option<ProcRecord>,
+  /// Windows' stand-in for the process group: everything the child
+  /// starts joins its job, so terminating the job reaches what a group
+  /// kill would, even once the child itself has exited.
+  #[cfg(windows)]
+  job: Option<job::ProcessJob>,
+}
+
+/// The child a [`ChildGroup`] owns: one tokio spawned, or on Windows one
+/// spawned with C runtime descriptors past stdio, which `Command` cannot.
+pub enum OwnedChild {
+  Tokio(Box<tokio::process::Child>),
+  #[cfg(windows)]
+  Raw(super::windows_spawn::RawChild),
+}
+
+impl From<tokio::process::Child> for OwnedChild {
+  fn from(child: tokio::process::Child) -> Self {
+    Self::Tokio(Box::new(child))
+  }
+}
+
+#[cfg(windows)]
+impl From<super::windows_spawn::RawChild> for OwnedChild {
+  fn from(child: super::windows_spawn::RawChild) -> Self {
+    Self::Raw(child)
+  }
+}
+
+impl OwnedChild {
+  /// The pid, until the child's exit has been observed.
+  #[must_use]
+  pub fn id(&self) -> Option<u32> {
+    match self {
+      Self::Tokio(child) => child.id(),
+      #[cfg(windows)]
+      Self::Raw(child) => child.id(),
+    }
+  }
+
+  #[cfg(not(unix))]
+  fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+    match self {
+      Self::Tokio(child) => child.try_wait(),
+      #[cfg(windows)]
+      Self::Raw(child) => child.try_wait(),
+    }
+  }
+
+  /// # Errors
+  /// Fails when the child is running and refuses to end.
+  pub fn start_kill(&mut self) -> std::io::Result<()> {
+    match self {
+      Self::Tokio(child) => child.start_kill(),
+      #[cfg(windows)]
+      Self::Raw(child) => child.start_kill(),
+    }
+  }
+
+  /// # Errors
+  /// Fails when the system cannot report on the child.
+  pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    match self {
+      Self::Tokio(child) => child.wait().await,
+      #[cfg(windows)]
+      Self::Raw(child) => child.wait().await,
+    }
+  }
 }
 
 /// Whether our child `pid` has exited, without reaping it: the exit
@@ -290,21 +377,36 @@ pub fn child_exited(pid: u32) -> std::io::Result<bool> {
   }
 }
 
+/// Whether `pid` has exited. Windows keeps no unreaped state to read
+/// without disturbing, so this asks whether the process is still running.
+///
+/// # Errors
+/// Fails when the process table cannot be read.
+#[cfg(windows)]
+pub fn child_exited(pid: u32) -> std::io::Result<bool> {
+  windows_process(pid, |process| process.is_none())
+    .ok_or_else(|| std::io::Error::other("cannot read the process table"))
+}
+
 impl ChildGroup {
   #[must_use]
-  pub fn new(child: tokio::process::Child) -> Self {
+  pub fn new(child: impl Into<OwnedChild>) -> Self {
     Self::recorded(child, None, false)
   }
 
   /// Own a command without adding it to the browser recovery registry.
   #[must_use]
-  pub fn unregistered(child: tokio::process::Child) -> Self {
+  pub fn unregistered(child: impl Into<OwnedChild>) -> Self {
+    let child = child.into();
+    let pid = child.id().unwrap_or(0);
     Self {
-      pid: child.id().unwrap_or(0),
+      pid,
       child,
       registered: false,
       directory_cleanup: None,
       record: None,
+      #[cfg(windows)]
+      job: job::claim(pid),
     }
   }
 
@@ -314,7 +416,8 @@ impl ChildGroup {
   /// `owns_profile_dir` marks it as ours to delete (a temp dir), false
   /// for a caller-supplied persistent directory.
   #[must_use]
-  pub fn recorded(child: tokio::process::Child, profile_dir: Option<&std::path::Path>, owns_profile_dir: bool) -> Self {
+  pub fn recorded(child: impl Into<OwnedChild>, profile_dir: Option<&std::path::Path>, owns_profile_dir: bool) -> Self {
+    let child = child.into();
     // `id()` is `None` only after the child has been polled to
     // completion; fresh children always have an id.
     let pid = child.id().unwrap_or(0);
@@ -323,7 +426,8 @@ impl ChildGroup {
     } else {
       // Two layers, because they cover different deaths: the record
       // survives a hard kill and is reclaimed by the next start, the
-      // watchdog acts immediately but only while it is alive itself.
+      // watchdog (on Windows, the job) acts immediately.
+      #[cfg(unix)]
       super::reaper::watch(pid);
       ProcRecord::write(pid, profile_dir, owns_profile_dir)
     };
@@ -333,6 +437,8 @@ impl ChildGroup {
       registered: pid != 0,
       directory_cleanup: None,
       record,
+      #[cfg(windows)]
+      job: job::claim(pid),
     }
   }
 
@@ -386,6 +492,7 @@ impl ChildGroup {
 
   fn retire_registration(&mut self) -> std::io::Result<()> {
     if self.registered {
+      #[cfg(unix)]
       super::reaper::forget(self.pid);
       self.registered = false;
     }
@@ -432,6 +539,12 @@ impl ChildGroup {
         Err(error) => return Err(error.into()),
       }
     }
+    #[cfg(windows)]
+    match &self.job {
+      Some(job) => job.terminate()?,
+      // A browser Windows would not put in a job: walk its tree instead.
+      None => kill_process_group(self.pid),
+    }
     self.child.start_kill()
   }
 
@@ -447,8 +560,14 @@ impl ChildGroup {
         self.observe_exit().await?;
         self.terminate()?;
       }
-      #[cfg(not(unix))]
-      self.child.wait().await?;
+      // The leader is gone; what it started may not be.
+      #[cfg(windows)]
+      {
+        self.child.wait().await?;
+        if let Some(job) = &self.job {
+          job.terminate()?;
+        }
+      }
     }
     self.retire_registration()?;
     self.remove_owned_directories().await?;
@@ -496,6 +615,7 @@ impl Drop for ChildGroup {
     if let Err(error) = self.terminate() {
       tracing::warn!(%error, "failed to clean up owned process group during drop");
     }
+    #[cfg(unix)]
     if self.registered {
       super::reaper::forget(self.pid);
     }
@@ -630,8 +750,136 @@ pub fn track_spawned(pid: u32, profile_dir: Option<&std::path::Path>, owns_profi
   if pid == 0 {
     return;
   }
+  #[cfg(unix)]
   super::reaper::watch(pid);
+  #[cfg(windows)]
+  job::track(pid);
   let _ = ProcRecord::write_file(pid, profile_dir, owns_profile_dir);
+}
+
+/// Windows Job Objects, one per browser, each set to kill everything in
+/// it when its last handle closes. Only this process holds the handles,
+/// so a browser dies with ferridriver however ferridriver dies: what the
+/// Unix watchdog does, done by the kernel.
+#[cfg(windows)]
+mod job {
+  use std::sync::{Mutex, OnceLock, PoisonError};
+
+  use rustc_hash::FxHashMap;
+  use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+  use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    TerminateJobObject,
+  };
+  use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+  /// A job's handle, held as its address so the type is `Send`.
+  pub(crate) struct ProcessJob(usize);
+
+  impl ProcessJob {
+    fn handle(&self) -> HANDLE {
+      self.0 as HANDLE
+    }
+
+    /// A new kill-on-close job holding `pid`, or `None` (logged) when
+    /// Windows refuses: the browser then lives only as long as teardown.
+    #[allow(unsafe_code)]
+    fn holding(pid: u32) -> Option<Self> {
+      // SAFETY: an unnamed job with default security; the limits struct
+      // is plain data that outlives the call; every handle is checked
+      // before use, and the job is closed by `Drop` if a later step fails.
+      unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+          warn(pid, "cannot create a job for the browser");
+          return None;
+        }
+        let job = Self(job as usize);
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).ok()?;
+        if SetInformationJobObject(
+          job.handle(),
+          JobObjectExtendedLimitInformation,
+          (&raw const limits).cast(),
+          size,
+        ) == 0
+        {
+          warn(pid, "cannot make the browser's job kill on close");
+          return None;
+        }
+        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if process.is_null() {
+          warn(pid, "cannot open the browser to put it in a job");
+          return None;
+        }
+        let assigned = AssignProcessToJobObject(job.handle(), process);
+        CloseHandle(process);
+        if assigned == 0 {
+          warn(pid, "cannot put the browser in a job");
+          return None;
+        }
+        Some(job)
+      }
+    }
+
+    /// Kill every process in the job.
+    #[allow(unsafe_code)]
+    pub(crate) fn terminate(&self) -> std::io::Result<()> {
+      // SAFETY: the handle is a live job this value owns.
+      if unsafe { TerminateJobObject(self.handle(), 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+      }
+      Ok(())
+    }
+  }
+
+  impl Drop for ProcessJob {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+      // SAFETY: the handle is a live job this value owns; closing the last
+      // handle kills what is left in it.
+      unsafe {
+        CloseHandle(self.handle());
+      }
+    }
+  }
+
+  fn warn(pid: u32, what: &str) {
+    tracing::warn!(
+      target: "ferridriver::process",
+      pid,
+      error = %std::io::Error::last_os_error(),
+      "{what}; a hard kill of this process would leak it"
+    );
+  }
+
+  /// Jobs of browsers spawned but not yet owned by a `ChildGroup`, which
+  /// is built only after the launch handshake.
+  fn pending() -> &'static Mutex<FxHashMap<u32, ProcessJob>> {
+    static PENDING: OnceLock<Mutex<FxHashMap<u32, ProcessJob>>> = OnceLock::new();
+    PENDING.get_or_init(Mutex::default)
+  }
+
+  /// Put `pid` in a job the instant it is spawned.
+  pub(crate) fn track(pid: u32) {
+    let mut pending = pending().lock().unwrap_or_else(PoisonError::into_inner);
+    if !pending.contains_key(&pid)
+      && let Some(job) = ProcessJob::holding(pid)
+    {
+      pending.insert(pid, job);
+    }
+  }
+
+  /// The job `track` made for `pid`, or a new one.
+  pub(crate) fn claim(pid: u32) -> Option<ProcessJob> {
+    if pid == 0 {
+      return None;
+    }
+    let tracked = pending().lock().unwrap_or_else(PoisonError::into_inner).remove(&pid);
+    tracked.or_else(|| ProcessJob::holding(pid))
+  }
 }
 
 impl ProcRecord {
@@ -727,17 +975,35 @@ impl ProcRecord {
 /// which keeps the sweep conservative: it never kills on a maybe.
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn process_is_live(pid: u32) -> bool {
-  #[allow(clippy::cast_possible_wrap)]
-  let pid = pid as i32;
+pub(crate) fn process_is_live(pid: u32) -> bool {
+  let Ok(pid) = i32::try_from(pid) else {
+    return false;
+  };
   // SAFETY: signal 0 performs the existence/permission check only and
   // delivers nothing.
   unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
 }
 
-#[cfg(not(unix))]
-fn process_is_live(_pid: u32) -> bool {
-  true
+#[cfg(windows)]
+pub(crate) fn process_is_live(pid: u32) -> bool {
+  // Unreadable reads as live, as a recycled pid does on Unix: the sweep
+  // never kills on a maybe.
+  windows_process(pid, |process| process.is_some()).unwrap_or(true)
+}
+
+/// Run `read` on what Windows reports about `pid`, or `None` when the
+/// process table cannot be read at all.
+#[cfg(windows)]
+fn windows_process<T>(pid: u32, read: impl FnOnce(Option<&sysinfo::Process>) -> T) -> Option<T> {
+  use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+  let mut system = System::new().ok()?;
+  let pid = Pid::from_u32(pid);
+  system.refresh_processes_specifics(
+    ProcessesToUpdate::Some(&[pid]),
+    true,
+    ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+  );
+  Some(read(system.process(pid)))
 }
 
 /// The process's start time, as `<seconds>.<microseconds>` since the
@@ -969,6 +1235,46 @@ fn process_command(pid: u32) -> Option<String> {
   (!joined.is_empty()).then_some(joined)
 }
 
+/// The process's creation time, in seconds since the epoch.
+#[cfg(windows)]
+fn process_start_time(pid: u32) -> Option<String> {
+  windows_process(pid, |process| process.map(|process| process.start_time().to_string())).flatten()
+}
+
+#[cfg(windows)]
+fn process_command(pid: u32) -> Option<String> {
+  windows_process(pid, |process| {
+    let joined = process?
+      .cmd()
+      .iter()
+      .map(|arg| arg.to_string_lossy().into_owned())
+      .collect::<Vec<_>>()
+      .join(" ");
+    (!joined.is_empty()).then_some(joined)
+  })
+  .flatten()
+}
+
+/// A child that sleeps `seconds` and prints nothing, as a stand-in for a
+/// browser in tests: in its own process group on Unix, so a group kill
+/// cannot reach the test runner.
+#[cfg(test)]
+pub(crate) fn test_sleeper(seconds: u32) -> std::process::Command {
+  #[cfg(unix)]
+  {
+    use std::os::unix::process::CommandExt as _;
+    let mut command = std::process::Command::new("sleep");
+    command.arg(seconds.to_string()).process_group(0);
+    command
+  }
+  #[cfg(windows)]
+  {
+    let mut command = std::process::Command::new("powershell");
+    command.args(["-NoProfile", "-Command", &format!("Start-Sleep -Seconds {seconds}")]);
+    command
+  }
+}
+
 /// What a live pid from a record turned out to be.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Identity {
@@ -1141,7 +1447,9 @@ mod tests {
   /// someone else, which is exactly why the sweep also checks the
   /// command line before signalling anything.
   fn dead_pid() -> u32 {
-    let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+    let mut child = super::test_sleeper(0)
+      .spawn()
+      .expect("spawn a sleeper that exits at once");
     let pid = child.id();
     let _ = child.wait();
     pid
@@ -1181,6 +1489,7 @@ mod tests {
     assert!(!profile.exists(), "an owned profile dir is removed with its owner");
   }
 
+  #[cfg(unix)]
   /// A live process group that looks like an automation browser to
   /// `browser_matches`, in its own session so signalling it cannot reach the
   /// test runner. Returns (group leader pid, non-leader child pid); the
@@ -1262,6 +1571,7 @@ mod tests {
     }
   }
 
+  #[cfg(unix)]
   fn kill_group(leader: &mut std::process::Child) {
     kill_process_group(leader.id());
     let _ = leader.kill();
@@ -1287,11 +1597,18 @@ mod tests {
       .is_some_and(|state| state != "Z")
   }
 
+  #[cfg(windows)]
+  fn is_running(pid: u32) -> bool {
+    super::process_is_live(pid)
+  }
+
+  #[cfg(unix)]
   /// Give the group kill a moment to land before asking.
   fn settle() {
     std::thread::sleep(std::time::Duration::from_millis(200));
   }
 
+  #[cfg(unix)]
   /// `killpg` addresses a group by id, and a group's id is the pid of its
   /// leader — so a recycled pid that is merely a group MEMBER of someone
   /// else's group cannot be signalled through it. Pinned, because the
@@ -1310,6 +1627,7 @@ mod tests {
     assert!(survived, "a non-leader pid must never be group-killed by the sweep");
   }
 
+  #[cfg(unix)]
   /// With no profile directory to match on, the only thing separating our
   /// browser from anyone else's is the recorded start time: a recycled pid
   /// landing on an unrelated automation browser must be spared.
@@ -1340,6 +1658,7 @@ mod tests {
     assert!(survived, "a pid whose start time does not match the record is not ours");
   }
 
+  #[cfg(unix)]
   #[test]
   fn sweep_kills_a_recorded_browser_whose_start_time_matches() {
     let (_, mut leader) = spawn_fake_browser_group();
@@ -1422,11 +1741,10 @@ mod tests {
     rt.block_on(async {
       let profile = std::env::temp_dir().join(format!("ferridriver-record-test-{}", std::process::id()));
       std::fs::create_dir_all(&profile).expect("profile dir");
-      let child = tokio::process::Command::new("sleep")
-        .arg("30")
+      let child = tokio::process::Command::from(super::test_sleeper(30))
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn sleep");
+        .expect("spawn sleeper");
       let pid = child.id().expect("pid");
       let mut group = ChildGroup::recorded(child, Some(&profile), false);
       let path = registry_dir()
@@ -1650,5 +1968,74 @@ mod tests {
     done.await.expect("cleanup finishes after owner drop");
     assert!(!path.exists());
     assert!(!recovery.exists());
+  }
+
+  /// Windows has no process group to kill once the leader is gone: the
+  /// job the group owns reaches what the leader started anyway.
+  #[cfg(windows)]
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn a_group_ends_what_its_exited_leader_left_running() {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut leader = tokio::process::Command::new("powershell")
+      .args([
+        "-NoProfile",
+        "-Command",
+        "$p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' \
+         -WindowStyle Hidden -PassThru; Write-Output $p.Id",
+      ])
+      .stdout(std::process::Stdio::piped())
+      .kill_on_drop(true)
+      .spawn()
+      .expect("spawn leader");
+    let stdout = leader.stdout.take().expect("stdout piped");
+    let mut group = ChildGroup::unregistered(leader);
+    let line = tokio::io::BufReader::new(stdout)
+      .lines()
+      .next_line()
+      .await
+      .expect("read the sleeper's pid")
+      .expect("the leader prints the sleeper's pid");
+    let sleeper: u32 = line.trim().parse().expect("a pid");
+    assert!(is_running(sleeper), "the sleeper outlives its leader");
+    group.wait().await.expect("wait for the group");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!is_running(sleeper), "the group's job ends what the leader left");
+  }
+
+  /// The sweep's kill reaches a recorded browser's whole tree.
+  #[cfg(windows)]
+  #[test]
+  fn sweep_kills_a_recorded_browser_tree_whose_start_time_matches() {
+    use std::io::BufRead as _;
+    let mut leader = std::process::Command::new("powershell")
+      .args([
+        "-NoProfile",
+        "-Command",
+        "$p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' \
+         -WindowStyle Hidden -PassThru; Write-Output $p.Id; Start-Sleep -Seconds 60 # --remote-debugging-port=59999",
+      ])
+      .stdout(std::process::Stdio::piped())
+      .spawn()
+      .expect("spawn leader");
+    let mut line = String::new();
+    std::io::BufReader::new(leader.stdout.take().expect("stdout piped"))
+      .read_line(&mut line)
+      .expect("read the sleeper's pid");
+    let sleeper: u32 = line.trim().parse().expect("a pid");
+    let victim = leader.id();
+    let owner = dead_pid();
+    let record_path = write_record(owner, victim, None, false);
+
+    let _ = sweep_stale_browsers();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let leader_killed = !is_running(victim);
+    let sleeper_killed = !is_running(sleeper);
+    let _ = leader.kill();
+    let _ = leader.wait();
+    kill_process_group(sleeper);
+    let _ = std::fs::remove_file(&record_path);
+    assert!(leader_killed, "our own leaked browser is reclaimed");
+    assert!(sleeper_killed, "and so is what it started");
   }
 }

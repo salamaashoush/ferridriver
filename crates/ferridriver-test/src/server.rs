@@ -227,13 +227,28 @@ async fn start_server(config: &crate::config::WebServerConfig) -> ferridriver::e
 /// then `node`) go with it rather than outliving the run, as in
 /// Playwright's processLauncher.
 async fn kill_tree(child: &mut tokio::process::Child) {
-  #[cfg(unix)]
   if let Some(pid) = child.id() {
+    #[cfg(unix)]
     send_signal_to_group(pid, libc::SIGKILL);
+    #[cfg(windows)]
+    ferridriver::backend::process::kill_process_group(pid);
   }
   let _ = child.kill().await;
 }
 
+/// Windows has no signal to ask a process tree to stop, so Playwright does
+/// not support graceful shutdown there and kills the tree.
+#[cfg(windows)]
+async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Option<&crate::config::GracefulShutdown>) {
+  if graceful.is_some() {
+    tracing::info!(name = %name, "[{name}] Graceful shutdown is not supported on Windows; killing the process tree");
+  } else {
+    tracing::info!(name = %name, "[{name}] Hard-killing child process");
+  }
+  kill_tree(child).await;
+}
+
+#[cfg(unix)]
 async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Option<&crate::config::GracefulShutdown>) {
   let Some(g) = graceful else {
     tracing::info!(name = %name, "[{name}] Hard-killing child process");
@@ -256,14 +271,7 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
   );
   // SIGINT is meant for a whole process group, and SIGTERM goes the same
   // way for consistency, as Playwright's webServer does.
-  #[cfg(unix)]
   send_signal_to_group(pid, signum);
-  #[cfg(not(unix))]
-  {
-    let _ = (pid, signum);
-    let _ = child.kill().await;
-    return;
-  }
 
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(g.timeout);
   // The shell can die of the signal at once while the server it started
@@ -271,7 +279,6 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
   // for, not only the shell.
   let exited = tokio::time::timeout_at(deadline, async {
     let _ = child.wait().await;
-    #[cfg(unix)]
     while group_alive(pid) {
       tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -290,6 +297,7 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
   }
 }
 
+#[cfg(unix)]
 fn parse_signal(name: &str) -> libc::c_int {
   match name.trim().to_ascii_uppercase().as_str() {
     "SIGINT" => libc::SIGINT,

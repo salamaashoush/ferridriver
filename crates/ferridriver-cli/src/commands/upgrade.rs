@@ -22,6 +22,7 @@
 //! carries lives in the release NAME, because its tag never changes.
 
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
@@ -34,6 +35,14 @@ const REPO: &str = "salamaashoush/ferridriver";
 
 /// The binary this command replaces, and the helper shipped beside it.
 const BINARY: &str = "ferridriver";
+/// The binary's file name in a release archive and on disk.
+const BINARY_FILE: &str = if cfg!(windows) {
+  "ferridriver.exe"
+} else {
+  "ferridriver"
+};
+/// Windows releases are zip archives, as Windows unpacks them natively.
+const ARCHIVE_EXTENSION: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
 const WEBKIT_HOST: &str = "fd_webkit_host";
 
 /// The rolling prerelease canary builds are published to.
@@ -201,9 +210,9 @@ impl Release {
   /// versioned name would leave the old ones behind on the same release.
   fn archive_name(&self, target: &str) -> String {
     if self.tag_name == CANARY_TAG {
-      format!("{BINARY}-{CANARY_TAG}-{target}.tar.gz")
+      format!("{BINARY}-{CANARY_TAG}-{target}.{ARCHIVE_EXTENSION}")
     } else {
-      format!("{BINARY}-{}-{target}.tar.gz", self.version())
+      format!("{BINARY}-{}-{target}.{ARCHIVE_EXTENSION}", self.version())
     }
   }
 }
@@ -306,6 +315,7 @@ fn release_target() -> anyhow::Result<&'static str> {
     ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
     ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
     ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
+    ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
     (os, arch) => Err(anyhow::anyhow!(
       "no published binary for {os}/{arch} — build from source with `cargo install ferridriver-cli`"
     )),
@@ -414,15 +424,19 @@ async fn verify(url: &str, archive: &Path, name: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
-/// Unpack the tarball beside itself.
+/// Unpack the archive beside itself.
 fn unpack(archive: &Path, into: &Path) -> anyhow::Result<()> {
   let file = std::fs::File::open(archive)?;
-  let decoder = flate2::read::GzDecoder::new(file);
-  tar::Archive::new(decoder)
+  #[cfg(not(windows))]
+  tar::Archive::new(flate2::read::GzDecoder::new(file))
     .unpack(into)
     .map_err(|e| anyhow::anyhow!("unpacking {}: {e}", archive.display()))?;
-  if !into.join(BINARY).is_file() {
-    anyhow::bail!("{} contains no `{BINARY}` binary", archive.display());
+  #[cfg(windows)]
+  zip::ZipArchive::new(file)
+    .and_then(|mut zip| zip.extract(into))
+    .map_err(|e| anyhow::anyhow!("unpacking {}: {e}", archive.display()))?;
+  if !into.join(BINARY_FILE).is_file() {
+    anyhow::bail!("{} contains no `{BINARY_FILE}` binary", archive.display());
   }
   Ok(())
 }
@@ -437,14 +451,30 @@ fn install(staged: &Path, dir: &Path) -> anyhow::Result<()> {
   if helper.is_file() {
     place(&helper, &dir.join(WEBKIT_HOST))?;
   }
-  place(&staged.join(BINARY), &dir.join(BINARY))
+  place(&staged.join(BINARY_FILE), &dir.join(BINARY_FILE))
 }
 
 /// `rename(2)` one file over another, executable.
+#[cfg(unix)]
 fn place(from: &Path, to: &Path) -> anyhow::Result<()> {
   std::fs::set_permissions(from, std::fs::Permissions::from_mode(0o755))
     .map_err(|e| anyhow::anyhow!("making {} executable: {e}", from.display()))?;
   std::fs::rename(from, to).map_err(|e| anyhow::anyhow!("replacing {}: {e}", to.display()))
+}
+
+/// Windows will not replace a running executable but will rename one, so
+/// the old file steps aside to `.old` first; the next upgrade clears it.
+#[cfg(windows)]
+fn place(from: &Path, to: &Path) -> anyhow::Result<()> {
+  let aside = to.with_extension("exe.old");
+  let _ = std::fs::remove_file(&aside);
+  if to.exists() {
+    std::fs::rename(to, &aside).map_err(|e| anyhow::anyhow!("moving {} aside: {e}", to.display()))?;
+  }
+  std::fs::rename(from, to).map_err(|e| {
+    let _ = std::fs::rename(&aside, to);
+    anyhow::anyhow!("replacing {}: {e}", to.display())
+  })
 }
 
 #[cfg(test)]
@@ -503,6 +533,7 @@ mod tests {
       "x86_64-apple-darwin",
       "aarch64-unknown-linux-musl",
       "x86_64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc",
     ];
     let target = release_target().expect("this platform publishes a binary");
     assert!(published.contains(&target), "{target} is not a published target");

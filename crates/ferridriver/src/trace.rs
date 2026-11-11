@@ -970,22 +970,11 @@ pub fn sweep_stale_spools() {
     };
     let Some((pid, _)) = rest.split_once('-') else { continue };
     let Ok(pid) = pid.parse::<u32>() else { continue };
-    if pid == own_pid || process_alive(pid) {
+    if pid == own_pid || crate::backend::process::process_is_live(pid) {
       continue;
     }
     let _ = std::fs::remove_dir_all(entry.path());
   }
-}
-
-fn process_alive(pid: u32) -> bool {
-  let Ok(pid) = i32::try_from(pid) else {
-    return false;
-  };
-  // SAFETY: kill(2) with signal 0 touches no memory; it only probes for
-  // process existence (0 = alive, EPERM = alive but not ours).
-  #[allow(unsafe_code)]
-  let rc = unsafe { libc::kill(pid, 0) };
-  rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Platform string in the form the viewer's metadata pane (and every

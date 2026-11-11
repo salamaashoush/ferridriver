@@ -315,117 +315,36 @@ fn spawn_with_pipes(
   command: &mut tokio::process::Command,
   _chromium_path: &str,
 ) -> Result<(tokio::process::Child, BoxReader, BoxWriter)> {
-  use std::os::windows::io::RawHandle;
-  use std::ptr;
+  use crate::backend::windows_spawn::{inheritable, pipe_pair};
+  use std::os::windows::io::AsRawHandle as _;
 
-  let id = std::process::id();
-  let ts = std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_nanos();
-  let pipe_in_name = format!(r"\\.\pipe\ferridriver-in-{id}-{ts}");
-  let pipe_out_name = format!(r"\\.\pipe\ferridriver-out-{id}-{ts}");
-
-  fn to_wide(s: &str) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    std::ffi::OsStr::new(s)
-      .encode_wide()
-      .chain(std::iter::once(0))
-      .collect()
-  }
-
-  unsafe {
-    use windows_sys::Win32::Foundation::*;
-    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows_sys::Win32::Storage::FileSystem::*;
-    use windows_sys::Win32::System::Pipes::*;
-
-    let mut sa = SECURITY_ATTRIBUTES {
-      nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-      lpSecurityDescriptor: ptr::null_mut(),
-      bInheritHandle: TRUE,
-    };
-
-    let server_in = CreateNamedPipeW(
-      to_wide(&pipe_in_name).as_ptr(),
-      PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-      PIPE_TYPE_BYTE | PIPE_WAIT,
-      1,
-      65536,
-      65536,
-      0,
-      ptr::null_mut(),
-    );
-    if server_in == INVALID_HANDLE_VALUE {
-      return Err(FerriError::backend("CreateNamedPipe failed for input pipe"));
-    }
-
-    let server_out = CreateNamedPipeW(
-      to_wide(&pipe_out_name).as_ptr(),
-      PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-      PIPE_TYPE_BYTE | PIPE_WAIT,
-      1,
-      65536,
-      65536,
-      0,
-      ptr::null_mut(),
-    );
-    if server_out == INVALID_HANDLE_VALUE {
-      CloseHandle(server_in);
-      return Err(FerriError::backend("CreateNamedPipe failed for output pipe"));
-    }
-
-    let client_in = CreateFileW(
-      to_wide(&pipe_in_name).as_ptr(),
-      GENERIC_READ,
-      0,
-      &sa as *const SECURITY_ATTRIBUTES,
-      OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL,
-      0 as HANDLE,
-    );
-    if client_in == INVALID_HANDLE_VALUE {
-      CloseHandle(server_in);
-      CloseHandle(server_out);
-      return Err(FerriError::backend("CreateFile failed for Chrome input pipe"));
-    }
-
-    let client_out = CreateFileW(
-      to_wide(&pipe_out_name).as_ptr(),
-      GENERIC_WRITE,
-      0,
-      &sa as *const SECURITY_ATTRIBUTES,
-      OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL,
-      0 as HANDLE,
-    );
-    if client_out == INVALID_HANDLE_VALUE {
-      CloseHandle(server_in);
-      CloseHandle(server_out);
-      CloseHandle(client_in);
-      return Err(FerriError::backend("CreateFile failed for Chrome output pipe"));
-    }
-
+  // Made and handed over under the same exclusion as the spawn, so no other
+  // launch inherits this browser's ends while they are inheritable.
+  let (child, pair) = crate::backend::process::spawn_exclusive(|| {
+    let pair = pipe_pair("cdp").map_err(|e| FerriError::Backend(format!("CDP pipes: {e}")))?;
+    inheritable(&pair.theirs_read).map_err(|e| FerriError::Backend(format!("CDP pipes: {e}")))?;
+    inheritable(&pair.theirs_write).map_err(|e| FerriError::Backend(format!("CDP pipes: {e}")))?;
+    // Chromium reads the handle values from this switch on Windows.
     command.arg(format!(
       "--remote-debugging-io-pipes={},{}",
-      client_in as u32, client_out as u32,
+      pair.theirs_read.as_raw_handle() as usize,
+      pair.theirs_write.as_raw_handle() as usize,
     ));
-
     let child = command
       .spawn()
-      .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome: {e}")))?;
-
-    CloseHandle(client_in);
-    CloseHandle(client_out);
-
-    let reader = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(server_out as RawHandle)
-      .map_err(|e| FerriError::Backend(format!("tokio NamedPipeServer (read): {e}")))?;
-
-    let writer = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(server_in as RawHandle)
-      .map_err(|e| FerriError::Backend(format!("tokio NamedPipeServer (write): {e}")))?;
-
-    Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
-  }
+      .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome with --remote-debugging-pipe: {e}")))?;
+    Ok::<_, FerriError>((child, pair))
+  })?;
+  // Our copies of the child's ends close here, so the reader sees EOF once
+  // the browser's go.
+  let crate::backend::windows_spawn::PipePair {
+    ours_read, ours_write, ..
+  } = pair;
+  Ok((
+    child,
+    Box::new(ours_read) as BoxReader,
+    Box::new(ours_write) as BoxWriter,
+  ))
 }
 
 #[cfg(test)]

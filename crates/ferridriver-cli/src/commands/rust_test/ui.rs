@@ -151,7 +151,7 @@ enum CycleKind {
 
 struct Cycle {
   generation: u64,
-  pid: Option<i32>,
+  pid: Option<u32>,
   kind: CycleKind,
   started: std::time::Instant,
   passed: usize,
@@ -239,14 +239,11 @@ fn plan_run(command: &UiCommand, sidebar: &Sidebar, failed: &BTreeSet<String>) -
   }
 }
 
-pub(crate) fn kill_process_group(pid: Option<i32>) {
-  let Some(pid) = pid else { return };
-  // SAFETY: kill(2) touches no memory; the negative pid signals the
-  // whole process group — cargo, the harness binaries, and their
-  // browser children — which is exactly what Stop must take down.
-  #[allow(unsafe_code)]
-  unsafe {
-    libc::kill(-pid, libc::SIGKILL);
+/// Kill cargo, the harness binaries and their browsers: the process group
+/// `pid` leads on Unix, its process tree on Windows.
+pub(crate) fn kill_process_group(pid: Option<u32>) {
+  if let Some(pid) = pid {
+    ferridriver::backend::process::kill_process_group(pid);
   }
 }
 
@@ -322,10 +319,11 @@ impl CycleSpawner {
       .stdin(Stdio::null());
     // Fresh process group so Stop can kill cargo + harnesses + browsers
     // in one signal without touching this process.
+    #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
 
     let mut child = tokio::process::Command::from(cmd).spawn()?;
-    let pid = child.id().and_then(|p| i32::try_from(p).ok());
+    let pid = child.id();
     self.next_generation += 1;
     let generation = self.next_generation;
     let done_tx = self.done_tx.clone();
@@ -429,11 +427,23 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
   } = server;
   crate::ui::stdoutln!("\n  ferridriver UI mode\n\n  http://{addr}\n");
 
-  let sock_path = std::env::temp_dir().join(format!("ferridriver-ui-{}.sock", std::process::id()));
   let ids_path = std::env::temp_dir().join(format!("ferridriver-ui-{}.ids", std::process::id()));
-  let _ = std::fs::remove_file(&sock_path);
-  let listener = tokio::net::UnixListener::bind(&sock_path)
-    .map_err(|e| anyhow::anyhow!("bind UI socket {}: {e}", sock_path.display()))?;
+  #[cfg(unix)]
+  let (sock_path, listener) = {
+    let sock_path = std::env::temp_dir().join(format!("ferridriver-ui-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = tokio::net::UnixListener::bind(&sock_path)
+      .map_err(|e| anyhow::anyhow!("bind UI socket {}: {e}", sock_path.display()))?;
+    (sock_path, listener)
+  };
+  // Windows has no Unix sockets in std; the harnesses connect to loopback.
+  #[cfg(windows)]
+  let (sock_path, listener) = {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+      .await
+      .map_err(|e| anyhow::anyhow!("bind UI socket: {e}"))?;
+    (PathBuf::from(listener.local_addr()?.to_string()), listener)
+  };
   let _scratch_cleanup = ScratchCleanup(vec![sock_path.clone(), ids_path.clone()]);
   let (wire_tx, mut wire_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
   tokio::spawn(accept_harness_connections(listener, wire_tx));
@@ -458,7 +468,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
   // SIGTERM (kill's default) must also unwind gracefully: the socket
   // file cleanup and the cycle group-kill below only run on a normal
   // loop exit.
-  let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+  let mut sigterm = crate::commands::lifetime::Termination::new()?;
 
   let workers = test_config.worker_count();
   let mut sidebar = Sidebar::default();
@@ -507,7 +517,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
 
     tokio::select! {
       _ = tokio::signal::ctrl_c() => break,
-      _ = sigterm.recv() => break,
+      () = sigterm.recv() => break,
 
       message = wire_rx.recv() => {
         let Some(message) = message else { break };
@@ -577,8 +587,13 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
   Ok(())
 }
 
+#[cfg(unix)]
+type UiListener = tokio::net::UnixListener;
+#[cfg(windows)]
+type UiListener = tokio::net::TcpListener;
+
 async fn accept_harness_connections(
-  listener: tokio::net::UnixListener,
+  listener: UiListener,
   wire_tx: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
 ) {
   loop {

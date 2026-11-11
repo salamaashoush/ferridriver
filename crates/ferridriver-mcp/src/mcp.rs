@@ -54,7 +54,7 @@ async fn terminate_signal() {
 #[cfg(not(unix))]
 async fn terminate_signal() {
   if tokio::signal::ctrl_c().await.is_err() {
-    std::future::pending().await
+    std::future::pending::<()>().await;
   }
 }
 

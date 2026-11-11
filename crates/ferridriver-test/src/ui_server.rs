@@ -990,7 +990,11 @@ mod tests {
     let root = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("tempdir");
     std::fs::write(outside.path().join("secret.txt"), b"secret").expect("write");
+    #[cfg(unix)]
     std::os::unix::fs::symlink(outside.path().join("secret.txt"), root.path().join("link.txt")).expect("symlink");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file(outside.path().join("secret.txt"), root.path().join("link.txt"))
+      .expect("symlink");
     assert!(resolve_artifact_path(root.path(), "link.txt").is_none());
   }
 

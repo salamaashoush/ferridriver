@@ -118,17 +118,22 @@ pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> an
   let watcher = ferridriver_test::watch::FileWatcher::new(&cwd, &["**/*.rs".to_string()], &test_config.test_ignore)
     .map_err(|e| anyhow::anyhow!("start file watcher: {e}"))?;
   let chosen_runner = args.runner.unwrap_or(detect_test_runner());
-  let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+  let mut sigterm = crate::commands::lifetime::Termination::new()?;
 
   loop {
-    let mut cmd = full_test_command(&args, chosen_runner);
+    let cmd = full_test_command(&args, chosen_runner);
     // Fresh process group so an interrupt kills cargo + harness
     // binaries + their browsers without touching this process.
-    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    #[cfg(unix)]
+    let cmd = {
+      let mut cmd = cmd;
+      std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+      cmd
+    };
     let mut child = tokio::process::Command::from(cmd)
       .spawn()
       .map_err(|e| anyhow::anyhow!("failed to spawn `cargo`: {e}"))?;
-    let pid = child.id().and_then(|p| i32::try_from(p).ok());
+    let pid = child.id();
 
     let mut rerun_pending = false;
     let status = loop {
@@ -138,7 +143,7 @@ pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> an
           ui::kill_process_group(pid);
           return Ok(());
         },
-        _ = sigterm.recv() => {
+        () = sigterm.recv() => {
           ui::kill_process_group(pid);
           return Ok(());
         },
@@ -170,7 +175,7 @@ pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> an
     ));
     tokio::select! {
       _ = tokio::signal::ctrl_c() => return Ok(()),
-      _ = sigterm.recv() => return Ok(()),
+      () = sigterm.recv() => return Ok(()),
       change = watcher.recv() => {
         if change.is_none() {
           return Ok(());

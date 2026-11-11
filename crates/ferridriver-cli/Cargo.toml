@@ -70,6 +70,10 @@ tempfile = "3"
 # author's `paths` through the same parser the bundler resolved it with.
 json-strip-comments = "3"
 
+[target.'cfg(windows)'.dependencies]
+# Windows releases are zip archives.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 sha1 = "0.11"

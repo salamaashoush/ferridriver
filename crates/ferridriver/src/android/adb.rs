@@ -1,11 +1,7 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::io::AsyncBufReadExt;
 
 use super::AndroidSdk;
-use crate::backend::process::{ChildGroup, drain_child_stderr, output};
 use crate::error::{FerriError, Result};
 
 pub(crate) struct AdbEndpoint {
@@ -13,28 +9,31 @@ pub(crate) struct AdbEndpoint {
   pub home: PathBuf,
 }
 
+/// Managed ADB hands the server its listening socket as a descriptor
+/// (`acceptfd:0`) through a shell, which Windows cannot do.
+#[cfg(not(unix))]
+pub(super) fn start_server(
+  _sdk: &mut AndroidSdk,
+  _user_home: &Path,
+  _root: &Path,
+  _owner: &super::AndroidOwner,
+) -> impl std::future::Future<Output = Result<()>> {
+  std::future::ready(Err(FerriError::unsupported("managed Android requires a Unix host")))
+}
+
+#[cfg(unix)]
 pub(super) async fn start_server(
   sdk: &mut AndroidSdk,
   user_home: &Path,
   root: &Path,
   owner: &super::AndroidOwner,
 ) -> Result<()> {
-  #[cfg(not(unix))]
-  {
-    let _ = (sdk, user_home, root, owner);
-    return Err(FerriError::unsupported("managed Android requires a Unix host"));
-  }
-  #[cfg(unix)]
-  start_unix_server(sdk, user_home, root, owner).await
-}
+  use std::process::Stdio;
+  use std::time::Duration;
+  use tokio::io::AsyncBufReadExt;
 
-#[cfg(unix)]
-async fn start_unix_server(
-  sdk: &mut AndroidSdk,
-  user_home: &Path,
-  root: &Path,
-  owner: &super::AndroidOwner,
-) -> Result<()> {
+  use crate::backend::process::{ChildGroup, drain_child_stderr, output};
+
   let binary = sdk.root.join("platform-tools/adb");
   let auth_home = user_home.join(".android");
   tokio::fs::create_dir_all(&auth_home).await?;
@@ -127,6 +126,8 @@ pub(super) fn reserve_emulator_ports() -> Result<(TcpListener, TcpListener)> {
 #[cfg(all(test, unix))]
 mod tests {
   use super::*;
+  use std::process::Stdio;
+  use std::time::Duration;
 
   #[test]
   fn reserves_adjacent_console_and_device_ports() {

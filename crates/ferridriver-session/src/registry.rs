@@ -93,6 +93,9 @@ impl Registry {
       );
     }
     std::fs::create_dir_all(&dir)?;
+    // Windows sessions bind loopback TCP rather than a socket file in this
+    // directory, and the directory inherits the user profile's ACL.
+    #[cfg(unix)]
     restrict_to_owner(&dir)?;
     Ok(Self { dir })
   }
@@ -308,13 +311,6 @@ fn restrict_to_owner(dir: &Path) -> Result<()> {
     );
   }
   std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-  Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_to_owner(_dir: &Path) -> Result<()> {
-  // Windows sessions bind loopback TCP rather than a socket file in this
-  // directory; the descriptor inherits the user profile's ACL.
   Ok(())
 }
 

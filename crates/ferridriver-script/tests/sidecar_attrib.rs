@@ -6,6 +6,9 @@
   clippy::cast_sign_loss,
   unsafe_code
 )]
+// It times the Unix socket pair layer by layer; the Windows transport is
+// named pipes, which `backend::windows_spawn`'s own test covers.
+#![cfg(unix)]
 //! Differential attribution harness for the sidecar transport. NOT a gate;
 //! each test isolates one layer of the per-call cost so the deltas attribute
 //! the ~13us sequential floor:

@@ -351,8 +351,7 @@ mod tests {
       }
       requests
     });
-    let mut command = tokio::process::Command::new("sleep");
-    command.arg("30").process_group(0);
+    let mut command = tokio::process::Command::from(crate::backend::process::test_sleeper(30));
     let driver = Arc::new(Mutex::new(Some(ChildGroup::new(command.spawn().unwrap()))));
     let (allocation, completion) = Allocation::new();
     CURRENT
@@ -396,9 +395,7 @@ mod tests {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("profile");
     std::fs::write(&directory, b"sashoush cleanup fixture").unwrap();
-    let child = tokio::process::Command::new("sleep")
-      .arg("30")
-      .process_group(0)
+    let child = tokio::process::Command::from(crate::backend::process::test_sleeper(30))
       .kill_on_drop(true)
       .spawn()
       .unwrap();

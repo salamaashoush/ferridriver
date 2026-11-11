@@ -97,7 +97,7 @@ async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
   let mut watched: Vec<PathBuf> = Vec::new();
   let mut watchers = watch_roots(&report.roots, &mut watched)?;
 
-  let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+  let mut sigterm = crate::commands::lifetime::Termination::new()?;
   loop {
     ui::say(&format!(
       "\n{}  watching {} root(s) {}\n",
@@ -109,7 +109,7 @@ async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
       let recvs: Vec<_> = watchers.iter().map(|w| Box::pin(w.recv())).collect();
       tokio::select! {
         _ = tokio::signal::ctrl_c() => return Ok(()),
-        _ = sigterm.recv() => return Ok(()),
+        () = sigterm.recv() => return Ok(()),
         (change, _, _) = futures::future::select_all(recvs) => change,
       }
     };

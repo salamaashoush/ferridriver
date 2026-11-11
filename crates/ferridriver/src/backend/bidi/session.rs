@@ -331,7 +331,10 @@ impl BidiSession {
       &firefox_default_prefs(&downloads_dir)?,
       firefox_user_prefs,
     )?;
+    #[cfg(unix)]
     profile_guard.allow_firefox_start()?;
+    #[cfg(windows)]
+    profile_guard.allow_firefox_start();
 
     let mut command = tokio::process::Command::new(firefox_path);
     command.envs(env);

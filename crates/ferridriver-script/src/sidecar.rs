@@ -20,11 +20,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ferridriver::backend::process::ChildGroup;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, broadcast, oneshot, watch};
+
+/// Our end of fd 3 or fd 4: a socket pair on Unix, a named pipe on
+/// Windows, which the child's C runtime inherits as a descriptor.
+#[cfg(unix)]
+type Wire = tokio::net::UnixStream;
+#[cfg(windows)]
+type Wire = tokio::net::windows::named_pipe::NamedPipeServer;
 
 /// Max bytes a single inbound frame may reach before the connection is
 /// failed — guards against a runaway child writing an unterminated frame.
@@ -61,8 +67,10 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, SidecarError
 /// the background reader task. Cheap to share behind an `Arc`.
 pub struct Sidecar {
   name: String,
-  child: Mutex<Child>,
-  writer: Mutex<UnixStream>,
+  /// Owns the child and whatever it starts: its process group on Unix,
+  /// its job on Windows.
+  child: Mutex<ChildGroup>,
+  writer: Mutex<Wire>,
   next_id: AtomicU64,
   pending: Pending,
   events: broadcast::Sender<(String, Value)>,
@@ -103,16 +111,7 @@ impl Sidecar {
     if spec.command.is_empty() {
       return Err(SidecarError::Spawn("empty command".into()));
     }
-    // sp_in: parent writes requests -> child reads them as fd 3.
-    // sp_out: child writes responses as fd 4 -> parent reads them.
-    let (parent_in, child_in) = UnixStream::pair().map_err(|e| SidecarError::Spawn(e.to_string()))?;
-    let (parent_out, child_out) = UnixStream::pair().map_err(|e| SidecarError::Spawn(e.to_string()))?;
-
-    let child = spawn_child(spec, &child_in, &child_out)?;
-    // Parent does not need the child's ends; closing them lets the child see
-    // EOF when it exits and vice-versa.
-    drop(child_in);
-    drop(child_out);
+    let (child, parent_in, parent_out) = spawn_child(spec)?;
 
     // `parent_in` carries requests to the child (fd 3); `parent_out` carries
     // responses back (fd 4). Each is half-duplex in use, so own the whole
@@ -272,19 +271,9 @@ impl Sidecar {
     if let Some(task) = self.reader.lock().await.take() {
       task.abort();
     }
-    let mut child = self.child.lock().await;
-    // The child is a session leader (`setsid` in `spawn_child`), so
-    // killing its process group reaps grandchildren too — `start_kill`
-    // alone would orphan anything the sidecar spawned.
-    #[cfg(unix)]
-    if let Some(pid) = child.id().and_then(|p| i32::try_from(p).ok()) {
-      #[allow(unsafe_code)]
-      unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-      }
-    }
-    let _ = child.start_kill();
-    let _ = child.wait().await;
+    // The group reaches grandchildren too; killing the child alone would
+    // orphan anything the sidecar spawned.
+    let _ = self.child.lock().await.shutdown().await;
     // Fail any stragglers.
     let mut pending = self.pending.lock().await;
     for (_, tx) in pending.drain() {
@@ -294,11 +283,17 @@ impl Sidecar {
   }
 }
 
+/// Start the child with fd 3 reading what we write and fd 4 writing what
+/// we read: `(child, our fd-3 writer, our fd-4 reader)`.
 #[cfg(unix)]
-fn spawn_child(spec: &SidecarSpec, child_in: &UnixStream, child_out: &UnixStream) -> Result<Child, SidecarError> {
+fn spawn_child(spec: &SidecarSpec) -> Result<(ChildGroup, Wire, Wire), SidecarError> {
   use std::os::fd::AsRawFd;
 
-  let mut cmd = Command::new(&spec.command[0]);
+  // sp_in: parent writes requests -> child reads them as fd 3.
+  // sp_out: child writes responses as fd 4 -> parent reads them.
+  let (parent_in, child_in) = Wire::pair().map_err(|e| SidecarError::Spawn(e.to_string()))?;
+  let (parent_out, child_out) = Wire::pair().map_err(|e| SidecarError::Spawn(e.to_string()))?;
+  let mut cmd = tokio::process::Command::new(&spec.command[0]);
   cmd.args(&spec.command[1..]);
   for (k, v) in &spec.env {
     cmd.env(k, v);
@@ -344,21 +339,72 @@ fn spawn_child(spec: &SidecarSpec, child_in: &UnixStream, child_out: &UnixStream
       Ok(())
     });
   }
-  ferridriver::backend::process::spawn_exclusive(|| cmd.spawn()).map_err(|e| SidecarError::Spawn(e.to_string()))
+  let child =
+    ferridriver::backend::process::spawn_exclusive(|| cmd.spawn()).map_err(|e| SidecarError::Spawn(e.to_string()))?;
+  // Parent does not need the child's ends; closing them lets the child see
+  // EOF when it exits and vice-versa.
+  drop(child_in);
+  drop(child_out);
+  Ok((ChildGroup::unregistered(child), parent_in, parent_out))
 }
 
-#[cfg(not(unix))]
-fn spawn_child(_spec: &SidecarSpec, _child_in: &UnixStream, _child_out: &UnixStream) -> Result<Child, SidecarError> {
-  Err(SidecarError::Spawn(
-    "sidecars require a unix fd-3/4 transport (not supported on this platform)".into(),
-  ))
+/// [`spawn_child`] on Windows: the child's C runtime inherits the pipes as
+/// descriptors 3 and 4, as a Node child's does through libuv.
+#[cfg(windows)]
+fn spawn_child(spec: &SidecarSpec) -> Result<(ChildGroup, Wire, Wire), SidecarError> {
+  use ferridriver::backend::windows_spawn::{Inherited, Kind, pipe_pair, spawn};
+  use std::os::windows::io::OwnedHandle;
+
+  let spawn_error = |e: std::io::Error| SidecarError::Spawn(e.to_string());
+  let pipes = pipe_pair("sidecar").map_err(spawn_error)?;
+  let stdin = OwnedHandle::from(std::fs::File::open("NUL").map_err(spawn_error)?);
+  let (output, output_writer) = std::io::pipe().map_err(spawn_error)?;
+  let output_writer = OwnedHandle::from(output_writer);
+  let args: Vec<std::ffi::OsString> = spec.command[1..].iter().map(Into::into).collect();
+  let child = ferridriver::backend::process::spawn_exclusive(|| {
+    spawn(
+      std::path::Path::new(&spec.command[0]),
+      &args,
+      &spec.env,
+      spec.cwd.as_deref().map(std::path::Path::new),
+      &[
+        Inherited {
+          handle: &stdin,
+          kind: Kind::Device,
+        },
+        Inherited {
+          handle: &output_writer,
+          kind: Kind::Pipe,
+        },
+        Inherited {
+          handle: &output_writer,
+          kind: Kind::Pipe,
+        },
+        Inherited {
+          handle: &pipes.theirs_read,
+          kind: Kind::Pipe,
+        },
+        Inherited {
+          handle: &pipes.theirs_write,
+          kind: Kind::Pipe,
+        },
+      ],
+    )
+  })
+  .map_err(spawn_error)?;
+  drop(output_writer);
+  let _ = ferridriver::backend::process::drain_pipe(output);
+  let ferridriver::backend::windows_spawn::PipePair {
+    ours_read, ours_write, ..
+  } = pipes;
+  Ok((ChildGroup::unregistered(child), ours_write, ours_read))
 }
 
 /// Read NUL-delimited JSON frames from the child, routing `{id,...}` to the
 /// pending request and id-less frames to the event channel. Exits on EOF
 /// (child gone) or a fatal protocol error, failing all pending requests.
 async fn read_loop(
-  mut reader: UnixStream,
+  mut reader: Wire,
   pending: Pending,
   events: broadcast::Sender<(String, Value)>,
   closed: watch::Sender<bool>,

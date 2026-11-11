@@ -8,15 +8,34 @@
 
 #[cfg(unix)]
 fn main() {
-  use std::io::{Read, Write};
   use std::os::fd::FromRawFd;
   use std::os::unix::net::UnixStream;
 
   // SAFETY: the parent (the sidecar transport) dup'd its socket ends onto
   // fd 3 (read) and fd 4 (write) before exec; we adopt them here.
   #[allow(unsafe_code)]
-  let (mut rx, mut tx) = unsafe { (UnixStream::from_raw_fd(3), UnixStream::from_raw_fd(4)) };
+  let (rx, tx) = unsafe { (UnixStream::from_raw_fd(3), UnixStream::from_raw_fd(4)) };
+  serve(rx, tx);
+}
 
+#[cfg(windows)]
+fn main() {
+  use std::os::windows::io::{FromRawHandle, RawHandle};
+
+  // SAFETY: the parent handed its pipe ends over as C runtime descriptors
+  // 3 (read) and 4 (write); the runtime answers with their handles, which
+  // this process now owns.
+  #[allow(unsafe_code)]
+  let (rx, tx) = unsafe {
+    (
+      std::fs::File::from_raw_handle(libc::get_osfhandle(3) as RawHandle),
+      std::fs::File::from_raw_handle(libc::get_osfhandle(4) as RawHandle),
+    )
+  };
+  serve(rx, tx);
+}
+
+fn serve(mut rx: impl std::io::Read, mut tx: impl std::io::Write) {
   let mut buf: Vec<u8> = Vec::new();
   let mut chunk = [0u8; 4096];
   loop {
@@ -80,6 +99,3 @@ fn main() {
     }
   }
 }
-
-#[cfg(not(unix))]
-fn main() {}

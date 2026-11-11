@@ -9,6 +9,7 @@
 
 use crate::backend::process::ChildGroup;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 use thiserror::Error;
 
@@ -76,6 +77,45 @@ pub(crate) fn revision_from_path(path: &Path) -> String {
     .to_string()
 }
 
+/// The browser's arguments, as Playwright's `webkit.ts::defaultArgs`
+/// builds them for this platform.
+fn arguments(config: &LaunchConfig) -> Result<Vec<String>, LaunchError> {
+  let mut args = vec!["--inspector-pipe".to_string()];
+  if cfg!(windows) {
+    args.push("--disable-accelerated-compositing".into());
+  }
+  if config.headless {
+    args.push("--headless".into());
+  }
+  if let Some(ref dir) = config.user_data_dir {
+    crate::backend::ensure_user_data_dir(Some(&dir.to_string_lossy()))
+      .map_err(|e| LaunchError::Io(std::io::Error::other(e.to_string())))?;
+    args.push(format!("--user-data-dir={}", dir.display()));
+  } else {
+    args.push("--no-startup-window".into());
+  }
+  if let Some(ref proxy) = config.proxy_server {
+    if cfg!(windows) {
+      // Playwright's workaround for socks5 hostname resolution on
+      // Windows (microsoft/playwright#20451).
+      args.push(format!("--curl-proxy={}", proxy.replacen("socks5://", "socks5h://", 1)));
+    } else {
+      args.push(format!("--proxy={proxy}"));
+    }
+  }
+  if let Some(ref bypass) = config.proxy_bypass_list {
+    if cfg!(windows) {
+      args.push(format!("--curl-noproxy={bypass}"));
+    } else if cfg!(target_os = "linux") {
+      args.extend(bypass.split(',').map(|host| format!("--ignore-host={host}")));
+    } else {
+      args.push(format!("--proxy-bypass-list={bypass}"));
+    }
+  }
+  args.extend(config.extra_args.iter().cloned());
+  Ok(args)
+}
+
 /// Spawn the Playwright `WebKit` child with `--inspector-pipe`.
 ///
 /// `read_fd` is the fd the child should write outbound messages to
@@ -88,30 +128,7 @@ pub(crate) fn revision_from_path(path: &Path) -> String {
 pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<ChildGroup, LaunchError> {
   let mut cmd = Command::new(binary);
   cmd.envs(&config.env);
-  cmd.arg("--inspector-pipe");
-  if config.headless {
-    cmd.arg("--headless");
-  }
-  if let Some(ref dir) = config.user_data_dir {
-    crate::backend::ensure_user_data_dir(Some(&dir.to_string_lossy()))
-      .map_err(|e| LaunchError::Io(std::io::Error::other(e.to_string())))?;
-    cmd.arg(format!("--user-data-dir={}", dir.display()));
-  } else {
-    cmd.arg("--no-startup-window");
-  }
-  if let Some(ref proxy) = config.proxy_server {
-    cmd.arg(format!("--proxy={proxy}"));
-  }
-  if let Some(ref bypass) = config.proxy_bypass_list {
-    if cfg!(target_os = "linux") {
-      cmd.args(bypass.split(',').map(|host| format!("--ignore-host={host}")));
-    } else {
-      cmd.arg(format!("--proxy-bypass-list={bypass}"));
-    }
-  }
-  for arg in &config.extra_args {
-    cmd.arg(arg);
-  }
+  cmd.args(arguments(config)?);
 
   // The child expects fd 3 (its read end) and fd 4 (its write end).
   // SAFETY: the dup2 + fcntl calls happen post-fork in `pre_exec`
@@ -143,16 +160,74 @@ pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) 
   Ok(ChildGroup::recorded(child, config.user_data_dir.as_deref(), false))
 }
 
-/// Windows stub. The `--inspector-pipe` transport relies on `pre_exec`
-/// to dup fd 3 / fd 4 into the child before the binary starts; Windows
-/// has no fork model and PW WebKit does not ship a usable Windows
-/// inspector-pipe binary today either. Return a typed error so callers
-/// surface "Unsupported" instead of a build failure.
-#[cfg(not(unix))]
-pub fn spawn(_config: &LaunchConfig, _read_fd: i32, _write_fd: i32) -> Result<ChildGroup, LaunchError> {
-  Err(LaunchError::Io(std::io::Error::other(
-    "webkit launcher: --inspector-pipe spawn is not supported on this platform yet",
-  )))
+/// Spawn the Playwright `WebKit` child with `--inspector-pipe`, its C
+/// runtime descriptors 3 and 4 the child's ends of `theirs_read` /
+/// `theirs_write`, as Node hands them over for Playwright.
+#[cfg(windows)]
+pub fn spawn(
+  binary: &Path,
+  config: &LaunchConfig,
+  theirs_read: &std::os::windows::io::OwnedHandle,
+  theirs_write: &std::os::windows::io::OwnedHandle,
+) -> Result<ChildGroup, LaunchError> {
+  use crate::backend::windows_spawn::{Inherited, Kind, spawn as spawn_with_descriptors};
+  let args: Vec<std::ffi::OsString> = arguments(config)?.into_iter().map(Into::into).collect();
+  let mut envs: Vec<(String, String)> = config.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+  // Playwright keeps a persistent profile's cookies in the profile on
+  // Windows, where the curl backend otherwise holds them in memory.
+  if let Some(ref dir) = config.user_data_dir
+    && !config.env.contains_key("CURL_COOKIE_JAR_PATH")
+  {
+    envs.push((
+      "CURL_COOKIE_JAR_PATH".into(),
+      dir.join("cookiejar.db").to_string_lossy().into_owned(),
+    ));
+  }
+  let stdin = std::os::windows::io::OwnedHandle::from(std::fs::File::open("NUL")?);
+  let (output, output_writer) = std::io::pipe()?;
+  let output_writer = std::os::windows::io::OwnedHandle::from(output_writer);
+  tracing::debug!(
+    target: "ferridriver::browser::launch",
+    binary = %binary.display(),
+    ?args,
+    "spawning webkit"
+  );
+  let child = crate::backend::process::spawn_exclusive(|| {
+    spawn_with_descriptors(
+      binary,
+      &args,
+      &envs,
+      None,
+      &[
+        Inherited {
+          handle: &stdin,
+          kind: Kind::Device,
+        },
+        Inherited {
+          handle: &output_writer,
+          kind: Kind::Pipe,
+        },
+        Inherited {
+          handle: &output_writer,
+          kind: Kind::Pipe,
+        },
+        Inherited {
+          handle: theirs_read,
+          kind: Kind::Pipe,
+        },
+        Inherited {
+          handle: theirs_write,
+          kind: Kind::Pipe,
+        },
+      ],
+    )
+  })?;
+  // Our copy of the write end closes with this scope, so the drain sees
+  // EOF once the browser's own copies close.
+  drop(output_writer);
+  let _ = crate::backend::process::drain_pipe(output);
+  crate::backend::process::track_spawned(child.id().unwrap_or(0), config.user_data_dir.as_deref(), false);
+  Ok(ChildGroup::recorded(child, config.user_data_dir.as_deref(), false))
 }
 
 #[cfg(unix)]
@@ -179,9 +254,4 @@ fn pre_exec_setup_fds(read_fd: i32, write_fd: i32) -> std::io::Result<()> {
     }
   }
   Ok(())
-}
-
-#[cfg(not(unix))]
-fn pre_exec_setup_fds(_read_fd: i32, _write_fd: i32) -> std::io::Result<()> {
-  Err(std::io::Error::other("webkit launcher: non-unix not yet supported"))
 }

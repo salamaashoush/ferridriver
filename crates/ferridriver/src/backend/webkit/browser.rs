@@ -19,7 +19,9 @@ use super::transport::Transport;
 use crate::backend::AnyPage;
 use crate::error::{FerriError, Result};
 use serde_json::json;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -572,6 +574,7 @@ struct SpawnedBrowser {
   downloads_dir: Arc<std::path::PathBuf>,
 }
 
+#[cfg(unix)]
 fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBrowser, BrowserError> {
   // pair A — child reads fd 3 ← parent writes. pair B — child writes
   // fd 4 → parent reads. Swapping the pairs deadlocks both ends.
@@ -603,6 +606,38 @@ fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBr
     tokio::net::UnixStream::from_std(parent_write)?,
   );
   let conn = Connection::spawn(transport);
+  handle.install_connection(Arc::clone(&conn));
+  Ok(SpawnedBrowser {
+    version,
+    handle,
+    conn,
+    downloads_dir,
+  })
+}
+
+#[cfg(windows)]
+fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBrowser, BrowserError> {
+  let pipes = crate::backend::windows_spawn::pipe_pair("webkit")?;
+  let downloads = tempfile::Builder::new()
+    .prefix("ferridriver-webkit-downloads-")
+    .tempdir()?;
+  let downloads_dir = Arc::new(downloads.path().to_owned());
+  let binary = config
+    .executable_path
+    .clone()
+    .map_or_else(super::launcher::locate_binary, Ok)?;
+  let child = super::launcher::spawn(&binary, config, &pipes.theirs_read, &pipes.theirs_write)?;
+  let version = Arc::from(format!(
+    "webkit-playwright/{}",
+    super::launcher::revision_from_path(&binary)
+  ));
+  let handle = super::owner::WebKitOwner::new(child, downloads);
+  // Our copies of the child's ends close here, so the reader sees EOF once
+  // the browser's go.
+  let crate::backend::windows_spawn::PipePair {
+    ours_read, ours_write, ..
+  } = pipes;
+  let conn = Connection::spawn(Transport::new(ours_read, ours_write));
   handle.install_connection(Arc::clone(&conn));
   Ok(SpawnedBrowser {
     version,
@@ -789,10 +824,8 @@ mod ownership_tests {
     for popup in [false, true] {
       let downloads = tempfile::tempdir().unwrap();
       let path = downloads.path().to_owned();
-      let mut child = tokio::process::Command::new("sh")
-        .args(["-c", "exec sleep 30"])
+      let mut child = tokio::process::Command::from(crate::backend::process::test_sleeper(30))
         .stdout(std::process::Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .unwrap();

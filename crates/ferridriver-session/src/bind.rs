@@ -354,10 +354,23 @@ pub async fn bind_dispatcher(
   let endpoint = match (&options.host, options.port) {
     (Some(host), port) => Endpoint::Tcp(format!("{host}:{}", port.unwrap_or(0))),
     (None, Some(port)) => Endpoint::Tcp(format!("127.0.0.1:{port}")),
+    #[cfg(unix)]
     (None, None) => default_socket_endpoint(registry)?,
+    #[cfg(not(unix))]
+    (None, None) => Endpoint::Tcp("127.0.0.1:0".to_string()),
   };
+  // Windows has no Unix sockets in std, so the default session is loopback
+  // TCP. A socket file in an owner-only directory keeps other users out on
+  // Unix; a port does not, so there a token does, and one is generated.
+  #[cfg(not(unix))]
+  let token = match options.token {
+    None if options.host.is_none() && options.port.is_none() => Some(crate::server::generate_token()?),
+    token => token,
+  };
+  #[cfg(unix)]
+  let token = options.token;
 
-  let server = SessionServer::bind_with_token(endpoint, dispatcher, options.token).await?;
+  let server = SessionServer::bind_with_token(endpoint, dispatcher, token).await?;
   let resolved_endpoint = server.endpoint_string().to_string();
   let server = Arc::new(server);
 
@@ -422,11 +435,6 @@ fn default_socket_endpoint(registry: &Registry) -> Result<Endpoint> {
     ));
   }
   Ok(Endpoint::OwnedUnix(Arc::new(directory)))
-}
-
-#[cfg(not(unix))]
-fn default_socket_endpoint(_registry: &Registry) -> Result<Endpoint> {
-  Ok(Endpoint::Tcp("127.0.0.1:0".to_string()))
 }
 
 impl std::fmt::Debug for BoundSession {

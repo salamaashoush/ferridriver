@@ -137,13 +137,15 @@ pub async fn probes() -> Result<Value> {
 
 pub async fn child() -> Result<()> {
   use std::io::Write;
-  use tokio::signal::unix::{SignalKind, signal};
 
   if let Ok(code) = std::env::var("PROBE_EXIT") {
     std::process::exit(code.parse()?);
   }
-  let mut term = signal(SignalKind::terminate())?;
-  let mut interrupt = signal(SignalKind::interrupt())?;
+  #[cfg(unix)]
+  let (mut term, mut interrupt) = {
+    use tokio::signal::unix::{SignalKind, signal};
+    (signal(SignalKind::terminate())?, signal(SignalKind::interrupt())?)
+  };
   if std::env::var("PROBE_NOISY").as_deref() == Ok("true") {
     let bytes = vec![b'x'; 1024 * 1024];
     std::io::stdout().write_all(&bytes)?;
@@ -188,10 +190,17 @@ pub async fn child() -> Result<()> {
       })
       .await
   });
+  #[cfg(unix)]
   let received = tokio::select! {
     _ = term.recv() => "SIGTERM",
     _ = interrupt.recv() => "SIGINT",
     _ = cleanup_rx.recv() => "HTTP",
+  };
+  // Windows has no signal a web server is stopped with gracefully.
+  #[cfg(windows)]
+  let received = {
+    cleanup_rx.recv().await;
+    "HTTP"
   };
   std::fs::write(marker, received)?;
   release.send_replace(true);

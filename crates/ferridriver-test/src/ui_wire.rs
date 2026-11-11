@@ -27,7 +27,8 @@ use crate::config::{CliOverrides, TestConfig};
 use crate::model::TestPlan;
 use crate::reporter::{Reporter, ReporterEvent};
 
-/// Unix-socket path the CLI's UI bridge listens on.
+/// Where the CLI's UI bridge listens: a Unix socket path, or on Windows,
+/// which has no Unix sockets in std, a loopback `127.0.0.1:port`.
 pub const UI_SOCK_ENV: &str = "FERRITEST_UI_SOCK";
 /// Absolute artifacts root the CLI serves under `/artifact/`. Harness
 /// output is redirected there so attachment `urlPath`s resolve across
@@ -45,17 +46,25 @@ pub const LIST_ENV: &str = "FERRITEST_LIST";
 /// SIGSTOP): the send fails after two seconds instead of blocking a
 /// runtime worker for the rest of the run.
 pub struct UiSock {
-  stream: Mutex<std::os::unix::net::UnixStream>,
+  stream: Mutex<UiStream>,
 }
 
+#[cfg(unix)]
+type UiStream = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type UiStream = std::net::TcpStream;
+
 impl UiSock {
-  /// Connect to the CLI's listener at `path`.
+  /// Connect to the CLI's listener at `path` ([`UI_SOCK_ENV`]).
   ///
   /// # Errors
   ///
   /// Errors if the socket cannot be connected.
   pub fn connect(path: &Path) -> std::io::Result<Self> {
-    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    #[cfg(unix)]
+    let stream = UiStream::connect(path)?;
+    #[cfg(windows)]
+    let stream = UiStream::connect(path.to_string_lossy().as_ref())?;
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
     Ok(Self {
       stream: Mutex::new(stream),
@@ -193,9 +202,22 @@ mod tests {
 
   #[test]
   fn sock_streams_ndjson_lines() {
+    #[cfg(unix)]
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("ui.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+    #[cfg(unix)]
+    let (path, listener) = {
+      let path = dir.path().join("ui.sock");
+      let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+      (path, listener)
+    };
+    #[cfg(windows)]
+    let (path, listener) = {
+      let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+      (
+        PathBuf::from(listener.local_addr().expect("address").to_string()),
+        listener,
+      )
+    };
     let sock = UiSock::connect(&path).expect("connect");
     sock.send(&serde_json::json!({ "type": "testStarted", "id": "a" }));
     sock.send(&serde_json::json!({ "type": "testFinished", "id": "a" }));
