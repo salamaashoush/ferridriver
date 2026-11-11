@@ -862,7 +862,7 @@ impl BidiPage {
     timeout_ms: u64,
     referer: Option<&str>,
   ) -> Result<Option<Response>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     self.injected_script.reset();
     self.clear_handle_realms();
     self.nav_request_slot.clear();
@@ -888,8 +888,8 @@ impl BidiPage {
     }
 
     let wait = Self::lifecycle_to_wait(lifecycle);
-    let result = tokio::time::timeout(
-      std::time::Duration::from_millis(timeout_ms),
+    let result = tokio::time::timeout_at(
+      crate::backend::deadline_for(timeout_ms),
       self.cmd(
         "browsingContext.navigate",
         json!({
@@ -1010,13 +1010,13 @@ impl BidiPage {
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     self.injected_script.reset();
     self.clear_handle_realms();
     self.nav_request_slot.clear();
     let wait = Self::lifecycle_to_wait(lifecycle);
-    let result = tokio::time::timeout(
-      std::time::Duration::from_millis(timeout_ms),
+    let result = tokio::time::timeout_at(
+      crate::backend::deadline_for(timeout_ms),
       self.cmd(
         "browsingContext.reload",
         json!({
@@ -1039,10 +1039,10 @@ impl BidiPage {
   }
 
   pub async fn go_back(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     self.nav_request_slot.clear();
-    let result = tokio::time::timeout(
-      std::time::Duration::from_millis(timeout_ms),
+    let result = tokio::time::timeout_at(
+      crate::backend::deadline_for(timeout_ms),
       self.cmd(
         "browsingContext.traverseHistory",
         json!({
@@ -1065,10 +1065,10 @@ impl BidiPage {
   }
 
   pub async fn go_forward(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     self.nav_request_slot.clear();
-    let result = tokio::time::timeout(
-      std::time::Duration::from_millis(timeout_ms),
+    let result = tokio::time::timeout_at(
+      crate::backend::deadline_for(timeout_ms),
       self.cmd(
         "browsingContext.traverseHistory",
         json!({
@@ -1141,29 +1141,31 @@ impl BidiPage {
     // event unseen and leave this waiting out the whole bound.
     let mut rx = self.session.transport.tap_events();
     // Fast path: query readiness directly. A successful evaluate also
-    // proves the context is reachable.
-    if let Ok(Some(v)) = self.eval_internal("document.readyState", ctx).await
-      && let Some(s) = v.as_str()
-      && (s == "interactive" || s == "complete")
-    {
-      return Ok(());
+    // proves the context is reachable. A probe the operation's deadline
+    // cut off says nothing about the child, and the operation is over.
+    match self.eval_internal("document.readyState", ctx).await {
+      Ok(Some(v)) if v.as_str().is_some_and(|s| s == "interactive" || s == "complete") => return Ok(()),
+      Err(error) if error.is_timeout_error() => return Err(error),
+      _ => {},
     }
     // Slow path: the child is still parsing — wait for its own
     // domContentLoaded/load event (BiDi reports child events with
-    // `context` == the child id).
+    // `context` == the child id), for no longer than the operation has.
     let target = ctx.to_string();
-    let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-      while let Some(event) = rx.recv().await {
-        if matches!(
-          event.method.as_str(),
-          "browsingContext.domContentLoaded" | "browsingContext.load"
-        ) && event.params.get("context").and_then(|v| v.as_str()) == Some(target.as_str())
-        {
-          return;
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+    let waited = budget
+      .wait(async move {
+        while let Some(event) = rx.recv().await {
+          if matches!(
+            event.method.as_str(),
+            "browsingContext.domContentLoaded" | "browsingContext.load"
+          ) && event.params.get("context").and_then(|v| v.as_str()) == Some(target.as_str())
+          {
+            return;
+          }
         }
-      }
-    })
-    .await;
+      })
+      .await;
     // A timeout here is not fatal — the caller's own retry/deadline
     // still governs; we just stop blocking. The subsequent query will
     // surface a precise "no element found" if the child never loaded.
@@ -2372,6 +2374,11 @@ impl BidiPage {
     }
 
     self.spawn_worker_listener();
+    self.session.transport.observe_events(super::frames::frame_observer(
+      self.context_id.clone(),
+      Arc::clone(&self.frame_cache),
+      self.closed.clone(),
+    ));
     let mut rx = self.session.transport.tap_events();
     *self
       .event_barrier
@@ -2386,6 +2393,7 @@ impl BidiPage {
     let page_backref = self.page_backref.clone();
     let closed = self.closed.clone();
     let emitter = self.events.clone();
+    let frame_cache = Arc::clone(&self.frame_cache);
     let injected_script = self.injected_script.clone();
     let exposed_fns = self.exposed_fns.clone();
     let exposed_session = self.session.clone();
@@ -2465,6 +2473,7 @@ impl BidiPage {
           let emitter_for_refresh = emitter.clone();
           let parent_for_refresh = parent_id.clone();
           let child_for_refresh = frame_id.clone();
+          let cache_for_refresh = Arc::clone(&frame_cache);
           tokio::spawn(async move {
             let result = session_for_refresh
               .transport
@@ -2493,6 +2502,21 @@ impl BidiPage {
               }
               let cname = child.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
               let curl = child.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+              // Only the name: the frame may have navigated since the
+              // tree was read, and the reader keeps its URL in wire order.
+              {
+                let mut cache = cache_for_refresh
+                  .lock()
+                  .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if cache.record(cid).is_some_and(|record| !record.detached) {
+                  cache.attach(crate::backend::FrameInfo {
+                    frame_id: cid.to_string(),
+                    parent_frame_id: Some(parent_for_refresh.clone()),
+                    name: cname.clone(),
+                    url: String::new(),
+                  });
+                }
+              }
               emitter_for_refresh.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
                 frame_id: cid.to_string(),
                 parent_frame_id: Some(parent_for_refresh.clone()),

@@ -13,6 +13,7 @@
 
 pub mod browser;
 pub mod element;
+mod frames;
 pub mod input;
 pub mod page;
 mod profile;

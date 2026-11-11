@@ -557,7 +557,7 @@ async fn fx_slow(query: Option<&str>) -> Response<Body> {
         .find_map(|pair| pair.strip_prefix("ms=").and_then(|v| v.parse().ok()))
     })
     .unwrap_or(1000);
-  tokio::time::sleep(std::time::Duration::from_millis(ms.min(30_000))).await;
+  tokio::time::sleep(std::time::Duration::from_millis(ms.min(120_000))).await;
   fx_text("slow")
 }
 

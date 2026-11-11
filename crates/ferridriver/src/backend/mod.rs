@@ -39,6 +39,19 @@ pub(crate) static EMPTY_PARAMS: std::sync::LazyLock<serde_json::Value> =
 /// as an owned value (e.g. the cookie-context branch that conditionally
 /// produces a populated map). Hot/no-param paths borrow [`EMPTY_PARAMS`].
 #[inline]
+/// When an operation given `timeout_ms` gives up. `0` is Playwright's no
+/// timeout, so its deadline is a year off: never, for a navigation, and
+/// inside the range tokio's timer accepts.
+pub(crate) fn deadline_for(timeout_ms: u64) -> tokio::time::Instant {
+  const NEVER: std::time::Duration = std::time::Duration::from_hours(365 * 24);
+  let wait = if timeout_ms == 0 {
+    NEVER
+  } else {
+    std::time::Duration::from_millis(timeout_ms).min(NEVER)
+  };
+  tokio::time::Instant::now() + wait
+}
+
 pub(crate) fn empty_params() -> serde_json::Value {
   serde_json::Value::Object(serde_json::Map::new())
 }

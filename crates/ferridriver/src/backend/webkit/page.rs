@@ -1202,8 +1202,8 @@ impl WebKitPage {
       frame_id: None,
       referrer: referrer.map(str::to_string),
     };
-    let nav = tokio::time::timeout(
-      std::time::Duration::from_millis(timeout_ms),
+    let nav = tokio::time::timeout_at(
+      crate::backend::deadline_for(timeout_ms),
       self
         .browser
         .send(protocol::PLAYWRIGHT_NAVIGATE, serde_json::to_value(&params)?),
@@ -1252,7 +1252,7 @@ impl WebKitPage {
   async fn wait_for_lifecycle(&self, lifecycle: NavLifecycle, timeout_ms: u64, loader_id: Option<&str>) -> Result<()> {
     let signals = Arc::clone(&self.lifecycle);
     let nav_slot = self.nav_request_slot.clone();
-    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
+    let result = tokio::time::timeout_at(crate::backend::deadline_for(timeout_ms), async move {
       loop {
         let notified = signals.notify.notified();
         if signals.seen(lifecycle) && signals.committed(loader_id) {
@@ -1349,7 +1349,7 @@ impl WebKitPage {
   async fn wait_for_history_commit(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<bool> {
     let signals = Arc::clone(&self.lifecycle);
     let nav_slot = self.nav_request_slot.clone();
-    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
+    let result = tokio::time::timeout_at(crate::backend::deadline_for(timeout_ms), async move {
       loop {
         let notified = signals.notify.notified();
         if signals.seen(lifecycle) {

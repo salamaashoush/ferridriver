@@ -2709,8 +2709,8 @@ impl<T: CdpWrap> CdpPage<T> {
       // Playwright parity: 0 means no timeout.
       return self.goto_inner(url, lifecycle, timeout_ms, referer).await;
     }
-    match tokio::time::timeout(
-      std::time::Duration::from_millis(timeout_ms),
+    match tokio::time::timeout_at(
+      crate::backend::deadline_for(timeout_ms),
       self.goto_inner(url, lifecycle, timeout_ms, referer),
     )
     .await
@@ -2856,7 +2856,7 @@ impl<T: CdpWrap> CdpPage<T> {
         return; // no navigation started — zero cost.
       }
     }
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     loop {
       let notified = self.lifecycle_notify.notified();
       tokio::pin!(notified);
@@ -2999,7 +2999,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// "navigate-returns-with-whatever-we-have" semantics on hostile
   /// pages; the caller's response wait surfaces real failures.
   async fn await_loader_lifecycle(&self, expected_loader_id: &str, target_event: &str, timeout_ms: u64) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     loop {
       let notified = self.lifecycle_notify.notified();
       tokio::pin!(notified);
@@ -3030,7 +3030,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Waits for the main frame's `current_loader_id` to change away
   /// from `pre_loader_id` AND fire `target_event` for the new loader.
   async fn await_loader_change(&self, pre_loader_id: &str, target_event: &str, timeout_ms: u64) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     loop {
       let notified = self.lifecycle_notify.notified();
       tokio::pin!(notified);
@@ -3066,7 +3066,7 @@ impl<T: CdpWrap> CdpPage<T> {
     target_event: &str,
     timeout_ms: u64,
   ) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = crate::backend::deadline_for(timeout_ms);
     let main_frame = self.peek_main_frame_id();
     loop {
       let notified = self.lifecycle_notify.notified();

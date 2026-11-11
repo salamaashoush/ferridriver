@@ -40,6 +40,13 @@ pub(crate) struct BidiEvent {
   pub params: serde_json::Value,
 }
 
+/// Run by the reader on each event, in wire order, before the event is
+/// tapped and before any later reply is routed. For state a reply must
+/// already reflect (the frame tree after a `history.pushState` the caller
+/// just evaluated): a listener draining a tap can lag the reply that
+/// follows the event. Must not block. Returning `false` removes it.
+pub(crate) type EventObserver = Arc<dyn Fn(&BidiEvent) -> bool + Send + Sync>;
+
 enum TapMessage {
   Event(BidiEvent),
   Barrier(oneshot::Sender<()>),
@@ -140,6 +147,7 @@ pub(crate) struct BidiTransport {
   /// route interception) use these; a broadcast `Lagged` drop there
   /// corrupts tracker state, see the CDP dispatcher's tap rationale.
   event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>>,
+  observers: Arc<std::sync::Mutex<Vec<EventObserver>>>,
   /// Set by [`Self::start_close`] before the browser process is killed.
   /// Firefox dies without sending a WebSocket close frame, so the
   /// reader sees a TCP reset (`ResetWithoutClosingHandshake`) — during
@@ -232,6 +240,8 @@ impl BidiTransport {
     let event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>> =
       Arc::new(std::sync::Mutex::new(Vec::new()));
     let event_taps2 = Arc::clone(&event_taps);
+    let observers: Arc<std::sync::Mutex<Vec<EventObserver>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observers2 = Arc::clone(&observers);
 
     let closing = Arc::new(AtomicBool::new(false));
     let closing2 = Arc::clone(&closing);
@@ -285,12 +295,8 @@ impl BidiTransport {
               let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
               let event = BidiEvent { method, params };
               trace_event(&event);
-              // Taps first: lossless state trackers must observe the
-              // event before best-effort broadcast consumers.
-              {
-                let mut taps = event_taps2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                taps.retain(|tap| tap.send(TapMessage::Event(event.clone())).is_ok());
-              }
+              // Before best-effort broadcast consumers.
+              deliver_losslessly(&observers2, &event_taps2, &event);
               if let Some(sender) = event_tx2.load().as_ref() {
                 let _ = sender.send(event);
               }
@@ -312,6 +318,10 @@ impl BidiTransport {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+      observers2
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
       fail_pending(&pending2);
       reader_ended.send_replace(true);
       debug!("BiDi reader task ended");
@@ -324,6 +334,7 @@ impl BidiTransport {
       write_tx,
       event_tx,
       event_taps,
+      observers,
       closing,
       tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
     })
@@ -336,6 +347,11 @@ impl BidiTransport {
     self.event_tx.store(None);
     self
       .event_taps
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
+    self
+      .observers
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clear();
@@ -403,6 +419,19 @@ impl BidiTransport {
       .map_or_else(|| broadcast::channel(1).1, |sender| sender.subscribe())
   }
 
+  /// Run `observer` on every event from the reader, in wire order, until
+  /// it returns `false` or the transport closes. See [`EventObserver`].
+  pub(crate) fn observe_events(&self, observer: EventObserver) {
+    if self.closing.load(Ordering::Acquire) {
+      return;
+    }
+    self
+      .observers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(observer);
+  }
+
   /// Lossless, wire-ordered event tap. Never drops; consumers filter by
   /// method at the receive site. State-mutating consumers MUST use this
   /// instead of [`Self::subscribe_events`].
@@ -417,6 +446,32 @@ impl BidiTransport {
     }
     rx
   }
+}
+
+/// Hand `event` to the observers, dropping the ones that are done, then to
+/// the lossless taps: observers move state a reply must already reflect,
+/// taps feed the state trackers that drain them.
+fn deliver_losslessly(
+  observers: &std::sync::Mutex<Vec<EventObserver>>,
+  taps: &std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>,
+  event: &BidiEvent,
+) {
+  // Cloned out so an observer may register another.
+  let current = observers
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  let finished: Vec<EventObserver> = current.into_iter().filter(|observer| !observer(event)).collect();
+  if !finished.is_empty() {
+    observers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .retain(|observer| !finished.iter().any(|done| Arc::ptr_eq(done, observer)));
+  }
+  taps
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .retain(|tap| tap.send(TapMessage::Event(event.clone())).is_ok());
 }
 
 /// Process a `BiDi` command response (success or error) by correlating with the pending map.
@@ -479,6 +534,7 @@ mod tests {
       write_tx,
       event_tx: Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(broadcast::channel(1).0)))),
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      observers: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
       tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![worker]),
     };
@@ -558,6 +614,7 @@ mod tests {
       write_tx,
       event_tx: Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(broadcast::channel(1).0)))),
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      observers: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     };
@@ -604,6 +661,7 @@ mod tests {
       write_tx,
       event_tx: Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(broadcast::channel(1).0)))),
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
+      observers: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     };

@@ -655,21 +655,28 @@ impl ElementHandle {
     let deadline = (timeout_ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms));
     let _turn = page.screenshot_turn().await?;
     let mut attempt = 0usize;
-    let bytes = loop {
-      let backoff =
-        crate::locator::Locator::RETRY_BACKOFFS_MS[attempt.min(crate::locator::Locator::RETRY_BACKOFFS_MS.len() - 1)];
-      attempt += 1;
-      if backoff > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-      }
-      if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-        return Err(FerriError::timeout("screenshot", timeout_ms));
-      }
-      match crate::screenshotter::screenshot_resolved_element(&page, self.any_element(), format, &request).await {
-        Err(e) if e.to_string().contains("error:notvisible") => {},
-        other => break other?,
-      }
-    };
+    let bytes = crate::operation_budget::scoped(
+      timeout_ms,
+      || "screenshot".into(),
+      Box::pin(async {
+        loop {
+          let backoff = crate::locator::Locator::RETRY_BACKOFFS_MS
+            [attempt.min(crate::locator::Locator::RETRY_BACKOFFS_MS.len() - 1)];
+          attempt += 1;
+          if backoff > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+          }
+          if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err(FerriError::timeout("screenshot", timeout_ms));
+          }
+          match crate::screenshotter::screenshot_resolved_element(&page, self.any_element(), format, &request).await {
+            Err(e) if e.to_string().contains("error:notvisible") => {},
+            other => break other,
+          }
+        }
+      }),
+    )
+    .await?;
     if let Some(ref path) = opts.path {
       if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -1005,46 +1012,53 @@ impl ElementHandle {
 
     let backoffs_ms: [u64; 7] = [0, 0, 20, 50, 100, 100, 500];
     let mut idx: usize = 0;
-    loop {
-      if let Some(d) = deadline
-        && tokio::time::Instant::now() >= d
-      {
-        return Err(FerriError::timeout(
-          format!("wait_for_element_state {state_literal}"),
-          resolved_timeout,
-        ));
-      }
-      let delay_ms = backoffs_ms[idx.min(backoffs_ms.len() - 1)];
-      idx = idx.saturating_add(1);
-      if delay_ms > 0 {
-        let sleep_ms = match deadline {
-          Some(d) => {
-            let left =
-              u64::try_from(d.saturating_duration_since(tokio::time::Instant::now()).as_millis()).unwrap_or(delay_ms);
-            delay_ms.min(left)
-          },
-          None => delay_ms,
-        };
-        if sleep_ms > 0 {
-          tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-        }
-      }
+    crate::operation_budget::scoped(
+      resolved_timeout,
+      || format!("wait_for_element_state {state_literal}"),
+      async move {
+        loop {
+          if let Some(d) = deadline
+            && tokio::time::Instant::now() >= d
+          {
+            return Err(FerriError::timeout(
+              format!("wait_for_element_state {state_literal}"),
+              resolved_timeout,
+            ));
+          }
+          let delay_ms = backoffs_ms[idx.min(backoffs_ms.len() - 1)];
+          idx = idx.saturating_add(1);
+          if delay_ms > 0 {
+            let sleep_ms = match deadline {
+              Some(d) => {
+                let left = u64::try_from(d.saturating_duration_since(tokio::time::Instant::now()).as_millis())
+                  .unwrap_or(delay_ms);
+                delay_ms.min(left)
+              },
+              None => delay_ms,
+            };
+            if sleep_ms > 0 {
+              tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+            }
+          }
 
-      let outcome = self
-        .js_handle
-        .evaluate(&probe_expr, SerializedArgument::default(), Some(true))
-        .await?;
-      if let SerializedValue::Str(s) = &outcome {
-        if s == "done" {
-          return Ok(());
+          let outcome = self
+            .js_handle
+            .evaluate(&probe_expr, SerializedArgument::default(), Some(true))
+            .await?;
+          if let SerializedValue::Str(s) = &outcome {
+            if s == "done" {
+              return Ok(());
+            }
+            // Any `error:not*` is a retriable signal — keep polling until
+            // the deadline. Anything else is a hard error.
+            if !s.starts_with("error:not") {
+              return Err(FerriError::Evaluation(format!("wait_for_element_state: {s}")));
+            }
+          }
         }
-        // Any `error:not*` is a retriable signal — keep polling until
-        // the deadline. Anything else is a hard error.
-        if !s.starts_with("error:not") {
-          return Err(FerriError::Evaluation(format!("wait_for_element_state: {s}")));
-        }
-      }
-    }
+      },
+    )
+    .await
   }
 
   /// Playwright: `elementHandle.waitForSelector(selector, options?)`
@@ -1075,43 +1089,50 @@ impl ElementHandle {
 
     let backoffs_ms: [u64; 7] = [0, 0, 20, 50, 100, 100, 500];
     let mut idx: usize = 0;
-    loop {
-      if let Some(d) = deadline
-        && tokio::time::Instant::now() >= d
-      {
-        return Err(FerriError::timeout(
-          format!("wait_for_selector {selector}"),
-          resolved_timeout,
-        ));
-      }
-      let delay_ms = backoffs_ms[idx.min(backoffs_ms.len() - 1)];
-      idx = idx.saturating_add(1);
-      if delay_ms > 0 {
-        let sleep_ms = match deadline {
-          Some(d) => {
-            let left =
-              u64::try_from(d.saturating_duration_since(tokio::time::Instant::now()).as_millis()).unwrap_or(delay_ms);
-            delay_ms.min(left)
-          },
-          None => delay_ms,
-        };
-        if sleep_ms > 0 {
-          tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-        }
-      }
+    crate::operation_budget::scoped(
+      resolved_timeout,
+      || format!("wait_for_selector {selector}"),
+      async move {
+        loop {
+          if let Some(d) = deadline
+            && tokio::time::Instant::now() >= d
+          {
+            return Err(FerriError::timeout(
+              format!("wait_for_selector {selector}"),
+              resolved_timeout,
+            ));
+          }
+          let delay_ms = backoffs_ms[idx.min(backoffs_ms.len() - 1)];
+          idx = idx.saturating_add(1);
+          if delay_ms > 0 {
+            let sleep_ms = match deadline {
+              Some(d) => {
+                let left = u64::try_from(d.saturating_duration_since(tokio::time::Instant::now()).as_millis())
+                  .unwrap_or(delay_ms);
+                delay_ms.min(left)
+              },
+              None => delay_ms,
+            };
+            if sleep_ms > 0 {
+              tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+            }
+          }
 
-      // Evaluate_handle so a positive match returns a retained handle
-      // we can promote to an ElementHandle without a second round
-      // trip. Dispose intermediates eagerly on null.
-      let result = self
-        .js_handle
-        .evaluate_handle(&probe_expr, SerializedArgument::default(), Some(true))
-        .await?;
-      if let Some(eh) = result.as_element() {
-        return Ok(Some(eh));
-      }
-      let _ = result.dispose().await;
-    }
+          // Evaluate_handle so a positive match returns a retained handle
+          // we can promote to an ElementHandle without a second round
+          // trip. Dispose intermediates eagerly on null.
+          let result = self
+            .js_handle
+            .evaluate_handle(&probe_expr, SerializedArgument::default(), Some(true))
+            .await?;
+          if let Some(eh) = result.as_element() {
+            return Ok(Some(eh));
+          }
+          let _ = result.dispose().await;
+        }
+      },
+    )
+    .await
   }
 
   // ── Temp-tag bridge to Locator actions ───────────────────────────────

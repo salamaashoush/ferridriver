@@ -748,7 +748,12 @@ impl Page {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
     let pre_nav = self.observed_lens();
-    let result = self.inner.goto(&resolved, lifecycle, timeout, referer).await;
+    let result = crate::operation_budget::scoped(
+      timeout,
+      || format!("navigating to {resolved}"),
+      self.inner.goto(&resolved, lifecycle, timeout, referer),
+    )
+    .await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
     }
@@ -853,7 +858,9 @@ impl Page {
     let trace_span = self.trace_span("goBack", serde_json::json!({}));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let result = self
-      .finish_navigation(self.inner.go_back(lifecycle, timeout).await)
+      .finish_navigation(
+        crate::operation_budget::scoped(timeout, || "going back".into(), self.inner.go_back(lifecycle, timeout)).await,
+      )
       .await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
@@ -880,7 +887,14 @@ impl Page {
     let trace_span = self.trace_span("goForward", serde_json::json!({}));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let result = self
-      .finish_navigation(self.inner.go_forward(lifecycle, timeout).await)
+      .finish_navigation(
+        crate::operation_budget::scoped(
+          timeout,
+          || "going forward".into(),
+          self.inner.go_forward(lifecycle, timeout),
+        )
+        .await,
+      )
       .await;
     if let Some(span) = trace_span {
       self.snapshot_after_and_finish(span, result.as_ref().err()).await;
@@ -907,7 +921,8 @@ impl Page {
     let trace_span = self.trace_span("reload", serde_json::json!({}));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
     let pre_nav = self.observed_lens();
-    let result = self.inner.reload(lifecycle, timeout).await;
+    let result =
+      crate::operation_budget::scoped(timeout, || "reloading".into(), self.inner.reload(lifecycle, timeout)).await;
     let navigation_succeeded = result.is_ok();
     let result = self.finish_navigation(result).await;
     if let Some(span) = trace_span {
@@ -2294,19 +2309,13 @@ impl Page {
     if !opts.mask.is_empty() {
       self.inner.ensure_engine_injected().await?;
     }
-    let capture = crate::screenshotter::screenshot_page(self, &opts);
-    let bytes = match opts.timeout {
-      Some(ms) if ms > 0 => {
-        let fut = tokio::time::timeout(std::time::Duration::from_millis(ms), capture);
-        match fut.await {
-          Ok(res) => res?,
-          Err(_) => {
-            return Err(crate::error::FerriError::timeout("screenshot", ms));
-          },
-        }
-      },
-      _ => capture.await?,
-    };
+    let timeout = opts.timeout.unwrap_or_else(|| self.default_timeout());
+    let bytes = crate::operation_budget::scoped(
+      timeout,
+      || "screenshot".into(),
+      Box::pin(crate::screenshotter::screenshot_page(self, &opts)),
+    )
+    .await?;
     if let Some(ref path) = opts.path {
       if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -5383,7 +5392,10 @@ pub(crate) fn page_state_observer(
 ) -> impl Fn(&PageEvent) + Send + Sync {
   let wire_tracks_frames = matches!(
     kind,
-    crate::backend::BackendKind::CdpPipe | crate::backend::BackendKind::CdpWs | crate::backend::BackendKind::WebKit
+    crate::backend::BackendKind::CdpPipe
+      | crate::backend::BackendKind::CdpWs
+      | crate::backend::BackendKind::WebKit
+      | crate::backend::BackendKind::Bidi
   );
   move |event| {
     match event {

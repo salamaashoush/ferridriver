@@ -129,6 +129,40 @@ impl OperationBudget {
   }
 }
 
+/// Milliseconds the current operation has left: `None` outside one or
+/// for one without a timeout, `Some(0)` once its deadline has passed.
+pub(crate) fn operation_remaining_ms() -> Option<u64> {
+  OperationBudget::capture().and_then(|budget| match budget.remaining_ms() {
+    Ok(left) => left,
+    Err(_) => Some(0),
+  })
+}
+
+/// Run `future` as one public operation with `timeout_ms` (`0`: none), the
+/// way Playwright's `ProgressController` races a call and every protocol
+/// command it sends against one deadline: each command waits until that
+/// deadline rather than the transport's own default, and the operation
+/// ends there whatever it is waiting on. Nested inside another operation,
+/// the tighter deadline wins. An operation without a timeout arms no timer.
+///
+/// A command cut off by the deadline fails as the command it was, so once
+/// the deadline has passed a timeout is reported as `operation` timing out,
+/// unless it already carries the operation's own `Call log:`.
+pub(crate) async fn scoped<T>(
+  timeout_ms: u64,
+  operation: impl FnOnce() -> String,
+  future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+  let budget = OperationBudget::operation(timeout_ms)?;
+  match budget.scope(budget.wait(future)).await {
+    Err(Expired { timeout_ms }) => Err(FerriError::timeout(operation(), timeout_ms)),
+    Ok(Err(FerriError::Timeout { call_log, .. })) if call_log.is_empty() && budget.remaining_ms().is_err() => {
+      Err(FerriError::timeout(operation(), budget.timeout_ms()))
+    },
+    Ok(result) => result,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -211,6 +245,25 @@ mod tests {
       })
       .await;
     assert!(OperationBudget::capture().is_none());
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_scoped_operation_owns_the_deadline_of_its_commands() {
+    let command = || async {
+      OperationBudget::current(30_000)?
+        .wait(tokio::time::sleep(Duration::from_secs(45)))
+        .await
+        .map_err(|error| error.error("waiting for Page.navigate response"))
+    };
+    scoped(60_000, || "navigating".into(), command()).await.unwrap();
+    scoped(0, || "navigating".into(), command()).await.unwrap();
+    let started = Instant::now();
+    let error = scoped(1000, || "navigating".into(), command()).await.unwrap_err();
+    assert_eq!(error.to_string(), "Timeout 1000ms exceeded while navigating");
+    assert_eq!(Instant::now() - started, Duration::from_millis(1000));
+    let started = Instant::now();
+    assert!(command().await.unwrap_err().is_timeout_error());
+    assert_eq!(Instant::now() - started, Duration::from_secs(30));
   }
 
   #[tokio::test(start_paused = true)]

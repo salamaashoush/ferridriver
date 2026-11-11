@@ -252,7 +252,7 @@ impl Frame {
     let opts = options.unwrap_or_default();
     let polling = opts.polling.unwrap_or(crate::options::Polling::Raf);
     let timeout = opts.timeout.unwrap_or_else(|| self.page.default_timeout());
-    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    let deadline = deadline_after(timeout);
     // Truthiness is decided page-side (`!!`) so objects, NaN, and
     // empty-string edge cases follow JS semantics exactly instead of a
     // lossy serialized-value reconstruction.
@@ -262,51 +262,51 @@ impl Frame {
     } else {
       format!("!!({fn_source})")
     };
-    loop {
-      if let Some(d) = deadline
-        && tokio::time::Instant::now() >= d
-      {
-        return Err(crate::error::FerriError::timeout(
-          format!("waiting for function: {fn_source}"),
-          timeout,
-        ));
+    let expired = || deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
+    let timed_out = || crate::error::FerriError::timeout(format!("waiting for function: {fn_source}"), timeout);
+    crate::operation_budget::scoped(timeout, || format!("waiting for function: {fn_source}"), async move {
+      loop {
+        if expired() {
+          return Err(timed_out());
+        }
+        match self.evaluate(&probe, arg.clone(), Some(probe_is_function)).await {
+          Ok(value) => {
+            if crate::protocol::result_to_serde::<bool>(&value).unwrap_or(false) {
+              break;
+            }
+          },
+          Err(e) => {
+            if !crate::locator::is_retryable_action_error(&e.to_string()) {
+              return Err(e);
+            }
+          },
+        }
+        match polling {
+          crate::options::Polling::Interval(ms) => {
+            tokio::time::sleep(std::time::Duration::from_millis(ms.max(1))).await;
+          },
+          crate::options::Polling::Raf => {
+            // One animation frame between polls; a failing round-trip
+            // (frame mid-navigation) degrades to a frame-length sleep.
+            if self
+              .evaluate(
+                "() => new Promise(f => requestAnimationFrame(() => f(1)))",
+                crate::protocol::SerializedArgument::default(),
+                Some(true),
+              )
+              .await
+              .is_err()
+            {
+              tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            }
+          },
+        }
       }
-      match self.evaluate(&probe, arg.clone(), Some(probe_is_function)).await {
-        Ok(value) => {
-          if crate::protocol::result_to_serde::<bool>(&value).unwrap_or(false) {
-            break;
-          }
-        },
-        Err(e) => {
-          if !crate::locator::is_retryable_action_error(&e.to_string()) {
-            return Err(e);
-          }
-        },
-      }
-      match polling {
-        crate::options::Polling::Interval(ms) => {
-          tokio::time::sleep(std::time::Duration::from_millis(ms.max(1))).await;
-        },
-        crate::options::Polling::Raf => {
-          // One animation frame between polls; a failing round-trip
-          // (frame mid-navigation) degrades to a frame-length sleep.
-          if self
-            .evaluate(
-              "() => new Promise(f => requestAnimationFrame(() => f(1)))",
-              crate::protocol::SerializedArgument::default(),
-              Some(true),
-            )
-            .await
-            .is_err()
-          {
-            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-          }
-        },
-      }
-    }
-    // Materialize the truthy result as a handle. The function runs once
-    // more; waitForFunction predicates are truthy-stable by contract.
-    self.evaluate_handle(fn_source, arg, is_function).await
+      // Materialize the truthy result as a handle. The function runs once
+      // more; waitForFunction predicates are truthy-stable by contract.
+      self.evaluate_handle(fn_source, arg, is_function).await
+    })
+    .await
   }
 
   /// Playwright: `frame.$eval(selector, pageFunction, arg?): Promise<R>`
@@ -729,13 +729,16 @@ impl Frame {
   ) -> Result<Option<crate::network::Response>> {
     use crate::events::PageEvent;
     let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = deadline_after(timeout_ms);
     let main = self.is_main_frame();
     let wanted = |url: &str| opts.url.as_ref().is_none_or(|matcher| matcher.matches(url));
     let mut document: Option<crate::network::Response> = None;
     let response = loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      let event = match tokio::time::timeout(remaining, events.recv()).await {
+      let next = match deadline {
+        Some(d) => tokio::time::timeout_at(d, events.recv()).await,
+        None => Ok(events.recv().await),
+      };
+      let event = match next {
         Ok(Some(event)) => event,
         Ok(None) => return Err(crate::error::FerriError::target_closed(None)),
         Err(_) => return Err(crate::error::FerriError::timeout("waiting for navigation", timeout_ms)),
@@ -772,12 +775,8 @@ impl Frame {
       crate::options::LoadState::Commit => return Ok(response),
       state => state.as_str(),
     };
-    let remaining = u64::try_from(
-      deadline
-        .saturating_duration_since(tokio::time::Instant::now())
-        .as_millis(),
-    )
-    .unwrap_or(u64::MAX);
+    let remaining = remaining_timeout(deadline)
+      .ok_or_else(|| crate::error::FerriError::timeout("waiting for navigation", timeout_ms))?;
     self
       .wait_for_load_state_impl(
         Some(state),
@@ -852,7 +851,7 @@ impl Frame {
     opts: crate::options::WaitForUrlOptions,
   ) -> Result<()> {
     let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = deadline_after(timeout_ms);
     let timed_out = || {
       crate::error::FerriError::timeout(
         format!("waiting for URL matching {:?}", condition.describe()),
@@ -864,19 +863,27 @@ impl Frame {
     loop {
       let url = self.url();
       if tested.as_deref() != Some(url.as_str()) {
-        let matched = tokio::time::timeout_at(deadline, condition.test(&url))
-          .await
-          .map_err(|_| timed_out())??;
+        let matched = match deadline {
+          Some(d) => tokio::time::timeout_at(d, condition.test(&url))
+            .await
+            .map_err(|_| timed_out())??,
+          None => condition.test(&url).await?,
+        };
         if matched {
           break;
         }
         tested = Some(url);
       }
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      if remaining.is_zero() {
-        return Err(timed_out());
-      }
-      let tick = remaining.min(std::time::Duration::from_millis(250));
+      let tick = match deadline {
+        None => std::time::Duration::from_millis(250),
+        Some(d) => {
+          let remaining = d.saturating_duration_since(tokio::time::Instant::now());
+          if remaining.is_zero() {
+            return Err(timed_out());
+          }
+          remaining.min(std::time::Duration::from_millis(250))
+        },
+      };
       tokio::select! {
         ev = events.recv() => {
           if ev.is_none() {
@@ -892,12 +899,7 @@ impl Frame {
       crate::options::LoadState::Commit => return Ok(()),
       state => state.as_str(),
     };
-    let remaining = u64::try_from(
-      deadline
-        .saturating_duration_since(tokio::time::Instant::now())
-        .as_millis(),
-    )
-    .unwrap_or(u64::MAX);
+    let remaining = remaining_timeout(deadline).ok_or_else(timed_out)?;
     self
       .wait_for_load_state_impl(
         Some(state),
@@ -1138,81 +1140,80 @@ impl Frame {
 
   pub(crate) async fn set_content_impl(&self, html: &str, opts: crate::options::SetContentOptions) -> Result<()> {
     let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_navigation_timeout());
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = deadline_after(timeout_ms);
+    let timed_out = || crate::error::FerriError::timeout("setting frame content", timeout_ms);
     let wait_until = opts.wait_until.unwrap_or_default();
-    let state = if self.is_main_frame() {
-      self.page.inner.set_content(html).await?;
-      match wait_until {
-        crate::options::LoadState::Commit => None,
-        state => Some(state.as_str()),
-      }
-    } else {
-      // Chromium reports `complete` for a document rewritten this way while
-      // its images are still loading, though its `load` event still waits
-      // for them. A listener added before `document.open()` is removed by
-      // it, and with nothing to load the event fires inside
-      // `document.close()`, so the listener goes on between the two. The
-      // event leaves a mark that is read back.
-      let load = matches!(
-        wait_until,
-        crate::options::LoadState::Load | crate::options::LoadState::NetworkIdle
-      );
-      self
-        .evaluate_untraced(
-          "({ html, mark }) => { \
+    crate::operation_budget::scoped(timeout_ms, || "setting frame content".into(), async move {
+      let state = if self.is_main_frame() {
+        self.page.inner.set_content(html).await?;
+        match wait_until {
+          crate::options::LoadState::Commit => None,
+          state => Some(state.as_str()),
+        }
+      } else {
+        // Chromium reports `complete` for a document rewritten this way while
+        // its images are still loading, though its `load` event still waits
+        // for them. A listener added before `document.open()` is removed by
+        // it, and with nothing to load the event fires inside
+        // `document.close()`, so the listener goes on between the two. The
+        // event leaves a mark that is read back.
+        let load = matches!(
+          wait_until,
+          crate::options::LoadState::Load | crate::options::LoadState::NetworkIdle
+        );
+        self
+          .evaluate_untraced(
+            "({ html, mark }) => { \
              delete window[mark]; \
              document.open(); document.write(html); \
              window.addEventListener('load', () => { window[mark] = true; }, { once: true }); \
              document.close(); \
            }",
-          crate::protocol::argument_from_serde(&serde_json::json!({ "html": html, "mark": SET_CONTENT_MARK }))?,
-          Some(true),
-        )
-        .await?;
-      if load {
-        loop {
-          // Read in the world the mark was set in.
-          let loaded = self
-            .evaluate_untraced(
-              "mark => { const loaded = window[mark] === true; if (loaded) delete window[mark]; return loaded; }",
-              crate::protocol::argument_from_serde(SET_CONTENT_MARK)?,
-              Some(true),
-            )
-            .await?;
-          if matches!(loaded, crate::protocol::SerializedValue::Bool(true)) {
-            break;
+            crate::protocol::argument_from_serde(&serde_json::json!({ "html": html, "mark": SET_CONTENT_MARK }))?,
+            Some(true),
+          )
+          .await?;
+        if load {
+          loop {
+            // Read in the world the mark was set in.
+            let loaded = self
+              .evaluate_untraced(
+                "mark => { const loaded = window[mark] === true; if (loaded) delete window[mark]; return loaded; }",
+                crate::protocol::argument_from_serde(SET_CONTENT_MARK)?,
+                Some(true),
+              )
+              .await?;
+            if matches!(loaded, crate::protocol::SerializedValue::Bool(true)) {
+              break;
+            }
+            if deadline.is_some_and(|d| tokio::time::Instant::now() >= d) {
+              return Err(timed_out());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
           }
-          if tokio::time::Instant::now() >= deadline {
-            return Err(crate::error::FerriError::timeout("setting frame content", timeout_ms));
-          }
-          tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+        (wait_until == crate::options::LoadState::NetworkIdle).then_some("networkidle")
+      };
+      if let Some(state) = state {
+        let remaining = remaining_timeout(deadline).ok_or_else(timed_out)?;
+        self
+          .wait_for_load_state_impl(
+            Some(state),
+            crate::options::WaitForLoadStateOptions {
+              timeout: Some(remaining),
+            },
+          )
+          .await?;
       }
-      (wait_until == crate::options::LoadState::NetworkIdle).then_some("networkidle")
-    };
-    if let Some(state) = state {
-      let remaining = u64::try_from(
-        deadline
-          .saturating_duration_since(tokio::time::Instant::now())
-          .as_millis(),
-      )
-      .unwrap_or(u64::MAX);
-      self
-        .wait_for_load_state_impl(
-          Some(state),
-          crate::options::WaitForLoadStateOptions {
-            timeout: Some(remaining),
-          },
-        )
-        .await?;
-    }
-    // The new document's subframes are attached by now. The listener
-    // can miss the ones of a page that never navigated, whose main frame
-    // no event has introduced, so the tree is read back.
-    if let Ok(infos) = self.page.inner.get_frame_tree().await {
-      self.page.reseed_frames(infos);
-    }
-    Ok(())
+      // The new document's subframes are attached by now. The listener
+      // can miss the ones of a page that never navigated, whose main frame
+      // no event has introduced, so the tree is read back.
+      if let Ok(infos) = self.page.inner.get_frame_tree().await {
+        self.page.reseed_frames(infos);
+      }
+      Ok(())
+    })
+    .await
   }
 
   /// Playwright: `frame.addScriptTag(options?: { content?, path?, type?,
@@ -1419,7 +1420,7 @@ impl Frame {
       }
     }
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let deadline = deadline_after(timeout_ms);
 
     let (js, timeout_label) = match state {
       "domcontentloaded" => (JS_WAIT_DOMCONTENTLOADED, "waiting for domcontentloaded"),
@@ -1427,22 +1428,30 @@ impl Frame {
       _ => (JS_WAIT_LOAD, "waiting for load state"),
     };
 
-    loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      if remaining.is_zero() {
-        return Err(crate::error::FerriError::timeout(timeout_label, timeout_ms));
+    crate::operation_budget::scoped(timeout_ms, || timeout_label.into(), async move {
+      loop {
+        let attempt_cap = match deadline {
+          None => std::time::Duration::from_secs(5),
+          Some(d) => {
+            let remaining = d.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+              return Err(crate::error::FerriError::timeout(timeout_label, timeout_ms));
+            }
+            remaining.min(std::time::Duration::from_secs(5))
+          },
+        };
+        match tokio::time::timeout(attempt_cap, self.eval::<bool>(js)).await {
+          Ok(Ok(true)) => return Ok(()),
+          Ok(Ok(false) | Err(_)) => {
+            // Transient evaluate failure (document destroyed mid-wait);
+            // brief pause, then re-arm in whatever document is live now.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+          },
+          Err(_) => {}, // attempt cap hit — re-arm
+        }
       }
-      let attempt_cap = remaining.min(std::time::Duration::from_secs(5));
-      match tokio::time::timeout(attempt_cap, self.eval::<bool>(js)).await {
-        Ok(Ok(true)) => return Ok(()),
-        Ok(Ok(false) | Err(_)) => {
-          // Transient evaluate failure (document destroyed mid-wait);
-          // brief pause, then re-arm in whatever document is live now.
-          tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        },
-        Err(_) => {}, // attempt cap hit — re-arm
-      }
-    }
+    })
+    .await
   }
 
   // ── Action methods (Playwright parity — task 3.9) ──────────────────────
@@ -2023,4 +2032,21 @@ fn missing_tag_source() -> crate::error::FerriError {
     "options",
     "Provide an object with a `url`, `path` or `content` property",
   )
+}
+
+/// `timeout_ms` from now, or `None` for `0`, which is no timeout.
+fn deadline_after(timeout_ms: u64) -> Option<tokio::time::Instant> {
+  (timeout_ms != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms))
+}
+
+/// What is left of `deadline` as a timeout to hand a nested wait (`0`:
+/// none), or `None` once it has passed.
+fn remaining_timeout(deadline: Option<tokio::time::Instant>) -> Option<u64> {
+  match deadline {
+    None => Some(0),
+    Some(d) => match d.saturating_duration_since(tokio::time::Instant::now()).as_millis() {
+      0 => None,
+      left => Some(u64::try_from(left).unwrap_or(u64::MAX)),
+    },
+  }
 }

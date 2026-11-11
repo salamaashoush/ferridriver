@@ -81,16 +81,25 @@ macro_rules! retry_resolve {
     let mut __trace_input_pending = __trace_span.is_some();
     // Last call-log line, to collapse identical retry messages.
     let mut __trace_last_log = ::std::string::String::new();
-    let __result = 'retry: {
-      let __op_name: &str = $op;
-      let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
-      let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
-        ::std::option::Option::None
-      } else {
-        ::std::option::Option::Some(
-          ::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout),
-        )
-      };
+    let __op_name: &str = $op;
+    let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
+    let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
+      ::std::option::Option::None
+    } else {
+      ::std::option::Option::Some(
+        ::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout),
+      )
+    };
+    let __expired = || __deadline.is_some_and(|__d| ::std::time::Instant::now() >= __d);
+    // Every protocol command of every attempt waits at most until the
+    // action's deadline, so a stalled browser fails the action on time.
+    // The attempt itself is not cut off: it reports why it failed, which
+    // the call log carries (Playwright's "element is outside of the
+    // viewport").
+    let __budget = $crate::operation_budget::OperationBudget::operation(__resolved_timeout);
+    let __result = match __budget {
+      ::std::result::Result::Err(__e) => ::std::result::Result::Err(__e),
+      ::std::result::Result::Ok(__budget) => __budget.scope(async { 'retry: {
 
       let __signal = $crate::abort::current();
       if let ::std::option::Option::Some(__signal) = __signal.as_ref()
@@ -109,13 +118,11 @@ macro_rules! retry_resolve {
         }
         // Deadline check up-front so we never race into one more attempt after
         // time has already run out.
-        if let ::std::option::Option::Some(__d) = __deadline {
-          if ::std::time::Instant::now() >= __d {
-            break 'retry ::std::result::Result::Err(
-              $crate::error::FerriError::timeout(__op_name.to_string(), __resolved_timeout)
-                .with_call_log(::std::mem::take(&mut __call_log)),
-            );
-          }
+        if __expired() {
+          break 'retry ::std::result::Result::Err(
+            $crate::error::FerriError::timeout(__op_name.to_string(), __resolved_timeout)
+              .with_call_log(::std::mem::take(&mut __call_log)),
+          );
         }
 
         // Action pre-checks: run registered locator handlers if any of their
@@ -158,6 +165,9 @@ macro_rules! retry_resolve {
         };
         let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
         if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
+          if __expired() {
+            continue;
+          }
           break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
         }
         let __sel_js = match $crate::selectors::build_selone_js(&__rsel, "window.__fd", $self.strict) {
@@ -214,9 +224,11 @@ macro_rules! retry_resolve {
                     }
                     __trace_last_log = __line;
                   }
-                } else {
+                } else if !__expired() {
                   break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
                 }
+                // Otherwise a command the deadline cut off: the loop's own
+                // check reports the action timing out, with its call log.
               },
             }
           },
@@ -234,6 +246,7 @@ macro_rules! retry_resolve {
           },
         }
       }
+    }}).await,
     };
     if let ::std::option::Option::Some(__s) = __trace_span {
       __trace_page
@@ -1834,83 +1847,84 @@ impl Locator {
     let state = opts.state.unwrap_or_default();
     // Playwright's `timeout: 0` waits for as long as it takes.
     let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    let timed_out = || format!("waiting for '{}' to be {state}", self.selector);
 
-    loop {
-      if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-        return Err(crate::error::FerriError::timeout(
-          format!("waiting for '{}' to be {state}", self.selector),
-          timeout,
-        ));
+    crate::operation_budget::scoped(timeout, timed_out, async move {
+      loop {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+          return Err(crate::error::FerriError::timeout(timed_out(), timeout));
+        }
+        // Resolve frameLocator enter-frame hops each poll so a child frame
+        // that is not yet attached (or was re-attached) is picked up on a
+        // later attempt (no-op for plain selectors). A resolution failure
+        // means the parent `<iframe>` / child frame is not present: for
+        // `attached`/`visible` that is a retry, for `detached`/`hidden`
+        // the element is by definition gone.
+        let resolved = self.resolved().await;
+        let attached = match &resolved {
+          Ok((rframe, rsel)) => {
+            let inner = rframe.page_arc().inner();
+            let frame_id: Option<&str> = if rframe.is_main_frame() {
+              None
+            } else {
+              Some(rframe.id())
+            };
+            let sel_js = selectors::build_selone_js(rsel, "window.__fd", self.strict)?;
+            // A document being replaced has no engine yet: not attached.
+            let found = match inner.ensure_engine_injected().await {
+              Ok(()) => selectors::query_one_prebuilt(inner, &sel_js, &self.selector, frame_id)
+                .await
+                .map(|_| ()),
+              Err(e) => Err(e),
+            };
+            selectors::cleanup_tags(inner).await;
+            match found {
+              Ok(()) => true,
+              // Playwright's strict `waitForSelector` throws on a second
+              // match; waiting on would only end in a timeout that hides it.
+              Err(e) => match selectors::parse_strict_violation_count(&e) {
+                Some(count) => return Err(crate::error::FerriError::strict(self.selector.clone(), count)),
+                None => false,
+              },
+            }
+          },
+          Err(_) => false,
+        };
+        match state {
+          crate::options::WaitState::Attached => {
+            // Only require DOM presence — do not consult computed style.
+            if attached {
+              return Ok(());
+            }
+          },
+          crate::options::WaitState::Visible => {
+            // DOM presence AND computed-style visible. Fail silently
+            // (fall through to next poll) if `is_visible()` errors
+            // because the element is detached mid-poll.
+            if let Ok(true) = self.is_visible().await {
+              return Ok(());
+            }
+          },
+          crate::options::WaitState::Detached => {
+            if !attached {
+              return Ok(());
+            }
+          },
+          crate::options::WaitState::Hidden => {
+            // Playwright: `hidden` is satisfied by detachment OR by the
+            // element being present but not visible.
+            if !attached {
+              return Ok(());
+            }
+            if let Ok(false) = self.is_visible().await {
+              return Ok(());
+            }
+          },
+        }
+        crate::abort::sleep(std::time::Duration::from_millis(50)).await;
       }
-      // Resolve frameLocator enter-frame hops each poll so a child frame
-      // that is not yet attached (or was re-attached) is picked up on a
-      // later attempt (no-op for plain selectors). A resolution failure
-      // means the parent `<iframe>` / child frame is not present: for
-      // `attached`/`visible` that is a retry, for `detached`/`hidden`
-      // the element is by definition gone.
-      let resolved = self.resolved().await;
-      let attached = match &resolved {
-        Ok((rframe, rsel)) => {
-          let inner = rframe.page_arc().inner();
-          let frame_id: Option<&str> = if rframe.is_main_frame() {
-            None
-          } else {
-            Some(rframe.id())
-          };
-          let sel_js = selectors::build_selone_js(rsel, "window.__fd", self.strict)?;
-          // A document being replaced has no engine yet: not attached.
-          let found = match inner.ensure_engine_injected().await {
-            Ok(()) => selectors::query_one_prebuilt(inner, &sel_js, &self.selector, frame_id)
-              .await
-              .map(|_| ()),
-            Err(e) => Err(e),
-          };
-          selectors::cleanup_tags(inner).await;
-          match found {
-            Ok(()) => true,
-            // Playwright's strict `waitForSelector` throws on a second
-            // match; waiting on would only end in a timeout that hides it.
-            Err(e) => match selectors::parse_strict_violation_count(&e) {
-              Some(count) => return Err(crate::error::FerriError::strict(self.selector.clone(), count)),
-              None => false,
-            },
-          }
-        },
-        Err(_) => false,
-      };
-      match state {
-        crate::options::WaitState::Attached => {
-          // Only require DOM presence — do not consult computed style.
-          if attached {
-            return Ok(());
-          }
-        },
-        crate::options::WaitState::Visible => {
-          // DOM presence AND computed-style visible. Fail silently
-          // (fall through to next poll) if `is_visible()` errors
-          // because the element is detached mid-poll.
-          if let Ok(true) = self.is_visible().await {
-            return Ok(());
-          }
-        },
-        crate::options::WaitState::Detached => {
-          if !attached {
-            return Ok(());
-          }
-        },
-        crate::options::WaitState::Hidden => {
-          // Playwright: `hidden` is satisfied by detachment OR by the
-          // element being present but not visible.
-          if !attached {
-            return Ok(());
-          }
-          if let Ok(false) = self.is_visible().await {
-            return Ok(());
-          }
-        },
-      }
-      crate::abort::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    })
+    .await
   }
 
   // ── Screenshot ────────────────────────────────────────────────────────────
@@ -2405,37 +2419,48 @@ impl Locator {
     timeout_ms: Option<u64>,
   ) -> Result<()> {
     let timeout = timeout_ms.unwrap_or_else(|| self.frame.page_arc().default_timeout());
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-    loop {
-      let now = tokio::time::Instant::now();
-      if now >= deadline {
-        return Err(crate::error::FerriError::timeout(
-          format!("waiting for function on locator {}", self.selector),
-          timeout,
-        ));
-      }
-      let remaining = u64::try_from((deadline - now).as_millis()).unwrap_or(u64::MAX);
-      let opts = crate::options::EvaluateOptions {
-        timeout: Some(remaining),
-      };
-      if let Ok(value) = self
-        .evaluate_impl(fn_source, arg.clone(), is_function, Some(opts))
-        .await
-        && let Ok(json) = crate::protocol::result_to_serde::<serde_json::Value>(&value)
-      {
-        let truthy = match &json {
-          serde_json::Value::Bool(b) => *b,
-          serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
-          serde_json::Value::String(s) => !s.is_empty(),
-          serde_json::Value::Null => false,
-          _ => true,
-        };
-        if truthy {
-          return Ok(());
+    // Playwright's `timeout: 0` waits for as long as it takes.
+    let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    let timed_out = || format!("waiting for function on locator {}", self.selector);
+    crate::operation_budget::scoped(
+      timeout,
+      timed_out,
+      Box::pin(async move {
+        loop {
+          let remaining = match deadline {
+            None => 0,
+            Some(deadline) => match deadline
+              .saturating_duration_since(tokio::time::Instant::now())
+              .as_millis()
+            {
+              0 => return Err(crate::error::FerriError::timeout(timed_out(), timeout)),
+              left => u64::try_from(left).unwrap_or(u64::MAX),
+            },
+          };
+          let opts = crate::options::EvaluateOptions {
+            timeout: Some(remaining),
+          };
+          if let Ok(value) = self
+            .evaluate_impl(fn_source, arg.clone(), is_function, Some(opts))
+            .await
+            && let Ok(json) = crate::protocol::result_to_serde::<serde_json::Value>(&value)
+          {
+            let truthy = match &json {
+              serde_json::Value::Bool(b) => *b,
+              serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
+              serde_json::Value::String(s) => !s.is_empty(),
+              serde_json::Value::Null => false,
+              _ => true,
+            };
+            if truthy {
+              return Ok(());
+            }
+          }
+          tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+      }),
+    )
+    .await
   }
 
   /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`
@@ -2781,54 +2806,60 @@ impl Locator {
       )]
     };
     let mut attempt = 0usize;
-    loop {
-      let delay = backoffs[attempt.min(backoffs.len() - 1)];
-      attempt += 1;
-      if delay > 0 {
-        let left = deadline.map_or(delay, |deadline| {
-          u64::try_from(
-            deadline
-              .saturating_duration_since(tokio::time::Instant::now())
-              .as_millis(),
-          )
-          .unwrap_or(delay)
-        });
-        crate::abort::sleep(std::time::Duration::from_millis(delay.min(left))).await;
-      }
-      if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-        return Err(crate::error::FerriError::timeout(op, timeout).with_call_log(call_log()));
-      }
-      let evaluated: Result<(Option<serde_json::Value>, String)> = async {
-        let (frame, selector) = self.resolved().await?;
-        let parts_json = selectors::build_parts_json(&selectors::parse(&selector)?);
-        let inner = frame.page_arc().inner();
-        inner.ensure_engine_injected().await?;
-        let js = selectors::build_read_js(&parts_json, self.strict, js_body, "window.__fd");
-        let raw = if frame.is_main_frame() {
-          inner.evaluate(&js).await
-        } else {
-          inner.evaluate_in_frame(&js, frame.id()).await
-        }?;
-        Ok((raw, selector))
-      }
-      .await;
-      match evaluated {
-        // What the page answered is settled: a value, a breach of strict
-        // mode, or an element the read rejects. Only no match waits.
-        Ok((raw, selector)) => {
-          if let Some(value) = selectors::decode_read_result(raw, &selector)? {
-            return Ok(value);
+    // Commands only: the loop owns the deadline, so its timeout keeps
+    // the `Call log:` the operation recorded.
+    crate::operation_budget::OperationBudget::operation(timeout)?
+      .scope(async move {
+        loop {
+          let delay = backoffs[attempt.min(backoffs.len() - 1)];
+          attempt += 1;
+          if delay > 0 {
+            let left = deadline.map_or(delay, |deadline| {
+              u64::try_from(
+                deadline
+                  .saturating_duration_since(tokio::time::Instant::now())
+                  .as_millis(),
+              )
+              .unwrap_or(delay)
+            });
+            crate::abort::sleep(std::time::Duration::from_millis(delay.min(left))).await;
           }
-        },
-        Err(
-          e @ (crate::error::FerriError::InvalidSelector { .. }
-          | crate::error::FerriError::TargetClosed { .. }
-          | crate::error::FerriError::Aborted { .. }),
-        ) => return Err(e),
-        // A frame between documents, or one not attached yet.
-        Err(_) => {},
-      }
-    }
+          if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(crate::error::FerriError::timeout(op, timeout).with_call_log(call_log()));
+          }
+          let evaluated: Result<(Option<serde_json::Value>, String)> = async {
+            let (frame, selector) = self.resolved().await?;
+            let parts_json = selectors::build_parts_json(&selectors::parse(&selector)?);
+            let inner = frame.page_arc().inner();
+            inner.ensure_engine_injected().await?;
+            let js = selectors::build_read_js(&parts_json, self.strict, js_body, "window.__fd");
+            let raw = if frame.is_main_frame() {
+              inner.evaluate(&js).await
+            } else {
+              inner.evaluate_in_frame(&js, frame.id()).await
+            }?;
+            Ok((raw, selector))
+          }
+          .await;
+          match evaluated {
+            // What the page answered is settled: a value, a breach of strict
+            // mode, or an element the read rejects. Only no match waits.
+            Ok((raw, selector)) => {
+              if let Some(value) = selectors::decode_read_result(raw, &selector)? {
+                return Ok(value);
+              }
+            },
+            Err(
+              e @ (crate::error::FerriError::InvalidSelector { .. }
+              | crate::error::FerriError::TargetClosed { .. }
+              | crate::error::FerriError::Aborted { .. }),
+            ) => return Err(e),
+            // A frame between documents, or one not attached yet.
+            Err(_) => {},
+          }
+        }
+      })
+      .await
   }
 
   /// Legacy: non-retrying eval for callers that handle retry themselves.

@@ -983,6 +983,10 @@ impl Response {
         "Response.body() is not supported on this backend".into(),
       ));
     };
+    // Playwright's `internalBody` awaits the response finishing first: a
+    // body read as soon as a `commit` goto returns is still arriving, and
+    // Chromium has none to give for it yet.
+    let _ = self.finished().await;
     let bytes = f().await?;
     self.inner.state.write().await.body_cache = Some(bytes.clone());
     Ok(bytes)

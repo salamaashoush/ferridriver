@@ -897,9 +897,18 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
   // on retry resyncs us to the current layout.
   let retry_backoff_ms: [u64; 5] = [0, 20, 100, 100, 500];
   let mut attempt: usize = 0;
+  let mut last_reason: Option<String> = None;
   loop {
     if attempt > 0 {
       let wait_ms = retry_backoff_ms[attempt.min(retry_backoff_ms.len() - 1)];
+      // The action's deadline falls inside this wait: report why the last
+      // attempt failed, which the action's call log records, rather than
+      // sleep into the deadline and time out with no reason.
+      if let Some(reason) = last_reason.take()
+        && crate::operation_budget::operation_remaining_ms().is_some_and(|left| left <= wait_ms)
+      {
+        return Err(FerriError::Backend(reason));
+      }
       if wait_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
       }
@@ -936,6 +945,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
           if attempt >= retry_backoff_ms.len() + 2 {
             return Err(FerriError::Backend(reason));
           }
+          last_reason = Some(reason);
           continue;
         },
       }
