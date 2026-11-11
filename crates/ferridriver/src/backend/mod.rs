@@ -2130,6 +2130,21 @@ impl AnyPage {
     }
   }
 
+  /// A raw `WebKit` Inspector Protocol session on this page's main target.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Unsupported`] off the `WebKit`
+  /// backend.
+  pub fn new_webkit_session(&self) -> Result<crate::webkit_session::WebKitSession> {
+    match self {
+      Self::WebKit(p) => Ok(crate::webkit_session::WebKitSession::new(p.clone())),
+      Self::CdpPipe(_) | Self::CdpWs(_) | Self::Bidi(_) | Self::WebDriver(_) => Err(
+        crate::error::FerriError::unsupported("WebKit session is only available on the webkit backend"),
+      ),
+    }
+  }
+
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     page_dispatch!(self, route(route))
   }

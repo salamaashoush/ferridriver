@@ -703,6 +703,25 @@ impl ContextRef {
     page.inner().new_cdp_session().await
   }
 
+  /// A raw `WebKit` Inspector Protocol session on `page`'s main target,
+  /// the `WebKit` counterpart of [`Self::new_cdp_session`]. Playwright
+  /// keeps the same session private, as `WKPage._session`. `WebKit` only.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::InvalidArgument`] for a page of
+  /// another context, and [`crate::error::FerriError::Unsupported`] on
+  /// Chromium, `BiDi`, and `WebDriver`.
+  pub fn new_webkit_session(&self, page: &Page) -> Result<crate::webkit_session::WebKitSession> {
+    if page.context().map(Self::composite) != Some(self.composite()) {
+      return Err(crate::error::FerriError::invalid_argument(
+        "page",
+        "the page belongs to another browser context",
+      ));
+    }
+    page.inner().new_webkit_session()
+  }
+
   /// Install every registered context-level WebSocket route onto a
   /// fresh page (context scope — page-level routes keep precedence).
   async fn apply_context_ws_routes(&self, page: &Arc<Page>) -> Result<()> {

@@ -90,6 +90,28 @@ JSON pipe to a `pw_run.sh` child process. Same code on Linux and macOS.
   or `npx playwright install webkit`.
 - A few hundred MB on disk per platform.
 
+**Raw protocol access**
+
+`context.new_webkit_session(&page)` is the WebKit counterpart of
+`new_cdp_session`: a raw WebKit Inspector Protocol session on the page's
+main target, for domains Playwright does not wrap, such as `LayerTree`.
+Playwright keeps the same session private, as `WKPage._session`.
+
+```rust
+let session = context.new_webkit_session(&page)?;
+session.send("LayerTree.enable", json!({})).await?;
+let document = session.send("DOM.getDocument", json!({})).await?;
+let layers = session
+  .send("LayerTree.layersForNode", json!({ "nodeId": document["root"]["nodeId"] }))
+  .await?;
+```
+
+`send` always reaches the target that is live at the call, so it follows a
+cross-process navigation. `session.events()` streams the live target's
+events in wire order, and ends when that target goes away; take another
+after a cross-process navigation. Once the page closes, `send` is refused
+and its events have ended.
+
 ## `bidi` — Firefox via WebDriver BiDi
 
 Native Firefox driver. ferridriver launches `firefox` with a fresh
