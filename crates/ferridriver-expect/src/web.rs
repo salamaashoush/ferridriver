@@ -45,6 +45,15 @@ impl Receiver<'_> {
     }
   }
 
+  /// The backoff between two judgements, cut short by a change to the
+  /// document being judged.
+  async fn pause(&self, pause: Duration) {
+    match self {
+      Self::Locator(locator) => locator.pause_until_change(pause).await,
+      Self::Page(page) => page.pause_until_change(pause).await,
+    }
+  }
+
   async fn judge(&self, params: &ExpectParams) -> ferridriver::Result<ExpectOutcome> {
     match self {
       Self::Locator(locator) => locator.expect_once(params).await,
@@ -207,7 +216,7 @@ impl<'a> WebAssert<'a> {
         break;
       }
       if !pause.is_zero() {
-        ferridriver::abort::sleep(remaining.map_or(pause, |r| pause.min(r))).await;
+        self.receiver.pause(remaining.map_or(pause, |r| pause.min(r))).await;
       }
       let remaining = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
       if remaining.is_some_and(|r| r.is_zero()) || aborted() {

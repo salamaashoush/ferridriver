@@ -77,3 +77,52 @@ test.describe('waitForSelector with several matches', () => {
     await page.locator('.row').nth(1).waitFor({ state: 'attached', timeout: 3000 });
   });
 });
+
+// The wait is held in the page and reruns on DOM mutations, which do not
+// carry every way an element comes to match. Each case below changes the
+// answer with no mutation record in the watched document.
+test.describe('waitFor sees changes no mutation record carries', () => {
+  test('a rule inserted through the CSSOM', async ({ page }) => {
+    await page.setContent("<style>#box { display: none }</style><p id='box'>x</p>");
+    await page.evaluate(() => {
+      setTimeout(() => document.styleSheets[0].insertRule('#box { display: block !important }', 1), 150);
+    });
+    await page.locator('#box').waitFor({ state: 'visible', timeout: 3000 });
+    await page.evaluate(() => {
+      setTimeout(() => document.styleSheets[0].deleteRule(1), 150);
+    });
+    await page.locator('#box').waitFor({ state: 'hidden', timeout: 3000 });
+  });
+
+  test("an element added inside a shadow root", async ({ page }) => {
+    await page.setContent("<div id='host'></div>");
+    await page.evaluate(() => {
+      const root = document.getElementById('host')!.attachShadow({ mode: 'open' });
+      setTimeout(() => { root.innerHTML = "<button id='deep'>deep</button>"; }, 150);
+    });
+    await page.locator('#deep').waitFor({ timeout: 3000 });
+    await page.evaluate(() => {
+      setTimeout(() => { document.getElementById('host')!.shadowRoot!.innerHTML = ''; }, 150);
+    });
+    await page.locator('#deep').waitFor({ state: 'detached', timeout: 3000 });
+  });
+
+  test('a paused clock neither strands the wait nor its timeout', async ({ page }) => {
+    await page.clock.install({ time: 1_000_000_000_000 });
+    await page.setContent('<main></main>');
+    await page.clock.pauseAt(1_000_000_060_000);
+    const started = Date.now();
+    expect(await message(page.locator('#never').waitFor({ timeout: 400 }))).toMatch(/Timeout 400ms/);
+    expect(Date.now() - started).toBeLessThan(3000);
+    await page.evaluate(() => { document.querySelector('main')!.innerHTML = "<i id='now'>now</i>"; });
+    await page.locator('#now').waitFor({ timeout: 3000 });
+  });
+
+  test('an assertion sees a value set from script', async ({ page }) => {
+    await page.setContent("<input id='field'>");
+    await page.evaluate(() => {
+      setTimeout(() => { (document.getElementById('field') as HTMLInputElement).value = 'set'; }, 150);
+    });
+    await expect(page.locator('#field')).toHaveValue('set', { timeout: 3000 });
+  });
+});

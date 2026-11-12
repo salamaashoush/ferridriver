@@ -143,7 +143,7 @@ macro_rules! retry_resolve {
             ::std::option::Option::None => __delay_ms,
           };
           if __sleep_ms > 0 {
-            $crate::abort::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
+            $self.frame.pause_until_change(::std::time::Duration::from_millis(__sleep_ms)).await;
           }
         }
 
@@ -1854,74 +1854,73 @@ impl Locator {
         if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
           return Err(crate::error::FerriError::timeout(timed_out(), timeout));
         }
-        // Resolve frameLocator enter-frame hops each poll so a child frame
+        // Resolve frameLocator enter-frame hops each slice so a child frame
         // that is not yet attached (or was re-attached) is picked up on a
         // later attempt (no-op for plain selectors). A resolution failure
         // means the parent `<iframe>` / child frame is not present: for
         // `attached`/`visible` that is a retry, for `detached`/`hidden`
         // the element is by definition gone.
-        let resolved = self.resolved().await;
-        let attached = match &resolved {
+        let slice_ms = deadline.map_or(Self::WAIT_SLICE_MS, |deadline| {
+          u64::try_from(
+            deadline
+              .saturating_duration_since(tokio::time::Instant::now())
+              .as_millis(),
+          )
+          .unwrap_or(Self::WAIT_SLICE_MS)
+          .clamp(1, Self::WAIT_SLICE_MS)
+        });
+        let answer = match self.resolved().await {
           Ok((rframe, rsel)) => {
             let inner = rframe.page_arc().inner();
-            let frame_id: Option<&str> = if rframe.is_main_frame() {
-              None
-            } else {
-              Some(rframe.id())
-            };
-            let sel_js = selectors::build_selone_js(rsel, "window.__fd", self.strict)?;
+            let parts_json = selectors::build_parts_json(&selectors::parse(&rsel)?);
+            let js = format!(
+              "window.__fd.waitForState({parts_json},{},'{}',{slice_ms})",
+              self.strict,
+              state.as_str(),
+            );
             // A document being replaced has no engine yet: not attached.
-            let found = match inner.ensure_engine_injected().await {
-              Ok(()) => selectors::query_one_prebuilt(inner, &sel_js, &self.selector, frame_id)
-                .await
-                .map(|_| ()),
-              Err(e) => Err(e),
-            };
-            selectors::cleanup_tags(inner).await;
-            match found {
-              Ok(()) => true,
-              // Playwright's strict `waitForSelector` throws on a second
-              // match; waiting on would only end in a timeout that hides it.
-              Err(e) => match selectors::parse_strict_violation_count(&e) {
-                Some(count) => return Err(crate::error::FerriError::strict(self.selector.clone(), count)),
-                None => false,
-              },
+            match inner.ensure_engine_injected().await {
+              Ok(()) if rframe.is_main_frame() => inner.evaluate(&js).await.ok().flatten(),
+              Ok(()) => inner.evaluate_in_frame(&js, rframe.id()).await.ok().flatten(),
+              Err(_) => None,
             }
           },
-          Err(_) => false,
+          Err(_) => None,
         };
-        match state {
-          crate::options::WaitState::Attached => {
-            // Only require DOM presence — do not consult computed style.
-            if attached {
-              return Ok(());
-            }
-          },
-          crate::options::WaitState::Visible => {
-            // DOM presence AND computed-style visible. Fail silently
-            // (fall through to next poll) if `is_visible()` errors
-            // because the element is detached mid-poll.
-            if let Ok(true) = self.is_visible().await {
-              return Ok(());
-            }
-          },
-          crate::options::WaitState::Detached => {
-            if !attached {
-              return Ok(());
-            }
-          },
-          crate::options::WaitState::Hidden => {
-            // Playwright: `hidden` is satisfied by detachment OR by the
-            // element being present but not visible.
-            if !attached {
-              return Ok(());
-            }
-            if let Ok(false) = self.is_visible().await {
-              return Ok(());
-            }
-          },
+        let answer = answer
+          .as_ref()
+          .and_then(serde_json::Value::as_str)
+          .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        match answer
+          .as_ref()
+          .and_then(|answer| answer.get("done"))
+          .and_then(serde_json::Value::as_bool)
+        {
+          Some(true) => return Ok(()),
+          // The page watched for the whole slice and the state never came.
+          Some(false) => continue,
+          None => {},
         }
-        crate::abort::sleep(std::time::Duration::from_millis(50)).await;
+        // Playwright's strict `waitForSelector` throws on a second match;
+        // waiting on would only end in a timeout that hides it.
+        if let Some(count) = answer
+          .as_ref()
+          .and_then(|answer| answer.get("strict"))
+          .and_then(serde_json::Value::as_u64)
+        {
+          return Err(crate::error::FerriError::strict(
+            self.selector.clone(),
+            usize::try_from(count).unwrap_or(usize::MAX),
+          ));
+        }
+        // No frame, no engine or no document to ask: nothing is attached.
+        if matches!(
+          state,
+          crate::options::WaitState::Detached | crate::options::WaitState::Hidden
+        ) {
+          return Ok(());
+        }
+        crate::abort::sleep(std::time::Duration::from_millis(10)).await;
       }
     })
     .await
@@ -2456,7 +2455,10 @@ impl Locator {
               return Ok(());
             }
           }
-          tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+          self
+            .frame
+            .pause_until_change(std::time::Duration::from_millis(50))
+            .await;
         }
       }),
     )
@@ -2673,6 +2675,13 @@ impl Locator {
 
   /// Backoff schedule matching Playwright's retryWithProgressAndTimeouts.
   pub(crate) const RETRY_BACKOFFS_MS: &'static [u64] = &[0, 0, 20, 50, 100, 100, 500];
+
+  /// How long one page-side wait watches before the host asks again.
+  /// The page reports a change as it happens, so this bounds only what
+  /// the host cannot see from inside one document: a `frameLocator` hop
+  /// that now resolves to a different frame, and how long a wait the
+  /// caller abandoned keeps observing.
+  const WAIT_SLICE_MS: u64 = 100;
 
   /// Resolve element + run JS callback in ONE CDP call, with a short
   /// retry and no timeout: `toMatchAriaSnapshot` polls it, and its

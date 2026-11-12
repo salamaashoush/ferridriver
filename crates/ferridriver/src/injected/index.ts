@@ -196,7 +196,7 @@ function executeSelector(parts: SelectorPart[], root: Node): Element[] {
 
 // ── Actionability (delegates to Playwright's InjectedScript) ──
 
-type ElementState = 'visible' | 'hidden' | 'enabled' | 'disabled' | 'editable' | 'stable' | 'checked' | 'unchecked' | 'indeterminate';
+type ElementState = 'visible' | 'hidden' | 'enabled' | 'disabled' | 'editable' | 'stable' | 'stable-frame' | 'checked' | 'unchecked' | 'indeterminate';
 
 /**
  * Whether every `<iframe>` between `node` and the top document is visible
@@ -349,19 +349,69 @@ function clickGuard(el: Element): string {
 async function awaitStates(el: Element, states: ElementState[]): Promise<string | undefined> {
   // Non-stable states (visible / enabled / editable) are synchronous — no
   // rAF — so check them directly.
-  const nonStable = states.filter((s) => s !== 'stable');
+  const nonStable = states.filter((s) => s !== 'stable' && s !== 'stable-frame');
   const result = await injected.checkElementStates(el, nonStable as any, frameVisible(el));
   if (result === 'error:notconnected') return 'connected';
   if (result !== undefined) return (result as any).missingState;
 
-  if (states.includes('stable')) {
+  const inOneFrame = states.includes('stable-frame');
+  if (inOneFrame || states.includes('stable')) {
+    const playwright = () =>
+      injected.checkElementStates(el, ['stable'] as any, frameVisible(el)).then((r: any) => r === undefined);
     const stable = await Promise.race([
-      injected.checkElementStates(el, ['stable'] as any, frameVisible(el)).then((r: any) => r === undefined),
+      inOneFrame ? stableInOneFrame(el, playwright) : playwright(),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 1000)),
     ]);
     if (!stable) return 'stable';
   }
   return undefined;
+}
+
+/**
+ * The `stable` state judged over one frame instead of Playwright's two.
+ *
+ * Playwright takes its first box inside an animation frame and compares
+ * at the one after, so a still element costs a frame and whatever was
+ * left of the one before. Here the first box is taken at once and
+ * compared inside the next frame, which catches the same movers: a frame
+ * callback registered before this one has run by then, and a CSS
+ * animation or transition has had its clock advanced.
+ *
+ * What a frame cannot vouch for is an element moved from a timer, which
+ * moves whenever the timer says. A frame that lands within
+ * `STABLE_WATCH_MS` of the first box is therefore followed by a timer for
+ * the rest of it and a last comparison, so the box is always watched for
+ * at least that long; Playwright's own watch is one frame interval. A
+ * document with an animation in flight gets `playwright` itself: one
+ * that started in this very task still reports its starting box.
+ */
+const STABLE_WATCH_MS = 8;
+
+function stableInOneFrame(el: Element, playwright: () => Promise<boolean>): Promise<boolean> {
+  const builtins = injected.utils.builtins;
+  const box = () => {
+    const target = injected.retarget(el, 'no-follow-label');
+    if (!target) return null;
+    const rect = target.getBoundingClientRect();
+    return [rect.top, rect.left, rect.width, rect.height];
+  };
+  const first = box();
+  if (!first) return Promise.resolve(false);
+  const animating = (el.ownerDocument ?? document).getAnimations().some((a) => a.playState === 'running' || a.pending);
+  if (animating) return playwright();
+  const started = builtins.performance.now();
+  return new Promise((resolve) => {
+    const unmoved = () => {
+      const next = box();
+      return next !== null && next.every((value, i) => value === first[i]);
+    };
+    builtins.requestAnimationFrame(() => {
+      if (!unmoved()) return resolve(false);
+      const left = STABLE_WATCH_MS - (builtins.performance.now() - started);
+      if (left <= 0) return resolve(true);
+      builtins.setTimeout(() => resolve(unmoved()), left);
+    });
+  });
 }
 
 /**
@@ -534,6 +584,109 @@ function resolveOne<T>(parts: SelectorPart[], map: (el: Element) => T): { ok: T 
   if (r.length > 1)
     return { strict: r.length };
   return { ok: map(r[0]) };
+}
+
+/**
+ * Wait in the page for `parts` to reach `state`, for at most `budgetMs`.
+ *
+ * The host used to ask once and sleep 50ms between asks, so an element
+ * that appeared just after an ask was reported up to 50ms late. Here the
+ * judgement reruns when the DOM mutates and again every frame, which
+ * covers what a mutation record does not: a stylesheet rule inserted
+ * through the CSSOM, a transition ending, a shadow root's own subtree.
+ *
+ * The timers are the builtins captured before page script ran, so an
+ * installed fake clock cannot strand the wait. `budgetMs` keeps a wait
+ * the host abandoned from outliving it by more than one slice.
+ *
+ * Answers a JSON string: `{done:true}`, `{done:false}` once the budget
+ * is spent, `{strict:n}`, or `{error}`.
+ */
+function waitForState(
+  parts: SelectorPart[],
+  strict: boolean,
+  state: 'attached' | 'detached' | 'visible' | 'hidden',
+  budgetMs: number,
+): Promise<string> {
+  const builtins = injected.utils.builtins;
+  return new Promise(resolve => {
+    let settled = false;
+    // A selector that is expensive to run is judged once a frame rather
+    // than once per batch of mutations.
+    let costly = false;
+    const observer = new MutationObserver(() => {
+      if (!costly) judge();
+    });
+    const finish = (answer: string) => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      resolve(answer);
+    };
+    const judge = () => {
+      if (settled) return;
+      const started = builtins.performance.now();
+      try {
+        const found = executeSelector(parts, document);
+        if (strict && found.length > 1) {
+          finish(JSON.stringify({ strict: found.length }));
+          return;
+        }
+        const attached = found.length > 0;
+        const visible = () => elementState(found[0], 'visible') === true;
+        const reached = state === 'attached' ? attached
+          : state === 'detached' ? !attached
+            : state === 'visible' ? attached && visible()
+              : !attached || !visible();
+        if (reached) finish('{"done":true}');
+      } catch (e) {
+        finish(JSON.stringify({ error: String(e) }));
+      }
+      costly = builtins.performance.now() - started > 2;
+    };
+    const frame = () => {
+      judge();
+      if (!settled) builtins.requestAnimationFrame(frame);
+    };
+    judge();
+    if (settled) return;
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    builtins.requestAnimationFrame(frame);
+    builtins.setTimeout(() => finish('{"done":false}'), budgetMs);
+  });
+}
+
+/**
+ * Resolve when the document changes, or after `budgetMs` with `false`.
+ *
+ * A retry that sleeps its whole backoff judges a change late by however
+ * much of the sleep was left. The host parks here instead, so the sleep
+ * ends with the change that could alter the verdict. What a mutation
+ * record does not carry reaches it as the event the change raises: a
+ * typed value, a toggled control, focus moving, an animation ending, a
+ * resource arriving. A change that raises neither (a shadow root's own
+ * subtree, a property set from script) is seen when the budget ends,
+ * which is when the plain sleep would have looked.
+ */
+const CHANGE_EVENTS = ['input', 'change', 'focusin', 'focusout', 'transitionend', 'animationend', 'load', 'error'];
+
+function waitForChange(budgetMs: number): Promise<boolean> {
+  const builtins = injected.utils.builtins;
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (changed: boolean) => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      for (const type of CHANGE_EVENTS) document.removeEventListener(type, onEvent, true);
+      resolve(changed);
+    };
+    const onEvent = () => finish(true);
+    const observer = new MutationObserver(onEvent);
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    for (const type of CHANGE_EVENTS) document.addEventListener(type, onEvent, true);
+    builtins.setTimeout(() => finish(false), budgetMs);
+  });
 }
 
 /**
@@ -764,6 +917,8 @@ if (!(window.__fd instanceof Object)) {
     clickGuard,
     clickPrep,
     awaitStates,
+    waitForState,
+    waitForChange,
     selectOption,
     selectOptions,
     getOptions,

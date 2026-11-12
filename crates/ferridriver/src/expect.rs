@@ -245,6 +245,65 @@ async fn evaluate_engine(
 
 const ENGINE_MISSING: &str = "__fd_engine_missing__";
 
+/// The least time between two looks at a document that keeps changing,
+/// so a page mutating every millisecond is judged a couple of hundred
+/// times a second rather than once per mutation.
+pub(crate) const CHANGE_FLOOR: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// A retry's backoff pause that ends early when the frame's document
+/// changes (`window.__fd.waitForChange`). Never longer than `pause`: a
+/// document that cannot be watched (navigating, no engine, script
+/// blocked behind a dialog) is slept on for what is left of it.
+async fn pause_until_change(page: &crate::page::Page, frame_id: Option<&str>, pause: std::time::Duration) {
+  if pause.is_zero() {
+    return;
+  }
+  let started = tokio::time::Instant::now();
+  let call = format!("window.__fd.waitForChange({})", pause.as_millis());
+  let watch = tokio::time::timeout(pause, evaluate_engine(page, frame_id, &call, "waitForChange"));
+  let signal = crate::abort::current();
+  let watched = match signal.as_ref() {
+    Some(signal) => tokio::select! {
+      watched = watch => watched,
+      () = signal.aborted() => return,
+    },
+    None => watch.await,
+  };
+  let floor = match watched {
+    Ok(Ok(_)) => CHANGE_FLOOR.min(pause),
+    Ok(Err(_)) | Err(_) => pause,
+  };
+  crate::abort::sleep(floor.saturating_sub(started.elapsed())).await;
+}
+
+impl Frame {
+  /// Pause a retry for at most `pause`, resuming as soon as this frame's
+  /// document changes.
+  pub async fn pause_until_change(&self, pause: std::time::Duration) {
+    let frame_id = (!self.is_main_frame()).then(|| self.id().to_string());
+    pause_until_change(self.page(), frame_id.as_deref(), pause).await;
+  }
+}
+
+impl crate::page::Page {
+  /// [`Frame::pause_until_change`] on the main frame's document.
+  pub async fn pause_until_change(&self, pause: std::time::Duration) {
+    pause_until_change(self, None, pause).await;
+  }
+}
+
+impl crate::locator::Locator {
+  /// [`Frame::pause_until_change`] on the frame this locator resolves
+  /// in, through any frame hops. A hop that cannot be entered yet is
+  /// slept on.
+  pub async fn pause_until_change(&self, pause: std::time::Duration) {
+    match self.resolved().await {
+      Ok((frame, _)) => frame.pause_until_change(pause).await,
+      Err(_) => crate::abort::sleep(pause).await,
+    }
+  }
+}
+
 impl crate::locator::Locator {
   /// [`Frame::expect_once`] on this locator, through any frame hops and
   /// under its strictness.
