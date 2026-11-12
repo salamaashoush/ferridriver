@@ -2120,9 +2120,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11fc83d49eda7ed82fab6fe186eb800f35e304db752bbf84a3176726260695a"
+checksum = "905aef6a6630ea90e27cf22cd09206862c6027a31639d8365496bdb6e9fc6945"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -2144,9 +2144,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-bundle"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ee1aa034c07b13471392574697aaee04c1076b89539d15c901a9cba998d4f5"
+checksum = "e3ac3caf4c46d719548b58c44833d4b75f21e47f98cefc07d26c5223988d714b"
 dependencies = [
  "dunce",
  "ferrijs",
@@ -2164,9 +2164,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-fetch"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00f852fb02f2542cec1df452bf16c498b0cd2cb86738dfd7fbc650f7c8a527cd"
+checksum = "d806eed646d6778074c041629ec49b65d4fe7bd57da3d0092189138178b98d45"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -2184,18 +2184,18 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-permissions"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2858ca3725785ed648421fc1e0c66f19106fe3ce35866ca41f1d5ac2f9dbd712"
+checksum = "0a29109f0a641c9c20cfc248d9e989ad8ffd09e175d3b970bcf7489ed1626bde"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ferrijs-serde"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9048e4c2448830cebaf9692568781987523a731d53862ada7f883190f0b0500"
+checksum = "652b14dd0f364ef4cced6582002508bbaa4c2d83bb988adbd122ec92a5d63fde"
 dependencies = [
  "rquickjs",
  "serde",
@@ -2203,9 +2203,9 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-std"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44deae27c9a4fe1347d374ce151ebd3d8deea3aeda36c8fcc45a9b31f98d3245"
+checksum = "ad67e62d3f3fae4ce11492ef751ebba557cd177a83ef02984090418b8c976c66"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
