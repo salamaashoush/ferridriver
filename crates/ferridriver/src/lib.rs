@@ -22,6 +22,8 @@
 //! let md = page.markdown().await?;
 //! ```
 
+#![recursion_limit = "256"]
+
 // ── Public API (Playwright-compatible) ──
 pub mod abort;
 pub mod accessibility;
