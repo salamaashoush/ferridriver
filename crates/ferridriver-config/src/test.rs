@@ -570,6 +570,15 @@ fn deserialize_optional_workers<'de, D: serde::Deserializer<'de>>(deserializer: 
 
 // ── Test config ─────────────────────────────────────────────────────────────
 
+/// `stableCheck`: how long a pointer action watches an element's box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StableCheck {
+  #[default]
+  Playwright,
+  Frame,
+}
+
 /// Test runner configuration.
 // Each bool field is an independent feature flag set in user TOML —
 // grouping into enums would be ceremony, not a real state machine.
@@ -722,6 +731,34 @@ pub struct TestConfig {
   /// Set it when `workers` leaves cores idle; leave it at `0` otherwise.
   #[serde(default)]
   pub context_prewarm: u32,
+  /// Give each test a context the previous test on its worker has
+  /// finished with, emptied, instead of a new one.
+  ///
+  /// A new context costs a renderer process, about 40ms of wall clock
+  /// and 95ms of CPU per test on Chromium; an emptied one about 3ms.
+  /// Emptied means its document, history, cookies, permissions, HTTP
+  /// cache and the storage of every origin it visited are gone, and
+  /// nothing the previous test set on its page or context carries over.
+  /// A context made with a proxy or given `httpCredentials` is not
+  /// reused, as the browser cannot take either back. What does carry
+  /// over is credentials a page put in a URL itself
+  /// (`http://user:pass@host`), which the browser caches for that
+  /// server; off by default for that reason. Chromium only; the other
+  /// browsers keep creating contexts.
+  #[serde(default)]
+  pub context_reuse: bool,
+  /// How a pointer action (`click`, `hover`, `tap`, `check`) decides the
+  /// element has stopped moving.
+  ///
+  /// `playwright`, the default, is Playwright's own check: the box in one
+  /// animation frame against the box in the next, 17 to 33ms at 60Hz for
+  /// every such action. `frame` compares the box the action starts with
+  /// against the next frame's, watching it for at least 8ms: 8 to 17ms.
+  /// A document with an animation in flight still gets the Playwright
+  /// check. What `frame` can miss and Playwright would catch is an
+  /// element moved from a timer that fires less often than every 8ms.
+  #[serde(default)]
+  pub stable_check: StableCheck,
   /// `[secrets]`, resolved to `(name, value)` pairs by the CLI. Each value
   /// is replaced by `<secret>NAME</secret>` in the traces, the JSON report
   /// and the error context the run writes. Never read from or written to
@@ -1757,6 +1794,8 @@ impl Default for TestConfig {
       has_bdd: false,
       module_aliases: BTreeMap::new(),
       context_prewarm: 0,
+      stable_check: StableCheck::default(),
+      context_reuse: false,
       secrets: Vec::new(),
     }
   }

@@ -450,6 +450,7 @@ declare global {
     configGrep?: unknown;
     configGrepInvert?: unknown;
     contextPrewarm?: unknown;
+    contextReuse?: unknown;
     dryRun?: unknown;
     examplesTitleFormat?: unknown;
     expect?: unknown;
@@ -486,6 +487,7 @@ declare global {
     scriptMatch?: unknown;
     snapshotDir?: unknown;
     snapshotPathTemplate?: unknown;
+    stableCheck?: unknown;
     steps?: unknown;
     storageState?: unknown;
     strict?: unknown;

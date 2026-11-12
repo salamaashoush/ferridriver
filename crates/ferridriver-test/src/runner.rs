@@ -539,6 +539,10 @@ impl TestRunner {
     ferridriver_expect::set_default_expect_timeout(std::time::Duration::from_millis(
       self.config.resolved_expect(None).timeout_ms(),
     ));
+    ferridriver::actions::set_stable_check(match self.config.stable_check {
+      ferridriver_config::test::StableCheck::Playwright => ferridriver::actions::StableCheck::Playwright,
+      ferridriver_config::test::StableCheck::Frame => ferridriver::actions::StableCheck::Frame,
+    });
     self.export_base_url_env();
     // A fresh run numbers its workers from zero again (watch and UI
     // sessions run many).
@@ -1679,7 +1683,8 @@ impl TestRunner {
           } else {
             Arc::new(
               BrowserHandle::with_connection(plan.clone(), connection.clone())
-                .reporting_launch_failure(Arc::clone(&launch_failed)),
+                .reporting_launch_failure(Arc::clone(&launch_failed))
+                .recycling_contexts(config.context_reuse),
             )
           };
           pending = Box::pin(worker.run(
@@ -3021,6 +3026,8 @@ pub struct BrowserHandle {
   /// Raised when a launch fails, so the run can tell a browser that never
   /// started from tests that failed on their own.
   launch_failed: Option<Arc<std::sync::atomic::AtomicBool>>,
+  /// `contextReuse`: the browser keeps closed contexts for the next test.
+  recycle_contexts: bool,
 }
 
 type BrowserLaunch = futures::future::Shared<futures::future::BoxFuture<'static, ferridriver::Result<Arc<Browser>>>>;
@@ -3128,6 +3135,7 @@ impl BrowserHandle {
       launch: tokio::sync::Mutex::default(),
       shared: false,
       launch_failed: None,
+      recycle_contexts: false,
     }
   }
 
@@ -3135,6 +3143,14 @@ impl BrowserHandle {
   #[must_use]
   pub fn reporting_launch_failure(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
     self.launch_failed = Some(flag);
+    self
+  }
+
+  /// Have the browser this handle launches keep closed contexts for the
+  /// next test (`[test] contextReuse`).
+  #[must_use]
+  pub fn recycling_contexts(mut self, enabled: bool) -> Self {
+    self.recycle_contexts = enabled;
     self
   }
 
@@ -3150,6 +3166,7 @@ impl BrowserHandle {
       launch: tokio::sync::Mutex::default(),
       shared: true,
       launch_failed: None,
+      recycle_contexts: false,
     }
   }
 
@@ -3179,9 +3196,11 @@ impl BrowserHandle {
           let plan = self.plan.clone();
           let connection = self.connection.clone();
           let cell = self.cell.clone();
+          let recycle_contexts = self.recycle_contexts;
           // A cancelled fixture must not abandon a session still being created by the driver.
           let task = tokio::spawn(async move {
             let browser = Arc::new(launch_with_plan(plan, connection).await?);
+            browser.set_context_recycling(recycle_contexts).await;
             let _ = cell.set(browser.clone());
             Ok(browser)
           });

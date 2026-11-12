@@ -12,6 +12,7 @@
 mod paused;
 pub mod pipe;
 pub(crate) mod recording;
+mod recycle;
 mod renderer;
 mod screenshot;
 pub mod transport;
@@ -126,6 +127,9 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// attach listener (which has no `self`) prunes it on detach — a
   /// per-clone copy would keep growing one dead entry per page opened.
   attached_targets: AttachedTargets,
+  /// Contexts emptied for reuse (see [`recycle`]). Shared across clones:
+  /// a context retired through one handle is taken through another.
+  spares: Arc<recycle::Spares>,
   /// Product version string captured from CDP `Browser.getVersion().product`
   /// at handshake time. Matches what Playwright surfaces via `browser.version()`
   /// (its initializer stores the same value and returns it synchronously).
@@ -243,6 +247,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       transport: Arc::clone(&self.transport),
       child: Arc::clone(&self.child),
       attached_targets: Arc::clone(&self.attached_targets),
+      spares: Arc::clone(&self.spares),
       version: Arc::clone(&self.version),
       isolated_contexts: self.isolated_contexts,
       headful: self.headful,
@@ -451,17 +456,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // the lazy `ensure_engine_injected` RTT.
     let inject_fut = async {
       if let Some(src) = init_script {
-        transport
-          .send_command(
-            session_id,
-            "Page.addScriptToEvaluateOnNewDocument",
-            &serde_json::json!({
-              "source": src,
-              "runImmediately": true,
-            }),
-          )
-          .await
-          .map(|_| ())
+        let [main, utility] = engine_registrations(src, true);
+        tokio::try_join!(
+          transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", &main),
+          transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", &utility),
+        )
+        .map(|_| ())
       } else {
         Ok(())
       }
@@ -587,6 +587,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       isolated_contexts,
       headful,
       front_tab: Arc::default(),
+      spares: Arc::default(),
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       downloads_dir,
       popup_taps,
@@ -850,6 +851,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
+      utility_contexts: Arc::default(),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
@@ -1008,6 +1010,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       browser_context_id: None,
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
+      utility_contexts: Arc::default(),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
@@ -1059,6 +1062,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
         "Android Chrome does not support isolated browser contexts",
       ));
     }
+    // A proxy is fixed when the context is created, so only a context
+    // without one can stand in for another.
+    if proxy.is_none()
+      && let Some(spare) = self.spares.take_context()
+    {
+      return Ok(spare);
+    }
     let mut params = serde_json::json!({"disposeOnDetach": true});
     if let Some(p) = proxy {
       params["proxyServer"] = serde_json::json!(p.chromium_server());
@@ -1071,15 +1081,20 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .send_command(None, "Target.createBrowserContext", &params)
       .await?;
 
-    ctx
+    let id = ctx
       .get("browserContextId")
       .and_then(|v| v.as_str())
       .map(String::from)
-      .ok_or_else(|| FerriError::backend("No browserContextId"))
+      .ok_or_else(|| FerriError::backend("No browserContextId"))?;
+    if proxy.is_some() {
+      self.spares.mark_proxied(&id);
+    }
+    Ok(id)
   }
 
   /// Dispose a browser context. Matches Playwright's `context.close()`.
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
+    self.forget_spare(browser_context_id);
     self
       .transport
       .send_command(
@@ -1122,12 +1137,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Ok(target_id)
   }
 
-  pub async fn new_page(
-    &self,
-    url: &str,
-    browser_context_id: Option<&str>,
-    viewport: Option<&crate::options::ViewportConfig>,
-  ) -> Result<AnyPage> {
+  /// Create a page target and wait for its auto-attached session. The
+  /// target comes back paused (`waitForDebuggerOnStart`).
+  async fn create_attached_target(&self, browser_context_id: Option<&str>) -> Result<(String, Option<String>)> {
     // Tap BEFORE createTarget so we can't miss the auto-attach; a
     // broadcast drop here was a 30s new_page hang.
     let mut event_rx = self.transport.tap_event_methods(&["Target.attachedToTarget"], None);
@@ -1158,6 +1170,24 @@ impl<T: CdpWrap> CdpBrowser<T> {
     })
     .await
     .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
+    Ok((target_id, sid))
+  }
+
+  pub async fn new_page(
+    &self,
+    url: &str,
+    browser_context_id: Option<&str>,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<AnyPage> {
+    let kept = browser_context_id.and_then(|context| Some((context, self.spares.take_page(context)?)));
+    let inject_src = crate::selectors::build_lazy_inject_js();
+    // A recycled context comes with its page, already attached and with
+    // the engine in its blank document.
+    let engine_installed = kept.is_some();
+    let (target_id, sid) = match kept {
+      Some((context, page)) => self.adopt_kept_page(context, page, &inject_src).await?,
+      None => self.create_attached_target(browser_context_id).await?,
+    };
 
     self
       .attached_targets
@@ -1180,9 +1210,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // use. Page.getFrameTree is intentionally NOT in the batch —
     // see PERF_AUDIT §M.4: the post-`Page.navigate` path seeds the
     // frame cache via `peek_main_frame_id()` for free.
-    let inject_src = crate::selectors::build_lazy_inject_js();
-    let frame_tree_seed =
-      Self::enable_domains(&self.transport, sid.as_deref(), viewport, true, Some(&inject_src)).await?;
+    let init_script = (!engine_installed).then_some(inject_src.as_str());
+    let frame_tree_seed = Self::enable_domains(&self.transport, sid.as_deref(), viewport, true, init_script).await?;
 
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
@@ -1201,6 +1230,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
+      utility_contexts: Arc::default(),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
@@ -1609,6 +1639,7 @@ impl CdpBrowser<ws::WsTransport> {
       isolated_contexts,
       headful,
       front_tab: Arc::default(),
+      spares: Arc::default(),
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
@@ -2037,6 +2068,11 @@ pub struct CdpPage<T: CdpTransport> {
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
   frame_contexts: Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
+  /// Frame ID -> the execution context of its utility world, once the
+  /// browser has announced one. The engine is registered there as a
+  /// new-document script, so the world exists for every document without
+  /// being asked for; `fill` reads it here instead of asking.
+  utility_contexts: Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
   renderers: Arc<renderer::Renderers>,
   /// Notified by the wire observer after each map insert so
   /// [`Self::resolve_frame_context`] wakes on the exact event instead
@@ -2398,6 +2434,29 @@ const DRAG_SETUP_JS: &str = "(function() {\
 
 const DRAG_CLEANUP_JS: &str = "window.__cleanupDrag ? window.__cleanupDrag() : false";
 
+/// The two `Page.addScriptToEvaluateOnNewDocument` registrations that put
+/// the engine in a page: the main world, and the utility world `fill`
+/// runs in.
+///
+/// Both carry the same source text, so V8 answers the utility world's
+/// compile from the main world's: about 0.5ms per document, against the
+/// 4.6ms a first `fill` paid to compile the engine again over
+/// `Runtime.callFunctionOn`, which shares no cache. Only the main world
+/// runs immediately. A document already loaded gets its utility engine
+/// from `fill`'s own lazy injection, since running the script immediately
+/// compiles it through the inspector at full cost whether or not the
+/// document is ever filled.
+///
+/// `run_immediately` is for a page whose current document is to be used
+/// as it is. A caller about to navigate leaves it off and lets the new
+/// document take the engine through the cached path.
+fn engine_registrations(source: &str, run_immediately: bool) -> [serde_json::Value; 2] {
+  [
+    serde_json::json!({ "source": source, "runImmediately": run_immediately }),
+    serde_json::json!({ "source": source, "worldName": UTILITY_WORLD }),
+  ]
+}
+
 pub struct InjectedScriptManager {
   injected: std::sync::atomic::AtomicBool,
 }
@@ -2429,16 +2488,11 @@ impl InjectedScriptManager {
     // fail to resolve. Mirrors Playwright's
     // `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts`
     // injection pattern.
-    let full_inject_js = crate::selectors::build_lazy_inject_js();
-    let _ = page
-      .cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        serde_json::json!({
-            "source": full_inject_js,
-            "runImmediately": true,
-        }),
-      )
-      .await?;
+    let [main, utility] = engine_registrations(&crate::selectors::build_lazy_inject_js(), true);
+    tokio::try_join!(
+      Box::pin(page.cmd("Page.addScriptToEvaluateOnNewDocument", main)),
+      Box::pin(page.cmd("Page.addScriptToEvaluateOnNewDocument", utility)),
+    )?;
     self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
   }
@@ -2454,6 +2508,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       browser_context_id: self.browser_context_id.clone(),
       events: self.events.clone(),
       frame_contexts: self.frame_contexts.clone(),
+      utility_contexts: self.utility_contexts.clone(),
       frame_contexts_notify: self.frame_contexts_notify.clone(),
       renderers: self.renderers.clone(),
       exposed_fns: self.exposed_fns.clone(),
@@ -2749,6 +2804,10 @@ impl<T: CdpWrap> CdpPage<T> {
     if let Some(r) = referer {
       nav_params["referrer"] = serde_json::Value::String(r.to_string());
     }
+    let (pre_loader_id, pre_same_document) = {
+      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      (state.current_loader_id.clone(), state.same_document_seq)
+    };
     let nav_result = self.cmd("Page.navigate", nav_params).await?;
 
     if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str())
@@ -2783,13 +2842,22 @@ impl<T: CdpWrap> CdpPage<T> {
     // navigation (the failure mode that produced "Not attached to an
     // active page" when `Page.reload` was sent in the middle of a
     // cross-origin RFH swap).
+    // `Page.navigate` answers with a loaderId only when it created a
+    // document. A fragment jump has none: it commits in the document
+    // already loaded, announces itself with `Page.navigatedWithinDocument`
+    // and issues no request. Waiting on the empty loader matched nothing
+    // and ran out the whole navigation timeout; the event is waited for
+    // because it can trail the command's answer, and the URL with it.
+    if nav_loader_id.is_empty() {
+      self
+        .await_history_commit(&pre_loader_id, pre_same_document, target_event, timeout_ms)
+        .await?;
+      return Ok(None);
+    }
     self
       .await_loader_lifecycle(&nav_loader_id, target_event, timeout_ms)
       .await?;
-    // `Page.navigate` answers with a loaderId only when it created a
-    // document; a fragment jump has none and no request to wait for.
-    let grace = Self::nav_grace_for(!nav_loader_id.is_empty());
-    Ok(self.await_nav_response(grace).await)
+    Ok(self.await_nav_response(Some(&nav_loader_id)).await)
   }
 
   /// Resolve the main-document `Response` captured by the network
@@ -2802,18 +2870,14 @@ impl<T: CdpWrap> CdpPage<T> {
   /// the lifecycle reach us on separate consumers and the request can be
   /// processed second. A same-document navigation never issues one, so
   /// waiting there would only slow it down.
-  async fn await_nav_response(&self, grace: std::time::Duration) -> Option<Response> {
-    self.nav_request_slot.final_response(grace).await
-  }
-
-  /// The grace a navigation that committed `expected_loader_id` gets;
-  /// zero when the document did not change.
-  fn nav_grace_for(new_document: bool) -> std::time::Duration {
-    if new_document {
-      crate::network::NAV_REQUEST_GRACE
-    } else {
-      std::time::Duration::ZERO
-    }
+  async fn await_nav_response(&self, loader_id: Option<&str>) -> Option<Response> {
+    let Some(loader_id) = loader_id else {
+      return self.nav_request_slot.final_response(std::time::Duration::ZERO).await;
+    };
+    self
+      .nav_request_slot
+      .final_response_for(Some(loader_id), crate::network::NAV_REQUEST_GRACE)
+      .await
   }
 
   fn current_loader_id(&self) -> String {
@@ -2928,8 +2992,12 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .await_loader_change(&pre_loader_id, target_event, timeout_ms)
       .await?;
-    let grace = Self::nav_grace_for(self.current_loader_id() != pre_loader_id);
-    Ok(self.await_nav_response(grace).await)
+    let loader_id = self.current_loader_id();
+    Ok(
+      self
+        .await_nav_response((loader_id != pre_loader_id).then_some(loader_id.as_str()))
+        .await,
+    )
   }
 
   pub async fn go_back(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
@@ -2985,8 +3053,12 @@ impl<T: CdpWrap> CdpPage<T> {
     {
       return Ok(None);
     }
-    let grace = Self::nav_grace_for(self.current_loader_id() != pre_loader_id);
-    Ok(self.await_nav_response(grace).await)
+    let loader_id = self.current_loader_id();
+    Ok(
+      self
+        .await_nav_response((loader_id != pre_loader_id).then_some(loader_id.as_str()))
+        .await,
+    )
   }
 
   /// Wait until the page's main-frame [`LifecycleState`] has both
@@ -3147,6 +3219,31 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   // ---- JavaScript ----
+
+  /// The utility world `element` belongs to, when that is known without
+  /// asking the browser: the element is this page's own (not a child
+  /// renderer's) and the page has one frame, whose utility world has been
+  /// announced.
+  #[must_use]
+  pub fn known_utility_context(&self, element: &CdpElement<T>) -> Option<i64> {
+    if element.session_id().as_deref() != self.session_id.as_deref() {
+      return None;
+    }
+    let frames = self
+      .frame_contexts
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ids = frames.keys();
+    let (Some(only), None) = (ids.next(), ids.next()) else {
+      return None;
+    };
+    self
+      .utility_contexts
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(only)
+      .copied()
+  }
 
   pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
@@ -6123,7 +6220,12 @@ impl<T: CdpWrap> CdpPage<T> {
     emitter: crate::events::EventEmitter,
     nav_request_slot: crate::network::NavRequestSlot,
   ) -> tokio::task::AbortHandle {
-    let mut rx = transport.tap_event_domains(&["Network"], session_id.as_deref());
+    // `Page` rides the same tap so a document's commit is seen in wire
+    // order after its request: that is what lets a navigation waiter
+    // tell "no request" from "request not processed yet".
+    let mut rx = transport.tap_event_domains(&["Network", "Page"], session_id.as_deref());
+    let commits = nav_request_slot.clone();
+    let main_frame = Arc::clone(&target_id);
     let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(
       transport,
       session_id.clone(),
@@ -6141,6 +6243,16 @@ impl<T: CdpWrap> CdpPage<T> {
         let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let params = event.get("params");
         match method {
+          "Page.frameNavigated" => {
+            let frame = params.and_then(|p| p.get("frame"));
+            if let Some(loader_id) = frame
+              .filter(|f| f.get("id").and_then(|v| v.as_str()) == Some(&*main_frame))
+              .and_then(|f| f.get("loaderId"))
+              .and_then(|v| v.as_str())
+            {
+              commits.commit_loader(loader_id.to_string());
+            }
+          },
           "Network.requestWillBeSent" => {
             if let Some(p) = params {
               tracker.on_request_will_be_sent(p, &network_log, &emitter).await;
@@ -6579,6 +6691,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .push(worker.abort_handle());
     let contexts = self.frame_contexts.clone();
+    let utility = self.utility_contexts.clone();
     let notify = self.frame_contexts_notify.clone();
     let target = self.target_id.clone();
     Arc::new(move |raw, method| {
@@ -6591,7 +6704,7 @@ impl<T: CdpWrap> CdpPage<T> {
           | "Page.frameDetached"
       ) && let Ok(event) = serde_json::from_slice(raw)
       {
-        Self::handle_tracker_event(&event, &contexts, &notify, &target, &binding_tx);
+        Self::handle_tracker_event(&event, &contexts, &utility, &notify, &target, &binding_tx);
       }
     })
   }
@@ -6599,6 +6712,7 @@ impl<T: CdpWrap> CdpPage<T> {
   fn handle_tracker_event(
     event: &serde_json::Value,
     frame_contexts: &Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
+    utility_contexts: &Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
     contexts_notify: &Arc<tokio::sync::Notify>,
     target_id: &Arc<str>,
     binding_tx: &tokio::sync::mpsc::UnboundedSender<BindingCall>,
@@ -6620,6 +6734,11 @@ impl<T: CdpWrap> CdpPage<T> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(frame_id.to_string(), ctx_id);
               contexts_notify.notify_waiters();
+            } else if !frame_id.is_empty() && ctx.get("name").and_then(|v| v.as_str()) == Some(UTILITY_WORLD) {
+              utility_contexts
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(frame_id.to_string(), ctx_id);
             }
           }
         }
@@ -6634,10 +6753,19 @@ impl<T: CdpWrap> CdpPage<T> {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
           contexts.retain(|_, &mut v| v != ctx_id);
+          drop(contexts);
+          utility_contexts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, &mut v| v != ctx_id);
         }
       },
       "Runtime.executionContextsCleared" => {
         frame_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .clear();
+        utility_contexts
           .write()
           .unwrap_or_else(std::sync::PoisonError::into_inner)
           .clear();
@@ -6662,6 +6790,10 @@ impl<T: CdpWrap> CdpPage<T> {
           .and_then(|v| v.as_str())
         {
           frame_contexts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(fid);
+          utility_contexts
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(fid);
@@ -7680,8 +7812,23 @@ impl<T: CdpTransport> CdpElement<T> {
   /// element is the browser's own and nothing the page put on it (a
   /// framework's own `value` property) is seen. The world is created by
   /// name, so every call reaches the same one.
-  pub async fn call_js_fn_value_in_utility(&self, function: &str) -> Result<Option<serde_json::Value>> {
+  ///
+  /// `known` is the utility world's execution context when the page
+  /// already has it ([`CdpPage::known_utility_context`]): the three round
+  /// trips that find the element's frame and ask for its world are then
+  /// skipped. A context that has gone since (the document navigated) is
+  /// refused by the browser, and the long way is taken.
+  pub async fn call_js_fn_value_in_utility(
+    &self,
+    function: &str,
+    known: Option<i64>,
+  ) -> Result<Option<serde_json::Value>> {
     let object_id = self.object_id().await?;
+    if let Some(context) = known
+      && let Ok(adopted) = self.adopt_into(&object_id, context).await
+    {
+      return self.call_adopted(&adopted, function).await;
+    }
     let root = self
       .cmd(
         "Runtime.callFunctionOn",
@@ -7713,8 +7860,14 @@ impl<T: CdpTransport> CdpElement<T> {
     let context = world["executionContextId"]
       .as_i64()
       .ok_or_else(|| FerriError::protocol("Page.createIsolatedWorld", "missing execution context"))?;
+    let adopted = self.adopt_into(&object_id, context).await?;
+    self.call_adopted(&adopted, function).await
+  }
+
+  /// This element's handle in the world of `context`.
+  async fn adopt_into(&self, object_id: &str, context: i64) -> Result<String> {
     let node = self
-      .cmd("DOM.describeNode", serde_json::json!({ "objectId": &*object_id }))
+      .cmd("DOM.describeNode", serde_json::json!({ "objectId": object_id }))
       .await?;
     let backend_node = node
       .pointer("/node/backendNodeId")
@@ -7726,11 +7879,15 @@ impl<T: CdpTransport> CdpElement<T> {
         serde_json::json!({ "backendNodeId": backend_node, "executionContextId": context }),
       )
       .await?;
-    let adopted = adopted
+    adopted
       .pointer("/object/objectId")
       .and_then(serde_json::Value::as_str)
-      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "the element is not in the utility world"))?
-      .to_string();
+      .map(str::to_string)
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "the element is not in the utility world"))
+  }
+
+  /// Call `function` on an adopted handle and release it.
+  async fn call_adopted(&self, adopted: &str, function: &str) -> Result<Option<serde_json::Value>> {
     let result = self
       .cmd(
         "Runtime.callFunctionOn",

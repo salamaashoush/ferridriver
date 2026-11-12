@@ -916,6 +916,23 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if context disposal fails.
+  /// Close a context whose user is done with it, in whichever way lets
+  /// the next one start soonest. Chromium empties the context and keeps
+  /// it for the next [`Self::new_context`] (`cdp::recycle`); the other
+  /// backends have no way to drop what a session installed without
+  /// dropping the page, and dispose it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context had to be disposed and that failed.
+  pub async fn retire_context(&self, browser_context_id: &str, origins: &[String]) -> Result<()> {
+    match self {
+      Self::CdpPipe(b) => Box::pin(b.retire_context(browser_context_id, origins)).await,
+      Self::CdpWs(b) => Box::pin(b.retire_context(browser_context_id, origins)).await,
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => self.dispose_context(browser_context_id).await,
+    }
+  }
+
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     match self {
       Self::CdpPipe(b) => b.dispose_context(browser_context_id).await,
@@ -1466,8 +1483,16 @@ impl AnyPage {
     function: &str,
   ) -> Result<Option<serde_json::Value>> {
     match (self, element) {
-      (_, AnyElement::CdpPipe(element)) => element.call_js_fn_value_in_utility(function).await,
-      (_, AnyElement::CdpWs(element)) => element.call_js_fn_value_in_utility(function).await,
+      (Self::CdpPipe(page), AnyElement::CdpPipe(element)) => {
+        let known = page.known_utility_context(element);
+        element.call_js_fn_value_in_utility(function, known).await
+      },
+      (Self::CdpWs(page), AnyElement::CdpWs(element)) => {
+        let known = page.known_utility_context(element);
+        element.call_js_fn_value_in_utility(function, known).await
+      },
+      (_, AnyElement::CdpPipe(element)) => element.call_js_fn_value_in_utility(function, None).await,
+      (_, AnyElement::CdpWs(element)) => element.call_js_fn_value_in_utility(function, None).await,
       (_, AnyElement::Bidi(element)) => element.call_js_fn_value_in_utility(function).await,
       (AnyPage::WebKit(page), AnyElement::WebKit(element)) => {
         element.call_js_fn_value_in(&page.utility_contexts, function).await

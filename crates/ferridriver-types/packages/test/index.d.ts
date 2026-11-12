@@ -330,6 +330,7 @@ export interface FerridriverTestConfig {
   configGrep?: unknown;
   configGrepInvert?: unknown;
   contextPrewarm?: unknown;
+  contextReuse?: unknown;
   dryRun?: unknown;
   examplesTitleFormat?: unknown;
   expect?: unknown;
@@ -366,6 +367,7 @@ export interface FerridriverTestConfig {
   scriptMatch?: unknown;
   snapshotDir?: unknown;
   snapshotPathTemplate?: unknown;
+  stableCheck?: unknown;
   steps?: unknown;
   storageState?: unknown;
   strict?: unknown;

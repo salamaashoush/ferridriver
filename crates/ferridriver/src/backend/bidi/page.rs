@@ -920,7 +920,10 @@ impl BidiPage {
         } else {
           std::time::Duration::ZERO
         };
-        self.await_nav_response(grace, deadline, timeout_ms).await
+        // A command that waited for the document answers after the
+        // document's request was announced; `none` answers before it.
+        let announced = new_document && wait != "none";
+        self.await_nav_response(grace, announced, deadline, timeout_ms).await
       },
       Ok(Err(e)) => Err(e),
       Err(_) => Err(FerriError::timeout(format!("navigating to {url}"), timeout_ms)),
@@ -939,6 +942,7 @@ impl BidiPage {
   async fn await_nav_response(
     &self,
     grace: std::time::Duration,
+    announced: bool,
     deadline: tokio::time::Instant,
     timeout_ms: u64,
   ) -> Result<Option<Response>> {
@@ -948,8 +952,15 @@ impl BidiPage {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clone();
     tokio::time::timeout_at(deadline, async {
+      let mut grace = grace;
       if let Some(barrier) = barrier {
         barrier.wait().await?;
+        // The consumer has now processed everything that came before the
+        // answer, so a request announced by then is in the slot and a
+        // document with none (`about:blank`) has nothing to wait for.
+        if announced {
+          grace = std::time::Duration::ZERO;
+        }
       }
       Ok(self.nav_request_slot.final_response(grace).await)
     })
@@ -1030,7 +1041,7 @@ impl BidiPage {
     match result {
       Ok(Ok(_)) => {
         self
-          .await_nav_response(crate::network::NAV_REQUEST_GRACE, deadline, timeout_ms)
+          .await_nav_response(crate::network::NAV_REQUEST_GRACE, wait != "none", deadline, timeout_ms)
           .await
       },
       Ok(Err(e)) => Err(e),
@@ -1056,7 +1067,7 @@ impl BidiPage {
     match result {
       Ok(Ok(_)) => {
         self
-          .await_nav_response(crate::network::NAV_REQUEST_GRACE, deadline, timeout_ms)
+          .await_nav_response(crate::network::NAV_REQUEST_GRACE, false, deadline, timeout_ms)
           .await
       },
       Ok(Err(e)) => Err(e),
@@ -1082,7 +1093,7 @@ impl BidiPage {
     match result {
       Ok(Ok(_)) => {
         self
-          .await_nav_response(crate::network::NAV_REQUEST_GRACE, deadline, timeout_ms)
+          .await_nav_response(crate::network::NAV_REQUEST_GRACE, false, deadline, timeout_ms)
           .await
       },
       Ok(Err(e)) => Err(e),

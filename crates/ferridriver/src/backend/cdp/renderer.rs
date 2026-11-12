@@ -408,6 +408,7 @@ impl<T: CdpWrap> CdpPage<T> {
     page.session_id = Some(renderer.session.clone());
     page.main_frame_id = renderer.main_frame.clone();
     page.frame_contexts = renderer.contexts.clone();
+    page.utility_contexts = Arc::default();
     page.frame_contexts_notify = renderer.contexts_notify.clone();
     page.injected_script = renderer.injected.clone();
     page.fetch = renderer.fetch.clone();

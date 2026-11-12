@@ -689,6 +689,9 @@ impl NavRequestSlot {
   }
 
   /// The navigation request, waiting up to `timeout` for one to land.
+  /// A caller that names its loader is answered as soon as the slot has
+  /// seen that loader commit: a document with no request at all
+  /// (`about:blank`, a back/forward-cache restore) then costs nothing.
   ///
   /// The lifecycle events a navigation waiter watches and the network
   /// events that fill this slot reach us on separate consumers, so a
@@ -703,23 +706,28 @@ impl NavRequestSlot {
   }
 
   async fn wait_for(&self, loader_id: Option<&str>, timeout: std::time::Duration) -> Option<Request> {
-    if let Some(request) = self.get_for(loader_id) {
-      return Some(request);
-    }
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
       let notified = self.filled.notified();
       tokio::pin!(notified);
-      // Arm before the second look: a `set` racing between the two would
+      // Arm before the look: a `set` racing between the two would
       // otherwise notify nobody and leave this waiting out the timeout.
       notified.as_mut().enable();
+      // Read before the requests: the consumer that fills this slot sees
+      // a document's request before its commit, so a commit already
+      // recorded means every request of that loader is in the slot.
+      let settled = loader_id.is_some() && self.committed_loader().as_deref() == loader_id;
       if let Some(request) = self.get_for(loader_id) {
         return Some(request);
       }
-      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+      if settled || tokio::time::timeout_at(deadline, notified).await.is_err() {
         return self.get_for(loader_id);
       }
     }
+  }
+
+  fn committed_loader(&self) -> Option<String> {
+    self.committed.lock().ok().and_then(|guard| guard.clone())
   }
 
   pub fn clear(&self) {

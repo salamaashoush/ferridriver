@@ -369,6 +369,7 @@ mod tests {
       transport,
       child: Arc::default(),
       attached_targets: Arc::default(),
+      spares: Arc::default(),
       version: Arc::from("Chrome/fixture"),
       isolated_contexts: true,
       headful: false,
@@ -502,7 +503,14 @@ mod tests {
       json!({"method":"Runtime.executionContextsCleared","params":{}}),
       created("replacement"),
     ] {
-      CdpPage::<PipeTransport>::handle_tracker_event(&event, &contexts, &notify, &Arc::from("main"), &sender);
+      CdpPage::<PipeTransport>::handle_tracker_event(
+        &event,
+        &contexts,
+        &Arc::default(),
+        &notify,
+        &Arc::from("main"),
+        &sender,
+      );
     }
     let call = queued.try_recv().unwrap();
     assert_eq!(call.source.frame, "child");

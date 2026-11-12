@@ -283,8 +283,9 @@ pub async fn click_prep(
   // visible + enabled + stable. `clickPrep` is async (the `stable` gate
   // does rAF box-stability sampling page-side); `call_js_fn_value` awaits
   // the returned promise, so this stays ONE round-trip.
+  let stable = stable_check().state();
   let js = format!(
-    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, ['visible','enabled','stable'], {scroll_lit})); }}"
+    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, ['visible','enabled','{stable}'], {scroll_lit})); }}"
   );
   let raw = element
     .call_js_fn_value(&js)
@@ -322,6 +323,51 @@ pub async fn click_prep(
     .and_then(serde_json::Value::as_f64)
     .ok_or_else(|| FerriError::evaluation("click_prep: bad y"))?;
   Ok(ClickPrep::Ready { x, y })
+}
+
+/// How long an action watches an element's box before trusting that it
+/// has stopped moving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StableCheck {
+  /// Playwright's check: the box sampled in one animation frame equals
+  /// the box in the next. About 33ms at 60Hz for an element at rest.
+  #[default]
+  Playwright,
+  /// The box sampled when the action starts equals the box in the next
+  /// animation frame, watched for at least 8ms: about 10ms on average and
+  /// 17ms at most at 60Hz. A document with an animation in flight gets
+  /// the Playwright check. An element moved from a timer slower than the
+  /// watch can pass here where Playwright would have caught it.
+  Frame,
+}
+
+impl StableCheck {
+  /// The state name the injected `awaitStates` runs this check under.
+  fn state(self) -> &'static str {
+    match self {
+      Self::Playwright => "stable",
+      Self::Frame => "stable-frame",
+    }
+  }
+}
+
+static STABLE_CHECK_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Choose the stability check every later pointer action in this process
+/// runs. Process-wide, as the selector registry is: the check is a
+/// property of how the suite is run, not of a page.
+pub fn set_stable_check(check: StableCheck) {
+  STABLE_CHECK_FRAME.store(check == StableCheck::Frame, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The stability check pointer actions currently run.
+#[must_use]
+pub fn stable_check() -> StableCheck {
+  if STABLE_CHECK_FRAME.load(std::sync::atomic::Ordering::Relaxed) {
+    StableCheck::Frame
+  } else {
+    StableCheck::Playwright
+  }
 }
 
 // ─── Fill ───────────────────────────────────────────────────────────────────
@@ -909,9 +955,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       {
         return Err(FerriError::Backend(reason.clone()));
       }
-      if wait_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-      }
+      pause_for_change(page, std::time::Duration::from_millis(wait_ms)).await;
     }
 
     // Cycle scroll alignment across retries — Playwright `_retryPointerAction`
@@ -1327,6 +1371,29 @@ pub async fn select_options(
   )
 }
 
+const ACTIONABLE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A retry's pause that ends early when the page's main document changes
+/// (`window.__fd.waitForChange`), so an element that becomes actionable
+/// 5ms into a 50ms pause is acted on then. Never longer than `pause`: a
+/// document that cannot be watched (navigating, no engine, the element's
+/// own frame is a child) is slept on for all of it.
+async fn pause_for_change(page: &AnyPage, pause: std::time::Duration) {
+  if pause.is_zero() {
+    return;
+  }
+  let started = tokio::time::Instant::now();
+  let call = format!(
+    "window.__fd instanceof Object ? window.__fd.waitForChange({}) : null",
+    pause.as_millis()
+  );
+  let floor = match tokio::time::timeout(pause, page.evaluate(&call)).await {
+    Ok(Ok(Some(serde_json::Value::Bool(_)))) => crate::expect::CHANGE_FLOOR.min(pause),
+    _ => pause,
+  };
+  tokio::time::sleep(floor.saturating_sub(started.elapsed())).await;
+}
+
 /// Wait for an element to be actionable (visible, enabled, stable).
 /// Polls from the Rust side with short sleeps — no blocking JS promises
 /// — so parallel pages can make progress concurrently.
@@ -1362,8 +1429,7 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
       return Ok(());
     }
 
-    // Yield to other tasks (allows parallel pages to make progress)
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    pause_for_change(page, ACTIONABLE_POLL).await;
   }
 }
 
@@ -1381,7 +1447,12 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
 pub async fn wait_for_states(element: &AnyElement, page: &AnyPage, states: &[&str]) -> Result<()> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
   let _ = page.ensure_engine_injected().await;
-  let states_lit = states.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",");
+  let stable = stable_check().state();
+  let states_lit = states
+    .iter()
+    .map(|s| format!("'{}'", if *s == "stable" { stable } else { s }))
+    .collect::<Vec<_>>()
+    .join(",");
   // `awaitStates` resolves to `undefined` when every state passes (so
   // `?? 'ok'` yields `"ok"`), or the failing state name otherwise.
   let js = format!(
@@ -1405,6 +1476,6 @@ pub async fn wait_for_states(element: &AnyElement, page: &AnyPage, states: &[&st
       return Ok(());
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    pause_for_change(page, ACTIONABLE_POLL).await;
   }
 }

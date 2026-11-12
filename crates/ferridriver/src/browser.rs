@@ -732,6 +732,24 @@ impl Browser {
     self.isolated_contexts
   }
 
+  /// Have closed contexts kept for reuse instead of disposed.
+  ///
+  /// A context and its first page cost a renderer process on every
+  /// backend. With this on, Chromium empties a context being closed
+  /// (its document, history, cookies, permissions, cache, and the
+  /// storage of every origin it visited) and gives it, with one blank
+  /// page, to the next [`Self::new_context`] that asks for no proxy.
+  /// A context made with a proxy or given HTTP credentials is disposed
+  /// as before, since neither can be taken back; so is every context on
+  /// the other backends.
+  pub async fn set_context_recycling(&self, enabled: bool) {
+    self.state.write().await.closed_contexts = if enabled {
+      crate::state::ClosedContexts::Recycled
+    } else {
+      crate::state::ClosedContexts::Disposed
+    };
+  }
+
   /// Backend kind negotiated by the connected instance.
   #[must_use]
   pub fn backend_kind(&self) -> crate::backend::BackendKind {

@@ -140,3 +140,28 @@ test('page.url() reads a pushState the moment the evaluate that made it returns'
   });
   expect(page.mainFrame().url()).toBe(`${baseURL}/pushed#after`);
 });
+
+test('goto to a fragment of the loaded document resolves at once with no response', async ({ page, baseURL }) => {
+  const landed = `${baseURL}/fx/landed`;
+  await page.goto(landed);
+  await page.evaluate(() => {
+    (window as any).__kept = 1;
+  });
+  const started = Date.now();
+  expect(await page.goto(`${landed}#first`)).toBeNull();
+  expect(await page.goto(`${landed}#second`)).toBeNull();
+  expect(Date.now() - started).toBeLessThan(5000);
+  expect(page.url()).toBe(`${landed}#second`);
+  expect(await page.evaluate(() => (window as any).__kept)).toBe(1);
+});
+
+test('goto to a document that issues no request does not wait for one', async ({ page, baseURL }) => {
+  await page.goto(`${baseURL}/fx/landed`);
+  const started = Date.now();
+  for (let i = 0; i < 5; i++) {
+    expect(await page.goto('about:blank')).toBeNull();
+    expect(page.url()).toBe('about:blank');
+    expect((await page.goto(`${baseURL}/fx/landed`))?.status()).toBe(200);
+  }
+  expect(Date.now() - started).toBeLessThan(1000);
+});

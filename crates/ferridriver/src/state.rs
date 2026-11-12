@@ -289,6 +289,17 @@ pub struct ContextInitScript {
   pub installed: Arc<std::sync::Mutex<Vec<(crate::backend::AnyPage, String)>>>,
 }
 
+/// What becomes of a context when it is closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClosedContexts {
+  /// Disposed, with its pages.
+  #[default]
+  Disposed,
+  /// Handed to the backend to empty and keep for the next context
+  /// (`AnyBrowser::retire_context`).
+  Recycled,
+}
+
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
@@ -483,6 +494,12 @@ pub struct BrowserState {
   /// `BrowserContext._origins`. `storageState()` reads the ones no live
   /// page is on through a page of its own.
   pub visited_origins: VisitedOrigins,
+  pub closed_contexts: ClosedContexts,
+  /// Contexts that were ever given HTTP credentials, by composite key,
+  /// including ones that have since had them taken away. The browser
+  /// caches what it authenticated with and offers no way to clear it, so
+  /// such a context is never kept for another user.
+  pub http_authenticated: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
   /// Each context's open pages, readable without this state's lock:
   /// what makes `context.pages()` synchronous, as in Playwright.
   pub context_pages: ContextPages,
@@ -609,6 +626,8 @@ impl BrowserState {
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       visited_origins: VisitedOrigins::default(),
+      closed_contexts: ClosedContexts::default(),
+      http_authenticated: Arc::default(),
       context_pages: ContextPages::default(),
       record_har_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
@@ -2439,6 +2458,11 @@ impl BrowserState {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .remove(composite);
     self.visited_origins.forget(composite);
+    self
+      .http_authenticated
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(composite);
     self.context_pages.forget(composite);
     self
       .record_har_installed
@@ -2477,6 +2501,15 @@ impl BrowserState {
   /// (one CDP call kills the context + all pages, matching Playwright's doClose).
   pub async fn remove_context(&mut self, context: &str) {
     let key = self.session_key(context);
+    let composite = key.to_composite();
+    let authenticated = self
+      .get_context_options(&composite)
+      .is_some_and(|options| options.http_credentials.is_some())
+      || self
+        .http_authenticated
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&composite);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
       let ctx_id = inst.context(&key.context).ok().and_then(|c| c.cdp_context_id.clone());
       // A page's native recording goes with its target; write it first.
@@ -2488,7 +2521,12 @@ impl BrowserState {
       // context of its own, so its tabs have to be closed one by one —
       // dropping the handles alone left them open in the browser.
       if let Some(id) = ctx_id {
-        let _ = inst.browser.dispose_context(&id).await;
+        let _ = if self.closed_contexts == ClosedContexts::Recycled && !authenticated {
+          let origins = self.visited_origins.of(&composite);
+          Box::pin(inst.browser.retire_context(&id, &origins)).await
+        } else {
+          inst.browser.dispose_context(&id).await
+        };
       } else {
         let pages: Vec<AnyPage> = inst.context(&key.context).map(|c| c.pages.clone()).unwrap_or_default();
         for page in pages {

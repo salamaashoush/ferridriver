@@ -2145,6 +2145,13 @@ impl ContextRef {
     let composite = self.key.to_composite();
     {
       let state = self.state.read().await;
+      if credentials.is_some() {
+        state
+          .http_authenticated
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .insert(composite.clone());
+      }
       let mut opts = state.get_context_options(&composite).unwrap_or_default();
       opts.http_credentials.clone_from(&credentials);
       state.set_context_options(&composite, opts);
