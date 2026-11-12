@@ -677,6 +677,9 @@ describe('actions', () => {
   });
 
   test('script_fill_types_into_the_field', async ({ page, browserName }) => {
+    // Playwright: "WebKit win does not support color inputs" and the date
+    // family (page/page-fill.spec.ts:86, :111); `type=date` is a text field.
+    test.fixme(browserName === 'webkit' && process.platform === 'win32', 'WebKit on Windows has no date input');
     // The value goes in as typing puts it in: the field is focused, its
     // content selected and replaced through the input domain, so the page
     // sees trusted `beforeinput` and `input` events, and emptying it is a

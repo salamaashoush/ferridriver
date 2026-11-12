@@ -881,11 +881,23 @@ async fn run_reset(listener: tokio::net::TcpListener, state: Arc<ResetState>) {
 /// at startup for `127.0.0.1` and signed by nobody — so every client
 /// rejects it unless it is explicitly told to ignore certificate errors.
 async fn run_tls(listener: tokio::net::TcpListener) {
-  let Ok(cert) = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()]) else {
+  let Ok(mut params) = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()]) else {
     return;
   };
-  let certs = vec![cert.cert.der().clone()];
-  let key = tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(cert.signing_key.serialize_der());
+  // rcgen's default expiry is the year 4096, which Windows WebKit's curl
+  // cannot represent: it reports the certificate as expiring before 1970.
+  let year = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(1970, |since| 1970 + since.as_secs() / 31_556_952);
+  params.not_after = rcgen::date_time_ymd(i32::try_from(year + 2).unwrap_or(i32::MAX), 1, 1);
+  let Ok(signing_key) = rcgen::KeyPair::generate() else {
+    return;
+  };
+  let Ok(cert) = params.self_signed(&signing_key) else {
+    return;
+  };
+  let certs = vec![cert.der().clone()];
+  let key = tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(signing_key.serialize_der());
   let Ok(key) = key else { return };
   // Name the crypto provider rather than taking the process default:
   // cargo unifies rustls features across the workspace build, so both

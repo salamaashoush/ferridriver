@@ -10,6 +10,7 @@
 // call, and a following run compares against it. Both orders have to
 // pass, which is why nothing here asserts a file is absent.
 
+import { isAbsolute, join, sep } from 'node:path';
 import { test, describe, expect } from '@ferridriver/test';
 
 describe('testInfo.snapshotPath', () => {
@@ -41,9 +42,9 @@ describe('testInfo.snapshotPath', () => {
     const declared = testInfo.snapshotPath('a.png', { kind: 'screenshot' });
     expect(declared).toContain('snapshot-path.test.ts-snapshots');
     // Absolute, because a template resolves against the config dir.
-    expect(declared.startsWith('/')).toBe(true);
+    expect(isAbsolute(declared)).toBe(true);
     // Relative to testDir, so the absolute spec path is not glued on.
-    expect(declared).not.toContain('/tests/e2e/e2e/');
+    expect(declared).not.toContain(`${sep}${join('tests', 'e2e', 'e2e')}${sep}`);
   });
 
   test('a kind decides the default extension of an unnamed snapshot', async ({}, testInfo) => {
@@ -66,7 +67,7 @@ describe('testInfo.snapshotPath', () => {
     const nested = testInfo.snapshotPath('nested', 'deep', 'b.png');
     // The project still qualifies the leaf, so the assertion is on the
     // directory part and the extension.
-    expect(nested).toContain('nested/deep/b');
+    expect(nested).toContain(join('nested', 'deep', 'b'));
     expect(nested.endsWith('.png')).toBe(true);
   });
 

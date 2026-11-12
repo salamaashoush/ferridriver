@@ -9,6 +9,7 @@
 
 import { test, describe, expect } from '@ferridriver/test';
 import type { Browser, BrowserContextOptions, Page, Response } from '@ferridriver/test';
+import { dirname, join } from 'node:path';
 import { fxProxyLog, fxProxyLogReset, fxProxyUrl } from './helpers/server';
 
 // Firefox/BiDi rejects unsupported context options with a typed error
@@ -656,7 +657,7 @@ describe('context options', () => {
     const file = attached.entry.response.content._file;
     expect(typeof file).toBe('string');
     expect(file).toMatch(/^[0-9a-f]{40}\./);
-    const beside = `${attached.harPath.slice(0, attached.harPath.lastIndexOf('/'))}/${file}`;
+    const beside = join(dirname(attached.harPath), file!);
     expect((await fs.promises.readFile(beside, 'utf8')).length).toBeGreaterThan(0);
 
     // minimal: the timing breakdown is dropped, which is the whole

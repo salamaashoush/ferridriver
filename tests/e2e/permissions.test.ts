@@ -7,7 +7,10 @@ import type { Page } from '@ferridriver/test';
 const geolocation = (page: Page) =>
   page.evaluate(() => navigator.permissions.query({ name: 'geolocation' }).then(status => status.state));
 
-test('clearPermissions takes back what grantPermissions gave', async ({ page, context }) => {
+test('clearPermissions takes back what grantPermissions gave', async ({ page, context, browserName }) => {
+  // Playwright: "Permissions API is disabled on Windows WebKit" (library/permissions.spec.ts:25).
+  // Its `permissions.query` throws NotSupportedError until a grant exists.
+  test.fixme(browserName === 'webkit' && process.platform === 'win32', 'Permissions API is disabled on Windows WebKit');
   await page.goto('/fx/landed');
   const before = await geolocation(page);
   expect(before).not.toBe('granted');
@@ -21,7 +24,10 @@ test('clearPermissions takes back what grantPermissions gave', async ({ page, co
 
 // "should grant geolocation permission when origin is listed" and
 // "should not grant other permissions when origin is not listed".
-test('a grant for one origin leaves the others alone', async ({ page, context }) => {
+test('a grant for one origin leaves the others alone', async ({ page, context, browserName }) => {
+  // Playwright: "Permissions API is disabled on Windows WebKit" (library/permissions.spec.ts:25).
+  // Its `permissions.query` throws NotSupportedError until a grant exists.
+  test.fixme(browserName === 'webkit' && process.platform === 'win32', 'Permissions API is disabled on Windows WebKit');
   await page.goto('http://localhost:47831/fx/landed');
   const before = await geolocation(page);
   await context.grantPermissions(['geolocation'], { origin: 'http://127.0.0.1:47831/any/path' });
