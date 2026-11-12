@@ -20,8 +20,11 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 rustc-hash = "2"
 tracing = { workspace = true }
-mimalloc = { workspace = true }
 base64 = { workspace = true }
+
+# The global allocator everywhere but Windows (see `lib.rs`).
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+mimalloc = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"
