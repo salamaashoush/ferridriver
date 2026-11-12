@@ -270,9 +270,9 @@ impl Analysis {
       .collect();
 
     let (mut shared_size, mut no_attribution_size) = (0u64, 0u64);
-    for ordinal in 0..snapshot.node_count {
+    for (ordinal, &owner) in self.native_context.iter().enumerate().take(snapshot.node_count) {
       let self_size = snapshot.node_self_size(ordinal);
-      match self.native_context[ordinal] {
+      match owner {
         SHARED_NATIVE_CONTEXT => shared_size += self_size,
         NO_NATIVE_CONTEXT => no_attribution_size += self_size,
         owner => {
