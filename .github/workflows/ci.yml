@@ -184,6 +184,8 @@ jobs:
           - { os: windows-latest, id: e2e-bidi, gate: --only e2e --project bidi }
           - { os: windows-latest, id: napi, gate: --only napi }
           - { os: windows-latest, id: rust, gate: --only rust-build --only doc-tests }
+          - { os: windows-11-arm, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
+          - { os: windows-11-arm, id: rust, gate: --only rust-build --only doc-tests }
     steps:
       - uses: actions/checkout@v4
         with:

@@ -65,6 +65,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            cross: false
     steps:
       - uses: actions/checkout@v4
         with:
