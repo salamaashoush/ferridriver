@@ -113,7 +113,14 @@ pub(super) fn header() -> Vec<u8> {
     ]
     .concat(),
   );
-  [ebml, SEGMENT.to_vec(), UNKNOWN_SIZE.to_vec(), info, element(TRACKS, &track)].concat()
+  [
+    ebml,
+    SEGMENT.to_vec(),
+    UNKNOWN_SIZE.to_vec(),
+    info,
+    element(TRACKS, &track),
+  ]
+  .concat()
 }
 
 /// What precedes one frame: a Cluster at `timestamp_ms` holding a single
@@ -173,6 +180,8 @@ mod tests {
     let find = |needle: &[u8]| head.windows(needle.len()).any(|window| window == needle);
     assert!(find(b"matroska"));
     assert!(find(b"V_MJPEG"));
-    assert!(find(&[0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]));
+    assert!(find(&[
+      0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+    ]));
   }
 }

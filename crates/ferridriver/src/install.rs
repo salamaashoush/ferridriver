@@ -1312,8 +1312,8 @@ impl BrowserInstaller {
     progress(InstallProgress::Resolving);
     let browsers = self.released_browsers_json().await?;
     let platform = webkit_platform_for_host()?;
-    let (archive, executable) =
-      ffmpeg_build(&platform).ok_or_else(|| FerriError::unsupported(format!("no Playwright ffmpeg build for {platform}")))?;
+    let (archive, executable) = ffmpeg_build(&platform)
+      .ok_or_else(|| FerriError::unsupported(format!("no Playwright ffmpeg build for {platform}")))?;
     let revision = browser_revision(browsers, "ffmpeg", &platform)?;
     let install_dir = self.cache_dir.join(format!("ffmpeg-{revision}"));
     self
@@ -1554,7 +1554,11 @@ impl BrowserInstaller {
     let entries = std::fs::read_dir(&self.cache_dir).ok()?;
     let mut candidates: Vec<_> = entries
       .filter_map(std::result::Result::ok)
-      .filter(|e| CacheFamily::Ffmpeg.version_of(&e.file_name().to_string_lossy()).is_some())
+      .filter(|e| {
+        CacheFamily::Ffmpeg
+          .version_of(&e.file_name().to_string_lossy())
+          .is_some()
+      })
       .collect();
     candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
     candidates.into_iter().find_map(|entry| {

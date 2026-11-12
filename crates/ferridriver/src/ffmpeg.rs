@@ -1,6 +1,6 @@
 //! Video encoding through an ffmpeg subprocess, as Playwright's
 //! `FfmpegVideoRecorder` does it: each JPEG frame goes down stdin once,
-//! wrapped in Matroska with its own timestamp ([`ebml`]), and ffmpeg holds
+//! wrapped in Matroska with its own timestamp (`ebml`), and ffmpeg holds
 //! frames for as long as their timestamps say. No compile-time ffmpeg/libav
 //! dependency: the binary is `FERRIDRIVER_FFMPEG`, the one `ferridriver
 //! install ffmpeg` fetched, Playwright's, or `ffmpeg` on PATH.
@@ -71,7 +71,11 @@ fn find_ffmpeg() -> Result<&'static Path> {
       std::env::var_os("FERRIDRIVER_FFMPEG")
         .map(PathBuf::from)
         .filter(|path| path.is_file())
-        .or_else(|| crate::install::BrowserInstaller::new().find_installed_ffmpeg().map(PathBuf::from))
+        .or_else(|| {
+          crate::install::BrowserInstaller::new()
+            .find_installed_ffmpeg()
+            .map(PathBuf::from)
+        })
         .or_else(|| crate::install::find_playwright_browser(crate::install::CachedBrowser::Ffmpeg))
         .or_else(|| {
           let on_path = PathBuf::from("ffmpeg");
@@ -434,6 +438,9 @@ mod tests {
     // A recording abandoned without a stop time is held the same second.
     let mut writer = FrameWriter::new(Vec::new()).unwrap();
     writer.frame(vec![7], 0.0).unwrap();
-    assert_eq!(clusters(&writer.finish(None).unwrap()), vec![(0, vec![7]), (1_000, vec![7])]);
+    assert_eq!(
+      clusters(&writer.finish(None).unwrap()),
+      vec![(0, vec![7]), (1_000, vec![7])]
+    );
   }
 }
