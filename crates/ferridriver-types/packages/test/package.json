@@ -1,6 +1,6 @@
 {
   "name": "@ferridriver/test",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Type declarations for ferridriver's native TypeScript test runner (`ferridriver test`)",
   "license": "MIT",
   "types": "./index.d.ts",
