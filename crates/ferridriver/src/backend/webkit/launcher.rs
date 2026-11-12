@@ -35,6 +35,8 @@ pub enum LaunchError {
     "Playwright WebKit binary not found in any of: FERRIDRIVER_WEBKIT, ferridriver cache, Playwright cache. Run `ferridriver install webkit` to download it."
   )]
   BinaryNotFound,
+  #[error("executable not found at {}", .0.display())]
+  ExecutableNotFound(PathBuf),
   #[error("io: {0}")]
   Io(#[from] std::io::Error),
 }
@@ -53,6 +55,17 @@ pub fn locate_binary() -> Result<PathBuf, LaunchError> {
     .map(PathBuf::from)
     .or_else(|| crate::install::find_playwright_browser(crate::install::CachedBrowser::WebKit))
     .ok_or(LaunchError::BinaryNotFound)
+}
+
+/// An explicit `executablePath`, refused up front when nothing is there:
+/// the operating system's own wording for a missing program differs per
+/// platform.
+pub fn require_executable(path: PathBuf) -> Result<PathBuf, LaunchError> {
+  if path.is_file() {
+    Ok(path)
+  } else {
+    Err(LaunchError::ExecutableNotFound(path))
+  }
 }
 
 /// The PW `WebKit` build revision parsed from the located binary's

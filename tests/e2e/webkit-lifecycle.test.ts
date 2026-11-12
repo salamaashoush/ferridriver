@@ -1,6 +1,6 @@
 import { test, expect, type Browser, type Download } from '@ferridriver/test';
 import { promises as fs } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { runOnceAcrossProjects } from './helpers/projects';
 
 test('independent WebKit browsers retain independent downloads after one closes', async ({ baseURL }) => {
@@ -39,19 +39,35 @@ test('WebKit launches the explicit executable and reports its installed launcher
   runOnceAcrossProjects();
   const binary = webkit().executablePath();
   expect(binary).toBeTruthy();
-  const executable = test.info().outputPath('custom-webkit.sh');
+  // The launcher sits in a `webkit-<revision>` directory of our own, and the
+  // revision a browser reports is read off the directory it was launched
+  // from. On Windows, where the launcher is the browser itself, the
+  // directory is a junction to the installed build; elsewhere it holds a
+  // wrapper script that also leaves a marker.
+  const launcherDir = test.info().outputPath('webkit-sashoush');
   const marker = test.info().outputPath('selected-executable');
-  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-  await fs.mkdir(dirname(executable), {recursive:true});
-  await fs.writeFile(executable, `#!/bin/sh\nprintf '%s' selected > ${quote(marker)}\nexec ${quote(binary!)} "$@"\n`);
-  await fs.chmod(executable, 0o700);
+  let executable: string;
+  if (process.platform === 'win32') {
+    await fs.mkdir(dirname(launcherDir), {recursive:true});
+    await fs.symlink(dirname(binary!), launcherDir, 'junction');
+    executable = join(launcherDir, basename(binary!));
+  } else {
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+    await fs.mkdir(launcherDir, {recursive:true});
+    executable = join(launcherDir, 'custom-webkit.sh');
+    await fs.writeFile(executable, `#!/bin/sh\nprintf '%s' selected > ${quote(marker)}\nexec ${quote(binary!)} "$@"\n`);
+    await fs.chmod(executable, 0o700);
+  }
   const browser = await webkit().launch({headless:true, executablePath:executable});
   try {
+    expect(browser.version()).toBe('webkit-playwright/sashoush');
     const page = await browser.newPage();
     await page.setContent('<button onclick="this.textContent = event.isTrusted ? \'trusted\' : \'synthetic\'">Click</button>');
     await page.getByRole('button').click();
     expect(await page.getByRole('button').textContent()).toBe('trusted');
-    expect(await fs.readFile(marker, 'utf8')).toBe('selected');
+    if (process.platform !== 'win32') {
+      expect(await fs.readFile(marker, 'utf8')).toBe('selected');
+    }
   } finally {
     await browser.close();
   }

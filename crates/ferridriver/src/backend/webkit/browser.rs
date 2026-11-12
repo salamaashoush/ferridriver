@@ -342,7 +342,14 @@ impl WebKitBrowser {
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = CreateContextParams::default();
     if let Some(p) = proxy {
-      params.proxy_server = Some(p.server_origin());
+      // Windows WebKit's curl resolves names locally for `socks5://`;
+      // Playwright's `socks5h://` hands them to the proxy (`wkBrowser.ts`).
+      let server = p.server_origin();
+      params.proxy_server = Some(if cfg!(windows) {
+        server.replacen("socks5://", "socks5h://", 1)
+      } else {
+        server
+      });
       params.proxy_bypass_list = p.bypass_list();
     }
     let resp = self
@@ -589,7 +596,7 @@ fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBr
   let binary = config
     .executable_path
     .clone()
-    .map_or_else(super::launcher::locate_binary, Ok)?;
+    .map_or_else(super::launcher::locate_binary, super::launcher::require_executable)?;
   let child = super::launcher::spawn(&binary, config, child_write_fd, child_read_fd)?;
   let version = Arc::from(format!(
     "webkit-playwright/{}",
@@ -625,7 +632,7 @@ fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBr
   let binary = config
     .executable_path
     .clone()
-    .map_or_else(super::launcher::locate_binary, Ok)?;
+    .map_or_else(super::launcher::locate_binary, super::launcher::require_executable)?;
   let child = super::launcher::spawn(&binary, config, &pipes.theirs_read, &pipes.theirs_write)?;
   let version = Arc::from(format!(
     "webkit-playwright/{}",
