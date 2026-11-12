@@ -111,17 +111,26 @@ test('frames between clicks of an element at rest', async ({ page }, testInfo) =
 });
 `;
 
+// One run per project: all four browsers one after another in a single run
+// outlast the 25s the `probe` command allows on a CI runner.
 async function frames(stableCheck) {
   const cwd = await workspace({ 'ferridriver.toml': config(stableCheck), 'stable.spec.ts': SPEC });
-  const result = await run(['test', '--no-inherit', '--headless', '--workers', '1', '--reporter', 'line'], { cwd });
-  passed(result);
-  const spent = new Map([...result.text.matchAll(/FRAMES (\S+) (\d+)/g)].map((m) => [m[1], Number(m[2])]));
-  assert.deepEqual([...spent.keys()].sort(), PROJECTS.map(([name]) => name).sort(), result.text);
+  const spent = new Map();
+  for (const [name] of PROJECTS) {
+    const result = await run(
+      ['test', '--no-inherit', '--headless', '--workers', '1', '--reporter', 'line', '--project', name],
+      { cwd },
+    );
+    passed(result);
+    const reported = [...result.text.matchAll(/FRAMES (\S+) (\d+)/g)];
+    assert.deepEqual(reported.map((m) => m[1]), [name], result.text);
+    spent.set(name, Number(reported[0][2]));
+  }
   return spent;
 }
 
 test('stableCheck = "frame" holds a click for every kind of mover and needs fewer frames', async () => {
-  test.setTimeout(120_000);
+  test.setTimeout(300_000);
   const playwright = await frames(undefined);
   const frame = await frames('frame');
   for (const [name] of PROJECTS) {

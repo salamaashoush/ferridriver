@@ -446,8 +446,10 @@ describe('locators', () => {
       expect(error.message).toContain('Timeout 400ms exceeded');
       expect(Date.now() - started).toBeLessThan(5000);
     }
-    // The bag does not get in the way of a call that succeeds.
-    expect(await page.locator('#here').evaluate((el: Element) => el.id, undefined, { timeout: 400 })).toBe('here');
+    // The bag does not get in the way of a call that succeeds. Its timeout
+    // is not the 400ms above: on a loaded 3-core runner WebKit's first
+    // attempt alone has taken longer than that.
+    expect(await page.locator('#here').evaluate((el: Element) => el.id, undefined, { timeout: 5000 })).toBe('here');
   });
 
   test('aria_snapshot_boxes', async ({ page }) => {
