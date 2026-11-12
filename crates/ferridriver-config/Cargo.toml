@@ -6,7 +6,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
@@ -24,7 +23,6 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
 shellexpand = { workspace = true }
-config = { workspace = true }
 serde_ignored = "0.1"
 # Names the exact field path in a deserialization error. serde alone
 # reports `invalid type: string, expected a sequence` with no clue which

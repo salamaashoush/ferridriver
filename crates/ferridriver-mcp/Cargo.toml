@@ -6,7 +6,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
@@ -40,6 +39,5 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
-config = { workspace = true }
 shellexpand = { workspace = true }
 dirs = { workspace = true }

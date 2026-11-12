@@ -30,7 +30,6 @@ rust-version = "1.97.0"
 license = "MIT OR Apache-2.0"
 authors = ["Salama Ashoush <salamaashoush@gmail.com>"]
 repository = "https://github.com/salamaashoush/ferridriver"
-homepage = "https://github.com/salamaashoush/ferridriver"
 readme = "README.md"
 keywords = ["browser", "automation", "playwright", "cdp", "testing"]
 categories = ["development-tools::testing", "web-programming"]
@@ -106,7 +105,6 @@ tokio-util = "0.7"
 dashmap = "6"
 arc-swap = "1"
 mimalloc = { version = "0.1", default-features = false }
-config = { version = "0.15", default-features = false, features = ["toml", "json", "yaml"] }
 shellexpand = "3"
 dirs = "7"
 which = "8"
