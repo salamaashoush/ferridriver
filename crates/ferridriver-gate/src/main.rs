@@ -48,6 +48,20 @@ fn job_timeout() -> u64 {
   })
 }
 
+/// Every binary but the gate's own: the gate is running, and Windows refuses
+/// to replace a running executable, which relinking it with the workspace's
+/// features would do.
+const BUILD: &[&str] = &[
+  "cargo",
+  "build",
+  "--locked",
+  "--workspace",
+  "--exclude",
+  "ferridriver-gate",
+  "--bins",
+  "--lib",
+];
+
 /// The suites that drive browsers, as `--only` names them.
 const BROWSER_SUITES: [&str; 5] = ["e2e", "integration", "bdd", "acceptance", "acceptance-bdd"];
 
@@ -96,7 +110,7 @@ fn jobs(
   let mut jobs = vec![
     Job::new(
       "build",
-      &["cargo", "build", "--locked", "--workspace", "--bins", "--lib"],
+      BUILD,
       if ready && !overlap_ready_prerequisites {
         &["lint"]
       } else {
