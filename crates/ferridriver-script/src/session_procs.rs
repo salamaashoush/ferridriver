@@ -64,11 +64,7 @@ fn configure(cmd: &mut Command, rc: &ResolvedCommand) {
 
 fn build(rc: &ResolvedCommand) -> Command {
   let mut cmd = match &rc.exec {
-    ResolvedExec::Shell(line) => {
-      let mut c = Command::new("sh");
-      c.arg("-c").arg(line);
-      c
-    },
+    ResolvedExec::Shell(line) => Command::from(ferridriver::backend::process::shell_command(line)),
     ResolvedExec::Argv(argv) => {
       // Argv is non-empty (deserialization enforces it); be defensive.
       let mut c = Command::new(argv.first().map_or("true", String::as_str));
@@ -274,15 +270,18 @@ async fn own_process(
 ) {
   let mut observing = true;
   loop {
-    let (result, reply, abandoned) = tokio::select! {
-      result = group.wait(), if observing => (result, None, false),
+    let (result, reply, abandoned, stopped) = tokio::select! {
+      result = group.wait(), if observing => (result, None, false, false),
       request = control.recv() => {
         let abandoned = request.is_none();
+        // A process ended by this request exits as `-1` on every platform;
+        // only Unix says so itself, through the signal that ended it.
+        let stopped = group.is_running();
         let result = match group.terminate() {
           Ok(()) => group.wait().await,
           Err(error) => Err(error),
         };
-        (result, request, abandoned)
+        (result, request, abandoned, stopped)
       }
     };
     match result {
@@ -292,7 +291,7 @@ async fn own_process(
             tracing::warn!(%error, "command output task failed");
           }
         }
-        exit.send_replace(Some(status.code().unwrap_or(-1)));
+        exit.send_replace(Some(if stopped { -1 } else { status.code().unwrap_or(-1) }));
         if let Some(reply) = reply {
           let _ = reply.send(Ok(()));
         }
@@ -720,9 +719,10 @@ fn pump<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
 mod tests {
   use super::*;
 
-  fn command(source: &str, persistent: bool) -> ResolvedCommand {
+  /// A shell-form command: `unix` runs under `sh`, `windows` under `cmd.exe`.
+  fn command(unix: &str, windows: &str, persistent: bool) -> ResolvedCommand {
     ResolvedCommand {
-      exec: ResolvedExec::Shell(source.into()),
+      exec: ResolvedExec::Shell(if cfg!(windows) { windows } else { unix }.into()),
       timeout_ms: Some(2_000),
       env: Vec::new(),
       cwd: None,
@@ -735,7 +735,14 @@ mod tests {
   async fn natural_exit_cleans_descendants_and_preserves_output_for_all_waiters() {
     let procs = SessionProcs::default();
     procs
-      .start("sashoush", &command("sleep 30 & printf ready; exit 7", true))
+      .start(
+        "sashoush",
+        &command(
+          "sleep 30 & printf ready; exit 7",
+          r#"start "" /b ping -n 31 127.0.0.1 >nul & <nul set /p=ready& exit 7"#,
+          true,
+        ),
+      )
       .expect("start");
     let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
       tokio::join!(procs.wait("sashoush"), procs.wait("sashoush"))
@@ -752,7 +759,11 @@ mod tests {
   #[tokio::test]
   async fn close_waits_for_termination_and_permanently_closes_admission() {
     let procs = SessionProcs::default();
-    let spec = command("printf ready; exec sleep 30", true);
+    let spec = command(
+      "printf ready; exec sleep 30",
+      "<nul set /p=ready& ping -n 31 127.0.0.1 >nul",
+      true,
+    );
     procs.start("sashoush", &spec).expect("start");
     procs.wait_for_output("sashoush", "ready").await.expect("ready");
     let exit = procs.inner.lock().expect("registry")["sashoush"].exit.clone();
@@ -767,7 +778,7 @@ mod tests {
     );
     assert!(
       procs
-        .run_oneshot(&command("printf unexpected", false))
+        .run_oneshot(&command("printf unexpected", "<nul set /p=unexpected", false))
         .await
         .expect_err("closed admission")
         .contains("closing")
@@ -779,7 +790,11 @@ mod tests {
   async fn cancelled_oneshot_remains_owned_until_cleanup_finishes() {
     let procs = Arc::new(SessionProcs::default());
     let worker = Arc::clone(&procs);
-    let task = tokio::spawn(async move { worker.exec_oneshot(&command("exec sleep 30", false)).await });
+    let task = tokio::spawn(async move {
+      worker
+        .exec_oneshot(&command("exec sleep 30", "ping -n 31 127.0.0.1 >nul", false))
+        .await
+    });
     let job = tokio::time::timeout(Duration::from_secs(3), async {
       loop {
         if let Some(job) = procs.jobs.lock().expect("jobs").first().cloned() {
@@ -804,7 +819,11 @@ mod tests {
   async fn oneshot_preserves_leader_status_and_terminates_remaining_descendants() {
     let procs = SessionProcs::default();
     let result = procs
-      .exec_oneshot(&command("sleep 30 & printf ready; exit 7", false))
+      .exec_oneshot(&command(
+        "sleep 30 & printf ready; exit 7",
+        r#"start "" /b ping -n 31 127.0.0.1 >nul & <nul set /p=ready& exit 7"#,
+        false,
+      ))
       .await
       .expect("result");
     assert_eq!(result.exit_code, Some(7));
@@ -816,7 +835,7 @@ mod tests {
   #[tokio::test]
   async fn timeout_and_output_overflow_finish_cleanup_before_returning() {
     let procs = SessionProcs::default();
-    let mut spec = command("exec sleep 30", false);
+    let mut spec = command("exec sleep 30", "ping -n 31 127.0.0.1 >nul", false);
     spec.timeout_ms = Some(20);
     let error = procs.exec_oneshot(&spec).await.err().expect("timeout");
     assert!(
@@ -828,7 +847,12 @@ mod tests {
     assert!(error.contains(" state "), "{error}");
     assert!(procs.jobs.lock().expect("jobs").is_empty());
     let error = procs
-      .exec_oneshot(&command("exec yes sashoush", false))
+      .exec_oneshot(&{
+        let mut spec = command("exec yes sashoush", "for /l %i in (0,0,1) do @echo sashoush", false);
+        // cmd.exe's `echo` takes far longer than `yes` to fill the cap.
+        spec.timeout_ms = Some(if cfg!(windows) { 120_000 } else { 2_000 });
+        spec
+      })
       .await
       .err()
       .expect("output overflow");

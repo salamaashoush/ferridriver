@@ -18,9 +18,10 @@ use std::fmt;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// What to execute. A string runs through `sh -c` (shell features
-/// live); an array is executed directly with no shell (each element is
-/// one argv entry — no quoting, no metacharacter interpretation).
+/// What to execute. A string runs through the platform shell (`sh -c`;
+/// `cmd /c` on Windows), shell features live; an array is executed
+/// directly with no shell (each element is one argv entry — no quoting,
+/// no metacharacter interpretation).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum CommandRun {
@@ -149,7 +150,7 @@ impl<'de> Deserialize<'de> for CommandSpec {
 /// A command resolved against caller `vars`: ready to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedExec {
-  /// `sh -c <line>` — values shell-escaped.
+  /// The platform shell's line — values quoted for that shell.
   Shell(String),
   /// Direct argv — no shell, values substituted literally per element.
   Argv(Vec<String>),
@@ -195,7 +196,7 @@ impl CommandSpec {
     };
 
     let exec = match &self.run {
-      CommandRun::Shell(tpl) => ResolvedExec::Shell(subst(tpl, |k| scalar(k).map(|v| shell_single_quote(&v)))?),
+      CommandRun::Shell(tpl) => ResolvedExec::Shell(subst(tpl, |k| scalar(k).and_then(|v| shell_quote(k, &v)))?),
       CommandRun::Argv(args) => {
         let mut out = Vec::with_capacity(args.len());
         for a in args {
@@ -242,8 +243,30 @@ fn subst(tpl: &str, mut repl: impl FnMut(&str) -> Result<String, String>) -> Res
   Ok(out)
 }
 
-fn shell_single_quote(s: &str) -> String {
-  format!("'{}'", s.replace('\'', r"'\''"))
+/// A NUL cannot reach `sh`: its command line is a C string.
+#[cfg(unix)]
+fn shell_quote(name: &str, value: &str) -> Result<String, String> {
+  if value.contains('\0') {
+    return Err(format!("value for `${{{name}}}` contains a NUL byte"));
+  }
+  Ok(format!("'{}'", value.replace('\'', r"'\''")))
+}
+
+/// `cmd.exe` expands `%name%` even inside double quotes, has no escape that
+/// holds for every value, and hands quotes through to the program rather
+/// than removing them. So only a value made of characters it never
+/// interprets, and with no space to split it, is substituted, as is.
+/// Anything else belongs in the argv form, which needs no quoting.
+#[cfg(windows)]
+fn shell_quote(name: &str, value: &str) -> Result<String, String> {
+  let safe = |c: char| c.is_ascii_alphanumeric() || "_-.,:/\\@=+".contains(c);
+  if !value.is_empty() && value.chars().all(safe) {
+    Ok(value.to_owned())
+  } else {
+    Err(format!(
+      "value for `${{{name}}}` has characters cmd.exe interprets; use the argv form (`run: [...]`) to pass it"
+    ))
+  }
 }
 
 #[cfg(test)]
@@ -293,12 +316,33 @@ mod tests {
   }
 
   #[test]
-  fn shell_substitution_is_single_quoted() {
+  fn shell_substitution_is_quoted_for_the_platform_shell() {
     let s = CommandSpec::shell("echo ${msg}");
-    let r = s
-      .resolve(&vars(&[("msg", serde_json::json!("a'b; rm -rf /"))]))
-      .unwrap();
-    assert_eq!(r.exec, ResolvedExec::Shell(r"echo 'a'\''b; rm -rf /'".to_string()));
+    let hostile = vars(&[("msg", serde_json::json!("a'b; rm -rf /"))]);
+    #[cfg(unix)]
+    assert_eq!(
+      s.resolve(&hostile).unwrap().exec,
+      ResolvedExec::Shell(r"echo 'a'\''b; rm -rf /'".to_string())
+    );
+    // cmd.exe has no quoting that holds, so the value is refused.
+    #[cfg(windows)]
+    assert!(s.resolve(&hostile).unwrap_err().contains("argv form"));
+    let plain = s.resolve(&vars(&[("msg", serde_json::json!("staging-2"))])).unwrap();
+    #[cfg(unix)]
+    assert_eq!(plain.exec, ResolvedExec::Shell("echo 'staging-2'".to_string()));
+    #[cfg(windows)]
+    assert_eq!(plain.exec, ResolvedExec::Shell("echo staging-2".to_string()));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_nul_cannot_be_substituted_into_a_shell_line() {
+    let s = CommandSpec::shell("echo ${msg}");
+    assert!(
+      s.resolve(&vars(&[("msg", serde_json::json!("a\0b"))]))
+        .unwrap_err()
+        .contains("NUL")
+    );
   }
 
   #[test]

@@ -1015,11 +1015,7 @@ impl CommandCache {
 /// graph; this one only needs one-shot execution with a bound.
 fn execute(resolved: &ResolvedCommand) -> Result<serde_json::Value, String> {
   let mut command = match &resolved.exec {
-    ResolvedExec::Shell(line) => {
-      let mut c = Command::new("sh");
-      c.args(["-c", line]);
-      c
-    },
+    ResolvedExec::Shell(line) => ferridriver::backend::process::shell_command(line),
     ResolvedExec::Argv(argv) => {
       let (program, rest) = argv.split_first().ok_or("empty argv")?;
       let mut c = Command::new(program);
@@ -1132,6 +1128,15 @@ mod tests {
     serde_json::from_str(json).expect("spec")
   }
 
+  /// A shell-form spec: `unix` runs under `sh`, `windows` under `cmd.exe`,
+  /// with `extra` fields (`cwd`, `timeoutMs`) beside `run`. Built as a JSON
+  /// value, so a path in either line needs no escaping.
+  fn shell(unix: &str, windows: &str, extra: serde_json::Value) -> CommandSpec {
+    let mut object = extra;
+    object["run"] = serde_json::Value::String(if cfg!(windows) { windows } else { unix }.to_string());
+    serde_json::from_value(object).expect("spec")
+  }
+
   fn view<'a>(
     instances: &'a std::collections::HashMap<String, InstanceConfig>,
     args: Option<&'a CommandSpec>,
@@ -1160,7 +1165,11 @@ mod tests {
     instances.insert("staging".to_string(), InstanceConfig::default());
     instances.insert("dev".to_string(), InstanceConfig::default());
     // Would exit non-zero with its own message if it were ever reached.
-    let args = spec(r#""echo boom >&2; exit 2""#);
+    let args = shell(
+      "echo boom >&2; exit 2",
+      "echo boom 1>&2 & exit 2",
+      serde_json::json!({}),
+    );
     let cache = CommandCache::default();
     let v = view(&instances, Some(&args), None, &cache);
 
@@ -1187,8 +1196,12 @@ mod tests {
   fn an_args_command_supplies_the_whole_launch_shape() {
     let mut instances = std::collections::HashMap::new();
     instances.insert("staging".to_string(), InstanceConfig::default());
-    let args = spec(
-      r#""printf '{\"args\":[\"--flag\"],\"profileDir\":\"/managed/staging\",\"executablePath\":\"/bin/cft\",\"env\":{\"FROM_CMD\":\"1\"}}'""#,
+    let launch =
+      r#"{"args":["--flag"],"profileDir":"/managed/staging","executablePath":"/bin/cft","env":{"FROM_CMD":"1"}}"#;
+    let args = shell(
+      &format!("printf '{launch}'"),
+      &format!("echo {launch}"),
+      serde_json::json!({}),
     );
     let cache = CommandCache::default();
     let v = view(&instances, Some(&args), None, &cache);
@@ -1213,8 +1226,12 @@ mod tests {
         ..InstanceConfig::default()
       },
     );
-    let args = spec(
-      r#""printf '{\"args\":[],\"profileDir\":\"/managed\",\"executablePath\":\"/managed/chrome\",\"env\":{\"FROM_CMD\":\"command\"}}'""#,
+    let launch =
+      r#"{"args":[],"profileDir":"/managed","executablePath":"/managed/chrome","env":{"FROM_CMD":"command"}}"#;
+    let args = shell(
+      &format!("printf '{launch}'"),
+      &format!("echo {launch}"),
+      serde_json::json!({}),
     );
     let cache = CommandCache::default();
     let v = view(&instances, Some(&args), None, &cache);
@@ -1364,11 +1381,18 @@ mod tests {
   }
 
   #[test]
-  fn shell_form_single_quotes_the_instance_name() {
-    // Even if a name slipped past validation, substitution is quoted.
+  fn shell_form_quotes_the_instance_name() {
+    // Even if a name slipped past validation, substitution is quoted, or
+    // refused where the shell has no quoting that holds (cmd.exe).
     let s = spec(r#""echo --env ${INSTANCE}""#);
-    let r = resolve_for_instance(&s, "sta'ging").expect("resolve");
-    assert_eq!(r.exec, ResolvedExec::Shell(r"echo --env 'sta'\''ging'".to_string()));
+    let r = resolve_for_instance(&s, "sta'ging");
+    #[cfg(unix)]
+    assert_eq!(
+      r.expect("resolve").exec,
+      ResolvedExec::Shell(r"echo --env 'sta'\''ging'".to_string())
+    );
+    #[cfg(windows)]
+    assert!(r.expect_err("refused").contains("argv form"));
   }
 
   #[test]
@@ -1391,7 +1415,12 @@ mod tests {
   fn args_command_json_object_shape_is_accepted() {
     let instances = std::collections::HashMap::new();
     let cache = CommandCache::default();
-    let s = spec(r#""printf '{\"environment\":\"staging\",\"args\":[\"--a\",\"--b\"]}'""#);
+    let launch = r#"{"environment":"staging","args":["--a","--b"]}"#;
+    let s = shell(
+      &format!("printf '{launch}'"),
+      &format!("echo {launch}"),
+      serde_json::json!({}),
+    );
     let v = view(&instances, Some(&s), None, &cache);
     assert_eq!(v.overrides_for("staging").expect("overrides").args, ["--a", "--b"]);
   }
@@ -1409,7 +1438,11 @@ mod tests {
   fn args_command_failure_is_fatal_not_a_warning() {
     let instances = std::collections::HashMap::new();
     let cache = CommandCache::default();
-    let s = spec(r#""echo bad env >&2; exit 2""#);
+    let s = shell(
+      "echo bad env >&2; exit 2",
+      "echo bad env 1>&2 & exit 2",
+      serde_json::json!({}),
+    );
     let v = view(&instances, Some(&s), None, &cache);
     // Silently launching a browser with no environment mapping is how a
     // caller ends up on the wrong environment.
@@ -1423,7 +1456,11 @@ mod tests {
   fn command_timeout_is_bounded() {
     let instances = std::collections::HashMap::new();
     let cache = CommandCache::default();
-    let s = spec(r#"{"run":"sleep 5","timeoutMs":150}"#);
+    let s = shell(
+      "sleep 5",
+      "ping -n 6 127.0.0.1 >nul",
+      serde_json::json!({ "timeoutMs": 150 }),
+    );
     let v = view(&instances, Some(&s), None, &cache);
     let started = Instant::now();
     let err = v.overrides_for("slow").expect_err("must time out");
@@ -1519,10 +1556,17 @@ mod tests {
     // than whether its endpoint was accepted (a dead one is rejected either way).
     let tmp = tempfile::tempdir().expect("tempdir");
     let marker = tmp.path().join("${INSTANCE}.ran");
-    let discover = spec(&format!(
-      r#""touch {} && echo ws://127.0.0.1:9222/devtools/browser/x""#,
-      marker.display()
-    ));
+    let discover = shell(
+      &format!(
+        "touch {} && echo ws://127.0.0.1:9222/devtools/browser/x",
+        marker.display()
+      ),
+      &format!(
+        r#"type nul > "{}" && echo ws://127.0.0.1:9222/devtools/browser/x"#,
+        marker.display()
+      ),
+      serde_json::json!({}),
+    );
     let view = view(&instances, None, Some(&discover), &cache);
 
     let _ = view.resolve_connect("webkit");
@@ -1972,7 +2016,11 @@ mod tests {
     let instances = std::collections::HashMap::new();
     let cache = CommandCache::default();
     // ~256KB of args, four times the usual 64KB pipe buffer.
-    let s = spec(r#"{"run":"for i in $(seq 1 16000); do echo --flag-$i; done","timeoutMs":20000}"#);
+    let s = shell(
+      "for i in $(seq 1 16000); do echo --flag-$i; done",
+      "for /l %i in (1,1,16000) do @echo --flag-%i",
+      serde_json::json!({ "timeoutMs": 20000 }),
+    );
     let v = view(&instances, Some(&s), None, &cache);
     let args = v.overrides_for("chatty").expect("must not time out").args;
     assert_eq!(args.len(), 16000, "every line survives");
@@ -1990,8 +2038,8 @@ mod tests {
 
     let cache = CommandCache::default();
     let make = |dir: &Path| {
-      let json = format!(r#"{{"run":"cat marker","cwd":"{}"}}"#, dir.display());
-      resolve_for_instance(&spec(&json), "x").expect("resolve")
+      let spec = shell("cat marker", "type marker", serde_json::json!({ "cwd": dir }));
+      resolve_for_instance(&spec, "x").expect("resolve")
     };
     let first = cache.get_or_exec(&make(a.path()), DEFAULT_CACHE_TTL).expect("a");
     let second = cache.get_or_exec(&make(b.path()), DEFAULT_CACHE_TTL).expect("b");
@@ -2006,10 +2054,12 @@ mod tests {
     let dir = tempfile::tempdir().expect("tempdir");
     let counter = dir.path().join("runs");
     let cache = Arc::new(CommandCache::default());
-    let s = spec(&format!(
-      r#""echo x >> {0}; wc -l < {0}""#,
-      counter.display().to_string().replace('"', "")
-    ));
+    let counter_path = counter.display().to_string();
+    let s = shell(
+      &format!("echo x >> '{counter_path}'; wc -l < '{counter_path}'"),
+      &format!(r#"echo x>>"{counter_path}" & find /c /v "" < "{counter_path}""#),
+      serde_json::json!({}),
+    );
     let resolved = resolve_for_instance(&s, "x").expect("resolve");
 
     std::thread::scope(|scope| {
@@ -2029,7 +2079,7 @@ mod tests {
   #[test]
   fn cache_serves_within_ttl_and_flush_clears_it() {
     let cache = CommandCache::default();
-    let s = spec(r#""date +%s%N""#);
+    let s = shell("date +%s%N", "echo %RANDOM%%TIME%", serde_json::json!({}));
     let resolved = resolve_for_instance(&s, "x").expect("resolve");
     let first = cache.get_or_exec(&resolved, DEFAULT_CACHE_TTL).expect("first");
     let second = cache.get_or_exec(&resolved, DEFAULT_CACHE_TTL).expect("second");

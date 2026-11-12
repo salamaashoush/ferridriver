@@ -124,6 +124,27 @@ pub fn setsid_pre_exec() -> impl FnMut() -> std::io::Result<()> + Send + Sync + 
   }
 }
 
+/// A command line run through the platform shell, as Node's `shell: true`
+/// does: `sh -c <line>` on Unix, `cmd.exe /d /s /c "<line>"` on Windows.
+/// The Windows line is passed verbatim, since `cmd` does not parse its
+/// command line the way the C runtime quoting `Command` applies expects.
+#[must_use]
+pub fn shell_command(line: &str) -> std::process::Command {
+  #[cfg(unix)]
+  {
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", line]);
+    command
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::process::CommandExt as _;
+    let mut command = std::process::Command::new("cmd.exe");
+    command.args(["/d", "/s", "/c"]).raw_arg(format!("\"{line}\""));
+    command
+  }
+}
+
 /// Continuously drain a spawned browser's piped stderr into tracing.
 ///
 /// A browser launched with `Stdio::piped()` stderr MUST have that pipe
@@ -566,6 +587,7 @@ impl ChildGroup {
         self.child.wait().await?;
         if let Some(job) = &self.job {
           job.terminate()?;
+          job.until_empty(std::time::Duration::from_secs(10)).await?;
         }
       }
     }
@@ -694,7 +716,7 @@ struct OwnedDirectories {
 impl OwnedDirectories {
   fn remove(&mut self) -> std::io::Result<()> {
     for dir in &self.paths {
-      super::async_tempdir::removal_result(dir, std::fs::remove_dir_all(dir))?;
+      super::async_tempdir::removal_result(dir, super::async_tempdir::remove_dir_all_retrying(dir))?;
     }
     self.paths.clear();
     if let Some(path) = &self.recovery_path {
@@ -769,8 +791,8 @@ mod job {
   use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
   use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
-    TerminateJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
   };
   use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
@@ -830,6 +852,50 @@ mod job {
       // SAFETY: the handle is a live job this value owns.
       if unsafe { TerminateJobObject(self.handle(), 1) } == 0 {
         return Err(std::io::Error::last_os_error());
+      }
+      Ok(())
+    }
+
+    /// How many processes in the job are still running.
+    #[allow(unsafe_code)]
+    fn active_processes(&self) -> std::io::Result<u32> {
+      let size =
+        u32::try_from(std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>()).map_err(std::io::Error::other)?;
+      // SAFETY: the handle is a live job this value owns, and the
+      // accounting struct is plain data sized as the call is told.
+      unsafe {
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+        if QueryInformationJobObject(
+          self.handle(),
+          JobObjectBasicAccountingInformation,
+          (&raw mut info).cast(),
+          size,
+          std::ptr::null_mut(),
+        ) == 0
+        {
+          return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.ActiveProcesses)
+      }
+    }
+
+    /// Wait until every process in the job has gone. `TerminateJobObject`
+    /// only starts the kills, and a process it ended keeps its files open
+    /// until it is gone: a Firefox content process still holding the
+    /// profile makes deleting it fail with a sharing violation.
+    pub(crate) async fn until_empty(&self, limit: std::time::Duration) -> std::io::Result<()> {
+      let deadline = std::time::Instant::now() + limit;
+      while self.active_processes()? > 0 {
+        if std::time::Instant::now() >= deadline {
+          return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+              "the browser's processes were still running {}s after being killed",
+              limit.as_secs()
+            ),
+          ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
       }
       Ok(())
     }
@@ -1397,7 +1463,8 @@ fn reclaim_record(path: &std::path::Path, record: &BrowserRecord) -> bool {
   for dir in &record.owned_dirs {
     let dir = std::path::Path::new(dir);
     if is_reclaimable_dir(dir) {
-      if let Err(error) = super::async_tempdir::removal_result(dir, std::fs::remove_dir_all(dir)) {
+      if let Err(error) = super::async_tempdir::removal_result(dir, super::async_tempdir::remove_dir_all_retrying(dir))
+      {
         tracing::warn!(%error, path = %dir.display(), "process recovery directory removal failed");
         cleanup_complete = false;
       }

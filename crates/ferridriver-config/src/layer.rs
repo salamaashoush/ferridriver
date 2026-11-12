@@ -1186,7 +1186,9 @@ fn anchor_in_place(value: &mut Value, dir: &Path) {
 /// consumer that knows about `~`), or carrying a `${VAR}` template a
 /// caller substitutes before use.
 fn anchored(dir: &Path, text: &str) -> Option<String> {
-  if text.is_empty() || text.starts_with('~') || text.contains("${") || Path::new(text).is_absolute() {
+  // `has_root`, not `is_absolute`: on Windows `/abs` names the current
+  // drive's root, which is not a path relative to the config.
+  if text.is_empty() || text.starts_with('~') || text.contains("${") || Path::new(text).has_root() {
     return None;
   }
   Some(normalize_path(&dir.join(text)).to_string_lossy().into_owned())
@@ -1563,8 +1565,9 @@ mod tests {
   #[test]
   fn anchored_leaves_absolute_tilde_and_templates_alone() {
     let dir = Path::new("/base");
-    assert_eq!(anchored(dir, "./x.ts").as_deref(), Some("/base/x.ts"));
-    assert_eq!(anchored(dir, "x.ts").as_deref(), Some("/base/x.ts"));
+    let expected = normalize_path(&dir.join("x.ts")).to_string_lossy().into_owned();
+    assert_eq!(anchored(dir, "./x.ts").as_deref(), Some(expected.as_str()));
+    assert_eq!(anchored(dir, "x.ts").as_deref(), Some(expected.as_str()));
     assert!(anchored(dir, "/abs/x.ts").is_none());
     assert!(anchored(dir, "~/x.ts").is_none());
     assert!(anchored(dir, "/tmp/${INSTANCE}/profile").is_none());

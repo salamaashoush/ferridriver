@@ -508,8 +508,8 @@ mod tests {
     let null = OwnedHandle::from(std::fs::File::open("NUL").expect("NUL"));
     let mut ours_write = pair.ours_write;
     let mut ours_read = pair.ours_read;
-    let script = "$i = [System.IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr]$env:FD3, $false), 'Read'); \
-       $o = [System.IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr]$env:FD4, $false), 'Write'); \
+    let script = "$i = [System.IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr][long]$env:FD3, $false), 'Read'); \
+       $o = [System.IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr][long]$env:FD4, $false), 'Write'); \
        $b = New-Object byte[] 4; $n = $i.Read($b, 0, 4); $o.Write($b, 0, $n); $o.Flush()";
     let envs = [
       (

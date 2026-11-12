@@ -346,8 +346,8 @@ mod tests {
     let issues = check(
       &[pkg(ExtensionManifest {
         requires: ExtensionRequires {
-          // `sh` exists on every platform this repo builds for.
-          commands: vec!["sh".into()],
+          // The platform shell exists wherever this repo builds.
+          commands: vec![if cfg!(windows) { "cmd" } else { "sh" }.into()],
           ..Default::default()
         },
         ..Default::default()

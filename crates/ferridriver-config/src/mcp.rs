@@ -673,7 +673,11 @@ mod tests {
   #[test]
   fn args_command_failure_aborts_instead_of_launching_unconfigured() {
     let mut config = McpConfig::default();
-    config.browser.instance_args_command = Some(spec(r#""echo bad >&2; exit 2""#));
+    config.browser.instance_args_command = Some(spec(if cfg!(windows) {
+      r#""echo bad 1>&2 & exit 2""#
+    } else {
+      r#""echo bad >&2; exit 2""#
+    }));
     // Previously a warn-only path: the browser launched with no
     // environment mapping and the caller never knew.
     assert!(config.instance_overrides("default").is_err());

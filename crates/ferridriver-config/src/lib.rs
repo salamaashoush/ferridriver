@@ -946,7 +946,7 @@ mod tests {
     // consumer never has to guess which cwd the value meant.
     assert_eq!(
       root.bundler.alias.get("@wdio/utils").map(String::as_str),
-      Some(dir.join("shims/wdio-utils.ts").to_string_lossy().as_ref())
+      Some(dir.join("shims").join("wdio-utils.ts").to_string_lossy().as_ref())
     );
     assert_eq!(
       root.bundler.virtual_modules.get("acme:env").map(String::as_str),
@@ -1200,7 +1200,7 @@ command = []
       root.extensions.paths(),
       [
         dir.join("ext").to_string_lossy().into_owned(),
-        dir.join("tools/login.ts").to_string_lossy().into_owned()
+        dir.join("tools").join("login.ts").to_string_lossy().into_owned()
       ]
     );
     assert_eq!(root.extensions.policy(), ExtensionPolicyConfig::default());

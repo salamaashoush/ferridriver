@@ -192,7 +192,17 @@ fn lock_profile(profile: &Path) -> Result<File> {
     .write(true)
     .share_mode(0)
     .open(profile.join("parent.lock"))
-    .map_err(FerriError::from)
+    .map_err(|error| {
+      // A running Firefox holds `parent.lock` open unshared.
+      let held = error
+        .raw_os_error()
+        .and_then(|code| u32::try_from(code).ok())
+        .is_some_and(|code| {
+          code == windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION
+            || code == windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION
+        });
+      if held { busy(profile) } else { error.into() }
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -424,6 +434,26 @@ mod tests {
       assert!(error.to_string().contains("firefoxUserPrefs"), "{error}");
       assert!(!profile.exists());
     }
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn a_profile_firefox_holds_open_is_reported_in_use() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let profile = tempfile::tempdir().unwrap();
+    let firefox = std::fs::OpenOptions::new()
+      .create(true)
+      .truncate(false)
+      .write(true)
+      .share_mode(0)
+      .open(profile.path().join("parent.lock"))
+      .unwrap();
+    let Err(error) = ProfileGuard::acquire(profile.path()) else {
+      panic!("a held parent.lock must refuse the launch");
+    };
+    assert!(error.to_string().contains("already in use"), "{error}");
+    drop(firefox);
+    assert!(ProfileGuard::acquire(profile.path()).is_ok());
   }
 
   #[cfg(unix)]

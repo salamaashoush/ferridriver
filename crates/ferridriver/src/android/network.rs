@@ -118,8 +118,10 @@ mod tests {
     // than expected on the first attempt; a listener left open keeps
     // accepting and fails the wait. Rebinding the address is no proof
     // there: the probe's own closes leave TIME_WAIT on the port, which
-    // blocks a new bind on macOS whichever reuse options it sets.
-    let refused = tokio::time::timeout(Duration::from_secs(2), async {
+    // blocks a new bind on macOS whichever reuse options it sets. Windows
+    // retries a refused loopback connect for about two seconds before
+    // failing it, so one refusal alone takes that long there.
+    let refused = tokio::time::timeout(Duration::from_secs(10), async {
       loop {
         // Linux can connect a TCP socket to itself if both ephemeral endpoints coincide.
         let probe = tokio::net::TcpSocket::new_v4().unwrap();

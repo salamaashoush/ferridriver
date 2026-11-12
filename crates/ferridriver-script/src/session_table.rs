@@ -1008,7 +1008,14 @@ mod tests {
       .start(
         "sashoush",
         &crate::command_spec::ResolvedCommand {
-          exec: crate::command_spec::ResolvedExec::Shell("printf ready; exec sleep 30".into()),
+          exec: crate::command_spec::ResolvedExec::Shell(
+            if cfg!(windows) {
+              "<nul set /p=ready& ping -n 31 127.0.0.1 >nul"
+            } else {
+              "printf ready; exec sleep 30"
+            }
+            .into(),
+          ),
           timeout_ms: None,
           env: Vec::new(),
           cwd: None,

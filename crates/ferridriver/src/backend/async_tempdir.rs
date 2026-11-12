@@ -44,7 +44,7 @@ impl AsyncTempDir {
   /// # Errors
   /// Failed filesystem removal or a failed cleanup task leaves the path retained for another attempt.
   pub async fn remove_now(&self) -> crate::Result<()> {
-    self.remove_with(|path| std::fs::remove_dir_all(path)).await
+    self.remove_with(remove_dir_all_retrying).await
   }
 
   async fn remove_with(&self, remove: impl FnOnce(&Path) -> std::io::Result<()> + Send + 'static) -> crate::Result<()> {
@@ -73,6 +73,52 @@ impl AsyncTempDir {
   }
 }
 
+/// Node's `fs.rm(dir, { recursive: true, maxRetries: 10 })`, which is how
+/// Playwright removes a browser's directories: a file a process that was
+/// just killed still holds, or that a virus scanner has open, refuses
+/// deletion for a moment (Windows' sharing violation), so a busy, denied
+/// or not-yet-empty removal is tried again, waiting 100 ms longer each
+/// time.
+pub(crate) fn remove_dir_all_retrying(path: &Path) -> std::io::Result<()> {
+  const RETRIES: u64 = 10;
+  let mut attempt = 0;
+  loop {
+    match std::fs::remove_dir_all(path) {
+      Err(error) if attempt < RETRIES && transient(&error) => {
+        attempt += 1;
+        std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+      },
+      result => return result,
+    }
+  }
+}
+
+/// What Node retries: `EBUSY`, `EMFILE`, `ENFILE`, `ENOTEMPTY`, `EPERM`.
+/// Windows reports a file another process holds as a sharing or lock
+/// violation, which libuv maps to `EBUSY`.
+fn transient(error: &std::io::Error) -> bool {
+  #[cfg(windows)]
+  if error.raw_os_error().is_some_and(|code| {
+    u32::try_from(code).is_ok_and(|code| {
+      code == windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION
+        || code == windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION
+    })
+  }) {
+    return true;
+  }
+  #[cfg(unix)]
+  if error
+    .raw_os_error()
+    .is_some_and(|code| code == libc::EMFILE || code == libc::ENFILE)
+  {
+    return true;
+  }
+  matches!(
+    error.kind(),
+    std::io::ErrorKind::ResourceBusy | std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::PermissionDenied
+  )
+}
+
 pub(crate) fn removal_result(path: &Path, result: std::io::Result<()>) -> std::io::Result<()> {
   match result {
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => match std::fs::symlink_metadata(path) {
@@ -88,7 +134,7 @@ struct RemoveOnDrop(PathBuf);
 
 impl Drop for RemoveOnDrop {
   fn drop(&mut self) {
-    if let Err(error) = removal_result(&self.0, std::fs::remove_dir_all(&self.0)) {
+    if let Err(error) = removal_result(&self.0, remove_dir_all_retrying(&self.0)) {
       tracing::warn!(%error, path = %self.0.display(), "Temporary directory final cleanup failed");
     }
   }

@@ -340,20 +340,11 @@ fn spawn_command(
   env: &std::collections::BTreeMap<String, String>,
   output: &OutputPolicy,
 ) -> ferridriver::error::Result<(tokio::process::Child, OutputTail)> {
-  let mut cmd = if cfg!(target_os = "windows") {
-    let mut c = tokio::process::Command::new("cmd");
-    c.args(["/C", command]);
-    c
-  } else {
-    // A plain `sh -c`, so `build && start` runs both halves. Signals reach
-    // the real server because the shell leads a process group and the
-    // group is what gets signalled.
-    let mut c = tokio::process::Command::new("sh");
-    c.args(["-c", command]);
-    #[cfg(unix)]
-    c.process_group(0);
-    c
-  };
+  // The platform shell, so `build && start` runs both halves. On Unix the
+  // shell leads a process group and the group is what gets signalled.
+  let mut cmd = tokio::process::Command::from(ferridriver::backend::process::shell_command(command));
+  #[cfg(unix)]
+  cmd.process_group(0);
   cmd.current_dir(cwd);
   for (k, v) in env {
     cmd.env(k, v);
