@@ -1280,7 +1280,7 @@ impl BrowserInstaller {
     let webkit_root = self.cache_dir.join("webkit");
     let install_dir = webkit_root.join(format!("webkit-{revision}"));
     let marker_file = install_dir.join(".downloaded");
-    let executable = install_dir.join("pw_run.sh");
+    let executable = install_dir.join(WEBKIT_EXECUTABLE);
 
     // The marker names the archive, so a build made for another OS release
     // under the same revision is replaced rather than kept.
@@ -1347,7 +1347,7 @@ impl BrowserInstaller {
 
     if !executable.exists() {
       return Err(backend_err(format!(
-        "extraction completed but pw_run.sh not found at: {}",
+        "extraction completed but {WEBKIT_EXECUTABLE} not found at: {}",
         executable.display()
       )));
     }
@@ -1476,7 +1476,7 @@ impl BrowserInstaller {
     candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
 
     candidates.into_iter().find_map(|entry| {
-      let exe = entry.path().join("pw_run.sh");
+      let exe = entry.path().join(WEBKIT_EXECUTABLE);
       (entry.path().join(".downloaded").exists() && exe.is_file()).then(|| exe.to_string_lossy().to_string())
     })
   }
@@ -1528,6 +1528,10 @@ impl Default for BrowserInstaller {
 
 /// The platform name the `WebKit` builds are published under for this host:
 /// `mac26-arm64`, `ubuntu24.04-x64`, `win64`.
+/// What Playwright launches inside a `WebKit` build: a shell wrapper on
+/// Linux and macOS, the browser itself on Windows.
+const WEBKIT_EXECUTABLE: &str = if cfg!(windows) { "Playwright.exe" } else { "pw_run.sh" };
+
 fn webkit_platform_for_host() -> Result<String> {
   let os = std::env::consts::OS;
   let arch = std::env::consts::ARCH;
@@ -1607,7 +1611,9 @@ fn current_platform() -> String {
     ("linux", "aarch64") => "linux-arm64".to_string(),
     ("macos", "x86_64") => "mac-x64".to_string(),
     ("macos", "aarch64") => "mac-arm64".to_string(),
-    ("windows", "x86_64") => "win64".to_string(),
+    // Chrome for Testing publishes no ARM64 Windows build; Playwright runs
+    // the x64 one there under Windows' emulation, and so does this.
+    ("windows", "x86_64" | "aarch64") => "win64".to_string(),
     ("windows", "x86") => "win32".to_string(),
     _ => format!("{os}-{arch}"),
   }
@@ -1676,6 +1682,11 @@ fn firefox_archive_info(version: &str) -> Result<(String, String, String)> {
     )),
     ("macos", "x86_64" | "aarch64") => Ok(("mac".into(), format!("Firefox {version}.dmg"), ".dmg".into())),
     ("windows", "x86_64") => Ok(("win64".into(), format!("Firefox Setup {version}.exe"), ".exe".into())),
+    ("windows", "aarch64") => Ok((
+      "win64-aarch64".into(),
+      format!("Firefox Setup {version}.exe"),
+      ".exe".into(),
+    )),
     ("windows", "x86") => Ok(("win32".into(), format!("Firefox Setup {version}.exe"), ".exe".into())),
     _ => Err(FerriError::unsupported(format!(
       "unsupported platform for Firefox: {os}-{arch}"
@@ -1689,7 +1700,7 @@ fn firefox_executable_path(install_dir: &Path) -> PathBuf {
   let os = std::env::consts::OS;
   match os {
     "macos" => install_dir.join("Firefox.app/Contents/MacOS/firefox"),
-    "windows" => install_dir.join("core/firefox.exe"),
+    "windows" => install_dir.join("core").join("firefox.exe"),
     // Linux: tar extracts to firefox/ subdirectory
     _ => install_dir.join("firefox/firefox"),
   }
@@ -1705,11 +1716,67 @@ fn extract_firefox_archive(archive_path: &Path, dest: &Path) -> Result<()> {
     extract_tar_xz(archive_path, dest)
   } else if path_str.ends_with(".dmg") {
     extract_dmg(archive_path, dest)
+  } else if path_str.ends_with(".exe") {
+    #[cfg(windows)]
+    {
+      extract_installer(archive_path, dest)
+    }
+    #[cfg(not(windows))]
+    {
+      Err(FerriError::unsupported(
+        "Firefox's Windows installer is unpacked only on Windows",
+      ))
+    }
   } else {
     Err(FerriError::unsupported(format!(
       "unsupported Firefox archive format: {path_str}"
     )))
   }
+}
+
+/// Unpack Firefox's Windows installer without running it. The installer is
+/// a 7-Zip self-extractor (a stub, then a 7z archive whose `core/` is the
+/// browser), so its `core/` is read straight out of the archive. Running it
+/// with `/ExtractDir`, as Puppeteer does, waits forever where there is no
+/// desktop (a service, an SSH session, a CI runner).
+#[cfg(windows)]
+fn extract_installer(installer: &Path, dest: &Path) -> Result<()> {
+  const SIGNATURE: &[u8] = b"7z\xBC\xAF\x27\x1C";
+  let bytes = std::fs::read(installer)?;
+  // The stub may hold the signature bytes too, so each match is tried.
+  let mut archive = bytes
+    .windows(SIGNATURE.len())
+    .enumerate()
+    .filter(|(_, window)| *window == SIGNATURE)
+    .find_map(|(start, _)| {
+      sevenz_rust2::ArchiveReader::new(std::io::Cursor::new(&bytes[start..]), sevenz_rust2::Password::empty()).ok()
+    })
+    .ok_or_else(|| backend_err(format!("{} holds no 7z archive", installer.display())))?;
+  archive
+    .for_each_entries(|entry, reader| {
+      let name = entry.name().replace('\\', "/");
+      if !name.starts_with("core/") {
+        return Ok(true);
+      }
+      let relative = Path::new(&name);
+      if relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+      {
+        return Err(sevenz_rust2::Error::Other(format!("{name} leaves the archive").into()));
+      }
+      let target = dest.join(relative);
+      if entry.is_directory() {
+        std::fs::create_dir_all(&target)?;
+      } else {
+        if let Some(parent) = target.parent() {
+          std::fs::create_dir_all(parent)?;
+        }
+        std::io::copy(reader, &mut std::fs::File::create(&target)?)?;
+      }
+      Ok(true)
+    })
+    .map_err(|error| backend_err(format!("unpacking {}: {error}", installer.display())))
 }
 
 /// Extract a .tar.bz2 archive.

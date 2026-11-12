@@ -316,6 +316,7 @@ fn release_target() -> anyhow::Result<&'static str> {
     ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
     ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
     ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+    ("windows", "aarch64") => Ok("aarch64-pc-windows-msvc"),
     (os, arch) => Err(anyhow::anyhow!(
       "no published binary for {os}/{arch} — build from source with `cargo install ferridriver-cli`"
     )),
@@ -534,6 +535,7 @@ mod tests {
       "aarch64-unknown-linux-musl",
       "x86_64-unknown-linux-musl",
       "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
     ];
     let target = release_target().expect("this platform publishes a binary");
     assert!(published.contains(&target), "{target} is not a published target");

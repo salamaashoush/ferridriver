@@ -61,6 +61,8 @@ rustix = { version = "1", features = ["fs", "process", "system"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+# Firefox's Windows installer is a 7-Zip self-extractor.
+sevenz-rust2 = { version = "0.25", default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
