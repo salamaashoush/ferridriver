@@ -904,10 +904,10 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       // The action's deadline falls inside this wait: report why the last
       // attempt failed, which the action's call log records, rather than
       // sleep into the deadline and time out with no reason.
-      if let Some(reason) = last_reason.take()
+      if let Some(reason) = last_reason.as_ref()
         && crate::operation_budget::operation_remaining_ms().is_some_and(|left| left <= wait_ms)
       {
-        return Err(FerriError::Backend(reason));
+        return Err(FerriError::Backend(reason.clone()));
       }
       if wait_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
@@ -931,7 +931,16 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     let (x, y) = if opts.is_force() {
       resolve_click_point(element, opts.position, opts.scrolls()).await?
     } else {
-      match click_prep(element, page, opts.position, scroll_align).await? {
+      let prep = match click_prep(element, page, opts.position, scroll_align).await {
+        Ok(prep) => prep,
+        // The deadline cut this attempt off before it could say why it
+        // failed: report why the one before it did.
+        Err(error) if error.is_timeout_error() => {
+          return Err(last_reason.map_or(error, FerriError::Backend));
+        },
+        Err(error) => return Err(error),
+      };
+      match prep {
         ClickPrep::Ready { x, y } => (x, y),
         ClickPrep::NotActionable { reason } => {
           // `notconnected` => the element is gone; surface it so the

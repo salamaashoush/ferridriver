@@ -55,3 +55,16 @@ test('rejects an unknown scroll mode', async ({ page }) => {
   const error = await page.locator('button').click({ scroll: 'sideways' as 'none' }).catch((e: Error) => e) as Error;
   expect(String(error)).toContain('sideways');
 });
+
+test('a click its deadline cuts off still says why it was retrying', async ({ page }) => {
+  await page.setContent(`
+    <div style="height: 2000px;"></div>
+    <button>click me</button>
+  `);
+  // Each timeout ends the action at a different point of the retry
+  // schedule: during a backoff, or inside an attempt's own commands.
+  for (const timeout of [150, 300, 450, 600, 900, 1300]) {
+    const error = await page.locator('button').click({ scroll: 'none', timeout }).catch((e: Error) => e) as Error;
+    expect(error.message, `timeout ${timeout}`).toContain('element is outside of the viewport');
+  }
+});
