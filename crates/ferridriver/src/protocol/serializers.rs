@@ -1387,6 +1387,34 @@ mod tests {
   }
 
   #[test]
+  fn deserializes_numbers_from_wire_text_exactly() {
+    let texts = [
+      "107.08281326293945",
+      "230.86153411865234",
+      "119.41610336303711",
+      "986.6722412109375",
+      "217.92601013183594",
+    ];
+    let exact = |text: &str| text.parse::<f64>().unwrap().to_bits();
+    for text in texts {
+      let decoded = serde_json::from_str::<SerializedValue>(text).unwrap();
+      assert_eq!(decoded.as_number().map(f64::to_bits), Some(exact(text)), "{text}");
+    }
+    let wire = format!("{{\"a\":[{}],\"id\":1}}", texts.join(","));
+    let SerializedValue::Array { items, .. } = serde_json::from_str::<SerializedValue>(&wire).unwrap() else {
+      panic!("{wire} decodes as an array");
+    };
+    assert_eq!(items.len(), texts.len());
+    for (item, text) in items.iter().zip(texts) {
+      assert_eq!(
+        item.as_number().map(f64::to_bits),
+        Some(exact(text)),
+        "{text} in an array"
+      );
+    }
+  }
+
+  #[test]
   fn deserializes_special_tag() {
     for (wire, expected) in [
       (json!({"v": "null"}), SpecialValue::Null),

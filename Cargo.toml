@@ -80,7 +80,7 @@ ferrijs-serde = "0.9.2"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 base64 = "0.23"
 regex = "1"
 async-trait = "0.1"
