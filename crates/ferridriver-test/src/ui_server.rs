@@ -833,7 +833,13 @@ fn outcome_json(outcome: &TestOutcome, artifacts_root: &Path) -> serde_json::Val
       if let AttachmentBody::Path(ref path) = attachment.body {
         entry["path"] = serde_json::Value::String(path.display().to_string());
         if let Ok(relative) = path.strip_prefix(artifacts_root) {
-          let encoded = encode_url_path(&relative.to_string_lossy());
+          // A URL path separates with `/` whatever the platform's paths use.
+          let relative = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+          let encoded = encode_url_path(&relative);
           entry["urlPath"] = serde_json::Value::String(format!("/artifact/{encoded}"));
         }
       }

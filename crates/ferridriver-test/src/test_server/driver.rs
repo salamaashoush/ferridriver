@@ -650,7 +650,20 @@ fn retain_tests(plan: &mut TestPlan, keep: impl Fn(&crate::model::TestCase) -> b
 /// be relative to the root. Comparing the tails of both, resolved
 /// against the root, is what makes the two meet.
 fn matches_location(root: &Path, file: &str, location: &str) -> bool {
-  let cleaned = location.replace('\\', "");
+  // The UI sends the path regex-escaped (`\/`, `\.`, and on Windows `\\`):
+  // one level of escape comes off, and every separator becomes `/`.
+  let mut cleaned = String::with_capacity(location.len());
+  let mut chars = location.chars();
+  while let Some(c) = chars.next() {
+    match c {
+      '\\' => {
+        if let Some(escaped) = chars.next() {
+          cleaned.push(if escaped == '\\' { '/' } else { escaped });
+        }
+      },
+      c => cleaned.push(c),
+    }
+  }
   // Trailing `:line` / `:line:column`, when the UI sends a position.
   let path = cleaned
     .rsplit_once(':')
@@ -666,8 +679,10 @@ fn matches_location(root: &Path, file: &str, location: &str) -> bool {
     file.to_string()
   } else {
     root.join(file).display().to_string()
-  };
+  }
+  .replace('\\', "/");
   let absolute = absolute.trim_start_matches('/');
+  let file = file.replace('\\', "/");
   absolute.ends_with(&path) || path.ends_with(absolute) || file.ends_with(&path)
 }
 

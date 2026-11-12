@@ -58,13 +58,16 @@ pub fn relative_to(root: &Path, file: &str) -> String {
   parts.join("/")
 }
 
+/// `path` with `/` separators. Joining components would put a separator
+/// after the root (`//repo`) and, on Windows, between the drive and the
+/// root (`C:/\\repo`), so the separators are swapped in place instead.
 fn slashes(path: &Path) -> String {
-  path
-    .components()
-    .map(|component| component.as_os_str().to_string_lossy().into_owned())
-    .collect::<Vec<_>>()
-    .join("/")
-    .replacen("//", "/", 1)
+  let text = path.to_string_lossy();
+  if std::path::MAIN_SEPARATOR == '/' {
+    text.into_owned()
+  } else {
+    text.replace(std::path::MAIN_SEPARATOR, "/")
+  }
 }
 
 #[cfg(test)]
@@ -110,14 +113,14 @@ mod tests {
 
   #[test]
   fn a_file_under_the_root_is_relative_with_forward_slashes() {
-    let root = Path::new("/repo");
-    assert_eq!(relative_to(root, "/repo/tests/a.spec.ts"), "tests/a.spec.ts");
+    let root = comparable_path(Path::new("/repo"));
+    assert_eq!(relative_to(&root, "/repo/tests/a.spec.ts"), "tests/a.spec.ts");
   }
 
   #[test]
   fn a_file_beside_the_root_climbs_out_of_it() {
-    let root = Path::new("/repo/config");
-    assert_eq!(relative_to(root, "/repo/tests/a.spec.ts"), "../tests/a.spec.ts");
+    let root = comparable_path(Path::new("/repo/config"));
+    assert_eq!(relative_to(&root, "/repo/tests/a.spec.ts"), "../tests/a.spec.ts");
   }
 
   #[test]

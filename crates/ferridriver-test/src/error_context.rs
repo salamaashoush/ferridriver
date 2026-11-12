@@ -92,12 +92,11 @@ fn message_of(error: &TestFailure) -> String {
   strip_ansi(&error.to_string()).into_owned()
 }
 
+/// `file` relative to `cwd`; a file outside it (or already relative) as
+/// given. No absoluteness test: on Windows a rooted path with no drive is
+/// not `is_absolute`, yet still lies under a rooted `cwd`.
 fn relative_file_path(file: &str, cwd: &Path) -> String {
-  let path = Path::new(file);
-  if !path.is_absolute() {
-    return file.to_string();
-  }
-  path
+  Path::new(file)
     .strip_prefix(cwd)
     .map_or_else(|_| file.to_string(), |p| p.display().to_string())
 }

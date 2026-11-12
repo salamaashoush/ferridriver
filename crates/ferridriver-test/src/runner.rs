@@ -3393,6 +3393,8 @@ mod project_filter_tests {
     let link = base.join("linked");
     #[cfg(unix)]
     std::os::unix::fs::symlink(base.join("real"), &link).expect("symlink");
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(base.join("real"), &link).expect("symlink");
 
     let via_link = absolute_path(&link.join("specs/a.spec.ts").to_string_lossy());
     let via_real = absolute_path(&file.to_string_lossy());

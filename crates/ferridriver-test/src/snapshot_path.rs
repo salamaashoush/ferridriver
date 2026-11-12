@@ -28,7 +28,7 @@ const DEFAULT_TRIM_LENGTH: usize = 100;
 /// Playwright's `windowsFilesystemFriendlyLength` — the output copy of a
 /// name is trimmed harder than the baseline, because it is joined onto
 /// the (much longer) output directory.
-const WINDOWS_FRIENDLY_LENGTH: usize = 60;
+pub(crate) const WINDOWS_FRIENDLY_LENGTH: usize = 60;
 
 /// The legacy layout, unchanged since Playwright 1.x: a `-snapshots`
 /// directory beside the spec.
@@ -454,7 +454,7 @@ fn sanitize_file_path_before_extension(file_path: &str, ext: &str) -> String {
 
 /// Playwright's `trimLongString`: keep both ends, put a short hash in
 /// the middle, so two long names that share a prefix stay distinct.
-fn trim_long_string(s: &str, length: usize) -> String {
+pub(crate) fn trim_long_string(s: &str, length: usize) -> String {
   if s.chars().count() <= length {
     return s.to_string();
   }
@@ -574,7 +574,9 @@ mod tests {
     let rendered = resolved.absolute_snapshot_path.to_string_lossy().into_owned();
     assert!(!rendered.contains('{'), "{rendered} kept a literal brace");
     assert!(
-      rendered.ends_with("/e2e/login.spec.ts/sign-in-shows-the-form-1.png"),
+      resolved
+        .absolute_snapshot_path
+        .ends_with("e2e/login.spec.ts/sign-in-shows-the-form-1.png"),
       "unexpected anonymous name: {rendered}"
     );
   }

@@ -273,9 +273,13 @@ mod expect_step_tests {
       expected: Some(json!(["home", "hero.png"])),
       ..step("toHaveScreenshot")
     };
+    // The path separator is escaped like any other character of the title.
     assert_eq!(
       shot.title(),
-      format!("Expect \"toHaveScreenshot(home{}hero.png)\"", std::path::MAIN_SEPARATOR)
+      format!(
+        "Expect {}",
+        serde_json::Value::String(format!("toHaveScreenshot(home{}hero.png)", std::path::MAIN_SEPARATOR))
+      )
     );
   }
 

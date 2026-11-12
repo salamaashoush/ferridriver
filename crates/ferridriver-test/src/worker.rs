@@ -1036,7 +1036,9 @@ fn write_error_context(
 }
 
 pub(crate) fn test_artifact_dir_name(id: &crate::model::TestId, project: &str) -> String {
-  let name = artifact_dir_name(&id.full_name(), project);
+  let mut titles = id.title_path();
+  let file = titles.remove(0);
+  let name = artifact_dir_name(&file, &titles.join(" "), project);
   if id.repeat_each_index == 0 {
     name
   } else {
@@ -1044,25 +1046,33 @@ pub(crate) fn test_artifact_dir_name(id: &crate::model::TestId, project: &str) -
   }
 }
 
-/// Directory-safe name for a test's artifact folder under `outputDir`.
-/// Titles and file paths are user-controlled and may contain path
-/// separators or `..` — folding each path-hostile component keeps every
-/// artifact inside `outputDir` (Playwright sanitizes the same way).
-pub(crate) fn artifact_dir_name(full_name: &str, project: &str) -> String {
-  let name = full_name
-    .chars()
-    .map(|c| match c {
-      '/' | '\\' | ':' => '-',
-      c if c.is_control() => '-',
-      c => c,
-    })
-    .collect::<String>()
-    .replace("..", "-");
+/// The name of a test's folder under `outputDir`, as Playwright's
+/// `TestInfo.outputDir` builds it (`worker/testInfo.ts`): the spec path
+/// without its `.spec`/`.test` extension and with its separators as `-`,
+/// then the title path through `sanitizeForFilePath`, trimmed to a length
+/// a Windows path can carry. No separator, `..`, or character a Windows
+/// file name refuses survives, so every artifact stays inside `outputDir`.
+pub(crate) fn artifact_dir_name(file: &str, title: &str, project: &str) -> String {
+  let file = strip_test_extension(file).replace(['/', '\\', ':'], "-");
+  let name = crate::snapshot_path::trim_long_string(
+    &format!("{file}-{}", crate::snapshot_path::sanitize_for_file_path(title)),
+    crate::snapshot_path::WINDOWS_FRIENDLY_LENGTH,
+  );
   if project.is_empty() {
     name
   } else {
     format!("{name}-{}", &ferridriver::tracing::sha1_hex(project.as_bytes())[..12])
   }
+}
+
+fn strip_test_extension(file: &str) -> &str {
+  const KINDS: [&str; 2] = [".spec.", ".test."];
+  const EXTENSIONS: [&str; 8] = ["js", "ts", "jsx", "tsx", "mjs", "mts", "cjs", "cts"];
+  KINDS
+    .iter()
+    .flat_map(|kind| EXTENSIONS.iter().map(move |ext| (kind, ext)))
+    .find_map(|(kind, ext)| file.strip_suffix(ext)?.strip_suffix(kind))
+    .unwrap_or(file)
 }
 
 /// `TestInfo.outputDir` / `snapshotDir` are user-facing and absolute in
@@ -1144,7 +1154,8 @@ impl Worker {
       parallel_index: self.slot,
       repeat_each_index,
       output_dir: absolutize(self.config.output_dir.join("__suite_hooks__").join(artifact_dir_name(
-        suite_key,
+        suite_key.split("::").next().unwrap_or(suite_key),
+        &suite_key.split("::").skip(1).collect::<Vec<_>>().join(" "),
         self.config.name.as_deref().unwrap_or_default(),
       ))),
       snapshot_dir: snapshot_dir(&self.config),
@@ -2772,8 +2783,23 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
 mod tests {
   #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-  use super::{EffectiveContextConfig, after_hooks_step, build_context_options, config_viewport};
+  use super::{EffectiveContextConfig, after_hooks_step, artifact_dir_name, build_context_options, config_viewport};
   use crate::config::{ContextConfig, ViewportConfig, expand_device_keys};
+
+  #[test]
+  fn an_output_dir_name_is_one_path_component_windows_accepts() {
+    assert_eq!(
+      artifact_dir_name("tests/e2e/tracing.test.ts", "tracing har tracing_start_har", ""),
+      "tests-e2e-tracing-tracing-har-tracing_start_har"
+    );
+    let hostile = artifact_dir_name("C:\\specs\\a.spec.mjs", "a > b: \"c\" <d>|e? *f ../../g", "cdp-pipe");
+    assert!(
+      !hostile.contains(['<', '>', ':', '"', '/', '\\', '|', '?', '*', ' ']) && !hostile.contains(".."),
+      "{hostile}"
+    );
+    let long = artifact_dir_name("a.test.ts", &"title ".repeat(30), "");
+    assert_eq!(long.chars().count(), 60, "{long}");
+  }
 
   #[tokio::test]
   async fn a_wedged_teardown_step_names_itself_and_skips_the_rest() {
