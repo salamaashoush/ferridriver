@@ -44,7 +44,7 @@ pub struct McpArgs {
 pub struct InstallArgs {
   /// Browsers to install: `chromium`, `chromium-headless-shell`,
   /// `chromedriver`, `firefox`, `webkit`, `safari`, `android`,
-  /// `android-driver`, `ios`, or `axe`. Defaults to `chromium`.
+  /// `android-driver`, `ios`, `axe`, or `ffmpeg`. Defaults to `chromium`.
   /// `chromedriver` is the `ChromeDriver` of the installed Chromium's
   /// version, for driving it over classic `WebDriver`. `android-driver` is
   /// the pair of APKs the Android device API installs on a device for

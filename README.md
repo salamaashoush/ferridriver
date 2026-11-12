@@ -572,7 +572,7 @@ bun test
 - Without an explicit path, a launch takes the newest build in ferridriver's
   own cache (`FERRIDRIVER_BROWSERS_PATH`), then the newest in Playwright's
   (`PLAYWRIGHT_BROWSERS_PATH`), then a browser installed on the system.
-- `ffmpeg` on `PATH` at runtime for video recording (optional).
+- ffmpeg for video recording (optional): `ferridriver install ffmpeg`, or an `ffmpeg` on `PATH`.
 - Node.js 16+ or Bun 1.0+ only if you build or consume `@ferridriver/node`.
 
 ## Documentation

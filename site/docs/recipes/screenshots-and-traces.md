@@ -208,7 +208,7 @@ height = 360
 Without a size, a video takes the page's viewport scaled down to fit
 800x800: a 1280x720 page records at 800x450.
 
-Requires `ffmpeg` on `PATH` at runtime.
+Chromium records inside the browser (AV1 in MP4). Firefox and WebKit record through ffmpeg: `ferridriver install ffmpeg` fetches the build Playwright records with, and an `ffmpeg` on `PATH` works too. Those recordings are VP9 in WebM, or H.264 in MP4 from an ffmpeg without a VP9 encoder.
 
 ## TypeScript
 

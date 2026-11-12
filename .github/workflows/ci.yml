@@ -206,7 +206,7 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config ffmpeg
+            libclang-dev pkg-config
 
       # Ubuntu 24.04 denies unprivileged user namespaces, which Chromium's
       # sandbox needs whenever `--no-sandbox` is not among its arguments.
@@ -216,7 +216,7 @@ jobs:
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install pkg-config llvm ffmpeg
+        run: brew install pkg-config llvm
 
       - name: Install JavaScript build dependencies
         run: bun install --frozen-lockfile
@@ -228,9 +228,9 @@ jobs:
       # build every other suite launches; `chromedriver` is the driver
       # published for that exact version. Under the image's own Chromium
       # it sat 20s and more in startup, past the test's budget.
-      - name: Install browsers, ChromeDriver and accessibility engine
+      - name: Install browsers, ChromeDriver, accessibility engine and ffmpeg
         shell: bash
-        run: target/debug/ferridriver install --with-deps chromium chromedriver firefox webkit axe
+        run: target/debug/ferridriver install --with-deps chromium chromedriver firefox webkit axe ffmpeg
 
       # The gate's default of 32 browser slots is sized for a desktop. The
       # hosted runners have 4 vCPUs on Linux and 3 on macOS.

@@ -81,6 +81,17 @@ pub(super) fn webkit_archive(platform: &str) -> Option<&'static str> {
   })
 }
 
+/// Playwright's ffmpeg archive for `platform`: one static build per
+/// architecture, published for the releases it builds `WebKit` for.
+pub(super) fn ffmpeg_archive(platform: &str) -> Option<&'static str> {
+  webkit_archive(platform)?;
+  Some(if platform.ends_with("-arm64") {
+    "ffmpeg-linux-arm64.zip"
+  } else {
+    "ffmpeg-linux.zip"
+  })
+}
+
 /// The package manager and the deduplicated packages that `groups` need
 /// on `platform`.
 pub(super) fn packages(platform: &str, groups: &[DependencyGroup]) -> Result<(PackageManager, Vec<&'static str>)> {
@@ -914,6 +925,10 @@ mod tests {
     assert_eq!(webkit_archive("ubuntu26.04-x64"), Some("webkit-ubuntu-26.04.zip"));
     assert_eq!(webkit_archive("arch-x64"), Some("webkit-ubuntu-24.04.zip"));
     assert_eq!(webkit_archive("ubuntu20.04-x64"), None);
+    // ffmpeg is one static build per architecture, for the same releases.
+    assert_eq!(ffmpeg_archive("debian13-arm64"), Some("ffmpeg-linux-arm64.zip"));
+    assert_eq!(ffmpeg_archive("arch-x64"), Some("ffmpeg-linux.zip"));
+    assert_eq!(ffmpeg_archive("ubuntu20.04-x64"), None);
   }
 
   #[test]

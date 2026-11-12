@@ -1,14 +1,17 @@
-//! Video encoding via ffmpeg subprocess (matches Playwright's approach).
+//! Video encoding through an ffmpeg subprocess, as Playwright's
+//! `FfmpegVideoRecorder` does it: each JPEG frame goes down stdin once,
+//! wrapped in Matroska with its own timestamp ([`ebml`]), and ffmpeg holds
+//! frames for as long as their timestamps say. No compile-time ffmpeg/libav
+//! dependency: the binary is `FERRIDRIVER_FFMPEG`, the one `ferridriver
+//! install ffmpeg` fetched, Playwright's, or `ffmpeg` on PATH.
 //!
-//! Spawns `ffmpeg` CLI and pipes JPEG frames to stdin. No compile-time
-//! ffmpeg/libav dependency -- the binary just needs `ffmpeg` on PATH at
-//! runtime when `--video` is used.
-//!
-//! Codec selection matches Playwright: VP8/WebM by default, fallback to
-//! libx264/MP4 if VP8 is unavailable.
+//! VP9 into `WebM` with Playwright's encoder settings, falling back to
+//! libx264 into MP4 for an ffmpeg without a VP9 encoder.
+
+mod ebml;
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 
@@ -26,13 +29,14 @@ fn f64_to_i64(v: f64) -> i64 {
 fn detect_encoder() -> &'static str {
   static ENCODER: OnceLock<&'static str> = OnceLock::new();
   ENCODER.get_or_init(|| {
-    // Check if ffmpeg supports VP8 (libvpx)
-    let has_vpx = Command::new("ffmpeg")
+    // Playwright's own ffmpeg carries libvpx-vp9 and no VP8.
+    let Ok(ffmpeg) = find_ffmpeg() else { return "h264" };
+    let has_vpx = Command::new(ffmpeg)
       .args(["-hide_banner", "-encoders"])
       .stdout(Stdio::piped())
       .stderr(Stdio::null())
       .output()
-      .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libvpx"));
+      .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libvpx-vp9"));
     if has_vpx { "vpx" } else { "h264" }
   })
 }
@@ -53,33 +57,87 @@ pub fn video_content_type() -> &'static str {
   }
 }
 
-/// Find the ffmpeg binary path.
+/// The ffmpeg that records video, in the order `WebKit`'s launcher looks
+/// for its browser: `FERRIDRIVER_FFMPEG`, ferridriver's cache, Playwright's
+/// cache, then `ffmpeg` on PATH.
 ///
 /// # Errors
 ///
-/// Returns an error if ffmpeg is not found on PATH.
-fn find_ffmpeg() -> Result<&'static str> {
-  static FFMPEG: OnceLock<Result<&'static str>> = OnceLock::new();
+/// Returns an error if none of them runs.
+fn find_ffmpeg() -> Result<&'static Path> {
+  static FFMPEG: OnceLock<Result<PathBuf>> = OnceLock::new();
   FFMPEG
     .get_or_init(|| {
-      // Check if ffmpeg is available
-      match Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-      {
-        Ok(s) if s.success() => Ok("ffmpeg"),
-        _ => Err(FerriError::Unsupported(
-          "ffmpeg not found. Install ffmpeg to enable video recording:\n  \
-           macOS:  brew install ffmpeg\n  \
-           Linux:  apt install ffmpeg\n  \
-           Windows: winget install ffmpeg"
-            .into(),
-        )),
-      }
+      std::env::var_os("FERRIDRIVER_FFMPEG")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| crate::install::BrowserInstaller::new().find_installed_ffmpeg().map(PathBuf::from))
+        .or_else(|| crate::install::find_playwright_browser(crate::install::CachedBrowser::Ffmpeg))
+        .or_else(|| {
+          let on_path = PathBuf::from("ffmpeg");
+          Command::new(&on_path)
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+            .then_some(on_path)
+        })
+        .ok_or_else(|| {
+          FerriError::Unsupported(
+            "ffmpeg not found. Install it to record video: ferridriver install ffmpeg (or put ffmpeg on PATH)".into(),
+          )
+        })
     })
-    .clone()
+    .as_ref()
+    .map(PathBuf::as_path)
+    .map_err(Clone::clone)
+}
+
+/// Playwright's VP9 settings (`videoRecorder.ts`): realtime encoding with
+/// no lookahead, and a bitrate and thread count that grow with the pixel
+/// rate over the 800x450 at 25 fps its 1 Mbit/s budget was tuned for, so a
+/// large or fast recording stays sharp and keeps up.
+fn vp9_args(width: u32, height: u32, fps: u32) -> Vec<String> {
+  let pixel_rate = f64::from(width) * f64::from(height) * f64::from(fps);
+  let scale = (pixel_rate / (800.0 * 450.0 * 25.0)).max(1.0);
+  let bitrate = f64_to_i64(scale * 1000.0);
+  let threads = f64_to_i64((scale / 4.0).ceil()).clamp(1, 8);
+  let tile_columns = match threads {
+    1 => 0,
+    2 => 1,
+    3 | 4 => 2,
+    _ => 3,
+  };
+  [
+    "-c:v",
+    "libvpx-vp9",
+    "-qmin",
+    "0",
+    "-qmax",
+    "50",
+    "-crf",
+    "8",
+    "-deadline",
+    "realtime",
+    "-cpu-used",
+    "8",
+    "-lag-in-frames",
+    "0",
+  ]
+  .into_iter()
+  .map(String::from)
+  .chain([
+    "-b:v".to_string(),
+    format!("{bitrate}k"),
+    "-threads".to_string(),
+    threads.to_string(),
+    "-tile-columns".to_string(),
+    tile_columns.to_string(),
+    "-row-mt".to_string(),
+    "1".to_string(),
+  ])
+  .collect()
 }
 
 /// Spawn an ffmpeg process that reads JPEG frames from stdin and writes video.
@@ -89,30 +147,26 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
   let w = width & !1;
   let h = height & !1;
 
-  // Build args matching Playwright's FfmpegVideoRecorder:
-  //   -f image2pipe -c:v mjpeg -i pipe:0    -- read JPEG frames from stdin
-  //   -avioflags direct                      -- reduce buffering
-  //   -fpsprobesize 0 -probesize 32          -- reduce initial analysis delay
-  //   -analyzeduration 0                     -- skip stream analysis
-  //   -r {fps}                               -- output framerate
-  //   -vf pad=W:H:0:0:gray,crop=W:H:0:0     -- resize to exact dimensions
+  // Playwright's FfmpegVideoRecorder input:
+  //   -f matroska -i pipe:0                  -- timestamped MJPEG frames on stdin
+  //   -fpsprobesize 0 -probesize 32
+  //   -analyzeduration 0                     -- start without buffering to analyse
+  //   -r {fps}                               -- constant output rate; ffmpeg holds
+  //                                             each frame until the next one's time
   //   -y -an                                 -- overwrite, no audio
-  //   -threads 1                             -- reduce CPU contention
+  // `-avioflags direct` would break Matroska parsing, which needs the
+  // input buffering it turns off.
   let mut args: Vec<String> = vec![
     "-loglevel".into(),
     "error".into(),
     "-f".into(),
-    "image2pipe".into(),
-    "-avioflags".into(),
-    "direct".into(),
+    "matroska".into(),
     "-fpsprobesize".into(),
     "0".into(),
     "-probesize".into(),
     "32".into(),
     "-analyzeduration".into(),
     "0".into(),
-    "-c:v".into(),
-    "mjpeg".into(),
     "-i".into(),
     "pipe:0".into(),
     "-y".into(),
@@ -123,27 +177,7 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
 
   // Codec-specific settings (matching Playwright)
   if detect_encoder() == "vpx" {
-    args.extend(
-      [
-        "-c:v",
-        "vp8",
-        "-qmin",
-        "0",
-        "-qmax",
-        "50",
-        "-crf",
-        "8",
-        "-deadline",
-        "realtime",
-        "-speed",
-        "8",
-        "-b:v",
-        "1M",
-        "-threads",
-        "1",
-      ]
-      .map(String::from),
-    );
+    args.extend(vp9_args(w, h, fps));
   } else {
     args.extend(
       [
@@ -172,7 +206,10 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
     ),
   ]);
 
-  // Output file
+  args.extend([
+    "-metadata".into(),
+    format!("creation_time={}", crate::tracing::now_iso8601()),
+  ]);
   args.push(output_path.to_string_lossy().into_owned());
 
   crate::backend::process::spawn_exclusive(|| {
@@ -186,67 +223,17 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
   .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg: {e}")))
 }
 
-/// Encode a white video of `duration` seconds at the requested
-/// `width x height` with no piped input. Used as the fallback when the
-/// screencast produced zero frames so the output file still exists, has
-/// the right dimensions, and matches Playwright's `_stop` whitespace-frame
-/// behaviour.
-fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32, duration: f64) -> Result<()> {
-  let ffmpeg = find_ffmpeg()?;
-  let w = width & !1;
-  let h = height & !1;
-  let duration = duration.max(1.0 / f64::from(fps));
-  let mut args: Vec<String> = vec![
-    "-loglevel".into(),
-    "error".into(),
-    "-y".into(),
-    "-f".into(),
-    "lavfi".into(),
-    "-i".into(),
-    format!("color=c=white:s={w}x{h}:d={duration:.3}:r={fps}"),
-    "-an".into(),
-  ];
-  if detect_encoder() == "vpx" {
-    args.extend(
-      [
-        "-c:v",
-        "vp8",
-        "-qmin",
-        "0",
-        "-qmax",
-        "50",
-        "-crf",
-        "8",
-        "-deadline",
-        "realtime",
-        "-speed",
-        "8",
-        "-b:v",
-        "1M",
-        "-threads",
-        "1",
-      ]
-      .map(String::from),
-    );
-  } else {
-    args.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "1"].map(String::from));
-  }
-  args.push(output_path.to_string_lossy().into_owned());
-  let output = Command::new(ffmpeg)
-    .args(&args)
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .output()
-    .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg (blank): {e}")))?;
-  if !output.status.success() {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(FerriError::backend(format!(
-      "ffmpeg blank-encode exited with {}: {stderr}",
-      output.status
-    )));
-  }
-  Ok(())
+/// Encode a recording the screencast never sent a frame to, which ffmpeg
+/// would otherwise refuse to write: Playwright's `_stop` writes
+/// `createWhiteImage`, a white JPEG at quality 80, at the stop time, so
+/// the file still exists at the right size.
+fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32, stop: f64) -> Result<()> {
+  let white = image::RgbImage::from_pixel(width.max(1), height.max(1), image::Rgb([255, 255, 255]));
+  let mut jpeg = Vec::new();
+  image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
+    .encode_image(&white)
+    .map_err(|e| FerriError::backend(format!("white frame: {e}")))?;
+  encode_frames(vec![(jpeg, stop)], stop, output_path, width, height, fps)
 }
 
 /// What the recorder feeds the encoder: frames stamped with seconds since
@@ -256,57 +243,43 @@ pub(crate) enum EncoderInput {
   End { at: f64 },
 }
 
-/// Maps timestamped frames onto a constant-rate timeline that starts at
-/// the recording's start and ends at its stop, so the encoded video's
-/// time is wall time. Each output slot holds the newest frame received
-/// by then; the first frame also fills the slots before it arrived and
-/// the last one fills the slots up to the stop (an idle page sends no
-/// frames).
-struct FramePacer {
-  fps: f64,
-  pending: Option<(Vec<u8>, i64)>,
+/// The write side of Playwright's recorder: the Matroska header once, then
+/// each frame once in its own timestamped cluster. ffmpeg's `-r` holds a
+/// frame until the next one's time, so an idle page costs nothing here.
+struct FrameWriter<W: Write> {
+  out: W,
+  last: Option<(Vec<u8>, f64)>,
 }
 
-impl FramePacer {
-  fn new(fps: u32) -> Self {
-    Self {
-      fps: f64::from(fps),
-      pending: None,
-    }
+impl<W: Write> FrameWriter<W> {
+  fn new(mut out: W) -> std::io::Result<Self> {
+    out.write_all(&ebml::header())?;
+    Ok(Self { out, last: None })
   }
 
-  fn slot(&self, at: f64) -> i64 {
-    f64_to_i64((at * self.fps).floor()).max(0)
-  }
-
-  fn push(
-    &mut self,
-    jpeg: Vec<u8>,
-    at: f64,
-    write: &mut impl FnMut(&[u8]) -> std::io::Result<()>,
-  ) -> std::io::Result<()> {
-    let slot = self.slot(at);
-    self.pending = Some(match self.pending.take() {
-      None => (jpeg, 0),
-      Some((prev, prev_slot)) if slot > prev_slot => {
-        for _ in prev_slot..slot {
-          write(&prev)?;
-        }
-        (jpeg, slot)
-      },
-      Some((_, prev_slot)) => (jpeg, prev_slot),
-    });
+  /// A frame `at` seconds after the recording started.
+  fn frame(&mut self, jpeg: Vec<u8>, at: f64) -> std::io::Result<()> {
+    self.emit(&jpeg, at)?;
+    self.last = Some((jpeg, at));
     Ok(())
   }
 
-  fn finish(self, end: f64, write: &mut impl FnMut(&[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
-    if let Some((last, last_slot)) = self.pending {
-      let total = f64_to_i64((end * self.fps).round()).max(last_slot + 1);
-      for _ in last_slot..total {
-        write(&last)?;
-      }
+  fn emit(&mut self, jpeg: &[u8], at: f64) -> std::io::Result<()> {
+    let ms = u64::try_from(f64_to_i64((at * 1000.0).round())).unwrap_or(0);
+    self.out.write_all(&ebml::cluster_header(ms, jpeg.len()))?;
+    self.out.write_all(jpeg)
+  }
+
+  /// The last frame once more, at the stop or a second after it arrived,
+  /// whichever is later (Playwright's `_stop`): a frame is shown only
+  /// until the next one's time, so the final one needs a successor to be
+  /// shown at all, and the page's final state stays on screen.
+  fn finish(mut self, stop: Option<f64>) -> std::io::Result<W> {
+    if let Some((jpeg, at)) = self.last.take() {
+      let held = stop.map_or(1.0, |stop| (stop - at).max(1.0));
+      self.emit(&jpeg, at + held)?;
     }
-    Ok(())
+    Ok(self.out)
   }
 }
 
@@ -337,15 +310,11 @@ pub(crate) fn encode_stream(
   height: u32,
   fps: u32,
 ) -> Result<()> {
-  // Wait for the first frame before spawning the image2pipe encoder.
-  // If no frame ever arrives (short recording on a page that never
-  // produced a compositor frame, e.g. data: URL closed immediately
-  // after navigation), ffmpeg's image2pipe input would exit with
-  // "Output file does not contain any stream". Playwright handles
-  // this in `videoRecorder.ts::_stop` by writing a synthesised
-  // white frame before closing stdin; we do the equivalent through
-  // ffmpeg's `lavfi color=` source at the requested dimensions -- no
-  // extra dependency, no fake bitmap.
+  // Wait for the first frame before spawning the encoder. If none ever
+  // arrives (a page that never produced a compositor frame, e.g. a data:
+  // URL closed right after navigation), ffmpeg would exit with "Output
+  // file does not contain any stream". Playwright's `_stop` writes a white
+  // frame then, and so does `encode_blank`.
   let (first, first_at) = match rx.blocking_recv() {
     Some(EncoderInput::Frame { jpeg, at }) => (jpeg, at),
     Some(EncoderInput::End { at }) => return encode_blank(output_path, width, height, fps, at),
@@ -353,32 +322,30 @@ pub(crate) fn encode_stream(
   };
 
   let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
-  let mut stdin = child
+  let stdin = child
     .stdin
     .take()
     .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
-  let mut write = |frame: &[u8]| stdin.write_all(frame);
 
-  let mut pacer = FramePacer::new(fps);
-  let mut end = None;
-  let mut written = pacer.push(first, first_at, &mut write);
-  while written.is_ok() {
-    match rx.blocking_recv() {
-      Some(EncoderInput::Frame { jpeg, at }) => written = pacer.push(jpeg, at, &mut write),
-      Some(EncoderInput::End { at }) => {
-        end = Some(at);
-        break;
-      },
-      None => break,
+  // A write fails only when ffmpeg has gone, and its exit status says why.
+  if let Ok(mut writer) = FrameWriter::new(stdin) {
+    let mut stop = None;
+    let mut written = writer.frame(first, first_at);
+    while written.is_ok() {
+      match rx.blocking_recv() {
+        Some(EncoderInput::Frame { jpeg, at }) => written = writer.frame(jpeg, at),
+        Some(EncoderInput::End { at }) => {
+          stop = Some(at);
+          break;
+        },
+        None => break,
+      }
+    }
+    if written.is_ok() {
+      // Closing stdin is what tells ffmpeg the recording ended.
+      drop(writer.finish(stop));
     }
   }
-  if written.is_ok() {
-    // Without a stop time the recording was abandoned; close on the last frame.
-    let _ = pacer.finish(end.unwrap_or(0.0), &mut write);
-  }
-
-  // Close stdin to signal EOF, then wait for ffmpeg to finish
-  drop(stdin);
   finish_ffmpeg(child)
 }
 
@@ -397,71 +364,76 @@ pub(crate) fn encode_frames(
   fps: u32,
 ) -> Result<()> {
   let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
-  let mut stdin = child
+  let stdin = child
     .stdin
     .take()
     .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
-  let mut write = |frame: &[u8]| stdin.write_all(frame);
-
-  let mut pacer = FramePacer::new(fps);
-  let written = frames
-    .into_iter()
-    .try_for_each(|(jpeg, at)| pacer.push(jpeg, at, &mut write));
-  if written.is_ok() {
-    let _ = pacer.finish(end, &mut write);
+  if let Ok(mut writer) = FrameWriter::new(stdin) {
+    let written = frames.into_iter().try_for_each(|(jpeg, at)| writer.frame(jpeg, at));
+    if written.is_ok() {
+      drop(writer.finish(Some(end)));
+    }
   }
-
-  drop(stdin);
   finish_ffmpeg(child)
 }
 
 #[cfg(test)]
 mod tests {
-  use super::FramePacer;
+  use super::{FrameWriter, ebml};
 
-  fn pace(frames: &[(u8, f64)], end: f64) -> Vec<u8> {
+  /// The `(timestamp ms, frame)` clusters a writer produced, read back.
+  fn clusters(stream: &[u8]) -> Vec<(u64, Vec<u8>)> {
+    let header = ebml::header();
+    assert!(stream.starts_with(&header));
+    let mut rest = &stream[header.len()..];
     let mut out = Vec::new();
-    let mut write = |frame: &[u8]| {
-      out.push(frame[0]);
-      Ok(())
-    };
-    let mut pacer = FramePacer::new(25);
-    for &(id, at) in frames {
-      pacer.push(vec![id], at, &mut write).unwrap();
+    while !rest.is_empty() {
+      // Cluster id (4), size vint (1-2), E7 + size + timestamp, A3 + size + 4-byte head, frame.
+      assert_eq!(&rest[..4], &[0x1F, 0x43, 0xB6, 0x75]);
+      let size_len = if rest[4] & 0x80 != 0 { 1 } else { 2 };
+      let mut at = 4 + size_len;
+      assert_eq!(rest[at], 0xE7);
+      let ts_len = usize::from(rest[at + 1] & 0x7F);
+      let ts = rest[at + 2..at + 2 + ts_len]
+        .iter()
+        .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
+      at += 2 + ts_len;
+      assert_eq!(rest[at], 0xA3);
+      let (block_len, vint_len) = if rest[at + 1] & 0x80 != 0 {
+        (usize::from(rest[at + 1] & 0x7F), 1)
+      } else {
+        ((usize::from(rest[at + 1] & 0x3F) << 8) | usize::from(rest[at + 2]), 2)
+      };
+      let frame_start = at + 1 + vint_len + 4;
+      let frame_end = at + 1 + vint_len + block_len;
+      out.push((ts, rest[frame_start..frame_end].to_vec()));
+      rest = &rest[frame_end..];
     }
-    pacer.finish(end, &mut write).unwrap();
     out
   }
 
   #[test]
-  fn the_video_spans_the_recording_wall_time() {
-    // One frame early on, then 5 s of an unchanged page.
-    let out = pace(&[(1, 0.1), (2, 0.5)], 5.72);
-    assert_eq!(out.len(), 143, "5.72 s at 25 fps");
-    assert!(out[..12].iter().all(|&f| f == 1));
-    assert!(out[12..].iter().all(|&f| f == 2));
+  fn each_frame_is_written_once_with_its_time() {
+    let mut writer = FrameWriter::new(Vec::new()).unwrap();
+    writer.frame(vec![1; 3], 0.1).unwrap();
+    writer.frame(vec![2; 200], 0.5).unwrap();
+    let stream = writer.finish(Some(5.72)).unwrap();
+    // The last frame is repeated at the stop, so it is held until then.
+    assert_eq!(
+      clusters(&stream),
+      vec![(100, vec![1; 3]), (500, vec![2; 200]), (5_720, vec![2; 200])]
+    );
   }
 
   #[test]
-  fn the_first_frame_covers_the_time_before_it_arrived() {
-    let out = pace(&[(1, 0.4)], 1.0);
-    assert_eq!(out, vec![1; 25]);
-  }
-
-  #[test]
-  fn frames_sharing_a_slot_keep_the_newest() {
-    // 60 fps input must not stretch a 25 fps timeline.
-    let frames: Vec<(u8, f64)> = (0..60u8).map(|i| (i, f64::from(i) / 60.0)).collect();
-    let out = pace(&frames, 1.0);
-    assert_eq!(out.len(), 25);
-    assert_eq!(out[0], 2, "slot 0 shows the newest frame received in it");
-    assert_eq!(out[24], 59);
-  }
-
-  #[test]
-  fn a_stop_before_the_last_frame_still_shows_it_once() {
-    let out = pace(&[(1, 0.0), (2, 1.0)], 0.9);
-    assert_eq!(out.len(), 26);
-    assert_eq!(out[25], 2);
+  fn the_last_frame_is_held_for_at_least_a_second() {
+    let mut writer = FrameWriter::new(Vec::new()).unwrap();
+    writer.frame(vec![7], 2.0).unwrap();
+    let stream = writer.finish(Some(2.25)).unwrap();
+    assert_eq!(clusters(&stream), vec![(2_000, vec![7]), (3_000, vec![7])]);
+    // A recording abandoned without a stop time is held the same second.
+    let mut writer = FrameWriter::new(Vec::new()).unwrap();
+    writer.frame(vec![7], 0.0).unwrap();
+    assert_eq!(clusters(&writer.finish(None).unwrap()), vec![(0, vec![7]), (1_000, vec![7])]);
   }
 }

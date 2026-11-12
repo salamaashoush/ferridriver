@@ -232,6 +232,7 @@ pub enum CacheFamily {
   Firefox,
   WebKit,
   AxeCore,
+  Ffmpeg,
 }
 
 impl CacheFamily {
@@ -246,6 +247,7 @@ impl CacheFamily {
       "firefox" => Self::Firefox,
       "webkit" => Self::WebKit,
       "axe" => Self::AxeCore,
+      "ffmpeg" => Self::Ffmpeg,
       _ => return None,
     })
   }
@@ -265,6 +267,7 @@ impl CacheFamily {
       Self::Firefox => "firefox-",
       Self::WebKit => "webkit-",
       Self::AxeCore => "axe-core-",
+      Self::Ffmpeg => "ffmpeg-",
     }
   }
 
@@ -1277,10 +1280,72 @@ impl BrowserInstaller {
       .ok_or_else(|| FerriError::unsupported(format!("no Playwright WebKit build for {platform}")))?;
     let revision = browser_revision(browsers, "webkit", &platform)?;
 
-    let webkit_root = self.cache_dir.join("webkit");
-    let install_dir = webkit_root.join(format!("webkit-{revision}"));
+    let install_dir = self.cache_dir.join("webkit").join(format!("webkit-{revision}"));
+    self
+      .install_playwright_build(
+        PlaywrightBuild {
+          name: "webkit",
+          label: "WebKit",
+          executable: install_dir.join(WEBKIT_EXECUTABLE),
+          install_dir,
+          revision,
+          archive,
+        },
+        &progress,
+      )
+      .await
+  }
+
+  /// Install Playwright's ffmpeg, the build `playwright install ffmpeg`
+  /// fetches: the one video recording encodes with. It decodes the
+  /// screencast's JPEG frames and writes VP8 into `WebM`, and nothing else.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Playwright's `browsers.json` is unreachable, the
+  /// host platform has no published ffmpeg build, the download fails after
+  /// all retries, or extraction fails.
+  pub async fn install_ffmpeg<F>(&self, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    progress(InstallProgress::Resolving);
+    let browsers = self.released_browsers_json().await?;
+    let platform = webkit_platform_for_host()?;
+    let (archive, executable) =
+      ffmpeg_build(&platform).ok_or_else(|| FerriError::unsupported(format!("no Playwright ffmpeg build for {platform}")))?;
+    let revision = browser_revision(browsers, "ffmpeg", &platform)?;
+    let install_dir = self.cache_dir.join(format!("ffmpeg-{revision}"));
+    self
+      .install_playwright_build(
+        PlaywrightBuild {
+          name: "ffmpeg",
+          label: "ffmpeg",
+          executable: install_dir.join(executable),
+          install_dir,
+          revision,
+          archive,
+        },
+        &progress,
+      )
+      .await
+  }
+
+  /// Download one build from the Playwright CDN, falling over between its
+  /// mirrors, and unpack it into its own directory.
+  async fn install_playwright_build<F>(&self, build: PlaywrightBuild, progress: &F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    let PlaywrightBuild {
+      name,
+      label,
+      revision,
+      archive,
+      install_dir,
+      executable,
+    } = build;
     let marker_file = install_dir.join(".downloaded");
-    let executable = install_dir.join(WEBKIT_EXECUTABLE);
 
     // The marker names the archive, so a build made for another OS release
     // under the same revision is replaced rather than kept.
@@ -1300,17 +1365,17 @@ impl BrowserInstaller {
 
     let tmp_dir = self.cache_dir.join(".tmp");
     tokio::fs::create_dir_all(&tmp_dir).await?;
-    let zip_path = tmp_dir.join(format!("webkit-{revision}.zip"));
+    let zip_path = tmp_dir.join(format!("{name}-{revision}.zip"));
 
     let mut last_error = String::new();
     'outer: for host in PW_CDN_MIRRORS {
-      let url = format!("{host}/builds/webkit/{revision}/{archive}");
+      let url = format!("{host}/builds/{name}/{revision}/{archive}");
       for attempt in 1..=DOWNLOAD_RETRIES {
         progress(InstallProgress::Downloading {
           bytes_downloaded: 0,
           total_bytes: None,
         });
-        match self.download_file(&url, &zip_path, &progress).await {
+        match self.download_file(&url, &zip_path, progress).await {
           Ok(()) => {
             last_error.clear();
             break 'outer;
@@ -1324,7 +1389,7 @@ impl BrowserInstaller {
     }
     if !last_error.is_empty() {
       return Err(backend_err(format!(
-        "WebKit download failed after exhausting mirrors: {last_error}"
+        "{label} download failed after exhausting mirrors: {last_error}"
       )));
     }
 
@@ -1347,7 +1412,7 @@ impl BrowserInstaller {
 
     if !executable.exists() {
       return Err(backend_err(format!(
-        "extraction completed but {WEBKIT_EXECUTABLE} not found at: {}",
+        "extraction completed but {label} not found at: {}",
         executable.display()
       )));
     }
@@ -1481,6 +1546,23 @@ impl BrowserInstaller {
     })
   }
 
+  /// Return the path to an installed ffmpeg, or `None` if not installed.
+  #[must_use]
+  pub fn find_installed_ffmpeg(&self) -> Option<String> {
+    let platform = webkit_platform_for_host().ok()?;
+    let (_, executable) = ffmpeg_build(&platform)?;
+    let entries = std::fs::read_dir(&self.cache_dir).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| CacheFamily::Ffmpeg.version_of(&e.file_name().to_string_lossy()).is_some())
+      .collect();
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
+    candidates.into_iter().find_map(|entry| {
+      let exe = entry.path().join(executable);
+      (entry.path().join(".downloaded").exists() && exe.is_file()).then(|| exe.to_string_lossy().to_string())
+    })
+  }
+
   /// Return the path to an installed Firefox, or `None` if not installed.
   #[must_use]
   pub fn find_installed_firefox(&self) -> Option<String> {
@@ -1528,6 +1610,34 @@ impl Default for BrowserInstaller {
 
 /// The platform name the `WebKit` builds are published under for this host:
 /// `mac26-arm64`, `ubuntu24.04-x64`, `win64`.
+/// One build on the Playwright CDN: `builds/<name>/<revision>/<archive>`,
+/// unpacked into `install_dir`, with `executable` the file that proves it.
+struct PlaywrightBuild {
+  name: &'static str,
+  label: &'static str,
+  revision: String,
+  archive: &'static str,
+  install_dir: PathBuf,
+  executable: PathBuf,
+}
+
+/// Playwright's ffmpeg archive for `platform`, and the executable in it
+/// (`registry/index.ts`). There is none before macOS 14 or on the Linux
+/// releases Playwright no longer builds for; Windows on ARM runs the x64
+/// build, as it does Chromium and `WebKit`.
+fn ffmpeg_build(platform: &str) -> Option<(&'static str, &'static str)> {
+  #[cfg(target_os = "linux")]
+  if let Some(archive) = linux::ffmpeg_archive(platform) {
+    return Some((archive, "ffmpeg-linux"));
+  }
+  Some(match platform {
+    "mac14" | "mac15" | "mac26" => ("ffmpeg-mac.zip", "ffmpeg-mac"),
+    "mac14-arm64" | "mac15-arm64" | "mac26-arm64" => ("ffmpeg-mac-arm64.zip", "ffmpeg-mac"),
+    "win64" => ("ffmpeg-win64.zip", "ffmpeg-win64.exe"),
+    _ => return None,
+  })
+}
+
 /// What Playwright launches inside a `WebKit` build: a shell wrapper on
 /// Linux and macOS, the browser itself on Windows.
 const WEBKIT_EXECUTABLE: &str = if cfg!(windows) { "Playwright.exe" } else { "pw_run.sh" };

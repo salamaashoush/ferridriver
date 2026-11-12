@@ -109,7 +109,7 @@ working linker and `pkg-config` (Linux).
 
 Runtime dependencies:
 
-- **Linux video recording (`--video`)** — install `ffmpeg`.
+- **Video recording (`--video`)** — `ferridriver install ffmpeg` fetches the ffmpeg Playwright records with; an `ffmpeg` on `PATH` works too.
 - **Firefox backend (`bidi`)** — install Firefox (`apt`, `brew`, `pacman`); ferridriver does not bundle it.
 - **WebKit backend** — Playwright WebKit binary as above.
 

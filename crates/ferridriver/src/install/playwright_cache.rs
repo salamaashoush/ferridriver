@@ -14,6 +14,8 @@ pub enum CachedBrowser {
   ChromiumHeadlessShell,
   Firefox,
   WebKit,
+  /// Playwright's own ffmpeg, which records video.
+  Ffmpeg,
 }
 
 impl CachedBrowser {
@@ -23,6 +25,7 @@ impl CachedBrowser {
       Self::ChromiumHeadlessShell => "chromium_headless_shell-",
       Self::Firefox => "firefox-",
       Self::WebKit => "webkit-",
+      Self::Ffmpeg => "ffmpeg-",
     }
   }
 
@@ -39,6 +42,7 @@ impl CachedBrowser {
       Self::ChromiumHeadlessShell => &["chrome-headless-shell-mac-arm64/chrome-headless-shell"],
       Self::Firefox => &["firefox/Nightly.app/Contents/MacOS/firefox"],
       Self::WebKit => &["pw_run.sh"],
+      Self::Ffmpeg => &["ffmpeg-mac"],
     };
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     let table: &[&str] = match self {
@@ -49,6 +53,7 @@ impl CachedBrowser {
       Self::ChromiumHeadlessShell => &["chrome-headless-shell-mac-x64/chrome-headless-shell"],
       Self::Firefox => &["firefox/Nightly.app/Contents/MacOS/firefox"],
       Self::WebKit => &["pw_run.sh"],
+      Self::Ffmpeg => &["ffmpeg-mac"],
     };
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let table: &[&str] = match self {
@@ -59,6 +64,7 @@ impl CachedBrowser {
       ],
       Self::Firefox => &["firefox/firefox"],
       Self::WebKit => &["pw_run.sh"],
+      Self::Ffmpeg => &["ffmpeg-linux"],
     };
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     let table: &[&str] = match self {
@@ -69,6 +75,7 @@ impl CachedBrowser {
       ],
       Self::Firefox => &["firefox/firefox"],
       Self::WebKit => &["pw_run.sh"],
+      Self::Ffmpeg => &["ffmpeg-linux"],
     };
     #[cfg(target_os = "windows")]
     let table: &[&str] = match self {
@@ -76,6 +83,7 @@ impl CachedBrowser {
       Self::ChromiumHeadlessShell => &["chrome-headless-shell-win64/chrome-headless-shell.exe"],
       Self::Firefox => &["firefox/firefox.exe"],
       Self::WebKit => &["Playwright.exe"],
+      Self::Ffmpeg => &["ffmpeg-win64.exe"],
     };
     #[cfg(not(any(
       all(target_os = "macos", any(target_arch = "aarch64", target_arch = "x86_64")),

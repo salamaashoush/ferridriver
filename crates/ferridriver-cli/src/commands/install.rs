@@ -14,10 +14,11 @@ use crate::cli;
 use crate::ui;
 
 /// What this command knows how to fetch, in the order `--help` lists
-/// them. `axe` is not a browser; it is the accessibility engine, and it
-/// is here because it is provisioned the same way and to the same
-/// place, rather than vendored into the repository.
-const KNOWN: [&str; 10] = [
+/// them. `axe` and `ffmpeg` are not browsers; they are the accessibility
+/// engine and the video encoder, and they are here because they are
+/// provisioned the same way and to the same place, rather than vendored
+/// into the repository or left to the system.
+const KNOWN: [&str; 11] = [
   "chromium",
   "chromium-headless-shell",
   "chromedriver",
@@ -25,6 +26,7 @@ const KNOWN: [&str; 10] = [
   "webkit",
   "safari",
   "axe",
+  "ffmpeg",
   "android",
   "android-driver",
   "ios",
@@ -60,6 +62,7 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
       "safari" => installer.install_safari(phase.callback()).await,
       "ios" => installer.install_ios(phase.callback()).await,
       "axe" => installer.install_axe_core(phase.callback()).await,
+      "ffmpeg" => installer.install_ffmpeg(phase.callback()).await,
       "android-driver" => installer.install_android_driver(phase.callback()).await,
       "android" => {
         installer
