@@ -120,6 +120,11 @@ impl ContextPool {
       inbox.drain_arrivals();
       if let Some(prepared) = inbox.take(key) {
         self.hits.fetch_add(1, Ordering::Relaxed);
+        // Replace what was just taken while this test runs. Refilling
+        // only after a miss left every other test to create its own
+        // context inline, and all of them at a depth of one.
+        self.spawn_refills(&mut inbox, browser, key, opts, backend);
+        self.spawn_promotions(&mut inbox);
         break prepared;
       }
       self.spawn_refills(&mut inbox, browser, key, opts, backend);
