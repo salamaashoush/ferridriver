@@ -38,6 +38,8 @@ Paeth = "Paeth"
 invokable = "invokable"
 # "tempory" appears in a PR title quoted in PLAYWRIGHT_COMPAT.md (history note, not our prose)
 tempory = "tempory"
+# "trun" is the ISO BMFF track fragment run box, read when counting MP4 frames
+trun = "trun"
 # "caf" appears as the first three chars of a git short-sha
 caf = "caf"
 # "clonable" — JS-idiomatic spelling (Web API uses `structuredClone`); test name parity
