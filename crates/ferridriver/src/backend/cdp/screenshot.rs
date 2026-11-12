@@ -11,12 +11,17 @@ pub(super) async fn capture<T: CdpTransport>(
 ) -> Result<Vec<u8>> {
   // Layout metrics can be valid before Chromium has a captureable surface.
   // Synchronize with rendering so the first capture cannot sample that gap.
+  // The gap closes with the document's first frame, so only the first
+  // capture of a document waits: the mark lives on the document's global
+  // and goes away with it. Waiting every time costs each screenshot a
+  // whole frame on top of the one `Page.captureScreenshot` draws itself.
   let rendered = transport
     .send_command(
       session_id,
       "Runtime.evaluate",
       &json!({
-        "expression": "new Promise(resolve => requestAnimationFrame(() => resolve(undefined)))",
+        "expression": "(() => { const k = Symbol.for('ferridriver.painted'); if (globalThis[k]) return undefined; \
+                       return new Promise(resolve => requestAnimationFrame(() => { globalThis[k] = true; resolve(undefined); })); })()",
         "awaitPromise": true,
         "returnByValue": true,
       }),
