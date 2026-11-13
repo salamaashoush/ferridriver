@@ -214,6 +214,15 @@ jobs:
         if: runner.os == 'Linux'
         run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
 
+      # Defender scans every process and file a browser creates. On the
+      # hosted Windows images that made each test 10x (x64) to 50x (ARM)
+      # slower than on a local Windows machine, and held profile files
+      # open long enough to fail their removal.
+      - name: Stop real-time scanning (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
         run: brew install pkg-config llvm
