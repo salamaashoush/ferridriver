@@ -375,10 +375,13 @@ fn rust_jobs(log: &Path, root: &Path, workers: usize) -> Result<Vec<Job>> {
     let source = value["target"]["src_path"]
       .as_str()
       .context("test artifact missing source")?;
+    // Canonical like `root`: on Windows that is the `\\?\` form, which a
+    // path cargo reports never starts with.
     let crate_root = Path::new(source)
       .ancestors()
       .find(|dir| dir.join("Cargo.toml").exists())
-      .context("test crate root")?;
+      .context("test crate root")?
+      .canonicalize()?;
     let package = crate_root
       .file_name()
       .context("test crate directory")?
@@ -388,7 +391,9 @@ fn rust_jobs(log: &Path, root: &Path, workers: usize) -> Result<Vec<Job>> {
       .is_some_and(|kinds| kinds.iter().any(|kind| kind == "test"));
     let mut job = Job::new(&format!("rust/{package}/{target}"), &[executable], &["rust-build"]);
     job.cargo = package == "ferridriver-cli" && target == "test_ui_mode";
-    let example = source.contains("/examples/");
+    let example = Path::new(source)
+      .components()
+      .any(|part| part.as_os_str() == "examples");
     if integration && !example {
       job.command.push("--test-threads=1".into());
     } else if !integration {
