@@ -161,7 +161,8 @@ jobs:
     name: Test (${{ matrix.os }}, ${{ matrix.id }})
     needs: [basics]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # A cold Windows build of every test target alone took most of an hour.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
