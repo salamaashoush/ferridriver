@@ -1331,9 +1331,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // Reclaim the profile directory here rather than leaving it to the
     // last `Arc` drop: at process teardown the runtime may never run
     // the deferred removal, which leaked one multi-megabyte Chromium
-    // profile per session.
+    // profile per session. A file something still holds after the retries
+    // (Windows) is logged and left to the drop, as Playwright's
+    // `processLauncher` logs and carries on, rather than failing the close.
     if let Some(dir) = self.user_data_dir.as_ref() {
-      dir.remove_now().await?;
+      let _ = dir.remove_now().await;
     }
     if let Some(session) = &self.webdriver {
       session.close().await?;

@@ -570,8 +570,11 @@ impl BidiBrowser {
       }
     }
     drop(child);
+    // As Playwright's `processLauncher`: a profile file something still
+    // holds after the retries (Windows) is logged and left to the next
+    // attempt when the directory is dropped, not reported as a failed close.
     if let Some(dir) = self.profile_dir.as_ref() {
-      dir.remove_now().await?;
+      let _ = dir.remove_now().await;
     }
     self.session.transport.close().await
   }
