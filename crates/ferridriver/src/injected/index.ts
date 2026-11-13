@@ -385,7 +385,9 @@ async function awaitStates(el: Element, states: ElementState[]): Promise<string 
  * document with an animation in flight gets `playwright` itself: one
  * that started in this very task still reports its starting box.
  */
-const STABLE_WATCH_MS = 8;
+// Linux WebKit fires a 4ms interval every 8 to 12ms, which 8ms let move
+// unseen; much past 12 and a still element costs Firefox a second frame.
+const STABLE_WATCH_MS = 12;
 
 function stableInOneFrame(el: Element, playwright: () => Promise<boolean>): Promise<boolean> {
   const builtins = injected.utils.builtins;
