@@ -157,7 +157,9 @@ jobs:
     # browser slot, so a slow suite cannot starve the others or run into
     # the gate's per-suite limit, and a failure names its suite. macOS
     # covers WebKit, Chromium, the addon and the Rust tests; Firefox runs
-    # on Linux.
+    # on Linux. Windows ARM64 runs the Rust tests only: the hosted ARM
+    # runner drove x64 Chrome about 30x slower than a local ARM machine,
+    # past every spec's limit, so its browser suites are run locally.
     name: Test (${{ matrix.os }}, ${{ matrix.id }})
     needs: [basics]
     runs-on: ${{ matrix.os }}
@@ -185,7 +187,6 @@ jobs:
           - { os: windows-latest, id: e2e-bidi, gate: --only e2e --project bidi }
           - { os: windows-latest, id: napi, gate: --only napi }
           - { os: windows-latest, id: rust, gate: --only rust-build --only doc-tests }
-          - { os: windows-11-arm, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
           - { os: windows-11-arm, id: rust, gate: --only rust-build --only doc-tests }
     steps:
       - uses: actions/checkout@v4
