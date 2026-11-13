@@ -581,7 +581,9 @@ describe('actions', () => {
     await page.goto(dataUrl("<input id='cb' type='checkbox' onclick='event.preventDefault()'>"));
     let msg = 'no-throw';
     try {
-      await page.locator('#cb').check({ timeout: 500 });
+      // The error comes straight after the click, so a long budget costs
+      // nothing; 500ms ran out before the click on a busy runner.
+      await page.locator('#cb').check({ timeout: 5000 });
     } catch (e) {
       msg = String((e as Error).message ?? e);
     }
