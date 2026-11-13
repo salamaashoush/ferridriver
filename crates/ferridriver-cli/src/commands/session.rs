@@ -151,6 +151,8 @@ async fn open(args: SessionOpenArgs, origin: ConfigOrigin<'_>) -> anyhow::Result
   let mut diagnostics = tempfile::NamedTempFile::new_in(registry.dir()).context("creating session startup result")?;
   cmd.arg("--startup-error").arg(diagnostics.path());
   cmd.stderr(std::process::Stdio::null());
+  #[cfg(windows)]
+  keep_stdio_from_the_host();
   let mut child = cmd.spawn().context("spawning session host process")?;
 
   // The host owns the configured provisioning deadline, including SDK installation.
@@ -257,6 +259,30 @@ fn host_command(args: &SessionOpenArgs, origin: &ConfigOrigin<'_>) -> anyhow::Re
     cmd.stdin(std::process::Stdio::null());
   }
   Ok(cmd)
+}
+
+/// A Windows child inherits every inheritable handle its parent holds, so
+/// the host would keep this process's stdout and stderr open for as long as
+/// the session lives, and a caller reading `session open`'s output would
+/// wait for the session to close. The host still gets the stdio it is
+/// given: `Command` duplicates what it hands a child.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn keep_stdio_from_the_host() {
+  use std::os::windows::io::AsRawHandle as _;
+  use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+  for handle in [
+    std::io::stdin().as_raw_handle(),
+    std::io::stdout().as_raw_handle(),
+    std::io::stderr().as_raw_handle(),
+  ] {
+    if handle.is_null() {
+      continue;
+    }
+    // SAFETY: a standard handle of this process, live for the call. One
+    // Windows refuses the flag on (a console) is not inherited anyway.
+    let _ = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+  }
 }
 
 async fn wait_for_descriptor(
@@ -604,7 +630,17 @@ mod tests {
   async fn session_readiness_follows_publication_and_host_exit() {
     let directory = tempfile::tempdir().unwrap();
     let registry = Registry::open_at(directory.path()).unwrap();
-    let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    // A host that stays up until killed. Windows has no `sleep`; a ping of
+    // the loopback 30 times takes as long.
+    let mut child = if cfg!(windows) {
+      std::process::Command::new("ping")
+        .args(["-n", "31", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+    } else {
+      std::process::Command::new("sleep").arg("30").spawn()
+    }
+    .unwrap();
     let pid = child.id();
     let publisher = registry.clone();
     let publish = async move {

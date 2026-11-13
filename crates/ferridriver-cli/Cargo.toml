@@ -72,6 +72,8 @@ json-strip-comments = "3"
 [target.'cfg(windows)'.dependencies]
 # Windows releases are zip archives.
 zip = { version = "9", default-features = false, features = ["deflate"] }
+# Keeps the session host from inheriting the opener's stdio handles.
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
