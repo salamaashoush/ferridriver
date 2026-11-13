@@ -157,11 +157,17 @@ test('goto to a fragment of the loaded document resolves at once with no respons
 
 test('goto to a document that issues no request does not wait for one', async ({ page, baseURL }) => {
   await page.goto(`${baseURL}/fx/landed`);
-  const started = Date.now();
+  // Only the about:blank gotos are timed: waiting for a request each would
+  // add 250ms apiece, while the HTTP navigations between them are as slow
+  // as the machine is loaded.
+  let blank = 0;
   for (let i = 0; i < 5; i++) {
+    const started = Date.now();
     expect(await page.goto('about:blank')).toBeNull();
+    blank += Date.now() - started;
     expect(page.url()).toBe('about:blank');
     expect((await page.goto(`${baseURL}/fx/landed`))?.status()).toBe(200);
   }
-  expect(Date.now() - started).toBeLessThan(1000);
+  console.log(`about:blank x5 ${blank}ms`);
+  expect(blank).toBeLessThan(1000);
 });

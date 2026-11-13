@@ -1184,8 +1184,10 @@ describe('actions', () => {
   });
 
   test('script_press_options', async ({ page }) => {
-    // 1. delay:120 — pressing A with delay produces a keydown->keyup gap
-    //    of at least 80ms on every backend.
+    // 1. delay:400 — pressing A with delay produces a keydown->keyup gap
+    //    of at least 380ms on every backend. The gap without a delay is a
+    //    protocol round trip, which a loaded runner has taken past 100ms,
+    //    so the two are kept far apart.
     await page.goto(
       dataUrl(
         "<input id='i'><div id='out'>0</div>" +
@@ -1200,9 +1202,9 @@ describe('actions', () => {
       ),
     );
     await page.locator('#i').click();
-    await page.locator('#i').press('A', { delay: 120 });
+    await page.locator('#i').press('A', { delay: 400 });
     const withDelay = parseInt((await page.evaluate("document.getElementById('out').textContent")) as string, 10);
-    expect(withDelay).toBeGreaterThanOrEqual(80);
+    expect(withDelay).toBeGreaterThanOrEqual(380);
 
     // 2. delay:0 (default) — the same measurement should be near-zero.
     //    Proves that `delay` actually changed the dispatch path and
@@ -1223,7 +1225,7 @@ describe('actions', () => {
     await page.locator('#i').click();
     await page.locator('#i').press('B');
     const noDelay = parseInt((await page.evaluate("document.getElementById('out').textContent")) as string, 10);
-    expect(noDelay).toBeLessThan(80);
+    expect(noDelay).toBeLessThan(250);
 
     // 3. noWaitAfter:true — call returns promptly (< 2s wall-clock). The
     //    event-loop distinction isn't directly observable; the smoke

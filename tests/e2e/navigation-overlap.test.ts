@@ -9,7 +9,13 @@ const HOST = `${ORIGIN}/frames/one-frame.html`;
 test('goto lands on its own document while another navigation is pending', async ({ page }) => {
   for (let round = 0; round < 5; round++) {
     await page.goto(`${ORIGIN}/empty.html`);
-    await page.evaluate((url: string) => { location.href = url; }, `${ORIGIN}/fx/slow?ms=300`);
+    // Assigning location only asks the renderer to navigate; until its
+    // request is out, the goto below can start first and be the one
+    // cancelled, which is a different scenario.
+    await Promise.all([
+      page.waitForRequest(`${ORIGIN}/fx/slow?ms=300`),
+      page.evaluate((url: string) => { location.href = url; }, `${ORIGIN}/fx/slow?ms=300`),
+    ]);
     const response = await page.goto(HOST);
     expect(response!.url()).toBe(HOST);
     expect(response!.status()).toBe(200);
