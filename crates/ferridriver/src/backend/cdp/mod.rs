@@ -2857,6 +2857,12 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .await_loader_lifecycle(&nav_loader_id, target_event, timeout_ms)
       .await?;
+    // An `about:` document never issues a request, so there is no response
+    // to wait for. Waiting for its commit to reach the network consumer
+    // instead cost up to the whole grace on a busy runner.
+    if url.starts_with("about:") {
+      return Ok(None);
+    }
     Ok(self.await_nav_response(Some(&nav_loader_id)).await)
   }
 
