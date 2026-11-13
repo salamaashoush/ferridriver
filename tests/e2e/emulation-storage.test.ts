@@ -94,11 +94,13 @@ describe('emulation and storage', () => {
       Number(await page.evaluate(() => {
         const start = performance.now();
         let x = 0;
-        for (let i = 0; i < 3e7; i++) x += i % 7;
+        for (let i = 0; i < 1e8; i++) x += i % 7;
         return [performance.now() - start, x][0];
       }));
     // The fastest of a few runs is the CPU's own cost; a single run also
-    // measures whatever else the machine was doing at that moment.
+    // measures whatever else the machine was doing at that moment. Each run
+    // is long enough for the throttler to bite: a 50ms spin on Windows came
+    // out under 2x at a rate of 6.
     const fastest = async () => Math.min(await spin(), await spin(), await spin());
     const fast = await fastest();
     await context.setCPUThrottling(6);

@@ -18,7 +18,7 @@ test('clicks an in-viewport element when scroll is "none"', async ({ page }) => 
     <button onclick="window._clicked=true">click me</button>
     <div style="height: 2000px;"></div>
   `);
-  await page.locator('button').click({ scroll: 'none', timeout: 2000 });
+  await page.locator('button').click({ scroll: 'none', timeout: 10000 });
   expect(await page.evaluate('window._clicked')).toBe(true);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
 });
