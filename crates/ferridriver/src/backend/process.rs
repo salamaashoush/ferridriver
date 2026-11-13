@@ -630,6 +630,17 @@ impl ChildGroup {
     self.record.take();
     Ok(())
   }
+
+  /// [`Self::shutdown`] for a browser's `close()`, which Playwright's
+  /// `processLauncher` never fails over cleanup: the error is logged. What
+  /// could not be removed (a profile file Windows still reports in use)
+  /// stays owned, so the group's drop tries again and the retained
+  /// recovery record lets the next sweep reclaim it.
+  pub async fn shutdown_for_close(&mut self) {
+    if let Err(error) = self.shutdown().await {
+      tracing::warn!(%error, "browser shutdown left cleanup for a later attempt");
+    }
+  }
 }
 
 impl Drop for ChildGroup {

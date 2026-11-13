@@ -561,7 +561,7 @@ impl BidiBrowser {
       self.session.transport.start_close();
       // Group kill first (helpers die with the parent), then reap so
       // the enclosing runtime carries no zombie.
-      group.shutdown().await?;
+      group.shutdown_for_close().await;
       child.take();
       if let Err(reason) = flushed {
         return Err(FerriError::Backend(format!(
