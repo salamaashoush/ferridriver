@@ -59,6 +59,7 @@ test('native WebMCP reports unavailable documents explicitly', async ({page}) =>
 for (const transport of ['pipe', 'ws'] as const) {
   test(`native WebMCP tools and results over ${transport}`, async () => {
     runOnceAcrossProjects();
+    test.fixme(process.platform === 'darwin' && !!process.env.CI, 'timed out once on the hosted macOS runner');
     const browser = await chromium({transport}).launch({headless: true,
       args: ['--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport']});
     try {

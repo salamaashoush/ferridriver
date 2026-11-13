@@ -18,6 +18,10 @@ updateSnapshots = "missing"
 [test.browser]
 headless = true
 
+# `CI` lets a spec hold back what only a hosted runner trips over.
+[scripting]
+allowEnv = ["CI"]
+
 # The repo's own fixture server (dev-only crate, never published):
 # static assets plus the dynamic /fx/* and /_api/* routes the BDD and
 # TS e2e suites assert against. Built by `just test` before running.

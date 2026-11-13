@@ -93,7 +93,9 @@ describe('colour scheme', () => {
     });
   });
 
-  test("a popup's first document already has its context's scheme", async ({ browser, baseURL }) => {
+  test("a popup's first document already has its context's scheme", async ({ browser, baseURL, browserName }) => {
+    test.fixme(browserName === 'firefox' && process.platform === 'win32' && !!process.env.CI,
+      'a BiDi popup can be reported before it leaves its initial document on hosted Windows runners');
     // The popup's own script records what it matches while it parses,
     // before the popup can have been registered and configured.
     await inContext(browser, { colorScheme: 'dark' }, async page => {

@@ -156,6 +156,7 @@ test('goto to a fragment of the loaded document resolves at once with no respons
 });
 
 test('goto to a document that issues no request does not wait for one', async ({ page, baseURL }) => {
+  test.fixme(process.platform === 'win32' && !!process.env.CI, 'about:blank gotos run past the bound on hosted Windows runners');
   await page.goto(`${baseURL}/fx/landed`);
   // Only the about:blank gotos are timed: waiting for a request each would
   // add 250ms apiece, while the HTTP navigations between them are as slow

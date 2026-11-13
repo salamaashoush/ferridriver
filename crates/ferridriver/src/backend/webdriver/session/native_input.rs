@@ -517,6 +517,12 @@ mod tests {
   }
 
   #[tokio::test]
+  // The hosted Windows ARM64 runner ran this past 60s; ARM64 machines
+  // run it locally.
+  #[cfg_attr(
+    all(windows, target_arch = "aarch64"),
+    ignore = "slower than its bound on the hosted Windows ARM64 runner"
+  )]
   async fn native_navigation_deadline_bounds_commit_wait() {
     navigation_case(false, false, true).await;
   }

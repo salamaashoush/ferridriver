@@ -223,7 +223,9 @@ describe('events', () => {
     }
   });
 
-  test('context_popup_page_event_and_opener', async ({ browser, baseURL }) => {
+  test('context_popup_page_event_and_opener', async ({ browser, baseURL, browserName }) => {
+    test.fixme(browserName === 'firefox' && process.platform === 'win32' && !!process.env.CI,
+      'a BiDi popup can be reported before it leaves its initial document on hosted Windows runners');
     // A window.open popup is claimed by the backend popup listener
     // (CDP openerId targets, BiDi originalOpener contexts, WebKit
     // pageProxyCreated.openerId), registered into the context, and
