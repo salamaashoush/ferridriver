@@ -620,13 +620,22 @@ async fn a_served_browser_with_site_isolation_loads_a_cross_site_frame() -> anyh
     ensure!(std::time::Instant::now() < deadline, "the page never loaded: {state}");
     tokio::time::sleep(Duration::from_millis(100)).await;
   }
-  let targets = app.send(None, "Target.getTargets", serde_json::json!({})).await?;
-  let frame = targets["targetInfos"]
-    .as_array()
-    .context("the targets")?
-    .iter()
-    .find(|info| info["type"] == "iframe")
-    .with_context(|| format!("no frame of its own: {targets}"))?;
+  // The frame's target can be registered just after the page reports
+  // complete; on a Windows runner the first look did not find it yet.
+  let frame = loop {
+    let targets = app.send(None, "Target.getTargets", serde_json::json!({})).await?;
+    let found = targets["targetInfos"]
+      .as_array()
+      .context("the targets")?
+      .iter()
+      .find(|info| info["type"] == "iframe")
+      .cloned();
+    if let Some(frame) = found {
+      break frame;
+    }
+    ensure!(std::time::Instant::now() < deadline, "no frame of its own: {targets}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  };
   ensure!(
     frame["url"].as_str().is_some_and(|url| url.ends_with("/help")),
     "{frame}"
