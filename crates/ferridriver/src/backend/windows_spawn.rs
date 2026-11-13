@@ -54,16 +54,24 @@ pub struct PipePair {
   pub theirs_write: OwnedHandle,
 }
 
-/// A [`PipePair`] named after `label`, this process and the time, so two
-/// launches never meet.
+/// A [`PipePair`] named after `label`, this process, a per-process
+/// sequence and the time, so two launches never meet. The time alone did
+/// not keep them apart: workers that launch together at the start of a run
+/// read the same clock tick, and the second `CreateNamedPipeW` failed with
+/// "All pipe instances are busy".
 /// # Errors
 /// Fails when Windows cannot create or open the pipes.
 pub fn pipe_pair(label: &str) -> io::Result<PipePair> {
+  static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+  let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
   let stamp = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default()
     .as_nanos();
-  let base = format!(r"\\.\pipe\ferridriver-{label}-{}-{stamp}", std::process::id());
+  let base = format!(
+    r"\\.\pipe\ferridriver-{label}-{}-{sequence}-{stamp}",
+    std::process::id()
+  );
   let to_child = wide(OsStr::new(&format!("{base}-in")));
   let from_child = wide(OsStr::new(&format!("{base}-out")));
   let ours_write = server(&to_child, PIPE_ACCESS_OUTBOUND)?;
