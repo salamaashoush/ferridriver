@@ -1,8 +1,8 @@
 // A page is emulated with no reduced motion, no forced colours and no
 // contrast preference unless its context or `emulateMedia` names one, the
-// way it is emulated light. Firefox overrides none of these per page, so
-// there they stay the browser's own, and only a value asked for outright
-// is refused.
+// way it is emulated light. Firefox overrides none of these per page:
+// its profile pins reduced motion off, the other two stay the browser's
+// own, and only a value asked for outright is refused.
 
 import { test, describe, expect } from '@ferridriver/test';
 import type { Browser, BrowserContextOptions, Page } from '@ferridriver/test';

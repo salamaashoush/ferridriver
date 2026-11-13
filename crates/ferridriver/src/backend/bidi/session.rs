@@ -578,6 +578,12 @@ user_pref("browser.uitour.enabled", false);
 user_pref("toolkit.cosmeticAnimations.enabled", false);
 user_pref("browser.rights.3.shown", true);
 
+// ── Media defaults ────────────────────────────────────────────────────
+// No reduced motion unless a test asks, as Playwright emulates by default.
+// BiDi cannot override it per page, so without this a host with animations
+// turned off (Windows runners) leaks `prefers-reduced-motion: reduce`.
+user_pref("ui.prefersReducedMotion", 0);
+
 // ── Updates & telemetry (all disabled) ────────────────────────────────
 user_pref("app.update.enabled", false);
 user_pref("app.update.auto", false);
