@@ -22,7 +22,7 @@
 //! ```
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -328,6 +328,18 @@ struct BoundParam {
   binding: ParamBinding,
 }
 
+/// `line!()` / `column!()` spanned to the test function's name, so the
+/// registration records where the test is written rather than where the
+/// attribute expanded: the location reporters print and the order a
+/// file's tests run in.
+fn source_position(fn_name: &syn::Ident) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+  let span = fn_name.span();
+  (
+    quote_spanned! {span=> ::core::line!() },
+    quote_spanned! {span=> ::core::column!() },
+  )
+}
+
 fn classify_param(arg: &FnArg) -> syn::Result<BoundParam> {
   let FnArg::Typed(pt) = arg else {
     return Err(syn::Error::new(arg.span(), "test functions cannot take self"));
@@ -466,6 +478,8 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     None => quote! { None },
   };
 
+  let (line_expr, column_expr) = source_position(fn_name);
+
   let expanded = quote! {
     #(#attrs)*
     #[allow(clippy::unused_async)]
@@ -478,6 +492,9 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     ferridriver_test::inventory::submit! {
       ferridriver_test::discovery::TestRegistration {
         file: file!(),
+        line: #line_expr,
+        column: #column_expr,
+        index: 0,
         module_path: module_path!(),
         name: #fn_name_str,
         fixture_requests: &[#(#fixture_array),*],
@@ -614,6 +631,8 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     None => quote! { None },
   };
 
+  let (line_expr, column_expr) = source_position(fn_name);
+
   // Generate one inventory::submit! per data row.
   let mut submissions = Vec::new();
   for (row_idx, row) in args.data.iter().enumerate() {
@@ -656,6 +675,7 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
       .collect();
 
     let inner_fn_name = format_ident!("__ferritest_each_{}_{}", fn_name, row_idx);
+    let row_index = u32::try_from(row_idx).unwrap_or(u32::MAX);
     let fixture_array = fixture_names.iter().map(|f| quote! { #f });
     let binding_stmts = binding_stmts.clone();
     let annotations = annotations.clone();
@@ -675,6 +695,9 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
       ferridriver_test::inventory::submit! {
         ferridriver_test::discovery::TestRegistration {
           file: file!(),
+          line: #line_expr,
+          column: #column_expr,
+          index: #row_index,
           module_path: module_path!(),
           name: #test_name,
           fixture_requests: &[#(#fixture_array),*],
@@ -1064,6 +1087,7 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
     .into();
   }
   let (binding_stmts, _) = fixture_binding_stmts(&params);
+  let (line_expr, _) = source_position(fn_name);
 
   if is_suite_hook {
     // before_all / after_all: fn(FixturePool) -> Result
@@ -1082,6 +1106,7 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
       ferridriver_test::inventory::submit! {
         ferridriver_test::discovery::HookRegistration {
           module_path: module_path!(),
+          line: #line_expr,
           suite_hook_fn: Some(#fn_name),
           each_hook_fn: None,
           kind: ferridriver_test::discovery::HookKindTag::#kind_ident,
@@ -1108,6 +1133,7 @@ fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStr
       ferridriver_test::inventory::submit! {
         ferridriver_test::discovery::HookRegistration {
           module_path: module_path!(),
+          line: #line_expr,
           suite_hook_fn: None,
           each_hook_fn: Some(#fn_name),
           kind: ferridriver_test::discovery::HookKindTag::#kind_ident,

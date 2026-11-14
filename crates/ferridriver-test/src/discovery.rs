@@ -18,6 +18,13 @@ use crate::model::{
 /// What the `#[ferritest]` proc macro submits via `inventory::submit!`.
 pub struct TestRegistration {
   pub file: &'static str,
+  /// Where the test function is written; reporters print it and a
+  /// file's tests run in this order.
+  pub line: u32,
+  pub column: u32,
+  /// Row of a `#[ferritest_each]` expansion (0 for a plain test), which
+  /// orders the rows of one function after each other.
+  pub index: u32,
   /// The `module_path!()` of the test function.
   /// Used to derive the suite name from the Rust module structure.
   pub module_path: &'static str,
@@ -47,6 +54,8 @@ pub enum HookKindTag {
 /// What `#[before_all]` / `#[after_all]` / `#[before_each]` / `#[after_each]` submit.
 pub struct HookRegistration {
   pub module_path: &'static str,
+  /// Hooks of one kind run in the order they are written.
+  pub line: u32,
   /// For before_all/after_all: `fn(FixturePool) -> Future<Result<(), TestFailure>>`
   pub suite_hook_fn: Option<fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
   /// For before_each/after_each: `fn(FixturePool, Arc<TestInfo>) -> Future<Result<(), TestFailure>>`
@@ -105,7 +114,12 @@ fn suite_from_module_path(mp: &str) -> &str {
 pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
   let mut suites: rustc_hash::FxHashMap<String, TestSuite> = rustc_hash::FxHashMap::default();
 
-  for reg in inventory::iter::<TestRegistration> {
+  // `inventory` yields registrations in link order, which is not source
+  // order; Playwright runs a file's tests in the order they are written.
+  let mut registrations: Vec<&TestRegistration> = inventory::iter::<TestRegistration>.into_iter().collect();
+  registrations.sort_by_key(|reg| (reg.file, reg.line, reg.column, reg.index));
+
+  for reg in registrations {
     let file = reg.file.to_string();
     // Derive suite name from module_path: strip the last segment (fn name).
     let suite_name = suite_from_module_path(reg.module_path);
@@ -120,8 +134,8 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
         file: file.clone(),
         suite: Some(suite_name.to_string()),
         name: reg.name.to_string(),
-        line: None,
-        column: None,
+        line: usize::try_from(reg.line).ok(),
+        column: usize::try_from(reg.column).ok(),
       },
       test_fn: Arc::new(move |pool| test_fn_ptr(pool)),
       fixture_requests: reg.fixture_requests.iter().map(|s| (*s).to_string()).collect(),
@@ -145,7 +159,9 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
   }
 
   // Collect hooks and attach them to matching suites.
-  for reg in inventory::iter::<HookRegistration> {
+  let mut hooks: Vec<&HookRegistration> = inventory::iter::<HookRegistration>.into_iter().collect();
+  hooks.sort_by_key(|reg| (reg.module_path, reg.line));
+  for reg in hooks {
     let hook_suite = suite_from_module_path(reg.module_path);
     // Find the matching suite — hooks attach to the suite derived from their module.
     for suite in suites.values_mut() {
@@ -187,7 +203,11 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
     }
   }
 
-  let suites: Vec<TestSuite> = suites.into_values().collect();
+  let mut suites: Vec<TestSuite> = suites.into_values().collect();
+  suites.sort_by(|a, b| {
+    let first_line = |suite: &TestSuite| suite.tests.first().and_then(|t| t.id.line);
+    (a.file.as_str(), first_line(a)).cmp(&(b.file.as_str(), first_line(b)))
+  });
   let total_tests = suites.iter().map(|s| s.tests.len()).sum();
 
   let mut plan = apply_filters(
