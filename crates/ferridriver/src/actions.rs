@@ -242,8 +242,15 @@ pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> std::res
 /// pattern in `/tmp/playwright/packages/playwright-core/src/server/dom.ts`.
 #[derive(Debug)]
 pub enum ClickPrep {
-  /// Element is actionable; cursor target is `(x, y)`.
-  Ready { x: f64, y: f64 },
+  /// Element is actionable; cursor target is `(x, y)`. `armed` is the
+  /// outcome of arming the hit-target interceptor in the same call, when
+  /// one was asked for: `None` when none was, or when the page could not
+  /// arm it (the action then dispatches uninstrumented).
+  Ready {
+    x: f64,
+    y: f64,
+    armed: Option<InstallOutcome>,
+  },
   /// Element exists but is not currently actionable. Carries the
   /// reason marker (`notvisible` / `notconnected` / `disabled`),
   /// formatted as a Playwright-style `error:not<state>` string so
@@ -270,6 +277,7 @@ pub async fn click_prep(
   page: &AnyPage,
   position: Option<crate::options::Point>,
   scroll_align: Option<&str>,
+  hit_action: Option<&str>,
 ) -> Result<ClickPrep> {
   let _ = page.ensure_engine_injected().await;
   let position_lit = match position {
@@ -284,8 +292,9 @@ pub async fn click_prep(
   // does rAF box-stability sampling page-side); `call_js_fn_value` awaits
   // the returned promise, so this stays ONE round-trip.
   let stable = stable_check().state();
+  let hit_lit = hit_action.map_or_else(|| "null".to_string(), |action| format!("'{action}'"));
   let js = format!(
-    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, ['visible','enabled','{stable}'], {scroll_lit})); }}"
+    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, ['visible','enabled','{stable}'], {scroll_lit}, {hit_lit})); }}"
   );
   let raw = element
     .call_js_fn_value(&js)
@@ -322,7 +331,12 @@ pub async fn click_prep(
     .get("y")
     .and_then(serde_json::Value::as_f64)
     .ok_or_else(|| FerriError::evaluation("click_prep: bad y"))?;
-  Ok(ClickPrep::Ready { x, y })
+  let armed = match parsed.get("hit").and_then(serde_json::Value::as_str) {
+    None | Some("error:notconnected") => None,
+    Some("ok") => Some(InstallOutcome::Armed),
+    Some(description) => Some(InstallOutcome::Miss(description.to_string())),
+  };
+  Ok(ClickPrep::Ready { x, y, armed })
 }
 
 /// How long an action watches an element's box before trusting that it
@@ -972,10 +986,15 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     // Single combined pre-flight: actionability (visible /
     // enabled / stable) + `scrollIntoView` + viewport-intersected
     // `clickPoint` in ONE callFunctionOn.
-    let (x, y) = if opts.is_force() {
-      resolve_click_point(element, opts.position, opts.scrolls()).await?
+    // The interceptor is armed inside the pre-flight call itself unless
+    // the action skips it (force) or only checks it (trial).
+    let arm_in_prep = !opts.is_force() && !opts.is_trial();
+    let (x, y, armed) = if opts.is_force() {
+      let (x, y) = resolve_click_point(element, opts.position, opts.scrolls()).await?;
+      (x, y, None)
     } else {
-      let prep = match click_prep(element, page, opts.position, scroll_align).await {
+      let hit_action = arm_in_prep.then_some("mouse");
+      let prep = match click_prep(element, page, opts.position, scroll_align, hit_action).await {
         Ok(prep) => prep,
         // The deadline cut this attempt off before it could say why it
         // failed: report why the one before it did.
@@ -985,7 +1004,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
         Err(error) => return Err(error),
       };
       match prep {
-        ClickPrep::Ready { x, y } => (x, y),
+        ClickPrep::Ready { x, y, armed } => (x, y, armed),
         ClickPrep::NotActionable { reason } => {
           // `notconnected` => the element is gone; surface it so the
           // locator re-resolves. Transient failures (notinviewport while a
@@ -1025,14 +1044,14 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       }
       false
     } else {
-      match install_hit_interceptor(element, x, y, "mouse").await {
-        Ok(InstallOutcome::Armed) => true,
-        Ok(InstallOutcome::Miss(description)) => {
+      match armed {
+        Some(InstallOutcome::Armed) => true,
+        Some(InstallOutcome::Miss(description)) => {
           // Another element already covers the hit point: do NOT
           // dispatch; bubble the retryable miss (see the trial branch).
           return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
         },
-        Err(_) => false,
+        None => false,
       }
     };
 
@@ -1100,7 +1119,8 @@ enum HitResult {
 }
 
 /// Outcome of arming the page-side hit-target interceptor.
-enum InstallOutcome {
+#[derive(Debug)]
+pub enum InstallOutcome {
   /// Interceptor armed; finalize after the dispatch.
   Armed,
   /// The preliminary `expectHitTarget` already reports another element

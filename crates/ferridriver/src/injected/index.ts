@@ -428,16 +428,23 @@ function stableInOneFrame(el: Element, playwright: () => Promise<boolean>): Prom
  * `point` is `null` when the element is not actionable; the host
  * branches on `reason`. Like Playwright, any element may be clicked:
  * a `<select>` takes focus and a file input opens its chooser.
+ *
+ * With `hitAction`, the hit-target interceptor is armed at the resolved
+ * point in the same call (`hit` is `installHitInterceptor`'s answer),
+ * which saves the round trip between finding the point and arming it:
+ * on a loaded machine that trip alone can cost the action a frame.
  */
 async function clickPrep(
   el: Element,
   position: { x: number; y: number } | null,
   states: ElementState[],
   scrollAlign?: ScrollIntoViewOptions | null | false,
+  hitAction?: 'hover' | 'tap' | 'mouse' | null,
 ): Promise<{
   actionable: boolean;
   reason?: string;
   point: { x: number; y: number } | null;
+  hit?: string;
 }> {
   // Full actionability (visible / enabled / stable as requested) before
   // resolving the click point — mirrors Playwright's `_performPointerAction`
@@ -503,7 +510,9 @@ async function clickPrep(
     y += fr.y;
     win = win.parent;
   }
-  return { actionable: true, point: { x, y } };
+  const point = { x, y };
+  if (hitAction) return { actionable: true, point, hit: installHitInterceptor(el, point, hitAction) };
+  return { actionable: true, point };
 }
 
 // ── Actions (delegates to Playwright where possible) ──
