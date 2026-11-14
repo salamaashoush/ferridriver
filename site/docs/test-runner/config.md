@@ -164,6 +164,15 @@ connectOptions = { headers = { authorization = "Bearer …" }, timeout = 30000 }
 `[test.browser].slowMo` pauses after each input and navigation action,
 launched or connected alike.
 
+`[test.browser.firefoxUserPrefs]` sets Firefox `about:config`
+preferences at launch (Playwright's `launchOptions.firefoxUserPrefs`);
+other browsers ignore it:
+
+```toml
+[test.browser.firefoxUserPrefs]
+"layout.frame_rate" = 60
+```
+
 ### Devices
 
 `device` names an entry of Playwright's device registry and pre-seeds

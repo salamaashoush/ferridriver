@@ -9,6 +9,16 @@ const PROJECTS = [
   ['webkit', 'webkit', 'webkit'],
 ];
 
+// Frames are only a unit of cost at a fixed rate. Chromium and WebKit
+// paint headless at 60Hz, Firefox at the display's rate: on a 120Hz
+// display Playwright's two-frame check takes 8 to 16ms, the same as the
+// 12ms watch "frame" keeps for timer-driven movers, so the frame counts
+// below would compare nothing. Pinned to the 60Hz the check is costed at.
+const FIREFOX_AT_60HZ = `
+[test.projects.browser.firefoxUserPrefs]
+"layout.frame_rate" = 60
+`;
+
 const config = (stableCheck) => `[test]
 testMatch = ["*.spec.ts"]
 ${stableCheck ? `stableCheck = "${stableCheck}"` : ''}
@@ -21,7 +31,7 @@ name = "${name}"
 browser = "${browser}"
 backend = "${backend}"
 headless = true
-`).join('')}`;
+${browser === 'firefox' ? FIREFOX_AT_60HZ : ''}`).join('')}`;
 
 // A button that reports, on every click, whether it was still being moved.
 const SPEC = `import { test, expect } from '@ferridriver/test';
