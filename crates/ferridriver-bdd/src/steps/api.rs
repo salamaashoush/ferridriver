@@ -43,7 +43,7 @@ async fn send_get(world: &mut BrowserWorld, url: String) {
   let url_resolved = super::resolve_url(&url);
   let ctx = get_or_create_ctx(world);
   let resp = ctx
-    .get(&url_resolved, None)
+    .get(&url_resolved)
     .await
     .map_err(|e| StepError::wrap(format!("GET {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -54,7 +54,7 @@ async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
   let url_resolved = super::resolve_url(&url);
   let ctx = get_or_create_ctx(world);
   let resp = ctx
-    .post(&url_resolved, None)
+    .post(&url_resolved)
     .await
     .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -75,7 +75,8 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
     ..Default::default()
   };
   let resp = ctx
-    .post(&url_resolved, Some(opts))
+    .post(&url_resolved)
+    .options(opts)
     .await
     .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -96,7 +97,8 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
     ..Default::default()
   };
   let resp = ctx
-    .put(&url_resolved, Some(opts))
+    .put(&url_resolved)
+    .options(opts)
     .await
     .map_err(|e| StepError::wrap(format!("PUT {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -107,7 +109,7 @@ async fn send_delete(world: &mut BrowserWorld, url: String) {
   let url_resolved = super::resolve_url(&url);
   let ctx = get_or_create_ctx(world);
   let resp = ctx
-    .delete(&url_resolved, None)
+    .delete(&url_resolved)
     .await
     .map_err(|e| StepError::wrap(format!("DELETE {url}"), e))?;
   world.set_state(LastHttpResponse(resp));
@@ -128,7 +130,8 @@ async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: 
     ..Default::default()
   };
   let resp = ctx
-    .patch(&url_resolved, Some(opts))
+    .patch(&url_resolved)
+    .options(opts)
     .await
     .map_err(|e| StepError::wrap(format!("PATCH {url}"), e))?;
   world.set_state(LastHttpResponse(resp));

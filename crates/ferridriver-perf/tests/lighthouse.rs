@@ -250,7 +250,7 @@ fn compare_accessibility(name: &str, floor: &Floor) {
   let recording = recording(name);
   let ours = on_page(&recording.page, async |page| {
     page
-      .check_accessibility(None)
+      .check_accessibility()
       .await
       .expect("run the accessibility audit (is axe installed? `ferridriver install axe`)")
   });
@@ -359,7 +359,7 @@ fn accessibility_on_a_page_broken_in_the_other_dimension() {
 fn compare_page_quality(name: &str, expected_failures: usize) {
   let recording = recording(name);
   let ours = on_page(&recording.page, async |page| {
-    page.check_page_quality(None).await.expect("run the page audits")
+    page.check_page_quality().await.expect("run the page audits")
   });
 
   let mut differences = Vec::new();

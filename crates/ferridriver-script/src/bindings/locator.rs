@@ -383,7 +383,7 @@ impl LocatorJs {
       has_not: parsed.has_not,
       visible: parsed.visible,
     };
-    Ok(LocatorJs::new(self.inner.filter(&opts)))
+    Ok(LocatorJs::new(self.inner.filter_with(&opts)))
   }
 
   /// Playwright: `locator.and(locator: Locator): Locator`

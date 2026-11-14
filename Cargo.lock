@@ -5958,6 +5958,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-script",
  "ferridriver-test",
+ "regex",
  "tokio",
 ]
 

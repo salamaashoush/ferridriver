@@ -77,13 +77,11 @@ async fn close_current_tab(world: &mut BrowserWorld) {
 async fn should_see_tab_count(world: &mut BrowserWorld, expected: i64) {
   let ctx = world.context()?.clone();
   let expected_count = expected as usize;
-  expect_poll(
-    move || {
-      let c = ctx.clone();
-      async move { c.discover_pages().await.map(|p| p.len()).unwrap_or(0) }
-    },
-    Duration::from_secs(5),
-  )
+  expect_poll(move || {
+    let c = ctx.clone();
+    async move { c.discover_pages().await.map(|p| p.len()).unwrap_or(0) }
+  })
+  .with_timeout(Duration::from_secs(5))
   .to_equal(expected_count)
   .await
   .map_err(to_step_err)?;

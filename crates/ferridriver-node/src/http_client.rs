@@ -397,7 +397,7 @@ impl HttpClient {
   #[napi]
   pub async fn get(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.get(&url, opts).await.into_napi()?;
+    let resp = self.inner.get(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -405,7 +405,7 @@ impl HttpClient {
   #[napi]
   pub async fn post(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.post(&url, opts).await.into_napi()?;
+    let resp = self.inner.post(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -413,7 +413,7 @@ impl HttpClient {
   #[napi]
   pub async fn put(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.put(&url, opts).await.into_napi()?;
+    let resp = self.inner.put(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -421,7 +421,7 @@ impl HttpClient {
   #[napi]
   pub async fn delete(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.delete(&url, opts).await.into_napi()?;
+    let resp = self.inner.delete(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -429,7 +429,7 @@ impl HttpClient {
   #[napi]
   pub async fn patch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.patch(&url, opts).await.into_napi()?;
+    let resp = self.inner.patch(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -437,7 +437,7 @@ impl HttpClient {
   #[napi]
   pub async fn head(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core()).transpose()?;
-    let resp = self.inner.head(&url, opts).await.into_napi()?;
+    let resp = self.inner.head(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -466,7 +466,7 @@ impl HttpClient {
       ),
     };
     let opts = merge_over(base, options.map(|o| o.to_core()).transpose()?);
-    let resp = self.inner.fetch(&url, opts).await.into_napi()?;
+    let resp = self.inner.fetch(&url).maybe_options(opts).await.into_napi()?;
     Ok(HttpResponse { inner: resp })
   }
 
@@ -504,8 +504,12 @@ impl HttpClient {
   /// Playwright: `apiRequestContext.clearCookies(options?: { name?, domain?, path? })`.
   #[napi]
   pub async fn clear_cookies(&self, options: Option<crate::types::ClearCookieOptions>) -> Result<()> {
-    let filter: ferridriver::backend::ClearCookieOptions = options.map(Into::into).unwrap_or_default();
-    self.inner.clear_cookies(&filter).await.into_napi()
+    self
+      .inner
+      .clear_cookies()
+      .maybe_options(options.map(Into::into))
+      .await
+      .into_napi()
   }
 }
 

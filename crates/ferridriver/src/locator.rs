@@ -445,7 +445,7 @@ impl Locator {
   ) -> Locator {
     let mut opts = options.clone();
     opts.visible = None; // Omit<LocatorOptions, 'visible'>
-    self.locator(selector_or_locator).filter(&opts)
+    self.locator(selector_or_locator).filter_with(&opts)
   }
 
   /// Locate elements by ARIA role, refined via builder setters.
@@ -550,7 +550,7 @@ impl Locator {
   /// Playwright: `locator.visible(): Locator` — only the visible matches.
   #[must_use]
   pub fn visible(&self) -> Locator {
-    self.filter(&crate::options::FilterOptions {
+    self.filter_with(&crate::options::FilterOptions {
       visible: Some(true),
       ..Default::default()
     })
@@ -582,8 +582,24 @@ impl Locator {
     self.chain(&format!("nth={index}")).strict(false)
   }
 
-  /// Filter this locator by text content, inner-locator presence/absence,
-  /// or visibility. Option-to-selector encoding:
+  /// Playwright: `filter(options?: { has?, hasNot?, hasText?, hasNotText?,
+  /// visible? }): Locator`. The options chain as setters on the returned
+  /// builder, which derefs to the filtered [`Locator`]:
+  ///
+  /// ```ignore
+  /// page.get_by_role("listitem").filter().has_text("Ship it").click().await?;
+  /// rows.filter().has(page.get_by_role("button").name("Delete")).first();
+  /// ```
+  ///
+  /// See [`Self::filter_with`] for the selector encoding.
+  #[must_use]
+  pub fn filter(&self) -> crate::locator_builder::LocatorBuilder<FilterOptions> {
+    let base = self.clone();
+    crate::locator_builder::LocatorBuilder::new(move |opts: &FilterOptions| base.filter_with(opts))
+  }
+
+  /// [`Self::filter`] with a whole option bag, for callers that already
+  /// hold one (the bindings). Option-to-selector encoding:
   ///
   /// * `has_text` → ` >> internal:has-text=<escaped>` — string is
   ///   `"quoted"i` (case-insensitive substring), regex is `/source/flags`
@@ -600,7 +616,7 @@ impl Locator {
   /// caller sees an [`crate::error::FerriError::InvalidSelector`]. The
   /// method itself stays infallible.
   #[must_use]
-  pub fn filter(&self, opts: &FilterOptions) -> Locator {
+  pub fn filter_with(&self, opts: &FilterOptions) -> Locator {
     use std::fmt::Write as _;
 
     // Build the combined filter suffix in one buffer, then chain once.
@@ -3113,7 +3129,7 @@ impl FrameLocator {
     selector_or_locator: impl Into<crate::options::LocatorLike>,
     options: &crate::options::FilterOptions,
   ) -> Locator {
-    self.locator(selector_or_locator).filter(options)
+    self.locator(selector_or_locator).filter_with(options)
   }
 
   fn child(&self, selector: &str) -> Locator {

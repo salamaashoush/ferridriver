@@ -13,6 +13,13 @@
 ///   getters off a `RegExp` via prototype-chain access. Wire-shape
 ///   inputs like `{ regexSource, regexFlags }` are never exposed to
 ///   the user.
+/// * `StringOrRegex::from(regex::Regex::new("^/todos$")?)` — a Rust
+///   regex. Locators and web-first assertions evaluate the pattern in the
+///   page's JavaScript engine, so the source must also be a valid
+///   `ECMAScript` pattern; a leading inline flag group such as `(?i)`
+///   becomes the JS flag and `(?P<name>` becomes `(?<name>`.
+///
+/// The same type serves locators and assertions.
 #[derive(Debug, Clone)]
 pub enum StringOrRegex {
   String(String),
@@ -37,6 +44,141 @@ impl StringOrRegex {
       source: source.into(),
       flags: flags.into(),
     }
+  }
+
+  /// The regex variant compiled for Rust-side matching.
+  ///
+  /// `None` for the string variant.
+  ///
+  /// # Errors
+  ///
+  /// [`crate::FerriError::InvalidArgument`] when the pattern uses a
+  /// JavaScript-only feature (lookaround, backreferences).
+  #[must_use]
+  pub fn compile(&self) -> Option<crate::error::Result<regex::Regex>> {
+    match self {
+      Self::String(_) => None,
+      Self::Regex { source, flags } => Some(compile_for_match(source, flags)),
+    }
+  }
+
+  /// Rust-side match: exact equality for a string, `test` for a regex. A
+  /// pattern Rust cannot compile matches nothing.
+  #[must_use]
+  pub fn matches(&self, actual: &str) -> bool {
+    match self {
+      Self::String(expected) => actual == expected,
+      Self::Regex { .. } => self.compile().is_some_and(|re| re.is_ok_and(|re| re.is_match(actual))),
+    }
+  }
+
+  /// [`Self::matches`] with Playwright's `ignoreCase` semantics: strings
+  /// compare case-folded, regexes are re-evaluated with the `i` flag.
+  #[must_use]
+  pub fn matches_with(&self, actual: &str, ignore_case: bool) -> bool {
+    if !ignore_case {
+      return self.matches(actual);
+    }
+    match self {
+      Self::String(expected) => actual.to_lowercase() == expected.to_lowercase(),
+      Self::Regex { source, flags } => {
+        let flags = if flags.contains('i') {
+          flags.clone()
+        } else {
+          format!("{flags}i")
+        };
+        compile_for_match(source, &flags).is_ok_and(|re| re.is_match(actual))
+      },
+    }
+  }
+
+  /// Playwright's `ExpectedTextMatcher.matches` with
+  /// `normalizeWhiteSpace: true`: a string expectation compares
+  /// normalized against normalized, a regex is tested against the raw
+  /// text.
+  #[must_use]
+  pub fn matches_normalized(&self, actual: &str, ignore_case: bool, substring: bool) -> bool {
+    match self {
+      Self::String(expected) => {
+        let (mut exp, mut act) = (normalize_white_space(expected), normalize_white_space(actual));
+        if ignore_case {
+          exp = exp.to_lowercase();
+          act = act.to_lowercase();
+        }
+        if substring { act.contains(&exp) } else { act == exp }
+      },
+      Self::Regex { .. } => self.matches_with(actual, ignore_case),
+    }
+  }
+
+  /// `"text"` for a string, `/source/flags` for a regex.
+  #[must_use]
+  pub fn description(&self) -> String {
+    self.to_string()
+  }
+}
+
+impl std::fmt::Display for StringOrRegex {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::String(s) => write!(f, "\"{s}\""),
+      Self::Regex { source, flags } => write!(f, "/{source}/{flags}"),
+    }
+  }
+}
+
+/// Rust-side compile for matching: the flags that change nothing about
+/// whether a string matches (`y`, `d`) are dropped rather than refused.
+fn compile_for_match(source: &str, flags: &str) -> crate::error::Result<regex::Regex> {
+  let flags: String = flags
+    .chars()
+    .filter(|c| matches!(c, 'i' | 'm' | 's' | 'g' | 'u'))
+    .collect();
+  crate::url_matcher::compile_js_regex(source, &flags)
+}
+
+/// Playwright's `normalizeWhiteSpace` (`isomorphic/stringUtils.ts`):
+/// drop zero-width spaces and soft hyphens, trim, then collapse every
+/// whitespace run to a single space.
+#[must_use]
+pub fn normalize_white_space(text: &str) -> String {
+  let stripped: String = text.chars().filter(|c| *c != '\u{200b}' && *c != '\u{ad}').collect();
+  stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Split a Rust regex source into an `ECMAScript` source and flags: a
+/// leading inline flag group made only of `i`, `m` and `s` becomes the
+/// flags, and Python-style named groups become JS named groups.
+fn rust_regex_to_js(source: &str) -> (String, String) {
+  let mut body = source;
+  let mut flags = String::new();
+  if let Some(rest) = source.strip_prefix("(?")
+    && let Some(end) = rest.find(')')
+    && end > 0
+    && rest[..end].chars().all(|c| matches!(c, 'i' | 'm' | 's'))
+  {
+    flags = rest[..end].to_string();
+    body = &rest[end + 1..];
+  }
+  (body.replace("(?P<", "(?<"), flags)
+}
+
+impl From<regex::Regex> for StringOrRegex {
+  fn from(re: regex::Regex) -> Self {
+    Self::from(&re)
+  }
+}
+
+impl From<&regex::Regex> for StringOrRegex {
+  fn from(re: &regex::Regex) -> Self {
+    let (source, flags) = rust_regex_to_js(re.as_str());
+    Self::Regex { source, flags }
+  }
+}
+
+impl From<&String> for StringOrRegex {
+  fn from(s: &String) -> Self {
+    Self::String(s.clone())
   }
 }
 
@@ -186,6 +328,24 @@ impl LocatorLike {
 impl From<crate::locator::Locator> for LocatorLike {
   fn from(l: crate::locator::Locator) -> Self {
     Self::Locator(l)
+  }
+}
+
+impl From<&crate::locator::Locator> for LocatorLike {
+  fn from(l: &crate::locator::Locator) -> Self {
+    Self::Locator(l.clone())
+  }
+}
+
+impl<O> From<crate::locator_builder::LocatorBuilder<O>> for LocatorLike {
+  fn from(l: crate::locator_builder::LocatorBuilder<O>) -> Self {
+    Self::Locator(l.into_locator())
+  }
+}
+
+impl<O> From<&crate::locator_builder::LocatorBuilder<O>> for LocatorLike {
+  fn from(l: &crate::locator_builder::LocatorBuilder<O>) -> Self {
+    Self::Locator((**l).clone())
   }
 }
 
@@ -1540,6 +1700,18 @@ pub enum Polling {
   Interval(u64),
 }
 
+impl From<u64> for Polling {
+  fn from(ms: u64) -> Self {
+    Self::Interval(ms)
+  }
+}
+
+impl From<std::time::Duration> for Polling {
+  fn from(interval: std::time::Duration) -> Self {
+    Self::Interval(u64::try_from(interval.as_millis()).unwrap_or(u64::MAX))
+  }
+}
+
 impl<'de> serde::Deserialize<'de> for Polling {
   fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
     #[derive(serde::Deserialize)]
@@ -2350,6 +2522,62 @@ pub fn construct_url_with_base(base: Option<&str>, given: &str) -> String {
     None => reqwest::Url::parse(given),
   };
   resolved.map_or_else(|_| given.to_owned(), Into::into)
+}
+
+#[cfg(test)]
+mod string_or_regex_tests {
+  use super::StringOrRegex;
+
+  fn parts(value: &StringOrRegex) -> (&str, &str) {
+    match value {
+      StringOrRegex::Regex { source, flags } => (source, flags),
+      StringOrRegex::String(_) => panic!("expected the regex variant"),
+    }
+  }
+
+  #[test]
+  fn a_rust_regex_becomes_an_ecmascript_source_and_flags() {
+    let plain = StringOrRegex::from(regex::Regex::new(r"^/todos$").unwrap());
+    assert_eq!(parts(&plain), (r"^/todos$", ""));
+
+    let flagged = StringOrRegex::from(&regex::Regex::new(r"(?is)ship\s+it").unwrap());
+    assert_eq!(parts(&flagged), (r"ship\s+it", "is"));
+
+    let named = StringOrRegex::from(regex::Regex::new(r"(?P<id>\d+)").unwrap());
+    assert_eq!(parts(&named), (r"(?<id>\d+)", ""));
+
+    // A group that is not purely flags stays in the pattern.
+    let group = StringOrRegex::from(regex::Regex::new(r"(?:a|b)c").unwrap());
+    assert_eq!(parts(&group), (r"(?:a|b)c", ""));
+  }
+
+  #[test]
+  fn rust_side_matching_follows_playwright() {
+    let exact = StringOrRegex::from("Count: 2");
+    assert!(exact.matches("Count: 2"));
+    assert!(!exact.matches("Count: 22"));
+    assert!(exact.matches_with("count: 2", true));
+
+    let re = StringOrRegex::regex(r"\bdone\b", "");
+    assert!(re.matches("item done"));
+    assert!(!re.matches("undone"));
+    assert!(StringOrRegex::regex("DONE", "").matches_with("done", true));
+
+    assert!(StringOrRegex::from("a b").matches_normalized("  a \n b ", false, false));
+    assert!(StringOrRegex::from("b").matches_normalized("a  b c", false, true));
+
+    // Lookbehind is JavaScript-only: refused by `compile`, matches nothing.
+    let js_only = StringOrRegex::regex("(?<=a)b", "");
+    assert!(js_only.compile().is_some_and(|r| r.is_err()));
+    assert!(!js_only.matches("ab"));
+    assert!(StringOrRegex::from("x").compile().is_none());
+  }
+
+  #[test]
+  fn displays_as_playwright_prints_it() {
+    assert_eq!(StringOrRegex::from("hi").to_string(), "\"hi\"");
+    assert_eq!(StringOrRegex::regex("a+", "i").to_string(), "/a+/i");
+  }
 }
 
 #[cfg(test)]

@@ -17,3 +17,4 @@ ferridriver-test = { path = "../../crates/ferridriver-test" }
 # registers the runner's session publisher.
 ferridriver-script = { path = "../../crates/ferridriver-script" }
 tokio = { workspace = true }
+regex = { workspace = true }

@@ -63,6 +63,6 @@ impl FileChooserJs {
   ) -> rquickjs::Result<()> {
     let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
     let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-    self.inner.set_files(files, opts).await.into_js_with(&ctx)
+    self.inner.set_files(files).maybe_options(opts).await.into_js_with(&ctx)
   }
 }

@@ -63,6 +63,10 @@ ferridriver test --headless --backend cdp-pipe --grep login
 
 ## Tests and fixture parameters
 
+Tests run in the order they are written: a file's tests by source
+position, the rows of a `#[ferritest_each]` in row order, hooks of one
+kind in declaration order.
+
 `#[ferritest]` functions declare what they need as parameters. Two forms:
 
 - `name: Arc<T>` — resolves the fixture named `name` (built-in or custom)
@@ -168,6 +172,11 @@ async fn lists_users(page: Arc<Page>, seeded_users: Arc<Vec<User>>) {
 }
 ```
 
+Custom fixtures may depend on any built-in, including `request` and
+`test_info`. Scope still applies: a worker fixture cannot take a
+test-scoped one, and the run fails before any test starts with the
+reason printed.
+
 `#[fixture(auto)]` resolves the fixture for every test in scope without an
 explicit parameter (Playwright's `auto: true`). `timeout = "10s"` bounds
 setup.
@@ -222,6 +231,23 @@ let png = page.screenshot().full_page(true).format(ScreenshotFormat::Jpeg).await
 let ctx = browser.new_context().locale("de-DE").viewport(ViewportOption::Fixed(cfg)).await?;
 ```
 
+Locator filters, HTTP requests, function waits and script tags follow
+the same shape:
+
+```rust
+let rows = page.get_by_role("listitem");
+rows.filter().has_text("Ship it").click().await?;
+rows.filter().has(page.get_by_role("button").name("Delete")).first();
+
+let res = request.post("/api/todos").json(json!({ "title": "milk" })).header("x-trace", "1").await?;
+let todos: Vec<Todo> = request.get("/api/todos").param("done", "false").await?.json()?;
+
+page.wait_for_function("() => window.appReady").polling(100u64).await?;
+page.wait_for_function_with("n => document.querySelectorAll('li').length === n", &3).await?;
+page.add_script_tag().content("window.seed = 1").await?;
+context.clear_cookies().name("session").await?;
+```
+
 Enumerated options are real enums (`LoadState`, `WaitState`,
 `ScreenshotFormat`, `Role`, `MouseButton`, ...) with `From<&str>` so
 string literals keep working; timeout/delay setters take ms (`u64`) or a
@@ -260,14 +286,97 @@ expect(&locator).not().to_be_visible().await?;
 expect(&locator).with_timeout(Duration::from_secs(10)).to_have_count(3).await?;
 ```
 
-`expect_poll(|| async { ... })`, `to_pass`, value matchers
-(`expect_value`), and screenshot/aria-snapshot matchers
-(`to_have_screenshot`, `to_match_aria_snapshot`) are re-exported through
-`ferridriver_test::expect`.
+Wherever Playwright takes `string | RegExp`, pass a string or a
+`regex::Regex`; locators and assertions share one `StringOrRegex`. The
+pattern runs in the page's JavaScript engine, so it must also be a
+valid ECMAScript pattern (a leading `(?i)` becomes the `i` flag).
+
+```rust
+expect(&page).to_have_url(Regex::new(r"/todos$")?).await?;
+expect(&rows.filter().has_text(Regex::new(r"(?i)^ship")?)).to_have_count(1).await?;
+```
+
+`expect_poll` is Playwright's `expect.poll`: the timeout defaults to the
+configured `expectTimeout`, and `.not()`, `.with_timeout()`,
+`.with_message()` and `.with_intervals()` chain before the matcher
+(`to_equal`, `to_satisfy`, `to_be_greater_than`, ...):
+
+```rust
+expect_poll(|| async { api.pending_jobs().await }).to_equal(0).await?;
+expect_poll(read_status).not().to_equal("loading".into()).await?;
+```
+
+Screenshot and ARIA snapshot matchers (`to_have_screenshot`,
+`to_have_screenshot_with`, `to_match_aria_snapshot`) are in the prelude
+and accept the same subjects as every other matcher. `to_pass` and the
+value matchers (`expect_value`) live in `ferridriver_test::expect`.
 
 Plain `assert!` / `assert_eq!` / `panic!` are safe inside tests, fixtures,
 and hooks: the worker catches the unwind and records it as that test's
 failure (with screenshot-on-failure), like any other assertion error.
+
+## Errors
+
+`?` works on any `std::error::Error` inside a test, hook, fixture or a
+helper returning `ferridriver_test::Result<T>`, the way any throw fails
+a Playwright test. Browser errors keep their Playwright class name
+(`TimeoutError: ...`), assertion failures their diff, and other errors
+their `source()` chain. `Context` (in the prelude) explains a failure or
+a missing value; `TestFailure::msg` builds one from text:
+
+```rust
+let total: u32 = page.locator("#total").inner_text().await?.parse().context("cart total")?;
+let names = rows.all_inner_texts().await?;
+let first = names.first().context("no rows rendered")?;
+if total == 0 {
+    return Err(TestFailure::msg("empty cart"));
+}
+```
+
+## Testing a Rust web app
+
+A server written in Rust can run inside the test process: a fixture
+binds a free port, spawns the router, and shuts it down at teardown.
+Each test then gets its own server and state.
+
+```rust
+#[fixture]
+async fn app(_ctx: TestContext) -> ferridriver_test::Result<Fixture<String>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        axum::serve(listener, my_app::router())
+            .with_graceful_shutdown(async { let _ = stopped.await; })
+            .await
+    });
+    Ok(Fixture::new(url).on_teardown(|_| async move { let _ = stop.send(()); }))
+}
+```
+
+A client-side WebAssembly app (Leptos CSR, Dioxus web, Yew) is built
+for `wasm32-unknown-unknown`, which the test harness cannot be. Keep
+the harness in the same crate by making its dependencies host-only:
+
+```toml
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+ferridriver-test = "..."
+tokio = { version = "1", features = ["rt-multi-thread"] }
+```
+
+Build the app first (`trunk build`, `dx build --platform web`) and let
+the runner serve the output, so `page.goto("/todos")` and `request`
+resolve against it:
+
+```toml
+[[test.webServer]]
+staticDir = "dist"   # trunk; dx: "target/dx/<app>/debug/web/public"
+spa = true           # client-side routes fall back to index.html
+```
+
+Prefer this to `command = "trunk serve"` or `dx serve`: a dev server
+answers its readiness URL while it is still compiling, so the first
+tests reach a build-progress page instead of the app.
 
 ## Configuration
 

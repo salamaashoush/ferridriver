@@ -4,6 +4,7 @@
 //! renderer's YAML output format. Every other locator matcher lives in
 //! [`ferridriver_expect`] (single source of truth).
 
+use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,9 +66,9 @@ pub trait LocatorSnapshotMatchers {
   async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure>;
 }
 
-impl LocatorSnapshotMatchers for Expect<'_, Locator> {
+impl<L: Borrow<Locator>> LocatorSnapshotMatchers for Expect<'_, L> {
   async fn to_match_snapshot(&self, name: &str) -> Result<(), TestFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
     let snap_dir = std::path::PathBuf::from("__snapshots__");
     let info = crate::model::TestInfo {
@@ -135,7 +136,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
   }
 
   async fn to_have_screenshot_with(&self, name: &str, options: ScreenshotMatcherOptions) -> Result<(), TestFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     // What the call did not set comes from `expect.toHaveScreenshot`.
     let options = options.with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
     let timeout = options.timeout.unwrap_or(self.timeout);
@@ -157,7 +158,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
   }
 
   async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
-    let locator = self.subject;
+    let locator: &Locator = self.subject.borrow();
     let is_not = self.is_not;
     // `expect.toMatchAriaSnapshot.children` applies to every template
     // that does not declare its own `/children`.

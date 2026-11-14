@@ -213,13 +213,13 @@ impl HttpClientJs {
     Ok(Promised::from(async move {
       let opts = Some(with_guard(opts, guard));
       let resp = match verb {
-        Verb::Get => inner.get(&url, opts).await,
-        Verb::Post => inner.post(&url, opts).await,
-        Verb::Put => inner.put(&url, opts).await,
-        Verb::Delete => inner.delete(&url, opts).await,
-        Verb::Patch => inner.patch(&url, opts).await,
-        Verb::Head => inner.head(&url, opts).await,
-        Verb::Fetch => inner.fetch(&url, opts).await,
+        Verb::Get => inner.get(&url).maybe_options(opts).await,
+        Verb::Post => inner.post(&url).maybe_options(opts).await,
+        Verb::Put => inner.put(&url).maybe_options(opts).await,
+        Verb::Delete => inner.delete(&url).maybe_options(opts).await,
+        Verb::Patch => inner.patch(&url).maybe_options(opts).await,
+        Verb::Head => inner.head(&url).maybe_options(opts).await,
+        Verb::Fetch => inner.fetch(&url).maybe_options(opts).await,
       }
       .into_js_with(&ctx)?;
       Ok(HttpResponseJs::new(resp))
@@ -477,9 +477,13 @@ impl HttpClientJs {
   /// Playwright: `clearCookies(options?: { name?, domain?, path? })`.
   #[qjs(rename = "clearCookies")]
   pub async fn clear_cookies<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let filter = crate::bindings::context::clear_cookie_options(&ctx, options.0, "APIRequestContext.clearCookies")?
-      .unwrap_or_default();
-    self.inner.clear_cookies(&filter).await.into_js_with(&ctx)
+    let filter = crate::bindings::context::clear_cookie_options(&ctx, options.0, "APIRequestContext.clearCookies")?;
+    self
+      .inner
+      .clear_cookies()
+      .maybe_options(filter)
+      .await
+      .into_js_with(&ctx)
   }
 }
 

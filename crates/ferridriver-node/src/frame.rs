@@ -300,7 +300,7 @@ impl Frame {
       signal,
       self
         .inner
-        .wait_for_function(&page_function.source, serialized, page_function.is_function, opts),
+        .wait_for_function_serialized(&page_function.source, serialized, page_function.is_function, opts),
     )
     .await?;
     Ok(crate::js_handle::JSHandle::wrap(handle))
@@ -386,7 +386,8 @@ impl Frame {
   ) -> Result<crate::element_handle::ElementHandle> {
     let handle = self
       .inner
-      .add_script_tag(options.unwrap_or_default().into())
+      .add_script_tag()
+      .maybe_options(options.map(Into::into))
       .await
       .into_napi()?;
     Ok(crate::element_handle::ElementHandle::wrap(handle))
@@ -401,7 +402,8 @@ impl Frame {
   ) -> Result<crate::element_handle::ElementHandle> {
     let handle = self
       .inner
-      .add_style_tag(options.unwrap_or_default().into())
+      .add_style_tag()
+      .maybe_options(options.map(Into::into))
       .await
       .into_napi()?;
     Ok(crate::element_handle::ElementHandle::wrap(handle))

@@ -56,7 +56,6 @@ Stored baseline; failures emit a diff image next to the snapshot.
 
 ```rust
 use ferridriver_test::prelude::*;
-use ferridriver_test::expect::LocatorSnapshotMatchers;
 
 #[ferritest]
 async fn dashboard_snapshot(page: Arc<Page>) {
@@ -96,7 +95,6 @@ and great for catching unintended a11y regressions.
 
 ```rust
 use ferridriver_test::prelude::*;
-use ferridriver_test::expect::PageSnapshotMatchers;
 
 expect(&page).to_match_aria_snapshot(r#"
 - banner:
@@ -159,15 +157,10 @@ network 14 requests, 1 failed
 ## Manual tracing
 
 ```rust
-context.tracing().start(TracingStartOptions {
-    screenshots: true,
-    snapshots: true,
-    sources: true,
-    ..Default::default()
-}).await?;
+context.tracing().start().screenshots(true).snapshots(true).sources(true).await?;
 page.goto("https://app.example.com").await?;
 page.locator("button.cta").click().await?;
-context.tracing().stop(TracingStopOptions { path: Some("trace.zip".into()) }).await?;
+context.tracing().stop().path("trace.zip").await?;
 ```
 
 ```ts

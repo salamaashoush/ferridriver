@@ -141,7 +141,12 @@ impl Coverage {
   ///
   /// JavaScript coverage already running, a browser that is not
   /// Chromium, or a protocol failure.
-  pub async fn start_js_coverage(&self, options: JsCoverageOptions) -> Result<()> {
+  #[track_caller]
+  pub fn start_js_coverage(&self) -> crate::action::Action<'_, JsCoverageOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.start_js_coverage_impl(opts).await }))
+  }
+
+  async fn start_js_coverage_impl(&self, options: JsCoverageOptions) -> Result<()> {
     let mut state = self.state().lock().await;
     if state.js.is_some() {
       return Err(FerriError::invalid_argument(
@@ -289,7 +294,12 @@ impl Coverage {
   ///
   /// CSS coverage already running, a browser that is not Chromium, or a
   /// protocol failure.
-  pub async fn start_css_coverage(&self, options: CssCoverageOptions) -> Result<()> {
+  #[track_caller]
+  pub fn start_css_coverage(&self) -> crate::action::Action<'_, CssCoverageOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.start_css_coverage_impl(opts).await }))
+  }
+
+  async fn start_css_coverage_impl(&self, options: CssCoverageOptions) -> Result<()> {
     let mut state = self.state().lock().await;
     if state.css.is_some() {
       return Err(FerriError::invalid_argument(

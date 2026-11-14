@@ -55,14 +55,14 @@ impl TracingJs {
   #[qjs(rename = "start")]
   pub async fn start<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_start_options(&options)?;
-    self.ctx.tracing().start(opts).await.into_js_with(&ctx)
+    self.ctx.tracing().start().options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.startChunk(options?: { name?, title? })`.
   #[qjs(rename = "startChunk")]
   pub async fn start_chunk<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_chunk_options(&options)?;
-    self.ctx.tracing().start_chunk(opts).await.into_js_with(&ctx)
+    self.ctx.tracing().start_chunk().options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.group(name, options?: { location? })`. Nests
@@ -83,14 +83,14 @@ impl TracingJs {
   #[qjs(rename = "stopChunk")]
   pub async fn stop_chunk<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_stop_options(&ctx, &options)?;
-    self.ctx.tracing().stop_chunk(opts).await.into_js_with(&ctx)
+    self.ctx.tracing().stop_chunk().options(opts).await.into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.stop(options?: { path? })`.
   #[qjs(rename = "stop")]
   pub async fn stop<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_stop_options(&ctx, &options)?;
-    self.ctx.tracing().stop(opts).await.into_js_with(&ctx)
+    self.ctx.tracing().stop().options(opts).await.into_js_with(&ctx)
   }
 }
 

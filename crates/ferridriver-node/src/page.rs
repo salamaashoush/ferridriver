@@ -1606,7 +1606,7 @@ impl Page {
       signal,
       self
         .inner
-        .wait_for_function(&page_function.source, serialized, page_function.is_function, opts),
+        .wait_for_function_serialized(&page_function.source, serialized, page_function.is_function, opts),
     )
     .await?;
     Ok(crate::js_handle::JSHandle::wrap(handle))
@@ -1645,7 +1645,8 @@ impl Page {
   pub async fn check_accessibility(&self, options: Option<AccessibilityAuditOptions>) -> Result<AccessibilityReport> {
     let report = self
       .inner
-      .check_accessibility(options.map(Into::into))
+      .check_accessibility()
+      .maybe_options(options.map(Into::into))
       .await
       .into_napi()?;
     Ok(report.into())
@@ -1709,7 +1710,8 @@ impl Page {
   pub async fn check_page_quality(&self, options: Option<PageQualityOptions>) -> Result<PageQualityReport> {
     let report = self
       .inner
-      .check_page_quality(options.map(Into::into))
+      .check_page_quality()
+      .maybe_options(options.map(Into::into))
       .await
       .into_napi()?;
     Ok(report.into())
@@ -2315,7 +2317,8 @@ impl Page {
   ) -> Result<crate::element_handle::ElementHandle> {
     let handle = self
       .inner
-      .add_script_tag(options.unwrap_or_default().into())
+      .add_script_tag()
+      .maybe_options(options.map(Into::into))
       .await
       .map_err(crate::error::to_napi)?;
     Ok(crate::element_handle::ElementHandle::wrap(handle))
@@ -2330,7 +2333,8 @@ impl Page {
   ) -> Result<crate::element_handle::ElementHandle> {
     let handle = self
       .inner
-      .add_style_tag(options.unwrap_or_default().into())
+      .add_style_tag()
+      .maybe_options(options.map(Into::into))
       .await
       .map_err(crate::error::to_napi)?;
     Ok(crate::element_handle::ElementHandle::wrap(handle))

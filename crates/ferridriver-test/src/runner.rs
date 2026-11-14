@@ -795,7 +795,7 @@ impl TestRunner {
         Err(e) => {
           tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
           bus.emit(ReporterEvent::RunError {
-            error: Box::new(crate::model::TestFailure::from(format!("webServer start failed: {e}"))),
+            error: Box::new(crate::model::TestFailure::msg(format!("webServer start failed: {e}"))),
           });
           bus.emit(ReporterEvent::RunFinished {
             total: 0,
@@ -1399,8 +1399,13 @@ impl TestRunner {
       }
       if let Err(e) = validate_dag(&fixture_defs) {
         tracing::error!(target: "ferridriver::fixture", "fixture DAG error: {e}");
+        // Nothing has run yet; without this the run exits non-zero with
+        // no output at all, the reason only reachable through RUST_LOG.
+        event_bus.emit(ReporterEvent::RunError {
+          error: Box::new(crate::model::TestFailure::msg(format!("Invalid fixtures: {e}"))),
+        });
         return ExecuteSummary {
-          exit_code: 1,
+          exit_code: exit::FAILED,
           total: total_tests,
           failed: total_tests,
           ..Default::default()
@@ -1431,7 +1436,7 @@ impl TestRunner {
           // Before the run boundary: only the error itself is known,
           // and a report with no tests and this error beats a silent one.
           event_bus.emit(ReporterEvent::RunError {
-            error: Box::new(crate::model::TestFailure::from(format!("webServer start failed: {e}"))),
+            error: Box::new(crate::model::TestFailure::msg(format!("webServer start failed: {e}"))),
           });
           return ExecuteSummary {
             exit_code: exit::INFRASTRUCTURE,
@@ -1815,7 +1820,7 @@ impl TestRunner {
       if let Err(error) = outcome {
         infrastructure_failed = true;
         event_bus.emit(ReporterEvent::RunError {
-          error: Box::new(crate::model::TestFailure::from(format!(
+          error: Box::new(crate::model::TestFailure::msg(format!(
             "worker cleanup failed: {error}"
           ))),
         });
@@ -2986,6 +2991,13 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> Result<La
     env: (!overrides.env.is_empty()).then_some(overrides.env),
     ignore_default_args: overrides.ignore_default_args,
     slow_mo: browser_config.slow_mo,
+    firefox_user_prefs: (!browser_config.firefox_user_prefs.is_empty()).then(|| {
+      browser_config
+        .firefox_user_prefs
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+    }),
     args,
     default_viewport: browser_config
       .viewport

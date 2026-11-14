@@ -2,7 +2,6 @@
 //! Wire-encoded as a tagged JSON object so the script layer can produce
 //! them in JS and have them round-trip through `serde_json::Value`.
 
-use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::value::StringOrRegex;
@@ -128,9 +127,7 @@ impl Asymmetric {
         } else {
           let pat = obj.get("regex")?.as_str()?;
           let flags = obj.get("flags").and_then(Value::as_str).unwrap_or("");
-          Some(Self::StringMatching(StringOrRegex::Regex(crate::JsRegex::new(
-            pat, flags,
-          ))))
+          Some(Self::StringMatching(StringOrRegex::regex(pat, flags)))
         }
       },
       "closeTo" => {
@@ -263,33 +260,6 @@ impl Asymmetric {
       Self::Not(inner) => format!("Not({})", inner.description()),
     }
   }
-}
-
-/// Compile a JS-style regex (pattern + flag string).
-pub fn compile_js_regex(pattern: &str, flags: &str) -> Result<Regex, regex::Error> {
-  let mut prefix = String::new();
-  if !flags.is_empty() {
-    let mut letters = String::new();
-    for c in flags.chars() {
-      match c {
-        'i' => letters.push('i'),
-        'm' => letters.push('m'),
-        's' => letters.push('s'),
-        'x' => letters.push('x'),
-        // 'g' / 'u' / 'y' have no Rust regex equivalent at the inline
-        // flag level; ignored silently so a user-supplied global flag
-        // does not break matching.
-        _ => {},
-      }
-    }
-    if !letters.is_empty() {
-      prefix = format!("(?{letters})");
-    }
-  }
-  Regex::new(&format!(
-    "{prefix}{}",
-    ferridriver::url_matcher::js_regex_source(pattern)
-  ))
 }
 
 pub fn close_enough(a: f64, b: f64, digits: u8) -> bool {

@@ -4863,16 +4863,14 @@ async fn fetch_for_route(refetch: &RouteRefetch<'_>) -> Result<(u16, Vec<(String
     ..Default::default()
   });
   let response = client
-    .fetch(
-      refetch.url,
-      Some(crate::http_client::RequestOptions {
-        method: Some(refetch.method.to_string()),
-        headers: Some(headers),
-        data: refetch.body.map(<[u8]>::to_vec),
-        fail_on_status_code: Some(false),
-        ..Default::default()
-      }),
-    )
+    .fetch(refetch.url)
+    .options(crate::http_client::RequestOptions {
+      method: Some(refetch.method.to_string()),
+      headers: Some(headers),
+      data: refetch.body.map(<[u8]>::to_vec),
+      fail_on_status_code: Some(false),
+      ..Default::default()
+    })
     .await
     .map_err(|e| FerriError::protocol("route url override", format!("request to {} failed: {e}", refetch.url)))?;
 

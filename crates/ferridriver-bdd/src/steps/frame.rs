@@ -7,7 +7,7 @@
 use crate::step::StepError;
 use ferridriver::frame::Frame;
 use ferridriver_bdd_macros::{step, then, when};
-use ferridriver_test::expect::{AssertionFailure, DEFAULT_EXPECT_TIMEOUT, expect_poll};
+use ferridriver_test::expect::{AssertionFailure, expect_poll};
 
 fn to_step_err(e: AssertionFailure) -> StepError {
   StepError {
@@ -44,16 +44,13 @@ async fn switch_to_main_frame(world: &mut BrowserWorld) {
 async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
   let page = world.page()?.clone();
   let expected_count = expected as usize;
-  expect_poll(
-    || {
-      let p = page.clone();
-      async move {
-        p.sync_frames().await.ok();
-        p.frames().len()
-      }
-    },
-    DEFAULT_EXPECT_TIMEOUT,
-  )
+  expect_poll(|| {
+    let p = page.clone();
+    async move {
+      p.sync_frames().await.ok();
+      p.frames().len()
+    }
+  })
   .to_equal(expected_count)
   .await
   .map_err(to_step_err)?;
@@ -63,17 +60,14 @@ async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
 async fn frame_should_exist(world: &mut BrowserWorld, name_or_url: String) {
   let page = world.page()?.clone();
   let name = name_or_url.clone();
-  expect_poll(
-    || {
-      let p = page.clone();
-      let n = name.clone();
-      async move {
-        p.sync_frames().await.ok();
-        p.frame(n.as_str()).is_some() || p.frame(ferridriver::options::FrameSelector::by_url(n)).is_some()
-      }
-    },
-    DEFAULT_EXPECT_TIMEOUT,
-  )
+  expect_poll(|| {
+    let p = page.clone();
+    let n = name.clone();
+    async move {
+      p.sync_frames().await.ok();
+      p.frame(n.as_str()).is_some() || p.frame(ferridriver::options::FrameSelector::by_url(n)).is_some()
+    }
+  })
   .to_equal(true)
   .await
   .map_err(to_step_err)?;

@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let page = context.new_page().await?;
   page.goto(&url).await?;
   page.wait_for_load_state(None).await?;
-  let report = page.check_accessibility(None).await?;
+  let report = page.check_accessibility().await?;
   browser.close().await?;
   println!("{}", serde_json::to_string_pretty(&report)?);
   Ok(())

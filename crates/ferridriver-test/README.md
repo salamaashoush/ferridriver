@@ -102,10 +102,18 @@ Generates one test per row, named `title_check (<row values>)`.
 
 Resolution walks Global → Worker → Test. Workers reuse the browser; each
 test gets a fresh context and page. Register custom fixtures with the
-`#[fixture(scope = "...")]` macro — `async fn name(ctx: TestContext) ->
-ferridriver_test::Result<T>`, resolved via `ctx.get::<T>("name")`;
-dependencies (built-in or custom) resolve lazily and the DAG is validated
-at startup.
+`#[fixture(scope = "...")]` macro. Parameters name the fixtures it
+depends on (`async fn api(request: Arc<HttpClient>) ->
+ferridriver_test::Result<Api>`), built-in or custom, including
+`request` and `test_info`; the DAG and scopes are validated at startup
+and a violation fails the run with the reason printed.
+
+## Errors
+
+`?` accepts any `std::error::Error` in tests, hooks and fixtures.
+Browser errors keep their Playwright class name, assertion failures their
+diff. `Context` adds an explanation (`.context("cart total")?`, also on
+`Option`), and `TestFailure::msg("...")` builds a failure from text.
 
 ## Hooks
 
@@ -139,8 +147,15 @@ All matchers support `.not`, `.with_timeout(Duration)`, `.with_message(&str)`,
 **Locator — other (5):** `to_have_js_property`, `to_have_count`,
 `to_match_snapshot`, `to_have_screenshot`, `to_match_aria_snapshot`.
 
-**Poll / satisfy (4):** `to_equal`, `to_satisfy`, `to_pass`,
-`to_pass_with_options`.
+**Poll (`expect_poll(f)`):** `to_equal`, `to_satisfy`,
+`to_be_greater_than[_or_equal]`, `to_be_less_than[_or_equal]`, with
+`.not()`, `.with_timeout()`, `.with_message()`, `.with_intervals()`; the
+timeout defaults to `expect_timeout`.
+
+**Retry a block:** `to_pass`, `to_pass_with_options`.
+
+Text expectations take a string or a `regex::Regex`, the same
+`StringOrRegex` locators use.
 
 ## Reporters
 

@@ -545,6 +545,13 @@ fn slots_of(defs: &FxHashMap<String, FixtureDef>) -> Vec<crate::fixture_graph::F
     .collect()
 }
 
+/// Fixtures the worker puts into its pools itself rather than through a
+/// [`FixtureDef`] in [`builtin_fixtures`], at the scope each lives in, so
+/// a `#[fixture]` may depend on them and the scope rule still holds (a
+/// worker fixture cannot take `test_info`).
+const INJECTED_FIXTURES: &[(&str, FixtureScope)] =
+  &[("request", FixtureScope::Worker), ("test_info", FixtureScope::Test)];
+
 /// Validate that fixture definitions form a DAG (no cycles) and that no
 /// fixture depends on one that does not outlive it.
 ///
@@ -552,12 +559,22 @@ fn slots_of(defs: &FxHashMap<String, FixtureDef>) -> Vec<crate::fixture_graph::F
 ///
 /// The reason from [`crate::fixture_graph`], which is the same text a JS
 /// chain or a BDD scenario would report for the same shape.
-pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> ferridriver::error::Result<()> {
-  let slots = slots_of(defs);
+pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> {
+  let mut slots = slots_of(defs);
+  for (name, scope) in INJECTED_FIXTURES {
+    if !defs.contains_key(*name) {
+      slots.push(crate::fixture_graph::FixtureSlot {
+        reg: slots.len(),
+        name: (*name).to_string(),
+        deps: Vec::new(),
+        auto: false,
+        scope: *scope,
+        option: false,
+      });
+    }
+  }
   let names: Vec<String> = slots.iter().map(|s| s.name.clone()).collect();
-  crate::fixture_graph::dependency_order(&slots, &names, &|_| false)
-    .map(|_| ())
-    .map_err(|e| ferridriver::FerriError::invalid_argument("fixture", e))
+  crate::fixture_graph::dependency_order(&slots, &names, &|_| false).map(|_| ())
 }
 
 /// Built-in fixture definitions for the ferridriver test runner.
@@ -570,6 +587,9 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> ferridriver::error::R
   let headless = browser_config.headless;
   let executable_path = browser_config.executable_path.clone();
   let args = browser_config.args.clone();
+  let firefox_user_prefs: Option<FxHashMap<String, serde_json::Value>> =
+    (!browser_config.firefox_user_prefs.is_empty())
+      .then(|| browser_config.firefox_user_prefs.clone().into_iter().collect());
   let viewport = browser_config
     .viewport
     .as_ref()
@@ -594,6 +614,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> ferridriver::error::R
         let exec = executable_path.clone();
         let extra_args = args.clone();
         let vp = viewport.clone();
+        let prefs = firefox_user_prefs.clone();
         Box::pin(async move {
           let plan = LaunchPlan {
             backend,
@@ -602,6 +623,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> ferridriver::error::R
             executable_path: exec,
             args: extra_args,
             default_viewport: vp,
+            firefox_user_prefs: prefs,
             ..Default::default()
           };
           let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
@@ -723,5 +745,48 @@ mod setup_tests {
       .unwrap()
       .unwrap();
     assert_eq!(*browser, 42);
+  }
+
+  fn def(name: &str, scope: FixtureScope, dependencies: &[&str]) -> FixtureDef {
+    FixtureDef {
+      name: name.into(),
+      scope,
+      dependencies: dependencies.iter().map(|d| (*d).to_string()).collect(),
+      setup: Arc::new(|_| Box::pin(async { Ok(Arc::new(()) as ArcValue) })),
+      teardown: None,
+      timeout: Duration::ZERO,
+      auto: false,
+    }
+  }
+
+  #[test]
+  fn fixtures_may_depend_on_the_worker_injected_request_and_test_info() {
+    let defs = FxHashMap::from_iter([
+      (
+        "app_version".into(),
+        def("app_version", FixtureScope::Worker, &["request"]),
+      ),
+      (
+        "titled".into(),
+        def("titled", FixtureScope::Test, &["test_info", "app_version"]),
+      ),
+    ]);
+    assert_eq!(validate_dag(&defs), Ok(()));
+  }
+
+  #[test]
+  fn a_worker_fixture_cannot_take_test_info() {
+    let defs = FxHashMap::from_iter([("bad".into(), def("bad", FixtureScope::Worker, &["test_info"]))]);
+    let err = validate_dag(&defs).unwrap_err();
+    assert!(err.contains("\"bad\"") && err.contains("\"test_info\""), "{err}");
+  }
+
+  #[test]
+  fn an_unknown_dependency_is_still_named() {
+    let defs = FxHashMap::from_iter([("lonely".into(), def("lonely", FixtureScope::Test, &["nobody"]))]);
+    assert_eq!(
+      validate_dag(&defs).unwrap_err(),
+      "Fixture \"lonely\" has unknown parameter \"nobody\"."
+    );
   }
 }

@@ -876,9 +876,14 @@ impl HttpClient {
   ///
   /// Returns an error if a filter's regex does not compile, or if the
   /// context's cookies cannot be cleared.
-  pub async fn clear_cookies(&self, options: &crate::backend::ClearCookieOptions) -> crate::error::Result<()> {
+  #[track_caller]
+  pub fn clear_cookies(&self) -> crate::action::Action<'_, crate::backend::ClearCookieOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.clear_cookies_impl(&opts).await }))
+  }
+
+  async fn clear_cookies_impl(&self, options: &crate::backend::ClearCookieOptions) -> crate::error::Result<()> {
     match (&self.context, self.pool.jar()) {
-      (Some(context), _) => context.clear_cookies_filtered(options).await,
+      (Some(context), _) => context.clear_cookies_impl(options).await,
       (None, Some(jar)) => {
         let filter = options.compile()?;
         jar.remove(|cookie| filter.matches(cookie));
@@ -1134,58 +1139,84 @@ impl HttpClient {
     })
   }
 
-  /// Send a GET request.
+  /// Playwright: `get(url: string, options?)`. Options chain as setters
+  /// on the returned action (`.header(..)`, `.json(..)`, `.params(..)`,
+  /// `.timeout(..)`, ...).
   ///
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    self.fetch(url, Some(with_method(options, "GET"))).await
+  #[track_caller]
+  pub fn get(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    self.verb(url, "GET")
   }
 
-  /// Send a POST request.
+  /// Playwright: `post(url: string, options?)`. Options chain as setters
+  /// on the returned action (`.header(..)`, `.json(..)`, `.params(..)`,
+  /// `.timeout(..)`, ...).
   ///
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    self.fetch(url, Some(with_method(options, "POST"))).await
+  #[track_caller]
+  pub fn post(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    self.verb(url, "POST")
   }
 
-  /// Send a PUT request.
+  /// Playwright: `put(url: string, options?)`. Options chain as setters
+  /// on the returned action (`.header(..)`, `.json(..)`, `.params(..)`,
+  /// `.timeout(..)`, ...).
   ///
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    self.fetch(url, Some(with_method(options, "PUT"))).await
+  #[track_caller]
+  pub fn put(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    self.verb(url, "PUT")
   }
 
-  /// Send a DELETE request.
+  /// Playwright: `delete(url: string, options?)`. Options chain as setters
+  /// on the returned action (`.header(..)`, `.json(..)`, `.params(..)`,
+  /// `.timeout(..)`, ...).
   ///
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    self.fetch(url, Some(with_method(options, "DELETE"))).await
+  #[track_caller]
+  pub fn delete(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    self.verb(url, "DELETE")
   }
 
-  /// Send a PATCH request.
+  /// Playwright: `patch(url: string, options?)`. Options chain as setters
+  /// on the returned action (`.header(..)`, `.json(..)`, `.params(..)`,
+  /// `.timeout(..)`, ...).
   ///
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    self.fetch(url, Some(with_method(options, "PATCH"))).await
+  #[track_caller]
+  pub fn patch(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    self.verb(url, "PATCH")
   }
 
-  /// Send a HEAD request.
+  /// Playwright: `head(url: string, options?)`. Options chain as setters
+  /// on the returned action (`.header(..)`, `.json(..)`, `.params(..)`,
+  /// `.timeout(..)`, ...).
   ///
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    self.fetch(url, Some(with_method(options, "HEAD"))).await
+  #[track_caller]
+  pub fn head(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    self.verb(url, "HEAD")
+  }
+
+  #[track_caller]
+  fn verb(&self, url: &str, method: &'static str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    let url = url.to_string();
+    crate::action::Action::new(move |opts: RequestOptions| {
+      Box::pin(async move { self.fetch_impl(&url, with_method(Some(opts), method)).await })
+    })
   }
 
   /// Send an HTTP request (generic method — all verbs delegate here).
@@ -1193,8 +1224,13 @@ impl HttpClient {
   /// # Errors
   ///
   /// Returns an error if the request fails or `fail_on_status_code` is set and the response is 4xx/5xx.
-  pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
-    let opts = options.unwrap_or_default();
+  #[track_caller]
+  pub fn fetch(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpResponse> {
+    let url = url.to_string();
+    crate::action::Action::new(move |opts: RequestOptions| Box::pin(async move { self.fetch_impl(&url, opts).await }))
+  }
+
+  async fn fetch_impl(&self, url: &str, opts: RequestOptions) -> crate::error::Result<HttpResponse> {
     let request = self.build_request(url, &opts).await?;
     let response = self.send_answering_challenge(request).await?;
     let http = HttpResponse::buffer(response).await?;
@@ -1218,12 +1254,15 @@ impl HttpClient {
   ///
   /// Returns an error if the request fails, or `fail_on_status_code` is
   /// set and the response is 4xx/5xx (checked before any body is read).
-  pub async fn fetch_stream(
-    &self,
-    url: &str,
-    options: Option<RequestOptions>,
-  ) -> crate::error::Result<HttpStreamResponse> {
-    let opts = options.unwrap_or_default();
+  #[track_caller]
+  pub fn fetch_stream(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpStreamResponse> {
+    let url = url.to_string();
+    crate::action::Action::new(move |opts: RequestOptions| {
+      Box::pin(async move { self.fetch_stream_impl(&url, opts).await })
+    })
+  }
+
+  async fn fetch_stream_impl(&self, url: &str, opts: RequestOptions) -> crate::error::Result<HttpStreamResponse> {
     let request = self.build_request(url, &opts).await?;
     let response = self.send_answering_challenge(request).await?;
     if opts.fail_on_status_code.or(self.fail_on_status_code).unwrap_or(false) && fails_status(response.status) {
@@ -1762,7 +1801,7 @@ mod context_bound_tests {
       credentials("elsewhere", Some("http://elsewhere.example.com"), None),
       credentials("pass", Some(&base), None),
     ]);
-    let resp = client.get(&format!("{base}/"), None).await.unwrap();
+    let resp = client.get(&format!("{base}/")).await.unwrap();
     assert_eq!((resp.status(), resp.text().unwrap().as_str()), (200, "AUTHED"));
     assert_eq!(*log.lock().unwrap(), ["", "Basic dXNlcjpwYXNz"]);
   }
@@ -1771,7 +1810,7 @@ mod context_bound_tests {
   async fn credentials_sent_always_go_out_before_any_challenge() {
     let (base, log) = spawn_auth_server("Basic");
     let client = client_with(vec![credentials("pass", None, Some(HttpCredentialsSend::Always))]);
-    let resp = client.get(&format!("{base}/"), None).await.unwrap();
+    let resp = client.get(&format!("{base}/")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(*log.lock().unwrap(), ["Basic dXNlcjpwYXNz"]);
   }
@@ -1780,7 +1819,7 @@ mod context_bound_tests {
   async fn refused_credentials_are_not_tried_again() {
     let (base, log) = spawn_auth_server("Basic");
     let client = client_with(vec![credentials("wrong", None, None)]);
-    let resp = client.get(&format!("{base}/"), None).await.unwrap();
+    let resp = client.get(&format!("{base}/")).await.unwrap();
     assert_eq!(resp.status(), 401);
     // base64("user:wrong")
     assert_eq!(*log.lock().unwrap(), ["", "Basic dXNlcjp3cm9uZw=="]);
@@ -1809,7 +1848,11 @@ mod context_bound_tests {
         headers,
         ..RequestOptions::default()
       };
-      let resp = client_with(list).get(&format!("{base}/"), Some(options)).await.unwrap();
+      let resp = client_with(list)
+        .get(&format!("{base}/"))
+        .options(options)
+        .await
+        .unwrap();
       assert_eq!(resp.status(), 401, "{scheme}");
       assert_eq!(*log.lock().unwrap(), [sent], "{scheme}");
     }
@@ -1824,9 +1867,9 @@ mod context_bound_tests {
       let list = read.lock().unwrap().clone();
       Box::pin(async move { list })
     }));
-    assert_eq!(client.get(&format!("{base}/"), None).await.unwrap().status(), 401);
+    assert_eq!(client.get(&format!("{base}/")).await.unwrap().status(), 401);
     *current.lock().unwrap() = vec![credentials("pass", None, None)];
-    assert_eq!(client.get(&format!("{base}/"), None).await.unwrap().status(), 200);
+    assert_eq!(client.get(&format!("{base}/")).await.unwrap().status(), 200);
     assert_eq!(*log.lock().unwrap(), ["", "", "Basic dXNlcjpwYXNz"]);
   }
 
@@ -1838,7 +1881,7 @@ mod context_bound_tests {
     // A cookie for another domain must not leak in.
     bridge.seed(cookie("other", "x", "example.com"));
     let client = HttpClient::context_bound(bridge);
-    let resp = client.get(&format!("{base}/echo"), None).await.unwrap();
+    let resp = client.get(&format!("{base}/echo")).await.unwrap();
     assert_eq!(resp.status(), 200);
     let log = log.lock().unwrap();
     assert_eq!(log.len(), 1);
@@ -1856,7 +1899,7 @@ mod context_bound_tests {
     });
     let bridge = MockBridge::new();
     let client = HttpClient::context_bound(Arc::clone(&bridge) as Arc<dyn ContextBridge>);
-    client.get(&format!("{base}/set"), None).await.unwrap();
+    client.get(&format!("{base}/set")).await.unwrap();
     assert_eq!(bridge.cookie_value("sid").as_deref(), Some("fresh"));
   }
 
@@ -1878,7 +1921,7 @@ mod context_bound_tests {
     });
     let bridge = MockBridge::new();
     let client = HttpClient::context_bound(Arc::clone(&bridge) as Arc<dyn ContextBridge>);
-    let resp = client.get(&format!("{base}/hop"), None).await.unwrap();
+    let resp = client.get(&format!("{base}/hop")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().unwrap(), "landed");
     // The redirect hop's Set-Cookie reached the bridge...
@@ -1901,13 +1944,8 @@ mod context_bound_tests {
     let bridge = MockBridge::new();
     let client = HttpClient::context_bound(bridge);
     let resp = client
-      .post(
-        &format!("{base}/submit"),
-        Some(RequestOptions {
-          json_data: Some(serde_json::json!({"a": 1})),
-          ..Default::default()
-        }),
-      )
+      .post(&format!("{base}/submit"))
+      .json(serde_json::json!({"a": 1}))
       .await
       .unwrap();
     assert_eq!(resp.status(), 200);
@@ -1932,13 +1970,8 @@ mod context_bound_tests {
     bridge.seed(cookie("ctx", "1", "127.0.0.1"));
     let client = HttpClient::context_bound(Arc::clone(&bridge) as Arc<dyn ContextBridge>);
     client
-      .get(
-        &format!("{base}/hop"),
-        Some(RequestOptions {
-          headers: Some(vec![("cookie".into(), "manual=1".into())]),
-          ..Default::default()
-        }),
-      )
+      .get(&format!("{base}/hop"))
+      .header("cookie", "manual=1")
       .await
       .unwrap();
     let log = log.lock().unwrap();
@@ -1953,16 +1986,7 @@ mod context_bound_tests {
   async fn max_redirects_zero_returns_the_redirect() {
     let (base, _log) = spawn_server(|_| (302, vec![("Location".into(), "/next".into())], ""));
     let client = HttpClient::context_bound(MockBridge::new());
-    let resp = client
-      .get(
-        &format!("{base}/hop"),
-        Some(RequestOptions {
-          max_redirects: Some(0),
-          ..Default::default()
-        }),
-      )
-      .await
-      .unwrap();
+    let resp = client.get(&format!("{base}/hop")).max_redirects(0).await.unwrap();
     assert_eq!(resp.status(), 302);
   }
 
@@ -1970,16 +1994,7 @@ mod context_bound_tests {
   async fn redirect_loop_errors_at_budget() {
     let (base, _log) = spawn_server(|_| (302, vec![("Location".into(), "/again".into())], ""));
     let client = HttpClient::context_bound(MockBridge::new());
-    let err = client
-      .get(
-        &format!("{base}/hop"),
-        Some(RequestOptions {
-          max_redirects: Some(3),
-          ..Default::default()
-        }),
-      )
-      .await
-      .unwrap_err();
+    let err = client.get(&format!("{base}/hop")).max_redirects(3).await.unwrap_err();
     assert!(err.to_string().contains("too many redirects"), "got {err}");
   }
 
@@ -1996,7 +2011,7 @@ mod context_bound_tests {
       cookies: StdMutex::new(Vec::new()),
     });
     let client = HttpClient::context_bound(bridge);
-    let resp = client.get("/relative", None).await.unwrap();
+    let resp = client.get("/relative").await.unwrap();
     assert_eq!(resp.status(), 200);
     let log = log.lock().unwrap();
     assert!(log[0].starts_with("GET /relative"), "got {:?}", log[0]);

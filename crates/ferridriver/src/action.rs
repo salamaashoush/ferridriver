@@ -138,6 +138,16 @@ macro_rules! action_setter {
       }
     }
   };
+  // `Vec<String>` fields: accept any iterator of string-likes.
+  ($opts:path, strs $name:ident, $ty:ty) => {
+    impl<T> Action<'_, $opts, T> {
+      #[doc = concat!("Set the `", stringify!($name), "` option.")]
+      pub fn $name(mut self, value: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.opts.$name = value.into_iter().map(Into::into).collect();
+        self
+      }
+    }
+  };
   // For fields whose name would collide with a Rust method-naming
   // convention (`is_*` setters taking `self` by value trip
   // `clippy::wrong_self_convention`).
@@ -285,6 +295,66 @@ action_options!(crate::options::WaitOptions {
 
 action_options!(crate::options::WaitForUrlOptions {
   opt wait_until: crate::options::LoadState,
+  ms timeout: u64,
+});
+
+action_options!(crate::backend::ClearCookieOptions {
+  opt name: crate::options::StringOrRegex,
+  opt domain: crate::options::StringOrRegex,
+  opt path: crate::options::StringOrRegex,
+});
+
+action_options!(crate::coverage::JsCoverageOptions {
+  opt reset_on_navigation: bool,
+  opt report_anonymous_scripts: bool,
+});
+
+action_options!(crate::coverage::CssCoverageOptions {
+  opt reset_on_navigation: bool,
+});
+
+action_options!(crate::trace::TracingStartOptions {
+  opt name: String,
+  opt title: String,
+  raw screenshots: bool,
+  raw snapshots: bool,
+  raw sources: bool,
+});
+
+action_options!(crate::trace::TracingChunkOptions {
+  opt name: String,
+  opt title: String,
+});
+
+action_options!(crate::trace::TracingStopOptions {
+  opt path: std::path::PathBuf,
+});
+
+action_options!(crate::accessibility::AccessibilityOptions {
+  strs include: String,
+  strs exclude: String,
+  strs tags: String,
+});
+
+action_options!(crate::audits::PageQualityOptions {
+  strs only: String,
+});
+
+action_options!(crate::options::AddScriptTagOptions {
+  opt content: String,
+  opt path: std::path::PathBuf,
+  opt script_type: String,
+  opt url: String,
+});
+
+action_options!(crate::options::AddStyleTagOptions {
+  opt content: String,
+  opt path: std::path::PathBuf,
+  opt url: String,
+});
+
+action_options!(crate::options::WaitForFunctionOptions {
+  opt polling: crate::options::Polling,
   ms timeout: u64,
 });
 
@@ -446,3 +516,100 @@ action_options!(crate::options::BrowserContextOptions {
   opt user_agent: String,
   raw viewport: crate::options::ViewportOption,
 });
+
+/// Playwright's `APIRequestContext` per-request options as setters.
+impl<T> Action<'_, crate::http_client::RequestOptions, T> {
+  /// Playwright's `method` option.
+  pub fn method(mut self, method: impl Into<String>) -> Self {
+    self.opts.method = Some(method.into());
+    self
+  }
+
+  /// Add one header (Playwright's `headers` option, one entry at a time).
+  pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    self
+      .opts
+      .headers
+      .get_or_insert_with(Vec::new)
+      .push((name.into(), value.into()));
+    self
+  }
+
+  /// Playwright's `headers` option: replaces any headers set so far.
+  pub fn headers<K: Into<String>, V: Into<String>>(mut self, headers: impl IntoIterator<Item = (K, V)>) -> Self {
+    self.opts.headers = Some(headers.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
+    self
+  }
+
+  /// Playwright's `data` option as a string or bytes, sent verbatim.
+  pub fn data(mut self, body: impl Into<Vec<u8>>) -> Self {
+    self.opts.data = Some(body.into());
+    self
+  }
+
+  /// Playwright's `data` option as a serializable value: sent as JSON
+  /// with `content-type: application/json`.
+  pub fn json(mut self, body: impl Into<serde_json::Value>) -> Self {
+    self.opts.json_data = Some(body.into());
+    self
+  }
+
+  /// Playwright's `form` option: an `application/x-www-form-urlencoded`
+  /// body.
+  pub fn form<K: Into<String>, V: Into<String>>(mut self, fields: impl IntoIterator<Item = (K, V)>) -> Self {
+    self.opts.form = Some(fields.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
+    self
+  }
+
+  /// Playwright's `multipart` option: a `multipart/form-data` body.
+  pub fn multipart(mut self, fields: impl IntoIterator<Item = crate::http_client::MultipartField>) -> Self {
+    self.opts.multipart = Some(fields.into_iter().collect());
+    self
+  }
+
+  /// Add one query parameter.
+  pub fn param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    self
+      .opts
+      .params
+      .get_or_insert_with(Vec::new)
+      .push((name.into(), value.into()));
+    self
+  }
+
+  /// Playwright's `params` option: replaces any parameters set so far.
+  pub fn params<K: Into<String>, V: Into<String>>(mut self, params: impl IntoIterator<Item = (K, V)>) -> Self {
+    self.opts.params = Some(params.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
+    self
+  }
+
+  /// Playwright's `timeout` option (milliseconds or `Duration`).
+  pub fn timeout(mut self, timeout: impl Into<crate::options::TimeoutMs>) -> Self {
+    self.opts.timeout = Some(std::time::Duration::from_millis(timeout.into().0));
+    self
+  }
+
+  /// Playwright's `failOnStatusCode` option.
+  pub fn fail_on_status_code(mut self, fail: bool) -> Self {
+    self.opts.fail_on_status_code = Some(fail);
+    self
+  }
+
+  /// Playwright's `maxRedirects` option.
+  pub fn max_redirects(mut self, max: u32) -> Self {
+    self.opts.max_redirects = Some(max);
+    self
+  }
+
+  /// Playwright's `maxRetries` option.
+  pub fn max_retries(mut self, max: u32) -> Self {
+    self.opts.max_retries = Some(max);
+    self
+  }
+
+  /// Playwright's `ignoreHTTPSErrors` option.
+  pub fn ignore_https_errors(mut self, ignore: bool) -> Self {
+    self.opts.ignore_https_errors = Some(ignore);
+    self
+  }
+}

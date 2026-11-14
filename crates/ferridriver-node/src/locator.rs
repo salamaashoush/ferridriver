@@ -252,7 +252,11 @@ impl Locator {
 
   #[napi]
   pub fn filter(&self, options: FilterOptions) -> Locator {
-    Self::wrap(self.inner.filter(&ferridriver::options::FilterOptions::from(options)))
+    Self::wrap(
+      self
+        .inner
+        .filter_with(&ferridriver::options::FilterOptions::from(options)),
+    )
   }
 
   /// Intersection: matches the same element that both locators match.

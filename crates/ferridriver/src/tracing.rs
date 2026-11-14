@@ -178,7 +178,12 @@ impl Tracing {
   /// # Errors
   ///
   /// Errors if tracing is already started on this context.
-  pub async fn start(&self, options: crate::trace::TracingStartOptions) -> Result<()> {
+  #[track_caller]
+  pub fn start(&self) -> crate::action::Action<'_, crate::trace::TracingStartOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.start_impl(opts).await }))
+  }
+
+  async fn start_impl(&self, options: crate::trace::TracingStartOptions) -> Result<()> {
     let composite = self.ctx.composite();
     let (browser_name, context_options, traces_dir) = {
       let state = self.ctx.state().read().await;
@@ -276,7 +281,12 @@ impl Tracing {
   /// # Errors
   ///
   /// Errors if tracing was not started.
-  pub async fn start_chunk(&self, options: crate::trace::TracingChunkOptions) -> Result<()> {
+  #[track_caller]
+  pub fn start_chunk(&self) -> crate::action::Action<'_, crate::trace::TracingChunkOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.start_chunk_impl(opts).await }))
+  }
+
+  async fn start_chunk_impl(&self, options: crate::trace::TracingChunkOptions) -> Result<()> {
     let recorder = crate::trace::recorder_for(&self.ctx.composite())
       .ok_or_else(|| FerriError::backend("Must start tracing before starting a new chunk".to_string()))?;
     recorder.start_chunk(self.network_log_len().await, options.name, options.title);
@@ -317,7 +327,12 @@ impl Tracing {
   /// # Errors
   ///
   /// Errors if tracing was not started or the export fails.
-  pub async fn stop_chunk(&self, options: crate::trace::TracingStopOptions) -> Result<()> {
+  #[track_caller]
+  pub fn stop_chunk(&self) -> crate::action::Action<'_, crate::trace::TracingStopOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.stop_chunk_impl(opts).await }))
+  }
+
+  async fn stop_chunk_impl(&self, options: crate::trace::TracingStopOptions) -> Result<()> {
     let recorder = crate::trace::recorder_for(&self.ctx.composite())
       .ok_or_else(|| FerriError::backend("Must start tracing before stopping".to_string()))?;
     if let Some(path) = options.path {
@@ -334,7 +349,12 @@ impl Tracing {
   /// # Errors
   ///
   /// Errors if tracing was not started or the export fails.
-  pub async fn stop(&self, options: crate::trace::TracingStopOptions) -> Result<()> {
+  #[track_caller]
+  pub fn stop(&self) -> crate::action::Action<'_, crate::trace::TracingStopOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.stop_impl(opts).await }))
+  }
+
+  async fn stop_impl(&self, options: crate::trace::TracingStopOptions) -> Result<()> {
     let composite = self.ctx.composite();
     let recorder = crate::trace::take_recorder(&composite)
       .ok_or_else(|| FerriError::backend("Must start tracing before stopping".to_string()))?;

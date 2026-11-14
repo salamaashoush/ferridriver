@@ -1687,7 +1687,8 @@ impl PageJs {
         }
         let handle = self
           .inner
-          .add_script_tag(opts.unwrap_or_default())
+          .add_script_tag()
+          .maybe_options(opts)
           .await
           .into_js_with(&ctx)?;
         Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
@@ -1713,7 +1714,8 @@ impl PageJs {
         }
         let handle = self
           .inner
-          .add_style_tag(opts.unwrap_or_default())
+          .add_style_tag()
+          .maybe_options(opts)
           .await
           .into_js_with(&ctx)?;
         Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
@@ -2013,11 +2015,12 @@ impl PageJs {
         };
         let report = self
           .inner
-          .check_accessibility(Some(ferridriver::accessibility::AccessibilityOptions {
+          .check_accessibility()
+          .options(ferridriver::accessibility::AccessibilityOptions {
             include: parsed.include.unwrap_or_default(),
             exclude: parsed.exclude.unwrap_or_default(),
             tags: parsed.tags.unwrap_or_default(),
-          }))
+          })
           .await
           .into_js_with(&ctx)?;
         crate::bindings::convert::serde_to_js(&ctx, &report)
@@ -2115,9 +2118,10 @@ impl PageJs {
         };
         let report = self
           .inner
-          .check_page_quality(Some(ferridriver::audits::PageQualityOptions {
+          .check_page_quality()
+          .options(ferridriver::audits::PageQualityOptions {
             only: parsed.only.unwrap_or_default(),
-          }))
+          })
           .await
           .into_js_with(&ctx)?;
         crate::bindings::convert::serde_to_js(&ctx, &report)
@@ -3047,7 +3051,7 @@ impl PageJs {
         let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
         let handle = self
           .inner
-          .wait_for_function(&src, serialized, is_fn, opts)
+          .wait_for_function_serialized(&src, serialized, is_fn, opts)
           .await
           .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
         Ok(crate::bindings::js_handle::JSHandleJs::new(handle))

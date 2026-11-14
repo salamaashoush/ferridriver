@@ -232,7 +232,8 @@ impl InterceptedRequest {
       ..Default::default()
     };
     client
-      .fetch(options.url.as_deref().unwrap_or(&self.url), Some(request))
+      .fetch(options.url.as_deref().unwrap_or(&self.url))
+      .options(request)
       .await
   }
 }

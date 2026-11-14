@@ -131,14 +131,12 @@ async fn should_see_dialog_text(world: &mut BrowserWorld, expected: String) {
     .ok_or_else(|| StepError::from("no dialog handler was set -- use 'I accept/dismiss the dialog' first"))?;
 
   let exp = expected.clone();
-  expect_poll(
-    move || {
-      let l = log.clone();
-      let e = exp.clone();
-      async move { l.last_message().map_or(false, |m| m.contains(&e)) }
-    },
-    std::time::Duration::from_secs(5),
-  )
+  expect_poll(move || {
+    let l = log.clone();
+    let e = exp.clone();
+    async move { l.last_message().map_or(false, |m| m.contains(&e)) }
+  })
+  .with_timeout(std::time::Duration::from_secs(5))
   .to_equal(true)
   .await
   .map_err(to_step_err)?;
@@ -152,13 +150,11 @@ async fn should_have_seen_dialog_count(world: &mut BrowserWorld, expected: i64) 
     .ok_or_else(|| StepError::from("no dialog handler was set -- use 'I accept/dismiss the dialog' first"))?;
 
   let expected_count = expected as usize;
-  expect_poll(
-    move || {
-      let l = log.clone();
-      async move { l.len() }
-    },
-    std::time::Duration::from_secs(5),
-  )
+  expect_poll(move || {
+    let l = log.clone();
+    async move { l.len() }
+  })
+  .with_timeout(std::time::Duration::from_secs(5))
   .to_equal(expected_count)
   .await
   .map_err(to_step_err)?;

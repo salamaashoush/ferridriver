@@ -130,23 +130,29 @@ impl<T> Expect<'_, T> {
 // ── expect.poll() ──
 
 /// Poll a generic async function until its return value satisfies a
-/// matcher. Matches Playwright's `expect.poll()`.
+/// matcher. Matches Playwright's `expect.poll(fn, { timeout, intervals,
+/// message })`: the timeout defaults to the configured `expect` timeout.
+#[must_use = "expect.poll asserts nothing until a matcher is awaited"]
 pub struct ExpectPoll<F> {
   generator: F,
   timeout: Duration,
   intervals: Vec<u64>,
+  is_not: bool,
+  message: Option<String>,
 }
 
 /// Create a polling expect (Playwright's `expect.poll(fn)`).
-pub fn expect_poll<F, Fut, T>(generator: F, timeout: Duration) -> ExpectPoll<F>
+pub fn expect_poll<F, Fut, T>(generator: F) -> ExpectPoll<F>
 where
   F: Fn() -> Fut,
   Fut: Future<Output = T>,
 {
   ExpectPoll {
     generator,
-    timeout,
+    timeout: crate::poll::default_expect_timeout(),
     intervals: POLL_INTERVALS.to_vec(),
+    is_not: false,
+    message: None,
   }
 }
 
@@ -154,22 +160,55 @@ impl<F, Fut, T> ExpectPoll<F>
 where
   F: Fn() -> Fut,
   Fut: Future<Output = T>,
-  T: PartialEq + std::fmt::Debug,
+  T: std::fmt::Debug,
 {
-  #[must_use]
+  /// Playwright's `timeout` option.
+  pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    self.timeout = timeout;
+    self
+  }
+
+  /// Playwright's `intervals` option, in milliseconds; the last one
+  /// repeats.
   pub fn with_intervals(mut self, intervals: Vec<u64>) -> Self {
     self.intervals = intervals;
     self
   }
 
-  /// Assert the polled value equals the expected value.
-  pub async fn to_equal(self, expected: T) -> Result<(), AssertionFailure> {
+  /// Playwright's `message` option: prefixes the failure.
+  pub fn with_message(mut self, message: impl Into<String>) -> Self {
+    self.message = Some(message.into());
+    self
+  }
+
+  /// Invert the matcher (`expect.poll(fn).not`).
+  pub fn not(mut self) -> Self {
+    self.is_not = !self.is_not;
+    self
+  }
+
+  /// Poll until `pass(actual)` (or its negation under `.not()`) holds, or
+  /// fail at the deadline with the last value received.
+  async fn poll(self, method: &str, expected: String, pass: impl Fn(&T) -> bool) -> Result<(), AssertionFailure> {
     let deadline = tokio::time::Instant::now() + self.timeout;
     let mut interval_idx = 0;
     loop {
       let actual = (self.generator)().await;
-      if actual == expected {
+      if pass(&actual) != self.is_not {
         return Ok(());
+      }
+      let now = tokio::time::Instant::now();
+      if now >= deadline {
+        let not = if self.is_not { ".not" } else { "" };
+        let prefix = self.message.as_deref().map(|m| format!("{m}\n\n")).unwrap_or_default();
+        return Err(AssertionFailure::new(
+          format!("{prefix}expect.poll(){not}.{method}() failed"),
+          Some(format!(
+            "Expected: {not_word}{expected}\nReceived: {actual:?}\nTimeout:  {}ms",
+            self.timeout.as_millis(),
+            not_word = if self.is_not { "not " } else { "" },
+          )),
+        ));
       }
       let interval_ms = self
         .intervals
@@ -179,45 +218,67 @@ where
       interval_idx += 1;
       // Clamp the interval to the remaining budget so the final
       // attempt lands AT the deadline instead of bailing early.
-      let now = tokio::time::Instant::now();
-      if now >= deadline {
-        return Err(AssertionFailure::new(
-          "expect.poll().to_equal() timed out".to_string(),
-          Some(format!("Expected: {expected:?}\nReceived: {actual:?}")),
-        ));
-      }
-      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
-      tokio::time::sleep(sleep_dur).await;
+      tokio::time::sleep(Duration::from_millis(interval_ms).min(deadline - now)).await;
     }
   }
 
-  /// Assert the polled value satisfies a predicate.
+  /// Assert the polled value equals `expected`.
+  pub async fn to_equal(self, expected: T) -> Result<(), AssertionFailure>
+  where
+    T: PartialEq,
+  {
+    let description = format!("{expected:?}");
+    self.poll("toEqual", description, |actual| *actual == expected).await
+  }
+
+  /// Assert the polled value satisfies `predicate`, described in the
+  /// failure as `description`.
   pub async fn to_satisfy(self, predicate: impl Fn(&T) -> bool, description: &str) -> Result<(), AssertionFailure> {
-    let deadline = tokio::time::Instant::now() + self.timeout;
-    let mut interval_idx = 0;
-    loop {
-      let actual = (self.generator)().await;
-      if predicate(&actual) {
-        return Ok(());
-      }
-      let interval_ms = self
-        .intervals
-        .get(interval_idx)
-        .copied()
-        .unwrap_or_else(|| self.intervals.last().copied().unwrap_or(1000));
-      interval_idx += 1;
-      // Clamp the interval to the remaining budget so the final
-      // attempt lands AT the deadline instead of bailing early.
-      let now = tokio::time::Instant::now();
-      if now >= deadline {
-        return Err(AssertionFailure::new(
-          "expect.poll().to_satisfy() timed out".to_string(),
-          Some(format!("Expected: {description}\nReceived: {actual:?}")),
-        ));
-      }
-      let sleep_dur = Duration::from_millis(interval_ms).min(deadline - now);
-      tokio::time::sleep(sleep_dur).await;
-    }
+    self.poll("toSatisfy", description.to_string(), predicate).await
+  }
+
+  /// Assert the polled value is `> expected`.
+  pub async fn to_be_greater_than(self, expected: T) -> Result<(), AssertionFailure>
+  where
+    T: PartialOrd,
+  {
+    let description = format!("> {expected:?}");
+    self
+      .poll("toBeGreaterThan", description, |actual| *actual > expected)
+      .await
+  }
+
+  /// Assert the polled value is `>= expected`.
+  pub async fn to_be_greater_than_or_equal(self, expected: T) -> Result<(), AssertionFailure>
+  where
+    T: PartialOrd,
+  {
+    let description = format!(">= {expected:?}");
+    self
+      .poll("toBeGreaterThanOrEqual", description, |actual| *actual >= expected)
+      .await
+  }
+
+  /// Assert the polled value is `< expected`.
+  pub async fn to_be_less_than(self, expected: T) -> Result<(), AssertionFailure>
+  where
+    T: PartialOrd,
+  {
+    let description = format!("< {expected:?}");
+    self
+      .poll("toBeLessThan", description, |actual| *actual < expected)
+      .await
+  }
+
+  /// Assert the polled value is `<= expected`.
+  pub async fn to_be_less_than_or_equal(self, expected: T) -> Result<(), AssertionFailure>
+  where
+    T: PartialOrd,
+  {
+    let description = format!("<= {expected:?}");
+    self
+      .poll("toBeLessThanOrEqual", description, |actual| *actual <= expected)
+      .await
   }
 }
 
@@ -306,4 +367,69 @@ where
     options.timeout, err.message
   );
   Err(err)
+}
+
+#[cfg(test)]
+mod poll_tests {
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicU32, Ordering};
+  use std::time::Duration;
+
+  use super::expect_poll;
+
+  fn counter() -> (Arc<AtomicU32>, impl Fn() -> std::future::Ready<u32>) {
+    let calls = Arc::new(AtomicU32::new(0));
+    let seen = calls.clone();
+    (calls, move || {
+      std::future::ready(seen.fetch_add(1, Ordering::SeqCst) + 1)
+    })
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn polls_until_the_value_arrives() {
+    let (calls, next) = counter();
+    expect_poll(next).to_be_greater_than_or_equal(3).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn not_inverts_and_the_failure_reports_the_last_value() {
+    let failure = expect_poll(|| std::future::ready(7))
+      .not()
+      .with_timeout(Duration::from_millis(300))
+      .with_message("cart total")
+      .to_equal(7)
+      .await
+      .unwrap_err();
+    assert_eq!(failure.message, "cart total\n\nexpect.poll().not.toEqual() failed");
+    let diff = failure.diff.unwrap_or_default();
+    assert!(
+      diff.contains("Expected: not 7") && diff.contains("Received: 7") && diff.contains("300ms"),
+      "{diff}"
+    );
+    expect_poll(|| std::future::ready(1)).not().to_equal(2).await.unwrap();
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn the_default_deadline_is_the_expect_timeout() {
+    let started = tokio::time::Instant::now();
+    expect_poll(|| std::future::ready(0))
+      .to_be_greater_than(0)
+      .await
+      .unwrap_err();
+    assert_eq!(started.elapsed(), crate::poll::default_expect_timeout());
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn ordering_matchers_compare_the_polled_value() {
+    expect_poll(|| std::future::ready(2)).to_be_less_than(3).await.unwrap();
+    expect_poll(|| std::future::ready(3))
+      .to_be_less_than_or_equal(3)
+      .await
+      .unwrap();
+    expect_poll(|| std::future::ready("b"))
+      .to_satisfy(|v| v.len() == 1, "one character")
+      .await
+      .unwrap();
+  }
 }

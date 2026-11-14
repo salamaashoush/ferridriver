@@ -43,16 +43,31 @@ where
 #[allow(async_fn_in_trait)]
 pub trait PageSnapshotMatchers {
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure>;
+  /// Playwright `toHaveScreenshot(name, options?)` with the full capture
+  /// option bag.
+  async fn to_have_screenshot_with(
+    &self,
+    name: &str,
+    options: crate::expect::ScreenshotMatcherOptions,
+  ) -> Result<(), TestFailure>;
   async fn to_match_aria_snapshot(&self, expected: &str) -> Result<(), TestFailure>;
 }
 
 impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
   async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
+    self
+      .to_have_screenshot_with(name, crate::expect::ScreenshotMatcherOptions::default())
+      .await
+  }
+
+  async fn to_have_screenshot_with(
+    &self,
+    name: &str,
+    options: crate::expect::ScreenshotMatcherOptions,
+  ) -> Result<(), TestFailure> {
     let page = self.subject;
-    // The comparison budget comes from `expect.toHaveScreenshot` when
-    // the call named nothing of its own.
-    let options = crate::expect::ScreenshotMatcherOptions::default()
-      .with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
+    // What the call did not set comes from `expect.toHaveScreenshot`.
+    let options = options.with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
     let timeout = options.timeout.unwrap_or(self.timeout);
     let snap_dir = std::env::var("SNAPSHOT_DIR")
       .map(std::path::PathBuf::from)

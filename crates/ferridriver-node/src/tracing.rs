@@ -67,15 +67,15 @@ impl Tracing {
     ts_args_type = "options?: { name?: string, title?: string, screenshots?: boolean, snapshots?: boolean, sources?: boolean, live?: boolean }"
   )]
   pub async fn start(&self, options: Option<TracingStartOptionsJs>) -> Result<()> {
-    let opts = options.map(Into::into).unwrap_or_default();
-    self.inner.tracing().start(opts).await.into_napi()
+    let opts = options.map(Into::into);
+    self.inner.tracing().start().maybe_options(opts).await.into_napi()
   }
 
   /// Playwright: `tracing.startChunk(options?: { name?, title? })`.
   #[napi(ts_args_type = "options?: { name?: string, title?: string }")]
   pub async fn start_chunk(&self, options: Option<TracingChunkOptionsJs>) -> Result<()> {
-    let opts = options.map(Into::into).unwrap_or_default();
-    self.inner.tracing().start_chunk(opts).await.into_napi()
+    let opts = options.map(Into::into);
+    self.inner.tracing().start_chunk().maybe_options(opts).await.into_napi()
   }
 
   /// Playwright: `tracing.group(name, options?: { location? })`. Nests
@@ -101,15 +101,15 @@ impl Tracing {
   /// Playwright: `tracing.stopChunk(options?: { path? })`.
   #[napi(ts_args_type = "options?: { path?: string }")]
   pub async fn stop_chunk(&self, options: Option<TracingStopOptionsJs>) -> Result<()> {
-    let opts = options.map(Into::into).unwrap_or_default();
-    self.inner.tracing().stop_chunk(opts).await.into_napi()
+    let opts = options.map(Into::into);
+    self.inner.tracing().stop_chunk().maybe_options(opts).await.into_napi()
   }
 
   /// Playwright: `tracing.stop(options?: { path? })`.
   #[napi(ts_args_type = "options?: { path?: string }")]
   pub async fn stop(&self, options: Option<TracingStopOptionsJs>) -> Result<()> {
-    let opts = options.map(Into::into).unwrap_or_default();
-    self.inner.tracing().stop(opts).await.into_napi()
+    let opts = options.map(Into::into);
+    self.inner.tracing().stop().maybe_options(opts).await.into_napi()
   }
 }
 

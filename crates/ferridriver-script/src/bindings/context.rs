@@ -143,10 +143,13 @@ impl BrowserContextJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        match clear_cookie_options(&ctx, options.0, "BrowserContext.clearCookies")? {
-          None => self.inner.clear_cookies().await.into_js_with(&ctx),
-          Some(core) => self.inner.clear_cookies_filtered(&core).await.into_js_with(&ctx),
-        }
+        let filter = clear_cookie_options(&ctx, options.0, "BrowserContext.clearCookies")?;
+        self
+          .inner
+          .clear_cookies()
+          .maybe_options(filter)
+          .await
+          .into_js_with(&ctx)
       })
       .await
   }

@@ -74,8 +74,8 @@ For non-`<input>` triggers (a custom button that opens a native chooser
 via JS):
 
 ```rust
-let chooser = page.wait_for_file_chooser(10_000).await?;
-chooser.set_files(InputFiles::Paths(vec!["fixtures/avatar.png".into()]), None).await?;
+let (chooser, ()) = page.expect_file_chooser(|| page.get_by_role("button").name("Upload").click()).await?;
+chooser.set_files("fixtures/avatar.png").await?;
 ```
 
 ## TypeScript

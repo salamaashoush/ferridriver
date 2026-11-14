@@ -42,7 +42,8 @@ impl CoverageJs {
     let options = options(&ctx, options_bag)?;
     self
       .inner
-      .start_js_coverage(ferridriver::coverage::JsCoverageOptions {
+      .start_js_coverage()
+      .options(ferridriver::coverage::JsCoverageOptions {
         reset_on_navigation: options.reset_on_navigation,
         report_anonymous_scripts: options.report_anonymous_scripts,
       })
@@ -63,7 +64,8 @@ impl CoverageJs {
     let options = options(&ctx, options_bag)?;
     self
       .inner
-      .start_css_coverage(ferridriver::coverage::CssCoverageOptions {
+      .start_css_coverage()
+      .options(ferridriver::coverage::CssCoverageOptions {
         reset_on_navigation: options.reset_on_navigation,
       })
       .await

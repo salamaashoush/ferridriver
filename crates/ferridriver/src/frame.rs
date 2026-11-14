@@ -242,7 +242,57 @@ impl Frame {
   /// [`crate::error::FerriError::timeout`] when the function never
   /// turns truthy before the deadline; page-side exceptions from the
   /// function itself are forwarded.
-  pub async fn wait_for_function(
+  ///
+  /// Options chain as setters: `.polling(100)`, `.timeout(5_000)`.
+  #[track_caller]
+  pub fn wait_for_function(
+    &self,
+    fn_source: &str,
+  ) -> crate::action::Action<'static, crate::options::WaitForFunctionOptions, crate::js_handle::JSHandle> {
+    self.wait_for_function_action(fn_source, Ok(crate::protocol::SerializedArgument::default()))
+  }
+
+  /// [`Self::wait_for_function`] with a serde-serialized argument passed
+  /// to the page function, as [`Self::eval_with`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::wait_for_function`], plus the serialization error when
+  /// `arg` cannot be encoded.
+  #[track_caller]
+  pub fn wait_for_function_with(
+    &self,
+    fn_source: &str,
+    arg: &(impl serde::Serialize + ?Sized),
+  ) -> crate::action::Action<'static, crate::options::WaitForFunctionOptions, crate::js_handle::JSHandle> {
+    self.wait_for_function_action(fn_source, crate::protocol::argument_from_serde(arg))
+  }
+
+  #[track_caller]
+  fn wait_for_function_action(
+    &self,
+    fn_source: &str,
+    arg: Result<crate::protocol::SerializedArgument>,
+  ) -> crate::action::Action<'static, crate::options::WaitForFunctionOptions, crate::js_handle::JSHandle> {
+    let frame = self.clone();
+    let fn_source = fn_source.to_string();
+    crate::action::Action::new(move |opts| {
+      Box::pin(async move {
+        frame
+          .wait_for_function_serialized(&fn_source, arg?, None, Some(opts))
+          .await
+      })
+    })
+  }
+
+  /// [`Self::wait_for_function`] for callers holding an already
+  /// serialized argument and an explicit function-or-expression flag
+  /// (the bindings).
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::wait_for_function`].
+  pub async fn wait_for_function_serialized(
     &self,
     fn_source: &str,
     arg: crate::protocol::SerializedArgument,
@@ -256,12 +306,15 @@ impl Frame {
     // Truthiness is decided page-side (`!!`) so objects, NaN, and
     // empty-string edge cases follow JS semantics exactly instead of a
     // lossy serialized-value reconstruction.
-    let probe_is_function = is_function.unwrap_or(false);
-    let probe = if probe_is_function {
-      format!("arg => !!(({fn_source})(arg))")
-    } else {
-      format!("!!({fn_source})")
+    // `None` auto-detects as Playwright's predicate does: a source that
+    // evaluates to a function is called with `arg`, anything else is the
+    // value itself (`server/frames.ts::waitForFunctionExpression`).
+    let probe = match is_function {
+      Some(true) => format!("arg => !!(({fn_source})(arg))"),
+      Some(false) => format!("!!({fn_source})"),
+      None => format!("arg => {{ const r = ({fn_source}); return !!(typeof r === 'function' ? r(arg) : r); }}"),
     };
+    let probe_is_function = is_function != Some(false);
     let expired = || deadline.is_some_and(|d| tokio::time::Instant::now() >= d);
     let timed_out = || crate::error::FerriError::timeout(format!("waiting for function: {fn_source}"), timeout);
     crate::operation_budget::scoped(timeout, || format!("waiting for function: {fn_source}"), async move {
@@ -454,7 +507,7 @@ impl Frame {
   /// (including `visible`).
   #[must_use]
   pub fn locator_with(&self, selector: &str, options: &crate::options::FilterOptions) -> Locator {
-    self.locator(selector).filter(options)
+    self.locator(selector).filter_with(options)
   }
 
   #[must_use]
@@ -1224,7 +1277,17 @@ impl Frame {
   ///
   /// Returns an error if none of `url`, `path` and `content` is given,
   /// `path` cannot be read, or the script fails to load.
-  pub async fn add_script_tag(
+  ///
+  /// Options chain as setters: `.content(..)`, `.url(..)`, `.path(..)`.
+  #[track_caller]
+  pub fn add_script_tag(
+    &self,
+  ) -> crate::action::Action<'static, crate::options::AddScriptTagOptions, crate::element_handle::ElementHandle> {
+    let frame = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { frame.add_script_tag_impl(opts).await }))
+  }
+
+  async fn add_script_tag_impl(
     &self,
     options: crate::options::AddScriptTagOptions,
   ) -> Result<crate::element_handle::ElementHandle> {
@@ -1277,7 +1340,17 @@ impl Frame {
   ///
   /// Returns an error if none of `url`, `path` and `content` is given,
   /// `path` cannot be read, or the stylesheet fails to load.
-  pub async fn add_style_tag(
+  ///
+  /// Options chain as setters: `.content(..)`, `.url(..)`, `.path(..)`.
+  #[track_caller]
+  pub fn add_style_tag(
+    &self,
+  ) -> crate::action::Action<'static, crate::options::AddStyleTagOptions, crate::element_handle::ElementHandle> {
+    let frame = self.clone();
+    crate::action::Action::new(move |opts| Box::pin(async move { frame.add_style_tag_impl(opts).await }))
+  }
+
+  async fn add_style_tag_impl(
     &self,
     options: crate::options::AddStyleTagOptions,
   ) -> Result<crate::element_handle::ElementHandle> {

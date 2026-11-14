@@ -1348,15 +1348,25 @@ impl Page {
   /// [`crate::error::FerriError::Unsupported`] when axe-core is not
   /// installed, and [`crate::error::FerriError::Backend`] when the page
   /// could not run it.
-  pub async fn check_accessibility(
+  ///
+  /// Options chain as setters: `.include(["main"])`, `.tags(["wcag2a"])`.
+  #[track_caller]
+  pub fn check_accessibility(
     self: &Arc<Self>,
-    options: Option<crate::accessibility::AccessibilityOptions>,
+  ) -> crate::action::Action<'_, crate::accessibility::AccessibilityOptions, crate::accessibility::AccessibilityReport>
+  {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.check_accessibility_impl(opts).await }))
+  }
+
+  async fn check_accessibility_impl(
+    self: &Arc<Self>,
+    options: crate::accessibility::AccessibilityOptions,
   ) -> Result<crate::accessibility::AccessibilityReport> {
     let path = crate::install::BrowserInstaller::new().axe_core_path();
     let source = crate::accessibility::load_axe_source(&path)?;
     let argument = crate::accessibility::AuditArgument {
       source: &source,
-      options: options.unwrap_or_default().into(),
+      options: options.into(),
     };
     let value = self
       .evaluate(
@@ -1481,11 +1491,19 @@ impl Page {
   ///
   /// [`crate::error::FerriError::Backend`] when the page could not be
   /// read.
-  pub async fn check_page_quality(
+  ///
+  /// Options chain as setters: `.only(["image-alt", "is-crawlable"])`.
+  #[track_caller]
+  pub fn check_page_quality(
     self: &Arc<Self>,
-    options: Option<crate::audits::PageQualityOptions>,
+  ) -> crate::action::Action<'_, crate::audits::PageQualityOptions, crate::audits::PageQualityReport> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.check_page_quality_impl(opts).await }))
+  }
+
+  async fn check_page_quality_impl(
+    self: &Arc<Self>,
+    options: crate::audits::PageQualityOptions,
   ) -> Result<crate::audits::PageQualityReport> {
-    let options = options.unwrap_or_default();
     let value = self
       .evaluate(
         crate::audits::gather_source(),
@@ -3064,7 +3082,35 @@ impl Page {
   /// # Errors
   ///
   /// See [`crate::frame::Frame::wait_for_function`].
-  pub async fn wait_for_function(
+  #[track_caller]
+  pub fn wait_for_function(
+    self: &Arc<Self>,
+    fn_source: &str,
+  ) -> crate::action::Action<'static, crate::options::WaitForFunctionOptions, crate::js_handle::JSHandle> {
+    self.main_frame().wait_for_function(fn_source)
+  }
+
+  /// [`Self::wait_for_function`] with a serde-serialized argument.
+  ///
+  /// # Errors
+  ///
+  /// See [`crate::frame::Frame::wait_for_function_with`].
+  #[track_caller]
+  pub fn wait_for_function_with(
+    self: &Arc<Self>,
+    fn_source: &str,
+    arg: &(impl serde::Serialize + ?Sized),
+  ) -> crate::action::Action<'static, crate::options::WaitForFunctionOptions, crate::js_handle::JSHandle> {
+    self.main_frame().wait_for_function_with(fn_source, arg)
+  }
+
+  /// [`Self::wait_for_function`] for callers holding an already
+  /// serialized argument (the bindings).
+  ///
+  /// # Errors
+  ///
+  /// See [`crate::frame::Frame::wait_for_function`].
+  pub async fn wait_for_function_serialized(
     self: &Arc<Self>,
     fn_source: &str,
     arg: crate::protocol::SerializedArgument,
@@ -3073,7 +3119,7 @@ impl Page {
   ) -> Result<crate::js_handle::JSHandle> {
     self
       .main_frame()
-      .wait_for_function(fn_source, arg, is_function, options)
+      .wait_for_function_serialized(fn_source, arg, is_function, options)
       .await
   }
 
@@ -4327,11 +4373,11 @@ impl Page {
   ///
   /// Returns an error if none of `url`, `path` and `content` is given,
   /// `path` cannot be read, or the script fails to load.
-  pub async fn add_script_tag(
+  #[track_caller]
+  pub fn add_script_tag(
     self: &Arc<Self>,
-    options: crate::options::AddScriptTagOptions,
-  ) -> Result<crate::element_handle::ElementHandle> {
-    self.main_frame().add_script_tag(options).await
+  ) -> crate::action::Action<'static, crate::options::AddScriptTagOptions, crate::element_handle::ElementHandle> {
+    self.main_frame().add_script_tag()
   }
 
   /// Playwright: `page.addStyleTag(options?: { content?, path?, url? }):
@@ -4342,11 +4388,11 @@ impl Page {
   ///
   /// Returns an error if none of `url`, `path` and `content` is given,
   /// `path` cannot be read, or the stylesheet fails to load.
-  pub async fn add_style_tag(
+  #[track_caller]
+  pub fn add_style_tag(
     self: &Arc<Self>,
-    options: crate::options::AddStyleTagOptions,
-  ) -> Result<crate::element_handle::ElementHandle> {
-    self.main_frame().add_style_tag(options).await
+  ) -> crate::action::Action<'static, crate::options::AddStyleTagOptions, crate::element_handle::ElementHandle> {
+    self.main_frame().add_style_tag()
   }
 
   // ── Dialog handling ─────────────────────────────────────────────────────

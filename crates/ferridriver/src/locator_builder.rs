@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use crate::locator::Locator;
-use crate::options::{RoleOptions, TextOptions};
+use crate::options::{FilterOptions, RoleOptions, TextOptions};
 
 /// A [`Locator`] whose selector is built lazily from an option bag `O`.
 /// Setters refine the options; any locator use (via `Deref`) materializes
@@ -105,3 +105,9 @@ lazy_setter!(RoleOptions, selected, bool);
 lazy_setter!(RoleOptions, include_hidden, bool);
 
 lazy_setter!(TextOptions, exact, bool);
+
+lazy_setter!(FilterOptions, has_text, crate::options::StringOrRegex);
+lazy_setter!(FilterOptions, has_not_text, crate::options::StringOrRegex);
+lazy_setter!(FilterOptions, has, crate::options::LocatorLike);
+lazy_setter!(FilterOptions, has_not, crate::options::LocatorLike);
+lazy_setter!(FilterOptions, visible, bool);

@@ -1187,9 +1187,9 @@ pub fn translate_features_js(
 
           let session = worker_session(test_info.worker_index, bundle, step_graph, cwd, setup, &pool)
             .await
-            .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
+            .map_err(|e| TestFailure::msg(format!("JS step load failed: {e}")))?;
 
-          let mut world = if session.needs_browser(&scenario).map_err(TestFailure::from)? {
+          let mut world = if session.needs_browser(&scenario).map_err(TestFailure::msg)? {
             let browser = pool
               .get("browser")
               .await
@@ -1247,7 +1247,7 @@ pub fn translate_features_js(
               _ => None,
             })
             .unwrap_or_else(|| "scenario failed".to_string());
-          Err(TestFailure::from(msg))
+          Err(TestFailure::msg(msg))
         })
       });
 

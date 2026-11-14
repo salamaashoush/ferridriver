@@ -1226,12 +1226,33 @@ impl ContextRef {
       }))
   }
 
-  /// Clear all cookies in this context.
+  /// Playwright: `context.clearCookies(options?: { name?, domain?, path?
+  /// })`. Without a filter every cookie goes; with one, those matching
+  /// all of it. Filters chain as setters, each a string or regex:
+  ///
+  /// ```ignore
+  /// context.clear_cookies().await?;
+  /// context.clear_cookies().name("session").domain("example.com").await?;
+  /// ```
   ///
   /// # Errors
   ///
-  /// Returns an error if the context does not exist or clearing cookies fails.
-  pub async fn clear_cookies(&self) -> Result<()> {
+  /// Returns an error if the context does not exist, a filter's regex
+  /// does not compile, or clearing cookies fails.
+  #[track_caller]
+  pub fn clear_cookies(&self) -> crate::action::Action<'_, crate::backend::ClearCookieOptions, ()> {
+    crate::action::Action::new(move |opts| Box::pin(async move { self.clear_cookies_impl(&opts).await }))
+  }
+
+  pub(crate) async fn clear_cookies_impl(&self, options: &crate::backend::ClearCookieOptions) -> Result<()> {
+    if options.is_empty() {
+      self.clear_all_cookies().await
+    } else {
+      self.clear_cookies_matching(options).await
+    }
+  }
+
+  async fn clear_all_cookies(&self) -> Result<()> {
     self
       .traced("clearCookies", serde_json::json!({}), async {
         let page = {
@@ -1246,16 +1267,7 @@ impl ContextRef {
       .await
   }
 
-  /// Clear cookies matching the given filters (matches Playwright's `context.clearCookies(options?)`).
-  /// If no filters are specified, all cookies are cleared.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the context does not exist or clearing cookies fails.
-  pub async fn clear_cookies_filtered(&self, options: &crate::backend::ClearCookieOptions) -> Result<()> {
-    if options.is_empty() {
-      return self.clear_cookies().await;
-    }
+  async fn clear_cookies_matching(&self, options: &crate::backend::ClearCookieOptions) -> Result<()> {
     let page = {
       let state = self.state.read().await;
       state.context(&self.name)?.active_page().cloned()

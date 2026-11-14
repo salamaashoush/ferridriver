@@ -210,7 +210,7 @@ impl TestBrowserResources {
       streaming: ferridriver::trace::TraceStreaming::from_live(spec.live),
     };
     ctx.set_traces_dir(spec.traces_dir.clone()).await;
-    match ctx.tracing().start(options).await {
+    match ctx.tracing().start().options(options).await {
       Ok(()) => {
         let composite = ctx.composite();
         *spec.composite.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(composite.clone());
@@ -235,10 +235,7 @@ impl TestBrowserResources {
       .is_some();
     if started {
       crate::ui_server::unregister_live_trace(&spec.key);
-      let _ = ctx
-        .tracing()
-        .stop(ferridriver::trace::TracingStopOptions::default())
-        .await;
+      let _ = ctx.tracing().stop().await;
     }
   }
 
@@ -1219,7 +1216,7 @@ impl Worker {
     worker_defs.insert(
       "request".into(),
       build_worker_request_def(
-        self.config.base_url.clone(),
+        self.config.base_url.clone().or_else(crate::config::base_url_from_env),
         core_http_credentials(&self.config.browser.use_options.http_credentials),
         self
           .config
@@ -2206,7 +2203,11 @@ impl Worker {
             ))
           });
           let tracing = ctx.tracing();
-          let stop = tracing.stop(ferridriver::trace::TracingStopOptions { path: path.clone() });
+          let stop = std::future::IntoFuture::into_future(
+            tracing
+              .stop()
+              .options(ferridriver::trace::TracingStopOptions { path: path.clone() }),
+          );
           match Box::pin(after_hooks_step(
             after_budget,
             &after_limit_rx,

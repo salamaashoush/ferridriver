@@ -43,7 +43,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::element_handle::ElementHandle;
-use crate::error::Result;
 use crate::options::{InputFiles, SetInputFilesOptions};
 use crate::page::Page;
 
@@ -107,8 +106,9 @@ impl FileChooser {
   ///
   /// Forwards the element's `set_input_files` error (missing file,
   /// backend protocol failure, disposed handle).
-  pub async fn set_files(&self, files: InputFiles, opts: Option<SetInputFilesOptions>) -> Result<()> {
-    self.inner.element.set_input_files_impl(files, opts).await
+  #[track_caller]
+  pub fn set_files(&self, files: impl Into<InputFiles>) -> crate::action::Action<'static, SetInputFilesOptions, ()> {
+    self.inner.element.set_input_files(files)
   }
 }
 

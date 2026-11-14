@@ -472,7 +472,7 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   /// string; a pattern is refused as upstream refuses it.
   pub async fn to_have_role(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
-    if matches!(expected, StringOrRegex::Regex(_)) {
+    if matches!(expected, StringOrRegex::Regex { .. }) {
       return Err(AssertionFailure::new(
         "\"role\" argument in toHaveRole must be a string",
         None,

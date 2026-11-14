@@ -76,7 +76,7 @@ pub use subject::{
   expect_live, promise_failure,
 };
 pub use throw::{ExpectFn, ThrowMatcher, ThrownError, expect_fn};
-pub use value::{ExpectValue, JsRegex, StringOrRegex, expect_value};
+pub use value::{ExpectValue, StringOrRegex, expect_value};
 
 /// Failure produced by a synchronous value matcher.
 ///

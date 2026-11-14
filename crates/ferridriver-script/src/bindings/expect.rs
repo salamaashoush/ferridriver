@@ -886,10 +886,7 @@ fn parse_string_or_regex<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::R
     if let (Ok(s), Ok(f)) = (source, flags)
       && let (Some(s), Some(f)) = (s.as_string(), f.as_string())
     {
-      return Ok(StringOrRegex::Regex(ferridriver_expect::JsRegex::new(
-        s.to_string()?,
-        f.to_string()?,
-      )));
+      return Ok(StringOrRegex::regex(s.to_string()?, f.to_string()?));
     }
   }
   Err(type_error(ctx, "expected a string or RegExp"))
@@ -2193,8 +2190,11 @@ fn parse_throw_matcher<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resu
         .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
         .unwrap_or_default();
       let pat = s.to_string()?;
-      let re = ferridriver_expect::asymmetric::compile_js_regex(&pat, &flags)
-        .map_err(|e| type_error(ctx, format!("expect: invalid RegExp: {e}")))?;
+      let re = StringOrRegex::regex(pat, flags)
+        .compile()
+        .transpose()
+        .map_err(|e| type_error(ctx, format!("expect: invalid RegExp: {e}")))?
+        .ok_or_else(|| type_error(ctx, "expect: invalid RegExp"))?;
       return Ok(ThrowMatcher::Regex(re));
     }
     // Plain object → treat as match-against-{message,name}

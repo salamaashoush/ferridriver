@@ -433,7 +433,7 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
       }
 
       if let Some(msg) = result.error {
-        Err(TestFailure::from(msg))
+        Err(TestFailure::msg(msg))
       } else {
         Ok(())
       }

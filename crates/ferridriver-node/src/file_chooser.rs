@@ -53,6 +53,10 @@ impl FileChooser {
   ) -> Result<()> {
     let signal = crate::abort::take(&mut options);
     let opts = options.map(Into::into);
-    crate::abort::run(signal, self.inner.set_files(files.0, opts)).await
+    crate::abort::run(
+      signal,
+      std::future::IntoFuture::into_future(self.inner.set_files(files.0).maybe_options(opts)),
+    )
+    .await
   }
 }

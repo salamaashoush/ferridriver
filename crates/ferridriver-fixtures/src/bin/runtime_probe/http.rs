@@ -41,6 +41,6 @@ impl Guard {
 pub async fn run(request: Request) -> Result<Value> {
   let options = request.guard.map(Guard::into_options).transpose()?;
   let client = HttpClient::new(HttpClientOptions::default());
-  let response = client.get(&request.url, options).await?;
+  let response = client.get(&request.url).maybe_options(options).await?;
   Ok(json!({ "status": response.status(), "body": response.text()? }))
 }

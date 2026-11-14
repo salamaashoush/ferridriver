@@ -9,14 +9,12 @@ pub use ferridriver_expect::{
 
 use crate::model::TestFailure;
 
-impl From<ferridriver_expect::AssertionFailure> for TestFailure {
-  fn from(a: ferridriver_expect::AssertionFailure) -> Self {
-    TestFailure {
-      message: a.message,
-      stack: a.location.map(|loc| format!("at {loc}")),
-      diff: a.diff,
-      screenshot: None,
-      error_context: a.error_context,
-    }
+pub(crate) fn assertion_failure(a: ferridriver_expect::AssertionFailure) -> TestFailure {
+  TestFailure {
+    message: a.message,
+    stack: a.location.map(|loc| format!("at {loc}")),
+    diff: a.diff,
+    screenshot: None,
+    error_context: a.error_context,
   }
 }

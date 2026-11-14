@@ -783,6 +783,10 @@ pub struct BrowserConfig {
   )]
   pub viewport: Option<ViewportOverride>,
   pub slow_mo: Option<u64>,
+  /// Playwright `launchOptions.firefoxUserPrefs`: `about:config`
+  /// preferences for a Firefox launch, ignored by other browsers.
+  #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+  pub firefox_user_prefs: std::collections::BTreeMap<String, serde_json::Value>,
   /// Playwright `use` block: per-project context defaults.
   #[serde(default, rename = "use")]
   pub use_options: ContextConfig,
@@ -1245,6 +1249,7 @@ impl Default for BrowserConfig {
       args: Vec::new(),
       viewport: None,
       slow_mo: None,
+      firefox_user_prefs: std::collections::BTreeMap::new(),
       use_options: ContextConfig::default(),
       instance: None,
       connect: None,
@@ -1993,6 +1998,12 @@ impl TestConfig {
       if let Some(slow_mo) = pb.slow_mo {
         merged.browser.slow_mo = Some(slow_mo);
       }
+      // A project's preferences add to the suite's, and win per name.
+      merged.browser.firefox_user_prefs.extend(
+        pb.firefox_user_prefs
+          .iter()
+          .map(|(name, value)| (name.clone(), value.clone())),
+      );
       merge_context(&mut merged.browser.use_options, &pb.use_options);
     }
     if let Some(ref project_use) = project.use_options {
@@ -2589,5 +2600,28 @@ mod location_tests {
     assert_eq!(TestLocation::parse("tests/**/*.spec.ts"), None);
     assert_eq!(TestLocation::parse("tests/a:b.spec.ts"), None);
     assert_eq!(TestLocation::parse(":12"), None);
+  }
+}
+
+#[cfg(test)]
+mod firefox_user_prefs_tests {
+  use super::{ProjectConfig, TestConfig};
+
+  #[test]
+  fn a_project_adds_to_the_suite_preferences_and_wins_per_name() {
+    let suite: TestConfig = serde_json::from_str(
+      r#"{"browser":{"firefoxUserPrefs":{"layout.frame_rate":30,"dom.webnotifications.enabled":false}}}"#,
+    )
+    .expect("suite");
+    let project: ProjectConfig = serde_json::from_str(
+      r#"{"name":"bidi","browser":{"browser":"firefox","backend":"bidi","firefoxUserPrefs":{"layout.frame_rate":60}}}"#,
+    )
+    .expect("project");
+    let prefs = suite.merge_project(&project).browser.firefox_user_prefs;
+    assert_eq!(prefs.get("layout.frame_rate"), Some(&serde_json::json!(60)));
+    assert_eq!(
+      prefs.get("dom.webnotifications.enabled"),
+      Some(&serde_json::json!(false))
+    );
   }
 }

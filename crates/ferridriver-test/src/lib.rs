@@ -248,14 +248,21 @@ pub fn run_harness() {
 /// Prelude for convenient imports in test files.
 pub mod prelude {
   pub use std::sync::Arc;
+  pub use std::time::Duration;
 
-  pub use ferridriver::http_client::HttpClient;
-  pub use ferridriver::{Browser, ContextRef as BrowserContext, Locator, Page};
+  pub use ferridriver::http_client::{HttpClient, HttpResponse};
+  pub use ferridriver::options::{
+    LoadState, Modifier, MouseButton, Role, ScreenshotFormat, StringOrRegex, ViewportConfig, WaitState,
+  };
+  pub use ferridriver::{Browser, ContextRef as BrowserContext, FerriError, Frame, FrameLocator, Locator, Page};
 
   pub use crate::context::TestContext;
-  pub use crate::expect::{expect, expect_configured, expect_poll, to_pass};
+  pub use crate::expect::{
+    LocatorSnapshotMatchers, PageSnapshotMatchers, ScreenshotMatcherOptions, expect, expect_configured, expect_poll,
+    to_pass,
+  };
   pub use crate::fixture::{Fixture, FixturePool};
-  pub use crate::model::{TestFailure, TestInfo};
+  pub use crate::model::{Context, TestFailure, TestInfo};
   pub use ferridriver_test_macros::{
     after_all, after_each, before_all, before_each, ferritest, ferritest_each, ferritest_suite, fixture,
   };

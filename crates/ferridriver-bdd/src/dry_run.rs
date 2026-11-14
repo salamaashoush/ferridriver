@@ -219,7 +219,7 @@ fn dry_run_fn(scenario: Arc<ScenarioExecution>, issues: Arc<Vec<StepIssue>>, str
         }
       }
       match failure {
-        Some(message) => Err(TestFailure::from(message)),
+        Some(message) => Err(TestFailure::msg(message)),
         None => Ok(()),
       }
     })

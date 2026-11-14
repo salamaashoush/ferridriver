@@ -296,7 +296,8 @@ impl FrameJs {
         }
         let handle = self
           .inner
-          .add_script_tag(opts.unwrap_or_default())
+          .add_script_tag()
+          .maybe_options(opts)
           .await
           .into_js_with(&ctx)?;
         Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
@@ -322,7 +323,8 @@ impl FrameJs {
         }
         let handle = self
           .inner
-          .add_style_tag(opts.unwrap_or_default())
+          .add_style_tag()
+          .maybe_options(opts)
           .await
           .into_js_with(&ctx)?;
         Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
@@ -479,7 +481,7 @@ impl FrameJs {
         let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
         let handle = self
           .inner
-          .wait_for_function(&source, serialized, is_function, opts)
+          .wait_for_function_serialized(&source, serialized, is_function, opts)
           .await
           .into_js_with(&ctx)?;
         Ok(crate::bindings::js_handle::JSHandleJs::new(handle))

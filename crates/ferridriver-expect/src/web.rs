@@ -112,9 +112,9 @@ pub(crate) fn expected_text(
   };
   match value {
     StringOrRegex::String(s) => text.string = Some(s.clone()),
-    StringOrRegex::Regex(re) => {
-      text.regex_source = Some(re.source().to_owned());
-      text.regex_flags = Some(re.flags().to_owned());
+    StringOrRegex::Regex { source, flags } => {
+      text.regex_source = Some(source.clone());
+      text.regex_flags = Some(flags.clone());
     },
   }
   text
@@ -442,9 +442,9 @@ impl Shown {
             let entry = received.and_then(|r| r.get(index)).and_then(Value::as_str);
             match item {
               StringOrRegex::String(s) => Value::from(s.as_str()),
-              StringOrRegex::Regex(re) => match entry {
-                Some(entry) if re.is_match(entry) => Value::from(entry),
-                _ => Value::from(re.to_string()),
+              StringOrRegex::Regex { .. } => match entry {
+                Some(entry) if item.matches(entry) => Value::from(entry),
+                _ => Value::from(item.to_string()),
               },
             }
           })
@@ -525,7 +525,7 @@ fn quote(s: &str) -> String {
 fn print_expected_text(value: &StringOrRegex) -> String {
   match value {
     StringOrRegex::String(s) => quote(s),
-    StringOrRegex::Regex(re) => re.to_string(),
+    StringOrRegex::Regex { .. } => value.to_string(),
   }
 }
 

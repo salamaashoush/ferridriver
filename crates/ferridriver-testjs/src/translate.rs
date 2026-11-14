@@ -509,7 +509,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
         .sessions
         .get(test_info.worker_index, &pool)
         .await
-        .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
+        .map_err(|e| TestFailure::msg(format!("test session load failed: {e}")))?;
 
       let modifiers = pool
         .get("__test_modifiers")
@@ -980,7 +980,7 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
       let session = sessions
         .get(cached_info.as_ref().map_or(0, |ti| ti.worker_index), &pool)
         .await
-        .map_err(|e| TestFailure::from(format!("test session load failed: {e}")))?;
+        .map_err(|e| TestFailure::msg(format!("test session load failed: {e}")))?;
       let test_info = cached_info
         .clone()
         .unwrap_or_else(|| Arc::new(TestInfo::new_anonymous()));

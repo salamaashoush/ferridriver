@@ -771,9 +771,23 @@ impl TestInfo {
     let annotations = self.annotations.lock().await;
     annotations.clone()
   }
-  /// Add an attachment to this test.
-  pub async fn attach(&self, name: String, content_type: String, body: AttachmentBody) {
-    self.attach_to_step(name, content_type, body, None).await;
+  /// Playwright: `testInfo.attach(name, { body?, contentType?, path? })`.
+  /// `body` is bytes or text (`Vec<u8>`, `&[u8]`, `String`, `&str`) or a
+  /// file to copy (`PathBuf`, `&Path`).
+  ///
+  /// ```ignore
+  /// test_info.attach("after-delete", "image/png", page.screenshot().await?).await;
+  /// test_info.attach("log", "text/plain", "ok").await;
+  /// ```
+  pub async fn attach(
+    &self,
+    name: impl Into<String>,
+    content_type: impl Into<String>,
+    body: impl Into<AttachmentBody>,
+  ) {
+    self
+      .attach_to_step(name.into(), content_type.into(), body.into(), None)
+      .await;
   }
 
   /// [`Self::attach`] from inside a step (`stepInfo.attach`), so a
@@ -2013,63 +2027,137 @@ impl fmt::Display for TestFailure {
   }
 }
 
-impl std::error::Error for TestFailure {}
-
 impl TestFailure {
+  /// A failure carrying only a message: what `throw new Error(message)`
+  /// is in a Playwright test.
+  #[must_use]
+  pub fn msg(message: impl fmt::Display) -> Self {
+    Self {
+      message: message.to_string(),
+      stack: None,
+      diff: None,
+      screenshot: None,
+      error_context: None,
+    }
+  }
+
   /// Wrap a [`ferridriver::FerriError`] with a contextual prefix while
   /// preserving the Playwright-style typed class name. The resulting
   /// message reads `"<prefix>: <Name>: <message>"` for distinguishable
   /// variants and `"<prefix>: <message>"` for unnamed ones, so consumers
   /// that match on `TimeoutError:` still see the marker after the prefix.
   #[must_use]
-  pub fn wrap(prefix: impl std::fmt::Display, err: ferridriver::FerriError) -> Self {
-    Self {
-      message: format!("{prefix}: {}", err.display_named()),
-      stack: None,
-      diff: None,
-      screenshot: None,
-      error_context: None,
+  pub fn wrap(prefix: impl fmt::Display, err: ferridriver::FerriError) -> Self {
+    Self::msg(format!("{prefix}: {}", err.display_named()))
+  }
+
+  /// Prefix the message with `context`, keeping the diff, stack and
+  /// captured page state.
+  #[must_use]
+  pub fn context(mut self, context: impl fmt::Display) -> Self {
+    self.message = format!("{context}: {}", self.message);
+    self
+  }
+
+  /// The typed class name for the variants Playwright distinguishes
+  /// (`TimeoutError` / `TargetClosedError`) stays in front of the
+  /// message, so the TS bridge can re-hydrate a real class instance from
+  /// the `<Name>: <message>` shape, the convention
+  /// `ferridriver-node::error::to_napi` uses on the NAPI surface.
+  fn from_ferri(err: ferridriver::FerriError) -> Self {
+    Self::msg(err.display_named())
+  }
+
+  /// Any other error: its message, then each `source()` underneath it.
+  fn from_error(err: &(dyn std::error::Error + 'static)) -> Self {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+      message.push_str("\n\nCaused by: ");
+      message.push_str(&cause.to_string());
+      source = cause.source();
+    }
+    Self::msg(message)
+  }
+}
+
+/// `?` on any error inside a test, hook or fixture fails it with that
+/// error, the way any throw fails a Playwright test. Like `anyhow::Error`,
+/// `TestFailure` is therefore not itself a `std::error::Error` (the
+/// blanket conversion would otherwise overlap `From<T> for T`), and a
+/// message-only failure is [`TestFailure::msg`].
+///
+/// [`ferridriver::FerriError`] keeps its typed class name and an
+/// [`ferridriver_expect::AssertionFailure`] its diff, location and page
+/// state.
+impl<E> From<E> for TestFailure
+where
+  E: std::error::Error + Send + Sync + 'static,
+{
+  fn from(err: E) -> Self {
+    let mut slot = Some(err);
+    let any: &mut dyn std::any::Any = &mut slot;
+    if let Some(ferri) = any
+      .downcast_mut::<Option<ferridriver::FerriError>>()
+      .and_then(Option::take)
+    {
+      return Self::from_ferri(ferri);
+    }
+    if let Some(assertion) = any
+      .downcast_mut::<Option<ferridriver_expect::AssertionFailure>>()
+      .and_then(Option::take)
+    {
+      return crate::expect::value::assertion_failure(assertion);
+    }
+    match slot {
+      Some(err) => Self::from_error(&err),
+      None => Self::msg(""),
     }
   }
 }
 
-/// Legacy bridge: kept so test bodies that hand-build a `String` error
-/// (logging helpers, manual panic messages) keep `?`-propagating through
-/// `TestFailure`. Locator methods now return `Result<T, FerriError>` and
-/// flow through the dedicated [`From<ferridriver::FerriError>`] impl below.
-impl From<String> for TestFailure {
-  fn from(message: String) -> Self {
-    Self {
-      message,
-      stack: None,
-      diff: None,
-      screenshot: None,
-      error_context: None,
-    }
+/// Attach context to a failure on its way out, as `anyhow::Context`:
+///
+/// ```ignore
+/// let n: u32 = text.parse().context("todo counter")?;
+/// let row = rows.first().context("no rows rendered")?;
+/// ```
+pub trait Context<T> {
+  /// Fail with `context` in front of the underlying reason.
+  ///
+  /// # Errors
+  ///
+  /// The underlying failure, prefixed.
+  fn context(self, context: impl fmt::Display) -> std::result::Result<T, TestFailure>;
+
+  /// [`Self::context`] with the text built only on failure.
+  ///
+  /// # Errors
+  ///
+  /// The underlying failure, prefixed.
+  fn with_context<C: fmt::Display>(self, context: impl FnOnce() -> C) -> std::result::Result<T, TestFailure>;
+}
+
+impl<T, E> Context<T> for std::result::Result<T, E>
+where
+  TestFailure: From<E>,
+{
+  fn context(self, context: impl fmt::Display) -> std::result::Result<T, TestFailure> {
+    self.map_err(|e| TestFailure::from(e).context(context))
+  }
+
+  fn with_context<C: fmt::Display>(self, context: impl FnOnce() -> C) -> std::result::Result<T, TestFailure> {
+    self.map_err(|e| TestFailure::from(e).context(context()))
   }
 }
 
-impl From<&str> for TestFailure {
-  fn from(message: &str) -> Self {
-    Self::from(message.to_string())
+impl<T> Context<T> for Option<T> {
+  fn context(self, context: impl fmt::Display) -> std::result::Result<T, TestFailure> {
+    self.ok_or_else(|| TestFailure::msg(context))
   }
-}
 
-/// Enables `?` on any `Result<T, FerriError>` inside test functions after
-/// the migration to structured errors. Prepends the typed class name for
-/// the variants Playwright distinguishes (`TimeoutError` / `TargetClosedError`)
-/// so the TS bridge can re-hydrate a real class instance from the
-/// `<Name>: <message>` shape — same convention `ferridriver-node::error::to_napi`
-/// uses on the NAPI surface. Unnamed variants pass through verbatim.
-impl From<ferridriver::FerriError> for TestFailure {
-  fn from(err: ferridriver::FerriError) -> Self {
-    Self {
-      message: err.display_named(),
-      stack: None,
-      diff: None,
-      screenshot: None,
-      error_context: None,
-    }
+  fn with_context<C: fmt::Display>(self, context: impl FnOnce() -> C) -> std::result::Result<T, TestFailure> {
+    self.ok_or_else(|| TestFailure::msg(context()))
   }
 }
 
@@ -2087,6 +2175,42 @@ pub struct Attachment {
 pub enum AttachmentBody {
   Bytes(Vec<u8>),
   Path(PathBuf),
+}
+
+impl From<Vec<u8>> for AttachmentBody {
+  fn from(bytes: Vec<u8>) -> Self {
+    Self::Bytes(bytes)
+  }
+}
+
+impl From<&[u8]> for AttachmentBody {
+  fn from(bytes: &[u8]) -> Self {
+    Self::Bytes(bytes.to_vec())
+  }
+}
+
+impl From<String> for AttachmentBody {
+  fn from(text: String) -> Self {
+    Self::Bytes(text.into_bytes())
+  }
+}
+
+impl From<&str> for AttachmentBody {
+  fn from(text: &str) -> Self {
+    Self::Bytes(text.as_bytes().to_vec())
+  }
+}
+
+impl From<PathBuf> for AttachmentBody {
+  fn from(path: PathBuf) -> Self {
+    Self::Path(path)
+  }
+}
+
+impl From<&std::path::Path> for AttachmentBody {
+  fn from(path: &std::path::Path) -> Self {
+    Self::Path(path.to_path_buf())
+  }
 }
 
 // ── Unified Fixtures ──
@@ -2295,5 +2419,69 @@ mod tests {
   fn testfailure_wrap_unnamed_keeps_message_only() {
     let tf = TestFailure::wrap("fixture 'page' failed", FerriError::backend("oops"));
     assert_eq!(tf.message, "fixture 'page' failed: backend error: oops");
+  }
+
+  #[derive(Debug)]
+  struct Outer(std::io::Error);
+
+  impl std::fmt::Display for Outer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.write_str("loading fixtures")
+    }
+  }
+
+  impl std::error::Error for Outer {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+      Some(&self.0)
+    }
+  }
+
+  fn parse_count(text: &str) -> crate::Result<u32> {
+    let re = regex::Regex::new(r"(\d+)")?;
+    let digits = re.captures(text).and_then(|c| c.get(1)).context("no number rendered")?;
+    Ok(digits.as_str().parse::<u32>()?)
+  }
+
+  #[test]
+  fn question_mark_accepts_any_error() {
+    assert_eq!(parse_count("Count: 42").unwrap(), 42);
+    assert_eq!(parse_count("Count: none").unwrap_err().message, "no number rendered");
+    let overflow = parse_count("Count: 99999999999").unwrap_err();
+    assert_eq!(overflow.message, "number too large to fit in target type");
+
+    let json: std::result::Result<u32, _> = serde_json::from_str("nope");
+    let failure = TestFailure::from(json.unwrap_err());
+    assert!(failure.message.starts_with("expected ident"), "{}", failure.message);
+  }
+
+  #[test]
+  fn an_error_source_chain_is_kept() {
+    let failure = TestFailure::from(Outer(std::io::Error::other("disk full")));
+    assert_eq!(failure.message, "loading fixtures\n\nCaused by: disk full");
+  }
+
+  #[test]
+  fn typed_errors_keep_their_rendering() {
+    let ferri = TestFailure::from(FerriError::timeout("navigating", 30_000));
+    assert!(ferri.message.starts_with("TimeoutError: "), "{}", ferri.message);
+
+    let mut assertion =
+      ferridriver_expect::AssertionFailure::new("expect(value).toBe() failed", Some("Expected: 1".into()));
+    assertion.error_context = Some("- button".into());
+    let failure = TestFailure::from(assertion);
+    assert_eq!(failure.message, "expect(value).toBe() failed");
+    assert_eq!(failure.diff.as_deref(), Some("Expected: 1"));
+    assert_eq!(failure.error_context.as_deref(), Some("- button"));
+  }
+
+  #[test]
+  fn context_prefixes_without_losing_detail() {
+    let mut inner = TestFailure::msg("boom");
+    inner.diff = Some("diff".into());
+    let failure = Err::<(), _>(inner).context("saving the cart").unwrap_err();
+    assert_eq!(failure.message, "saving the cart: boom");
+    assert_eq!(failure.diff.as_deref(), Some("diff"));
+    let lazy = None::<u8>.with_context(|| format!("row {}", 3)).unwrap_err();
+    assert_eq!(lazy.message, "row 3");
   }
 }

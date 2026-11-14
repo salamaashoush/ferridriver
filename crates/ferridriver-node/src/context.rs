@@ -191,13 +191,12 @@ impl BrowserContext {
   /// regexes (Playwright's `server/browserContext.ts::clearCookies`).
   #[napi]
   pub async fn clear_cookies(&self, options: Option<crate::types::ClearCookieOptions>) -> Result<()> {
-    match options {
-      None => self.inner.clear_cookies().await.into_napi(),
-      Some(opts) => {
-        let core: ferridriver::backend::ClearCookieOptions = opts.into();
-        self.inner.clear_cookies_filtered(&core).await.into_napi()
-      },
-    }
+    self
+      .inner
+      .clear_cookies()
+      .maybe_options(options.map(Into::into))
+      .await
+      .into_napi()
   }
 
   #[napi]
