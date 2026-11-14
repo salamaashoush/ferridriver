@@ -1475,6 +1475,22 @@ async fn intercept_continue(
   let _ = target.send("Network.interceptWithRequest", params).await;
 }
 
+fn fulfilled_mime_type(response: &crate::route::FulfillResponse) -> String {
+  let named = response.content_type.as_deref().or_else(|| {
+    response
+      .headers
+      .iter()
+      .rev()
+      .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+      .map(|(_, value)| value.as_str())
+  });
+  let essence = named.map(|named| named.split_once(';').map_or(named, |(essence, _)| essence).trim());
+  match essence {
+    Some(essence) if !essence.is_empty() => essence.to_string(),
+    _ => crate::route::sniff_content_type(&response.body).to_string(),
+  }
+}
+
 async fn intercept_fulfill(
   target: &super::connection::Session,
   request_id: &str,
@@ -1486,15 +1502,11 @@ async fn intercept_fulfill(
   // the document is parsed. When the handler names no content type, run
   // the WHATWG sniffing step ourselves so fulfill renders the same as on
   // CDP/BiDi (where the browser sniffs the header-less response).
-  let mut mime_type = crate::route::sniff_content_type(&response.body).to_string();
+  let mime_type = fulfilled_mime_type(response);
   for (k, v) in &response.headers {
-    if k.eq_ignore_ascii_case("content-type") {
-      mime_type = v.clone();
-    }
     headers_map.insert(k.clone(), Value::String(v.clone()));
   }
   if let Some(ct) = response.content_type.as_ref() {
-    mime_type = ct.clone();
     headers_map.insert("content-type".to_string(), Value::String(ct.clone()));
   }
   let content_b64 = base64::engine::general_purpose::STANDARD.encode(&response.body);
@@ -1784,6 +1796,56 @@ mod frame_event_tests {
 
 #[cfg(test)]
 mod tests {
+  fn fulfilled(content_type: Option<&str>, headers: &[(&str, &str)], body: &str) -> String {
+    super::fulfilled_mime_type(&crate::route::FulfillResponse {
+      status: 200,
+      headers: headers
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect(),
+      body: body.as_bytes().to_vec(),
+      content_type: content_type.map(str::to_string),
+    })
+  }
+
+  #[test]
+  fn a_fulfilled_body_is_parsed_as_its_content_type_s_essence_without_parameters() {
+    assert_eq!(fulfilled(Some("text/html; charset=utf-8"), &[], ""), "text/html");
+    assert_eq!(fulfilled(Some(" text/css ;charset=utf-8"), &[], ""), "text/css");
+    assert_eq!(fulfilled(Some("font/woff2"), &[], ""), "font/woff2");
+    assert_eq!(
+      fulfilled(None, &[("Content-Type", "text/html; charset=utf-8")], ""),
+      "text/html"
+    );
+    assert_eq!(
+      fulfilled(
+        None,
+        &[
+          ("content-type", "text/plain"),
+          ("CONTENT-TYPE", "text/css; charset=utf-8")
+        ],
+        ""
+      ),
+      "text/css"
+    );
+    assert_eq!(
+      fulfilled(Some("image/png"), &[("content-type", "text/html")], ""),
+      "image/png"
+    );
+  }
+
+  #[test]
+  fn a_fulfilled_body_with_no_content_type_or_an_empty_one_is_sniffed() {
+    assert_eq!(fulfilled(None, &[], "<!doctype html><p>a</p>"), "text/html");
+    assert_eq!(fulfilled(None, &[], "plain words"), "text/plain");
+    assert_eq!(fulfilled(Some(""), &[], "<!doctype html><p>a</p>"), "text/html");
+    assert_eq!(fulfilled(Some(" ; charset=utf-8"), &[], "plain words"), "text/plain");
+    assert_eq!(
+      fulfilled(None, &[("content-type", "")], "<!doctype html><p>a</p>"),
+      "text/html"
+    );
+  }
+
   #[test]
   fn a_remote_address_splits_on_its_last_colon() {
     let v4 = super::parse_remote_address("127.0.0.1:8443").unwrap();
