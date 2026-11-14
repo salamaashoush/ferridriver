@@ -1788,7 +1788,29 @@ impl WebKitPage {
   }
 
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
+    let (x, y) = self.root_view_point(x, y).await?;
     super::input::tap(self, x, y).await
+  }
+
+  /// `Input.dispatchTapEvent` reaches `WebPage::fakeTouchTap`, which reads
+  /// its point in root-view coordinates, while every other input and
+  /// every point the injected script computes is in CSS pixels of the
+  /// layout viewport. The two agree until mobile emulation scales the
+  /// page: a document with no `<meta name=viewport>` lays out 980px wide
+  /// and is shrunk to fit, so an unconverted tap lands at the wrong
+  /// element (the `<body>` that "intercepts pointer events").
+  async fn root_view_point(&self, x: f64, y: f64) -> Result<(f64, f64)> {
+    if !self.is_mobile_emulation() {
+      return Ok((x, y));
+    }
+    let viewport = self
+      .eval_value(
+        "(() => { const v = window.visualViewport; return v ? [v.scale, v.offsetLeft, v.offsetTop] : [1, 0, 0]; })()",
+      )
+      .await?;
+    let component = |i: usize, default: f64| viewport.get(i).and_then(Value::as_f64).unwrap_or(default);
+    let (scale, left, top) = (component(0, 1.0), component(1, 0.0), component(2, 0.0));
+    Ok(((x - left) * scale, (y - top) * scale))
   }
 
   pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {

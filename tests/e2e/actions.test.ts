@@ -886,6 +886,51 @@ describe('actions', () => {
     expect(await page.evaluate("document.getElementById('kd').textContent")).toBe('shift');
   });
 
+  test('tap lands on its target when mobile emulation scales the page', async ({ browser, browserName }) => {
+    // A mobile context lays a page with no viewport meta out at 980px
+    // and shrinks it to fit 390px, so CSS pixels and the engine's view
+    // coordinates differ by the page scale. Both the locator tap and a
+    // touchscreen tap at CSS coordinates must reach the button, not the
+    // <body> under the unscaled point.
+    const options = { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true };
+    if (browserName === 'firefox') {
+      // `hasTouch` has no BiDi wire; the typed refusal naming the option
+      // is the behaviour (see devices.test.ts).
+      const ctx = await browser.newContext(options);
+      try {
+        let msg = '';
+        try {
+          await ctx.newPage();
+        } catch (e) {
+          msg = String((e as Error).message ?? e);
+        }
+        expect(msg.includes('hasTouch')).toBe(true);
+      } finally {
+        await ctx.close();
+      }
+      return;
+    }
+    const ctx = await browser.newContext(options);
+    try {
+      const page = await ctx.newPage();
+      await page.setContent(
+        "<button id='b' style='position:absolute;left:100px;top:200px;width:80px;height:40px'>b</button>" +
+          "<div id='hits'></div>" +
+          '<script>' +
+          "document.addEventListener('touchstart', e => {" +
+          "document.getElementById('hits').textContent += (e.target.id || e.target.tagName) + ';';" +
+          '}, { passive: true });' +
+          '</script>',
+      );
+      expect(await page.evaluate('visualViewport.scale < 1')).toBe(true);
+      await page.locator('#b').tap();
+      await page.touchscreen.tap(140, 220);
+      expect(await page.evaluate("document.getElementById('hits').textContent")).toBe('b;b;');
+    } finally {
+      await ctx.close();
+    }
+  });
+
   test('script_action_timeout', async ({ page }) => {
     // `opts.timeout` honors the user's deadline on every action method.
     // Each action is called on a selector that doesn't exist with
