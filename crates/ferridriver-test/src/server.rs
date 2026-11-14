@@ -165,6 +165,15 @@ impl WebServerManager {
 async fn start_server(config: &crate::config::WebServerConfig) -> ferridriver::error::Result<RunningServer> {
   let name = config.name.clone().unwrap_or_else(|| "WebServer".to_string());
   if let Some(dir) = &config.static_dir {
+    // A missing directory would still bind and answer every request with
+    // a 404, so each test fails on its own symptom instead of the run
+    // failing once on the cause (an app that was never built).
+    if !std::path::Path::new(dir).is_dir() {
+      return Err(ferridriver::FerriError::invalid_argument(
+        "webServer.staticDir",
+        format!("{dir:?} is not a directory; build the app first"),
+      ));
+    }
     let server = TestServer::start_with_options(PathBuf::from(dir), config.port, config.spa).await?;
     tracing::info!(name = %name, "[{name}] Static server ready at {} (serving {})", server.url(), dir);
     return Ok(RunningServer::Static(Box::new(StaticEntry { server, name })));
@@ -602,6 +611,22 @@ while True:
 
   async fn answers(port: u16) -> bool {
     tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
+  }
+
+  #[tokio::test]
+  async fn a_missing_static_dir_fails_the_start() {
+    let config = WebServerConfig {
+      static_dir: Some("no/such/dist".into()),
+      ..WebServerConfig::default()
+    };
+    let Err(error) = WebServerManager::start(&[config]).await else {
+      panic!("a missing staticDir must not start a server");
+    };
+    let message = error.to_string();
+    assert!(
+      message.contains("no/such/dist") && message.contains("not a directory"),
+      "{message}"
+    );
   }
 
   #[tokio::test]
