@@ -92,6 +92,19 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install pkg-config llvm
 
+      - name: Add swap for the LTO link
+        if: matrix.cross
+        # The fat-LTO link of the CLI runs in one rustc process and peaks
+        # near the hosted runner's memory: the aarch64 musl build was killed
+        # with SIGKILL in two of three canary runs. Swap on /mnt, which has
+        # the free space, keeps the profile (and the shipped binary) as is.
+        run: |
+          sudo fallocate -l 16G /mnt/ferridriver-swap
+          sudo chmod 600 /mnt/ferridriver-swap
+          sudo mkswap /mnt/ferridriver-swap
+          sudo swapon /mnt/ferridriver-swap
+          free -h
+
       - name: Install cross
         if: matrix.cross
         uses: taiki-e/install-action@cross
