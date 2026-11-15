@@ -1486,8 +1486,9 @@ for (const backend of BACKENDS) {
         '<div style="height:5000px">tall</div>'
       );
       await page.mouseWheel(0, 300);
-      // Give scroll time to apply
-      await page.waitForTimeout(100);
+      // A wheel event scrolls on the compositor, after the dispatch has
+      // returned: poll for it, as Playwright's own wheel specs do.
+      await page.waitForFunction("window.scrollY > 0", undefined, { timeout: 5000 });
       const scrollY = await page.evaluate("window.scrollY");
       expect(scrollY).toBeGreaterThan(0);
     });
