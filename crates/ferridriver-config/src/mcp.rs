@@ -361,6 +361,26 @@ impl McpConfig {
   pub fn instance_overrides(&self, instance: &str) -> Result<InstanceOverrides, String> {
     let mut merged = self.base_overrides(instance)?;
     let per_instance = self.routing().overrides_for(instance)?;
+    // The section's proxy was lowered for the section's browser; an
+    // instance running another engine spells the switch its own way.
+    let section_backend = merged.backend;
+    let instance_backend = per_instance.backend.or_else(|| {
+      per_instance
+        .kind
+        .map(ferridriver::options::BrowserKind::default_backend)
+    });
+    if let (Some(proxy), Some(from), Some(to)) = (&self.browser.proxy, section_backend, instance_backend)
+      && from != to
+      && per_instance.launched_proxy.is_none()
+    {
+      let lowered = crate::browser::proxy_launch_flags(&proxy.server, proxy.bypass.as_deref(), from);
+      merged.args.retain(|arg| !lowered.contains(arg));
+      merged.args.extend(crate::browser::proxy_launch_flags(
+        &proxy.server,
+        proxy.bypass.as_deref(),
+        to,
+      ));
+    }
 
     merged.kind = per_instance
       .kind
@@ -471,6 +491,35 @@ mod tests {
     config.browser.backend = Some(BackendKind::CdpPipe);
     assert!(config.browser_selection().is_err());
     assert!(config.base_overrides("default").is_err());
+  }
+
+  /// A section proxy reaches an instance on another engine in that
+  /// engine's own switch: `WebKit` refuses Chromium's `--proxy-server`.
+  #[test]
+  fn a_section_proxy_is_lowered_for_the_instance_s_engine() {
+    use ferridriver::options::BrowserKind;
+    let mut config = McpConfig::default();
+    config.browser.proxy = Some(crate::browser::ProxyConfig {
+      server: "http://127.0.0.1:3128".to_string(),
+      bypass: None,
+      username: Some("acme".to_string()),
+      password: Some("secret".to_string()),
+    });
+    let mut instance = config.instance_settings("webkit").unwrap();
+    instance.browser = Some(BrowserKind::WebKit);
+    config.browser.instances.insert("webkit".to_string(), instance);
+    let overrides = config.instance_overrides("webkit").unwrap();
+    assert!(
+      overrides.args.iter().all(|arg| !arg.starts_with("--proxy-server")),
+      "{:?}",
+      overrides.args
+    );
+    assert!(
+      overrides.args.contains(&"--proxy=http://127.0.0.1:3128".to_string()),
+      "{:?}",
+      overrides.args
+    );
+    assert!(overrides.launched_proxy.is_some());
   }
 
   #[test]
