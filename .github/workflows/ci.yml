@@ -250,6 +250,8 @@ jobs:
         env:
           FERRIDRIVER_GATE_WORKERS: ${{ runner.os == 'macOS' && 3 || 4 }}
           FERRIDRIVER_GATE_TIMEOUT: 1800
+          # Printed only when the test fails; see waits_listen_from_call.rs.
+          FERRIDRIVER_TEST_TRACE: ferridriver::backend::bidi=trace
 
       - name: Upload gate logs
         if: always()
