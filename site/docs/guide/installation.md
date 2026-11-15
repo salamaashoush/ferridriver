@@ -99,6 +99,14 @@ The WebKit backend speaks Playwright's WebKit Inspector protocol over
   picks it up automatically, **or**
 - the ferridriver cache, populated by `ferridriver install webkit`.
 
+`ferridriver install webkit` takes the build the latest Playwright release
+ships. To pin one, as a project on a fixed `playwright-core` does, pass the
+revision from that release's `browsers.json` to
+`BrowserInstaller::install_webkit_revision`. It installs into the Playwright
+cache as `playwright install` does, where both Playwright and ferridriver find
+it, and keeps a build already installed there. `with_download_hosts` points
+the download at a mirror instead of Playwright's CDN.
+
 WebKit is available on Linux and macOS only (the `--inspector-pipe`
 transport relies on a Unix fork/dup model). It is not native WKWebView.
 

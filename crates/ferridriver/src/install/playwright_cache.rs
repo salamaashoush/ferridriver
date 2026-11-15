@@ -7,6 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// The file Playwright's installer writes into a build's directory once
+/// the build is completely extracted.
+pub(crate) const INSTALLATION_COMPLETE: &str = "INSTALLATION_COMPLETE";
+
 /// A browser family as Playwright's cache names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachedBrowser {
@@ -118,6 +122,26 @@ pub fn playwright_cache_dir() -> Option<PathBuf> {
   }
 }
 
+/// The directory build `revision` of `browser` has under `cache`.
+pub(crate) fn build_dir(cache: &Path, browser: CachedBrowser, revision: &str) -> PathBuf {
+  cache.join(format!("{}{revision}", browser.directory_prefix()))
+}
+
+/// The executable of build `revision` of `browser` under `cache`, once
+/// its installer has marked the build complete.
+#[must_use]
+pub fn installed_build(cache: &Path, browser: CachedBrowser, revision: &str) -> Option<PathBuf> {
+  let dir = build_dir(cache, browser, revision);
+  if !dir.join(INSTALLATION_COMPLETE).is_file() {
+    return None;
+  }
+  browser
+    .executables()
+    .iter()
+    .map(|relative| dir.join(relative))
+    .find(|exe| exe.is_file())
+}
+
 /// The newest completely installed build of `browser` in Playwright's cache.
 #[must_use]
 pub fn find_playwright_browser(browser: CachedBrowser) -> Option<PathBuf> {
@@ -137,7 +161,7 @@ pub(crate) fn newest_build_in(cache: &Path, browser: CachedBrowser) -> Option<Pa
       let revision = name.to_str()?.strip_prefix(prefix)?.parse::<u64>().ok()?;
       Some((revision, entry.path()))
     })
-    .filter(|(_, dir)| dir.join("INSTALLATION_COMPLETE").is_file())
+    .filter(|(_, dir)| dir.join(INSTALLATION_COMPLETE).is_file())
     .collect();
   builds.sort_by_key(|(revision, _)| std::cmp::Reverse(*revision));
   builds.into_iter().find_map(|(_, dir)| {
@@ -151,7 +175,7 @@ pub(crate) fn newest_build_in(cache: &Path, browser: CachedBrowser) -> Option<Pa
 
 #[cfg(test)]
 mod tests {
-  use super::{CachedBrowser, newest_build_in};
+  use super::{CachedBrowser, INSTALLATION_COMPLETE, installed_build, newest_build_in};
   use std::path::Path;
 
   fn build(cache: &Path, dir: &str, relative: &str, complete: bool) {
@@ -159,7 +183,7 @@ mod tests {
     std::fs::create_dir_all(exe.parent().expect("parent")).expect("mkdir");
     std::fs::write(&exe, b"x").expect("write");
     if complete {
-      std::fs::write(cache.join(dir).join("INSTALLATION_COMPLETE"), b"").expect("marker");
+      std::fs::write(cache.join(dir).join(INSTALLATION_COMPLETE), b"").expect("marker");
     }
   }
 
@@ -205,6 +229,27 @@ mod tests {
     assert!(newest_build_in(cache.path(), CachedBrowser::Chromium).is_none());
     let found = newest_build_in(cache.path(), CachedBrowser::ChromiumHeadlessShell).expect("the shell");
     assert!(found.ends_with(shell), "got {}", found.display());
+  }
+
+  #[test]
+  fn a_pinned_build_counts_only_once_complete_and_only_at_its_own_revision() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let webkit = CachedBrowser::WebKit.executables()[0];
+    assert_eq!(installed_build(cache.path(), CachedBrowser::WebKit, "2370"), None);
+
+    build(cache.path(), "webkit-2370", webkit, false);
+    assert_eq!(installed_build(cache.path(), CachedBrowser::WebKit, "2370"), None);
+
+    std::fs::write(cache.path().join("webkit-2370").join(INSTALLATION_COMPLETE), b"").expect("marker");
+    assert_eq!(
+      installed_build(cache.path(), CachedBrowser::WebKit, "2370"),
+      Some(cache.path().join("webkit-2370").join(webkit))
+    );
+    assert_eq!(installed_build(cache.path(), CachedBrowser::WebKit, "2388"), None);
+
+    std::fs::create_dir_all(cache.path().join("webkit-2251")).expect("build without its executable");
+    std::fs::write(cache.path().join("webkit-2251").join(INSTALLATION_COMPLETE), b"").expect("marker");
+    assert_eq!(installed_build(cache.path(), CachedBrowser::WebKit, "2251"), None);
   }
 
   #[test]

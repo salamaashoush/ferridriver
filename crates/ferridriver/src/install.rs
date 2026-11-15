@@ -24,7 +24,7 @@ mod ios;
 mod linux;
 mod playwright_cache;
 
-pub use playwright_cache::{CachedBrowser, find_playwright_browser, playwright_cache_dir};
+pub use playwright_cache::{CachedBrowser, find_playwright_browser, installed_build, playwright_cache_dir};
 
 use std::path::{Path, PathBuf};
 
@@ -332,6 +332,7 @@ fn version_order(name: &str) -> (Vec<u64>, String) {
 pub struct BrowserInstaller {
   cache_dir: PathBuf,
   client: std::sync::OnceLock<Client>,
+  download_hosts: Vec<String>,
 }
 
 impl BrowserInstaller {
@@ -386,10 +387,7 @@ impl BrowserInstaller {
   /// Override with `FERRIDRIVER_BROWSERS_PATH` env var.
   #[must_use]
   pub fn new() -> Self {
-    Self {
-      cache_dir: default_cache_dir(),
-      client: std::sync::OnceLock::new(),
-    }
+    Self::with_cache_dir(default_cache_dir())
   }
 
   /// Create an installer with a custom cache directory.
@@ -398,7 +396,18 @@ impl BrowserInstaller {
     Self {
       cache_dir,
       client: std::sync::OnceLock::new(),
+      download_hosts: PW_CDN_MIRRORS.iter().map(|host| (*host).to_string()).collect(),
     }
+  }
+
+  /// Download Playwright's builds from `hosts`, tried in order, instead of
+  /// Playwright's CDN mirrors. What `PLAYWRIGHT_DOWNLOAD_HOST` does for
+  /// Playwright: a mirror inside a network that cannot reach the CDN, or a
+  /// local server under test. Each host serves `builds/<browser>/<revision>/<archive>`.
+  #[must_use]
+  pub fn with_download_hosts(mut self, hosts: Vec<String>) -> Self {
+    self.download_hosts = hosts;
+    self
   }
 
   /// The HTTP client, built on first use. Building it loads the system's CA
@@ -1303,6 +1312,7 @@ impl BrowserInstaller {
           install_dir,
           revision,
           archive,
+          marker: BuildMarker::Archive,
         },
         &progress,
       )
@@ -1338,6 +1348,7 @@ impl BrowserInstaller {
           install_dir,
           revision,
           archive,
+          marker: BuildMarker::Archive,
         },
         &progress,
       )
@@ -1357,13 +1368,11 @@ impl BrowserInstaller {
       archive,
       install_dir,
       executable,
+      marker,
     } = build;
-    let marker_file = install_dir.join(".downloaded");
+    let marker_file = install_dir.join(marker.file_name());
 
-    // The marker names the archive, so a build made for another OS release
-    // under the same revision is replaced rather than kept.
-    let installed = tokio::fs::read_to_string(&marker_file).await.unwrap_or_default();
-    if installed == archive && executable.exists() {
+    if marker.says_installed(&marker_file, archive).await && executable.exists() {
       let path = executable.to_string_lossy().to_string();
       progress(InstallProgress::AlreadyInstalled {
         version: revision.clone(),
@@ -1380,31 +1389,14 @@ impl BrowserInstaller {
     tokio::fs::create_dir_all(&tmp_dir).await?;
     let zip_path = tmp_dir.join(format!("{name}-{revision}.zip"));
 
-    let mut last_error = String::new();
-    'outer: for host in PW_CDN_MIRRORS {
-      let url = format!("{host}/builds/{name}/{revision}/{archive}");
-      for attempt in 1..=DOWNLOAD_RETRIES {
-        progress(InstallProgress::Downloading {
-          bytes_downloaded: 0,
-          total_bytes: None,
-        });
-        match self.download_file(&url, &zip_path, progress).await {
-          Ok(()) => {
-            last_error.clear();
-            break 'outer;
-          },
-          Err(e) => {
-            last_error = format!("{host} attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
-            let _ = tokio::fs::remove_file(&zip_path).await;
-          },
-        }
-      }
-    }
-    if !last_error.is_empty() {
-      return Err(backend_err(format!(
-        "{label} download failed after exhausting mirrors: {last_error}"
-      )));
-    }
+    self
+      .download_build(
+        &format!("builds/{name}/{revision}/{archive}"),
+        &zip_path,
+        label,
+        progress,
+      )
+      .await?;
 
     progress(InstallProgress::Extracting);
     tokio::fs::create_dir_all(&install_dir).await?;
@@ -1430,7 +1422,7 @@ impl BrowserInstaller {
       )));
     }
 
-    let _ = tokio::fs::write(&marker_file, archive.as_bytes()).await;
+    marker.write(&marker_file, archive).await?;
 
     let path = executable.to_string_lossy().to_string();
     progress(InstallProgress::Complete {
@@ -1438,6 +1430,91 @@ impl BrowserInstaller {
       path: path.clone(),
     });
     Ok(path)
+  }
+
+  /// Install `WebKit` build `revision` into Playwright's browser cache at
+  /// `cache`, laid out as `playwright install` lays it out:
+  /// `<cache>/webkit-<revision>`, marked complete by
+  /// `INSTALLATION_COMPLETE`. Playwright, and ferridriver's own launcher
+  /// through the Playwright cache, both find a build installed this way.
+  ///
+  /// For a project pinned to one `playwright-core`, whose `browsers.json`
+  /// names the revision. [`Self::install_webkit`] instead installs the
+  /// latest release's build into ferridriver's own cache. A build already
+  /// marked complete is kept, and a directory left without the marker by an
+  /// interrupted install is replaced.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `revision` is not a build number, the host
+  /// platform has no published `WebKit` build, the download fails from
+  /// every host after all retries, or extraction fails.
+  pub async fn install_webkit_revision<F>(&self, revision: &str, cache: &Path, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    if revision.is_empty() || !revision.bytes().all(|byte| byte.is_ascii_digit()) {
+      return Err(FerriError::invalid_argument(
+        "revision",
+        format!("'{revision}' is not a WebKit build number"),
+      ));
+    }
+    let platform = webkit_platform_for_host()?;
+    let archive = webkit_archive(&platform)
+      .ok_or_else(|| FerriError::unsupported(format!("no Playwright WebKit build for {platform}")))?;
+
+    if let Some(installed) = installed_build(cache, CachedBrowser::WebKit, revision) {
+      let path = installed.to_string_lossy().to_string();
+      progress(InstallProgress::AlreadyInstalled {
+        version: revision.to_string(),
+        path: path.clone(),
+      });
+      return Ok(path);
+    }
+
+    let install_dir = playwright_cache::build_dir(cache, CachedBrowser::WebKit, revision);
+    self
+      .install_playwright_build(
+        PlaywrightBuild {
+          name: "webkit",
+          label: "WebKit",
+          executable: install_dir.join(WEBKIT_EXECUTABLE),
+          install_dir,
+          revision: revision.to_string(),
+          archive,
+          marker: BuildMarker::PlaywrightComplete,
+        },
+        &progress,
+      )
+      .await
+  }
+
+  /// Download `build_path` from the first download host that serves it,
+  /// retrying each host before falling over to the next.
+  async fn download_build<F>(&self, build_path: &str, dest: &Path, what: &str, progress: &F) -> Result<()>
+  where
+    F: Fn(InstallProgress),
+  {
+    let mut last_error = format!("no download host is configured for {build_path}");
+    for host in &self.download_hosts {
+      let url = format!("{}/{build_path}", host.trim_end_matches('/'));
+      for attempt in 1..=DOWNLOAD_RETRIES {
+        progress(InstallProgress::Downloading {
+          bytes_downloaded: 0,
+          total_bytes: None,
+        });
+        match self.download_file(&url, dest, progress).await {
+          Ok(()) => return Ok(()),
+          Err(e) => {
+            last_error = format!("{host} attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
+            let _ = tokio::fs::remove_file(dest).await;
+          },
+        }
+      }
+    }
+    Err(backend_err(format!(
+      "{what} download failed after exhausting mirrors: {last_error}"
+    )))
   }
 
   /// Download Playwright's Android driver: the two APKs `_android` installs
@@ -1475,31 +1552,14 @@ impl BrowserInstaller {
     let tmp_dir = self.cache_dir.join(".tmp");
     tokio::fs::create_dir_all(&tmp_dir).await?;
     let zip_path = tmp_dir.join(format!("android-driver-{revision}.zip"));
-    let mut last_error = String::new();
-    'outer: for host in PW_CDN_MIRRORS {
-      let url = format!("{host}/builds/android/{revision}/android.zip");
-      for attempt in 1..=DOWNLOAD_RETRIES {
-        progress(InstallProgress::Downloading {
-          bytes_downloaded: 0,
-          total_bytes: None,
-        });
-        match self.download_file(&url, &zip_path, &progress).await {
-          Ok(()) => {
-            last_error.clear();
-            break 'outer;
-          },
-          Err(e) => {
-            last_error = format!("{host} attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
-            let _ = tokio::fs::remove_file(&zip_path).await;
-          },
-        }
-      }
-    }
-    if !last_error.is_empty() {
-      return Err(backend_err(format!(
-        "Android driver download failed after exhausting mirrors: {last_error}"
-      )));
-    }
+    self
+      .download_build(
+        &format!("builds/android/{revision}/android.zip"),
+        &zip_path,
+        "Android driver",
+        &progress,
+      )
+      .await?;
 
     progress(InstallProgress::Extracting);
     tokio::fs::create_dir_all(&install_dir).await?;
@@ -1636,6 +1696,47 @@ struct PlaywrightBuild {
   archive: &'static str,
   install_dir: PathBuf,
   executable: PathBuf,
+  marker: BuildMarker,
+}
+
+/// How a build's directory says the build is completely installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildMarker {
+  /// ferridriver's own cache: `.downloaded`, holding the archive's name, so
+  /// a build made for another OS release under the same revision is
+  /// replaced rather than kept.
+  Archive,
+  /// Playwright's cache: an empty `INSTALLATION_COMPLETE`, as
+  /// `playwright install` writes it.
+  PlaywrightComplete,
+}
+
+impl BuildMarker {
+  fn file_name(self) -> &'static str {
+    match self {
+      Self::Archive => ".downloaded",
+      Self::PlaywrightComplete => playwright_cache::INSTALLATION_COMPLETE,
+    }
+  }
+
+  async fn says_installed(self, marker_file: &Path, archive: &str) -> bool {
+    match self {
+      Self::Archive => tokio::fs::read_to_string(marker_file).await.unwrap_or_default() == archive,
+      Self::PlaywrightComplete => tokio::fs::metadata(marker_file)
+        .await
+        .is_ok_and(|found| found.is_file()),
+    }
+  }
+
+  async fn write(self, marker_file: &Path, archive: &str) -> Result<()> {
+    match self {
+      Self::Archive => {
+        let _ = tokio::fs::write(marker_file, archive.as_bytes()).await;
+        Ok(())
+      },
+      Self::PlaywrightComplete => Ok(tokio::fs::write(marker_file, b"").await?),
+    }
+  }
 }
 
 /// Playwright's ffmpeg archive for `platform`, and the executable in it
@@ -2378,5 +2479,247 @@ mod client_tests {
     let first: *const reqwest::Client = installer.client().expect("client");
     let second: *const reqwest::Client = installer.client().expect("client");
     assert!(std::ptr::eq(first, second));
+  }
+}
+
+#[cfg(test)]
+mod webkit_revision_tests {
+  use std::io::Write as _;
+  use std::path::{Path, PathBuf};
+  use std::sync::{Arc, Mutex};
+
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+  use super::playwright_cache::{CachedBrowser, INSTALLATION_COMPLETE, newest_build_in};
+  use super::{BrowserInstaller, DOWNLOAD_RETRIES, InstallProgress, webkit_archive, webkit_platform_for_host};
+
+  /// A host that serves `builds` by path and records every path asked for.
+  struct Host {
+    address: String,
+    asked: Arc<Mutex<Vec<String>>>,
+  }
+
+  impl Host {
+    async fn serving(builds: Vec<(String, Vec<u8>)>) -> Self {
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("listener");
+      let address = format!("http://{}", listener.local_addr().expect("address"));
+      let asked = Arc::new(Mutex::new(Vec::new()));
+      let log = Arc::clone(&asked);
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = Vec::new();
+          let mut chunk = [0_u8; 1024];
+          while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            match socket.read(&mut chunk).await {
+              Ok(0) | Err(_) => break,
+              Ok(read) => request.extend_from_slice(&chunk[..read]),
+            }
+          }
+          let line = String::from_utf8_lossy(&request)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+          let path = line.split(' ').nth(1).unwrap_or_default().to_string();
+          log.lock().expect("log").push(path.clone());
+          let response = match builds.iter().find(|(served, _)| *served == path) {
+            Some((_, body)) => [
+              format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+              )
+              .into_bytes(),
+              body.clone(),
+            ]
+            .concat(),
+            None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+          };
+          let _ = socket.write_all(&response).await;
+          let _ = socket.shutdown().await;
+        }
+      });
+      Self { address, asked }
+    }
+
+    fn asked(&self) -> Vec<String> {
+      self.asked.lock().expect("log").clone()
+    }
+  }
+
+  fn archive_path(revision: &str) -> String {
+    let platform = webkit_platform_for_host().expect("platform");
+    let archive = webkit_archive(&platform).expect("archive");
+    format!("/builds/webkit/{revision}/{archive}")
+  }
+
+  fn webkit_zip() -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+    zip.start_file("pw_run.sh", options).expect("entry");
+    zip.write_all(b"#!/bin/sh\n").expect("contents");
+    zip.add_directory("minibrowser-wpe", options).expect("directory");
+    zip.finish().expect("archive").into_inner()
+  }
+
+  fn installer(root: &Path, hosts: &[&Host]) -> BrowserInstaller {
+    BrowserInstaller::with_cache_dir(root.join("ferridriver"))
+      .with_download_hosts(hosts.iter().map(|host| host.address.clone()).collect())
+  }
+
+  fn playwright_cache(root: &Path) -> PathBuf {
+    root.join("ms-playwright")
+  }
+
+  #[tokio::test]
+  async fn a_pinned_revision_lands_in_playwright_s_cache_marked_complete() {
+    let host = Host::serving(vec![(archive_path("2370"), webkit_zip())]).await;
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    let installed = installer(root.path(), &[&host])
+      .install_webkit_revision("2370", &cache, |_| {})
+      .await
+      .expect("installed");
+    let build = cache.join("webkit-2370");
+    assert_eq!(PathBuf::from(&installed), build.join("pw_run.sh"));
+    assert!(build.join(INSTALLATION_COMPLETE).is_file());
+    assert!(build.join("minibrowser-wpe").is_dir());
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let mode = std::fs::metadata(&installed).expect("executable").permissions().mode();
+      assert_eq!(mode & 0o777, 0o755);
+    }
+    assert_eq!(host.asked(), [archive_path("2370")]);
+    assert_eq!(
+      newest_build_in(&cache, CachedBrowser::WebKit),
+      Some(build.join("pw_run.sh"))
+    );
+  }
+
+  #[tokio::test]
+  async fn a_build_already_marked_complete_is_kept_without_a_download() {
+    let host = Host::serving(vec![(archive_path("2370"), webkit_zip())]).await;
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    let installer = installer(root.path(), &[&host]);
+    installer
+      .install_webkit_revision("2370", &cache, |_| {})
+      .await
+      .expect("first install");
+    let seen = Mutex::new(Vec::new());
+    let kept = installer
+      .install_webkit_revision("2370", &cache, |event| seen.lock().expect("events").push(event))
+      .await
+      .expect("second install");
+    assert_eq!(PathBuf::from(kept), cache.join("webkit-2370").join("pw_run.sh"));
+    assert_eq!(host.asked().len(), 1);
+    let seen = seen.into_inner().expect("events");
+    assert!(
+      matches!(seen.as_slice(), [InstallProgress::AlreadyInstalled { version, .. }] if version == "2370"),
+      "{seen:?}"
+    );
+  }
+
+  #[tokio::test]
+  async fn an_install_interrupted_before_its_marker_is_replaced() {
+    let host = Host::serving(vec![(archive_path("2370"), webkit_zip())]).await;
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    let build = cache.join("webkit-2370");
+    std::fs::create_dir_all(&build).expect("build");
+    std::fs::write(build.join("pw_run.sh"), "#!/bin/sh\n").expect("executable");
+    std::fs::write(build.join("half-written.so"), "").expect("leftover");
+    let seen = Mutex::new(Vec::new());
+    installer(root.path(), &[&host])
+      .install_webkit_revision("2370", &cache, |event| seen.lock().expect("events").push(event))
+      .await
+      .expect("installed");
+    assert!(!build.join("half-written.so").exists());
+    assert!(build.join(INSTALLATION_COMPLETE).is_file());
+    assert_eq!(host.asked().len(), 1);
+    assert!(matches!(
+      seen.into_inner().expect("events").last(),
+      Some(InstallProgress::Complete { version, .. }) if version == "2370"
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_revision_that_is_not_a_build_number_is_refused_before_any_download() {
+    let host = Host::serving(vec![(archive_path("2370"), webkit_zip())]).await;
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    for revision in ["", "23a0", "../2370", "2370/..", "-1"] {
+      let refused = installer(root.path(), &[&host])
+        .install_webkit_revision(revision, &cache, |_| {})
+        .await
+        .expect_err("not a build number");
+      assert!(
+        refused.to_string().contains("is not a WebKit build number"),
+        "{refused}"
+      );
+    }
+    assert_eq!(host.asked(), Vec::<String>::new());
+    assert!(!cache.exists());
+  }
+
+  #[tokio::test]
+  async fn a_host_without_the_build_hands_over_to_the_next() {
+    let empty = Host::serving(Vec::new()).await;
+    let serving = Host::serving(vec![(archive_path("2370"), webkit_zip())]).await;
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    installer(root.path(), &[&empty, &serving])
+      .install_webkit_revision("2370", &cache, |_| {})
+      .await
+      .expect("installed from the second host");
+    assert_eq!(empty.asked().len(), DOWNLOAD_RETRIES as usize);
+    assert_eq!(serving.asked(), [archive_path("2370")]);
+  }
+
+  #[tokio::test]
+  async fn no_host_with_the_build_fails_and_leaves_no_build_behind() {
+    let empty = Host::serving(Vec::new()).await;
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    let failed = installer(root.path(), &[&empty])
+      .install_webkit_revision("2370", &cache, |_| {})
+      .await
+      .expect_err("no host has the build");
+    assert!(
+      failed
+        .to_string()
+        .contains("WebKit download failed after exhausting mirrors"),
+      "{failed}"
+    );
+    assert!(failed.to_string().contains("404"), "{failed}");
+    assert!(!cache.join("webkit-2370").exists());
+    assert_eq!(newest_build_in(&cache, CachedBrowser::WebKit), None);
+  }
+
+  #[tokio::test]
+  async fn without_a_download_host_nothing_is_fetched() {
+    let root = tempfile::tempdir().expect("root");
+    let cache = playwright_cache(root.path());
+    let failed = BrowserInstaller::with_cache_dir(root.path().join("ferridriver"))
+      .with_download_hosts(Vec::new())
+      .install_webkit_revision("2370", &cache, |_| {})
+      .await
+      .expect_err("no host");
+    assert!(
+      failed.to_string().contains("no download host is configured"),
+      "{failed}"
+    );
+  }
+
+  #[test]
+  fn playwright_s_cdn_is_the_default_download_host() {
+    let installer = BrowserInstaller::with_cache_dir(PathBuf::from("/cache"));
+    assert_eq!(
+      installer.download_hosts,
+      super::PW_CDN_MIRRORS
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect::<Vec<_>>()
+    );
   }
 }
