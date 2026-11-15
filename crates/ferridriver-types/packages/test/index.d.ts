@@ -2608,9 +2608,11 @@ export interface BrowserType {
   connectOverCDP(endpointURL: string, options?: { headers?: Record<string, string>; slowMo?: number; timeout?: number }): Promise<Browser>;
   launchPersistentContext(userDataDir: string, options?: BrowserContextOptions & LaunchOptions): Promise<BrowserContext>;
   /**
-   * Launch Chromium and serve its DevTools Protocol to other processes.
-   * Chromium only. `token`, when set, must come with every client as
-   * `Authorization: Bearer <token>` or a `token` query parameter.
+   * Launch the browser and serve its own protocol to other processes: the
+   * DevTools Protocol for Chromium, WebDriver BiDi for Firefox, whose
+   * clients share its one BiDi session. `token`, when set, must come with
+   * every client as `Authorization: Bearer <token>` or a `token` query
+   * parameter.
    */
   launchServer(options?: LaunchOptions & { host?: string; port?: number; wsPath?: string; token?: string }): Promise<BrowserServer>;
 }

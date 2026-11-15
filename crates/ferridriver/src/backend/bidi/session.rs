@@ -39,6 +39,9 @@ pub(crate) struct BidiSession {
   #[allow(dead_code)]
   pub browser_version: String,
   pub classic: Option<Arc<crate::backend::webdriver::session::WebDriverSession>>,
+  /// What `session.new` answered, which a served browser's clients are
+  /// answered with in turn.
+  pub capabilities: serde_json::Value,
   input_transport: Arc<std::sync::atomic::AtomicU8>,
   /// What each user context hands the pages the browser opens in it.
   pub(super) scopes: Arc<super::scope::ContextScopes>,
@@ -139,6 +142,7 @@ impl BidiSession {
       .and_then(|v| v.as_str())
       .unwrap_or("unknown")
       .to_string();
+    let kept_capabilities = capabilities.clone();
 
     debug!("BiDi session created: id={session_id}, browser={browser_name} {browser_version}");
 
@@ -192,6 +196,7 @@ impl BidiSession {
       browser_name,
       browser_version,
       classic,
+      capabilities: kept_capabilities,
       input_transport: Arc::new(std::sync::atomic::AtomicU8::new(0)),
       scopes: Arc::default(),
     })

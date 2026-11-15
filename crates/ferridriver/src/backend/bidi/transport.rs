@@ -29,7 +29,7 @@ impl std::fmt::Display for BidiError {
   }
 }
 
-type BidiResult = std::result::Result<serde_json::Value, BidiError>;
+pub(crate) type BidiResult = std::result::Result<serde_json::Value, BidiError>;
 
 /// A `BiDi` event received from the browser.
 #[derive(Debug, Clone)]
@@ -366,6 +366,21 @@ impl BidiTransport {
 
   /// Send a `BiDi` command and await the response.
   pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    self.send_raw(method, params).await?.map_err(|e| {
+      if matches!(e.error.as_str(), "no such frame" | "target closed") {
+        FerriError::target_closed(Some(e.to_string()))
+      } else if matches!(e.error.as_str(), "unknown command" | "unsupported operation") {
+        FerriError::unsupported(format!("{method}: {e}"))
+      } else {
+        FerriError::protocol(method, e.to_string())
+      }
+    })
+  }
+
+  /// Send a `BiDi` command and await the browser's answer as it gave it:
+  /// its result, or its error code and message. The outer error is the
+  /// transport's own, the connection closed or the time up.
+  pub async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
     let budget = crate::operation_budget::OperationBudget::current(60_000)?;
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
@@ -388,20 +403,11 @@ impl BidiTransport {
     trace!("BiDi send id={id}: {method}");
 
     budget.send(&self.write_tx, Message::Text(cmd.into())).await?;
-    let result = budget
+    budget
       .wait(rx)
       .await
       .map_err(|error| error.error(format!("BiDi command '{method}'")))?
-      .map_err(|_| FerriError::backend("BiDi command response channel dropped"))?;
-    result.map_err(|e| {
-      if matches!(e.error.as_str(), "no such frame" | "target closed") {
-        FerriError::target_closed(Some(e.to_string()))
-      } else if matches!(e.error.as_str(), "unknown command" | "unsupported operation") {
-        FerriError::unsupported(format!("{method}: {e}"))
-      } else {
-        FerriError::protocol(method, e.to_string())
-      }
-    })
+      .map_err(|_| FerriError::backend("BiDi command response channel dropped"))
   }
 
   /// Resolves once the connection to the browser has ended.

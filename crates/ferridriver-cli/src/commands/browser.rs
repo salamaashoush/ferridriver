@@ -1,4 +1,5 @@
-//! `ferridriver browser serve` — a launched Chromium another process drives.
+//! `ferridriver browser serve` — a launched Chromium or Firefox other
+//! processes drive.
 
 use std::io::Write as _;
 
@@ -45,14 +46,15 @@ async fn serve_browser(args: cli::BrowserServeArgs) -> anyhow::Result<()> {
       token,
     },
   };
-  let server = Box::pin(ferridriver::BrowserType::chromium().launch_server(options)).await?;
+  let launcher = ferridriver::BrowserType::server_launcher(args.browser)?;
+  let server = Box::pin(launcher.launch_server(options)).await?;
 
   // The endpoint is the command's output, so it goes to stdout alone and is
   // flushed at once: a supervisor reads the first line and hands it on.
   let mut stdout = std::io::stdout();
   writeln!(stdout, "{}", server.ws_endpoint())?;
   stdout.flush()?;
-  ui::note(&format!("serving Chromium on {}", server.local_addr()));
+  ui::note(&format!("serving {} on {}", args.browser.name(), server.local_addr()));
 
   let stdin = if args.exit_with_stdin {
     futures::future::Either::Left(super::lifetime::stdin_closed()?)

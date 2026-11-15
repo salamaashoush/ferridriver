@@ -1,7 +1,8 @@
 // `browserType.launchServer()` from Node: the endpoint it hands out is a
-// DevTools WebSocket another connection drives, admitted only with its token.
+// DevTools WebSocket, or Firefox's WebDriver BiDi, another connection
+// drives, admitted only with its token.
 import { describe, it, expect } from "bun:test";
-import { chromium, firefox } from "../index.js";
+import { chromium, firefox, webkit } from "../index.js";
 
 describe("launchServer", () => {
   it("serves chromium to a second connection that brings the token", async () => {
@@ -29,10 +30,26 @@ describe("launchServer", () => {
     }
   }, 60_000);
 
-  it("is chromium only", async () => {
-    const refused = await firefox()
+  it("serves firefox over BiDi to a second connection", async () => {
+    const server = await firefox().launchServer({ headless: true, token: "sashoush-node-token" });
+    try {
+      const browser = await firefox().connect(server.wsEndpoint());
+      try {
+        const page = await (await browser.newContext()).newPage();
+        await page.setContent("<title>remote</title>");
+        expect(await page.title()).toBe("remote");
+      } finally {
+        await browser.close();
+      }
+    } finally {
+      await server.close();
+    }
+  }, 60_000);
+
+  it("refuses webkit, which serves neither protocol", async () => {
+    const refused = await webkit()
       .launchServer()
       .then(() => "served", (error: Error) => error.message);
-    expect(refused).toContain("DevTools Protocol");
+    expect(refused).toContain("WebDriver BiDi");
   });
 });

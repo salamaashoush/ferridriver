@@ -1,11 +1,14 @@
-//! `browserType.launchServer()`: a launched Chromium whose `DevTools` endpoint
-//! other processes can reach.
+//! `browserType.launchServer()`: a launched browser whose own protocol other
+//! processes can reach: the Chrome `DevTools` Protocol for Chromium,
+//! `WebDriver` `BiDi` for Firefox.
 //!
-//! The browser listens for CDP on loopback only, as every launch here does.
-//! The server in front of it is what a remote client dials: one WebSocket per
-//! client, admitted on the unguessable `wsPath` and, when one is set, a token,
-//! then joined frame for frame to a connection of its own to the browser.
-//! Nothing is translated, so any CDP client works, `connectOverCDP` included.
+//! The browser listens on loopback only, as every launch here does. The
+//! server in front of it is what a remote client dials: one WebSocket per
+//! client, admitted on the unguessable `wsPath` and, when one is set, a token.
+//! A CDP client is joined frame for frame to a connection of its own to the
+//! browser; nothing is translated, so any CDP client works, `connectOverCDP`
+//! included. Firefox holds one `BiDi` session at a time, so every `BiDi`
+//! client shares the server's own (see `backend::bidi::relay`).
 //!
 //! A launch proxy wanting credentials is answered by the server itself, on a
 //! `DevTools` connection of its own that attaches to every target before it
@@ -44,6 +47,16 @@ pub struct ServeOptions {
   /// A secret every client must present, as `Authorization: Bearer <token>`
   /// or a `token` query parameter. The endpoint URL carries it.
   pub token: Option<String>,
+}
+
+/// What a served browser's clients are joined to.
+#[derive(Clone)]
+enum Upstream {
+  /// The browser's `DevTools` WebSocket, which each client gets a
+  /// connection of its own to.
+  Cdp(String),
+  /// The browser's one `BiDi` session, shared.
+  Bidi(Arc<crate::backend::bidi::relay::Relay>),
 }
 
 /// A launched browser served to other processes. Dropping it stops serving;
@@ -123,13 +136,14 @@ impl Drop for BrowserServer {
 impl BrowserType {
   /// Playwright: `browserType.launchServer(options?) -> BrowserServer`.
   ///
-  /// Serves the Chrome `DevTools` Protocol rather than Playwright's own wire
-  /// protocol, so it is Chromium only; a client reaches it with
-  /// `connectOverCDP` or `connect`.
+  /// Serves the browser's own protocol:
+  /// the Chrome `DevTools` Protocol for Chromium, which a client
+  /// reaches with `connectOverCDP` or `connect`, and `WebDriver` `BiDi` for
+  /// Firefox, which `firefox().connect()` or any `BiDi` client reaches.
   ///
   /// # Errors
   ///
-  /// The browser is not Chromium, fails to launch, or the address cannot be
+  /// The browser is `WebKit`, fails to launch, or the address cannot be
   /// bound.
   pub async fn launch_server(self, options: LaunchServerOptions) -> Result<BrowserServer> {
     let launcher = Self::server_launcher(self.kind())?;
@@ -138,22 +152,27 @@ impl BrowserType {
   }
 
   /// The browser type [`Self::launch_server`] launches with: Chromium over a
-  /// `DevTools` WebSocket, the only transport a second client can dial.
+  /// `DevTools` WebSocket, or Firefox over `WebDriver` `BiDi`, the
+  /// transports a second client can dial.
   ///
   /// # Errors
   ///
-  /// `kind` is not Chromium.
+  /// `kind` is neither Chromium nor Firefox.
   pub fn server_launcher(kind: BrowserKind) -> Result<Self> {
-    if kind != BrowserKind::Chromium {
-      return Err(FerriError::unsupported(format!(
-        "launchServer serves the Chrome DevTools Protocol, which {} does not speak",
-        kind.name()
-      )));
+    match kind {
+      BrowserKind::Chromium => Ok(Self::with_backend(
+        BrowserKind::Chromium,
+        crate::backend::BackendKind::CdpWs,
+      )),
+      BrowserKind::Firefox => Ok(Self::with_backend(
+        BrowserKind::Firefox,
+        crate::backend::BackendKind::Bidi,
+      )),
+      other => Err(FerriError::unsupported(format!(
+        "launchServer serves Chromium over the Chrome DevTools Protocol and Firefox over WebDriver BiDi; {} has neither",
+        other.name()
+      ))),
     }
-    Ok(Self::with_backend(
-      BrowserKind::Chromium,
-      crate::backend::BackendKind::CdpWs,
-    ))
   }
 }
 
@@ -162,23 +181,34 @@ impl BrowserServer {
   /// processes. Closing the server closes it. When the browser was launched
   /// with a proxy that wants credentials, the server answers the proxy's
   /// challenges for every page, those of contexts its clients create
-  /// included.
+  /// included: on Chromium over a `DevTools` connection of its own, on
+  /// Firefox through the shared session, whose own connection answers them.
   ///
   /// # Errors
   ///
-  /// The browser is not Chromium over a `DevTools` WebSocket, the address
-  /// cannot be bound, or the browser refuses to attach to its targets.
+  /// The browser is neither Chromium over a `DevTools` WebSocket nor a
+  /// browser over `BiDi`, the address cannot be bound, or the browser
+  /// refuses to attach to its targets.
   pub async fn serve(browser: Browser, options: ServeOptions) -> Result<Self> {
     let (upstream, proxy) = {
       let state = browser.state().read().await;
       let key = &browser.default_context().key;
       let plan = state.page_open_plan(key)?;
-      let upstream = plan
-        .browser
-        .cdp_ws_endpoint()
-        .map(str::to_string)
-        .ok_or_else(|| FerriError::backend("launchServer: the browser exposes no DevTools endpoint"))?;
-      (upstream, state.effective_proxy(&key.to_composite()))
+      let proxy = state.effective_proxy(&key.to_composite());
+      let credentials = proxy
+        .as_ref()
+        .filter(|proxy| !proxy.is_authenticated_socks())
+        .and_then(crate::options::ProxyConfig::credentials);
+      let upstream = match (plan.browser.cdp_ws_endpoint(), plan.browser.bidi_session()) {
+        (Some(endpoint), _) => Upstream::Cdp(endpoint.to_string()),
+        (None, Some(session)) => Upstream::Bidi(crate::backend::bidi::relay::Relay::start(session, credentials).await?),
+        (None, None) => {
+          return Err(FerriError::backend(
+            "launchServer: the browser exposes neither a DevTools endpoint nor a BiDi session",
+          ));
+        },
+      };
+      (upstream, proxy)
     };
     let host = options.host.clone().unwrap_or_else(|| "127.0.0.1".to_string());
     let listener = tokio::net::TcpListener::bind((host.as_str(), options.port.unwrap_or(0)))
@@ -206,13 +236,15 @@ impl BrowserServer {
 
     // An authenticated SOCKS5 proxy is reached through a relay that logs in
     // for the browser, so it never challenges.
-    let proxy_answers = match proxy
-      .filter(|proxy| !proxy.is_authenticated_socks())
-      .as_ref()
-      .and_then(crate::options::ProxyConfig::credentials)
-    {
-      Some(credentials) => Some(answer_proxy_challenges(&upstream, credentials).await?),
-      None => None,
+    let proxy_answers = match (
+      &upstream,
+      proxy
+        .filter(|proxy| !proxy.is_authenticated_socks())
+        .as_ref()
+        .and_then(crate::options::ProxyConfig::credentials),
+    ) {
+      (Upstream::Cdp(endpoint), Some(credentials)) => Some(answer_proxy_challenges(endpoint, credentials).await?),
+      _ => None,
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let accept = tokio::spawn(accept_clients(listener, upstream, admission, stopped));
@@ -269,7 +301,7 @@ impl Admission {
 
 async fn accept_clients(
   listener: tokio::net::TcpListener,
-  upstream: String,
+  upstream: Upstream,
   admission: Arc<Admission>,
   stopped: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -291,11 +323,12 @@ async fn accept_clients(
   }
 }
 
-/// Admit one client and relay its frames to a browser connection of its own
-/// until either side hangs up or the server stops.
+/// Admit one client and relay its frames to a browser connection of its own,
+/// or join it to the shared `BiDi` session, until either side hangs up or
+/// the server stops.
 async fn join(
   socket: tokio::net::TcpStream,
-  upstream: &str,
+  upstream: &Upstream,
   admission: &Admission,
   mut stopped: tokio::sync::watch::Receiver<bool>,
 ) -> std::result::Result<(), String> {
@@ -314,6 +347,13 @@ async fn join(
   let client = tokio_tungstenite::accept_hdr_async(socket, check)
     .await
     .map_err(|e| format!("handshake: {e}"))?;
+  let upstream = match upstream {
+    Upstream::Cdp(endpoint) => endpoint,
+    Upstream::Bidi(relay) => {
+      Arc::clone(relay).join(client, stopped).await;
+      return Ok(());
+    },
+  };
   let (browser, _) = tokio_tungstenite::connect_async(upstream)
     .await
     .map_err(|e| format!("browser: {e}"))?;
@@ -476,7 +516,7 @@ impl ProxyAnswers {
   }
 }
 
-async fn until_stopped(stopped: &mut tokio::sync::watch::Receiver<bool>) {
+pub(crate) async fn until_stopped(stopped: &mut tokio::sync::watch::Receiver<bool>) {
   while !*stopped.borrow_and_update() {
     if stopped.changed().await.is_err() {
       return;

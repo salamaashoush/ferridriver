@@ -17,6 +17,7 @@ mod frames;
 pub mod input;
 pub mod page;
 mod profile;
+pub(crate) mod relay;
 mod scope;
 pub(crate) mod session;
 #[cfg(test)]

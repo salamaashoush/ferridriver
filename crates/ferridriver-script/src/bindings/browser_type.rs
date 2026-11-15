@@ -81,8 +81,9 @@ impl BrowserTypeJs {
   }
 
   /// Playwright `browserType.launchServer(options?)`: Chromium serving its
-  /// `DevTools` Protocol on `host:port` (loopback and a free port unless
-  /// given), admitting clients on `wsPath` and, when set, `token`.
+  /// `DevTools` Protocol, or Firefox its `WebDriver` `BiDi` session, on
+  /// `host:port` (loopback and a free port unless given), admitting clients
+  /// on `wsPath` and, when set, `token`.
   #[qjs(rename = "launchServer")]
   pub async fn launch_server<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let (launch, serve) = match options.0 {

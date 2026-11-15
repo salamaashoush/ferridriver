@@ -110,8 +110,8 @@ test('a script serves chromium with launchServer and another connection drives i
         const context = await browser.newContext();
         const page = await context.newPage();
         await page.setContent('<title>remote</title>');
-        const notChromium = await firefox().launchServer().then(() => 'served', (error) => String(error.message));
-        return { title: await page.title(), refused, notChromium };
+        const notServed = await webkit().launchServer().then(() => 'served', (error) => String(error.message));
+        return { title: await page.title(), refused, notServed };
       } finally {
         await browser.close();
       }
@@ -121,7 +121,67 @@ test('a script serves chromium with launchServer and another connection drives i
   `);
   assert.equal(response.value.title, 'remote');
   assert.notEqual(response.value.refused, 'connected');
-  assert.match(response.value.notChromium, /DevTools Protocol/);
+  assert.match(response.value.notServed, /WebDriver BiDi/);
+});
+
+// Firefox holds one BiDi session, which the server's own connection has:
+// every client shares it, sees what it subscribed to, and what one client
+// ends is its own.
+test('a served Firefox is driven by two BiDi clients at once, and one leaving ends nothing of the other', async () => {
+  test.setTimeout(90000);
+  const response = await script(`
+    const server = await firefox().launchServer({ token: 'sashoush-bidi-token' });
+    try {
+      const endpoint = server.wsEndpoint();
+      const refused = await firefox().connect(endpoint.replace('sashoush-bidi-token', 'wrong'), { timeout: 5000 })
+        .then(() => 'connected', (error) => String(error.message));
+      const first = await firefox().connect(endpoint);
+      const second = await firefox().connect(endpoint);
+      const one = await (await first.newContext()).newPage();
+      const two = await (await second.newContext()).newPage();
+      await one.setContent('<title>first</title>');
+      await two.setContent('<title>second</title>');
+      const logged = [];
+      two.on('console', (message) => logged.push(message.text()));
+      await two.evaluate(() => console.log('from the second'));
+      await first.close();
+      await two.setContent('<title>still second</title>');
+      const after = await two.title();
+      const third = await firefox().connect(endpoint);
+      const three = await (await third.newContext()).newPage();
+      await three.setContent('<title>third</title>');
+      const titles = [await three.title(), after];
+      await second.close();
+      await third.close();
+      return { titles, logged, refused };
+    } finally {
+      await server.close();
+    }
+  `);
+  assert.deepEqual(response.value.titles, ['third', 'still second']);
+  assert.deepEqual(response.value.logged, ['from the second']);
+  assert.notEqual(response.value.refused, 'connected');
+});
+
+test('browser serve --browser firefox serves BiDi to a client that connects', async () => {
+  test.setTimeout(120000);
+  await commands.start('ui', { command: `exec ${quote(binary)} browser serve --browser firefox --token sashoush-cli-token` });
+  try {
+    const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+    assert.match(endpoint, /^ws:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}\?token=sashoush-cli-token$/);
+    const response = await script(`
+      const browser = await firefox().connect(${JSON.stringify(endpoint)});
+      const page = await (await browser.newContext()).newPage();
+      await page.setContent('<title>over bidi</title>');
+      const title = await page.title();
+      await browser.close();
+      return title;
+    `);
+    assert.equal(response.value, 'over bidi');
+    assert.match(commands.status('ui').stderr, /serving firefox on/);
+  } finally {
+    await stopEach('ui');
+  }
 });
 
 // The fixture server's forwarding proxies want credentials and resolve

@@ -146,17 +146,24 @@ of a file.
 ## `ferridriver browser serve`
 
 ```
-ferridriver browser serve [--host ADDR] [--port N] [--token TOKEN]
-                          [--ws-path PATH] [--headed] [--executable-path PATH]
-                          [--arg SWITCH]... [--proxy URL] [--proxy-bypass HOSTS]
-                          [--exit-with-stdin]
+ferridriver browser serve [--browser chromium|firefox] [--host ADDR] [--port N]
+                          [--token TOKEN] [--ws-path PATH] [--headed]
+                          [--executable-path PATH] [--arg SWITCH]...
+                          [--proxy URL] [--proxy-bypass HOSTS] [--exit-with-stdin]
 ```
 
-Launches Chromium and serves its DevTools Protocol to other processes. The
-first line on stdout is the WebSocket URL to dial, for
-`ferridriver test --connect`, `chromium().connectOverCDP()` or any CDP
-client. Each client gets its own connection to the browser; nothing is
-translated.
+Launches a browser and serves its own protocol to other processes. The
+first line on stdout is the WebSocket URL to dial. Chromium serves its
+DevTools Protocol, for `ferridriver test --connect`,
+`chromium().connectOverCDP()` or any CDP client; each client gets its own
+connection to the browser, and nothing is translated. Firefox serves
+WebDriver BiDi, for `firefox().connect()` or any BiDi client. Firefox holds
+one BiDi session at a time, so every client shares the server's: its
+`session.new` is answered with that session's capabilities, its commands
+come back under its own ids, it receives the events it subscribed to, and
+what it ends (`session.end`, `browser.close`, or hanging up) removes its
+subscriptions and what it added (user contexts, intercepts, data
+collectors, preload scripts), and nothing of the other clients'.
 
 A client is admitted on the URL's path, an unguessable string unless
 `--ws-path` names one, and, when the server has a token, on

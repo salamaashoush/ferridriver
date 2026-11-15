@@ -871,6 +871,16 @@ impl AnyBrowser {
     }
   }
 
+  /// The `WebDriver` `BiDi` session of a browser driven over one, which a
+  /// served browser shares with its clients. `None` on every other
+  /// transport.
+  pub(crate) fn bidi_session(&self) -> Option<std::sync::Arc<bidi::session::BidiSession>> {
+    match self {
+      Self::Bidi(b) => Some(std::sync::Arc::clone(&b.session)),
+      _ => None,
+    }
+  }
+
   #[must_use]
   pub fn is_alive(&self) -> bool {
     match self {

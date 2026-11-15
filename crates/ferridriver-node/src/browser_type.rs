@@ -153,8 +153,9 @@ impl BrowserType {
 
   /// Playwright `browserType.launchServer(options?) -> Promise<BrowserServer>`.
   ///
-  /// Serves the Chrome `DevTools` Protocol, so Chromium only; a client dials
-  /// `wsEndpoint()` with `connectOverCDP` or `connect`. `token`, when set,
+  /// Serves the browser's own protocol: the Chrome `DevTools` Protocol for
+  /// Chromium, which a client dials with `connectOverCDP` or `connect`, and
+  /// `WebDriver` `BiDi` for Firefox, which `firefox.connect` dials. `token`, when set,
   /// must come with every client as `Authorization: Bearer <token>` or a
   /// `token` query parameter, which the endpoint URL carries.
   #[napi(ts_args_type = "options?: {

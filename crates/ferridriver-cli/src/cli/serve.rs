@@ -10,14 +10,17 @@ pub struct BrowserCommandArgs {
 
 #[derive(Subcommand)]
 pub enum BrowserCommand {
-  /// Launch Chromium and serve its `DevTools` endpoint to other processes.
+  /// Launch a browser and serve its own protocol to other processes:
+  /// Chromium's `DevTools` endpoint, or Firefox's `WebDriver` `BiDi` session.
   ///
-  /// Prints the WebSocket URL a CDP client dials (`connectOverCDP`,
-  /// `ferridriver test --connect`) on stdout, then serves until it is sent
-  /// SIGTERM or SIGINT, the browser exits, or (with `--exit-with-stdin`) its
-  /// input ends, closing the browser on the way out.
+  /// Prints the WebSocket URL a client dials (`connectOverCDP`,
+  /// `firefox().connect()`, `ferridriver test --connect`) on stdout, then
+  /// serves until it is sent SIGTERM or SIGINT, the browser exits, or (with
+  /// `--exit-with-stdin`) its input ends, closing the browser on the way out.
+  /// Every client of a served Firefox shares its one `BiDi` session.
   #[command(after_help = "Examples:\n  \
     ferridriver browser serve\n  \
+    ferridriver browser serve --browser firefox\n  \
     ferridriver browser serve --host 0.0.0.0 --port 9300 --token \"$GRID_TOKEN\"\n  \
     FERRIDRIVER_BROWSER_PROXY=http://user:pass@proxy.example.com:3128 ferridriver browser serve\n  \
     ferridriver test --connect ws://grid-worker:9300/<path>?token=...")]
@@ -26,6 +29,11 @@ pub enum BrowserCommand {
 
 #[derive(Args)]
 pub struct BrowserServeArgs {
+  /// The browser to serve: `chromium` over the `DevTools` Protocol, or
+  /// `firefox` over `WebDriver` `BiDi`.
+  #[arg(long, default_value = "chromium")]
+  pub browser: ferridriver::options::BrowserKind,
+
   /// Address to listen on. Anything but loopback gets a token, generated
   /// when `--token` is not given.
   #[arg(long, default_value = "127.0.0.1")]
@@ -49,11 +57,12 @@ pub struct BrowserServeArgs {
   #[arg(long)]
   pub headed: bool,
 
-  /// Chromium binary to launch instead of the installed one.
+  /// Browser binary to launch instead of the installed one.
   #[arg(long)]
   pub executable_path: Option<String>,
 
-  /// Extra Chromium switch, repeatable (`--arg=--lang=de`).
+  /// Extra command-line argument for the browser, repeatable
+  /// (`--arg=--lang=de` for Chromium).
   #[arg(long = "arg", allow_hyphen_values = true)]
   pub args: Vec<String>,
 
