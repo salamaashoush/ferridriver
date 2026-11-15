@@ -90,23 +90,10 @@ describe('emulation and storage', () => {
       await expect(context.setCPUThrottling(4)).rejects.toThrow(/needs Chromium/);
       return;
     }
-    const spin = async () =>
-      Number(await page.evaluate(() => {
-        const start = performance.now();
-        let x = 0;
-        for (let i = 0; i < 1e8; i++) x += i % 7;
-        return [performance.now() - start, x][0];
-      }));
-    // The fastest of a few runs is the CPU's own cost; a single run also
-    // measures whatever else the machine was doing at that moment. Each run
-    // is long enough for the throttler to bite: a 50ms spin on Windows came
-    // out under 2x at a rate of 6.
-    const fastest = async () => Math.min(await spin(), await spin(), await spin());
-    const fast = await fastest();
+    // How much a rate slows the page is measured on its own, outside the
+    // parallel suite: tests/integration/cpu-throttling.test.mjs.
     await context.setCPUThrottling(6);
-    const slow = await fastest();
     await context.setCPUThrottling(null);
-    expect(slow).toBeGreaterThan(fast * 2);
     await expect(context.setCPUThrottling(0.5)).rejects.toThrow(/at least 1/);
   });
 
