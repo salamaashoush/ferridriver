@@ -238,7 +238,24 @@ async fn waits_listen_from_the_call_on_webkit() -> anyhow::Result<()> {
   Box::pin(waits_listen_from_the_call(launch(ferridriver::webkit()).await?)).await
 }
 
+/// The protocol trace a failing run prints, when `FERRIDRIVER_TEST_TRACE`
+/// names one (`ferridriver::backend::bidi=trace`). The first download on
+/// `BiDi` timed out on hosted Windows runners only, never on a Windows host
+/// of the same architecture; the trace says whether Firefox ever reported
+/// `browsingContext.downloadWillBegin`. Written through libtest's capture,
+/// so a passing run prints nothing.
+fn trace_from_env() {
+  if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_env("FERRIDRIVER_TEST_TRACE") {
+    let _ = tracing_subscriber::fmt()
+      .with_env_filter(filter)
+      .with_test_writer()
+      .with_ansi(false)
+      .try_init();
+  }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn waits_listen_from_the_call_on_bidi() -> anyhow::Result<()> {
+  trace_from_env();
   Box::pin(waits_listen_from_the_call(launch(ferridriver::firefox()).await?)).await
 }
