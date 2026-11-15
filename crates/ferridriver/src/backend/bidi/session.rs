@@ -370,6 +370,11 @@ impl BidiSession {
     }
 
     command.env("MOZ_CRASHREPORTER_DISABLE", "1");
+    // Release Firefox honours the remote-settings server pref below only
+    // with this set. Without it Firefox fetches Mozilla's at startup,
+    // through a launch proxy too, before the BiDi session exists to answer
+    // the proxy's challenge, and `session.new` can wait a minute on it.
+    command.env("MOZ_REMOTE_SETTINGS_DEVTOOLS", "1");
     if let Some(app_data) = &profile_dir.app_data {
       command.env("MOZ_APP_DATA", app_data.path());
       // On Linux Firefox's startup cache and fontconfig's font cache go
@@ -658,7 +663,7 @@ user_pref("focusmanager.testmode", true);
 user_pref("geo.provider.testing", true);
 user_pref("geo.wifi.scan", false);
 user_pref("general.useragent.updates.enabled", false);
-user_pref("services.settings.server", "http://dummy.test/dummy/blocklist/");
+user_pref("services.settings.server", "data:,#remote-settings-dummy/v1");
 user_pref("services.sync.enabled", false);
 user_pref("media.gmp-manager.updateEnabled", false);
 user_pref("media.sanity-test.disabled", true);
