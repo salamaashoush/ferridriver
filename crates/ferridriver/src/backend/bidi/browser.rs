@@ -25,6 +25,10 @@ pub struct BidiBrowser {
   /// [`crate::backend::PopupInfo`]) fed by the connect-time
   /// `browsingContext.contextCreated` listener.
   popup_taps: crate::backend::PopupTaps,
+  /// Which top-level contexts our own `browsingContext.create` made, so
+  /// the listener adopts every other one: a page another client of a
+  /// shared session opened, which carries no opener.
+  create_ledger: Arc<crate::backend::CreateLedger<(String, String)>>,
   /// Owned Firefox `--profile` directory for launched browsers. Removed
   /// by `close()`, or by the last handle drop if nobody closed. `None`
   /// for `connect()` — we don't own the profile of a browser someone
@@ -123,7 +127,8 @@ impl BidiBrowser {
     .await?;
     let session = Arc::new(session);
     let downloads_dir = new_downloads_dir()?;
-    let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
+    let create_ledger = Arc::new(crate::backend::CreateLedger::default());
+    let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir, &create_ledger);
     let owns_profile = profile.owned.is_some();
     let mut group = crate::backend::process::ChildGroup::recorded(child, Some(&profile.path), owns_profile);
     group.own_dir(downloads_dir.path());
@@ -131,6 +136,7 @@ impl BidiBrowser {
       session,
       child: Arc::new(tokio::sync::Mutex::new(Some(group))),
       popup_taps,
+      create_ledger,
       // A persistent profile is the caller's, so nothing here may delete
       // it — that is the whole point of asking for one.
       profile_dir: profile
@@ -248,11 +254,13 @@ impl BidiBrowser {
 
   fn from_session(session: Arc<BidiSession>) -> Result<Self> {
     let downloads_dir = new_downloads_dir()?;
-    let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir);
+    let create_ledger = Arc::new(crate::backend::CreateLedger::default());
+    let popup_taps = Self::spawn_popup_listener(&session, &downloads_dir, &create_ledger);
     Ok(Self {
       session,
       child: Arc::new(tokio::sync::Mutex::new(None)),
       popup_taps,
+      create_ledger,
       profile_dir: None,
       downloads_dir,
       webdriver: None,
@@ -269,13 +277,18 @@ impl BidiBrowser {
   /// contexts our `new_page` creates via `browsingContext.create`
   /// never do. Mirrors Playwright's
   /// `bidiBrowser.ts::_onBrowsingContextCreated`, which resolves the
-  /// opener from the same field.
+  /// opener from the same field. A top-level context with no opener that
+  /// no create of ours made is another client's page on a shared session,
+  /// adopted the same way once the ledger says it is not ours.
   fn spawn_popup_listener(
     session: &Arc<BidiSession>,
     downloads_dir: &Arc<tempfile::TempDir>,
+    ledger: &Arc<crate::backend::CreateLedger<(String, String)>>,
   ) -> crate::backend::PopupTaps {
     let taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut rx = session.transport.tap_events();
+    let mut flushed = ledger.take_flush_rx();
+    let ledger = Arc::clone(ledger);
     let session = Arc::clone(session);
     let downloads_dir = Arc::clone(downloads_dir);
     let listener_taps = Arc::clone(&taps);
@@ -286,7 +299,47 @@ impl BidiBrowser {
       // only the session intercept blocked on a page with no say in it.
       let mut popups: PopupRequests = rustc_hash::FxHashMap::default();
       let mut parents: rustc_hash::FxHashMap<String, String> = rustc_hash::FxHashMap::default();
-      while let Some(event) = rx.recv().await {
+      let adopt = |popups: &mut PopupRequests, context_id: &str, user_context: String, opener: Option<&str>| {
+        let page = BidiPage::create(
+          session.clone(),
+          context_id.to_string(),
+          Some(&user_context),
+          Arc::clone(&downloads_dir),
+        );
+        let (requests, forwarded) = tokio::sync::mpsc::unbounded_channel();
+        page.adopt_popup(forwarded);
+        popups.insert(context_id.to_string(), requests);
+        // Claimed inline: BidiPage::create is pure construction (no
+        // wire round-trip), and readiness is the pump's business.
+        let delivered = crate::backend::push_popup(
+          &listener_taps,
+          crate::backend::PopupInfo {
+            page: crate::backend::AnyPage::Bidi(page),
+            browser_context_id: if user_context == "default" {
+              None
+            } else {
+              Some(user_context)
+            },
+            opener_target_id: opener.map(str::to_string),
+          },
+        );
+        if !delivered {
+          debug!("popup {context_id} observed with no pump subscribed");
+        }
+      };
+      loop {
+        let event = tokio::select! {
+          event = rx.recv() => match event {
+            Some(event) => event,
+            None => break,
+          },
+          Some(()) = flushed.recv() => {
+            for (context_id, user_context) in ledger.take_unowned_parked() {
+              adopt(&mut popups, &context_id, user_context, None);
+            }
+            continue;
+          },
+        };
         match event.method.as_str() {
           "browsingContext.contextCreated" => {},
           "browsingContext.contextDestroyed" => {
@@ -309,40 +362,19 @@ impl BidiBrowser {
           parents.insert(context_id.to_string(), parent.to_string());
           continue;
         }
-        let Some(opener) = event.params.get("originalOpener").and_then(|v| v.as_str()) else {
-          continue;
-        };
         let user_context = event
           .params
           .get("userContext")
           .and_then(|v| v.as_str())
           .unwrap_or("default")
           .to_string();
-        let page = BidiPage::create(
-          session.clone(),
-          context_id.to_string(),
-          Some(&user_context),
-          Arc::clone(&downloads_dir),
-        );
-        let (requests, forwarded) = tokio::sync::mpsc::unbounded_channel();
-        page.adopt_popup(forwarded);
-        popups.insert(context_id.to_string(), requests);
-        // Claimed inline: BidiPage::create is pure construction (no
-        // wire round-trip), and readiness is the pump's business.
-        let delivered = crate::backend::push_popup(
-          &listener_taps,
-          crate::backend::PopupInfo {
-            page: crate::backend::AnyPage::Bidi(page),
-            browser_context_id: if user_context == "default" {
-              None
-            } else {
-              Some(user_context)
-            },
-            opener_target_id: Some(opener.to_string()),
+        match event.params.get("originalOpener").and_then(|v| v.as_str()) {
+          Some(opener) => adopt(&mut popups, context_id, user_context, Some(opener)),
+          None => {
+            if ledger.try_claim_ownerless(context_id, (context_id.to_string(), user_context.clone())) {
+              adopt(&mut popups, context_id, user_context, None);
+            }
           },
-        );
-        if !delivered {
-          debug!("popup {context_id} observed with no pump subscribed");
         }
       }
     });
@@ -493,16 +525,21 @@ impl BidiBrowser {
       params["userContext"] = json!(user_context_id);
     }
     let mut rx = self.session.transport.tap_events();
-    let result = self
+    self.create_ledger.begin_create();
+    let created = self
       .session
       .transport
       .send_command("browsingContext.create", params)
-      .await?;
-    let context_id = result
-      .get("context")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::protocol("browsingContext.create", "missing context id"))?
-      .to_string();
+      .await
+      .and_then(|result| {
+        result
+          .get("context")
+          .and_then(|v| v.as_str())
+          .map(str::to_string)
+          .ok_or_else(|| FerriError::protocol("browsingContext.create", "missing context id"))
+      });
+    self.create_ledger.end_create(created.as_deref().ok());
+    let context_id = created?;
 
     let wait_for_created = async {
       while let Some(event) = rx.recv().await {
