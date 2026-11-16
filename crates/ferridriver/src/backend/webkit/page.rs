@@ -2500,7 +2500,7 @@ impl WebKitPage {
     // Subscribe BEFORE startScreencast so we don't drop frames that
     // fire between the call returning and the listener spawning.
     let mut events = self.proxy.events();
-    self
+    let started = self
       .proxy
       .send(
         "Screencast.startScreencast",
@@ -2513,6 +2513,25 @@ impl WebKitPage {
       )
       .await
       .map_err(conn_err)?;
+    // WebKit holds back further frames until each one is acknowledged
+    // with the generation startScreencast returned, as Playwright's
+    // wkPage.ts::_onScreencastFrame does.
+    let generation = started.get("generation").cloned().ok_or_else(|| {
+      FerriError::protocol(
+        "Screencast.startScreencast",
+        "no generation to acknowledge frames with",
+      )
+    })?;
+    let acknowledger = self.proxy.clone();
+    let acknowledge = move || {
+      let proxy = acknowledger.clone();
+      let generation = generation.clone();
+      tokio::spawn(async move {
+        let _ = proxy
+          .send("Screencast.screencastFrameAck", json!({ "generation": generation }))
+          .await;
+      });
+    };
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, f64)>();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -2532,10 +2551,11 @@ impl WebKitPage {
             break;
           },
         };
-        if let Some(frame) = frame_of(&env)
-          && tx.send(frame).is_err()
-        {
-          break;
+        if let Some(frame) = frame_of(&env) {
+          if tx.send(frame).is_err() {
+            break;
+          }
+          acknowledge();
         }
       }
     });
