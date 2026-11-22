@@ -239,8 +239,7 @@ Common causes:
   DejaVu / Noto in CI.
 
 - **Headless behavior.** A few sites detect headless mode and serve
-  different HTML. Run locally without `--headless` (MCP and `run` are
-  headed by default) to confirm.
+  different HTML. Run locally with `--headed` to confirm.
 
 ## Performance
 

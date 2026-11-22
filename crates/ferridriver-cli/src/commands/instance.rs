@@ -45,7 +45,7 @@ pub async fn provision_instance(
   // applies to every instance that does not override it, and a hard-coded
   // default here would silently ignore it. `--headed` is the operator asking
   // to watch this one run, so it wins over both.
-  let headless = !headed && overrides.headless.unwrap_or(false);
+  let headless = !headed && overrides.headless.unwrap_or(true);
   let mode = connection
     .clone()
     .or_else(|| mcp_config.resolve_instance(instance))

@@ -116,7 +116,7 @@ cargo test --test e2e -- -g smoke --retries 2
 ferridriver test --headless --grep smoke     # forwards flags as FERRITEST_* env vars
 ```
 
-Tests run headed by default; pass `--headless` to opt into headless mode.
+Tests run headless by default; pass `--headed` to watch them in a window.
 Under cargo-nextest a `harness = false` binary appears as a single test;
 filter inside the harness with `--grep` / `FERRITEST_GREP` instead.
 

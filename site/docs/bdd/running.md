@@ -76,7 +76,7 @@ ferridriver-test = "0.4"
 cargo test --test bdd -- -j 4 --tags '@smoke and not @wip'
 ```
 
-Tests run headed by default; pass `--headless` to opt into headless mode.
+Tests run headless by default; pass `--headed` to watch them in a window.
 
 ## Reporters
 

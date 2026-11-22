@@ -258,14 +258,14 @@ impl McpConfig {
     })
   }
 
-  /// Whether headless mode is enabled (defaults to false).
+  /// Whether headless mode is enabled (defaults to true).
   #[must_use]
   pub fn headless(&self) -> bool {
     self
       .browser
       .headless
       .or_else(|| self.browser.global_browser.as_ref().and_then(|g| g.headless))
-      .unwrap_or(false)
+      .unwrap_or(true)
   }
 
   /// Cache TTL for command outputs.
@@ -485,7 +485,7 @@ mod tests {
     );
     assert!(config.resolve_instance("dev").is_none());
     assert_eq!(config.backend_kind(), BackendKind::CdpPipe);
-    assert!(!config.headless());
+    assert!(config.headless());
   }
 
   #[test]

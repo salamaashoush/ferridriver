@@ -170,7 +170,7 @@ transport.
 - **Writing a new suite today**: start on `cdp-pipe`. Add `webkit` and
   `bidi` projects when you need cross-browser coverage.
 - **Debugging a single test**: `--backend cdp-pipe` with `--workers 1` —
-  one browser, linear output. (MCP / `run` launch headed by default.)
+  one browser, linear output; add `--headed` to watch it.
 - **Attaching to a logged-in profile**: `cdp-raw` with
   `chromium().connect(...)`.
 - **Safari-family regression**: `webkit`.

@@ -36,9 +36,7 @@ reuseExistingServer = true
 # Backend matrix for the TS e2e suite: `ferridriver test` runs every
 # project; `--project <name>` narrows. BDD features are NOT in testMatch
 # — the feature suite runs through its own `ferridriver bdd` invocation
-# on the single [test.browser] above. Each project sets headless
-# explicitly: a project browser section that omits it would force
-# headed mode (the merge cannot tell an unset flag from `false`).
+# on the single [test.browser] above.
 
 [[test.projects]]
 name = "cdp-pipe"
