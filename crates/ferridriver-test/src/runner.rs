@@ -194,6 +194,14 @@ pub struct TestRunner {
   /// Worker numbers for the run in flight, shared with every project of
   /// it — see the reservation in [`Self::execute_with_summary`].
   worker_ids: Arc<std::sync::atomic::AtomicU32>,
+  /// The run's worker slots when projects share them; a runner on its
+  /// own makes its own.
+  run_slots: Option<Arc<crate::dispatcher::RunSlots>>,
+  /// The project's roster, when the run that started it ranked it
+  /// before it began.
+  project_roster: Option<Arc<crate::dispatcher::WorkerRoster>>,
+  /// Test durations from earlier runs, shared by every project of a run.
+  timings: Option<Arc<crate::timings::Timings>>,
 }
 
 /// Drop and annotate what a reporter's `preprocess` asked for, under
@@ -296,6 +304,9 @@ impl TestRunner {
       live_traces: false,
       project_plans: ProjectPlans::default(),
       worker_ids: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+      run_slots: None,
+      project_roster: None,
+      timings: None,
     }
   }
 
@@ -414,6 +425,9 @@ impl TestRunner {
       live_traces: self.live_traces,
       project_plans: self.project_plans.clone(),
       worker_ids: Arc::clone(&self.worker_ids),
+      run_slots: self.run_slots.clone(),
+      project_roster: None,
+      timings: self.timings.clone(),
     }
   }
 
@@ -655,16 +669,15 @@ impl TestRunner {
     let bus = builder.build();
 
     let narrow = move |name: &str, plan: &mut TestPlan| apply_run_edits(plan, name, &edits);
-    let summary = self
-      .execute_projects_with_summary(
-        plan,
-        bus.clone(),
-        ProjectHooks {
-          narrow: Some(&narrow),
-          ..ProjectHooks::default()
-        },
-      )
-      .await;
+    let summary = Box::pin(self.execute_projects_with_summary(
+      plan,
+      bus.clone(),
+      ProjectHooks {
+        narrow: Some(&narrow),
+        ..ProjectHooks::default()
+      },
+    ))
+    .await;
 
     bus.close();
     if let Some(driver_handle) = driver_handle
@@ -819,7 +832,13 @@ impl TestRunner {
     let mut merged: FxHashMap<usize, Arc<TestConfig>> = FxHashMap::default();
     let mut plans: FxHashMap<usize, TestPlan> = FxHashMap::default();
     let mut total_tests = 0usize;
-    for &idx in &scheduled {
+    // A project others depend on runs whole, and only when one of them
+    // has tests (see `dependents_of`); dependents are planned first.
+    let dependents = dependents_of(&projects, &scheduled);
+    let exempt_overrides = without_file_filters(&self.overrides);
+    let exempt_runner = self.with_run_options(Arc::clone(&self.config), exempt_overrides.clone());
+    let mut exempt: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+    for &idx in scheduled.iter().rev() {
       let mut mc = self.config.merge_project(&projects[idx]);
       mc.web_server = Vec::new();
       let mut p = self
@@ -827,12 +846,27 @@ impl TestRunner {
         .get(&projects[idx].name)
         .map_or_else(|| plan.clone(), |own| (*own).clone());
       filter_plan_for_project(&mut p, &mc, &projects[idx]);
-      if let Err(message) = self.apply_run_filters(&mut p, &projects[idx].name) {
+      let needed_by = dependents.get(&idx).map_or(&[][..], Vec::as_slice);
+      let filters = if needed_by.is_empty() {
+        self
+      } else {
+        exempt.insert(idx);
+        &exempt_runner
+      };
+      if let Err(message) = filters.apply_run_filters(&mut p, &projects[idx].name) {
         eprintln!("Error: {message}");
         return ExecuteSummary {
           exit_code: exit::USAGE,
           ..Default::default()
         };
+      }
+      if !needed_by.is_empty()
+        && needed_by
+          .iter()
+          .all(|other| plans.get(other).is_none_or(|plan| plan.total_tests == 0))
+      {
+        p.suites.clear();
+        p.total_tests = 0;
       }
       p.expand_repetitions(mc.repeat_each);
       if let Some(narrow) = hooks.narrow {
@@ -897,7 +931,31 @@ impl TestRunner {
     let mut remaining: Vec<usize> = scheduled.clone();
     let mut join_set: tokio::task::JoinSet<(usize, Option<ExecuteSummary>)> = tokio::task::JoinSet::new();
     let mut in_flight = 0usize;
-    let worker_slots = Arc::new(tokio::sync::Semaphore::new(num_workers as usize));
+    // Every project running draws its workers from these, the one with
+    // the longest critical path first: its own expected work, and the
+    // work of the projects that wait for it to finish.
+    let worker_slots = crate::dispatcher::RunSlots::new(num_workers);
+    let timings = Arc::new(crate::timings::Timings::load(&crate::identity::root(&self.config)));
+    let cap_of = |idx: usize| {
+      merged
+        .get(&idx)
+        .map_or_else(|| self.config.worker_count(), |config| config.worker_count())
+        .clamp(1, num_workers)
+    };
+    let mut planned: FxHashMap<usize, Vec<u64>> = plans
+      .iter()
+      .map(|(&idx, plan)| {
+        let name = projects[idx].name.as_str();
+        let tests = plan.suites.iter().flat_map(|suite| &suite.tests);
+        (idx, tests.map(|test| timings.expected([test], name)).collect())
+      })
+      .collect();
+    let after = work_waiting_on(&projects, &scheduled, |idx| {
+      planned
+        .get(&idx)
+        .map_or(0, |work| work.iter().sum::<u64>() / u64::from(cap_of(idx)))
+    });
+    let mut rosters: FxHashMap<usize, Arc<crate::dispatcher::WorkerRoster>> = FxHashMap::default();
 
     let mut exit_code = 0i32;
     let mut agg = ExecuteSummary::default();
@@ -908,7 +966,7 @@ impl TestRunner {
       // keep scanning until no further progress is possible this round.
       // A stop (a signal, the UI's Stop) lets running projects finish their
       // current tests and starts nothing new.
-      while in_flight < cap && worker_slots.available_permits() > 0 && !self.run_stop.is_requested() {
+      while in_flight < cap && !self.run_stop.is_requested() {
         // Find a not-yet-started project whose prerequisites are all terminal.
         let next = remaining.iter().copied().find(|&idx| {
           prereqs
@@ -962,32 +1020,37 @@ impl TestRunner {
           "running project",
         );
 
-        let ready_projects = remaining
-          .iter()
-          .filter(|&&pending| {
-            plans.get(&pending).is_some_and(|plan| plan.total_tests > 0)
-              && prereqs
-                .get(&pending)
-                .is_none_or(|deps| deps.iter().all(|(dep, _)| terminal.contains(dep)))
-          })
-          .count()
-          + 1;
         let mut project_config = merged
           .get(&idx)
           .map_or_else(|| (*self.config).clone(), |c| (**c).clone());
-        let allocation = worker_slots
-          .available_permits()
-          .div_ceil(ready_projects.min(cap - in_flight))
-          .min(project_plan.total_tests)
-          .min(project_config.worker_count().max(1) as usize) as u32;
-        project_config.workers = Some(allocation);
-        // The lease covers browser teardown too; releasing it at the last test
-        // would overlap the next project's launches with live old browsers.
-        let Ok(worker_lease) = Arc::clone(&worker_slots).try_acquire_many_owned(allocation) else {
-          unreachable!("only the project scheduler acquires worker slots");
+        // A project's `workers` caps how many of the run's slots it holds
+        // at once, as in Playwright; which ones it gets is decided test by
+        // test, not up front.
+        project_config.workers = Some(
+          project_config
+            .worker_count()
+            .max(1)
+            .min(num_workers)
+            .min(u32::try_from(project_plan.total_tests).unwrap_or(u32::MAX)),
+        );
+        let overrides = if exempt.contains(&idx) {
+          exempt_overrides.clone()
+        } else {
+          self.overrides.clone()
         };
-        let mut sub_runner = self.with_run_options(Arc::new(project_config), self.overrides.clone());
+        let mut sub_runner = self.with_run_options(Arc::new(project_config), overrides);
         sub_runner.suppress_run_boundary = true;
+        sub_runner.run_slots = Some(Arc::clone(&worker_slots));
+        let roster = crate::dispatcher::WorkerRoster::planned(
+          cap_of(idx).min(sub_runner.config.worker_count()) as usize,
+          num_workers as usize,
+          after.get(&idx).copied().unwrap_or_default(),
+          planned.remove(&idx).unwrap_or_default(),
+        );
+        worker_slots.starting(&roster);
+        rosters.insert(idx, Arc::clone(&roster));
+        sub_runner.project_roster = Some(roster);
+        sub_runner.timings = Some(Arc::clone(&timings));
         let (project_bus, drains) = match hooks.stream {
           Some(stream) => {
             let stream = stream(&projects[idx].name);
@@ -997,7 +1060,6 @@ impl TestRunner {
         };
         let owns_bus = hooks.stream.is_some();
         join_set.spawn(async move {
-          let _worker_lease = worker_lease;
           let summary = sub_runner.execute_with_summary(project_plan, project_bus.clone()).await;
           // A bus of this project's own is this project's to close: its
           // drains must finish before the caller calls the run over.
@@ -1023,6 +1085,9 @@ impl TestRunner {
         in_flight -= 1;
         match joined {
           Ok((idx, Some(summary))) => {
+            if let Some(roster) = rosters.get(&idx) {
+              worker_slots.started(roster);
+            }
             terminal.insert(idx);
             if summary.exit_code == exit::PASSED {
               passed_projects.insert(idx);
@@ -1035,15 +1100,27 @@ impl TestRunner {
             agg.flaky += summary.flaky;
           },
           Ok((idx, None)) => {
+            if let Some(roster) = rosters.get(&idx) {
+              worker_slots.started(roster);
+            }
             terminal.insert(idx);
             exit_code = exit::worst(exit_code, exit::FAILED);
           },
           Err(e) => {
             tracing::error!(target: "ferridriver::runner", "project task panicked: {e}");
+            // Which project it was is gone with it; none may hold slots
+            // back for a start that will not come.
+            for roster in rosters.values() {
+              worker_slots.started(roster);
+            }
             exit_code = exit::worst(exit_code, exit::INFRASTRUCTURE);
           },
         }
       }
+    }
+
+    if let Err(error) = timings.save() {
+      tracing::warn!(target: "ferridriver::runner", "could not keep test durations: {error}");
     }
 
     // ── Single aggregate RunFinished ──
@@ -1193,12 +1270,47 @@ impl TestRunner {
   /// # Errors
   /// When the project selection or the shard assignment is invalid.
   pub fn list(&self, plan: &TestPlan) -> Result<Vec<crate::listing::ListedTest>, String> {
-    let mut listed = Vec::new();
-    for run in self.scheduled_runs()? {
+    let runs = self.scheduled_runs()?;
+    // As the run plans them: a project others depend on runs whole, and
+    // only when one of them has tests (see `dependents_of`).
+    let indices: Vec<usize> = runs
+      .iter()
+      .map(|run| {
+        self
+          .config
+          .projects
+          .iter()
+          .position(|p| p.name == run.name)
+          .unwrap_or(usize::MAX)
+      })
+      .collect();
+    let dependents = dependents_of(&self.config.projects, &indices);
+    let mut plans: FxHashMap<usize, TestPlan> = FxHashMap::default();
+    for (run, &idx) in runs.iter().zip(&indices).rev() {
       let mut narrowed = run.narrow(plan);
-      let runner = self.with_run_options(Arc::clone(&run.config), self.overrides.clone());
+      let needed_by = dependents.get(&idx).map_or(&[][..], Vec::as_slice);
+      let overrides = if needed_by.is_empty() {
+        self.overrides.clone()
+      } else {
+        without_file_filters(&self.overrides)
+      };
+      let runner = self.with_run_options(Arc::clone(&run.config), overrides);
       runner.select_tests(&mut narrowed, &run.name)?;
-      listed.extend(crate::listing::list_plan(&narrowed, &run.name, &run.config));
+      if !needed_by.is_empty()
+        && needed_by
+          .iter()
+          .all(|other| plans.get(other).is_none_or(|p| p.total_tests == 0))
+      {
+        narrowed.suites.clear();
+        narrowed.total_tests = 0;
+      }
+      plans.insert(idx, narrowed);
+    }
+    let mut listed = Vec::new();
+    for (run, idx) in runs.iter().zip(&indices) {
+      if let Some(narrowed) = plans.get(idx) {
+        listed.extend(crate::listing::list_plan(narrowed, &run.name, &run.config));
+      }
     }
     Ok(listed)
   }
@@ -1263,6 +1375,13 @@ impl TestRunner {
   fn apply_run_filters(&self, plan: &mut TestPlan, project: &str) -> Result<(), String> {
     if !self.overrides.test_ids.is_empty() {
       crate::discovery::filter_by_test_ids(plan, project, &self.overrides.test_ids);
+    }
+    // The positional files, as Playwright filters a project's files by
+    // them. A file:line argument narrows its file to those lines below.
+    if !self.overrides.test_files.is_empty() {
+      let cwd = std::env::current_dir().unwrap_or_default();
+      let files = crate::discovery::FileFilter::new(&self.overrides.test_files, &cwd);
+      crate::discovery::filter_by_file(plan, |file| files.matches(file));
     }
     if !self.overrides.locations.is_empty() {
       crate::discovery::filter_by_locations(plan, &self.overrides.locations);
@@ -1592,15 +1711,41 @@ impl TestRunner {
           .sort_by_key(|assignment| assignment.test.id.line.unwrap_or(usize::MAX));
       }
     }
+    let (timings, owns_timings) = match &self.timings {
+      Some(timings) => (Arc::clone(timings), false),
+      None => (
+        Arc::new(crate::timings::Timings::load(&crate::identity::root(&self.config))),
+        true,
+      ),
+    };
     if let Some(seed) = &self.overrides.shuffle {
       shuffle_work(&mut units, seed);
+    } else {
+      // Longest first, so the run does not end on one long test while the
+      // other workers wait. A test that never ran has no length to go by
+      // and goes first, in plan order.
+      units.sort_by_cached_key(|unit| {
+        timings
+          .estimate(unit, &project)
+          .map_or((false, std::cmp::Reverse(0)), |ms| (true, std::cmp::Reverse(ms)))
+      });
     }
+    let slots = self
+      .run_slots
+      .clone()
+      .unwrap_or_else(|| crate::dispatcher::RunSlots::new(num_workers));
+    let roster = self
+      .project_roster
+      .clone()
+      .unwrap_or_else(|| crate::dispatcher::WorkerRoster::new(num_workers as usize, num_workers as usize));
+    roster.begin(num_workers as usize);
     for unit in units {
-      match unit {
+      roster.enqueue(timings.expected(unit.tests(), &project), || match unit {
         crate::dispatcher::WorkItem::Single(assignment) => dispatcher.enqueue_single(assignment),
         crate::dispatcher::WorkItem::Serial(batch) => dispatcher.enqueue_serial(batch),
-      }
+      });
     }
+    slots.started(&roster);
 
     // ── Spawn workers with lazy browser launch ──
     // Each worker holds a `BrowserHandle` that launches the browser on first
@@ -1609,7 +1754,6 @@ impl TestRunner {
     // critical in CI where Chromium's first-launch can exceed 30s.
     let (result_tx, mut result_rx) = mpsc::channel::<WorkerTestResult>(256);
 
-    let mut worker_handles = Vec::new();
     let launch_plan = match build_launch_plan(&self.config.browser) {
       Ok(plan) => plan,
       Err(message) => {
@@ -1659,11 +1803,11 @@ impl TestRunner {
     // scratch directory, a `.playwright-artifacts-0` the UI reads, and —
     // via the per-worker script session — the "test currently running"
     // that `test.step()` and `test.info()` resolve against.
-    let worker_base = self
-      .worker_ids
-      .fetch_add(num_workers, std::sync::atomic::Ordering::SeqCst);
-
-    for slot in 0..num_workers {
+    //
+    // Workers come and go with the work, as Playwright's do: one leaves
+    // once the queue is empty, handing its slot to a project still
+    // running, and work queued later (a retry) enlists new ones.
+    let spawn_worker = |place: crate::dispatcher::RosterPlace| {
       let config = Arc::clone(&self.config);
       let event_bus = worker_event_bus.clone();
       let live_traces = self.live_traces;
@@ -1676,12 +1820,18 @@ impl TestRunner {
       let connection = connection.clone();
       let stop_flag = dispatcher.stop_flag();
       let launch_failed = Arc::clone(&launch_failed);
+      let slots = Arc::clone(&slots);
+      let roster = Arc::clone(&roster);
 
-      let handle = tokio::spawn(async move {
-        let mut id = worker_base + slot;
+      tokio::spawn(async move {
+        // Held until the browser has closed: giving the slot back at the
+        // last test would overlap the next worker's launch with a live
+        // browser.
+        let lease = slots.take(&roster).await;
         let mut pending = None;
         loop {
-          let worker = Worker::new(id, slot, Arc::clone(&config), event_bus.clone(), live_traces);
+          let id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+          let worker = Worker::new(id, lease.index(), Arc::clone(&config), event_bus.clone(), live_traces);
           let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
           let browser_handle = if let Some(b) = &shared {
             Arc::new(BrowserHandle::from_shared(Arc::clone(b)))
@@ -1696,6 +1846,7 @@ impl TestRunner {
             browser_handle,
             custom_pool,
             rx.clone(),
+            &place,
             tx.clone(),
             Arc::clone(&stop_flag),
             pending,
@@ -1704,13 +1855,15 @@ impl TestRunner {
           if pending.is_none() || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
             break;
           }
-          id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         Ok::<(), ferridriver::FerriError>(())
-      });
-      worker_handles.push(handle);
-    }
-    drop(result_tx);
+      })
+    };
+    let mut worker_handles: Vec<_> = roster
+      .enlist(&dispatcher.receiver())
+      .into_iter()
+      .map(&spawn_worker)
+      .collect();
 
     // ── Collect results with retry re-dispatch ──
     // Statuses plus what the test was declared to end in: a `test.fail()`
@@ -1730,20 +1883,35 @@ impl TestRunner {
     let isolated = self.config.retry_strategy == crate::config::RetryStrategy::Isolated;
     let mut waiting_retries: std::collections::VecDeque<WorkerTestResult> = std::collections::VecDeque::new();
     let retry = |result: WorkerTestResult| {
-      dispatcher.retry_shared(crate::dispatcher::Retry {
-        test: result.test,
-        attempt: result.outcome.attempt + 1,
-        suite_key: result.suite_key,
-        hooks: result.hooks,
-        suite_mode: result.suite_mode,
-        serial_tail: result.serial_tail,
+      let expected = timings.expected(
+        std::iter::once(&result.test).chain(result.serial_tail.iter().map(|tail| &tail.test)),
+        &project,
+      );
+      roster.enqueue(expected, || {
+        dispatcher.retry_shared(crate::dispatcher::Retry {
+          test: result.test,
+          attempt: result.outcome.attempt + 1,
+          suite_key: result.suite_key,
+          hooks: result.hooks,
+          suite_mode: result.suite_mode,
+          serial_tail: result.serial_tail,
+        });
       });
     };
 
     let mut stop_requested = false;
     loop {
       let result = tokio::select! {
+        biased;
         result = result_rx.recv() => result,
+        // A worker sends its last result before it leaves, so with every
+        // worker gone and nothing left to read, the run is over.
+        () = roster.emptied() => {
+          if result_rx.is_empty() {
+            break;
+          }
+          continue;
+        },
         () = self.run_stop.wait(), if !stop_requested => {
           // UI Stop: trip the dispatcher's hard-stop so workers drop
           // queued items and exit after their current test, then keep
@@ -1761,6 +1929,9 @@ impl TestRunner {
         .or_insert_with(|| (Vec::new(), result.outcome.expected_status));
       entry.0.push(result.outcome.status);
       entry.1 = result.outcome.expected_status;
+      if result.outcome.status != TestStatus::Skipped {
+        timings.record(result.outcome.test_id.stable_id(&project), result.outcome.duration);
+      }
 
       if result.should_retry {
         tracing::debug!(
@@ -1809,6 +1980,13 @@ impl TestRunner {
       {
         retry(next);
       }
+      if !dispatcher.is_stopped() {
+        worker_handles.extend(roster.enlist(&dispatcher.receiver()).into_iter().map(&spawn_worker));
+      }
+    }
+
+    if owns_timings && let Err(error) = timings.save() {
+      tracing::warn!(target: "ferridriver::runner", "could not keep test durations: {error}");
     }
 
     let mut infrastructure_failed = false;
@@ -2848,7 +3026,88 @@ fn with_shuffle_seed(mut metadata: serde_json::Value, seed: Option<&str>) -> ser
   metadata
 }
 
-/// Applies project-level test_match, test_dir, grep, grep_invert, and tag filters.
+/// For each scheduled project, the scheduled projects that depend on it
+/// or name it as their teardown: Playwright's `buildProjectsClosure`
+/// marks such a project a dependency, which runs every test it has
+/// whatever files the command line named, and only when a project that
+/// needs it has tests to run. Indices are into `projects`; a run that
+/// is no configured project (the implicit one a config without projects
+/// runs) has nothing depending on it.
+/// For each scheduled project, the longest chain of work that can only
+/// start once it has finished: a project depending on it, then one
+/// depending on that, each taking `span`.
+fn work_waiting_on(
+  projects: &[ProjectConfig],
+  scheduled: &[usize],
+  span: impl Fn(usize) -> u64,
+) -> FxHashMap<usize, u64> {
+  fn visit(
+    idx: usize,
+    projects: &[ProjectConfig],
+    scheduled: &[usize],
+    span: &dyn Fn(usize) -> u64,
+    memo: &mut FxHashMap<usize, u64>,
+  ) -> u64 {
+    if let Some(&known) = memo.get(&idx) {
+      return known;
+    }
+    // Dependencies were checked for cycles; this only keeps a malformed
+    // graph from recursing without end.
+    memo.insert(idx, 0);
+    let name = projects.get(idx).map_or("", |project| project.name.as_str());
+    let longest = scheduled
+      .iter()
+      .copied()
+      .filter(|&other| {
+        projects
+          .get(other)
+          .is_some_and(|project| project.dependencies.iter().any(|dep| dep == name))
+      })
+      .map(|other| span(other).saturating_add(visit(other, projects, scheduled, span, memo)))
+      .max()
+      .unwrap_or(0);
+    memo.insert(idx, longest);
+    longest
+  }
+  let mut memo = FxHashMap::default();
+  for &idx in scheduled {
+    visit(idx, projects, scheduled, &span, &mut memo);
+  }
+  memo
+}
+
+fn dependents_of(projects: &[ProjectConfig], scheduled: &[usize]) -> FxHashMap<usize, Vec<usize>> {
+  scheduled
+    .iter()
+    .map(|&idx| {
+      let Some(name) = projects.get(idx).map(|project| project.name.as_str()) else {
+        return (idx, Vec::new());
+      };
+      let needing = scheduled
+        .iter()
+        .copied()
+        .filter(|&other| {
+          other != idx
+            && projects.get(other).is_some_and(|project| {
+              project.dependencies.iter().any(|dep| dep == name) || project.teardown.as_deref() == Some(name)
+            })
+        })
+        .collect();
+      (idx, needing)
+    })
+    .collect()
+}
+
+/// `overrides` without the positional file and `file:line` filters, as a
+/// dependency project runs.
+fn without_file_filters(overrides: &CliOverrides) -> CliOverrides {
+  let mut overrides = overrides.clone();
+  overrides.test_files.clear();
+  overrides.locations.clear();
+  overrides
+}
+
+/// Applies project-level test_dir, test_match, test_ignore, grep, grep_invert, and tag filters.
 fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &ProjectConfig) {
   // Filter by test_dir: only keep suites whose file lives under it.
   // `testDir` is anchored to the config file it was written in, so it
@@ -2869,6 +3128,18 @@ fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &P
         );
       }
       kept
+    });
+  }
+
+  // The project's own testMatch and testIgnore (the merged config
+  // carries them), as Playwright's `collectFilesForProject` applies them.
+  // A file scriptMatch names runs as a script, so it is kept as well.
+  let test_match = crate::discovery::FileMatcher::new(&config.test_match);
+  let script_match = crate::discovery::FileMatcher::new(&config.script_match);
+  let test_ignore = crate::discovery::FileMatcher::new(&config.test_ignore);
+  if !test_match.is_empty() || !test_ignore.is_empty() {
+    crate::discovery::filter_by_file(plan, |file| {
+      (test_match.is_empty() || test_match.matches(file) || script_match.matches(file)) && !test_ignore.matches(file)
     });
   }
 
@@ -3321,6 +3592,245 @@ mod project_plan_tests {
       },
       crate::config::CliOverrides::default(),
     )
+  }
+
+  /// One suite per file, each with one test, as discovery hands them.
+  fn plan_of_files(files: &[std::path::PathBuf]) -> TestPlan {
+    let suites: Vec<TestSuite> = files
+      .iter()
+      .map(|file| {
+        let mut suite = plan_named("suite").suites.remove(0);
+        suite.file = file.to_string_lossy().into_owned();
+        for test in &mut suite.tests {
+          test.id.file.clone_from(&suite.file);
+        }
+        suite
+      })
+      .collect();
+    TestPlan {
+      repetitions_expanded: false,
+      total_tests: suites.len(),
+      suites,
+      shard: None,
+    }
+  }
+
+  /// A run that is no configured project, as a config without projects
+  /// has, has nothing depending on it; one named among projects keeps
+  /// the projects that need it.
+  #[test]
+  fn dependents_of_a_run_outside_the_configured_projects_are_none() {
+    let projects = vec![
+      ProjectConfig {
+        name: "setup".into(),
+        ..Default::default()
+      },
+      ProjectConfig {
+        name: "app".into(),
+        dependencies: vec!["setup".into()],
+        ..Default::default()
+      },
+    ];
+    let dependents = super::dependents_of(&[], &[usize::MAX]);
+    assert_eq!(dependents.get(&usize::MAX), Some(&Vec::new()));
+    let dependents = super::dependents_of(&projects, &[0, 1, usize::MAX]);
+    assert_eq!(dependents.get(&0), Some(&vec![1]));
+    assert_eq!(dependents.get(&1), Some(&Vec::new()));
+  }
+
+  /// Each project runs only the files its own testMatch and testIgnore
+  /// pick, and a file named on the command line still brings the setup
+  /// project its project depends on, as Playwright's
+  /// `collectProjectsAndTestFiles` does.
+  #[test]
+  fn projects_run_their_own_files_and_a_named_file_keeps_its_setup() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let e2e = dir.path().join("e2e");
+    std::fs::create_dir_all(e2e.join("console")).expect("dirs");
+    let files: Vec<std::path::PathBuf> = ["portal.spec.ts", "console/owner.setup.ts", "console/dunning.spec.ts"]
+      .iter()
+      .map(|name| {
+        let file = e2e.join(name);
+        std::fs::write(&file, "").expect("write spec");
+        crate::identity::comparable_path(&file)
+      })
+      .collect();
+    let plan = plan_of_files(&files);
+    let projects = vec![
+      ProjectConfig {
+        name: "chromium".into(),
+        test_ignore: Some(vec!["console/**".into()]),
+        ..Default::default()
+      },
+      ProjectConfig {
+        name: "setup".into(),
+        test_match: Some(vec!["console/owner.setup.ts".into()]),
+        ..Default::default()
+      },
+      ProjectConfig {
+        name: "console".into(),
+        test_match: Some(vec!["console/**/*.spec.ts".into()]),
+        dependencies: vec!["setup".into()],
+        ..Default::default()
+      },
+    ];
+    let listed = |overrides: crate::config::CliOverrides| -> Vec<(String, String)> {
+      let runner = TestRunner::new(
+        TestConfig {
+          projects: projects.clone(),
+          test_match: vec!["**/*.spec.ts".into()],
+          reporter: Vec::new(),
+          ..Default::default()
+        },
+        overrides,
+      );
+      runner
+        .list(&plan)
+        .expect("list")
+        .into_iter()
+        .map(|test| {
+          let name = std::path::Path::new(&test.id.file)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+          (test.record.project, name)
+        })
+        .collect()
+    };
+    let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+      items.iter().map(|(a, b)| ((*a).to_owned(), (*b).to_owned())).collect()
+    };
+
+    assert_eq!(
+      listed(crate::config::CliOverrides::default()),
+      pairs(&[
+        ("chromium", "portal.spec.ts"),
+        ("setup", "owner.setup.ts"),
+        ("console", "dunning.spec.ts")
+      ])
+    );
+    let dunning = crate::config::CliOverrides {
+      test_files: vec![files[2].to_string_lossy().into_owned()],
+      ..Default::default()
+    };
+    assert_eq!(
+      listed(dunning),
+      pairs(&[("setup", "owner.setup.ts"), ("console", "dunning.spec.ts")])
+    );
+    let portal = crate::config::CliOverrides {
+      test_files: vec!["portal".into()],
+      ..Default::default()
+    };
+    assert_eq!(listed(portal), pairs(&[("chromium", "portal.spec.ts")]));
+  }
+
+  /// The run's worker slots serve whichever project has work, as
+  /// Playwright's dispatcher does: once a short project finishes, a long
+  /// one started beside it takes its slot and runs on every slot the run
+  /// has, rather than on the share it was given when both started.
+  #[tokio::test]
+  async fn a_project_takes_the_slots_another_project_gives_back() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let file = |name: &str| {
+      let path = dir.path().join(name);
+      std::fs::write(&path, "").expect("write spec");
+      crate::identity::comparable_path(&path)
+    };
+    let mut files = vec![file("short.spec.ts")];
+    files.extend((0..8).map(|n| file(&format!("long-{n}.spec.ts"))));
+    let mut plan = plan_of_files(&files);
+    let running = Arc::new(AtomicUsize::new(0));
+    let most = Arc::new(AtomicUsize::new(0));
+    for suite in plan.suites.iter_mut().filter(|suite| suite.file.contains("long-")) {
+      for test in &mut suite.tests {
+        let running = Arc::clone(&running);
+        let most = Arc::clone(&most);
+        test.test_fn = Arc::new(move |_| {
+          let running = Arc::clone(&running);
+          let most = Arc::clone(&most);
+          Box::pin(async move {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            running.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+          })
+        });
+      }
+    }
+    let project = |name: &str, pattern: &str| ProjectConfig {
+      name: name.into(),
+      test_match: Some(vec![pattern.into()]),
+      ..Default::default()
+    };
+    let mut runner = TestRunner::new(
+      TestConfig {
+        projects: vec![project("long", "long-*.spec.ts"), project("short", "short.spec.ts")],
+        test_match: vec!["**/*.spec.ts".into()],
+        workers: Some(2),
+        reporter: Vec::new(),
+        ..Default::default()
+      },
+      crate::config::CliOverrides::default(),
+    );
+    assert_eq!(runner.run(plan).await, super::exit::PASSED);
+    assert_eq!(most.load(Ordering::SeqCst), 2);
+  }
+
+  /// A run keeps how long each test took, and the next run starts the
+  /// longest first, so no long test is left to run alone at the end.
+  #[tokio::test]
+  async fn the_next_run_starts_the_tests_that_took_longest() {
+    use std::sync::Mutex;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let lengths = [10u64, 40, 20, 30];
+    let files: Vec<std::path::PathBuf> = lengths
+      .iter()
+      .map(|ms| {
+        let path = dir.path().join(format!("takes-{ms}.spec.ts"));
+        std::fs::write(&path, "").expect("write spec");
+        crate::identity::comparable_path(&path)
+      })
+      .collect();
+    let started: Arc<Mutex<Vec<u64>>> = Arc::default();
+    let plan = || {
+      let mut plan = plan_of_files(&files);
+      for (suite, &ms) in plan.suites.iter_mut().zip(&lengths) {
+        let started = Arc::clone(&started);
+        suite.tests[0].test_fn = Arc::new(move |_| {
+          let started = Arc::clone(&started);
+          Box::pin(async move {
+            started.lock().expect("order").push(ms);
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            Ok(())
+          })
+        });
+      }
+      plan
+    };
+    let run = || {
+      TestRunner::new(
+        TestConfig {
+          config_dir: Some(dir.path().to_path_buf()),
+          workers: Some(1),
+          reporter: Vec::new(),
+          ..Default::default()
+        },
+        crate::config::CliOverrides::default(),
+      )
+    };
+    assert_eq!(run().run(plan()).await, super::exit::PASSED);
+    assert_eq!(
+      *started.lock().expect("order"),
+      lengths,
+      "nothing known yet: plan order"
+    );
+    started.lock().expect("order").clear();
+    assert_eq!(run().run(plan()).await, super::exit::PASSED);
+    assert_eq!(*started.lock().expect("order"), [40, 30, 20, 10]);
   }
 
   /// A project given its own plan runs THAT plan, not the shared one —

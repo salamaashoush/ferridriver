@@ -87,13 +87,41 @@ fn test_engine_config(
 /// resolved against `cwd` (and `testDir` when set). `.feature` globs
 /// belong to the BDD path and are skipped here; `testIgnore` prunes.
 ///
+/// With projects, each collects its own files under its own `testDir`,
+/// `testMatch` and `testIgnore` (falling back to the config's), as
+/// Playwright's `collectFilesForProject` does, and the bundle holds every
+/// project's; the runner then gives each project only its own.
+///
 /// A file `scriptMatch` also names is a script, not a test file.
 #[must_use]
 pub fn discover_test_files(config: &TestConfig, cwd: &Path) -> Vec<PathBuf> {
   let scripts = discover_script_files(config, cwd);
-  let mut files = discover_sources(config, cwd, &config.test_match);
+  let mut files = if config.projects.is_empty() {
+    discover_sources(config, cwd, &config.test_match)
+  } else {
+    let mut files: Vec<PathBuf> = config
+      .projects
+      .iter()
+      .flat_map(|project| {
+        let merged = with_default_match(config.merge_project(project));
+        discover_sources(&merged, cwd, &merged.test_match)
+      })
+      .collect();
+    files.sort();
+    files.dedup();
+    files
+  };
   files.retain(|file| !scripts.contains(file));
   files
+}
+
+/// A config naming no test files of its own discovers Playwright's
+/// default ones, unless it names only scripts.
+fn with_default_match(mut config: TestConfig) -> TestConfig {
+  if config.test_match.is_empty() && config.script_match.is_empty() {
+    config.test_match = DEFAULT_TEST_MATCH.iter().map(|s| (*s).to_string()).collect();
+  }
+  config
 }
 
 /// Discover the files `scriptMatch` names, which run as plain scripts.
@@ -561,14 +589,10 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
     );
   }
 
-  // Positional files/globs on the CLI replace the config's testMatch.
-  if !overrides.test_files.is_empty() {
-    config.test_match = overrides.test_files.clone();
-  }
-  // A config naming only scripts asked for no test files.
-  if config.test_match.is_empty() && config.script_match.is_empty() {
-    config.test_match = DEFAULT_TEST_MATCH.iter().map(|s| (*s).to_string()).collect();
-  }
+  // Positional files narrow what the config's testMatch finds, as in
+  // Playwright; the runner applies them per project (see
+  // `ferridriver_test::discovery::FileFilter`).
+  config = with_default_match(config);
 
   if overrides.ui || overrides.watch {
     let ui_mode = overrides.ui;

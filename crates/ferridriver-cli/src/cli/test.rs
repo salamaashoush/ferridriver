@@ -11,8 +11,11 @@ pub struct TestRunArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
-  /// Test file paths or globs. Overrides `[test].testMatch` from config.
-  /// `path:line` (or `path:line:column`) runs only the test declared there.
+  /// Test files to run: paths, globs, or regular expressions over the
+  /// file's path (as Playwright reads them). They narrow what each
+  /// project's `testMatch` finds; a project others depend on still runs
+  /// whole. `path:line` (or `path:line:column`) runs only the test
+  /// declared there.
   pub files: Vec<String>,
 
   /// Only run tests whose full title matches this substring/regex.
@@ -102,10 +105,8 @@ pub struct RustTestArgs {
   #[arg(long, help_heading = "Run")]
   pub profile: Option<String>,
 
-  /// Run ferritest harness binaries headless (exported as
-  /// `FERRITEST_HEADLESS`; non-harness test binaries ignore it).
-  #[arg(long, help_heading = "Harness")]
-  pub headless: bool,
+  #[command(flatten)]
+  pub windows: HarnessWindows,
 
   /// Browser backend for ferritest harness binaries (`cdp-pipe`,
   /// `cdp-raw`, `bidi`, `webkit`; exported as `FERRITEST_BACKEND`).
@@ -170,6 +171,30 @@ impl TestRunner {
     match self {
       Self::Nextest => "nextest",
       Self::Cargo => "cargo",
+    }
+  }
+}
+
+/// Whether ferritest harness binaries open their browsers in windows.
+#[derive(Args)]
+pub struct HarnessWindows {
+  /// Run ferritest harness binaries headless, which is the default
+  /// (exported as `FERRITEST_HEADLESS`; non-harness test binaries ignore it).
+  #[arg(long, overrides_with = "headed", help_heading = "Harness")]
+  pub headless: bool,
+
+  /// Open the harness binaries' browsers in windows to watch the run.
+  #[arg(long, overrides_with = "headless", help_heading = "Harness")]
+  pub headed: bool,
+}
+
+impl HarnessWindows {
+  /// `--headless` / `--headed`, or `None` when the config decides.
+  pub fn headless_override(&self) -> Option<bool> {
+    match (self.headless, self.headed) {
+      (true, _) => Some(true),
+      (_, true) => Some(false),
+      _ => None,
     }
   }
 }

@@ -501,6 +501,9 @@ async fn set_up(pool: &FixturePool, name: &str) -> ferridriver::error::Result<()
   let setup = Arc::clone(&def.setup);
   let teardown = def.teardown.as_ref().map(Arc::clone);
   let timeout = def.timeout;
+  // A failure names the fixture as specs know it, which an internal key
+  // standing in for it does not.
+  let known_as = def.name.clone();
 
   tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
   let result = if timeout.is_zero() {
@@ -508,9 +511,9 @@ async fn set_up(pool: &FixturePool, name: &str) -> ferridriver::error::Result<()
   } else {
     ferridriver::pause::run_within(timeout, setup(pool.clone()))
       .await
-      .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
+      .map_err(|_| FerriError::timeout(format!("fixture '{known_as}' setup"), timeout.as_millis() as u64))?
   };
-  let arc_val = result.map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
+  let arc_val = result.map_err(|e| FerriError::backend(format!("fixture '{known_as}' setup failed: {e}")))?;
 
   if let Some(td) = teardown {
     pool.register_teardown(name, Arc::clone(&arc_val), td);

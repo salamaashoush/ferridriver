@@ -177,6 +177,15 @@ impl TestBrowserResources {
     Some(Box::pin(self.pool.acquire(browser, &key, &opts, backend)).await)
   }
 
+  /// The `browser` a test or hook is handed: the worker's browser, whose
+  /// `newContext` starts from this test's `use` options, as Playwright's
+  /// does.
+  async fn browser(&self) -> ferridriver::error::Result<Arc<ferridriver::Browser>> {
+    let browser = self.handle.get().await?;
+    let opts = build_context_options(&self.effective, &self.output_dir, browser.backend_kind());
+    Ok(Arc::new(browser.inheriting_context_options(opts)))
+  }
+
   /// Everything a context needs before a test touches it.
   ///
   /// One seam for every path that produces a context — pooled, fresh, or
@@ -745,9 +754,15 @@ fn build_context_options(
   opts
 }
 
-/// Worker-scope `browser` fixture backed by `BrowserHandle`. Added to the
+/// The worker-scope fixture the test-scoped `browser` depends on: it
+/// launches the worker's browser at worker scope, outside any test's
+/// timeout, as Playwright's worker `browser` launches.
+const WORKER_BROWSER_LAUNCH: &str = "_browserLaunch";
+
+/// Worker-scope `browser` fixture backed by `BrowserHandle`, registered
+/// under `browser` and under [`WORKER_BROWSER_LAUNCH`]. Added to the
 /// custom_fixture_pool so every child suite/test pool can resolve it via
-/// the parent chain. Lazy: launches on first `get("browser")`.
+/// the parent chain. Lazy: launches on first `get`.
 fn build_worker_browser_def(handle: Arc<crate::runner::BrowserHandle>) -> FixtureDef {
   FixtureDef {
     name: "browser".into(),
@@ -780,6 +795,30 @@ fn build_browser_fixture_defs(
     Duration::from_secs(10)
   };
   let mut defs = FxHashMap::default();
+
+  // Shadows the worker's own `browser` for the tests and hooks this pool
+  // runs, over the browser the worker-scope launch already started.
+  defs.insert(
+    "browser".into(),
+    FixtureDef {
+      name: "browser".into(),
+      scope,
+      dependencies: vec![WORKER_BROWSER_LAUNCH.into()],
+      setup: Arc::new({
+        let resources = Arc::clone(&resources);
+        move |_pool| {
+          let resources = Arc::clone(&resources);
+          Box::pin(async move {
+            let browser = Box::pin(resources.browser()).await?;
+            Ok(browser as Arc<dyn std::any::Any + Send + Sync>)
+          })
+        }
+      }),
+      teardown: None,
+      timeout,
+      auto: false,
+    },
+  );
 
   defs.insert(
     "context".into(),
@@ -853,14 +892,14 @@ fn core_http_credentials(
     .collect()
 }
 
-fn build_worker_request_def(
+fn build_request_def(
   base_url: Option<String>,
   http_credentials: Vec<ferridriver::options::HttpCredentials>,
   proxy: Option<ferridriver::options::ProxyConfig>,
 ) -> FixtureDef {
   FixtureDef {
     name: "request".into(),
-    scope: FixtureScope::Worker,
+    scope: FixtureScope::Test,
     dependencies: vec![],
     setup: Arc::new(move |_pool| {
       let base_url = base_url.clone();
@@ -1197,6 +1236,7 @@ impl Worker {
     browser_handle: Arc<crate::runner::BrowserHandle>,
     custom_fixture_pool: FixturePool,
     rx: async_channel::Receiver<WorkItem>,
+    place: &crate::dispatcher::RosterPlace,
     result_tx: mpsc::Sender<WorkerTestResult>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     mut pending: Option<WorkItem>,
@@ -1205,17 +1245,21 @@ impl Worker {
       event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
     }
 
-    // Register the worker-scope `browser` + `request` fixtures on the
+    // Register `browser` (worker scope) and `request` (test scope) on the
     // custom pool so child suite/test pools resolve them via the parent
-    // chain. The backing `BrowserHandle` makes the browser launch lazy;
-    // the `HttpClient` is built once per worker so its reqwest pool,
-    // TLS context, and cookie jar are reused across every test on this
-    // worker.
+    // chain. The backing `BrowserHandle` makes the browser launch lazy.
+    // `request` is a new client per test, as Playwright's fixture is a
+    // new `APIRequestContext` per test: one shared across the worker
+    // carried each test's cookies into the next.
     let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
     worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(&browser_handle)));
     worker_defs.insert(
+      WORKER_BROWSER_LAUNCH.into(),
+      build_worker_browser_def(Arc::clone(&browser_handle)),
+    );
+    worker_defs.insert(
       "request".into(),
-      build_worker_request_def(
+      build_request_def(
         self.config.base_url.clone().or_else(crate::config::base_url_from_env),
         core_http_credentials(&self.config.browser.use_options.http_credentials),
         self
@@ -1235,7 +1279,7 @@ impl Worker {
     let mut repetition = None;
     while let Some(item) = match pending.take() {
       Some(item) => Some(item),
-      None => rx.recv().await.ok(),
+      None => place.next_or_leave(&rx),
     } {
       // `--max-failures` / `-x` flips this flag; drop any items that were
       // already buffered in the channel rather than processing them.

@@ -586,12 +586,14 @@ pub enum StableCheck {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TestConfig {
+  #[serde(deserialize_with = "one_or_many_patterns")]
   pub test_match: Vec<String>,
   /// Files that run as plain scripts rather than test files: each is one
   /// test whose body is the file's own top-level code, with `page`,
   /// `context`, `browser`, `request`, `expect` and `test` in scope.
   pub script_match: Vec<String>,
   pub test_dir: Option<String>,
+  #[serde(deserialize_with = "one_or_many_patterns")]
   pub test_ignore: Vec<String>,
   pub timeout: u64,
   /// ferridriver's flat spelling of `expect.timeout`, kept because it
@@ -613,6 +615,7 @@ pub struct TestConfig {
   pub retries: u32,
   #[serde(default)]
   pub retry_strategy: RetryStrategy,
+  #[serde(deserialize_with = "one_or_many_reporters")]
   pub reporter: Vec<ReporterConfig>,
   pub output_dir: PathBuf,
   pub browser: BrowserConfig,
@@ -827,6 +830,12 @@ pub struct BrowserConfig {
   /// here: it is declared once at the top level.
   #[serde(skip)]
   pub global_browser: Option<crate::browser::BrowserSectionConfig>,
+  /// Whether [`Self::normalize`] chose the engine because nobody named
+  /// one. The root config is normalized before its projects are merged
+  /// from it, and an engine chosen that way must still give way to the
+  /// device a project spreads into `use`, as an unset `browser` would.
+  #[serde(skip)]
+  pub engine_defaulted: bool,
 }
 
 /// Pre-seed a `use` block from `device = "<name>"`.
@@ -1036,6 +1045,44 @@ fn one_or_many_credentials<'de, D: serde::Deserializer<'de>>(
   })
 }
 
+/// Playwright's `testMatch` / `testIgnore`: one glob, or a list of them.
+fn one_or_many_patterns<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+  Ok(optional_patterns(deserializer)?.unwrap_or_default())
+}
+
+fn optional_patterns<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<String>>, D::Error> {
+  #[derive(Deserialize)]
+  #[serde(untagged)]
+  enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+  }
+  Ok(
+    Option::<OneOrMany>::deserialize(deserializer)?.map(|patterns| match patterns {
+      OneOrMany::One(pattern) => vec![pattern],
+      OneOrMany::Many(patterns) => patterns,
+    }),
+  )
+}
+
+/// Playwright's `reporter`: one reporter's name, or a list of entries.
+fn one_or_many_reporters<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<ReporterConfig>, D::Error> {
+  #[derive(Deserialize)]
+  #[serde(untagged)]
+  enum OneOrMany {
+    One(String),
+    Many(Vec<ReporterConfig>),
+  }
+  Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+    Some(OneOrMany::One(name)) => vec![ReporterConfig {
+      name,
+      options: BTreeMap::new(),
+    }],
+    Some(OneOrMany::Many(reporters)) => reporters,
+    None => Vec::new(),
+  })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyConfig {
@@ -1119,12 +1166,18 @@ impl BrowserConfig {
   /// pair — `chromium` over `cdp-pipe` — the same reading a project
   /// browser block already gets.
   pub fn apply_use_engine(&mut self) {
+    let unnamed = self.browser == "auto" || self.engine_defaulted;
     if let Some(ref name) = self.use_options.browser_name {
       self.browser.clone_from(name);
     } else if let Some(ref name) = self.use_options.default_browser_type
-      && self.browser == "auto"
+      && unnamed
     {
       self.browser.clone_from(name);
+      if self.engine_defaulted {
+        // The backend was filled in alongside the default engine; the
+        // device's engine picks its own.
+        "auto".clone_into(&mut self.backend);
+      }
     }
   }
 
@@ -1139,6 +1192,9 @@ impl BrowserConfig {
   /// - `browser = "webkit"` implies `backend = "webkit"`
   /// - Everything else defaults to `browser = "chromium"`, `backend = "cdp-pipe"`
   pub fn normalize(&mut self) {
+    if self.browser == "auto" && self.backend == "auto" {
+      self.engine_defaulted = true;
+    }
     if let Ok((backend, browser)) = self.resolve_kinds() {
       backend.name().clone_into(&mut self.backend);
       browser.name().clone_into(&mut self.browser);
@@ -1240,11 +1296,9 @@ impl Default for BrowserConfig {
       backend: "auto".into(),
       channel: None,
       global_browser: None,
-      // Default headed -- matches the new ferridriver CLI convention where
-      // `--headless` opts into headless mode. Playwright defaults to
-      // headless and uses `--headed` to flip; ferridriver does the inverse
-      // so the user can watch tests run by default.
-      headless: false,
+      // Headless unless asked, as Playwright runs: `--headed` (or
+      // `headless = false`) opens windows to watch a run.
+      headless: true,
       executable_path: None,
       args: Vec::new(),
       viewport: None,
@@ -1259,6 +1313,7 @@ impl Default for BrowserConfig {
       instance_discover_command: None,
       command_cache_ttl: None,
       command_cache: std::sync::Arc::default(),
+      engine_defaulted: false,
     }
   }
 }
@@ -1291,10 +1346,12 @@ impl<'de> Deserialize<'de> for ReporterConfig {
     use serde::de::Error as _;
 
     // A bare string is the shorthand for a reporter with no options.
+    // Playwright's `[name]` / `[name, options]` pair is the third.
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Repr {
       Name(String),
+      Pair(Vec<serde_json::Value>),
       Table(BTreeMap<String, serde_json::Value>),
     }
 
@@ -1304,6 +1361,32 @@ impl<'de> Deserialize<'de> for ReporterConfig {
           name,
           options: BTreeMap::new(),
         });
+      },
+      Repr::Pair(pair) => {
+        let mut items = pair.into_iter();
+        let name = match items.next() {
+          Some(serde_json::Value::String(name)) => name,
+          other => {
+            return Err(D::Error::custom(format!(
+              "a reporter pair starts with the reporter's name, got {other:?}"
+            )));
+          },
+        };
+        let options = match items.next() {
+          Some(serde_json::Value::Object(map)) => map.into_iter().collect(),
+          Some(serde_json::Value::Null) | None => BTreeMap::new(),
+          Some(other) => {
+            return Err(D::Error::custom(format!(
+              "a reporter's options must be an object, got {other}"
+            )));
+          },
+        };
+        if items.next().is_some() {
+          return Err(D::Error::custom(
+            "a reporter pair holds a name and its options, nothing more",
+          ));
+        }
+        return Ok(ReporterConfig { name, options });
       },
       Repr::Table(table) => table,
     };
@@ -1404,7 +1487,9 @@ impl Default for ReportSlowTestsConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct ProjectConfig {
   pub name: String,
+  #[serde(deserialize_with = "optional_patterns")]
   pub test_match: Option<Vec<String>>,
+  #[serde(deserialize_with = "optional_patterns")]
   pub test_ignore: Option<Vec<String>>,
   pub test_dir: Option<String>,
   pub browser: Option<BrowserConfig>,
@@ -2230,6 +2315,46 @@ mod reporter_config_tests {
   }
 
   #[test]
+  fn playwright_pairs_name_a_reporter_and_its_options() {
+    let parsed = parse(r#"reporter = [["list"], ["junit", { outputFile = "j.xml" }]]"#);
+    assert_eq!(parsed[0].name, "list");
+    assert!(parsed[0].options.is_empty());
+    assert_eq!(parsed[1].name, "junit");
+    assert_eq!(parsed[1].options["outputFile"], serde_json::json!("j.xml"));
+  }
+
+  #[test]
+  fn a_pair_without_a_name_or_with_a_third_entry_is_an_error() {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+      reporter: Vec<ReporterConfig>,
+    }
+    let parse = |src: &str| toml::from_str::<Wrapper>(src).map(|wrapper| wrapper.reporter);
+    assert!(parse("reporter = [[{ outputFile = \"x\" }]]\n").is_err());
+    assert!(parse("reporter = [[\"list\", {}, {}]]\n").is_err());
+  }
+
+  #[test]
+  fn a_test_section_takes_playwright_single_values() {
+    let config: super::TestConfig = serde_json::from_value(serde_json::json!({
+      "reporter": "html",
+      "testMatch": "e2e/**/*.spec.ts",
+      "testIgnore": "e2e/console/**",
+      "projects": [{ "name": "console", "testMatch": "console/*.spec.ts", "testIgnore": ["a/**", "b/**"] }],
+    }))
+    .expect("parse");
+    assert_eq!(config.reporter.len(), 1);
+    assert_eq!(config.reporter[0].name, "html");
+    assert_eq!(config.test_match, ["e2e/**/*.spec.ts"]);
+    assert_eq!(config.test_ignore, ["e2e/console/**"]);
+    assert_eq!(
+      config.projects[0].test_match.as_deref(),
+      Some(&["console/*.spec.ts".to_string()][..])
+    );
+    assert_eq!(config.projects[0].test_ignore.as_deref().map(<[String]>::len), Some(2));
+  }
+
+  #[test]
   fn a_missing_name_is_an_error_rather_than_a_nameless_reporter() {
     #[derive(serde::Deserialize)]
     struct Wrapper {
@@ -2523,6 +2648,54 @@ mod use_options_tests {
     assert_eq!(merged.browser.use_options.extra["profile"], serde_json::json!("admin"));
     // The key the project did not name is still the config's.
     assert_eq!(merged.browser.use_options.extra["theme"], serde_json::json!("light"));
+  }
+
+  /// The root config is normalized before projects merge from it; an
+  /// engine normalization filled in must still give way to the engine a
+  /// project's device names, as Playwright's `browserName` defaults from
+  /// `defaultBrowserType`. One the root names itself still wins.
+  #[test]
+  fn a_project_device_picks_the_engine_over_a_defaulted_root() {
+    let mut cfg = config(
+      r#"
+        [[projects]]
+        name = "firefox"
+        [projects.browser.use]
+        defaultBrowserType = "firefox"
+
+        [[projects]]
+        name = "webkit"
+        [projects.browser.use]
+        defaultBrowserType = "webkit"
+      "#,
+    );
+    cfg.browser.apply_use_engine();
+    cfg.browser.normalize();
+    let firefox = cfg.merge_project(&cfg.projects[0]);
+    assert_eq!(
+      (firefox.browser.browser.as_str(), firefox.browser.backend.as_str()),
+      ("firefox", "bidi")
+    );
+    let webkit = cfg.merge_project(&cfg.projects[1]);
+    assert_eq!(
+      (webkit.browser.browser.as_str(), webkit.browser.backend.as_str()),
+      ("webkit", "webkit")
+    );
+
+    let mut named = config(
+      r#"
+        [browser]
+        browser = "chromium"
+
+        [[projects]]
+        name = "firefox-device"
+        [projects.browser.use]
+        defaultBrowserType = "firefox"
+      "#,
+    );
+    named.browser.apply_use_engine();
+    named.browser.normalize();
+    assert_eq!(named.merge_project(&named.projects[0]).browser.browser, "chromium");
   }
 
   #[test]

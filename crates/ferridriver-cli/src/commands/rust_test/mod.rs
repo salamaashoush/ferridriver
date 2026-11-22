@@ -31,8 +31,8 @@ pub fn base_test_command(args: &cli::RustTestArgs, runner: cli::TestRunner) -> s
 
   let mut cmd = std::process::Command::new(program);
   cmd.args(&base_args);
-  if args.headless {
-    cmd.env("FERRITEST_HEADLESS", "1");
+  if let Some(headless) = args.windows.headless_override() {
+    cmd.env("FERRITEST_HEADLESS", if headless { "1" } else { "0" });
   }
   if let Some(backend) = args.backend.as_deref() {
     cmd.env("FERRITEST_BACKEND", backend);
@@ -105,7 +105,7 @@ pub fn run(args: &cli::RustTestArgs) -> anyhow::Result<()> {
 /// group (cargo, harness binaries, browsers) and exit.
 pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
   let overrides = ferridriver_test::config::CliOverrides {
-    headless_override: args.headless.then_some(true),
+    headless_override: args.windows.headless_override(),
     backend: args.backend.clone(),
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     tag: args.tag.clone(),

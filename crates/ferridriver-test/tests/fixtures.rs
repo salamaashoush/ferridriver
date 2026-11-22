@@ -254,6 +254,7 @@ async fn worker_completion_propagates_fixture_cleanup_failure() {
       browser,
       pool.clone(),
       receive,
+      &ferridriver_test::dispatcher::WorkerRoster::new(1, 1).join(),
       results,
       Arc::new(std::sync::atomic::AtomicBool::new(false)),
       None,

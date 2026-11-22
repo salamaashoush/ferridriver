@@ -448,11 +448,18 @@ impl TestPlanBuilder {
       .map(|s| (s.id, (s.name, s.file, s.mode, s.serial_scope)))
       .collect();
 
-    // Group tests by suite key.
-    let mut grouped: FxHashMap<String, Vec<TestCase>> = FxHashMap::default();
+    // Group tests by suite key, suites in the order their first test was
+    // added: the dispatcher queues them in plan order, and Playwright runs
+    // files in discovery order and tests in declaration order.
+    let mut grouped: Vec<(String, Vec<TestCase>)> = Vec::new();
+    let mut position: FxHashMap<String, usize> = FxHashMap::default();
     for tc in self.tests {
       let key = tc.id.suite.clone().unwrap_or_default();
-      grouped.entry(key).or_default().push(tc);
+      let index = *position.entry(key.clone()).or_insert_with(|| {
+        grouped.push((key, Vec::new()));
+        grouped.len() - 1
+      });
+      grouped[index].1.push(tc);
     }
 
     // Build hooks per suite.
@@ -2483,5 +2490,36 @@ mod tests {
     assert_eq!(failure.diff.as_deref(), Some("diff"));
     let lazy = None::<u8>.with_context(|| format!("row {}", 3)).unwrap_err();
     assert_eq!(lazy.message, "row 3");
+  }
+
+  #[test]
+  fn a_plan_keeps_its_suites_in_the_order_their_tests_were_added() {
+    let mut builder = TestPlanBuilder::new();
+    let added: Vec<String> = (0..16).map(|n| format!("{n:02}.spec.ts")).collect();
+    for file in &added {
+      builder.add_test(TestCase {
+        id: TestId {
+          file: file.clone(),
+          suite: Some(format!("{file}::root")),
+          name: "works".into(),
+          ..TestId::default()
+        },
+        test_fn: std::sync::Arc::new(|_| Box::pin(async { Ok(()) })),
+        fixture_requests: Vec::new(),
+        annotations: Vec::new(),
+        timeout: None,
+        retries: None,
+        expected_status: ExpectedStatus::Pass,
+        use_options: None,
+        metadata: None,
+      });
+    }
+    let files: Vec<String> = builder
+      .build()
+      .suites
+      .iter()
+      .map(|suite| suite.tests[0].id.file.clone())
+      .collect();
+    assert_eq!(files, added);
   }
 }

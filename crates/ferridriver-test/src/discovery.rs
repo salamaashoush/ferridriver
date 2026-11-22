@@ -632,3 +632,166 @@ mod tests {
     std::fs::remove_dir_all(&dir).ok();
   }
 }
+
+/// How a path glob reads, as minimatch does with `{ nocase, dot }`: `*`
+/// stays within one directory, case is ignored, dotfiles are included.
+const PATH_GLOB: glob::MatchOptions = glob::MatchOptions {
+  case_sensitive: false,
+  require_literal_separator: true,
+  require_literal_leading_dot: false,
+};
+
+/// Playwright's `createFileMatcher` over string patterns
+/// (`/tmp/playwright/packages/playwright/src/util.ts`): a pattern not
+/// already starting with `**/` is given one, so `console/**/*.spec.ts`
+/// matches wherever `console` sits, and each is matched against the
+/// file's absolute path, ignoring case, with dotfiles included.
+#[derive(Debug, Clone, Default)]
+pub struct FileMatcher {
+  patterns: Vec<glob::Pattern>,
+}
+
+impl FileMatcher {
+  #[must_use]
+  pub fn new(patterns: &[String]) -> Self {
+    let patterns = patterns
+      .iter()
+      .filter_map(|pattern| {
+        let pattern = pattern.replace('\\', "/");
+        let anchored = if pattern.starts_with("**/") || pattern.starts_with('/') {
+          pattern
+        } else {
+          format!("**/{pattern}")
+        };
+        glob::Pattern::new(&anchored).ok()
+      })
+      .collect();
+    Self { patterns }
+  }
+
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.patterns.is_empty()
+  }
+
+  /// Whether `file`, an absolute path, matches any pattern.
+  #[must_use]
+  pub fn matches(&self, file: &Path) -> bool {
+    let path = file.to_string_lossy().replace('\\', "/");
+    self
+      .patterns
+      .iter()
+      .any(|pattern| pattern.matches_with(&path, PATH_GLOB))
+  }
+}
+
+/// The positional file arguments of `ferridriver test a.spec.ts dir/`.
+/// Playwright reads each as a regular expression over the absolute path
+/// (`forceRegExp`), so `console/dunning` and `dunning.spec.ts` both pick
+/// the file; ferridriver has also always taken paths and globs. An
+/// argument naming a file or directory that exists picks that file or
+/// what is under it; one with glob characters picks what it matches as a
+/// glob from the working directory or as an expression.
+#[derive(Debug, Clone, Default)]
+pub struct FileFilter {
+  entries: Vec<FileFilterEntry>,
+}
+
+#[derive(Debug, Clone)]
+enum FileFilterEntry {
+  Path(std::path::PathBuf),
+  Expression(regex::Regex),
+  GlobOrExpression(glob::Pattern, Option<regex::Regex>),
+}
+
+impl FileFilter {
+  #[must_use]
+  pub fn new(args: &[String], cwd: &Path) -> Self {
+    let entries = args
+      .iter()
+      .filter_map(|arg| {
+        let path = cwd.join(arg);
+        if path.exists() {
+          return Some(FileFilterEntry::Path(crate::identity::comparable_path(&path)));
+        }
+        let expression = regex::RegexBuilder::new(arg).case_insensitive(true).build().ok();
+        // Anchored at the working directory as files are compared: links
+        // followed, so `/var/...` and `/private/var/...` agree.
+        let anchored = crate::identity::comparable_path(cwd).join(arg);
+        if arg.contains(['*', '?', '['])
+          && let Ok(glob) = glob::Pattern::new(&anchored.to_string_lossy().replace('\\', "/"))
+        {
+          return Some(FileFilterEntry::GlobOrExpression(glob, expression));
+        }
+        expression.map(FileFilterEntry::Expression)
+      })
+      .collect();
+    Self { entries }
+  }
+
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.entries.is_empty()
+  }
+
+  /// Whether `file` is one the arguments pick.
+  #[must_use]
+  pub fn matches(&self, file: &Path) -> bool {
+    let comparable = crate::identity::comparable_path(file);
+    let text = comparable.to_string_lossy().replace('\\', "/");
+    self.entries.iter().any(|entry| match entry {
+      FileFilterEntry::Path(path) => comparable.starts_with(path),
+      FileFilterEntry::Expression(expression) => expression.is_match(&text),
+      FileFilterEntry::GlobOrExpression(glob, expression) => {
+        glob.matches_with(&text, PATH_GLOB) || expression.as_ref().is_some_and(|expression| expression.is_match(&text))
+      },
+    })
+  }
+}
+
+/// Keep only the suites whose file `keep` accepts.
+pub fn filter_by_file(plan: &mut TestPlan, keep: impl Fn(&Path) -> bool) {
+  plan
+    .suites
+    .retain(|suite| keep(&crate::identity::comparable_path(Path::new(&suite.file))));
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
+#[cfg(test)]
+mod file_selection_tests {
+  use super::{FileFilter, FileMatcher};
+  use std::path::Path;
+
+  #[test]
+  fn a_pattern_matches_wherever_its_directory_sits_ignoring_case() {
+    let console = FileMatcher::new(&["console/**/*.spec.ts".to_owned()]);
+    assert!(console.matches(Path::new("/repo/e2e/console/dunning.spec.ts")));
+    assert!(console.matches(Path::new("/repo/e2e/Console/deep/billing.SPEC.ts")));
+    assert!(!console.matches(Path::new("/repo/e2e/learning.spec.ts")));
+    let ignore = FileMatcher::new(&["console/**".to_owned()]);
+    assert!(ignore.matches(Path::new("/repo/e2e/console/owner.setup.ts")));
+    let star = FileMatcher::new(&["*.spec.ts".to_owned()]);
+    assert!(star.matches(Path::new("/repo/e2e/a.spec.ts")));
+    let dotted = FileMatcher::new(&["**/*.ts".to_owned()]);
+    assert!(dotted.matches(Path::new("/repo/.hidden/a.ts")));
+  }
+
+  #[test]
+  fn positional_files_pick_by_path_by_expression_or_by_glob() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("e2e/console")).expect("dirs");
+    for file in ["e2e/console/dunning.spec.ts", "e2e/learning.spec.ts"] {
+      std::fs::write(root.join(file), "").expect("write");
+    }
+    let dunning = root.join("e2e/console/dunning.spec.ts");
+    let learning = root.join("e2e/learning.spec.ts");
+
+    let by_path = FileFilter::new(&["e2e/console".to_owned()], root);
+    assert!(by_path.matches(&dunning) && !by_path.matches(&learning));
+    let by_expression = FileFilter::new(&["DUNNING".to_owned()], root);
+    assert!(by_expression.matches(&dunning) && !by_expression.matches(&learning));
+    let by_glob = FileFilter::new(&["e2e/*.spec.ts".to_owned()], root);
+    assert!(!by_glob.matches(&dunning) && by_glob.matches(&learning));
+  }
+}

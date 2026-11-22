@@ -245,10 +245,10 @@ export interface TestType<TFixtures = TestFixtures> {
 
   each<Row>(rows: Row[]): (titleTemplate: string, body: (fixtures: TFixtures, row: Row) => void | Promise<void>) => void;
 
-  beforeAll(body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
-  beforeAll(title: string, body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
-  afterAll(body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
-  afterAll(title: string, body: (fixtures: Partial<TFixtures>, testInfo: TestInfo) => void | Promise<void>): void;
+  beforeAll(body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+  beforeAll(title: string, body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+  afterAll(body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
+  afterAll(title: string, body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
   beforeEach(body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
   beforeEach(title: string, body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;
   afterEach(body: (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>): void;

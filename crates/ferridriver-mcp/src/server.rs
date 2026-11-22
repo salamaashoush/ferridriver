@@ -1042,16 +1042,15 @@ impl McpServer {
     let guard = self.session_guard(&session).await;
     let context = self.mcp_run_context(&session).await?;
 
-    let result = self
-      .run_tool_on_session_vm(
-        &session,
-        &guard,
-        tool_name,
-        args_obj,
-        ferridriver_script::RunOptions::default(),
-        context,
-      )
-      .await;
+    let result = Box::pin(self.run_tool_on_session_vm(
+      &session,
+      &guard,
+      tool_name,
+      args_obj,
+      ferridriver_script::RunOptions::default(),
+      context,
+    ))
+    .await;
 
     self.extension_tool_result(tool_name, &result)
   }

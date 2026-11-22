@@ -124,6 +124,7 @@ pub mod snapshot_path;
 pub mod snapshot_record;
 pub mod step;
 pub mod test_server;
+pub(crate) mod timings;
 pub mod tracing;
 pub mod tui;
 pub mod tui_reporter;

@@ -23,11 +23,16 @@ test('extension defaults apply until overridden by a document and then the comma
   passed(config);
   assert.ok(config.text.includes('from-config.spec.ts'));
   assert.ok(!config.text.includes('from-extension.spec.ts'));
-  const cli = await list(cwd, 'specs/from-cli.spec.ts');
-  passed(cli);
-  assert.ok(cli.text.includes('from-cli.spec.ts'));
-  assert.ok(!cli.text.includes('from-config.spec.ts'));
-  assert.ok(!cli.text.includes('from-extension.spec.ts'));
+  // A file named on the command line narrows what testMatch finds, as
+  // Playwright's positional filters do; it does not add a file testMatch
+  // leaves out.
+  const named = await list(cwd, 'specs/from-config.spec.ts');
+  passed(named);
+  assert.ok(named.text.includes('from-config.spec.ts'));
+  const outside = await list(cwd, 'specs/from-cli.spec.ts');
+  assert.ok(!outside.text.includes('from-cli.spec.ts'), outside.text);
+  assert.ok(!outside.text.includes('from-config.spec.ts'), outside.text);
+  assert.ok(!outside.text.includes('from-extension.spec.ts'), outside.text);
 });
 
 for (const [title, source, policy, messages] of [
