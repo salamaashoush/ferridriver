@@ -164,7 +164,7 @@ fn check_commands(required: &[String], env: &RequirementEnv<'_>, push: &mut impl
 
 fn check_env(required: &[String], env: &RequirementEnv<'_>, push: &mut impl FnMut(bool, String)) {
   for name in required {
-    if !env.allow_env.iter().any(|a| a == name) {
+    if !crate::engine::allows_whole_env(env.allow_env) && !env.allow_env.iter().any(|a| a == name) {
       push(
         true,
         format!(

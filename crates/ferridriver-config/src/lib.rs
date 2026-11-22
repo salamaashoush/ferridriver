@@ -527,7 +527,9 @@ pub struct ScriptingConfig {
   /// `process.env`. Empty (default) ⇒ `process.env` is `{}`. Only names
   /// listed here, and only if present in the server's environment, are
   /// exposed — a script never sees an ambient secret the operator did
-  /// not name.
+  /// not name. `"*"` names every variable, as Node exposes them: for a
+  /// trusted suite written for Node, whose specs and child processes
+  /// read what the launcher set.
   pub allow_env: Vec<String>,
   /// The realm's `read` / `write` / `net` / `sys` grants and their
   /// `deny` carve-outs, in the runtime's own shape: each `true`, a

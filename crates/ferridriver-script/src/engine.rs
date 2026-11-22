@@ -307,13 +307,19 @@ impl ScriptCaps {
   /// Resolve from an operator allow-list: only the named variables, and
   /// only those actually present in the process environment, are
   /// captured. A name not in the environment is silently absent (same
-  /// as Node) -- it is never invented.
+  /// as Node) -- it is never invented. An entry of `*` names them all:
+  /// the operator's explicit choice to give scripts the environment Node
+  /// gives a program, as a test suite written for Node expects.
   #[must_use]
   pub fn resolve(allow_env: &[String]) -> Self {
-    let env = allow_env
-      .iter()
-      .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
-      .collect();
+    let env = if allows_whole_env(allow_env) {
+      std::env::vars().collect()
+    } else {
+      allow_env
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
+        .collect()
+    };
     Self {
       env,
       allow_env: allow_env.to_vec(),
@@ -363,9 +369,19 @@ impl ScriptCaps {
   #[must_use]
   pub fn realm_permissions(&self) -> Permissions {
     let mut p = self.permissions.clone();
-    p.env = ferrijs::permissions::Allow::Only(self.allow_env.clone());
+    p.env = if allows_whole_env(&self.allow_env) {
+      ferrijs::permissions::Allow::All
+    } else {
+      ferrijs::permissions::Allow::Only(self.allow_env.clone())
+    };
     p
   }
+}
+
+/// Whether `[scripting].allowEnv` names every variable (`"*"`).
+#[must_use]
+pub fn allows_whole_env(allow_env: &[String]) -> bool {
+  allow_env.iter().any(|name| name == "*")
 }
 
 /// The session's durable persistent-process registry, stashed as
@@ -1099,4 +1115,22 @@ fn install_call_globals(ctx: &Ctx<'_>, inst: GlobalsInstall) -> Result<(), Scrip
     None => inst.fetch.set_client(inst.default_request),
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{ScriptCaps, allows_whole_env};
+
+  #[test]
+  fn an_allow_env_star_exposes_the_whole_environment() {
+    let path = std::env::var("PATH").expect("PATH is set where tests run");
+    let caps = ScriptCaps::resolve(&["*".to_owned()]);
+    assert!(allows_whole_env(&caps.allow_env));
+    assert_eq!(caps.env.get("PATH"), Some(&path));
+    assert!(caps.realm_permissions().env.is_all());
+
+    let listed = ScriptCaps::resolve(&["PATH".to_owned()]);
+    assert_eq!(listed.env.len(), 1);
+    assert_eq!(listed.realm_permissions().env.entries(), ["PATH".to_owned()]);
+  }
 }

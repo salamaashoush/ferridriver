@@ -17,7 +17,7 @@ Always available (no authority, real values):
 | `hrtime()` / `hrtime.bigint()` | Returns `[seconds, nanos]` / `bigint` ns |
 | `stdout` / `stderr`          | `.write(chunk)` routes into the captured console (`stdout`→`log`, `stderr`→`error`). One trailing newline trimmed. Returns `true`. `isTTY` is `false`. |
 | `cwd()`                      | Returns the sandbox root, never the real cwd |
-| `env`                        | **Defaults to `{}`.** Names listed in `[scripting] allowEnv` and present in the server's environment appear, frozen. A name you didn't list is simply absent — there is no way to read an unlisted variable. |
+| `env`                        | **Defaults to `{}`.** Names listed in `[scripting] allowEnv` and present in the server's environment appear, frozen. A name you didn't list is simply absent — there is no way to read an unlisted variable. `allowEnv = ["*"]` lists every variable, as Node exposes them, for a trusted suite whose specs or child processes read the launcher's environment. |
 
 ### Absent on purpose
 
@@ -157,6 +157,28 @@ while the same script reaches the network, the browser and `commands`.
 Not served: the callback API (`fs.readFile(path, cb)`) and streams. Use
 the promise or sync form.
 
+## `child_process`
+
+`node:child_process` is Node's: `spawn`, `exec`, `execFile` (with their
+`util.promisify` forms), and `spawnSync`, `execSync` and `execFileSync`.
+Each start asks the realm's `run` grant for the program it executes, the
+shell for `exec`, `execSync` and `shell: true`. A program is granted by
+name (found on `PATH`) or by path.
+
+A child runs outside the sandbox with ferridriver's own authority, so
+granting a program grants whatever it can do. The realm's default
+permissions grant every program, as they grant every file; narrow it in
+`[scripting.permissions]`:
+
+```toml
+[scripting.permissions]
+run = ["bun", "git"]
+```
+
+A child's environment is the `env` option, or `process.env` when there
+is none, so it sees what the script sees: list what it needs in
+`allowEnv`, or `"*"` for all of it.
+
 ## `artifacts`
 
 Dedicated output directory (`artifacts_root` from MCP config), for
@@ -194,7 +216,7 @@ runtime does not have.
 - `module`, `__dirname`, `__filename` — no CommonJS at runtime (rolldown
   handles `require` calls at bundle time; `require` itself serves the
   native specifiers, and `require.resolve` answers paths).
-- Node's `child_process`, `cluster`, `http`, `https`, `net`, `tls`,
+- Node's `cluster`, `http`, `https`, `net`, `tls`,
   `dgram`, `dns`, `vm`, `worker_threads`, `crypto.createServer`, …
 - Browser DOM globals (`window`, `document`, `localStorage`, …) — these
   exist **inside `page.evaluate`**, not in script scope.
