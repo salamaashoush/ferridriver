@@ -72,7 +72,8 @@ ferrijs-serde = { workspace = true }
 # `bindings/` (formerly the rquickjs-extra crates, which capped rquickjs
 # at <0.12).
 rquickjs = { version = "0.14", features = [
-  "full-async",
+  "std",
+  "futures",
   "parallel",
   "macro",
   "loader",
@@ -112,7 +113,8 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # but integration tests are separate crates and cannot name a lib-only
 # dependency, so it is mirrored here.
 rquickjs = { version = "0.14", features = [
-  "full-async",
+  "std",
+  "futures",
   "parallel",
   "macro",
   "loader",
