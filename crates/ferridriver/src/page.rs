@@ -214,6 +214,7 @@ impl Page {
       self.inner.kind(),
       Arc::clone(&self.frame_cache),
       Arc::clone(self.inner.observed()),
+      self.inner.network_idle().cloned(),
     );
     // Frame and observation state must be current before public event delivery.
     let installed = self.inner.events().set_state_observer(Arc::new(observer));
@@ -3032,7 +3033,7 @@ impl Page {
     self: &Arc<Self>,
     selector: &str,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
   ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
     let page = Arc::clone(self);
     let selector = selector.to_string();
@@ -3051,7 +3052,7 @@ impl Page {
     self: &Arc<Self>,
     selector: &str,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
     opts: Option<crate::options::DispatchEventOptions>,
   ) -> Result<()> {
     self
@@ -4746,14 +4747,24 @@ impl Page {
 
     // Remove closed page from context's page list so context.pages() stays accurate.
     if let Some(ctx) = &self.context_ref {
-      let mut state = ctx.state.write().await;
-      let context_pages = state.context_pages.clone();
-      if let Ok(browser_ctx) = state.context_mut_checked(&ctx.name) {
-        browser_ctx.pages.retain(|p| !p.is_closed());
-        if browser_ctx.active_page_idx >= browser_ctx.pages.len() && !browser_ctx.pages.is_empty() {
-          browser_ctx.active_page_idx = browser_ctx.pages.len() - 1;
+      let close_context = {
+        let mut state = ctx.state.write().await;
+        let context_pages = state.context_pages.clone();
+        match state.context_mut_checked(&ctx.name) {
+          Ok(browser_ctx) => {
+            browser_ctx.pages.retain(|p| !p.is_closed());
+            if browser_ctx.active_page_idx >= browser_ctx.pages.len() && !browser_ctx.pages.is_empty() {
+              browser_ctx.active_page_idx = browser_ctx.pages.len() - 1;
+            }
+            context_pages.set(&ctx.key.to_composite(), &browser_ctx.pages);
+            browser_ctx.owned_by_page && browser_ctx.pages.is_empty()
+          },
+          Err(_) => false,
         }
-        context_pages.set(&ctx.key.to_composite(), &browser_ctx.pages);
+      };
+      // A page `browser.newPage()` opened takes its context with it.
+      if close_context {
+        ctx.close().await?;
       }
     }
 
@@ -5435,6 +5446,7 @@ pub(crate) fn page_state_observer(
   kind: crate::backend::BackendKind,
   cache: Arc<Mutex<FrameCache>>,
   observed: Arc<Mutex<crate::observed::ObservedBuffers>>,
+  network_idle: Option<Arc<crate::network_idle::NetworkIdle>>,
 ) -> impl Fn(&PageEvent) + Send + Sync {
   let wire_tracks_frames = matches!(
     kind,
@@ -5444,6 +5456,9 @@ pub(crate) fn page_state_observer(
       | crate::backend::BackendKind::Bidi
   );
   move |event| {
+    if let Some(network_idle) = &network_idle {
+      network_idle.observe(event);
+    }
     match event {
       PageEvent::FrameAttached(info) => {
         if !wire_tracks_frames && let Ok(mut g) = cache.lock() {

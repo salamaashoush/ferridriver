@@ -160,29 +160,27 @@ describe('actions', () => {
   });
 
   test('script_drag_default_steps', async ({ page }) => {
-    // A default dragTo (no options) must emit intermediate mousemoves
-    // between press and release — ferridriver defaults `steps` to 5.
-    // Drag libraries track the pointer across several moves to cross
-    // their drag threshold; a single source->target jump never starts
-    // the drag. Playwright defaults to one move but compensates with
-    // native drag interception, which only helps native HTML5 DnD —
-    // stepped moves are the fix for mousemove-tracked libraries.
-    await page.goto(
-      dataUrl(
-        '<style>html,body{margin:0;padding:0}</style>' +
-          "<div id='src' style='width:60px;height:60px;background:#f00;position:absolute;left:20px;top:20px'></div>" +
-          "<div id='tgt' style='width:60px;height:60px;background:#0f0;position:absolute;left:300px;top:300px'></div>" +
-          '<script>' +
-          'var down=false, movesWhileDown=0, allHeld=true;' +
-          "window.addEventListener('mousedown',function(){down=true;},true);" +
-          "window.addEventListener('mouseup',function(){down=false;},true);" +
-          "window.addEventListener('mousemove',function(e){ if(down){movesWhileDown++; if(e.buttons!==1){allHeld=false;}} },true);" +
-          '</script>',
-      ),
+    // Playwright's dragTo moves to the target in `steps` hops, one unless
+    // asked (`server/input.ts`: `const { steps = 1 }`), and every move
+    // while pressed reports the held button.
+    const page_ = dataUrl(
+      '<style>html,body{margin:0;padding:0}</style>' +
+        "<div id='src' style='width:60px;height:60px;background:#f00;position:absolute;left:20px;top:20px'></div>" +
+        "<div id='tgt' style='width:60px;height:60px;background:#0f0;position:absolute;left:300px;top:300px'></div>" +
+        '<script>' +
+        'var down=false, movesWhileDown=0, allHeld=true;' +
+        "window.addEventListener('mousedown',function(){down=true;},true);" +
+        "window.addEventListener('mouseup',function(){down=false;},true);" +
+        "window.addEventListener('mousemove',function(e){ if(down){movesWhileDown++; if(e.buttons!==1){allHeld=false;}} },true);" +
+        '</script>',
     );
+    await page.goto(page_);
     await page.locator('#src').dragTo(page.locator('#tgt'));
-    expect((await page.evaluate('movesWhileDown')) as number).toBeGreaterThanOrEqual(5);
-    expect(await page.evaluate('allHeld')).toBe(true);
+    expect(await page.evaluate('[movesWhileDown, allHeld]')).toEqual([1, true]);
+
+    await page.goto(page_);
+    await page.locator('#src').dragTo(page.locator('#tgt'), { steps: 5 });
+    expect(await page.evaluate('[movesWhileDown, allHeld]')).toEqual([5, true]);
   });
 
   test('script_drag_native_html5', async ({ page, browserName }) => {
@@ -194,9 +192,9 @@ describe('actions', () => {
     // and used to wedge the input queue for the rest of the page's life,
     // so the post-drag click assertion is part of the contract. WebKit's
     // Playwright build runs the native drag from the dispatched mouse
-    // events directly. Firefox over BiDi starts the drag (dragstart/
-    // dragenter fire) but its remote input stack never delivers the
-    // final drop — the same hole as Playwright's own BiDi backend, which
+    // events directly. Firefox over BiDi starts the drag but its remote
+    // input stack carries it no further, neither to the target nor to
+    // the drop — the same hole as Playwright's own BiDi backend, which
     // has no drag handling at all — so Firefox asserts the achievable
     // subset (drag started + input pipeline alive).
     await page.goto(
@@ -221,11 +219,11 @@ describe('actions', () => {
     );
     await page.locator('#dst').click();
     expect(log).toContain('dragstart');
-    expect(log).toContain('dragenter');
     // Input pipeline must stay alive after the native drag (no wedged
     // drag session).
     expect(await page.evaluate('window.clicked')).toBe(true);
     if (browserName !== 'firefox') {
+      expect(log).toContain('dragenter');
       expect(log).toContain('drop:payload-123');
     }
   });
@@ -564,6 +562,38 @@ describe('actions', () => {
     await page.goto(dataUrl("<select id='s' disabled><option value='a'>A</option><option value='b'>B</option></select>"));
     await page.locator('#s').selectOption('b', { force: true });
     expect(await page.evaluate("document.getElementById('s').value")).toBe('b');
+  });
+
+  test('script_select_option_waits_for_its_option', async ({ page }) => {
+    // Playwright's `_retryAction` treats `error:optionsnotfound` and
+    // `error:optionnotenabled` as "not yet" (server/dom.ts): an option
+    // rendered after the call starts, or enabled later, is selected.
+    await page.goto(dataUrl("<select id='s'><option value='a'>A</option><option value='c' disabled>C</option></select>"));
+    await page.evaluate(() => {
+      setTimeout(() => {
+        const option = document.createElement('option');
+        option.value = 'b';
+        option.textContent = 'B';
+        document.getElementById('s')!.append(option);
+      }, 300);
+    });
+    expect(await page.locator('#s').selectOption('B')).toEqual(['b']);
+
+    await page.evaluate(() => {
+      setTimeout(() => {
+        (document.querySelector('option[value=c]') as HTMLOptionElement).disabled = false;
+      }, 300);
+    });
+    expect(await page.locator('#s').selectOption('c')).toEqual(['c']);
+
+    let msg = 'no-throw';
+    try {
+      await page.locator('#s').selectOption('missing', { timeout: 300 });
+    } catch (e) {
+      msg = String((e as Error).message ?? e);
+    }
+    expect(msg.includes('Timeout')).toBe(true);
+    expect(msg.includes('did not find some options')).toBe(true);
   });
 
   test('script_check_behavior', async ({ page }) => {

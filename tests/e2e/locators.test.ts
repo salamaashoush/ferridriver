@@ -120,6 +120,31 @@ describe('locators', () => {
     expect(await page.locator('li').allTextContents()).toEqual(['a', 'b', 'c']);
   });
 
+  // `allInnerTexts` is each element's `innerText`, the rendered text,
+  // and `allTextContents` its untrimmed `textContent`: a table row reads
+  // with a tab between its cells in one and run together in the other,
+  // in the frame the locator names.
+  // A quote inside a regex is escaped as Playwright's
+  // `escapeRegexForSelector` escapes it, so a role or text regex with an
+  // apostrophe still matches.
+  test('a regex with a quote in it matches by role and by text', async ({ page }) => {
+    await page.goto(dataUrl(`<a href="#n">The school updated Salama Ashoush's medical summary</a><p>say "hi" now</p>`));
+    await expect(page.getByRole('link', { name: /Salama Ashoush's medical summary/ })).toBeVisible();
+    await expect(page.getByText(/say "hi"/)).toBeVisible();
+  });
+
+  test('all inner texts read rendered text, all text contents the raw text', async ({ page }) => {
+    const table = '<table><tr><td>Salama advanced</td><td>00</td></tr></table><p> spaced </p>';
+    await page.goto(dataUrl(table));
+    expect(await page.getByRole('row').allInnerTexts()).toEqual(['Salama advanced\t00']);
+    expect(await page.getByRole('row').allTextContents()).toEqual(['Salama advanced00']);
+    expect(await page.locator('p').allTextContents()).toEqual([' spaced ']);
+    await page.setContent(`<iframe srcdoc="${table.replace(/"/g, '&quot;')}"></iframe>`);
+    const frame = page.frameLocator('iframe');
+    await expect(frame.getByRole('row')).toHaveCount(1);
+    expect(await frame.getByRole('row').allInnerTexts()).toEqual(['Salama advanced\t00']);
+  });
+
   test('script_selector_chain', async ({ page }) => {
     await page.goto(
       dataUrl(

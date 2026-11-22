@@ -391,6 +391,7 @@ pub struct BidiPage {
   /// Console / page-error retention for `page.consoleMessages()` /
   /// `page.pageErrors()` (see `CdpPage::observed`).
   pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
+  pub(crate) network_idle: Arc<crate::network_idle::NetworkIdle>,
   /// Idempotent latch for the route (`network.beforeRequestSent`) listener.
   /// Spawned once per page: it reads the shared `routes` map live, so a
   /// `route`/`unroute` cycle (which drains `intercept_ids`) must NOT
@@ -573,6 +574,7 @@ impl BidiPage {
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      network_idle: Arc::default(),
       route_listener_started: Arc::new(AtomicBool::new(false)),
       forwarded_requests: Arc::new(std::sync::Mutex::new(None)),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1625,16 +1627,6 @@ impl BidiPage {
     let btn = input::button_name_to_id(button);
     self
       .cmd("input.performActions", input::mouse_up(&self.context_id, x, y, btn))
-      .await?;
-    Ok(())
-  }
-
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
-    self
-      .cmd(
-        "input.performActions",
-        input::click_and_drag(&self.context_id, from, to, steps),
-      )
       .await?;
     Ok(())
   }

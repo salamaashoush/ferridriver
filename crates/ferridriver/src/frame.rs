@@ -41,6 +41,22 @@ impl Frame {
     Self { page, id }
   }
 
+  /// The frame a wait that began on this one is about now. A cross-process
+  /// navigation hands the page a main frame under a new id, and the main
+  /// frame stays itself through it, as Playwright's main `Frame` does;
+  /// any other frame is this one.
+  fn live(&self, main: bool) -> Frame {
+    if main
+      && let Some(id) = self
+        .page
+        .with_frame_cache(crate::frame_cache::FrameCache::main_frame_id)
+      && id != self.id
+    {
+      return Frame::new(Arc::clone(&self.page), id);
+    }
+    self.clone()
+  }
+
   /// Backend-issued frame identifier. Sync — the underlying `Arc<str>`
   /// is set at construction. Used by the network module to match
   /// `Request.frame()` lookups against the page's frame cache.
@@ -911,10 +927,11 @@ impl Frame {
         timeout_ms,
       )
     };
+    let main = self.is_main_frame();
     let mut events = self.page.events().subscribe();
     let mut tested: Option<String> = None;
     loop {
-      let url = self.url();
+      let url = self.live(main).url();
       if tested.as_deref() != Some(url.as_str()) {
         let matched = match deadline {
           Some(d) => tokio::time::timeout_at(d, condition.test(&url))
@@ -954,6 +971,7 @@ impl Frame {
     };
     let remaining = remaining_timeout(deadline).ok_or_else(timed_out)?;
     self
+      .live(main)
       .wait_for_load_state_impl(
         Some(state),
         crate::options::WaitForLoadStateOptions {
@@ -1474,6 +1492,27 @@ impl Frame {
 
     let state = state.unwrap_or("load");
     let timeout_ms = opts.timeout.unwrap_or_else(|| self.page.default_timeout());
+    let main = self.is_main_frame();
+
+    // Playwright's `networkidle` is a lifecycle event of the document,
+    // fired once and kept: a wait after it returns at once.
+    if state == "networkidle"
+      && let Some(network_idle) = self.page.inner().network_idle().cloned()
+    {
+      let frame_id = Arc::clone(&self.live(main).id);
+      return crate::operation_budget::scoped(timeout_ms, || "waiting for networkidle".into(), async move {
+        let wait = network_idle.wait(&frame_id);
+        if let Some(deadline) = deadline_after(timeout_ms) {
+          tokio::time::timeout_at(deadline, wait)
+            .await
+            .map_err(|_| crate::error::FerriError::timeout("waiting for networkidle", timeout_ms))
+        } else {
+          wait.await;
+          Ok(())
+        }
+      })
+      .await;
+    }
 
     // The state check precedes the deadline, matching the old poll loop
     // and Playwright's local lifecycle bookkeeping: an already-reached
@@ -1481,7 +1520,7 @@ impl Frame {
     // the promise attempt's own round trip would eat a tiny budget and
     // report a false timeout on slower transports.
     if state != "networkidle"
-      && let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await
+      && let Ok(Some(v)) = self.live(main).backend_eval_expr("document.readyState").await
     {
       let s = v.as_str().unwrap_or("loading");
       let reached = match state {
@@ -1513,7 +1552,7 @@ impl Frame {
             remaining.min(std::time::Duration::from_secs(5))
           },
         };
-        match tokio::time::timeout(attempt_cap, self.eval::<bool>(js)).await {
+        match tokio::time::timeout(attempt_cap, self.live(main).eval::<bool>(js)).await {
           Ok(Ok(true)) => return Ok(()),
           Ok(Ok(false) | Err(_)) => {
             // Transient evaluate failure (document destroyed mid-wait);
@@ -1858,7 +1897,7 @@ impl Frame {
     &self,
     selector: &str,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
   ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
     let frame = self.clone();
     let selector = selector.to_string();
@@ -1876,7 +1915,7 @@ impl Frame {
     &self,
     selector: &str,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
     opts: Option<crate::options::DispatchEventOptions>,
   ) -> Result<()> {
     self

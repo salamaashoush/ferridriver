@@ -1315,7 +1315,7 @@ impl ElementHandle {
   pub fn dispatch_event(
     &self,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
   ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
     let handle = self.clone();
     let event_type = event_type.to_string();
@@ -1327,7 +1327,7 @@ impl ElementHandle {
   pub(crate) async fn dispatch_event_impl(
     &self,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
     opts: Option<crate::options::DispatchEventOptions>,
   ) -> Result<()> {
     self.ensure_live()?;

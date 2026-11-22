@@ -478,12 +478,6 @@ impl WebDriverPage {
       .await
   }
 
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
-    self
-      .perform_actions(crate::backend::bidi::input::click_and_drag("", from, to, steps))
-      .await
-  }
-
   /// Classic actions keep the held keys in the session's input state,
   /// which applies them to later key and pointer actions.
   pub(crate) async fn dispatch_key_down(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {

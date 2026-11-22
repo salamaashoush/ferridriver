@@ -1286,6 +1286,18 @@ impl AnyPage {
     }
   }
 
+  /// The page's `networkidle` lifecycle, on every backend that reports
+  /// its requests. Pinned to the backend page like [`Self::observed`].
+  pub(crate) fn network_idle(&self) -> Option<&std::sync::Arc<crate::network_idle::NetworkIdle>> {
+    match self {
+      AnyPage::CdpPipe(p) => Some(&p.network_idle),
+      AnyPage::CdpWs(p) => Some(&p.network_idle),
+      AnyPage::WebKit(p) => Some(&p.network_idle),
+      AnyPage::Bidi(p) => Some(&p.network_idle),
+      AnyPage::WebDriver(_) => None,
+    }
+  }
+
   /// Force a garbage-collection pass in the page's JS engine.
   /// Playwright: `page.requestGC(): Promise<void>`.
   pub async fn request_gc(&self) -> Result<()> {
@@ -1680,10 +1692,6 @@ impl AnyPage {
 
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     page_dispatch!(self, mouse_up(x, y, button, click_count))
-  }
-
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
-    page_dispatch!(self, click_and_drag(from, to, steps))
   }
 
   /// Insert text at the focus without emitting keyboard events (only

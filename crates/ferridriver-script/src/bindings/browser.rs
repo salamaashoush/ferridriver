@@ -44,20 +44,7 @@ impl BrowserJs {
   /// isomorphic serde lowering.
   #[qjs(rename = "newContext")]
   pub async fn new_context<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-    let core_opts = match options.0 {
-      None => None,
-      Some(v) if v.is_undefined() || v.is_null() => None,
-      Some(v) => {
-        let har_filter = record_har_url_filter(&ctx, &v)?;
-        let parsed: JsBrowserContextOptions = serde_from_js(&ctx, v)?;
-        let mut core = parsed.into_core();
-        crate::bindings::convert::check_context_paths(&ctx, &core)?;
-        if let Some(har) = core.record_har.as_mut() {
-          har.url_filter = har_filter;
-        }
-        Some(core)
-      },
-    };
+    let core_opts = context_options(&ctx, options)?;
     let ctx_ref = Arc::new(
       self
         .inner
@@ -314,10 +301,13 @@ impl BrowserJs {
     rquickjs::IntoJs::into_js(arr, &ctx)
   }
 
-  /// Playwright: `browser.newPage()`. Creates a page in the default context.
+  /// Playwright: `browser.newPage(options?)`. A page in a context of its
+  /// own, made from `options` as `newContext` makes one and closed with
+  /// the page, so two such pages share no cookies or storage.
   #[qjs(rename = "newPage")]
-  pub async fn new_page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let page = self.inner.new_page().await.into_js_with(&ctx)?;
+  pub async fn new_page<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let options = context_options(&ctx, options)?.unwrap_or_default();
+    let page = self.inner.new_page_in_own_context(options).await.into_js_with(&ctx)?;
     let instance = crate::bindings::identity::page_object(&ctx, page)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
@@ -890,4 +880,25 @@ fn record_har_url_filter<'js>(
     return Ok(None);
   }
   crate::bindings::page::options::url_value_to_matcher(ctx, filter).map(Some)
+}
+
+/// A `BrowserContextOptions` bag as `newContext` and `newPage` take it.
+fn context_options<'js>(
+  ctx: &Ctx<'js>,
+  options: Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::BrowserContextOptions>> {
+  match options.0 {
+    None => Ok(None),
+    Some(v) if v.is_undefined() || v.is_null() => Ok(None),
+    Some(v) => {
+      let har_filter = record_har_url_filter(ctx, &v)?;
+      let parsed: JsBrowserContextOptions = serde_from_js(ctx, v)?;
+      let mut core = parsed.into_core();
+      crate::bindings::convert::check_context_paths(ctx, &core)?;
+      if let Some(har) = core.record_har.as_mut() {
+        har.url_filter = har_filter;
+      }
+      Ok(Some(core))
+    },
+  }
 }

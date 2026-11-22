@@ -2189,6 +2189,20 @@ impl BrowserState {
     })
   }
 
+  /// Record that `key`'s context now exists in the browser as
+  /// `browser_context_id`, before any page of it does, so the first
+  /// page opens into it rather than into a context of its own.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance does not exist.
+  pub fn register_backend_context(&mut self, key: &SessionKey, browser_context_id: String) -> Result<()> {
+    self.ensure_not_disposed()?;
+    let inst = self.instance_mut(&key.instance)?;
+    inst.context_mut(&key.context).cdp_context_id = Some(browser_context_id);
+    Ok(())
+  }
+
   /// Register a newly created page back into the state after off-lock backend work.
   ///
   /// # Errors
@@ -3746,7 +3760,7 @@ mod tests {
       crate::options::LaunchPlan {
         backend,
         kind: selection.browser,
-        headless: false,
+        headless: true,
         ..Default::default()
       },
     )

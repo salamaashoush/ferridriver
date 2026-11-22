@@ -48,6 +48,9 @@ pub struct BrowserContext {
   /// CDP browser context ID (for `Target.disposeBrowserContext` on close).
   /// None for the default context.
   pub cdp_context_id: Option<String>,
+  /// Made by `browser.newPage()` for that one page, so it closes when
+  /// the page does, as Playwright's `Page._ownedContext` is.
+  pub(crate) owned_by_page: bool,
 }
 
 impl BrowserContext {
@@ -62,6 +65,7 @@ impl BrowserContext {
       dialog_log: Arc::new(RwLock::new(Vec::new())),
       name,
       cdp_context_id: None,
+      owned_by_page: false,
     }
   }
 
@@ -223,6 +227,26 @@ impl BrowserContext {
 // -- ContextRef: handle for the high-level Browser API -----------------------
 
 use crate::state::BrowserState;
+
+/// Where [`ContextRef`] reads and writes cookies: the context's live
+/// page, or a page of it opened for the purpose and closed after.
+struct CookieJar {
+  page: AnyPage,
+  opened: Option<Arc<Page>>,
+}
+
+impl CookieJar {
+  fn page(&self) -> &AnyPage {
+    &self.page
+  }
+
+  async fn done(self) -> Result<()> {
+    match self.opened {
+      Some(page) => page.close_impl(None).await,
+      None => Ok(()),
+    }
+  }
+}
 
 /// Handle to a browser context. Created by `Browser::new_context()` / `default_context()`.
 /// Provides the Playwright-compatible context API by delegating to `BrowserState`.
@@ -623,6 +647,22 @@ impl ContextRef {
     Ok(())
   }
 
+  /// Make this context in the browser if no page of it has yet, and
+  /// record it, so its first page opens into it.
+  async fn ensure_backend_context(&self) -> Result<()> {
+    Box::pin(BrowserState::ensure_instance_shared(&self.state, &self.key.instance)).await?;
+    if &*self.key.context == "default" {
+      return Ok(());
+    }
+    let plan = self.state.read().await.page_open_plan(&self.key)?;
+    if plan.browser_context_id.is_some() {
+      return Ok(());
+    }
+    let ctx_opts = self.state.read().await.get_context_options(&self.key.to_composite());
+    let id = Box::pin(self.create_backend_context(&plan.browser, ctx_opts.as_ref())).await?;
+    self.state.write().await.register_backend_context(&self.key, id)
+  }
+
   /// Create this context in the browser. An authenticated SOCKS5 proxy,
   /// which no browser can log in to, is handed over as a loopback relay that
   /// logs in for it.
@@ -904,15 +944,12 @@ impl ContextRef {
   pub async fn cookies(&self) -> Result<Vec<CookieData>> {
     self
       .traced("cookies", serde_json::json!({}), async {
-        let page = {
-          let state = self.state.read().await;
-          state.context(&self.name)?.active_page().cloned()
+        let Some(jar) = self.cookie_jar(false).await? else {
+          return Ok(Vec::new());
         };
-        if let Some(page) = page {
-          page.get_cookies().await
-        } else {
-          Ok(Vec::new())
-        }
+        let cookies = jar.page().get_cookies().await;
+        let done = jar.done().await;
+        cookies.and_then(|cookies| done.map(|()| cookies))
       })
       .await
   }
@@ -1174,16 +1211,19 @@ impl ContextRef {
           .into_iter()
           .map(crate::http_client::rewrite_cookie)
           .collect::<Result<Vec<_>>>()?;
-        let page = {
-          let state = self.state.read().await;
-          state.context(&self.name)?.active_page().cloned()
-        }
-        .ok_or(crate::error::FerriError::NotConnected)?;
-
+        // Before the first page Playwright still sets them, on the browser
+        // context itself, so a spec may seed cookies first.
+        let Some(jar) = self.cookie_jar(true).await? else {
+          return Ok(());
+        };
+        let mut outcome = Ok(());
         for cookie in cookies {
-          page.set_cookie(cookie).await?;
+          outcome = jar.page().set_cookie(cookie).await;
+          if outcome.is_err() {
+            break;
+          }
         }
-        Ok(())
+        outcome.and(jar.done().await)
       })
       .await
   }
@@ -1255,25 +1295,22 @@ impl ContextRef {
   async fn clear_all_cookies(&self) -> Result<()> {
     self
       .traced("clearCookies", serde_json::json!({}), async {
-        let page = {
-          let state = self.state.read().await;
-          state.context(&self.name)?.active_page().cloned()
+        let Some(jar) = self.cookie_jar(false).await? else {
+          return Ok(());
         };
-        if let Some(page) = page {
-          page.clear_cookies().await?;
-        }
-        Ok(())
+        let cleared = jar.page().clear_cookies().await;
+        cleared.and(jar.done().await)
       })
       .await
   }
 
   async fn clear_cookies_matching(&self, options: &crate::backend::ClearCookieOptions) -> Result<()> {
-    let page = {
-      let state = self.state.read().await;
-      state.context(&self.name)?.active_page().cloned()
+    let filter = options.compile()?;
+    let Some(jar) = self.cookie_jar(false).await? else {
+      return Ok(());
     };
-    if let Some(page) = page {
-      let filter = options.compile()?;
+    let kept = async {
+      let page = jar.page();
       let cookies = page.get_cookies().await?;
       page.clear_cookies().await?;
       for c in cookies {
@@ -1281,8 +1318,46 @@ impl ContextRef {
           page.set_cookie(c).await?;
         }
       }
+      Ok(())
     }
-    Ok(())
+    .await;
+    kept.and(jar.done().await)
+  }
+
+  /// A page to read and write this context's cookies through: its live
+  /// page, or, before it has one, a page of it nothing else sees, when
+  /// the context exists in the browser or `create` asks that it does.
+  /// Playwright keeps cookies on the browser context, so they are there
+  /// before any page.
+  async fn cookie_jar(&self, create: bool) -> Result<Option<CookieJar>> {
+    let live = {
+      let state = self.state.read().await;
+      state
+        .context(&self.name)
+        .ok()
+        .and_then(|ctx| ctx.active_page().cloned())
+    };
+    if let Some(page) = live {
+      return Ok(Some(CookieJar { page, opened: None }));
+    }
+    if create {
+      Box::pin(self.ensure_backend_context()).await?;
+    } else {
+      let made = self
+        .state
+        .read()
+        .await
+        .page_open_plan(&self.key)
+        .is_ok_and(|plan| plan.browser_context_id.is_some());
+      if !made {
+        return Ok(None);
+      }
+    }
+    let opened = self.open_storage_page().await?;
+    Ok(Some(CookieJar {
+      page: opened.inner().clone(),
+      opened: Some(opened),
+    }))
   }
 
   /// Delete a specific cookie by name and optional domain

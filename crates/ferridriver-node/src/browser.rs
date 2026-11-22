@@ -114,10 +114,21 @@ fn build_browser_event_callback(
 
 #[napi]
 impl Browser {
-  /// Create a new page (tab).
+  /// Playwright: `browser.newPage(options?)`. A page in a context of its
+  /// own, made from `options` as `newContext` makes one and closed with
+  /// the page, so two such pages share no cookies or storage.
   #[napi(ts_return_type = "Promise<Page>")]
-  pub async fn new_page(&self) -> Result<crate::identity::PageObject> {
-    let page = Box::pin(self.inner.new_page()).await.into_napi()?;
+  pub async fn new_page(
+    &self,
+    options: Option<crate::context::NapiBrowserContextOptions>,
+  ) -> Result<crate::identity::PageObject> {
+    let options = options
+      .map(crate::context::NapiBrowserContextOptions::into_core)
+      .transpose()?
+      .unwrap_or_default();
+    let page = Box::pin(self.inner.new_page_in_own_context(options))
+      .await
+      .into_napi()?;
     Ok(crate::identity::PageObject(page))
   }
 

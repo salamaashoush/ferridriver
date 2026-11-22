@@ -114,3 +114,25 @@ describe('expect equality', () => {
     expect(count).toEqual(1);
   });
 });
+
+// `toMatchObject` runs jest's `subsetEquality` before any shape or class
+// rule, so an Error, or a class instance whose field is a getter, matches
+// the keys a plain object names: the shape an RPC client's error takes.
+test('toMatchObject reads the expected keys off an Error or a class instance', () => {
+  class RpcError extends Error {
+    code: string;
+    constructor(code: string) {
+      super('Forbidden');
+      this.code = code;
+    }
+    get status() {
+      return 403;
+    }
+  }
+  const error = new RpcError('FORBIDDEN');
+  expect(error).toMatchObject({ code: 'FORBIDDEN' });
+  expect(error).toMatchObject({ code: 'FORBIDDEN', status: 403, message: 'Forbidden' });
+  expect(error).not.toMatchObject({ code: 'NOT_FOUND' });
+  expect(error).not.toMatchObject({ missing: 1 });
+  expect([error]).toMatchObject([{ code: 'FORBIDDEN' }]);
+});

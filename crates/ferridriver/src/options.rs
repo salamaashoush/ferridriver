@@ -1375,6 +1375,12 @@ impl CheckOptions {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct SelectOptionValue {
+  /// What a plain string asks for: an option whose value OR label is
+  /// this. Playwright sends `selectOption('x')` as `{ valueOrLabel }`
+  /// (`client/elementHandle.ts` `convertSelectOptionValues`); it is not
+  /// a key of the object form, so it is never read from one.
+  #[serde(rename = "valueOrLabel", skip_serializing_if = "Option::is_none", skip_deserializing)]
+  pub value_or_label: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub value: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -1389,6 +1395,16 @@ impl SelectOptionValue {
   pub fn by_value(s: impl Into<String>) -> Self {
     Self {
       value: Some(s.into()),
+      ..Self::default()
+    }
+  }
+
+  /// What a plain string selects: the option whose value or label is
+  /// `s`, as Playwright's `selectOption('s')` does.
+  #[must_use]
+  pub fn by_value_or_label(s: impl Into<String>) -> Self {
+    Self {
+      value_or_label: Some(s.into()),
       ..Self::default()
     }
   }
@@ -1491,7 +1507,7 @@ impl From<Vec<FilePayload>> for InputFiles {
 }
 
 /// Argument for `select_option` — anything option-descriptor-shaped
-/// converts: `"value"`, `["a", "b"]`, a single [`SelectOptionValue`]
+/// converts: `"value or label"`, `["a", "b"]`, a single [`SelectOptionValue`]
 /// (see [`SelectOptionValue::by_label`] / [`SelectOptionValue::by_index`]),
 /// or a prepared `Vec<SelectOptionValue>`.
 #[derive(Debug, Clone, Default)]
@@ -1499,13 +1515,13 @@ pub struct SelectOptionValues(pub Vec<SelectOptionValue>);
 
 impl From<&str> for SelectOptionValues {
   fn from(value: &str) -> Self {
-    Self(vec![SelectOptionValue::by_value(value)])
+    Self(vec![SelectOptionValue::by_value_or_label(value)])
   }
 }
 
 impl From<String> for SelectOptionValues {
   fn from(value: String) -> Self {
-    Self(vec![SelectOptionValue::by_value(value)])
+    Self(vec![SelectOptionValue::by_value_or_label(value)])
   }
 }
 
@@ -1523,19 +1539,25 @@ impl From<Vec<SelectOptionValue>> for SelectOptionValues {
 
 impl<const N: usize> From<[&str; N]> for SelectOptionValues {
   fn from(values: [&str; N]) -> Self {
-    Self(values.into_iter().map(SelectOptionValue::by_value).collect())
+    Self(values.into_iter().map(SelectOptionValue::by_value_or_label).collect())
   }
 }
 
 impl From<Vec<&str>> for SelectOptionValues {
   fn from(values: Vec<&str>) -> Self {
-    Self(values.into_iter().map(SelectOptionValue::by_value).collect())
+    Self(values.into_iter().map(SelectOptionValue::by_value_or_label).collect())
   }
 }
 
 impl From<&[&str]> for SelectOptionValues {
   fn from(values: &[&str]) -> Self {
-    Self(values.iter().copied().map(SelectOptionValue::by_value).collect())
+    Self(
+      values
+        .iter()
+        .copied()
+        .map(SelectOptionValue::by_value_or_label)
+        .collect(),
+    )
   }
 }
 
@@ -3442,6 +3464,67 @@ impl BrowserContextOptions {
       has_touch: self.has_touch.unwrap_or(false),
       is_landscape: false,
     })
+  }
+
+  /// The options `self` names, falling back to `base` for each one it
+  /// leaves out.
+  ///
+  /// Playwright's test runner fills a `browser.newContext(options)` made
+  /// inside a test from the test's own `use` options this way, key by
+  /// key, only where the caller named nothing
+  /// (`runBeforeCreateBrowserContext`, `playwright/src/index.ts`).
+  #[must_use]
+  pub fn layered_over(&self, base: &Self) -> Self {
+    let media = |own: &MediaOverride, base: &MediaOverride| {
+      if own.is_specified() { own.clone() } else { base.clone() }
+    };
+    Self {
+      accept_downloads: self.accept_downloads.or(base.accept_downloads),
+      test_id_attribute: self
+        .test_id_attribute
+        .clone()
+        .or_else(|| base.test_id_attribute.clone()),
+      base_url: self.base_url.clone().or_else(|| base.base_url.clone()),
+      bypass_csp: self.bypass_csp.or(base.bypass_csp),
+      color_scheme: media(&self.color_scheme, &base.color_scheme),
+      contrast: media(&self.contrast, &base.contrast),
+      device_scale_factor: self.device_scale_factor.or(base.device_scale_factor),
+      extra_http_headers: self
+        .extra_http_headers
+        .clone()
+        .or_else(|| base.extra_http_headers.clone()),
+      forced_colors: media(&self.forced_colors, &base.forced_colors),
+      geolocation: self.geolocation.or(base.geolocation),
+      has_touch: self.has_touch.or(base.has_touch),
+      http_credentials: self.http_credentials.clone().or_else(|| base.http_credentials.clone()),
+      ignore_https_errors: self.ignore_https_errors.or(base.ignore_https_errors),
+      is_mobile: self.is_mobile.or(base.is_mobile),
+      java_script_enabled: self.java_script_enabled.or(base.java_script_enabled),
+      locale: self.locale.clone().or_else(|| base.locale.clone()),
+      offline: self.offline.or(base.offline),
+      network_conditions: self.network_conditions.or(base.network_conditions),
+      cpu_throttling_rate: self.cpu_throttling_rate.or(base.cpu_throttling_rate),
+      permissions: self.permissions.clone().or_else(|| base.permissions.clone()),
+      origin_permissions: if self.origin_permissions.is_empty() {
+        base.origin_permissions.clone()
+      } else {
+        self.origin_permissions.clone()
+      },
+      proxy: self.proxy.clone().or_else(|| base.proxy.clone()),
+      record_har: self.record_har.clone().or_else(|| base.record_har.clone()),
+      record_video: self.record_video.clone().or_else(|| base.record_video.clone()),
+      reduced_motion: media(&self.reduced_motion, &base.reduced_motion),
+      screen: self.screen.or(base.screen),
+      service_workers: self.service_workers.or(base.service_workers),
+      storage_state: self.storage_state.clone().or_else(|| base.storage_state.clone()),
+      strict_selectors: self.strict_selectors.or(base.strict_selectors),
+      timezone_id: self.timezone_id.clone().or_else(|| base.timezone_id.clone()),
+      user_agent: self.user_agent.clone().or_else(|| base.user_agent.clone()),
+      viewport: match self.viewport {
+        ViewportOption::Default => base.viewport.clone(),
+        ref own => own.clone(),
+      },
+    }
   }
 
   /// The media features this context names for its pages, which a

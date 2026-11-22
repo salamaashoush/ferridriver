@@ -60,7 +60,9 @@ test('invalid navigation leaves the current document usable', async ({ page }) =
 });
 
 test('navigation completes a local address without a scheme', async ({ browser, baseURL }) => {
-  const context = await browser.newContext();
+  // A context made in a test inherits the test's baseURL, against which
+  // the address would be a relative path; an empty one resolves nothing.
+  const context = await browser.newContext({ baseURL: '' });
   try {
     const page = await context.newPage();
     const target = `${baseURL}/fx/landed`;

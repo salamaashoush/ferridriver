@@ -116,6 +116,18 @@ fn compare_uncycled<V: LiveValue>(
     return Ok(false);
   }
 
+  // jest's `subsetEquality`, which `toMatchObject` tries before any
+  // shape or class rule: an expected object with keys (not an Error, an
+  // array or a Date) matches any object that has each of those keys,
+  // read as JS reads them, through the prototype chain. That is how
+  // `expect(error).toMatchObject({ code: 'FORBIDDEN' })` matches an
+  // Error subclass carrying a `code`.
+  if mode.subset()
+    && let Shape::Object(want) = &e_shape
+  {
+    return subset_of(actual, want, mode, ev, seen);
+  }
+
   match (a_shape, e_shape) {
     (Shape::Primitive, Shape::Primitive) => actual.same_value(expected),
     (Shape::Function, Shape::Function) => actual.same_value(expected),
@@ -224,6 +236,34 @@ fn compare_objects<V: LiveValue>(
       return Ok(false);
     };
     if !compare(got, want, mode, ev, seen)? {
+      return Ok(false);
+    }
+  }
+  Ok(true)
+}
+
+/// `subsetEquality`'s walk: every key of `want` read off `actual`.
+/// Outside strict mode an `undefined` expected value means the key is
+/// absent or `undefined` on `actual` as well.
+fn subset_of<V: LiveValue>(
+  actual: &V,
+  want: &[(String, V)],
+  mode: Mode,
+  ev: Evaluator<'_>,
+  seen: &mut Vec<(u64, u64)>,
+) -> Result<bool, V::Error> {
+  for (key, wanted) in want {
+    let got = actual.get_prop(key)?;
+    if wanted.js_type() == JsType::Undefined {
+      if got.is_some_and(|got| got.js_type() != JsType::Undefined) {
+        return Ok(false);
+      }
+      continue;
+    }
+    let Some(got) = got else {
+      return Ok(false);
+    };
+    if !compare(&got, wanted, mode, ev, seen)? {
       return Ok(false);
     }
   }

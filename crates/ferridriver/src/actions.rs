@@ -12,6 +12,87 @@ use crate::error::{FerriError, Result};
 use crate::selectors;
 use rustc_hash::FxHashMap;
 
+/// What a locator's retry loop tells the pointer action it runs.
+#[derive(Clone)]
+struct PointerContext {
+  /// How many times the loop has already tried the action. Playwright's
+  /// `_retryPointerAction` picks each try's scroll alignment from this
+  /// count, and the count spans the tries a covering element sent back
+  /// to the loop, which is how a target under a `position: sticky`
+  /// header is finally revealed.
+  retry: usize,
+  /// The frame the element lives in, when it is not the main frame.
+  frame: Option<crate::frame::Frame>,
+}
+
+tokio::task_local! {
+  static POINTER: PointerContext;
+}
+
+/// Run `action` as try number `retry` of its locator's retry loop, on an
+/// element of `frame`.
+pub(crate) async fn with_pointer_context<F: std::future::Future>(
+  retry: usize,
+  frame: Option<crate::frame::Frame>,
+  action: F,
+) -> F::Output {
+  POINTER.scope(PointerContext { retry, frame }, action).await
+}
+
+fn pointer_retry() -> usize {
+  POINTER.try_with(|context| context.retry).unwrap_or(0)
+}
+
+/// How far the viewport of the action's frame sits from the top page's,
+/// beyond what the injected script's `frameElement` walk adds to a click
+/// point: that walk stops at the first cross-origin frame, whose
+/// `frameElement` it cannot read. Each such boundary adds its `<iframe>`'s
+/// content box, measured in the parent frame, as Playwright's
+/// `crPage._framePosition` does. Same-origin boundaries add nothing here,
+/// the walk having counted them already.
+async fn cross_origin_frame_offset() -> Result<(f64, f64)> {
+  /// Run on the owner `<iframe>`: `null` across a same-origin boundary,
+  /// otherwise its content box's position in the top-most document its
+  /// own same-origin ancestors reach.
+  const OWNER_POSITION: &str = "function() { \
+    if (this.contentDocument) return null; \
+    var r = this.getBoundingClientRect(); var s = getComputedStyle(this); \
+    var x = r.x + parseFloat(s.borderLeftWidth) + parseFloat(s.paddingLeft); \
+    var y = r.y + parseFloat(s.borderTopWidth) + parseFloat(s.paddingTop); \
+    var win = this.ownerDocument.defaultView; \
+    while (win && win !== win.parent && win.frameElement) { \
+      var fr = win.frameElement.getBoundingClientRect(); x += fr.x; y += fr.y; win = win.parent; \
+    } \
+    return { x: x, y: y }; }";
+  let Some(mut frame) = POINTER.try_with(|context| context.frame.clone()).ok().flatten() else {
+    return Ok((0.0, 0.0));
+  };
+  let (mut dx, mut dy) = (0.0, 0.0);
+  while let Some(parent) = frame.parent_frame() {
+    let owner = frame.frame_element().await?;
+    if let Some(position) = owner.any_element().call_js_fn_value(OWNER_POSITION).await?
+      && let (Some(x), Some(y)) = (position["x"].as_f64(), position["y"].as_f64())
+    {
+      dx += x;
+      dy += y;
+    }
+    frame = parent;
+  }
+  Ok((dx, dy))
+}
+
+/// The scroll alignment of a pointer action's `retry`-th try, in
+/// Playwright's order: the precise reveal first (`None`), then the
+/// element's end, center and start.
+fn scroll_alignment(retry: usize) -> Option<&'static str> {
+  match retry % 4 {
+    0 => None,
+    1 => Some("{block:'end',inline:'end'}"),
+    2 => Some("{block:'center',inline:'center'}"),
+    _ => Some("{block:'start',inline:'start'}"),
+  }
+}
+
 async fn ensure_mcp_support(page: &AnyPage) -> Result<String> {
   let fd = page.injected_script().await?;
   page.evaluate(selectors::MCP_SUPPORT_JS).await?;
@@ -842,11 +923,13 @@ pub async fn resolve_click_point(
   element: &AnyElement,
   position: Option<crate::options::Point>,
   scroll: bool,
+  alignment: Option<&str>,
 ) -> Result<(f64, f64)> {
   let position_js = match position {
     Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
     None => "null".to_string(),
   };
+  let alignment_js = alignment.unwrap_or("null");
   // Prefer the non-standard Chromium/WebKit `scrollIntoViewIfNeeded` —
   // a single native call that measures viewport + scroll in one step.
   // Fall back to the W3C `scrollIntoView({block:'center'})` on Firefox
@@ -855,7 +938,10 @@ pub async fn resolve_click_point(
   // best-available primitive, not a workaround.
   let js = format!(
     "function() {{ \
+      var align = {alignment_js}; \
       if (!{scroll}) {{ \
+      }} else if (align) {{ \
+        this.scrollIntoView(Object.assign({{ behavior: 'instant' }}, align)); \
       }} else if (typeof this.scrollIntoViewIfNeeded === 'function') {{ \
         this.scrollIntoViewIfNeeded(); \
       }} else {{ \
@@ -974,13 +1060,12 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
 
     // Cycle scroll alignment across retries — Playwright `_retryPointerAction`
     // (`undefined` => precise `scrollIntoViewIfNeeded`, then end/center/start)
-    // to reveal targets under `position:sticky` overlays.
-    let scroll_align = match attempt % 4 {
-      _ if !opts.scrolls() => Some("false"),
-      0 => None,
-      1 => Some("{block:'end',inline:'end'}"),
-      2 => Some("{block:'center',inline:'center'}"),
-      _ => Some("{block:'start',inline:'start'}"),
+    // to reveal targets under `position:sticky` overlays. The count runs
+    // on across the locator loop's tries as well as this loop's own.
+    let scroll_align = if opts.scrolls() {
+      scroll_alignment(pointer_retry() + attempt)
+    } else {
+      Some("false")
     };
 
     // Single combined pre-flight: actionability (visible /
@@ -990,7 +1075,7 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     // the action skips it (force) or only checks it (trial).
     let arm_in_prep = !opts.is_force() && !opts.is_trial();
     let (x, y, armed) = if opts.is_force() {
-      let (x, y) = resolve_click_point(element, opts.position, opts.scrolls()).await?;
+      let (x, y) = resolve_click_point(element, opts.position, opts.scrolls(), None).await?;
       (x, y, None)
     } else {
       let hit_action = arm_in_prep.then_some("mouse");
@@ -1059,7 +1144,8 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     let dispatch = if opts.is_trial() {
       Ok(())
     } else {
-      page.click_at_with(x, y, &args).await
+      let (dx, dy) = cross_origin_frame_offset().await?;
+      page.click_at_with(x + dx, y + dy, &args).await
     };
     let dispatch = dispatch.and(restore_modifiers(page, restore).await);
 
@@ -1218,6 +1304,7 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     element,
     opts.position,
     opts.scroll != Some(crate::options::ActionScroll::None),
+    scroll_alignment(pointer_retry()),
   )
   .await?;
 
@@ -1248,9 +1335,14 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
   let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
-    page
-      .hover_at_with(x, y, &crate::backend::BackendHoverArgs { steps: 1 })
-      .await
+    match cross_origin_frame_offset().await {
+      Ok((dx, dy)) => {
+        page
+          .hover_at_with(x + dx, y + dy, &crate::backend::BackendHoverArgs { steps: 1 })
+          .await
+      },
+      Err(error) => Err(error),
+    }
   };
   let result = result.and(restore_modifiers(page, restore).await);
 
@@ -1266,6 +1358,84 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     }
   }
   result
+}
+
+/// What to do with the pointer at the point one half of a drag resolved.
+pub(crate) enum DragStep {
+  /// Move to the source and press (Playwright's `'move and down'`).
+  Press,
+  /// Move to the target in `steps` from where the press was, and release
+  /// (`'move and up'`).
+  Release { from: (f64, f64), steps: u32 },
+}
+
+/// One half of Playwright's `dragAndDrop` (`server/frames.ts`), each its
+/// own pointer action as there: wait for the element to be visible and
+/// stable, reveal it, check that it receives the pointer at its point
+/// (as a mouse press on the source, a drag over the target), then act.
+/// Returns the point acted at.
+pub(crate) async fn drag_step(
+  element: &AnyElement,
+  page: &AnyPage,
+  opts: &crate::options::DragAndDropOptions,
+  step: DragStep,
+) -> Result<(f64, f64)> {
+  let force = opts.force.unwrap_or(false);
+  let trial = opts.trial.unwrap_or(false);
+  let (position, interceptor) = match step {
+    DragStep::Press => (opts.source_position, "mouse"),
+    DragStep::Release { .. } => (opts.target_position, "drag"),
+  };
+  if !force {
+    wait_for_states(element, page, &["visible", "stable"]).await.ok();
+  }
+  let (x, y) = resolve_click_point(
+    element,
+    position,
+    opts.scroll != Some(crate::options::ActionScroll::None),
+    scroll_alignment(pointer_retry()),
+  )
+  .await?;
+  let armed = if force {
+    false
+  } else if trial {
+    if let Ok(HitResult::Missed { description }) = expect_hit_target(element, x, y).await {
+      return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+    }
+    false
+  } else {
+    match install_hit_interceptor(element, x, y, interceptor).await {
+      Ok(InstallOutcome::Armed) => true,
+      Ok(InstallOutcome::Miss(description)) => {
+        return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+      },
+      Err(_) => false,
+    }
+  };
+  if trial {
+    return Ok((x, y));
+  }
+  let (dx, dy) = cross_origin_frame_offset().await?;
+  let (px, py) = (x + dx, y + dy);
+  let result = match step {
+    DragStep::Press => match page.move_mouse(px, py).await {
+      Ok(()) => page.mouse_down(px, py, "left", 1).await,
+      Err(error) => Err(error),
+    },
+    DragStep::Release { from, steps } => match page.move_mouse_smooth(from.0, from.1, px, py, steps).await {
+      Ok(()) => page.mouse_up(px, py, "left", 1).await,
+      Err(error) => Err(error),
+    },
+  };
+  if armed {
+    let hit = finalize_hit_interceptor(element).await;
+    if result.is_ok()
+      && let Ok(HitResult::Missed { description }) = hit
+    {
+      return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
+    }
+  }
+  result.map(|()| (px, py))
 }
 
 /// Dispatch a tap (touch event) with the full Playwright
@@ -1300,6 +1470,7 @@ pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::o
     element,
     opts.position,
     opts.scroll != Some(crate::options::ActionScroll::None),
+    scroll_alignment(pointer_retry()),
   )
   .await?;
 
@@ -1326,7 +1497,10 @@ pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::o
   let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
-    page.tap_at_with(x, y).await
+    match cross_origin_frame_offset().await {
+      Ok((dx, dy)) => page.tap_at_with(x + dx, y + dy).await,
+      Err(error) => Err(error),
+    }
   };
   let result = result.and(restore_modifiers(page, restore).await);
 

@@ -86,17 +86,11 @@ async fn focus(world: &mut BrowserWorld, selector: String) {
 
 #[when("I select {string} from {string}")]
 async fn select_option(world: &mut BrowserWorld, value: String, selector: String) {
-  // Match Playwright's plain-string selectOption semantics: a string can be
-  // either the option's `value` or its label. The injected script OR-matches
-  // across descriptors, so passing both descriptors selects whichever option
-  // matches either field.
+  // Playwright's plain-string selectOption: the option's value or its label.
   world
     .page()?
     .locator(&selector)
-    .select_option(vec![
-      ferridriver::options::SelectOptionValue::by_value(value.clone()),
-      ferridriver::options::SelectOptionValue::by_label(value.clone()),
-    ])
+    .select_option(ferridriver::options::SelectOptionValue::by_value_or_label(value.clone()))
     .await
     .map_err(|e| StepError::wrap(format!("select \"{value}\" from \"{selector}\""), e))?;
 }

@@ -978,7 +978,7 @@ pub fn parse_select_option_values<'js>(
 ) -> rquickjs::Result<Vec<ferridriver::options::SelectOptionValue>> {
   if value.is_string() {
     let s: String = value.get()?;
-    return Ok(vec![ferridriver::options::SelectOptionValue::by_value(s)]);
+    return Ok(vec![ferridriver::options::SelectOptionValue::by_value_or_label(s)]);
   }
   if let Some(arr) = value.as_array() {
     let len = arr.len();
@@ -987,7 +987,7 @@ pub fn parse_select_option_values<'js>(
       let el: Value<'js> = arr.get(idx)?;
       if el.is_string() {
         let s: String = el.get()?;
-        out.push(ferridriver::options::SelectOptionValue::by_value(s));
+        out.push(ferridriver::options::SelectOptionValue::by_value_or_label(s));
       } else if el.is_object() {
         // Direct ferrijs-serde (no serde_json::Value middle-hop).
         let desc: ferridriver::options::SelectOptionValue = serde_from_js(ctx, el)?;

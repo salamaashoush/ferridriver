@@ -108,6 +108,9 @@ macro_rules! retry_resolve {
         break 'retry ::std::result::Result::Err(__signal.error());
       }
       let mut __idx: usize = 0;
+      // Tries of the action itself (an element was found and acted on),
+      // which pick each pointer try's scroll alignment.
+      let mut __tries: usize = 0;
       loop {
         if let ::std::option::Option::Some(__signal) = __signal.as_ref()
           && __signal.is_aborted()
@@ -202,7 +205,9 @@ macro_rules! retry_resolve {
             }
             // Boxed: the guarded attempt would otherwise sit inline in the
             // state machine of every action this macro expands into.
-            match ::std::boxed::Box::pin($crate::abort::guard($body)).await {
+            let __try = __tries;
+            __tries = __tries.saturating_add(1);
+            match ::std::boxed::Box::pin($crate::actions::with_pointer_context(__try, (!__rframe.is_main_frame()).then(|| __rframe.clone()), $crate::abort::guard($body))).await {
               ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
               ::std::result::Result::Err(e @ $crate::error::FerriError::Aborted { .. }) => {
                 __call_log.push(format!("operation was aborted: {e}"));
@@ -262,6 +267,13 @@ macro_rules! retry_resolve {
 /// `error:notinviewport` is "element is outside of the viewport",
 /// `error:not<state>` is "element is not <state>".
 pub(crate) fn action_log_line(msg: &str) -> String {
+  // `server/dom.ts::_retryAction`'s lines for `selectOption`'s markers.
+  if msg.contains("error:optionsnotfound") {
+    return "did not find some options".to_string();
+  }
+  if msg.contains("error:optionnotenabled") {
+    return "option being selected is not enabled".to_string();
+  }
   let Some(at) = msg.find("error:not") else {
     return msg.strip_prefix("backend error: ").unwrap_or(msg).to_string();
   };
@@ -302,6 +314,10 @@ pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
     || msg.contains("not found")
     || msg.contains("detached")
     || msg.contains("error:not")
+    // `selectOption` before its options render, or while the one asked
+    // for is disabled: Playwright waits for both (`server/dom.ts`).
+    || msg.contains("error:optionsnotfound")
+    || msg.contains("error:optionnotenabled")
     // CDP stale-node / stale-context messages.
     || msg.contains("reference a Node")
     || msg.contains("Could not find node")
@@ -1311,7 +1327,7 @@ impl Locator {
   pub fn dispatch_event(
     &self,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
   ) -> crate::action::Action<'static, crate::options::DispatchEventOptions, ()> {
     let locator = self.clone();
     let event_type = event_type.to_string();
@@ -1323,53 +1339,32 @@ impl Locator {
   pub(crate) async fn dispatch_event_impl(
     &self,
     event_type: &str,
-    event_init: Option<serde_json::Value>,
+    event_init: crate::protocol::SerializedArgument,
     opts: Option<crate::options::DispatchEventOptions>,
   ) -> Result<()> {
     let timeout_ms = opts.and_then(|o| o.timeout);
-    let init_json = event_init.as_ref().map_or_else(
-      || "{}".to_string(),
-      |v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
-    );
-    // Escape `</script>` which would break our JS formatting if
-    // event_init contained a close-script sequence.
-    let init_js = init_json.replace("</", "<\\/");
-    let js = format!(
-      "function() {{ \
-        var type = '{event_type}'; \
-        var init = Object.assign({{bubbles: true, cancelable: true, composed: true}}, {init_js}); \
-        var ev; \
-        if (['click','dblclick','mousedown','mouseup','mouseenter','mouseleave','mousemove','mouseover','mouseout','contextmenu','auxclick'].includes(type)) {{ \
-          ev = new MouseEvent(type, init); \
-        }} else if (['keydown','keyup','keypress'].includes(type)) {{ \
-          ev = new KeyboardEvent(type, init); \
-        }} else if (['touchstart','touchend','touchmove','touchcancel'].includes(type) && typeof TouchEvent !== 'undefined') {{ \
-          ev = new TouchEvent(type, init); \
-        }} else if (['pointerdown','pointerup','pointermove','pointerover','pointerout','pointerenter','pointerleave','pointercancel','gotpointercapture','lostpointercapture'].includes(type)) {{ \
-          ev = new PointerEvent(type, init); \
-        }} else if (['dragstart','drag','dragenter','dragleave','dragover','drop','dragend'].includes(type)) {{ \
-          ev = new DragEvent(type, init); \
-        }} else if (['focus','blur','focusin','focusout'].includes(type)) {{ \
-          ev = new FocusEvent(type, init); \
-        }} else if (['input','beforeinput'].includes(type)) {{ \
-          ev = new InputEvent(type, init); \
-        }} else if (type === 'wheel') {{ \
-          ev = new WheelEvent(type, init); \
-        }} else if (['deviceorientation','deviceorientationabsolute'].includes(type)) {{ \
-          ev = new DeviceOrientationEvent(type, init); \
-        }} else {{ \
-          ev = new Event(type, init); \
-        }} \
-        this.dispatchEvent(ev); \
-      }}"
-    );
-    let js_ref = js.as_str();
+    // `eventInit` is an evaluation argument, as Playwright serializes it
+    // (`client/frame.ts` `serializeArgument(eventInit)`), so a JSHandle in
+    // it (a `DataTransfer` for a drop) reaches the page as the object it
+    // names.
+    let event_type_js = serde_json::to_string(event_type)?;
+    let source = format!("(el, eventInit) => {{ {DISPATCH_EVENT_BODY} }}").replace("__TYPE__", &event_type_js);
+    let source = source.as_str();
     retry_resolve!(
       self,
       timeout_ms,
       "dispatchEvent",
       ::serde_json::json!({ "type": event_type }),
-      |el, _page| async move { el.call_js_fn(js_ref).await }
+      |el, _page| async {
+        let page_arc = Arc::clone(self.frame.page_arc());
+        let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
+        let result = handle
+          .as_js_handle()
+          .evaluate(source, event_init.clone(), Some(true))
+          .await;
+        let _ = handle.dispose().await;
+        result.map(|_| ())
+      }
     )
   }
 
@@ -2071,57 +2066,24 @@ impl Locator {
     target: &Locator,
     options: Option<crate::options::DragAndDropOptions>,
   ) -> Result<()> {
-    // The rect script scrolls the element into view (unless the caller
-    // asked for `scroll: 'none'`) and returns its full padding-box rect so
-    // `sourcePosition` / `targetPosition` offset from the origin as
-    // Playwright does.
     let opts = options.unwrap_or_default();
-    let scroll = if opts.scroll == Some(crate::options::ActionScroll::None) {
-      ""
-    } else {
-      "try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); }"
-    };
-    let rect_js = format!(
-      "function() {{ {scroll} var r = this.getBoundingClientRect(); return {{x: r.x, y: r.y, width: r.width, height: r.height}}; }}"
-    );
-    let rect_js = rect_js.as_str();
-
-    // Resolve source then target geometry under the action retry funnel
-    // (Playwright resolves each with its own `_retryPointerAction`, source
-    // first), so a node that detaches mid-drag is re-resolved rather than
-    // surfacing a hard error.
-    let src = retry_resolve!(
+    let steps = opts.steps.unwrap_or(1);
+    let opts_ref = &opts;
+    // Press on the source, then release on the target, each its own
+    // pointer action with its own retries as in Playwright's
+    // `dragAndDrop`: the target is found, revealed and checked only once
+    // the drag has started, when the page may have moved it.
+    let from = retry_resolve!(
       self,
-      opts.timeout,
+      opts_ref.timeout,
       "dragTo",
       ::serde_json::json!({ "target": target.selector }),
-      |el, _page| async move { el.call_js_fn_value(rect_js).await }
-    )?
-    .ok_or_else(|| crate::error::FerriError::Backend("no source bounding box".into()))?;
-    let tgt = retry_resolve!(target, opts.timeout, "dragTo", |el, _page| async move {
-      el.call_js_fn_value(rect_js).await
-    })?
-    .ok_or_else(|| crate::error::FerriError::Backend("no target bounding box".into()))?;
-
-    let from = rect_point(&src, opts.source_position);
-    let to = rect_point(&tgt, opts.target_position);
-
-    // Playwright's `trial: true` performs actionability checks (resolve) and
-    // skips the actual action. We've already resolved both elements above,
-    // so simply return without dispatching mouse events.
-    if opts.trial.unwrap_or(false) {
-      return Ok(());
-    }
-
-    // Default to 5 interpolated moves rather than Playwright's 1. Playwright
-    // can afford a single jump because its Chromium backend intercepts the
-    // native drag (`Input.setInterceptDrags` + `Input.dispatchDragEvent`);
-    // ferridriver dispatches plain mouse events, and drag libraries
-    // (interact.js, dnd-kit, HTML5 DnD polyfills) only start a drag when
-    // intermediate `mousemove`s cross their drag threshold — a single jump
-    // from source to target never does.
-    let steps = opts.steps.unwrap_or(5);
-    self.frame.page_arc().inner().click_and_drag(from, to, steps).await
+      |el, page| async move { actions::drag_step(&el, page, opts_ref, actions::DragStep::Press).await }
+    )?;
+    retry_resolve!(target, opts_ref.timeout, "dragTo", |el, page| async move {
+      actions::drag_step(&el, page, opts_ref, actions::DragStep::Release { from, steps }).await
+    })?;
+    Ok(())
   }
 
   // ── Drop a payload onto this element ────────────────────────────────────
@@ -2288,40 +2250,39 @@ impl Locator {
     Ok(locators)
   }
 
-  /// Get text content of all matching elements.
+  /// Playwright: `locator.allTextContents()`, each matching element's
+  /// `textContent` as the page has it, in its own frame.
   ///
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn all_text_contents(&self) -> Result<Vec<String>> {
-    let parsed = selectors::parse(&self.selector)?;
-    let parts_json = selectors::build_parts_json(&parsed);
-    self.frame.page_arc().inner().ensure_engine_injected().await?;
-    let fd = "window.__fd";
-    let js = format!(
-      "(function() {{ var r = {fd}._exec({parts_json}, document); \
-       return r.map(function(e) {{ return (e.textContent || '').trim(); }}); }})()"
-    );
-    let val = self.frame.page_arc().inner().evaluate(&js).await?;
-    match val {
-      Some(serde_json::Value::Array(arr)) => Ok(
-        arr
-          .into_iter()
-          .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
-          .collect(),
-      ),
-      _ => Ok(Vec::new()),
-    }
+    self.all_strings("ee => ee.map(e => e.textContent || '')").await
   }
 
-  /// Get inner text of all matching elements.
+  /// Playwright: `locator.allInnerTexts()`, each matching element's
+  /// `innerText`: the rendered text, so table cells and blocks are
+  /// separated as a reader sees them, where `textContent` runs them
+  /// together.
   ///
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn all_inner_texts(&self) -> Result<Vec<String>> {
-    // Same as all_text_contents for our implementation
-    self.all_text_contents().await
+    self.all_strings("ee => ee.map(e => e.innerText)").await
+  }
+
+  async fn all_strings(&self, fn_source: &str) -> Result<Vec<String>> {
+    let value = self
+      .evaluate_all(fn_source, crate::protocol::SerializedArgument::default(), Some(true))
+      .await?;
+    Ok(match value.to_json_like() {
+      Some(serde_json::Value::Array(items)) => items
+        .into_iter()
+        .map(|item| item.as_str().unwrap_or_default().to_owned())
+        .collect(),
+      _ => Vec::new(),
+    })
   }
 
   // ── Evaluate (Playwright parity) ─────────────────────────────────────
@@ -3410,17 +3371,6 @@ pub fn guess_mime_type(name: &str) -> &'static str {
   }
 }
 
-fn rect_point(rect: &serde_json::Value, position: Option<crate::options::Point>) -> (f64, f64) {
-  let x = rect.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-  let y = rect.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-  let width = rect.get("width").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-  let height = rect.get("height").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-  match position {
-    Some(p) => (x + p.x, y + p.y),
-    None => (x + width / 2.0, y + height / 2.0),
-  }
-}
-
 pub(crate) fn build_role_selector(role: &str, opts: &RoleOptions) -> String {
   let mut sel = format!("internal:role={role}");
   if let Some(name) = &opts.name {
@@ -3520,24 +3470,29 @@ fn escape_for_attribute_selector(value: &StringOrRegex, exact: bool) -> String {
   }
 }
 
-/// Port of Playwright's `escapeRegexForSelector`. For regexes with
-/// `unicode` / `unicodeSets` flags we emit the source verbatim (per the
-/// upstream comment — identity character escapes aren't allowed in
-/// those modes). Otherwise we escape `>>` so the selector chain
-/// operator doesn't collide with the regex literal.
+/// Port of Playwright's `escapeRegexForSelector`
+/// (`injected/isomorphic/stringUtils.ts`). For regexes with `unicode` /
+/// `unicodeSets` flags the literal goes out verbatim (identity escapes
+/// are not allowed in those modes). Otherwise a quote that is not
+/// already escaped gets a backslash, so a regex inside an attribute
+/// clause (`internal:role=link[name=/Salama's/]`) does not end the value
+/// at its `'`, and `>>` is escaped so the chain operator does not split
+/// the literal.
 fn escape_regex_for_selector(source: &str, flags: &str) -> String {
-  let has_unicode = flags.contains('u') || flags.contains('v');
-  if has_unicode {
-    format!("/{source}/{flags}")
-  } else {
-    // Escape `>>` as `\>\>` so the selector chain operator can't
-    // prematurely split the regex literal. Matches Playwright's
-    // `String(re).replace(/>>/g, '\\>\\>')` step — quote escaping is
-    // only needed for attribute selectors, which our callers handle
-    // separately.
-    let escaped_source = source.replace(">>", "\\>\\>");
-    format!("/{escaped_source}/{flags}")
+  let literal = format!("/{source}/{flags}");
+  if flags.contains('u') || flags.contains('v') {
+    return literal;
   }
+  let mut escaped = String::with_capacity(literal.len() + 4);
+  let mut backslashes = 0usize;
+  for c in literal.chars() {
+    if matches!(c, '"' | '\'' | '`') && backslashes.is_multiple_of(2) {
+      escaped.push('\\');
+    }
+    backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+    escaped.push(c);
+  }
+  escaped.replace(">>", "\\>\\>")
 }
 
 /// Produce the Playwright-compatible JSON-quoted form of an inner
@@ -3817,6 +3772,8 @@ mod retry_classify_tests {
       "Execution context was destroyed.",
       "Cannot find context with specified id",
       "Node was not found",
+      "error:optionsnotfound",
+      "error:optionnotenabled",
     ] {
       assert!(is_retryable_action_error(msg), "should be retryable: {msg}");
     }
@@ -3852,5 +3809,55 @@ mod tests {
       action: "click".into(),
       message: "transport closed".into(),
     }));
+  }
+}
+
+/// The page side of [`Locator::dispatch_event`]: Playwright's
+/// `injectedScript.dispatchEvent`, with `__TYPE__` the event type as a
+/// JSON string.
+const DISPATCH_EVENT_BODY: &str = "\
+  var type = __TYPE__; \
+  var init = Object.assign({bubbles: true, cancelable: true, composed: true}, eventInit); \
+  var ev; \
+  if (['click','dblclick','mousedown','mouseup','mouseenter','mouseleave','mousemove','mouseover','mouseout','contextmenu','auxclick'].includes(type)) { \
+    ev = new MouseEvent(type, init); \
+  } else if (['keydown','keyup','keypress'].includes(type)) { \
+    ev = new KeyboardEvent(type, init); \
+  } else if (['touchstart','touchend','touchmove','touchcancel'].includes(type) && typeof TouchEvent !== 'undefined') { \
+    ev = new TouchEvent(type, init); \
+  } else if (['pointerdown','pointerup','pointermove','pointerover','pointerout','pointerenter','pointerleave','pointercancel','gotpointercapture','lostpointercapture'].includes(type)) { \
+    ev = new PointerEvent(type, init); \
+  } else if (['dragstart','drag','dragenter','dragleave','dragover','drop','dragend'].includes(type)) { \
+    ev = new DragEvent(type, init); \
+  } else if (['focus','blur','focusin','focusout'].includes(type)) { \
+    ev = new FocusEvent(type, init); \
+  } else if (['input','beforeinput'].includes(type)) { \
+    ev = new InputEvent(type, init); \
+  } else if (type === 'wheel') { \
+    ev = new WheelEvent(type, init); \
+  } else if (['deviceorientation','deviceorientationabsolute'].includes(type)) { \
+    ev = new DeviceOrientationEvent(type, init); \
+  } else { \
+    ev = new Event(type, init); \
+  } \
+  el.dispatchEvent(ev);";
+
+#[cfg(test)]
+mod regex_selector_tests {
+  use super::escape_regex_for_selector;
+
+  /// Playwright's `escapeRegexForSelector`: an unescaped quote gains a
+  /// backslash, an escaped one keeps its own, and `>>` is escaped.
+  #[test]
+  fn quotes_in_a_regex_are_escaped_for_the_selector() {
+    assert_eq!(
+      escape_regex_for_selector("Salama's summary", "i"),
+      r"/Salama\'s summary/i"
+    );
+    assert_eq!(escape_regex_for_selector(r#"a"b`c"#, ""), r#"/a\"b\`c/"#);
+    assert_eq!(escape_regex_for_selector(r"it\'s", ""), r"/it\'s/");
+    assert_eq!(escape_regex_for_selector(r"a\\'b", ""), r"/a\\\'b/");
+    assert_eq!(escape_regex_for_selector("a>>b", ""), r"/a\>\>b/");
+    assert_eq!(escape_regex_for_selector("it's", "u"), "/it's/u");
   }
 }

@@ -497,6 +497,7 @@ impl RegisteredRoute {
 /// interception loops run before parsing the full request payload.
 #[must_use]
 pub fn any_matching_route(routes: &[RegisteredRoute], url: &str) -> bool {
+  let url = url.split_once('#').map_or(url, |(request_url, _)| request_url);
   routes.iter().any(|r| r.live() && r.matcher.matches(url))
 }
 
@@ -608,6 +609,7 @@ pub async fn run_route_chain(
   routes: &tokio::sync::RwLock<Vec<RegisteredRoute>>,
   mut request: InterceptedRequest,
 ) -> RouteAction {
+  request.url = crate::network::without_fragment(request.url);
   let mut accumulated = ContinueOverrides::default();
   let mut tried: Vec<usize> = Vec::new();
   loop {

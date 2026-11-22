@@ -683,12 +683,7 @@ impl ElementHandleJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move {
-        let init_json = match event_init.0 {
-          Some(v) if !v.is_undefined() && !v.is_null() => {
-            Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(&ctx, v)?)
-          },
-          _ => None,
-        };
+        let init_json = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, event_init.0)?;
         let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
         self
           .inner

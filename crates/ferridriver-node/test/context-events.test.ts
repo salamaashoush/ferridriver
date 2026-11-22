@@ -27,7 +27,7 @@ for (const backend of BACKENDS) {
     });
 
     it("context.waitForEvent('framenavigated') resolves a Frame", async () => {
-      const context = browser.defaultContext();
+      const context = page.context();
       const [frame] = await Promise.all([
         context.waitForEvent("framenavigated", 5000),
         page.goto("data:text/html,<title>ctx-navmark</title>"),
@@ -37,7 +37,7 @@ for (const backend of BACKENDS) {
     });
 
     it("context.waitForEvent('pageload') resolves a Page", async () => {
-      const context = browser.defaultContext();
+      const context = page.context();
       const [p] = await Promise.all([
         context.waitForEvent("pageload", 5000),
         page.goto("data:text/html,<title>ctx-loadmark</title>"),
@@ -47,7 +47,7 @@ for (const backend of BACKENDS) {
     });
 
     it("context.once('framenavigated') delivers a Frame to the listener", async () => {
-      const context = browser.defaultContext();
+      const context = page.context();
       const got = new Promise<string>((resolve) => {
         context.once("framenavigated", (frame: any) => resolve(frame.url()));
       });

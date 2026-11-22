@@ -197,6 +197,40 @@ impl Drop for AttachTasks {
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
+  /// Every cookie of a browser context, without a page: Playwright's
+  /// `CRBrowserContext.doGetCookies` (`Storage.getCookies` on the
+  /// browser session). `None` is the default context.
+  pub async fn context_cookies(&self, browser_context_id: Option<&str>) -> Result<Vec<CookieData>> {
+    let result = self
+      .transport
+      .send_command(None, "Storage.getCookies", &context_params(browser_context_id))
+      .await?;
+    Ok(
+      result
+        .get("cookies")
+        .and_then(serde_json::Value::as_array)
+        .map(|cookies| cookies.iter().map(cookie_from_cdp).collect())
+        .unwrap_or_default(),
+    )
+  }
+
+  /// Playwright's `CRBrowserContext.addCookies`: `Storage.setCookies`.
+  pub async fn add_context_cookies(&self, browser_context_id: Option<&str>, cookies: &[CookieData]) -> Result<()> {
+    let mut params = context_params(browser_context_id);
+    params["cookies"] = cookies.iter().map(cookie_to_cdp).collect();
+    self.transport.send_command(None, "Storage.setCookies", &params).await?;
+    Ok(())
+  }
+
+  /// Playwright's `CRBrowserContext.doClearCookies`: `Storage.clearCookies`.
+  pub async fn clear_context_cookies(&self, browser_context_id: Option<&str>) -> Result<()> {
+    self
+      .transport
+      .send_command(None, "Storage.clearCookies", &context_params(browser_context_id))
+      .await?;
+    Ok(())
+  }
+
   /// Whether this browser's connection is still up.
   ///
   /// False once the transport hits EOF, which is what a crash or an
@@ -886,6 +920,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      network_idle: Arc::default(),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
       keyboard: Arc::default(),
@@ -1045,6 +1080,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      network_idle: Arc::default(),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
       keyboard: Arc::default(),
@@ -1269,6 +1305,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+      network_idle: Arc::default(),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
       keyboard: Arc::default(),
@@ -2256,6 +2293,7 @@ pub struct CdpPage<T: CdpTransport> {
   /// [`Self::frame_cache`]) so successive `crate::Page` wrappers share
   /// one history; filled by the same listener task.
   pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
+  pub(crate) network_idle: Arc<crate::network_idle::NetworkIdle>,
   /// Abort handles for every per-page listener task
   /// (`attach_listeners`, the Fetch interceptor). The listeners
   /// subscribe to TRANSPORT event channels, which stay open for the
@@ -2545,6 +2583,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       media_emulation: self.media_emulation.clone(),
       frame_listener_started: self.frame_listener_started.clone(),
       observed: self.observed.clone(),
+      network_idle: self.network_idle.clone(),
       listener_tasks: self.listener_tasks.clone(),
       drag_manager: self.drag_manager.clone(),
       keyboard: self.keyboard.clone(),
@@ -4983,43 +5022,15 @@ impl<T: CdpWrap> CdpPage<T> {
 
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     let steps = steps.max(1);
-    for i in 0..=steps {
+    for i in 1..=steps {
       let t = f64::from(i) / f64::from(steps);
-      let ease = t * t * (3.0 - 2.0 * t);
-      let x = from_x + (to_x - from_x) * ease;
-      let y = from_y + (to_y - from_y) * ease;
+      let x = from_x + (to_x - from_x) * t;
+      let y = from_y + (to_y - from_y) * t;
       // Per-step `move_mouse` (not a raw dispatch) so a drag started
       // mid-path is intercepted exactly like Playwright's `Mouse.move`
       // steps loop, which routes every step through `RawMouse.move`.
       self.move_mouse(x, y).await?;
     }
-    Ok(())
-  }
-
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
-    // Mirror Playwright's `frames.ts::dragAndDrop`:
-    //   mouse.move(source) -> mouse.down() -> mouse.move(target, {steps}) -> mouse.up()
-    // The initial hover-move positions the pointer over the draggable so
-    // drag libraries (interact.js, dnd-kit, native HTML5 DnD) register
-    // the ensuing `mousedown`/`pointerdown` as originating ON the
-    // element. Every move routes through the drag manager, so a native
-    // HTML5 drag started by the first held-button move is intercepted
-    // and re-dispatched as `dragEnter`/`dragOver`/`drop`, while JS drag
-    // libraries see stepped `mousemove`s carrying `buttons: 1`.
-    self.move_mouse(from.0, from.1).await?;
-    self.mouse_down(from.0, from.1, "left", 1).await?;
-    let steps = steps.max(1);
-    for i in 1..=steps {
-      let (x, y) = if steps == 1 {
-        (to.0, to.1)
-      } else {
-        let t = f64::from(i) / f64::from(steps);
-        let ease = t * t * (3.0 - 2.0 * t);
-        (from.0 + (to.0 - from.0) * ease, from.1 + (to.1 - from.1) * ease)
-      };
-      self.move_mouse(x, y).await?;
-    }
-    self.mouse_up(to.0, to.1, "left", 1).await?;
     Ok(())
   }
 
@@ -5150,54 +5161,11 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(|c| c.as_array())
       .cloned()
       .unwrap_or_default();
-    Ok(
-      cookies
-        .iter()
-        .map(|c| CookieData {
-          name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          domain: c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          path: c.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
-          http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
-          expires: c.get("expires").and_then(serde_json::Value::as_f64),
-          same_site: c
-            .get("sameSite")
-            .and_then(|v| v.as_str())
-            .and_then(|v| v.parse::<super::SameSite>().ok()),
-          url: None,
-        })
-        .collect(),
-    )
+    Ok(cookies.iter().map(cookie_from_cdp).collect())
   }
 
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
-    let mut params = serde_json::json!({
-        "name": cookie.name,
-        "value": cookie.value,
-    });
-    // Playwright `SetNetworkCookieParam.url`: CDP `Network.setCookie`
-    // accepts `url` and derives domain/path from it. Forward it so
-    // `addCookies([{ name, value, url }])` (the common Playwright form)
-    // works instead of erroring "url or domain needs to be specified".
-    if let Some(u) = &cookie.url {
-      params["url"] = serde_json::json!(u);
-    }
-    if !cookie.domain.is_empty() {
-      params["domain"] = serde_json::json!(cookie.domain);
-    }
-    if !cookie.path.is_empty() {
-      params["path"] = serde_json::json!(cookie.path);
-    }
-    params["secure"] = serde_json::json!(cookie.secure);
-    params["httpOnly"] = serde_json::json!(cookie.http_only);
-    if let Some(e) = cookie.expires {
-      params["expires"] = serde_json::json!(e);
-    }
-    if let Some(ss) = cookie.same_site {
-      params["sameSite"] = serde_json::json!(ss.as_str());
-    }
-    self.cmd("Network.setCookie", params).await?;
+    self.cmd("Network.setCookie", cookie_to_cdp(&cookie)).await?;
     Ok(())
   }
 
@@ -8628,5 +8596,61 @@ impl<T: CdpTransport> Drop for PendingWebMcpInvocation<T> {
         tracing::debug!(%error, "WebMCP invocation could not be canceled");
       }
     });
+  }
+}
+
+/// A cookie as `Storage.getCookies` / `Network.getCookies` return it.
+fn cookie_from_cdp(c: &serde_json::Value) -> CookieData {
+  CookieData {
+    name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    domain: c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    path: c.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    expires: c.get("expires").and_then(serde_json::Value::as_f64),
+    same_site: c
+      .get("sameSite")
+      .and_then(|v| v.as_str())
+      .and_then(|v| v.parse::<super::SameSite>().ok()),
+    url: None,
+  }
+}
+
+/// A cookie as `Network.setCookie` and `Storage.setCookies` take it
+/// (`Network.CookieParam`). Playwright's `SetNetworkCookieParam.url` is
+/// forwarded: the browser derives domain and path from it, so
+/// `addCookies([{ name, value, url }])` works without either.
+fn cookie_to_cdp(cookie: &CookieData) -> serde_json::Value {
+  let mut params = serde_json::json!({
+      "name": cookie.name,
+      "value": cookie.value,
+  });
+  if let Some(u) = &cookie.url {
+    params["url"] = serde_json::json!(u);
+  }
+  if !cookie.domain.is_empty() {
+    params["domain"] = serde_json::json!(cookie.domain);
+  }
+  if !cookie.path.is_empty() {
+    params["path"] = serde_json::json!(cookie.path);
+  }
+  params["secure"] = serde_json::json!(cookie.secure);
+  params["httpOnly"] = serde_json::json!(cookie.http_only);
+  if let Some(e) = cookie.expires {
+    params["expires"] = serde_json::json!(e);
+  }
+  if let Some(ss) = cookie.same_site {
+    params["sameSite"] = serde_json::json!(ss.as_str());
+  }
+  params
+}
+
+/// `{ browserContextId }` for a context's browser-session command; the
+/// default context is named by leaving it out.
+fn context_params(browser_context_id: Option<&str>) -> serde_json::Value {
+  match browser_context_id {
+    Some(id) => serde_json::json!({ "browserContextId": id }),
+    None => serde_json::json!({}),
   }
 }

@@ -218,7 +218,7 @@ impl Request {
   pub fn new(init: RequestInit) -> Self {
     let inner = Arc::new(RequestState {
       id: init.id,
-      url: init.url,
+      url: without_fragment(init.url),
       method: init.method,
       resource_type: init.resource_type,
       is_navigation_request: init.is_navigation_request,
@@ -279,6 +279,12 @@ impl Request {
   pub fn is_navigation_request(&self) -> bool {
     self.inner.is_navigation_request
   }
+  /// Whether both handles are the one request: a redirect's next hop is
+  /// another request under the same protocol id.
+  pub(crate) fn same_request(&self, other: &Request) -> bool {
+    Arc::ptr_eq(&self.inner, &other.inner)
+  }
+
   #[must_use]
   pub fn frame_id(&self) -> Option<&str> {
     self.inner.frame_id.as_deref()
@@ -603,6 +609,16 @@ pub struct RequestInit {
   pub raw_headers_fn: Option<RawHeadersFn>,
 }
 
+/// A request never carries its URL's fragment, though `WebKit` and `BiDi`
+/// report it on a navigation (Playwright's `stripFragmentFromUrl`,
+/// `server/network.ts`). Routes match and `url()` reads without it.
+pub(crate) fn without_fragment(mut url: String) -> String {
+  if let Some(hash) = url.find('#') {
+    url.truncate(hash);
+  }
+  url
+}
+
 /// How long a navigation waits for its document request to be seen after
 /// the lifecycle says the navigation finished. Long enough to cover the
 /// gap between two event consumers, short enough that a navigation with
@@ -815,7 +831,7 @@ impl Response {
   pub fn new(init: ResponseInit) -> Self {
     let inner = Arc::new(ResponseState {
       request: init.request.inner.clone(),
-      url: init.url,
+      url: without_fragment(init.url),
       status: init.status,
       status_text: init.status_text,
       from_service_worker: init.from_service_worker,

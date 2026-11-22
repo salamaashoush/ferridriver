@@ -69,6 +69,12 @@ pub struct Browser {
   disconnected: Arc<std::sync::atomic::AtomicBool>,
   /// What `browser.browserType()` answers.
   factory: crate::browser_type::BrowserType,
+  /// Options every context this handle makes with [`Self::new_context`]
+  /// starts from, under the ones the caller names. Per handle, not per
+  /// browser: a test runner gives each test its own clone carrying that
+  /// test's `use` options, so tests sharing one browser cannot see each
+  /// other's.
+  inherited_context_options: Option<Arc<crate::options::BrowserContextOptions>>,
 }
 
 /// One entry in [`Browser::context_names`].
@@ -130,6 +136,7 @@ impl Browser {
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory: crate::browser_type::BrowserType::for_backend(backend_kind),
+      inherited_context_options: None,
     }
   }
 
@@ -234,6 +241,7 @@ impl Browser {
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory: browser_type,
+      inherited_context_options: None,
     };
     drop(guard);
     Ok(browser.watch_connection(Some(closed)))
@@ -353,6 +361,7 @@ impl Browser {
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory: crate::browser_type::BrowserType::for_backend(backend_kind),
+      inherited_context_options: None,
     }
   }
 
@@ -377,12 +386,30 @@ impl Browser {
             "This browser does not support isolated contexts; use its default context",
           ));
         }
+        let opts = match &this.inherited_context_options {
+          Some(base) => opts.layered_over(base),
+          None => opts,
+        };
         let restore = opts.clone();
         let context = this.new_context_impl(Some(opts), true);
         context.restore_storage_state_credentials(&restore).await?;
         Ok(context)
       })
     })
+  }
+
+  /// This browser, as a handle whose [`Self::new_context`] fills every
+  /// option the caller leaves out from `options`.
+  ///
+  /// It is how a test's `browser` fixture behaves in Playwright: a
+  /// context a test makes itself gets the test's `use` options
+  /// (`baseURL`, viewport, locale, ...) unless it names its own.
+  #[must_use]
+  pub fn inheriting_context_options(&self, options: crate::options::BrowserContextOptions) -> Self {
+    Self {
+      inherited_context_options: Some(Arc::new(options)),
+      ..self.clone()
+    }
   }
 
   /// Create a context that [`Self::contexts`] does not report and that
@@ -771,6 +798,33 @@ impl Browser {
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Arc<Page>> {
     Box::pin(self.default_context().new_page()).await
+  }
+
+  /// Playwright's `browser.newPage(options)`: a page in a context of its
+  /// own, made from `options` as [`Self::new_context`] makes one (so a
+  /// test's `use` options fill what `options` leaves out), and closed
+  /// when the page closes. Two pages opened this way share no cookies or
+  /// storage. [`Self::new_page`] is the default context's page instead.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context or its page cannot be created.
+  pub async fn new_page_in_own_context(&self, options: crate::options::BrowserContextOptions) -> Result<Arc<Page>> {
+    let context = self.new_context().options(options).await?;
+    let page = match Box::pin(context.new_page()).await {
+      Ok(page) => page,
+      Err(error) => {
+        if let Err(cleanup) = context.close().await {
+          tracing::debug!("closing the context of a page that failed to open: {cleanup}");
+        }
+        return Err(error);
+      },
+    };
+    let mut state = context.state.write().await;
+    if let Ok(entry) = state.context_mut_checked(context.name()) {
+      entry.owned_by_page = true;
+    }
+    Ok(page)
   }
 
   /// Shorthand: create a new page and navigate to URL.

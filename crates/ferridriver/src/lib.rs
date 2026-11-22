@@ -58,6 +58,7 @@ pub mod locator_builder;
 pub use ferridriver_trace::locator_generator;
 pub mod locator_handler;
 pub mod network;
+pub(crate) mod network_idle;
 pub mod observed;
 mod operation_budget;
 pub mod options;

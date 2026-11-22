@@ -34,8 +34,8 @@ for (const backend of BACKENDS) {
 
     beforeAll(async () => {
       browser = await launchForBackend(backend);
-      context = browser.defaultContext();
       page = await browser.newPage();
+      context = page.context();
     }, 30_000);
 
     afterAll(async () => {

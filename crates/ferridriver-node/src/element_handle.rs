@@ -392,16 +392,16 @@ impl ElementHandle {
   }
 
   /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
-  #[napi]
+  #[napi(ts_args_type = "eventType: string, eventInit?: unknown, options?: DispatchEventOptions")]
   pub async fn dispatch_event(
     &self,
     event_type: String,
-    event_init: Option<serde_json::Value>,
+    event_init: Option<crate::types::NapiEvaluateArg>,
     options: Option<crate::types::DispatchEventOptions>,
   ) -> Result<()> {
     self
       .inner
-      .dispatch_event(&event_type, event_init)
+      .dispatch_event(&event_type, crate::page::build_evaluate_argument(event_init, false)?)
       .bag(options)?
       .await
       .into_napi()

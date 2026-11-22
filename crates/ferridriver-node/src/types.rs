@@ -778,6 +778,7 @@ pub struct SelectOptionValue {
 impl From<SelectOptionValue> for ferridriver::options::SelectOptionValue {
   fn from(o: SelectOptionValue) -> Self {
     Self {
+      value_or_label: None,
       value: o.value,
       label: o.label,
       index: o.index,
@@ -1009,7 +1010,7 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
     match unknown.get_type()? {
       napi::ValueType::String => {
         let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
-        out.push(ferridriver::options::SelectOptionValue::by_value(s));
+        out.push(ferridriver::options::SelectOptionValue::by_value_or_label(s));
       },
       napi::ValueType::Object => {
         let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
@@ -1026,7 +1027,7 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
             match el.get_type()? {
               napi::ValueType::String => {
                 let s = el.coerce_to_string()?.into_utf8()?.into_owned()?;
-                out.push(ferridriver::options::SelectOptionValue::by_value(s));
+                out.push(ferridriver::options::SelectOptionValue::by_value_or_label(s));
               },
               napi::ValueType::Object => {
                 let v: SelectOptionValue = unsafe { el.cast()? };
