@@ -639,7 +639,11 @@ impl Frame {
   ) -> Result<()> {
     self
       .inner
-      .dispatch_event(&selector, &event_type, crate::page::build_evaluate_argument(event_init, false)?)
+      .dispatch_event(
+        &selector,
+        &event_type,
+        crate::page::build_evaluate_argument(event_init, false)?,
+      )
       .bag(options)?
       .await
       .into_napi()

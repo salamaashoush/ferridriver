@@ -90,7 +90,9 @@ async fn select_option(world: &mut BrowserWorld, value: String, selector: String
   world
     .page()?
     .locator(&selector)
-    .select_option(ferridriver::options::SelectOptionValue::by_value_or_label(value.clone()))
+    .select_option(ferridriver::options::SelectOptionValue::by_value_or_label(
+      value.clone(),
+    ))
     .await
     .map_err(|e| StepError::wrap(format!("select \"{value}\" from \"{selector}\""), e))?;
 }
