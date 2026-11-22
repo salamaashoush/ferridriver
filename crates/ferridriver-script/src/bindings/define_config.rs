@@ -1,13 +1,19 @@
-//! `defineConfig` — the config-authoring merge a `--config <file.ts>`
-//! module folds its layers with.
+//! `defineConfig` and `defineTestConfig`, the two folds a config module
+//! writes its configuration with.
 //!
-//! Ported from `packages/playwright/src/common/configLoader.ts:32-87`.
-//! It is a JS-object merge, so it is a JS-object merge here too: the
-//! arguments are author-written config literals whose values include
-//! functions, explicit `undefined` and shared references, none of which
-//! survive a round trip through JSON. What ferridriver does with the
-//! merged document afterwards — which layer slot it occupies, which
-//! sections it may not set — is the config crate's, not this file's.
+//! A `ferridriver.config.ts` is the same document a `ferridriver.toml`
+//! is, so `defineConfig` folds whole documents, by the rules stacked
+//! config layers fold by ([`ferridriver_config::layer::merge_documents`]):
+//! a module combines exactly as `.toml` layers do.
+//!
+//! `defineTestConfig` is Playwright's `defineConfig`, ported from
+//! `packages/playwright/src/common/configLoader.ts:32-87`, for folding
+//! `[test]` sections the way Playwright folds its configs: `use` and
+//! `expect` one level deep, `webServer` concatenated, `projects` merged
+//! by name. It is a JS-object merge, so it is a JS-object merge here
+//! too: the arguments are config literals whose values include explicit
+//! `undefined` and shared references, none of which survive a round
+//! trip through JSON.
 //!
 //! Not ported: upstream's `kDefineConfigWasUsed` marker symbol. It is
 //! written onto the result and read by nothing in the Playwright tree,
@@ -17,7 +23,7 @@
 use rquickjs::function::Rest;
 use rquickjs::{Array, Ctx, Function, Object, Value};
 
-use crate::bindings::convert::throw_named;
+use crate::bindings::convert::{serde_from_js, serde_to_js, throw_named};
 
 /// Keys whose object value is merged one level deep instead of being
 /// replaced wholesale. Upstream spells each one out; the list is the
@@ -28,23 +34,67 @@ use crate::bindings::convert::throw_named;
 // its own schema then reported as unknown.
 const SHALLOW_MERGED_KEYS: &[&str] = &["expect", "use"];
 
-/// Install `defineConfig` on the `ferridriver` global, where the
-/// `@ferridriver/test` native module reads it from.
+/// Install `defineConfig` and `defineTestConfig` on the `ferridriver`
+/// global, where the `@ferridriver/test` native module reads them from.
 pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
-  let f = Function::new(ctx.clone(), define_config)?;
-  f.set_name("defineConfig")?;
-  fd.set("defineConfig", f)?;
+  let document = Function::new(ctx.clone(), define_config)?;
+  document.set_name("defineConfig")?;
+  fd.set("defineConfig", document)?;
+  let section = Function::new(ctx.clone(), define_test_config)?;
+  section.set_name("defineTestConfig")?;
+  fd.set("defineTestConfig", section)?;
   Ok(())
 }
 
-/// `defineConfig(config, ...configs)` — fold left, so the RIGHTMOST
-/// argument wins for every scalar key.
+/// `defineConfig(document, ...documents)` — fold left, so the RIGHTMOST
+/// document wins where layers would let it.
+///
+/// A single argument is returned as it was passed, not copied, as a
+/// module exporting one literal expects.
+fn define_config<'js>(ctx: Ctx<'js>, documents: Rest<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+  let mut iter = documents.0.into_iter();
+  let Some(first) = iter.next() else {
+    return Err(throw_named(
+      &ctx,
+      "TypeError",
+      "defineConfig() requires at least one configuration document".to_string(),
+    ));
+  };
+  let rest: Vec<Value<'js>> = iter.collect();
+  if rest.is_empty() {
+    return Ok(first);
+  }
+  let mut folded = document(&ctx, first)?;
+  for next in rest {
+    ferridriver_config::layer::merge_documents(&mut folded, &document(&ctx, next)?);
+  }
+  serde_to_js(&ctx, &folded)
+}
+
+/// One argument of `defineConfig`, as the document it stands for.
+fn document<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<serde_json::Value> {
+  let document: serde_json::Value = serde_from_js(ctx, value)?;
+  if !document.is_object() {
+    return Err(throw_named(
+      ctx,
+      "TypeError",
+      "defineConfig(): each argument must be a configuration document, the object a \
+       ferridriver.toml holds"
+        .to_string(),
+    ));
+  }
+  Ok(document)
+}
+
+/// `defineTestConfig(config, ...configs)` — Playwright's fold of
+/// `[test]` sections; fold left, so the RIGHTMOST argument wins for
+/// every scalar key.
 ///
 /// A single argument is returned as it was passed, not copied: upstream
 /// assigns `result = configs[0]` and never clones it, and a config that
 /// arrived by reference has to keep going out by reference.
-fn define_config<'js>(ctx: Ctx<'js>, configs: Rest<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+fn define_test_config<'js>(ctx: Ctx<'js>, configs: Rest<Value<'js>>) -> rquickjs::Result<Value<'js>> {
   let mut iter = configs.0.into_iter();
   let Some(first) = iter.next() else {
     // Upstream throws here too, from `result[kDefineConfigWasUsed] = true`
@@ -52,7 +102,7 @@ fn define_config<'js>(ctx: Ctx<'js>, configs: Rest<Value<'js>>) -> rquickjs::Res
     return Err(throw_named(
       &ctx,
       "TypeError",
-      "defineConfig() requires at least one config object".to_string(),
+      "defineTestConfig() requires at least one config object".to_string(),
     ));
   };
   let mut result = first;
@@ -203,7 +253,7 @@ fn project_list<'js>(value: &Value<'js>) -> rquickjs::Result<Vec<Value<'js>>> {
   Err(throw_named(
     value.ctx(),
     "TypeError",
-    "defineConfig(): `projects` must be an array of project objects".to_string(),
+    "defineTestConfig(): `projects` must be an array of project objects".to_string(),
   ))
 }
 

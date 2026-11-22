@@ -1,18 +1,18 @@
 // The parity acceptance config.
 //
-// Deliberately written the way a Playwright user writes one — the
-// default export folds through `defineConfig`, projects spread `devices`
-// entries, and the snapshot path is a template — while being a
-// ferridriver document, so the `[test]` section is where Playwright's
-// config shape goes.
+// Deliberately written the way a Playwright user writes one: the test
+// section folds through `defineTestConfig`, Playwright's `defineConfig`,
+// projects spread `devices` entries, and the snapshot path is a
+// template. The whole is a ferridriver document, which `defineConfig`
+// defines.
 //
 // It loads NO extensions. Everything asserted here is core, and it must
 // keep working for a suite that never writes an extension.
 
-import { defineConfig, devices } from '@ferridriver/test';
+import { defineConfig, defineTestConfig, devices } from '@ferridriver/test';
 
-export default {
-  test: defineConfig(
+export default defineConfig({
+  test: defineTestConfig(
     {
       testDir: '.',
       testMatch: ['*.spec.ts'],
@@ -39,4 +39,4 @@ export default {
       ],
     },
   ),
-};
+});

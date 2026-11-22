@@ -862,9 +862,9 @@ fn apply_layer(layer: &ConfigLayer, fold: &mut Fold<'_>) -> anyhow::Result<()> {
 /// read before the module could be bundled at all, so a value here
 /// would be advice arriving after the decision it advises on.
 ///
-/// Only `test.moduleAliases` is reachable in practice — the export IS
-/// the `[test]` section — but the check is written against the whole
-/// document so it still holds if that ever widens.
+/// A module's default export is a whole document, as a `.toml` file's
+/// contents are, so each of these can be written; each is refused by
+/// name rather than ignored.
 const REFUSED_SCRIPT_CONFIG_KEYS: &[(&str, &str)] = &[
   (
     "extensions",
@@ -1230,6 +1230,22 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     }
   }
   out
+}
+
+/// Fold `overlay` onto `base` by the rules stacked config layers fold
+/// by: objects merge key by key, the [`APPEND_KEYS`] arrays concatenate,
+/// and every other value is replaced. `defineConfig` folds a config
+/// module's documents with this, so a `.ts` config combines exactly as
+/// `.toml` layers do. The whole module is one layer, so where each key
+/// came from is the module's file, recorded when the layer is applied.
+pub fn merge_documents(base: &mut Value, overlay: &Value) {
+  merge(
+    base,
+    overlay,
+    "",
+    &Origin::File(PathBuf::new()),
+    &mut Provenance::default(),
+  );
 }
 
 /// Deep-merge `overlay` into `base`, recording provenance for every

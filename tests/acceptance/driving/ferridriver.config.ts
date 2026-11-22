@@ -8,8 +8,8 @@ import { defineConfig, devices } from '@ferridriver/test';
 // `extensions` is NOT here: the set of extensions is resolved before a
 // config module can be compiled, so it lives in the `ferridriver.toml`
 // beside this file. Everything a module CAN decide is here.
-export default {
-  test: defineConfig({
+export default defineConfig({
+  test: {
     features: ['features/**/*.feature'],
     steps: ['steps/**/*.ts'],
     snapshotPathTemplate: '{testDir}/__screenshots__/{projectName}/{platform}/{arg}{ext}',
@@ -25,5 +25,5 @@ export default {
         use: { ...devices['Desktop Chrome'], browserName: 'chromium' },
       },
     ],
-  }),
-};
+  },
+});

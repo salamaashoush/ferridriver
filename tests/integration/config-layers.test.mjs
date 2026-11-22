@@ -440,4 +440,9 @@ test('extension and config-module authoring types declare exactly their allowed 
   assert.deepEqual(declaredKeys(extension, 'TestConfigDefaults'), testKeys);
   assert.deepEqual(declaredKeys(extension, 'McpConfigDefaults'), Object.keys(r.defaults.mcp).sort());
   assert.deepEqual(declaredKeys(config, 'FerridriverTestConfig'), [...testKeys, ...r.aliases].sort());
+  // A module's document is a .toml's, less the three sections the loader
+  // reads before it can compile one, plus `extends`, read as layers stack.
+  const moduleRefused = ['extensions', 'bundler', 'scripting'];
+  const documentKeys = Object.keys(r.defaults).filter(key => !moduleRefused.includes(key));
+  assert.deepEqual(declaredKeys(config, 'FerridriverConfig'), [...documentKeys, 'extends'].sort());
 });

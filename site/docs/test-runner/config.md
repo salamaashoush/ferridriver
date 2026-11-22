@@ -194,11 +194,11 @@ config spreads it the way a Playwright config does:
 ```ts
 import { defineConfig, devices } from '@ferridriver/test';
 
-export default {
-  test: defineConfig({
+export default defineConfig({
+  test: {
     projects: [{ name: 'phone', use: { ...devices['iPhone 15'] } }],
-  }),
-};
+  },
+});
 ```
 
 ### Runner options in `use`
@@ -334,12 +334,14 @@ rules, and shadows the same way when two formats sit in one directory:
 
 ```ts
 // ferridriver.config.ts — the same document ferridriver.toml holds
-export default {
+import { defineConfig } from '@ferridriver/test';
+
+export default defineConfig({
   test: {
     testDir: './specs',
     projects: [{ name: 'chromium' }, { name: 'firefox' }],
   },
-};
+});
 ```
 
 ```bash
@@ -371,25 +373,39 @@ layer.
 
 ### `defineConfig`
 
-`defineConfig` is Playwright's function and folds Playwright's shape,
-which is ferridriver's `[test]` section — so it goes inside the
-document, not around it:
+`defineConfig` defines a configuration document, the object a
+`ferridriver.toml` holds. Given several, it folds them from left to
+right by the rules stacked config layers fold by: objects merge key by
+key, `allowEnv`, `chromeArgs`, `args`, `paths` and `sidecars`
+concatenate, and every other value, `projects` included, is replaced.
+A `.ts` config therefore combines exactly as `.toml` layers do.
 
 ```ts
 import { defineConfig } from '@ferridriver/test';
+import shared from './shared.config';
 
-export default {
-  test: defineConfig({
-    use: { baseURL: 'http://localhost:3000' },
-    projects: [{ name: 'chromium' }],
-  }),
-};
+export default defineConfig(shared, {
+  test: { use: { baseURL: 'http://localhost:3000' } },
+});
 ```
 
-It folds layers rightmost-winning: scalars are replaced; `use`, `expect`
-and `build` merge one level deep; `webServer` normalizes each side to a
-list and concatenates; `projects` merge by `name`, each match taking the
-incoming project's `use` on top, with new names appended.
+### `defineTestConfig`
+
+`defineTestConfig` folds `[test]` sections the way Playwright's
+`defineConfig` folds its configs, for a section assembled from parts:
+scalars are replaced; `use` and `expect` merge one level deep;
+`webServer` normalizes each side to a list and concatenates; `projects`
+merge by `name`, each match taking the incoming project's `use` on top,
+with new names appended.
+
+```ts
+import { defineConfig, defineTestConfig } from '@ferridriver/test';
+import { base } from './shared';
+
+export default defineConfig({
+  test: defineTestConfig(base, { projects: [{ name: 'chromium', retries: 2 }] }),
+});
+```
 
 ## Priority
 

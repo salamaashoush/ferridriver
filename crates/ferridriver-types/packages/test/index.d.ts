@@ -308,15 +308,36 @@ type MergedFixtures<List> = List extends [TestType<infer T>, ...infer Rest] ? T 
 export function mergeTests<List extends unknown[]>(...tests: List): TestType<MergedFixtures<List>>;
 
 /**
- * What a `--config <file.ts>` module's default export may set.
+ * A `ferridriver.config.ts` module's default export: the same document
+ * a `ferridriver.toml` holds, one key per section.
  *
- * The export IS the `[test]` section — `testDir`, `projects`, `use`,
- * `webServer` — which is the shape a `playwright.config.ts` already
- * has. Every other section stays with the `.toml` / `.yaml` / `.json`
- * layers, and so do the four the loader had to read before it could
- * compile this file at all: `extensions`, `bundler`, `scripting` and
- * `[test].moduleAliases` are absent by design, and setting one is
- * refused by name rather than ignored.
+ * Three sections are absent by design, because the loader had to read
+ * them before it could compile the module at all: `extensions`,
+ * `bundler` and `scripting`, with `[test].moduleAliases`. A module that
+ * sets one is refused by name rather than ignored; they go in a
+ * `ferridriver.toml` beside it.
+ *
+ * The keys are enumerated with no index signature, so a typo is a type
+ * error rather than a value nobody reads. A test pins this list against
+ * the schema it feeds.
+ */
+export interface FerridriverConfig {
+  artifactsMaxBytes?: unknown;
+  artifactsRoot?: unknown;
+  browser?: unknown;
+  engine?: unknown;
+  extends?: unknown;
+  mcp?: unknown;
+  scriptRoot?: unknown;
+  secrets?: unknown;
+  sidecars?: unknown;
+  test?: FerridriverTestConfig;
+}
+
+/**
+ * The `[test]` section of a configuration document: `testDir`,
+ * `projects`, `use`, `webServer`, in the shape a `playwright.config.ts`
+ * has.
  *
  * The keys are enumerated with no index signature, so a typo is a type
  * error rather than a value nobody reads. A test pins this list against
@@ -392,17 +413,30 @@ export interface FerridriverTestConfig {
 }
 
 /**
- * Fold configuration layers, rightmost winning.
+ * A configuration document, folded from left to right by the rules
+ * stacked config layers fold by: objects merge key by key, `allowEnv`,
+ * `chromeArgs`, `args`, `paths` and `sidecars` concatenate, and every
+ * other value is replaced. A `.ts` config therefore combines exactly as
+ * `.toml` layers do.
  *
- * Scalars are replaced; `use`, `expect` and `build` merge one level
- * deep; `webServer` normalizes each side to a list and concatenates;
+ * A single argument is returned unchanged, not copied.
+ */
+export function defineConfig(config: FerridriverConfig): FerridriverConfig;
+export function defineConfig(config: FerridriverConfig, ...configs: FerridriverConfig[]): FerridriverConfig;
+
+/**
+ * `[test]` sections folded the way Playwright folds its configs,
+ * rightmost winning.
+ *
+ * Scalars are replaced; `use` and `expect` merge one level deep;
+ * `webServer` normalizes each side to a list and concatenates;
  * `projects` merge by `name`, each match taking the incoming project's
  * own `use` on top, with names nothing matched appended in order.
  *
  * A single argument is returned unchanged, not copied.
  */
-export function defineConfig(config: FerridriverTestConfig): FerridriverTestConfig;
-export function defineConfig(
+export function defineTestConfig(config: FerridriverTestConfig): FerridriverTestConfig;
+export function defineTestConfig(
   config: FerridriverTestConfig,
   ...configs: FerridriverTestConfig[]
 ): FerridriverTestConfig;

@@ -27,7 +27,7 @@ test('equivalent module and TOML configurations discover the same selected tests
 
 test('configuration reports attribute module values to their source file', async () => {
   const cwd = await project({ 'ferridriver.config.ts': `import { defineConfig } from '@ferridriver/test';
-    export default { test: defineConfig({ projects: [{ name: 'one' }, { name: 'two' }] }) };` });
+    export default defineConfig({ test: { projects: [{ name: 'one' }, { name: 'two' }] } });` });
   const result = await run(['config', '--no-inherit'], { cwd });
   passed(result);
   assert.ok(result.text.includes('ferridriver.config.ts'));
