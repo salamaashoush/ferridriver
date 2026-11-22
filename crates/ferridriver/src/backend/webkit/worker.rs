@@ -133,6 +133,7 @@ impl WebKitWorker {
           "functionDeclaration": format!("function() {{ return ({expression}); }}"),
           "awaitPromise": true,
           "returnByValue": true,
+          "emulateUserGesture": true,
         }),
       )
       .await?;

@@ -41,6 +41,7 @@ impl WebKitElement {
           "arguments": [{ "objectId": self.object_id }],
           "returnByValue": return_by_value,
           "awaitPromise": true,
+          "emulateUserGesture": true,
         }),
       )
       .await

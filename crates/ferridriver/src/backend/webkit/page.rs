@@ -363,6 +363,10 @@ pub struct WebKitPage {
   /// Console / page-error retention for `page.consoleMessages()` /
   /// `page.pageErrors()` (see `CdpPage::observed`).
   pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
+  pub(crate) network_idle: Arc<crate::network_idle::NetworkIdle>,
+  /// The buttons held down, which every mouse event reports, so a move
+  /// after a press drags (Playwright's `Mouse._lastButton` / `_buttons`).
+  pub(crate) mouse: Arc<std::sync::Mutex<super::input::MouseState>>,
   /// Per-page lifecycle signals fed by the target-session listener.
   /// Lets navigation methods await `Page.loadEventFired` /
   /// `domContentEventFired` / `frameNavigated` survivably across
@@ -408,6 +412,12 @@ pub(crate) struct LifecycleSignals {
   pub failed: AtomicBool,
   pub failure_text: std::sync::Mutex<Option<String>>,
   pub failed_request_id: std::sync::Mutex<Option<String>>,
+  /// The request carrying the main frame's pending document, Playwright's
+  /// `frame.pendingDocument().request`: only its failure fails the
+  /// navigation. A navigation policy check unbinds it, so the old
+  /// process's "Frame load interrupted" for a load that a cross-site
+  /// redirect moved to a new process does not count.
+  pub pending_request: std::sync::Mutex<Option<String>>,
   /// `Playwright.provisionalLoadFailed` error text. Main-frame only by
   /// protocol (it is a page-proxy-level event), so a pending `goto` can
   /// treat it as its own failure without a request-id match — the
@@ -439,6 +449,10 @@ impl LifecycleSignals {
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     *self
       .failed_request_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *self
+      .pending_request
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     self
@@ -516,7 +530,45 @@ impl LifecycleSignals {
     self.notify.notify_waiters();
   }
 
-  pub fn mark_failed(&self, request_id: String, error_text: String) {
+  /// `request_id` now carries the main frame's pending document
+  /// (Playwright's `frameManager.requestStarted`).
+  pub fn bind_pending_request(&self, request_id: String) {
+    *self
+      .pending_request
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request_id);
+  }
+
+  /// The main frame is checking a navigation's policy, so the pending
+  /// document has no request until the next one starts (Playwright's
+  /// `frameManager.frameRequestedNavigation` with no document).
+  pub fn unbind_pending_request(&self) {
+    *self
+      .pending_request
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  }
+
+  /// A request failed. Only the one carrying the pending document fails
+  /// the navigation (Playwright's `frameManager.requestFailed`).
+  pub fn request_failed(&self, request_id: &str, error_text: &str) {
+    let pending = {
+      let mut slot = self
+        .pending_request
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if slot.as_deref() == Some(request_id) {
+        slot.take()
+      } else {
+        None
+      }
+    };
+    if let Some(request_id) = pending {
+      self.mark_failed(request_id, error_text.to_string());
+    }
+  }
+
+  fn mark_failed(&self, request_id: String, error_text: String) {
     self.failed.store(true, Ordering::SeqCst);
     *self
       .failure_text
@@ -695,6 +747,8 @@ impl WebKitPage {
         media_emulation: crate::backend::SharedMediaEmulation::default(),
         frame_listener_started: Arc::new(AtomicBool::new(false)),
         observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
+        network_idle: Arc::default(),
+        mouse: Arc::default(),
         lifecycle: Arc::new(LifecycleSignals::default()),
         console_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
         network_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
@@ -966,8 +1020,15 @@ impl WebKitPage {
   /// answered, a call sent before it has had its turn. It is reported
   /// like a call anchored in a document already gone, for the caller to
   /// make again in the document there now.
-  async fn call_function_on(&self, params: Value) -> std::result::Result<Value, super::connection::ConnectionError> {
+  async fn call_function_on(
+    &self,
+    mut params: Value,
+  ) -> std::result::Result<Value, super::connection::ConnectionError> {
     use super::connection::ConnectionError;
+    // As a user gesture, as Playwright's `WKExecutionContext` runs every
+    // call: a script `focus()` moves the focus into a cross-origin frame
+    // only from one.
+    params["emulateUserGesture"] = json!(true);
     let session = self.target_session();
     let Some(context) = params
       .get("objectId")
@@ -1835,10 +1896,6 @@ impl WebKitPage {
 
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     super::input::mouse_up(self, x, y, button, click_count).await
-  }
-
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
-    super::input::click_and_drag(self, from, to, steps).await
   }
 
   pub async fn insert_text(&self, text: &str) -> Result<()> {

@@ -19,6 +19,20 @@ fn err(e: ConnectionError) -> FerriError {
   e.into()
 }
 
+/// The mouse buttons held down, as Playwright's `Mouse` keeps them: the
+/// button pressed last and the mask of all held.
+#[derive(Debug, Default)]
+pub(crate) struct MouseState {
+  last: Option<MouseButton>,
+  buttons: u32,
+}
+
+/// The button and mask a move reports while buttons are held.
+fn pressed(page: &WebKitPage) -> (&'static str, u32) {
+  let state = page.mouse.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  (state.last.map_or("none", MouseButton::as_cdp), state.buttons)
+}
+
 /// The page keyboard's held modifiers as a `WebKit` mask.
 fn held(page: &WebKitPage) -> u32 {
   cdp_to_wk_mask(page.keyboard().modifiers())
@@ -114,12 +128,13 @@ pub async fn click(page: &WebKitPage, x: f64, y: f64, args: &BackendClickArgs) -
 
 pub async fn hover(page: &WebKitPage, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
   let _ = args;
+  let (button, buttons) = pressed(page);
   mouse_event(
     page,
     MouseEvent {
       ty: "move",
-      button: "none",
-      buttons: 0,
+      button,
+      buttons,
       x,
       y,
       click_count: 0,
@@ -162,12 +177,13 @@ pub async fn tap(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
 }
 
 pub async fn move_mouse(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
+  let (button, buttons) = pressed(page);
   mouse_event(
     page,
     MouseEvent {
       ty: "move",
-      button: "none",
-      buttons: 0,
+      button,
+      buttons,
       x,
       y,
       click_count: 0,
@@ -186,6 +202,7 @@ pub async fn move_mouse_smooth(
   steps: u32,
 ) -> Result<()> {
   let steps = steps.max(1);
+  let (button, buttons) = pressed(page);
   for i in 1..=steps {
     let t = f64::from(i) / f64::from(steps);
     let x = from_x + (to_x - from_x) * t;
@@ -194,8 +211,8 @@ pub async fn move_mouse_smooth(
       page,
       MouseEvent {
         ty: "move",
-        button: "none",
-        buttons: 0,
+        button,
+        buttons,
         x,
         y,
         click_count: 0,
@@ -230,12 +247,18 @@ pub async fn mouse_wheel(page: &WebKitPage, x: f64, y: f64, delta_x: f64, delta_
 
 pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
+  let buttons = {
+    let mut state = page.mouse.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.last = Some(b);
+    state.buttons |= button_mask(b);
+    state.buttons
+  };
   mouse_event(
     page,
     MouseEvent {
       ty: "down",
       button: b.as_cdp(),
-      buttons: button_mask(b),
+      buttons,
       x,
       y,
       click_count,
@@ -247,12 +270,18 @@ pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str, click_c
 
 pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
+  let buttons = {
+    let mut state = page.mouse.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.last = None;
+    state.buttons &= !button_mask(b);
+    state.buttons
+  };
   mouse_event(
     page,
     MouseEvent {
       ty: "up",
       button: b.as_cdp(),
-      buttons: 0,
+      buttons,
       x,
       y,
       click_count,
@@ -260,68 +289,6 @@ pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str, click_cou
     },
   )
   .await
-}
-
-pub async fn click_and_drag(page: &WebKitPage, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
-  mouse_event(
-    page,
-    MouseEvent {
-      ty: "move",
-      button: "none",
-      buttons: 0,
-      x: from.0,
-      y: from.1,
-      click_count: 0,
-      modifiers: held(page),
-    },
-  )
-  .await?;
-  mouse_event(
-    page,
-    MouseEvent {
-      ty: "down",
-      button: "left",
-      buttons: 1,
-      x: from.0,
-      y: from.1,
-      click_count: 1,
-      modifiers: held(page),
-    },
-  )
-  .await?;
-  let steps = steps.max(1);
-  for i in 1..=steps {
-    let t = f64::from(i) / f64::from(steps);
-    let x = from.0 + (to.0 - from.0) * t;
-    let y = from.1 + (to.1 - from.1) * t;
-    mouse_event(
-      page,
-      MouseEvent {
-        ty: "move",
-        button: "left",
-        buttons: 1,
-        x,
-        y,
-        click_count: 0,
-        modifiers: held(page),
-      },
-    )
-    .await?;
-  }
-  mouse_event(
-    page,
-    MouseEvent {
-      ty: "up",
-      button: "left",
-      buttons: 0,
-      x: to.0,
-      y: to.1,
-      click_count: 1,
-      modifiers: held(page),
-    },
-  )
-  .await?;
-  Ok(())
 }
 
 pub async fn type_text(page: &WebKitPage, text: &str) -> Result<()> {

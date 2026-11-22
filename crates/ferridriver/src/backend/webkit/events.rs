@@ -593,6 +593,41 @@ fn handle_main_frame_commit(ctx: &TargetListenerCtx, params: &Value) {
   }
 }
 
+/// A failed request fails the pending navigation when it carries it.
+fn fail_pending_document(ctx: &TargetListenerCtx, params: &Value) {
+  if let Some(request_id) = params.get("requestId").and_then(Value::as_str) {
+    let error_text = params
+      .get("errorText")
+      .and_then(Value::as_str)
+      .unwrap_or("navigation failed");
+    ctx.lifecycle.request_failed(request_id, error_text);
+  }
+}
+
+/// A main-frame document request now carries the pending navigation.
+fn bind_document_request(ctx: &TargetListenerCtx, params: &Value) {
+  if params.get("type").and_then(Value::as_str) == Some("Document")
+    && is_main_frame_event(ctx, params)
+    && let Some(request_id) = params.get("requestId").and_then(Value::as_str)
+  {
+    ctx.lifecycle.bind_pending_request(request_id.to_string());
+  }
+}
+
+/// Whether an event's `frameId` names the main frame. Unknown until the
+/// first commit, and again after a cross-process swap, when every frame
+/// is the main one.
+fn is_main_frame_event(ctx: &TargetListenerCtx, params: &Value) -> bool {
+  let main = ctx
+    .main_frame_id_cache
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  match (main.as_deref(), params.get("frameId").and_then(Value::as_str)) {
+    (Some(main), Some(frame)) => main == frame,
+    _ => true,
+  }
+}
+
 async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::Envelope) {
   match env.method.as_deref() {
     Some("Runtime.bindingCalled") => {
@@ -603,6 +638,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       dispatch_console(&env.params, &log, &ctx.emitter, &ctx.page_backref).await;
     },
     Some("Network.requestWillBeSent") => {
+      bind_document_request(ctx, &env.params);
       let log = arc_swap::Guard::into_inner(ctx.network_log.load());
       handle_request_will_be_sent(
         &env.params,
@@ -622,19 +658,13 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_loading_finished(&env.params, &ctx.requests, &ctx.emitter).await;
     },
     Some("Network.loadingFailed") => {
-      if let (Some(request_id), error_text) = (
-        env.params.get("requestId").and_then(Value::as_str),
-        env
-          .params
-          .get("errorText")
-          .and_then(Value::as_str)
-          .unwrap_or("navigation failed"),
-      ) {
-        ctx
-          .lifecycle
-          .mark_failed(request_id.to_string(), error_text.to_string());
-      }
+      fail_pending_document(ctx, &env.params);
       handle_loading_failed(&env.params, &ctx.requests, &ctx.emitter).await;
+    },
+    Some("Page.willCheckNavigationPolicy") => {
+      if is_main_frame_event(ctx, &env.params) {
+        ctx.lifecycle.unbind_pending_request();
+      }
     },
     Some("Page.loadEventFired") => {
       ctx.lifecycle.mark(crate::backend::NavLifecycle::Load);
@@ -1414,10 +1444,16 @@ fn build_intercepted(request_id: &str, request_payload: &Value) -> crate::route:
     .and_then(Value::as_str)
     .unwrap_or("GET")
     .to_string();
+  // Base64 on the wire, as on `Network.requestWillBeSent`
+  // (`wkInterceptableRequest.ts`).
   let post_data = request_payload
     .get("postData")
     .and_then(Value::as_str)
-    .map(std::string::ToString::to_string);
+    .and_then(|encoded| {
+      use base64::Engine as _;
+      let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+      Some(String::from_utf8_lossy(&bytes).into_owned())
+    });
   let mut headers = rustc_hash::FxHashMap::default();
   if let Some(map) = request_payload.get("headers").and_then(Value::as_object) {
     for (k, v) in map {
@@ -1757,6 +1793,7 @@ mod frame_event_tests {
       crate::backend::BackendKind::WebKit,
       Arc::clone(&cache),
       observed,
+      None,
     ))));
     let mut events = emitter.subscribe();
     let root = crate::backend::FrameInfo {
