@@ -21,7 +21,11 @@ test(`WebDriver native WebMCP concurrency, results and traces, bidi=${bidi}`, as
   const browserBinary = process.env.FERRIDRIVER_WEBDRIVER_CHROME ?? chromium().executablePath();
   const chromeOptions = {
     binary:browserBinary,
-    args:['--headless=new','--no-sandbox','--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport'],
+    // The switches ferridriver passes its own Chromium: without the mock
+    // keychain, macOS asks for the login password before Chromium may read
+    // its cookie key from the keychain.
+    args:['--headless=new','--no-sandbox','--no-first-run','--password-store=basic','--use-mock-keychain',
+      '--enable-features=WebMCP,WebMCPTesting,DevToolsWebMCPSupport'],
   };
   // ChromeDriver's own log is the only record of why a session did not
   // start; it is attached to the failure rather than kept on disk.
