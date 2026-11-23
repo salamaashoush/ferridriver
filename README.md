@@ -607,7 +607,7 @@ bun test
 
 - Full site: <https://salamaashoush.github.io/ferridriver/>
 - Per-crate rustdoc: <https://docs.rs/ferridriver>
-- Architecture and internals: [`CLAUDE.md`](./CLAUDE.md), [`docs/`](./docs/)
+- Architecture and internals: [`AGENTS.md`](./AGENTS.md), [`docs/`](./docs/)
 
 ## License
 

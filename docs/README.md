@@ -13,6 +13,15 @@ lives at <https://salamaashoush.github.io/ferridriver/>
 - [`playwright-compat.md`](./playwright-compat.md) — the compatibility
   harness behind `just compat`: how a spec is run against both runners
   and how a divergence is attributed.
+- [`backend-quirks.md`](./backend-quirks.md) — undocumented browser,
+  protocol and binding behaviour, by backend. Read before changing one.
+- [`protocol-deadlines.md`](./protocol-deadlines.md) — how a native
+  `page.webmcp` operation's single deadline is shared across backends.
+- [`android-device-api.md`](./android-device-api.md) — the `_android`
+  device API over an ADB server.
+- [`managed-android.md`](./managed-android.md) and
+  [`managed-ios.md`](./managed-ios.md) — Android browsers and iOS Safari
+  as managed instance targets.
 
 Only reference material belongs here. Handover notes, backlogs and design
 rationale rot the moment the code moves on; that context belongs in the

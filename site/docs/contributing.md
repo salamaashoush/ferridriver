@@ -7,7 +7,7 @@ significant code so we can agree on the approach.
 
 ## Repository layout
 
-11 workspace crates plus one example. See
+20 workspace crates plus two examples. See
 [Project layout](https://github.com/salamaashoush/ferridriver/blob/main/README.md#project-layout) in the README for the full
 table.
 
@@ -16,8 +16,8 @@ Documentation lives in [`site/`](https://github.com/salamaashoush/ferridriver/bl
 
 ## Prerequisites
 
-- Rust nightly (edition 2024), pinned in `rust-toolchain.toml`. MSRV
-  (`rust-version`) is 1.91.
+- Stable Rust (edition 2024), pinned in `rust-toolchain.toml`. MSRV
+  (`rust-version`) is 1.97.
 - `just` — task runner. `cargo install just` or use your package manager.
 - Bun 1.0+ (only for the `ferridriver-node` NAPI binding and the
   documentation site).
@@ -75,7 +75,7 @@ bun test
 
 ## Code style
 
-- Nightly Rust toolchain, edition 2024.
+- Stable Rust toolchain, edition 2024.
 - 2-space indent, 120-char line width (see `rustfmt.toml`).
 - `cargo fmt --all` before pushing.
 - Clippy: `correctness` / `perf` / `suspicious` = **deny**;
@@ -104,8 +104,9 @@ surface. When adding or changing API:
    `run_script`.
 5. Add a per-option integration test that observes a real DOM-side or
    protocol-side effect on **every backend** the API supports. Signatures
-   alone are not parity — see `CLAUDE.md` for the lessons-learned that
-   produced this rule.
+   alone are not parity. [`AGENTS.md`](https://github.com/salamaashoush/ferridriver/blob/main/AGENTS.md) has the full
+   workflow, and [`docs/backend-quirks.md`](https://github.com/salamaashoush/ferridriver/blob/main/docs/backend-quirks.md) the
+   per-backend behaviour that has cost the most time.
 
 ## Documentation
 
