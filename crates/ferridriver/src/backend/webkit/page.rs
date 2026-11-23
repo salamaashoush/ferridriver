@@ -2525,9 +2525,13 @@ impl WebKitPage {
       let proxy = acknowledger.clone();
       let generation = generation.clone();
       tokio::spawn(async move {
-        let _ = proxy
+        // A frame arriving as the page closes has nobody left to ack it.
+        if let Err(error) = proxy
           .send("Screencast.screencastFrameAck", json!({ "generation": generation }))
-          .await;
+          .await
+        {
+          tracing::debug!(target: "ferridriver::webkit", "screencast frame ack: {error}");
+        }
       });
     };
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, f64)>();
