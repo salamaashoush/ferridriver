@@ -1507,7 +1507,13 @@ impl BrowserInstaller {
           Ok(()) => return Ok(()),
           Err(e) => {
             last_error = format!("{host} attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
-            let _ = tokio::fs::remove_file(dest).await;
+            // The next attempt writes the file afresh; a partial one it
+            // cannot remove is overwritten there.
+            if let Err(error) = tokio::fs::remove_file(dest).await
+              && error.kind() != std::io::ErrorKind::NotFound
+            {
+              tracing::debug!(target: "ferridriver::install", "removing {}: {error}", dest.display());
+            }
           },
         }
       }
@@ -1730,10 +1736,7 @@ impl BuildMarker {
 
   async fn write(self, marker_file: &Path, archive: &str) -> Result<()> {
     match self {
-      Self::Archive => {
-        let _ = tokio::fs::write(marker_file, archive.as_bytes()).await;
-        Ok(())
-      },
+      Self::Archive => Ok(tokio::fs::write(marker_file, archive.as_bytes()).await?),
       Self::PlaywrightComplete => Ok(tokio::fs::write(marker_file, b"").await?),
     }
   }
