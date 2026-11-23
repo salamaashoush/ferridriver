@@ -5,4 +5,6 @@ target/
 index.js
 index.d.ts
 fd_webkit_host
-fd_webkit_host
+
+# Written by test/benchmark.ts on each run
+test/benchmark-results.csv

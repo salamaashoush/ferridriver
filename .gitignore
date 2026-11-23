@@ -5,9 +5,6 @@ node_modules/
 perf.data
 perf.data.old
 test-results/
-bench/pw-bench/node_modules/
-bench/pw-bench/package-lock.json
-bench/pw-bench/test-results/
 crates/ferridriver-types/packages/*/node_modules/
 crates/ferridriver-types/packages/*/bun.lock
 
@@ -26,7 +23,6 @@ target/dx/
 
 # Build artifacts
 crates/ferridriver-types/packages/*/dist/
-bench/results/
 rust_out
 trace-*.json
 
@@ -36,11 +32,10 @@ trace-*.json
 # Claude Code local state
 .claude/
 .DS_Store
-bench/_legacy/go-bench/chromedp-bench
-bench/_legacy/go-bench/rod-bench
-bench/results/
-.midnight-expert/
 
 # Python bytecode from the stress harnesses
 __pycache__/
 *.pyc
+
+# Compiler crash reports
+rustc-ice-*.txt

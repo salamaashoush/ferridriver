@@ -1,7 +1,5 @@
 [test]
-# Playwright specs under bench/pw-bench/ are driven by `npx playwright test`,
-# not Bun's test runner; they call `test()` at top level in a way Bun can't
-# schedule and would register 3 spurious "failures" at the repo root. Exclude
-# bench/ entirely since nothing there is a Bun test — benchmarks are hand-run
-# scripts.
+# scripts/bench-vs-playwright.sh copies Playwright specs into target/bench/,
+# which `npx playwright test` drives, not Bun's test runner; Bun would
+# register them as spurious failures at the repo root.
 pathIgnorePatterns = ["**/bench/**", "**/node_modules/**"]
