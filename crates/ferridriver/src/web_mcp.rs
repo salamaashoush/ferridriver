@@ -430,6 +430,28 @@ fn operation_result(result: SerializedValue, call: Option<(&str, u64)>) -> Resul
       let (name, deadline) = call.ok_or_else(|| FerriError::protocol("WebMCP", "timeout outside a tool call"))?;
       Err(FerriError::timeout(format!("calling WebMCP tool \"{name}\""), deadline))
     },
+    SerializedValue::Array { items, .. }
+      if items.len() == 3 && items.first() == Some(&SerializedValue::Str("failed".into())) =>
+    {
+      let (name, _) = call.ok_or_else(|| FerriError::protocol("WebMCP", "a failure outside a tool call"))?;
+      let text = |index: usize| match items.get(index) {
+        Some(SerializedValue::Str(text)) => text.as_str(),
+        _ => "",
+      };
+      let (kind, message) = (text(1), text(2));
+      // The standard `executeTool()` rejects with an OperationError when
+      // the tool fails, keeping the tool's own error from the caller;
+      // Firefox passes that error through instead. Only the DevTools
+      // domain reports the cause where the standard call hides it.
+      let cause = if kind == "OperationError" {
+        format!("the invocation failed, and the browser did not say why ({kind}: {message})")
+      } else {
+        format!("{kind}: {message}")
+      };
+      Err(FerriError::evaluation(format!(
+        "WebMCP tool \"{name}\" failed: {cause}"
+      )))
+    },
     _ => Err(FerriError::protocol("WebMCP", "invalid operation result")),
   }
 }

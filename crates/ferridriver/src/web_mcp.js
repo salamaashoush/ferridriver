@@ -54,7 +54,7 @@ try {
   result = await execute.call(model, tool, encoded ? JSON.stringify(input ?? {}) : (input ?? {}), {signal: controller.signal});
 } catch (error) {
   if (controller.signal.aborted) return ['timeout'];
-  throw error;
+  return ['failed', String(error?.name ?? 'Error'), String(error?.message ?? error)];
 } finally {
   if (timer !== null) clearTimeout(timer);
 }
