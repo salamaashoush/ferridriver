@@ -261,9 +261,10 @@ impl RunStop {
   /// Ask the in-flight run to stop after the tests currently executing.
   pub fn request(&self) {
     self.requested.store(true, std::sync::atomic::Ordering::SeqCst);
-    // notify_one stores a permit when no waiter is registered yet, so a
-    // request that lands before `wait` is first polled is not lost.
-    self.notify.notify_one();
+    // Every project running at once waits on this stop, and each has to
+    // see it: `notify_one` woke one project and left the rest running
+    // their queues out behind a UI that had stopped.
+    self.notify.notify_waiters();
   }
 
   fn reset(&self) {
@@ -277,8 +278,16 @@ impl RunStop {
   }
 
   async fn wait(&self) {
-    while !self.requested.load(std::sync::atomic::Ordering::SeqCst) {
-      self.notify.notified().await;
+    loop {
+      let notified = self.notify.notified();
+      tokio::pin!(notified);
+      // Registered before the flag is read, so a request landing between
+      // the read and the await still wakes this waiter.
+      notified.as_mut().enable();
+      if self.requested.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+      }
+      notified.await;
     }
   }
 }
@@ -3319,6 +3328,36 @@ type BrowserLaunch = futures::future::Shared<futures::future::BoxFuture<'static,
 struct BrowserLaunchState {
   closed: bool,
   pending: Option<BrowserLaunch>,
+}
+
+#[cfg(test)]
+mod run_stop_tests {
+  use super::RunStop;
+  use std::time::Duration;
+
+  /// Every project of a run waits on one stop; a request reaches all of
+  /// them, including one that started waiting after it.
+  #[tokio::test]
+  async fn a_stop_reaches_every_project_waiting_on_it() {
+    let stop = RunStop::default();
+    let waiting: Vec<_> = (0..3)
+      .map(|_| {
+        let stop = stop.clone();
+        tokio::spawn(async move { stop.wait().await })
+      })
+      .collect();
+    tokio::task::yield_now().await;
+    stop.request();
+    for project in waiting {
+      tokio::time::timeout(Duration::from_millis(100), project)
+        .await
+        .expect("every waiting project wakes")
+        .expect("task");
+    }
+    tokio::time::timeout(Duration::from_millis(100), stop.wait())
+      .await
+      .expect("a project that waits after the request returns at once");
+  }
 }
 
 #[cfg(test)]
