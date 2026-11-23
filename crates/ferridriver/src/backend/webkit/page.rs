@@ -2516,12 +2516,10 @@ impl WebKitPage {
     // WebKit holds back further frames until each one is acknowledged
     // with the generation startScreencast returned, as Playwright's
     // wkPage.ts::_onScreencastFrame does.
-    let generation = started.get("generation").cloned().ok_or_else(|| {
-      FerriError::protocol(
-        "Screencast.startScreencast",
-        "no generation to acknowledge frames with",
-      )
-    })?;
+    let generation = started
+      .get("generation")
+      .cloned()
+      .ok_or_else(|| FerriError::protocol("Screencast.startScreencast", "no generation to acknowledge frames with"))?;
     let acknowledger = self.proxy.clone();
     let acknowledge = move || {
       let proxy = acknowledger.clone();
