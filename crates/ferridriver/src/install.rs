@@ -2494,7 +2494,9 @@ mod webkit_revision_tests {
   use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
   use super::playwright_cache::{CachedBrowser, INSTALLATION_COMPLETE, newest_build_in};
-  use super::{BrowserInstaller, DOWNLOAD_RETRIES, InstallProgress, webkit_archive, webkit_platform_for_host};
+  use super::{
+    BrowserInstaller, DOWNLOAD_RETRIES, InstallProgress, WEBKIT_EXECUTABLE, webkit_archive, webkit_platform_for_host,
+  };
 
   /// A host that serves `builds` by path and records every path asked for.
   struct Host {
@@ -2558,7 +2560,7 @@ mod webkit_revision_tests {
   fn webkit_zip() -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
-    zip.start_file("pw_run.sh", options).expect("entry");
+    zip.start_file(WEBKIT_EXECUTABLE, options).expect("entry");
     zip.write_all(b"#!/bin/sh\n").expect("contents");
     zip.add_directory("minibrowser-wpe", options).expect("directory");
     zip.finish().expect("archive").into_inner()
@@ -2583,7 +2585,7 @@ mod webkit_revision_tests {
       .await
       .expect("installed");
     let build = cache.join("webkit-2370");
-    assert_eq!(PathBuf::from(&installed), build.join("pw_run.sh"));
+    assert_eq!(PathBuf::from(&installed), build.join(WEBKIT_EXECUTABLE));
     assert!(build.join(INSTALLATION_COMPLETE).is_file());
     assert!(build.join("minibrowser-wpe").is_dir());
     #[cfg(unix)]
@@ -2595,7 +2597,7 @@ mod webkit_revision_tests {
     assert_eq!(host.asked(), [archive_path("2370")]);
     assert_eq!(
       newest_build_in(&cache, CachedBrowser::WebKit),
-      Some(build.join("pw_run.sh"))
+      Some(build.join(WEBKIT_EXECUTABLE))
     );
   }
 
@@ -2614,7 +2616,7 @@ mod webkit_revision_tests {
       .install_webkit_revision("2370", &cache, |event| seen.lock().expect("events").push(event))
       .await
       .expect("second install");
-    assert_eq!(PathBuf::from(kept), cache.join("webkit-2370").join("pw_run.sh"));
+    assert_eq!(PathBuf::from(kept), cache.join("webkit-2370").join(WEBKIT_EXECUTABLE));
     assert_eq!(host.asked().len(), 1);
     let seen = seen.into_inner().expect("events");
     assert!(
@@ -2630,7 +2632,7 @@ mod webkit_revision_tests {
     let cache = playwright_cache(root.path());
     let build = cache.join("webkit-2370");
     std::fs::create_dir_all(&build).expect("build");
-    std::fs::write(build.join("pw_run.sh"), "#!/bin/sh\n").expect("executable");
+    std::fs::write(build.join(WEBKIT_EXECUTABLE), "#!/bin/sh\n").expect("executable");
     std::fs::write(build.join("half-written.so"), "").expect("leftover");
     let seen = Mutex::new(Vec::new());
     installer(root.path(), &[&host])

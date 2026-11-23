@@ -3825,7 +3825,9 @@ mod project_plan_tests {
     use std::sync::Mutex;
 
     let dir = tempfile::tempdir().expect("temp dir");
-    let lengths = [10u64, 40, 20, 30];
+    // Far enough apart that a timer ticking every 15.6ms (Windows) or a
+    // loaded scheduler cannot swap two of them.
+    let lengths = [20u64, 160, 60, 110];
     let files: Vec<std::path::PathBuf> = lengths
       .iter()
       .map(|ms| {
@@ -3869,7 +3871,7 @@ mod project_plan_tests {
     );
     started.lock().expect("order").clear();
     assert_eq!(run().run(plan()).await, super::exit::PASSED);
-    assert_eq!(*started.lock().expect("order"), [40, 30, 20, 10]);
+    assert_eq!(*started.lock().expect("order"), [160, 110, 60, 20]);
   }
 
   /// A project given its own plan runs THAT plan, not the shared one —

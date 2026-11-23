@@ -1123,10 +1123,11 @@ mod tests {
 
   #[test]
   fn an_allow_env_star_exposes_the_whole_environment() {
-    let path = std::env::var("PATH").expect("PATH is set where tests run");
     let caps = ScriptCaps::resolve(&["*".to_owned()]);
     assert!(allows_whole_env(&caps.allow_env));
-    assert_eq!(caps.env.get("PATH"), Some(&path));
+    // Every variable, under the name the OS keeps it by (Windows keeps
+    // `Path`, not `PATH`).
+    assert_eq!(caps.env, std::env::vars().collect::<std::collections::BTreeMap<_, _>>());
     assert!(caps.realm_permissions().env.is_all());
 
     let listed = ScriptCaps::resolve(&["PATH".to_owned()]);
