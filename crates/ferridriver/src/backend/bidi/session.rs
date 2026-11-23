@@ -550,18 +550,9 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
 }
 
 /// Based on Playwright's `playwright.cfg` and Puppeteer's Firefox defaults.
-fn firefox_default_prefs(downloads_dir: &std::path::Path) -> std::io::Result<Vec<u8>> {
-  use std::io::Write;
-
-  let mut f = Vec::new();
-
-  write_firefox_download_prefs(&mut f, downloads_dir)?;
-
-  // Each line: user_pref("key", value);
-  // Organised by category matching Playwright's structure.
-  write!(
-    f,
-    r#"// ── Process model ──────────────────────────────────────────────────────
+/// The profile's `user.js`, one `user_pref("key", value);` per line,
+/// organised by category as Playwright's profile is.
+const FIREFOX_PREFS: &str = r#"// ── Process model ──────────────────────────────────────────────────────
 // Force single content process for reliable mouse event dispatch (Playwright + Puppeteer).
 user_pref("fission.webContentIsolationStrategy", 0);
 user_pref("fission.bfcacheInParent", false);
@@ -608,6 +599,12 @@ user_pref("datareporting.healthreport.service.enabled", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
 user_pref("toolkit.telemetry.enabled", false);
 user_pref("toolkit.telemetry.server", "");
+user_pref("telemetry.fog.test.localhost_port", -1);
+user_pref("datareporting.usage.uploadEnabled", false);
+user_pref("datareporting.healthreport.documentServerURI", "http://dummy.test/dummy/healthreport/");
+user_pref("datareporting.healthreport.logging.consoleEnabled", false);
+user_pref("datareporting.healthreport.service.firstRun", false);
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
 user_pref("browser.translations.enable", false);
 
 // ── Extensions ────────────────────────────────────────────────────────
@@ -616,6 +613,10 @@ user_pref("extensions.enabledScopes", 5);
 user_pref("extensions.update.enabled", false);
 user_pref("extensions.screenshots.disabled", true);
 user_pref("extensions.blocklist.enabled", false);
+user_pref("extensions.update.notifyUser", false);
+user_pref("extensions.getAddons.cache.enabled", false);
+user_pref("extensions.installDistroAddons", false);
+user_pref("extensions.webservice.discoverURL", "http://dummy.test/dummy/discoveryURL");
 
 // ── Network (isolate from external services) ──────────────────────────
 user_pref("network.captive-portal-service.enabled", false);
@@ -624,6 +625,18 @@ user_pref("network.dns.disablePrefetch", true);
 user_pref("network.http.speculative-parallel-limit", 0);
 user_pref("network.cookie.CHIPS.enabled", false);
 user_pref("browser.pocket.enabled", false);
+user_pref("network.sntp.pools", "dummy.test");
+user_pref("browser.search.update", false);
+user_pref("browser.urlbar.suggest.searches", false);
+user_pref("browser.pagethumbnails.capturing_disabled", true);
+user_pref("browser.newtabpage.activity-stream.feeds.system.topstories", false);
+user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);
+user_pref("browser.newtabpage.activity-stream.newtabWallpapers.enabled", false);
+user_pref("browser.newtabpage.activity-stream.newtabWallpapers.v2.enabled", false);
+user_pref("browser.newtabpage.activity-stream.discoverystream.region-weather-config", "");
+user_pref("browser.translations.automaticallyPopup", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.usedOnWindows10.introURL", "");
 // Loopback follows a configured proxy unless its bypass list names it, as on
 // Chromium and WebKit. Firefox otherwise never proxies loopback. Hijacked
 // localhost stays a secure context, as it is when reached directly.
@@ -649,6 +662,17 @@ user_pref("dom.ipc.reportProcessHangs", false);
 user_pref("hangmonitor.timeout", 0);
 user_pref("apz.content_response_timeout", 60000);
 user_pref("toolkit.startup.max_resumed_crashes", -1);
+
+// ── Background pages (a tab behind a popup must keep running) ─────────
+// Without these a page that is not the front tab gets its timers clamped
+// and its animation frames throttled to about one a second, and every
+// action that waits on a frame (a click's stability and hit checks) takes
+// that long.
+user_pref("dom.min_background_timeout_value", 0);
+user_pref("dom.min_background_timeout_value_without_budget_throttling", 0);
+user_pref("dom.timeout.enable_budget_timer_throttling", false);
+user_pref("layout.testing.top-level-always-active", true);
+user_pref("browser.tabs.disableBackgroundZombification", false);
 
 // ── Remote / BiDi (essential) ─────────────────────────────────────────
 user_pref("remote.enabled", true);
@@ -680,8 +704,14 @@ user_pref("security.certerrors.mitm.priming.enabled", false);
 user_pref("startup.homepage_welcome_url", "about:blank");
 user_pref("startup.homepage_welcome_url.additional", "");
 user_pref("screenshots.browser.component.enabled", false);
-"#
-  )?;
+"#;
+
+fn firefox_default_prefs(downloads_dir: &std::path::Path) -> std::io::Result<Vec<u8>> {
+  let mut f = Vec::new();
+
+  write_firefox_download_prefs(&mut f, downloads_dir)?;
+
+  f.extend_from_slice(FIREFOX_PREFS.as_bytes());
 
   Ok(f)
 }

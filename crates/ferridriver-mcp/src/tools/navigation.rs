@@ -173,6 +173,10 @@ impl McpServer {
             // and left the cache pointing at the previous tab.
             self.invalidate_context(&s);
             let page = Box::pin(self.page(&s)).await?;
+            // The selected tab is the one in front, as in the browser's own
+            // tab strip: a tab left behind another renders on a throttled
+            // clock, so every action that waits for a frame there waits on it.
+            page.bring_to_front().await.map_err(Self::err)?;
             Box::pin(self.action_ok(&page, &s, &format!("Switched to page {idx}."))).await
           })
           .await
