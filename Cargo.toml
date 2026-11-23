@@ -72,12 +72,12 @@ ferridriver-types = { path = "crates/ferridriver-types", version = "0.7.0" }
 # `[patch.crates-io]` section rather than editing the versions here.
 # `intl`: spec code calls `Intl`, `localeCompare` and `toLocaleString`
 # as it does under Node, so the runner's realms carry ICU4X's.
-ferrijs = { version = "0.10.0", features = ["intl"] }
-ferrijs-std = "0.10.0"
-ferrijs-fetch = "0.10.0"
-ferrijs-bundle = "0.10.0"
-ferrijs-permissions = "0.10.0"
-ferrijs-serde = "0.10.0"
+ferrijs = { version = "0.10.1", features = ["intl"] }
+ferrijs-std = "0.10.1"
+ferrijs-fetch = "0.10.1"
+ferrijs-bundle = "0.10.1"
+ferrijs-permissions = "0.10.1"
+ferrijs-serde = "0.10.1"
 
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
