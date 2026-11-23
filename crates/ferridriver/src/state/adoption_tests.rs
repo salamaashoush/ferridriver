@@ -73,7 +73,7 @@ async fn a_cancelled_launch_caller_does_not_discard_or_duplicate_its_session() {
     headers: None,
     timeout: Some(1000),
   };
-  let state = Arc::new(tokio::sync::RwLock::new(state));
+  let state = state.into_shared();
   let launching = Arc::clone(&state);
   let launch = tokio::spawn(async move { BrowserState::ensure_instance_shared(&launching, "safari").await });
   receipt.await.unwrap();
@@ -137,7 +137,7 @@ async fn failed_initialization_retains_the_raw_session_until_deletion_succeeds()
         headers: None,
         timeout: Some(1000),
       };
-      let state = Arc::new(tokio::sync::RwLock::new(state));
+      let state = state.into_shared();
       let error = BrowserState::ensure_instance_shared(&state, "firefox")
         .await
         .unwrap_err();
@@ -165,7 +165,7 @@ async fn failed_initialization_retains_the_raw_session_until_deletion_succeeds()
 #[tokio::test]
 async fn close_retires_queued_launches_without_retiring_other_instances() {
   for shutdown in [false, true] {
-    let state = Arc::new(tokio::sync::RwLock::new(tests::test_state(BackendKind::WebDriver)));
+    let state = tests::test_state(BackendKind::WebDriver).into_shared();
     let permit = state.read().await.launch_permit("safari");
     let other = state.read().await.launch_permit("other");
     let held = Arc::clone(&permit).lock_owned().await;
@@ -226,7 +226,7 @@ async fn shutdown_waits_for_inflight_allocation_and_retains_failed_deletion() {
       headers: None,
       timeout: Some(1000),
     };
-    let state = Arc::new(tokio::sync::RwLock::new(state));
+    let state = state.into_shared();
     let launching = Arc::clone(&state);
     let launch = tokio::spawn(async move {
       if shared {

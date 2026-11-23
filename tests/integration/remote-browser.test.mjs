@@ -411,3 +411,57 @@ test('MCP connected to a running browser starts on the page it shows', async () 
     await stopEach('stdio', 'ui');
   }
 });
+
+// The `connect` tool adopts the browser's tabs, so no page is ever opened
+// through ferridriver; a tab one of them opens must still be listed.
+test('MCP connected through its connect tool lists the tab a link opens', async () => {
+  test.setTimeout(120000);
+  await fixtureServer(async (base) => {
+    await commands.start('ui', { command: `exec ${quote(binary)} browser serve` });
+    try {
+      const endpoint = (await commands.waitForOutput('ui', '\n', 60000)).trim();
+      const cwd = await workspace({});
+      const token = 'sashoush-connect-tool';
+      const command = [binary, 'mcp', '--no-inherit', '--transport', 'http', '--port', '0', '--headless',
+        '--token', token].map(quote).join(' ');
+      await commands.start('stdio', { command: `cd ${quote(cwd)} && exec ${command} 2>&1` });
+      const output = await commands.waitForOutput('stdio', '/mcp\n', 30000);
+      const url = output.match(/listening on (http:\/\/127\.0\.0\.1:\d+\/mcp)/)?.[1];
+      assert.ok(url, output);
+      const { session } = await mcpCall(url, token, undefined, {
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'integration', version: '1' } },
+      });
+      await mcpCall(url, token, session, { jsonrpc: '2.0', method: 'notifications/initialized' });
+      const tool = async (id, name, args) => {
+        const { answer } = await mcpCall(url, token, session, {
+          jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args },
+        });
+        const text = answer.result.content.map((part) => part.text ?? '').join('\n');
+        assert.ok(!answer.result.isError, text);
+        return text;
+      };
+      await tool(2, 'connect', { url: endpoint });
+      await tool(3, 'navigate', { url: `${base}/fx/inner` });
+      await tool(4, 'run_script', {
+        source: `await page.evaluate((href) => {
+          const link = document.createElement('a');
+          link.id = 'open';
+          link.href = href;
+          link.target = '_blank';
+          link.textContent = 'open';
+          document.body.append(link);
+        }, args[0]);
+        await page.click('#open');`,
+        args: [`${base}/fx/landed`],
+      });
+      await until(
+        async () => (await tool(5, 'page', { action: 'list' })).includes('/fx/landed'),
+        'the tab the link opened never showed in the page list',
+        15000,
+      );
+    } finally {
+      await stopEach('stdio', 'ui');
+    }
+  });
+});

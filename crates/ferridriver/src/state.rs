@@ -309,6 +309,12 @@ pub struct BrowserState {
   /// Instance name → browser generation whose popup pump is running
   /// (see [`Self::claim_popup_pump`]).
   popup_pumps: HashMap<String, u64>,
+  /// The lock this state is shared behind, once [`Self::into_shared`] put
+  /// it there. Installing a browser is what starts its popup pump, and the
+  /// pump registers popups through this handle. A pump started anywhere
+  /// later (on the first page opened) is a pump a client that connected
+  /// to a running browser and drives its existing tabs never gets.
+  shared: std::sync::Weak<tokio::sync::RwLock<BrowserState>>,
   /// Per-instance launch serialization, read through a shared guard by
   /// [`Self::ensure_instance_shared`]. Sync mutex so the permit can be
   /// taken while only holding the state's read lock.
@@ -632,30 +638,49 @@ impl BrowserState {
       record_har_installed: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
       popup_pumps: HashMap::default(),
+      shared: std::sync::Weak::new(),
       launch_permits: Arc::new(std::sync::Mutex::new(HashMap::default())),
     }
   }
 
-  /// Whether `instance`'s popup pump is already running for its current
-  /// browser generation. Lets the page-open path skip the write lock in
-  /// the steady state: every page open used to take the global write
-  /// guard purely to re-answer this question, which serialized parallel
-  /// workers against each other on a map lookup.
+  /// Put this state behind the lock every handle to it shares, and start
+  /// the popup pump of each browser already installed in it.
   #[must_use]
-  pub(crate) fn popup_pump_claimed(&self, instance: &str) -> bool {
-    let Some(inst) = self.instances.get(instance) else {
-      return false;
+  pub fn into_shared(self) -> Arc<tokio::sync::RwLock<Self>> {
+    let state = Arc::new_cyclic(|shared| {
+      let mut this = self;
+      this.shared = shared.clone();
+      tokio::sync::RwLock::new(this)
+    });
+    // Nothing else holds the lock yet, so this cannot wait.
+    if let Ok(mut guard) = state.try_write() {
+      let installed: Vec<String> = guard.instances.keys().cloned().collect();
+      for instance in installed {
+        guard.start_popup_pump(&instance);
+      }
+    }
+    state
+  }
+
+  /// Start `instance`'s popup pump unless its current browser generation
+  /// already has one, so popups from every page, adopted or opened, get
+  /// registered, configured and announced as `'page'` events. A state
+  /// nobody shares has nowhere to register them, and starts none.
+  fn start_popup_pump(&mut self, instance: &str) {
+    let Some(state) = self.shared.upgrade() else {
+      return;
     };
-    self.popup_pumps.get(instance) == Some(&inst.generation)
+    if let Some(browser) = self.claim_popup_pump(instance) {
+      crate::context::spawn_popup_pump(state, Arc::from(instance), &browser);
+    }
   }
 
   /// Claim the popup pump for `instance`'s CURRENT browser generation.
-  /// Returns the browser handle exactly once per generation — the
-  /// caller spawns `context::spawn_popup_pump` with it; later calls
+  /// Returns the browser handle exactly once per generation; later calls
   /// (and calls before the instance exists) return `None`. A relaunch
-  /// under the same name bumps the generation, so the next page open
-  /// starts a fresh pump against the new browser.
-  pub(crate) fn claim_popup_pump(&mut self, instance: &str) -> Option<AnyBrowser> {
+  /// under the same name bumps the generation, so its install starts a
+  /// fresh pump against the new browser.
+  fn claim_popup_pump(&mut self, instance: &str) -> Option<AnyBrowser> {
     let inst = self.instances.get(instance)?;
     let generation = inst.generation;
     let browser = inst.browser.clone();
@@ -1122,7 +1147,7 @@ impl BrowserState {
     self.ensure_not_disposed()?;
     let runtime = tokio::runtime::Handle::try_current().map_err(|error| FerriError::backend(error.to_string()))?;
     let allocation = self.prepare_allocation("default");
-    let state = Arc::new(tokio::sync::RwLock::new(self));
+    let state = self.into_shared();
     if let Some(resources) = resources {
       resources.retain(Arc::clone(&state))?;
     }
@@ -1292,6 +1317,7 @@ impl BrowserState {
     match owner {
       PendingOwner::Browser(instance) => {
         self.instances.insert(name, *instance);
+        self.start_popup_pump(instance_name);
       },
       owner @ PendingOwner::Allocation { .. } => {
         self.pending_cleanup.push((name, owner));
@@ -3804,7 +3830,7 @@ mod tests {
           timeout: Some(1000),
         })
       }));
-      let state = Arc::new(tokio::sync::RwLock::new(state));
+      let state = state.into_shared();
       if shared {
         BrowserState::ensure_instance_shared(&state, "safari").await.unwrap();
       } else {
@@ -3899,7 +3925,7 @@ mod tests {
           .to_string()
           .contains("unfinished cleanup")
       );
-      let state = Arc::new(tokio::sync::RwLock::new(state));
+      let state = state.into_shared();
       assert!(
         BrowserState::ensure_instance_shared(&state, "default")
           .await

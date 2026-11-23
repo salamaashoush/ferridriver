@@ -52,7 +52,7 @@ type RefMapHandle = Arc<ArcSwap<FxHashMap<String, i64>>>;
 impl SharedState {
   fn new(browser_state: BrowserState) -> Self {
     Self {
-      inner: Arc::new(RwLock::new(browser_state)),
+      inner: browser_state.into_shared(),
       ref_maps: Arc::new(DashMap::new()),
       log_handles: Arc::new(DashMap::new()),
       context_locks: Arc::new(DashMap::new()),
