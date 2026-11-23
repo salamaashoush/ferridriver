@@ -707,6 +707,11 @@ impl ContextRef {
   /// the `WebKit` counterpart of [`Self::new_cdp_session`]. Playwright
   /// keeps the same session private, as `WKPage._session`. `WebKit` only.
   ///
+  /// It is ferridriver's own session on the target, not a second one, so
+  /// a command that turns a domain off (`Runtime.disable`,
+  /// `Console.disable`, `Page.disable`) turns it off for ferridriver too,
+  /// and the page stops reporting what that domain carried.
+  ///
   /// # Errors
   ///
   /// Returns [`crate::error::FerriError::InvalidArgument`] for a page of
