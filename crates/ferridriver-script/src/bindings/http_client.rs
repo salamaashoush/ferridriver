@@ -648,7 +648,7 @@ impl HttpResponseJs {
   pub fn body<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
     settled(self.inner.body_shared().into_js_with(&ctx).and_then(|bytes| {
       let buffer = rquickjs::ArrayBuffer::from_source_immutable(ctx.clone(), bytes)?;
-      Ok(rquickjs::TypedArray::<u8>::from_arraybuffer(buffer)?.into_value())
+      crate::bindings::convert::node_buffer(&ctx, buffer)
     }))
   }
 

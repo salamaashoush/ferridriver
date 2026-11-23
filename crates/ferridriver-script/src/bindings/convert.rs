@@ -154,6 +154,25 @@ pub fn parse_timeout_number_or_bag<'js>(
   }
 }
 
+/// Bytes as Playwright hands them: a Node `Buffer` over `buffer`'s memory,
+/// no copy. A `Buffer` is a `Uint8Array` subclass, so `includes` finds a
+/// byte sequence and `toString('base64')` encodes, as a Node spec expects;
+/// a plain view would answer `includes(buffer)` with a quiet `false`. A
+/// realm without `Buffer` gets the view.
+pub fn node_buffer<'js>(ctx: &Ctx<'js>, buffer: rquickjs::ArrayBuffer<'js>) -> rquickjs::Result<Value<'js>> {
+  let from = ctx
+    .globals()
+    .get::<_, Value<'js>>("Buffer")
+    .ok()
+    .and_then(Value::into_object)
+    .and_then(|buffer| buffer.get::<_, Value<'js>>("from").ok())
+    .and_then(Value::into_function);
+  match from {
+    Some(from) => from.call((buffer,)),
+    None => Ok(rquickjs::TypedArray::<u8>::from_arraybuffer(buffer)?.into_value()),
+  }
+}
+
 /// Convert any `serde::Serialize` value into a JS value via
 /// `ferrijs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
 /// and no `serde_json::Value` middle allocation. Used for binding

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rquickjs::function::This;
-use rquickjs::{CatchResultExt, Ctx, Function, IntoJs, JsLifetime, Object, Persistent, TypedArray, Value};
+use rquickjs::{CatchResultExt, Ctx, Function, IntoJs, JsLifetime, Object, Persistent, Value};
 
 use ferridriver_test::config::{ReporterConfig, TestConfig};
 use ferridriver_test::reporter::{Reporter, ReporterEvent, RunStatus, api};
@@ -598,18 +598,8 @@ fn attachment_obj<'js>(ctx: &Ctx<'js>, attachment: &api::Attachment) -> rquickjs
     // Playwright hands a Buffer, which the runtime has as a real
     // Uint8Array subclass — a reporter calling `body.toString('base64')`
     // needs the subclass, not the view.
-    let bytes = TypedArray::<u8>::new(ctx.clone(), body.clone())?;
-    let buffer: Option<Function<'js>> = ctx
-      .globals()
-      .get::<_, Value<'js>>("Buffer")
-      .ok()
-      .and_then(Value::into_object)
-      .and_then(|b| b.get::<_, Value<'js>>("from").ok())
-      .and_then(Value::into_function);
-    match buffer {
-      Some(from) => obj.set("body", from.call::<_, Value<'js>>((bytes,))?)?,
-      None => obj.set("body", bytes)?,
-    }
+    let buffer = rquickjs::ArrayBuffer::new(ctx.clone(), body.clone())?;
+    obj.set("body", crate::bindings::convert::node_buffer(ctx, buffer)?)?;
   }
   Ok(obj)
 }

@@ -311,9 +311,9 @@ impl ResponseJs {
   /// as a `Uint8Array`.
   #[qjs(rename = "body")]
   pub async fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    use rquickjs::IntoJs;
     let bytes = self.inner.body().await.into_js_with(&ctx)?;
-    rquickjs::TypedArray::new(ctx.clone(), bytes)?.into_js(&ctx)
+    let buffer = rquickjs::ArrayBuffer::new(ctx.clone(), bytes)?;
+    crate::bindings::convert::node_buffer(&ctx, buffer)
   }
 
   #[qjs(rename = "text")]
