@@ -1,0 +1,60 @@
+name: Bug report
+description: Something behaves differently from Playwright or from the docs.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A single spec, `.feature` file, `run_script` call or ~10-line Rust test.
+      render: typescript
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      multiple: true
+      options:
+        - cdp-pipe
+        - cdp-raw
+        - bidi (Firefox)
+        - webkit
+        - not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      multiple: true
+      options:
+        - Rust library
+        - ferridriver test
+        - ferridriver bdd
+        - MCP server
+        - "@ferridriver/node"
+        - CLI (other)
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Output of `ferridriver --version` and `rustc --version`, OS and architecture.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Verbose output
+      description: Output of the failing command run with `-vv`.
+      render: text

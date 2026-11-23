@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://salamaashoush.github.io/ferridriver/
+    about: Guides, API reference and configuration.
+  - name: Report a security vulnerability
+    url: https://github.com/salamaashoush/ferridriver/security/advisories/new
+    about: Report privately, not as a public issue.

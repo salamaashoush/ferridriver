@@ -1,0 +1,19 @@
+name: Feature request
+description: A missing Playwright API, option or behaviour, or something new.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you are trying to do
+    validations:
+      required: true
+  - type: input
+    id: playwright
+    attributes:
+      label: Playwright equivalent
+      description: Link to the Playwright API or option this mirrors, if any.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
