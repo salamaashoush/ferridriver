@@ -4,9 +4,13 @@ import { join } from 'node:path';
 import { runOnceAcrossProjects } from './helpers/projects';
 
 for (const hostname of ['127.0.0.1', 'localhost']) {
-test(`attaching an existing ${hostname === 'localhost' ? 'cross-process' : 'same-process'} frame retains its document and ownership`, async () => {
+test(`attaching an existing ${hostname === 'localhost' ? 'cross-process' : 'same-process'} frame retains its document and ownership`, async ({}, info) => {
   runOnceAcrossProjects();
-  const owner = await chromium({transport: 'ws'}).launch({headless: true});
+  // A persistent context is the browser's default context, the one a
+  // connection adopts pages from; a page of a context another client
+  // created stays that client's.
+  const profile = info.outputPath('profile');
+  const owner = await chromium({transport: 'ws'}).launchPersistentContext(profile, {headless: true});
   try {
     const existing = await owner.newPage();
     await existing.goto('http://127.0.0.1:47831/fx/landed');
@@ -17,11 +21,7 @@ test(`attaching an existing ${hostname === 'localhost' ? 'cross-process' : 'same
       document.body.appendChild(frame);
       return new Promise(resolve => frame.onload = resolve);
     }, hostname);
-    const protocol = await owner.newBrowserCDPSession();
-    const commandLine = await protocol.send('Browser.getBrowserCommandLine') as {arguments: string[]};
-    const profile = commandLine.arguments.find(arg => arg.startsWith('--user-data-dir='))!.slice('--user-data-dir='.length);
     const [port] = (await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n');
-    await protocol.detach();
     const attached = await chromium().connectOverCDP(`http://127.0.0.1:${port}`);
     try {
       const pages = await attached.contexts()[0].pages();
