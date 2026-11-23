@@ -215,6 +215,9 @@ impl McpServer {
     // Serialize per-session: a concurrent run_script / extension / navigation
     // call on the same session must not interleave browser state.
     let guard = self.session_guard(&session).await;
+    // Under the guard, so a popup counted after this mark was opened by
+    // this call and no other.
+    let popups_before = self.state.read().await.popups_listed(&session);
     McpServer::emit_progress(&peer, token.as_ref(), 0.0, Some(1.0), "executing script").await;
 
     let Some(script_root) = self.script_root.clone() else {
@@ -358,9 +361,10 @@ impl McpServer {
     // Where the script left the session. Captured after the run and before
     // the guard is released, so it describes the page the caller's NEXT call
     // will act on. Reading it opens no action span, so it never appears in
-    // the code the run just echoed. A tab the script opened becomes the
-    // active page once it is listed, so that is waited for first.
+    // the code the run just echoed. A tab the script opened is waited for
+    // and made the active page first, so the report names it.
     self.opened_tabs_settled(&session).await;
+    self.state.write().await.activate_popup_since(&session, popups_before);
     let page_state = match Box::pin(self.page(&session)).await {
       Ok(page) => Some(ferridriver::response::PageState::capture(&page).await),
       Err(e) => {

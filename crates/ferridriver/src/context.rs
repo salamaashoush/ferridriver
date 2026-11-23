@@ -51,6 +51,12 @@ pub struct BrowserContext {
   /// Made by `browser.newPage()` for that one page, so it closes when
   /// the page does, as Playwright's `Page._ownedContext` is.
   pub(crate) owned_by_page: bool,
+  /// How many popups this context has listed, and the latest of them. A
+  /// caller marks the count before a call and activates the latest popup
+  /// if it moved, so only a tab that call opened takes focus: a popup that
+  /// opens later must not change the page a later call acts on.
+  popups_listed: u64,
+  latest_popup: Option<AnyPage>,
 }
 
 impl BrowserContext {
@@ -66,7 +72,36 @@ impl BrowserContext {
       name,
       cdp_context_id: None,
       owned_by_page: false,
+      popups_listed: 0,
+      latest_popup: None,
     }
+  }
+
+  /// List a popup without making it active.
+  pub(crate) fn list_popup(&mut self, page: AnyPage) {
+    self.pages.push(page.clone());
+    self.popups_listed += 1;
+    self.latest_popup = Some(page);
+  }
+
+  pub(crate) fn popups_listed(&self) -> u64 {
+    self.popups_listed
+  }
+
+  /// Make the latest popup listed after `mark` the active page, when it
+  /// is still open. Returns whether one was.
+  pub(crate) fn activate_popup_since(&mut self, mark: u64) -> bool {
+    if self.popups_listed <= mark {
+      return false;
+    }
+    let Some(latest) = self.latest_popup.as_ref().filter(|page| !page.is_closed()) else {
+      return false;
+    };
+    let Some(index) = self.pages.iter().position(|page| page.same_backend_page(latest)) else {
+      return false;
+    };
+    self.active_page_idx = index;
+    true
   }
 
   /// Context name.
@@ -105,6 +140,9 @@ impl BrowserContext {
   /// `window.close()`) grew a `Vec` of corpses for its whole life and paid
   /// a scan past them on every command.
   pub(crate) fn prune_closed_pages(&mut self) {
+    if self.latest_popup.as_ref().is_some_and(AnyPage::is_closed) {
+      self.latest_popup = None;
+    }
     if !self.pages.iter().any(AnyPage::is_closed) {
       return;
     }
@@ -448,6 +486,23 @@ impl ContextRef {
   #[must_use]
   pub fn name(&self) -> &str {
     &self.name
+  }
+
+  /// How many popups this context has listed: the mark to take before a
+  /// call, so that only a popup the call opened is activated after it.
+  pub async fn popups_listed(&self) -> u64 {
+    self.state.read().await.popups_listed(&self.key.to_composite())
+  }
+
+  /// Make the latest popup listed after `mark` the active page, and hand
+  /// it back; `None` when the call opened no popup that is still open.
+  pub async fn activate_popup_since(&self, mark: u64) -> Option<AnyPage> {
+    let composite = self.key.to_composite();
+    let mut state = self.state.write().await;
+    if !state.activate_popup_since(&composite, mark) {
+      return None;
+    }
+    state.active_page(&composite).ok().cloned()
   }
 
   /// Wait until every tab the browser opened before this call is listed
@@ -2868,7 +2923,10 @@ async fn register_popup(
   // Playwright's `context.pages()` leaves out a page that closed before
   // its first document did, while still announcing it.
   if !popup.page.is_closed() {
-    state.write().await.list_opened_page(&key, popup.page.clone())?;
+    state
+      .write()
+      .await
+      .list_opened_page(&key, popup.page.clone(), crate::state::Listing::Popup)?;
   }
 
   let record_opts = {

@@ -88,3 +88,28 @@ for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
     });
   });
 }
+
+// A tab that opens once the call that set it off has reported belongs to
+// no call: it is listed, and the page the next call acts on stays put.
+for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
+  test(`${backend}: MCP leaves the focus alone for a tab that opens after the call`, async () => {
+    await fixtureServer(async (base) => {
+      const client = await McpClient.launch(backend);
+      try {
+        const opener = `${base}/fx/inner`;
+        const late = ok(await client.call('run_script', {
+          source: 'await page.goto(args[1]); await page.evaluate((href) => { setTimeout(() => window.open(href), 300); }, args[0]); return 1;',
+          args: [`${base}/fx/landed`, opener],
+        }));
+        assert.equal(payload(late).page.url, opener, text(late));
+        const deadline = Date.now() + 15000;
+        while (!text(ok(await client.call('page', { action: 'list' }))).includes('/fx/landed')) {
+          assert.ok(Date.now() < deadline, 'the late tab never showed in the page list');
+          await new Promise((done) => setTimeout(done, 100));
+        }
+        const next = ok(await client.call('run_script', { source: 'return page.url();' }));
+        assert.equal(payload(next).value, opener, text(next));
+      } finally { await client.close(); }
+    });
+  });
+}

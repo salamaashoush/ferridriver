@@ -208,7 +208,14 @@ impl ScriptHost for SessionScriptHost {
 
     // Captured before the run so the page handle is in scope afterwards; the
     // read itself happens once the script is done.
-    let reported_page = request.page_state.then(|| run_context.page.clone()).flatten();
+    let started_on = run_context.page.clone();
+    let context_ref = run_context.browser_context.clone();
+    // Under the slot lock, so a popup counted after this mark was opened by
+    // this run and no other.
+    let popups_before = match &context_ref {
+      Some(context) => context.popups_listed().await,
+      None => 0,
+    };
     // The output directory outlives this run, so its record has to be
     // diffed to tell this run's outputs from every earlier run's.
     let artifacts_before = self
@@ -250,10 +257,23 @@ impl ScriptHost for SessionScriptHost {
       }
     }
 
+    // A tab the run opened is waited for and becomes the page the next run
+    // acts on; one that opens later is listed and leaves the focus alone.
+    let mut left_on = started_on;
+    if let (Some(context), Some(page)) = (&context_ref, &left_on) {
+      let within = std::time::Duration::from_millis(page.default_navigation_timeout());
+      if let Err(error) = context.opened_pages_settled(within).await {
+        tracing::debug!(%error, "tabs the run opened are not all listed yet");
+      }
+      if let Some(popup) = context.activate_popup_since(popups_before).await {
+        left_on = Some(ferridriver::Page::with_context(popup, context.as_ref().clone()));
+      }
+    }
+
     // After the run, so it describes where the script left the context rather
     // than where it started. Still under the slot lock, so a concurrent run on
     // the same context cannot navigate out from under the read.
-    if let Some(page) = reported_page {
+    if let Some(page) = left_on.filter(|_| request.page_state) {
       let mut state = ferridriver::response::PageState::capture(&page).await;
       // Redacted before it goes on the wire, not by the client: a URL is a
       // routine place for a credential to appear (`?token=…`), and the host

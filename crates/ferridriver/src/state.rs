@@ -300,6 +300,16 @@ pub enum ClosedContexts {
   Recycled,
 }
 
+/// How [`BrowserState::list_opened_page`] lists a page.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Listing {
+  /// A page opened through ferridriver, which becomes the active page.
+  Active,
+  /// A page the browser opened, which the caller whose call opened it
+  /// activates ([`BrowserState::activate_popup_since`]).
+  Popup,
+}
+
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
@@ -2241,7 +2251,7 @@ impl BrowserState {
     browser_context_id: Option<String>,
   ) -> Result<()> {
     self.wire_opened_page(key, &page, browser_context_id)?;
-    self.list_opened_page(key, page)
+    self.list_opened_page(key, page, Listing::Active)
   }
 
   /// Record what `page` logs and forward its events to its context,
@@ -2369,13 +2379,13 @@ impl BrowserState {
     Ok(())
   }
 
-  /// List a wired page in its context and make it the active one.
+  /// List a wired page in its context, as the active page or as a popup.
   ///
   /// # Errors
   ///
   /// Returns an error if the state was disposed or the browser instance
   /// does not exist.
-  pub(crate) fn list_opened_page(&mut self, key: &SessionKey, page: AnyPage) -> Result<()> {
+  pub(crate) fn list_opened_page(&mut self, key: &SessionKey, page: AnyPage, listing: Listing) -> Result<()> {
     if let Err(error) = self.ensure_not_disposed() {
       page.dispose_local();
       return Err(error);
@@ -2389,10 +2399,40 @@ impl BrowserState {
     // dropped. Otherwise a long session's `pages` only ever grows and
     // every command scans past the corpses.
     ctx.prune_closed_pages();
-    ctx.pages.push(page);
-    ctx.active_page_idx = ctx.pages.len() - 1;
+    match listing {
+      Listing::Active => {
+        ctx.pages.push(page);
+        ctx.active_page_idx = ctx.pages.len() - 1;
+      },
+      Listing::Popup => ctx.list_popup(page),
+    }
     context_pages.set(&listed_under, &ctx.pages);
     Ok(())
+  }
+
+  /// How many popups `context` has listed: the mark a caller takes before
+  /// a call, to activate only a popup that call opened
+  /// ([`Self::activate_popup_since`]).
+  #[must_use]
+  pub fn popups_listed(&self, context: &str) -> u64 {
+    let key = self.session_key(context);
+    self
+      .instance(&key.instance)
+      .and_then(|inst| inst.context(&key.context))
+      .map_or(0, BrowserContext::popups_listed)
+  }
+
+  /// Make the latest popup `context` listed after `mark` its active page.
+  /// Returns whether there was one to activate.
+  pub fn activate_popup_since(&mut self, context: &str, mark: u64) -> bool {
+    let key = self.session_key(context);
+    let Ok(inst) = self.instance_mut(&key.instance) else {
+      return false;
+    };
+    let Ok(ctx) = inst.context_mut_checked(&key.context) else {
+      return false;
+    };
+    ctx.activate_popup_since(mark)
   }
 
   /// Same as `open_page` but accepts a pre-parsed `SessionKey` (avoids re-parsing).
