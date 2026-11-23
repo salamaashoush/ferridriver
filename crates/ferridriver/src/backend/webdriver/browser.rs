@@ -28,6 +28,9 @@ pub struct WebDriverBrowser {
   timeout_ms: u64,
   windows: Arc<tokio::sync::Mutex<Windows>>,
   popup_taps: crate::backend::PopupTaps,
+  /// Windows handed to the popup listener that the pump has not yet
+  /// registered.
+  in_flight: crate::backend::PopupsInFlight,
   watching: Arc<std::sync::atomic::AtomicBool>,
   pub(crate) product: String,
   version: String,
@@ -114,6 +117,7 @@ impl WebDriverBrowser {
       timeout_ms: 30_000,
       windows: Arc::default(),
       popup_taps: Arc::default(),
+      in_flight: crate::backend::PopupsInFlight::default(),
       watching: Arc::default(),
       product,
       version,
@@ -134,6 +138,7 @@ impl WebDriverBrowser {
       let capabilities = self.capabilities.clone();
       let timeout_ms = self.timeout_ms;
       let taps = self.popup_taps.clone();
+      let in_flight = self.in_flight.clone();
       tokio::spawn(async move {
         loop {
           tokio::time::sleep(WINDOW_POLL).await;
@@ -143,13 +148,33 @@ impl WebDriverBrowser {
           if session.is_closed() {
             return;
           }
-          if let Err(error) = list_windows(&session, &windows, &capabilities, timeout_ms, Some(&taps)).await {
+          if let Err(error) =
+            list_windows(&session, &windows, &capabilities, timeout_ms, Some((&taps, &in_flight))).await
+          {
             tracing::debug!(target: "ferridriver::webdriver", %error, "listing windows for popups failed");
           }
         }
       });
     }
     self.popup_taps.clone()
+  }
+
+  /// Resolves once every window the session has open is registered.
+  /// Nothing announces a window, so the handles are asked for here, and
+  /// a window none of the polling has found yet is handed on now.
+  pub(crate) async fn popups_settled(&self) -> Result<()> {
+    if self.watching.load(std::sync::atomic::Ordering::Acquire) {
+      list_windows(
+        &self.session,
+        &self.windows,
+        &self.capabilities,
+        self.timeout_ms,
+        Some((&self.popup_taps, &self.in_flight)),
+      )
+      .await?;
+    }
+    self.in_flight.settled().await;
+    Ok(())
   }
 
   pub async fn new_page(&self, url: &str) -> Result<WebDriverPage> {
@@ -249,7 +274,7 @@ fn window_page(session: &Arc<WebDriverSession>, capabilities: &Value, timeout_ms
 /// The session's windows, less the ones a popup listener was handed. While
 /// polling for popups, a window nobody here opened goes to that listener
 /// when there is one, with the window the session last drove as its
-/// opener. A caller asking for the windows itself (`popup_taps` is `None`)
+/// opener. A caller asking for the windows itself (`popups` is `None`)
 /// gets every new one back: it is about to adopt them, and handing one to
 /// the listener instead would leave it out of the answer while the
 /// listener registers it.
@@ -258,7 +283,7 @@ async fn list_windows(
   windows: &tokio::sync::Mutex<Windows>,
   capabilities: &Value,
   timeout_ms: u64,
-  popup_taps: Option<&crate::backend::PopupTaps>,
+  popups: Option<(&crate::backend::PopupTaps, &crate::backend::PopupsInFlight)>,
 ) -> Result<Vec<WebDriverPage>> {
   let mut windows = windows.lock().await;
   let opener = session.selected_window();
@@ -295,13 +320,14 @@ async fn list_windows(
     let page = window_page(session, capabilities, timeout_ms, handle);
     windows.pages.insert(handle.to_owned(), page.clone());
     let announced = opened_here
-      && popup_taps.is_some_and(|popup_taps| {
+      && popups.is_some_and(|(popup_taps, in_flight)| {
         crate::backend::push_popup(
           popup_taps,
           crate::backend::PopupInfo {
             page: crate::backend::AnyPage::WebDriver(page.clone()),
             browser_context_id: None,
             opener_target_id: opener.clone(),
+            claim: in_flight.claim(),
           },
         )
       });
@@ -731,7 +757,7 @@ mod tests {
       &browser.windows,
       &browser.capabilities,
       browser.timeout_ms,
-      Some(&browser.popup_taps),
+      Some((&browser.popup_taps, &browser.in_flight)),
     )
     .await
     .unwrap();

@@ -157,6 +157,9 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// clones the browser, and its `new_page` must coordinate with the
   /// original's listener.
   create_ledger: Arc<CreateLedger>,
+  /// Popups the attach listener has seen open and the pump has not yet
+  /// registered.
+  popups: crate::backend::PopupWatch,
   /// Owned `--user-data-dir` for launched browsers. Held as `Arc<TempDir>` so
   /// cheap `Clone`s share ownership, and the directory is removed from disk
   /// when the last handle drops (after the `Child` is killed via
@@ -288,6 +291,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       front_tab: Arc::clone(&self.front_tab),
       popup_taps: Arc::clone(&self.popup_taps),
       create_ledger: Arc::clone(&self.create_ledger),
+      popups: self.popups.clone(),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
       downloads_dir: Arc::clone(&self.downloads_dir),
       attach_tasks: Arc::clone(&self.attach_tasks),
@@ -385,6 +389,7 @@ struct AttachCtx<T: CdpTransport> {
   ledger: Arc<CreateLedger>,
   attached: AttachedTargets,
   headful: bool,
+  in_flight: crate::backend::PopupsInFlight,
 }
 
 /// A paused page target the attach listener could not attribute yet:
@@ -396,6 +401,9 @@ struct ParkedTarget {
   session: String,
   browser_context: Option<String>,
   opener: Option<String>,
+  /// Counts the target as a popup in flight until a create of ours takes
+  /// it or the pump is done with it.
+  claim: Arc<crate::backend::PopupClaim>,
 }
 
 type CreateLedger = crate::backend::CreateLedger<ParkedTarget>;
@@ -598,7 +606,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       group.own_dir(downloads_dir.path());
     }
     let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
-    let (popup_taps, create_ledger, attach_tasks) =
+    let (popup_taps, create_ledger, attach_tasks, popups) =
       Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
 
     transport
@@ -626,6 +634,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       downloads_dir,
       popup_taps,
       create_ledger,
+      popups,
       attach_tasks: Arc::new(attach_tasks),
       webdriver: None,
       android: None,
@@ -657,8 +666,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
     downloads_dir: &Arc<DownloadsDir>,
     attached: &AttachedTargets,
     headful: bool,
-  ) -> (crate::backend::PopupTaps, Arc<CreateLedger>, AttachTasks) {
+  ) -> (
+    crate::backend::PopupTaps,
+    Arc<CreateLedger>,
+    AttachTasks,
+    crate::backend::PopupWatch,
+  ) {
     let popup_taps: crate::backend::PopupTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (popups, mut passes) = crate::backend::PopupWatch::with_barrier();
     let ledger = Arc::new(CreateLedger::default());
     let mut attach_rx = transport.tap_event_methods(
       &[
@@ -676,6 +691,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       ledger: Arc::clone(&ledger),
       attached: Arc::clone(attached),
       headful,
+      in_flight: popups.in_flight.clone(),
     };
     // Flush channel: `end_create` (called from new_page, no transport
     // access) signals the listener side to claim leftovers.
@@ -696,7 +712,23 @@ impl<T: CdpWrap> CdpBrowser<T> {
       // Popup targets already claimed — Chromium can announce the
       // same related target through more than one auto-attach scope.
       let mut claimed_popups: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-      while let Some(event) = attach_rx.recv().await {
+      loop {
+        // Events first: a barrier pass is answered only once every event
+        // queued ahead of it has been handled, which is what lets a caller
+        // know each popup announced so far is counted in flight.
+        let event = tokio::select! {
+          biased;
+          event = attach_rx.recv() => match event {
+            Some(event) => event,
+            None => break,
+          },
+          Some(pass) = passes.recv() => {
+            if pass.send(()).is_err() {
+              tracing::debug!("popup barrier caller went away");
+            }
+            continue;
+          },
+        };
         let Some(params) = event.get("params") else { continue };
         // A target that went away must leave the session cache, or the
         // map grows by one dead entry for every page ever opened.
@@ -750,6 +782,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       popup_taps,
       ledger,
       AttachTasks(vec![flush_task.abort_handle(), attach_task.abort_handle()]),
+      popups,
     )
   }
 
@@ -792,6 +825,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       session: session_id.to_string(),
       browser_context: browser_context_id,
       opener: opener_id,
+      claim: ctx.in_flight.claim(),
     };
     if parked.opener.is_none() && !ctx.ledger.try_claim_ownerless(&parked.target, parked.clone()) {
       // Parked — a create in flight may own it; the flush decides.
@@ -820,6 +854,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         session: session_id,
         browser_context: browser_context_id,
         opener: opener_id,
+        claim,
       } = parked;
       let claimed_page = Self::claim_popup(
         &transport,
@@ -837,6 +872,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
             page: T::wrap_page(page),
             browser_context_id,
             opener_target_id: opener_id,
+            claim,
           },
         ),
         Err(e) => {
@@ -958,6 +994,19 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
   pub(crate) fn popup_taps(&self) -> crate::backend::PopupTaps {
     Arc::clone(&self.popup_taps)
+  }
+
+  /// Resolves once every popup the browser announced before this call has
+  /// been registered. Events and replies share one ordered connection, so
+  /// the reply to a browser-level command comes after the attach event of
+  /// any tab the browser created before answering it.
+  pub(crate) async fn popups_settled(&self) -> Result<()> {
+    self
+      .transport
+      .send_command(None, "Browser.getVersion", &super::EMPTY_PARAMS)
+      .await?;
+    self.popups.settled().await;
+    Ok(())
   }
 
   /// The open pages of the browser's default context, attaching to any
@@ -1591,7 +1640,7 @@ impl CdpBrowser<ws::WsTransport> {
 
     let downloads_dir = new_downloads_dir()?;
     let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
-    let (popup_taps, create_ledger, attach_tasks) =
+    let (popup_taps, create_ledger, attach_tasks, popups) =
       Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
 
     // CDP can emit attachedToTarget before setAutoAttach replies. The
@@ -1682,6 +1731,7 @@ impl CdpBrowser<ws::WsTransport> {
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
+      popups,
       user_data_dir: None,
       webdriver: None,
       android: None,

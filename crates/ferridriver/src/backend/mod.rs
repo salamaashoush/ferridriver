@@ -616,6 +616,9 @@ pub struct PopupInfo {
   /// reports one — matched against `AnyPage::backend_target_id` to
   /// resolve `page.opener()`.
   pub opener_target_id: Option<String>,
+  /// Holds the popup in its browser's [`PopupsInFlight`] until the pump
+  /// is done with it.
+  pub(crate) claim: Arc<PopupClaim>,
 }
 
 /// Registry of live popup subscriptions a backend browser pushes
@@ -628,6 +631,107 @@ pub(crate) fn push_popup(taps: &PopupTaps, info: PopupInfo) -> bool {
   match taps.last() {
     Some(tap) => tap.send(info).is_ok(),
     None => false,
+  }
+}
+
+/// The popups a browser has opened that the state layer has not finished
+/// registering: counted from the moment the backend's listener reads the
+/// event that announces one, until its pump lists and announces it or
+/// gives up on it.
+#[derive(Clone, Default)]
+pub(crate) struct PopupsInFlight(Arc<InFlight>);
+
+#[derive(Default)]
+struct InFlight {
+  count: std::sync::atomic::AtomicUsize,
+  settled: tokio::sync::Notify,
+}
+
+impl PopupsInFlight {
+  pub(crate) fn claim(&self) -> Arc<PopupClaim> {
+    self.0.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Arc::new(PopupClaim(Arc::clone(&self.0)))
+  }
+
+  /// Resolves once no popup is in flight.
+  pub(crate) async fn settled(&self) {
+    loop {
+      let settled = self.0.settled.notified();
+      tokio::pin!(settled);
+      settled.as_mut().enable();
+      if self.0.count.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        return;
+      }
+      settled.await;
+    }
+  }
+}
+
+/// One popup counted in its browser's [`PopupsInFlight`]; dropping the
+/// last handle to it takes it off the count.
+pub struct PopupClaim(Arc<InFlight>);
+
+impl Drop for PopupClaim {
+  fn drop(&mut self) {
+    if self.0.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+      self.0.settled.notify_waiters();
+    }
+  }
+}
+
+/// A way to wait until a backend's event listener has handled every event
+/// it had been handed when the wait began. The listener answers a pass
+/// only from a `biased` select that drains its events first.
+#[derive(Clone)]
+pub(crate) struct ListenerBarrier(tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>);
+
+pub(crate) type BarrierPasses = tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>;
+
+impl ListenerBarrier {
+  pub(crate) fn new() -> (Self, BarrierPasses) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (Self(tx), rx)
+  }
+
+  /// Resolves once the listener has handled everything queued before this
+  /// call, or immediately when the listener has stopped.
+  pub(crate) async fn pass(&self) {
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    if self.0.send(answer).is_ok() && answered.await.is_err() {
+      tracing::debug!("popup listener stopped before answering a barrier");
+    }
+  }
+}
+
+/// What a browser knows about the popups it is opening: how many are in
+/// flight, and, where its listener reads them from an ordered stream, the
+/// barrier that says every one announced so far has been counted.
+#[derive(Clone, Default)]
+pub(crate) struct PopupWatch {
+  pub(crate) in_flight: PopupsInFlight,
+  barrier: Option<ListenerBarrier>,
+}
+
+impl PopupWatch {
+  /// A watch whose listener answers barrier passes from `BarrierPasses`.
+  pub(crate) fn with_barrier() -> (Self, BarrierPasses) {
+    let (barrier, passes) = ListenerBarrier::new();
+    (
+      Self {
+        in_flight: PopupsInFlight::default(),
+        barrier: Some(barrier),
+      },
+      passes,
+    )
+  }
+
+  /// Resolves once the listener has counted every popup announced before
+  /// this call and none of them is still in flight.
+  pub(crate) async fn settled(&self) {
+    if let Some(barrier) = &self.barrier {
+      barrier.pass().await;
+    }
+    self.in_flight.settled().await;
   }
 }
 
@@ -793,6 +897,18 @@ impl AnyBrowser {
   /// Subscribe to browser-created pages (popups). Lossless unbounded
   /// tap — the popup pump must never miss one (a missed CDP popup is a
   /// target parked on `waitForDebuggerOnStart` forever).
+  /// Resolves once every popup this browser opened before the call has
+  /// been registered: listed in its context and announced.
+  pub(crate) async fn popups_settled(&self) -> Result<()> {
+    match self {
+      Self::CdpPipe(b) => b.popups_settled().await,
+      Self::CdpWs(b) => b.popups_settled().await,
+      Self::WebKit(b) => b.popups_settled().await,
+      Self::Bidi(b) => b.popups_settled().await,
+      Self::WebDriver(b) => b.popups_settled().await,
+    }
+  }
+
   pub(crate) fn tap_popups(&self) -> tokio::sync::mpsc::UnboundedReceiver<PopupInfo> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let taps = match self {
@@ -1218,7 +1334,8 @@ impl AnyPage {
       AnyPage::CdpPipe(p) => p.resume_popup().await,
       AnyPage::CdpWs(p) => p.resume_popup().await,
       AnyPage::WebKit(p) => p.resume_popup().await,
-      AnyPage::Bidi(_) | AnyPage::WebDriver(_) => Ok(()),
+      AnyPage::Bidi(p) => p.first_document_committed().await,
+      AnyPage::WebDriver(_) => Ok(()),
     }
   }
 

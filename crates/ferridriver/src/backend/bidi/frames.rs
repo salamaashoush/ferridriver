@@ -82,3 +82,74 @@ pub(super) fn frame_observer(
     true
   })
 }
+
+/// Whether a top-level context's first navigation has started, and whether
+/// it has settled: committed, failed, been aborted, or the context closed.
+/// A popup opened for a URL starts on an empty document and navigates; one
+/// opened for nothing or `about:blank` stays on that document and starts
+/// no navigation at all.
+#[derive(Default)]
+pub(crate) struct FirstNavigation {
+  started: AtomicBool,
+  settled: AtomicBool,
+  notify: tokio::sync::Notify,
+}
+
+impl FirstNavigation {
+  pub(crate) fn is_settled(&self) -> bool {
+    self.settled.load(Ordering::Acquire)
+  }
+
+  /// Resolves once the navigation that has started settles, or at once
+  /// when none has started.
+  pub(crate) async fn settled_if_started(&self) {
+    loop {
+      let notified = self.notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      if self.is_settled() || !self.started.load(Ordering::Acquire) {
+        return;
+      }
+      notified.await;
+    }
+  }
+
+  fn settle(&self) {
+    self.settled.store(true, Ordering::Release);
+    self.notify.notify_waiters();
+  }
+}
+
+/// Top-level contexts whose first navigation has not settled, by id.
+pub(crate) type FirstNavigations = Arc<Mutex<FxHashMap<String, Arc<FirstNavigation>>>>;
+
+/// Track the first navigation of every top-level context in wire order, so
+/// that whatever the reply to a command says, the events sent before it
+/// are already counted here.
+pub(super) fn first_navigation_observer(navigations: FirstNavigations) -> EventObserver {
+  Arc::new(move |event: &BidiEvent| {
+    let text = |key: &str| event.params.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    let context = text("context");
+    let mut navigations = navigations.lock().unwrap_or_else(PoisonError::into_inner);
+    match event.method.as_str() {
+      "browsingContext.contextCreated" if text("parent").is_empty() => {
+        navigations.insert(context.to_owned(), Arc::default());
+      },
+      "browsingContext.navigationStarted" => {
+        if let Some(navigation) = navigations.get(context) {
+          navigation.started.store(true, Ordering::Release);
+        }
+      },
+      "browsingContext.navigationCommitted"
+      | "browsingContext.navigationFailed"
+      | "browsingContext.navigationAborted"
+      | "browsingContext.contextDestroyed" => {
+        if let Some(navigation) = navigations.remove(context) {
+          navigation.settle();
+        }
+      },
+      _ => {},
+    }
+    true
+  })
+}

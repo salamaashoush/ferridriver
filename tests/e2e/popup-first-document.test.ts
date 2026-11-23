@@ -50,3 +50,41 @@ test.describe('popup first document', () => {
     });
   }
 });
+
+// Playwright's `context.pages()` holds a popup back until its first
+// document commits: before that it is on the empty document every popup
+// starts with, which is not the page it was opened for.
+test.describe('popup listing', () => {
+  for (const [how, open] of openers) {
+    test(`joins context.pages() once its first document commits (${how})`, async ({ browser }) => {
+      const context = await browser.newContext();
+      try {
+        let release!: () => void;
+        const released = new Promise<void>((done) => { release = done; });
+        let requested!: () => void;
+        const reached = new Promise<void>((done) => { requested = done; });
+        await context.route('**/popup-held/**', async (route) => {
+          requested();
+          await released;
+          await route.fulfill({ body: '<body>held</body>', contentType: 'text/html' });
+        });
+        await context.route('**/popup-opener/**', (route) => route.fulfill({ body: '<body>opener</body>', contentType: 'text/html' }));
+        const page = await context.newPage();
+        await page.goto(`${ORIGIN}/popup-opener/index.html`);
+        const announced = context.waitForEvent('page') as Promise<Page>;
+        await open(page, `${ORIGIN}/popup-held/popup.html`);
+        await reached;
+        expect(context.pages().map((listed) => listed.url())).toEqual([`${ORIGIN}/popup-opener/index.html`]);
+        release();
+        const popup = await announced;
+        expect(popup.url()).toBe(`${ORIGIN}/popup-held/popup.html`);
+        expect(context.pages().map((listed) => listed.url())).toEqual([
+          `${ORIGIN}/popup-opener/index.html`,
+          `${ORIGIN}/popup-held/popup.html`,
+        ]);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+});

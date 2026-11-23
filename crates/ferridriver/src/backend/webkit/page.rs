@@ -909,6 +909,12 @@ impl WebKitPage {
   /// `Runtime.evaluate` on the target session. `return_by_value`
   /// controls whether the reply inlines the value or returns an
   /// `objectId` handle.
+  /// A command the page's web process answers, so its reply comes after
+  /// whatever that process sent before it.
+  pub(crate) async fn web_process_round_trip(&self) -> Result<()> {
+    self.runtime_evaluate("0", true).await.map(|_| ())
+  }
+
   async fn runtime_evaluate(&self, expression: &str, return_by_value: bool) -> Result<Value> {
     let resp = self
       .target_session()

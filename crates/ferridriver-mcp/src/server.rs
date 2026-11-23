@@ -1743,6 +1743,22 @@ impl McpServer {
     Ok(self.ok_text(format!("{msg}\n\n{snap}{tools}")))
   }
 
+  /// Wait until the tabs `context`'s browser has opened so far are listed,
+  /// so a report built next names the page the caller's next call acts on:
+  /// a click that opens a tab returns before the tab joins its context.
+  /// A tab still loading when the navigation timeout runs out is left for
+  /// a later call to find, rather than failing what the caller asked for.
+  pub(crate) async fn opened_tabs_settled(&self, context: &str) {
+    let Ok(page) = Box::pin(self.page(context)).await else {
+      return;
+    };
+    let within = std::time::Duration::from_millis(page.default_navigation_timeout());
+    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    if let Err(error) = ctx_ref.opened_pages_settled(within).await {
+      tracing::debug!(%error, "tabs the call opened are not all listed yet");
+    }
+  }
+
   /// Let work the action triggered finish before anyone looks at the page.
   ///
   /// Network quiet is the signal, capped by the configured budget: a page

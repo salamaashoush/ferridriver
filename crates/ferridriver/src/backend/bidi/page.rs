@@ -384,6 +384,8 @@ pub struct BidiPage {
   /// `Arc<crate::page::Page>` instances, so the cache lives on the
   /// backend to outlive them).
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// A popup's first navigation, set when the popup listener adopts it.
+  first_navigation: Arc<std::sync::OnceLock<Arc<super::frames::FirstNavigation>>>,
   /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
   pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
   /// Idempotent latch for the frame-event listener.
@@ -571,6 +573,7 @@ impl BidiPage {
       downloads_dir,
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      first_navigation: Arc::default(),
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
@@ -589,7 +592,34 @@ impl BidiPage {
   /// Take up a page the browser opened by itself: it starts with its
   /// context's routes, and resolves the blocked requests `requests`
   /// brings, the first of which its own tap would be too late for.
-  pub(super) fn adopt_popup(&self, requests: tokio::sync::mpsc::UnboundedReceiver<super::transport::BidiEvent>) {
+  /// A popup starts on an empty document that is not the one it was
+  /// opened for, unless it was opened for no URL or `about:blank`. It is
+  /// handed on once the navigation it started has committed (or failed, or
+  /// the popup closed), so the page its context lists is the page opened.
+  /// The reply to the round trip comes after any `navigationStarted` the
+  /// browser sent first, so a popup with none by then starts no navigation.
+  pub(crate) async fn first_document_committed(&self) -> Result<()> {
+    let Some(navigation) = self.first_navigation.get().cloned() else {
+      return Ok(());
+    };
+    if navigation.is_settled() {
+      return Ok(());
+    }
+    self.session.transport.send_command("session.status", json!({})).await?;
+    navigation.settled_if_started().await;
+    Ok(())
+  }
+
+  pub(super) fn adopt_popup(
+    &self,
+    requests: tokio::sync::mpsc::UnboundedReceiver<super::transport::BidiEvent>,
+    first_navigation: Option<Arc<super::frames::FirstNavigation>>,
+  ) {
+    if let Some(navigation) = first_navigation
+      && self.first_navigation.set(navigation).is_err()
+    {
+      tracing::debug!("popup adopted twice");
+    }
     if let Ok(mut routes) = self.routes.try_write() {
       *routes = self.session.scopes.routes(&self.user_context);
     }

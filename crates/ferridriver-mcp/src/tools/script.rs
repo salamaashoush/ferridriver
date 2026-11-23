@@ -358,7 +358,9 @@ impl McpServer {
     // Where the script left the session. Captured after the run and before
     // the guard is released, so it describes the page the caller's NEXT call
     // will act on. Reading it opens no action span, so it never appears in
-    // the code the run just echoed.
+    // the code the run just echoed. A tab the script opened becomes the
+    // active page once it is listed, so that is waited for first.
+    self.opened_tabs_settled(&session).await;
     let page_state = match Box::pin(self.page(&session)).await {
       Ok(page) => Some(ferridriver::response::PageState::capture(&page).await),
       Err(e) => {

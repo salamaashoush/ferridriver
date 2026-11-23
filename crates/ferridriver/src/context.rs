@@ -450,6 +450,27 @@ impl ContextRef {
     &self.name
   }
 
+  /// Wait until every tab the browser opened before this call is listed
+  /// and announced, at most `within`. A click that opens a tab returns
+  /// before the tab has committed its first document, which is when it
+  /// joins its context; whoever reports the context right after the click
+  /// waits here to find the tab in it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser stops answering, or `within` passes
+  /// with a tab still on its way.
+  pub async fn opened_pages_settled(&self, within: std::time::Duration) -> Result<()> {
+    let browser = self.state.read().await.instance_browser(&self.key.instance).cloned();
+    let Some(browser) = browser else {
+      return Ok(());
+    };
+    let timeout_ms = u64::try_from(within.as_millis()).unwrap_or(u64::MAX);
+    tokio::time::timeout(within, browser.popups_settled())
+      .await
+      .map_err(|_| crate::error::FerriError::timeout("waiting for the tabs the page opened", timeout_ms))?
+  }
+
   /// The context's active page, opening one only when it has none. A
   /// browser this instance connects to brings the pages already open in
   /// it, which connecting adopts, so a client attaching to a running
@@ -2773,10 +2794,11 @@ async fn register_popup(
     format!("{instance}:{ctx_name}")
   };
   let key = crate::state::SessionKey::parse(&composite);
-  {
-    let mut s = state.write().await;
-    s.register_opened_page(&key, popup.page.clone(), None)?;
-  }
+  // Wired now, so nothing its first document logs is missed, and listed
+  // only once that document has committed, below. Listed before, it is
+  // the active tab while still on the empty document it starts with, and
+  // whoever reads the context in that moment finds about:blank.
+  state.write().await.wire_opened_page(&key, &popup.page, None)?;
   // The browser handle keeps `popup.context().browser()` non-null,
   // matching Playwright where a popup shares the opener's context.
   // `new_async`, not `new`: the sync constructor degrades to a
@@ -2843,6 +2865,11 @@ async fn register_popup(
   {
     tracing::debug!("popup frames: {e}");
   }
+  // Playwright's `context.pages()` leaves out a page that closed before
+  // its first document did, while still announcing it.
+  if !popup.page.is_closed() {
+    state.write().await.list_opened_page(&key, popup.page.clone())?;
+  }
 
   let record_opts = {
     let s = state.read().await;
@@ -2861,6 +2888,9 @@ async fn register_popup(
   if let Some(opener) = opener {
     opener.events().emit(crate::events::PageEvent::Popup(Arc::clone(&page)));
   }
+  // Listed and announced: whoever waits on the browser's popups in flight
+  // may now read the context and find this one in it.
+  drop(popup.claim);
 
   // WebSocket-route install evaluates into the live document, so it runs
   // post-resume (first-document sockets on paused backends stay a

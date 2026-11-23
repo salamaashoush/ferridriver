@@ -88,6 +88,9 @@ struct BrowserInner {
   /// event can beat the create response (see
   /// [`crate::backend::CreateLedger`]).
   create_ledger: Arc<crate::backend::CreateLedger<ParkedProxy>>,
+  /// Popups the listener has seen open and the pump has not yet
+  /// registered.
+  popups: crate::backend::PopupWatch,
 }
 
 /// A `pageProxyCreated` without `openerId` observed while a
@@ -97,6 +100,7 @@ struct BrowserInner {
 struct ParkedProxy {
   proxy_id: String,
   context_id: Option<String>,
+  claim: Arc<crate::backend::PopupClaim>,
 }
 
 impl WebKitBrowser {
@@ -142,6 +146,7 @@ impl WebKitBrowser {
     let pages: Arc<Mutex<Vec<WebKitPage>>> = Arc::new(Mutex::new(Vec::new()));
     let download_events = root.events();
 
+    let (popups, passes) = crate::backend::PopupWatch::with_barrier();
     let browser = WebKitBrowser {
       inner: Arc::new(BrowserInner {
         conn,
@@ -154,6 +159,7 @@ impl WebKitBrowser {
         downloads_dir,
         popup_taps: Arc::new(Mutex::new(Vec::new())),
         create_ledger: Arc::new(crate::backend::CreateLedger::default()),
+        popups,
       }),
     };
     if let Some(mut events) = startup_events {
@@ -189,7 +195,7 @@ impl WebKitBrowser {
       browser.inner.downloads_dir.clone(),
       stopping.clone(),
     );
-    let popups = browser.spawn_popup_listener(stopping);
+    let popups = browser.spawn_popup_listener(stopping, passes);
     browser
       .inner
       .handle
@@ -204,13 +210,49 @@ impl WebKitBrowser {
     Arc::clone(&self.inner.popup_taps)
   }
 
+  /// Resolves once every popup the browser announced before this call has
+  /// been registered. A link that opens a window asks the UI process for a
+  /// policy decision first, and only creates the window once the answer is
+  /// back in its web process, after the click has returned. So each page's
+  /// web process is asked something: its reply comes after it created any
+  /// window, and the UI process announces a window as it creates it.
+  pub(crate) async fn popups_settled(&self) -> crate::error::Result<()> {
+    let pages: Vec<WebKitPage> = self
+      .inner
+      .pages
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    let round_trips = pages
+      .iter()
+      .filter(|page| !page.is_closed())
+      .map(WebKitPage::web_process_round_trip);
+    for answer in futures::future::join_all(round_trips).await {
+      if let Err(error) = answer {
+        tracing::debug!(%error, "a page closed while its popups were being counted");
+      }
+    }
+    self
+      .inner
+      .root
+      .send("Playwright.getInfo", serde_json::json!({}))
+      .await
+      .map_err(|error| crate::error::FerriError::backend(error.to_string()))?;
+    self.inner.popups.settled().await;
+    Ok(())
+  }
+
   /// Watch `Playwright.pageProxyCreated` for pages the BROWSER opened.
   /// `openerId` is only set for `window.open()` pages (protocol doc),
   /// so our own `Playwright.createPage` proxies — which fire the same
   /// event without it — are left to the `new_page` flow. Mirrors
   /// `wkBrowser.ts::_onPageProxyCreated`, which resolves the opener
   /// from the same field.
-  fn spawn_popup_listener(&self, mut stopping: tokio::sync::watch::Receiver<bool>) -> tokio::task::JoinHandle<()> {
+  fn spawn_popup_listener(
+    &self,
+    mut stopping: tokio::sync::watch::Receiver<bool>,
+    mut passes: crate::backend::BarrierPasses,
+  ) -> tokio::task::JoinHandle<()> {
     let mut rx = self.inner.root.events();
     let browser = Arc::downgrade(&self.inner);
     let mut flush_rx = self.inner.create_ledger.take_flush_rx();
@@ -231,11 +273,20 @@ impl WebKitBrowser {
             let Some(inner) = browser.upgrade() else { break };
             let browser = WebKitBrowser { inner };
             for parked in browser.inner.create_ledger.take_unowned_parked() {
-              popups.spawn(browser.claim_popup_proxy(parked.proxy_id, parked.context_id, None));
+              popups.spawn(browser.claim_popup_proxy(parked.proxy_id, parked.context_id, None, parked.claim));
             }
             continue;
           },
           env = rx.recv() => match env { Some(env) => env, None => break },
+          // After the events: a barrier pass is answered only once every
+          // event queued ahead of it has been handled, which is what lets
+          // a caller know each popup announced so far is counted in flight.
+          Some(pass) = passes.recv() => {
+            if pass.send(()).is_err() {
+              tracing::debug!("popup barrier caller went away");
+            }
+            continue;
+          },
         };
         let Some(inner) = browser.upgrade() else { break };
         let browser = WebKitBrowser { inner };
@@ -255,16 +306,18 @@ impl WebKitBrowser {
           .get("browserContextId")
           .and_then(serde_json::Value::as_str)
           .map(String::from);
+        let claim = browser.inner.popups.in_flight.claim();
         if opener.is_none() {
           let parked = ParkedProxy {
             proxy_id: proxy_id.to_string(),
             context_id: context_id.clone(),
+            claim: Arc::clone(&claim),
           };
           if !browser.inner.create_ledger.try_claim_ownerless(proxy_id, parked) {
             continue;
           }
         }
-        popups.spawn(browser.claim_popup_proxy(proxy_id.to_string(), context_id, opener));
+        popups.spawn(browser.claim_popup_proxy(proxy_id.to_string(), context_id, opener, claim));
       }
       popups.abort_all();
       while let Some(result) = popups.join_next().await {
@@ -285,6 +338,7 @@ impl WebKitBrowser {
     proxy_id: String,
     context_id: Option<String>,
     opener: Option<String>,
+    claim: Arc<crate::backend::PopupClaim>,
   ) -> impl std::future::Future<Output = ()> + Send + 'static {
     let proxy = self.inner.conn.page_proxy_session(proxy_id.clone());
     let attach = WebKitPage::attach(self, proxy, context_id.clone(), true);
@@ -306,6 +360,7 @@ impl WebKitBrowser {
               page: AnyPage::WebKit(page.clone()),
               browser_context_id,
               opener_target_id: opener,
+              claim,
             },
           );
           if !delivered {
@@ -843,6 +898,7 @@ mod ownership_tests {
       let (write, wire) = tokio::io::duplex(4096);
       let conn = Connection::spawn(Transport::new(read, write));
       handle.install_connection(Arc::clone(&conn));
+      let (popups, passes) = crate::backend::PopupWatch::with_barrier();
       let browser = WebKitBrowser {
         inner: Arc::new(BrowserInner {
           root: conn.browser_session(),
@@ -855,10 +911,11 @@ mod ownership_tests {
           downloads_dir: Arc::new(path.clone()),
           popup_taps: Arc::new(Mutex::new(Vec::new())),
           create_ledger: Arc::new(crate::backend::CreateLedger::default()),
+          popups,
         }),
       };
       let (shutdown, stopping) = tokio::sync::watch::channel(false);
-      let observer = browser.spawn_popup_listener(stopping);
+      let observer = browser.spawn_popup_listener(stopping, passes);
       browser
         .inner
         .handle

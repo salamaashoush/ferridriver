@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from '@ferridriver/test';
-import { workspace } from './support.mjs';
+import { fixtureServer, workspace } from './support.mjs';
 import { McpClient, dataUrl, ok, payload } from './mcp-client.mjs';
 
 const secret = 's3cr3t-value-9f2a';
@@ -55,5 +55,36 @@ for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
       assert.notEqual(second[0], first[0]);
       assert.equal((await stat(second[0])).isFile(), true);
     } finally { await client.close(); }
+  });
+}
+
+// A click that opens a tab returns before the tab has committed its first
+// document, which is when it joins its context. The report that follows
+// still names it, as the page the caller's next call acts on.
+for (const backend of ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit']) {
+  test(`${backend}: MCP reports the tab a script opened as the page it left active`, async () => {
+    await fixtureServer(async (base) => {
+      const client = await McpClient.launch(backend);
+      try {
+        const opens = {
+          'window.open': 'await page.evaluate((href) => { window.open(href); }, args[0]);',
+          'a target=_blank link': `await page.evaluate((href) => {
+            const link = document.createElement('a');
+            link.href = href;
+            link.target = '_blank';
+            link.textContent = 'open';
+            document.body.append(link);
+          }, args[0]);
+          await page.click('a');`,
+        };
+        for (const [how, open] of Object.entries(opens)) {
+          const response = ok(await client.call('run_script', {
+            source: `await page.goto(args[1]); ${open} return 1;`,
+            args: [`${base}/fx/landed`, `${base}/fx/inner`],
+          }));
+          assert.equal(payload(response).page.url, `${base}/fx/landed`, `${how}: ${text(response)}`);
+        }
+      } finally { await client.close(); }
+    });
   });
 }

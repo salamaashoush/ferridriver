@@ -2240,6 +2240,24 @@ impl BrowserState {
     page: AnyPage,
     browser_context_id: Option<String>,
   ) -> Result<()> {
+    self.wire_opened_page(key, &page, browser_context_id)?;
+    self.list_opened_page(key, page)
+  }
+
+  /// Record what `page` logs and forward its events to its context,
+  /// without listing it. A popup is wired before it runs, so nothing its
+  /// first document does is missed, and listed once that document has
+  /// committed ([`Self::list_opened_page`]).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance does not exist.
+  pub(crate) fn wire_opened_page(
+    &mut self,
+    key: &SessionKey,
+    page: &AnyPage,
+    browser_context_id: Option<String>,
+  ) -> Result<()> {
     if let Err(error) = self.ensure_not_disposed() {
       page.dispose_local();
       return Err(error);
@@ -2255,16 +2273,9 @@ impl BrowserState {
     let composite = key.to_composite();
     let context_events = self.get_or_create_context_events(&composite);
     let visited_origins = self.visited_origins.clone();
-    let context_pages = self.context_pages.clone();
-    let listed_under = composite.clone();
 
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut(&key.context);
-    // Opening a tab is the one moment a `&mut` on the context is
-    // guaranteed, so it is where the tabs the browser already closed get
-    // dropped. Otherwise a long session's `pages` only ever grows and
-    // every command scans past the corpses.
-    ctx.prune_closed_pages();
     if let Some(id) = browser_context_id {
       ctx.cdp_context_id = Some(id);
     }
@@ -2355,6 +2366,29 @@ impl BrowserState {
       }
     });
 
+    Ok(())
+  }
+
+  /// List a wired page in its context and make it the active one.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the state was disposed or the browser instance
+  /// does not exist.
+  pub(crate) fn list_opened_page(&mut self, key: &SessionKey, page: AnyPage) -> Result<()> {
+    if let Err(error) = self.ensure_not_disposed() {
+      page.dispose_local();
+      return Err(error);
+    }
+    let listed_under = key.to_composite();
+    let context_pages = self.context_pages.clone();
+    let inst = self.instance_mut(&key.instance)?;
+    let ctx = inst.context_mut(&key.context);
+    // Opening a tab is the one moment a `&mut` on the context is
+    // guaranteed, so it is where the tabs the browser already closed get
+    // dropped. Otherwise a long session's `pages` only ever grows and
+    // every command scans past the corpses.
+    ctx.prune_closed_pages();
     ctx.pages.push(page);
     ctx.active_page_idx = ctx.pages.len() - 1;
     context_pages.set(&listed_under, &ctx.pages);
