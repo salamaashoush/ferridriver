@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "types.d.ts",
   "license": "MIT OR Apache-2.0",
-  "author": "Salama Ashoush <salamaashoush@gmail.com>",
+  "author": "Salama Ashoush",
   "repository": {
     "type": "git",
     "url": "https://github.com/salamaashoush/ferridriver"

@@ -136,8 +136,9 @@ Include:
 
 ## Security
 
-Report vulnerabilities privately to <salamaashoush@gmail.com> rather
-than opening a public issue. PGP key on request.
+Report vulnerabilities privately through
+[GitHub security advisories](https://github.com/salamaashoush/ferridriver/security/advisories/new)
+rather than opening a public issue.
 
 ## License
 

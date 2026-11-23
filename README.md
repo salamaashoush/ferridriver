@@ -5,7 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/ferridriver.svg?logo=rust&color=c97b4a)](https://crates.io/crates/ferridriver)
 [![docs.rs](https://img.shields.io/docsrs/ferridriver?logo=docs.rs&color=c97b4a)](https://docs.rs/ferridriver)
 [![npm](https://img.shields.io/npm/v/@ferridriver/node.svg?logo=npm&color=c97b4a)](https://www.npmjs.com/package/@ferridriver/node)
-[![MSRV](https://img.shields.io/badge/MSRV-1.91-c97b4a?logo=rust)](./rust-toolchain.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.97-c97b4a?logo=rust)](./rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-c97b4a.svg)](./README.md#license)
 
 Browser automation written in Rust with a Playwright-compatible API. Four
@@ -28,26 +28,53 @@ expect breaking changes between minor versions.
 
 **Documentation:** <https://salamaashoush.github.io/ferridriver/>
 
+## Performance
+
+The same Playwright-authored specs, run unmodified by `ferridriver test` and
+by `playwright test` on the same `chrome-headless-shell`, 4 workers,
+`fullyParallel` on both sides, median of 5 interleaved runs (macOS, M5 Max,
+Playwright 1.64.1):
+
+- A browser-bound suite (96 hermetic DOM tests) finishes **1.6x** faster,
+  peaking at ~1.1GB of memory across runner, workers and browsers against
+  ~2.6GB.
+- The runner's own overhead (96 tests with no fixtures, so no browser work)
+  is **27x** lower: a worker is a thread with a QuickJS VM, not a Node process.
+- Per-test browser work (context, page, first layout) is at parity, because
+  the browser does it either way. Short suites gain the most.
+
+Method, environment, raw samples and the claims these numbers do not
+support: [BENCHMARKING.md](./BENCHMARKING.md). Reproduce with
+`scripts/bench-vs-playwright.sh <spec-dir>`.
+
 ## Project layout
 
-12 workspace crates plus one example crate.
+20 workspace crates plus two example crates.
 
 | Crate                          | Purpose |
 |--------------------------------|---------|
 | `ferridriver`                  | Core: `Browser`, `BrowserContext`, `Page`, `Frame`, `Locator`, `ElementHandle`, network routing, selectors, backends |
 | `ferridriver-config`           | Unified config schema (`ferridriver.{toml,yaml,json}` — `[mcp]`, `[test]`, `[scripting]`, `[extensions]`) |
-| `ferridriver-mcp`              | MCP server library (rmcp-based; stdio + HTTP transports; 10 tools) |
-| `ferridriver-cli`              | CLI binary: `mcp`, `bdd`, `test`, `run`, `codegen`, `session`, `install` subcommands |
+| `ferridriver-mcp`              | MCP server library (rmcp-based; stdio + HTTP transports; 13 tools) |
+| `ferridriver-cli`              | CLI binary: `init`, `mcp`, `test`, `bdd`, `run`, `codegen`, `session`, `trace`, `install`, `upgrade` and more |
 | `ferridriver-script`           | QuickJS engine — backs `run_script`, JS/TS BDD steps, and JS extensions |
+| `ferridriver-session`          | Session registry, IPC server and CLI client binding live browsers to named sessions |
 | `ferridriver-node`             | NAPI-RS binding shipping the browser API to Node.js / Bun |
 | `ferridriver-test`             | Test runner core — parallel workers, fixtures, hooks, retries, reporters, snapshots, traces |
+| `ferridriver-testjs`           | TypeScript test-file front-end for the test runner (QuickJS-native) |
 | `ferridriver-test-macros`      | `#[ferritest]`, `#[ferritest_each]`, `#[fixture]`, `#[ferritest_suite]`, hook attribute macros |
 | `ferridriver-expect`           | Auto-retrying assertion library — locator, page, value, polling matchers |
-| `ferridriver-perf`             | Chrome trace analysis — Core Web Vitals, the 19 DevTools insights, and the Lantern load simulator |
-| `ferridriver-types`            | The TypeScript declarations and device registry of this build, embedded for editors |
 | `ferridriver-bdd`              | BDD framework — Gherkin parser, step / hook registry, scenario translator, executor |
 | `ferridriver-bdd-macros`       | `#[given]`, `#[when]`, `#[then]`, `#[step]`, `#[before]`, `#[after]`, `#[param_type]` |
+| `ferridriver-trace`            | Read, summarize and redact Playwright trace archives |
+| `ferridriver-viewer`           | Embedded trace viewer, UI mode, recorder and HTML report |
+| `ferridriver-perf`             | Chrome trace analysis — Core Web Vitals, the 19 DevTools insights, and the Lantern load simulator |
+| `ferridriver-heap`             | V8 heap snapshot analysis: retained sizes, dominators, retaining paths |
+| `ferridriver-types`            | The TypeScript declarations and device registry of this build, embedded for editors |
+| `ferridriver-fixtures`         | Local fixture web server for ferridriver's own test suites (not published) |
+| `ferridriver-gate`             | Build and test gate orchestrator behind `just ready` (not published) |
 | `examples/bdd-example`         | Reference Rust BDD suite (feature files + Rust step bodies) |
+| `examples/rust-e2e`            | Reference Rust E2E suite on the ferridriver `TestRunner` |
 
 Everything above the core is a thin translator. The same `Page::click`
 implementation is reached by a Rust `#[ferritest]`, a Gherkin `When I click
@@ -407,9 +434,10 @@ ferridriver mcp --auto-connect chrome
 ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
 ```
 
-**10 tools.** `connect`, `navigate`, `page` (session bootstrap) · `snapshot`,
+**13 tools.** `connect`, `navigate`, `page` (session bootstrap) · `snapshot`,
 `screenshot`, `evaluate`, `search_page`, `diagnostics` (observation) ·
-`run_script` (action) · `ferridriver_extensions` (introspection).
+`run_script` (action) · `run_bdd` (Gherkin) · `webmcp_tools`, `webmcp_call`
+(the page's own WebMCP tools) · `ferridriver_extensions` (introspection).
 
 `run_script` runs sandboxed JavaScript against the live session with full
 `Page` / `Locator` / `BrowserContext` / `APIRequestContext` bindings. One script
@@ -561,8 +589,8 @@ bun test
 
 ## Requirements
 
-- Rust nightly (edition 2024). The toolchain is pinned in
-  `rust-toolchain.toml`; `rust-version` (MSRV) is 1.91.
+- Stable Rust (edition 2024). The toolchain is pinned in
+  `rust-toolchain.toml`; `rust-version` (MSRV) is 1.97.
 - Chrome or Chromium (`ferridriver install chromium`, or set
   `CHROMIUM_PATH` to use an existing install).
 - Firefox for the `bidi` backend (`ferridriver install firefox`, or set
@@ -583,4 +611,5 @@ bun test
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of [Apache License, Version 2.0](./LICENSE-APACHE) or
+[MIT license](./LICENSE-MIT) at your option.
