@@ -18,8 +18,8 @@ async function scheme(page: Page): Promise<{ light: boolean; dark: boolean }> {
 }
 
 // What a browser does with no scheme emulated, launched as Playwright
-// launches it: Firefox is set light; WebKit follows the desktop; headless
-// Chromium draws light on macOS and follows the desktop elsewhere.
+// launches it: Firefox is set light; WebKit and headless Chromium follow
+// the desktop, macOS's appearance included.
 function desktopPrefersDark(): boolean {
   try {
     if (process.platform === "darwin") {
@@ -35,8 +35,7 @@ function desktopPrefersDark(): boolean {
 
 function ownSchemeIsDark(backend: string): boolean {
   if (backend === "bidi") return false;
-  if (backend === "webkit") return desktopPrefersDark();
-  return process.platform !== "darwin" && desktopPrefersDark();
+  return desktopPrefersDark();
 }
 
 for (const backend of BACKENDS) {
