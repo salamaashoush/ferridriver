@@ -1459,7 +1459,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1569,7 +1569,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2107,9 +2107,8 @@ dependencies = [
 
 [[package]]
 name = "ferrijs"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7026264f8b7eda75b2e7568849c385cc4aeaf5fa53d8cb99fa8a50c3f9481010"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -2154,9 +2153,8 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-fetch"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a877ae854a631df9545ed992f8bbfa9420ceb0c484993f26401824c103cdcef"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -2174,9 +2172,8 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-intl"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd1e40a1bfd5f488480582324c374310c5975ed139f184a38d57c187caa6e3fb"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"
 dependencies = [
  "ferrijs-std",
  "fixed_decimal",
@@ -2190,18 +2187,16 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-permissions"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc53fac2a2d0a3384f7196b69f29e1aab681a4fae8cec1fe97d6b1cdefe45536"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ferrijs-serde"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8f03db2aea2d2ded8c9a76a5a33bef3b12b5dcbe377f69fefa34493eaa12577"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"
 dependencies = [
  "rquickjs",
  "serde",
@@ -2209,9 +2204,8 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-std"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "034326ea7ee5ca18c4d2a036f1f26cc56526bbd54129df10c0fe10843dd3ff50"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -3670,7 +3664,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cde48f36530cbd91b65f050101e6c056d6eb743cea2a8f0f19beef69c6742ff8"
 dependencies = [
  "scopeguard",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4243,7 +4237,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5425,7 +5419,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6394,7 +6388,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6452,7 +6446,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6593,7 +6587,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -7143,10 +7137,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7165,7 +7159,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8058,7 +8052,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8568,3 +8562,8 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "ferrijs-bundle"
+version = "0.10.1"
+source = "git+https://github.com/salamaashoush/ferrijs?rev=501c55a#501c55aa004e8cb04e44a5669314283a9bf92160"

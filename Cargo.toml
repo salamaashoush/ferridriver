@@ -140,3 +140,14 @@ opt-level = 1
 
 [profile.dev.package.ferridriver-mcp]
 opt-level = 1
+
+# Release candidate only: ferrijs's child_process fix on Windows, from
+# git, so CI proves it on Windows before 0.10.1 is published.
+[patch.crates-io]
+ferrijs = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
+ferrijs-std = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
+ferrijs-fetch = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
+ferrijs-bundle = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
+ferrijs-permissions = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
+ferrijs-serde = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
+ferrijs-intl = { git = "https://github.com/salamaashoush/ferrijs", rev = "501c55a" }
