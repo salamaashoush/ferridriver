@@ -58,8 +58,15 @@ describe('ignoreDefaultArgs', () => {
     // `--enable-automation` is one of the defaults, so a browser
     // launched without them will not report its command line at all.
     // The refusal IS the evidence that they went.
-    // ignoreDefaultArgs also removes the flag from headless: true.
-    const options = { headless: true, ignoreDefaultArgs: true, args: ['--headless', '--no-first-run'] };
+    // ignoreDefaultArgs also removes the flag from headless: true. The
+    // keychain switches go with the defaults, and without them Chrome on
+    // macOS asks the login keychain for its storage key, which prompts
+    // for the user's password mid-run.
+    const options = {
+      headless: true,
+      ignoreDefaultArgs: true,
+      args: ['--headless', '--no-first-run', '--use-mock-keychain', '--password-store=basic'],
+    };
     expect(await argv(options)).toBe('refused');
 
     const bare = await chromium().launch(options);
