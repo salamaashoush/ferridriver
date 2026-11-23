@@ -30,6 +30,7 @@ rust-version = "1.97.0"
 license = "MIT OR Apache-2.0"
 authors = ["Salama Ashoush"]
 repository = "https://github.com/salamaashoush/ferridriver"
+homepage = "https://salamaashoush.github.io/ferridriver/"
 readme = "README.md"
 keywords = ["browser", "automation", "playwright", "cdp", "testing"]
 categories = ["development-tools::testing", "web-programming"]

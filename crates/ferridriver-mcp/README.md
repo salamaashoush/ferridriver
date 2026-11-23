@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-c97b4a.svg)](https://github.com/salamaashoush/ferridriver)
 
 MCP (Model Context Protocol) server library for ferridriver. Implements
-ten tools focused on scripted browser automation; `run_script` is the
+13 tools focused on scripted browser automation; `run_script` is the
 primary action path, the other tools are cheap observation and bootstrap.
 
 This crate is the **library** behind `ferridriver mcp`. The binary that

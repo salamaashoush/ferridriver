@@ -16,7 +16,7 @@ flowchart TB
     D["ferridriver-test (TestRunner)"]
     E["ferridriver-bdd"]
     EX["ferridriver-expect"]
-    F["ferridriver-mcp (10 tools)"]
+    F["ferridriver-mcp (13 tools)"]
     S["ferridriver-script (QuickJS: run_script · JS/TS BDD steps · extensions)"]
   end
 
