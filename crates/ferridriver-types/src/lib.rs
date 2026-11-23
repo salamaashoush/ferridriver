@@ -22,8 +22,11 @@ pub const EXTENSION_DTS: &str = include_str!("../packages/extension/index.d.ts")
 /// `Locator`, ...) the extension declarations build on.
 pub const TEST_DTS: &str = include_str!("../packages/test/index.d.ts");
 
-/// The Node globals (`process`, `Buffer`, ...) scripts may use, referenced
-/// from `TEST_DTS`.
+/// The part of Node a spec's runtime implements (`process`, `node:fs`,
+/// `node:child_process`, ...). `TEST_DTS` takes Node's own types, as a
+/// project with `@types/node` or bun's types has them, so the two never
+/// compete; this subset stands in for `@types/node` where nothing is
+/// installed, as when `ferridriver ext check` checks a bare package.
 pub const TEST_NODE_DTS: &str = include_str!("../packages/test/node.d.ts");
 
 /// The globals of a plain script (`[test] scriptMatch`): `page`,
@@ -53,7 +56,7 @@ pub const PACKAGES: &[TypesPackage] = &[
   TypesPackage {
     name: "@ferridriver/test",
     declaration: TEST_DTS,
-    additional: &[("node.d.ts", TEST_NODE_DTS), ("script.d.ts", TEST_SCRIPT_DTS)],
+    additional: &[("script.d.ts", TEST_SCRIPT_DTS)],
   },
 ];
 
@@ -68,8 +71,8 @@ mod tests {
   }
 
   #[test]
-  fn test_declarations_reference_their_node_globals() {
-    assert!(TEST_DTS.starts_with("/// <reference path=\"./node.d.ts\" />"));
+  fn test_declarations_take_node_s_own_types() {
+    assert!(TEST_DTS.starts_with("/// <reference types=\"node\" />"));
     assert!(TEST_NODE_DTS.contains("process"));
   }
 }

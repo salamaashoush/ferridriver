@@ -13,7 +13,9 @@ use ferridriver_types::PACKAGES;
 
 /// Write every package as `<root>/<name>/index.d.ts` plus a minimal
 /// `package.json`, so plain Node resolution (and therefore TypeScript with
-/// no `paths` mapping) finds them.
+/// no `paths` mapping) finds them, and the Node subset the runtime
+/// implements as `<root>/@types/node`, for `@ferridriver/test`'s
+/// `/// <reference types="node" />` where nothing else provides it.
 ///
 /// Returns the written declaration paths, keyed by package name.
 pub fn materialize(root: &Path) -> std::io::Result<Vec<(&'static str, PathBuf)>> {
@@ -37,5 +39,12 @@ pub fn materialize(root: &Path) -> std::io::Result<Vec<(&'static str, PathBuf)>>
     )?;
     written.push((pkg.name, dts));
   }
+  let node = root.join("@types/node");
+  std::fs::create_dir_all(&node)?;
+  std::fs::write(node.join("index.d.ts"), ferridriver_types::TEST_NODE_DTS)?;
+  std::fs::write(
+    node.join("package.json"),
+    format!("{{\n  \"name\": \"@types/node\",\n  \"version\": \"{version}\",\n  \"types\": \"./index.d.ts\"\n}}\n"),
+  )?;
   Ok(written)
 }

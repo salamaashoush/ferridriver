@@ -14,8 +14,10 @@ describe('clock', () => {
     for (const frame of frames) {
       await frame.evaluate(() => {
         const original = window.setTimeout.bind(window);
-        window.setTimeout = (handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
-          original(handler, timeout ?? 100, ...args);
+        // Node's types, which a spec has, give setTimeout a __promisify__
+        // that the page's own function has no use for.
+        window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+          original(handler, timeout ?? 100, ...args)) as typeof window.setTimeout;
       });
     }
     // The installed clock runs in real time and pauseAt cannot move it

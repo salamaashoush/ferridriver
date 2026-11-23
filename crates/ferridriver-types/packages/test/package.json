@@ -14,7 +14,9 @@
   },
   "files": [
     "index.d.ts",
-    "node.d.ts",
     "script.d.ts"
-  ]
+  ],
+  "dependencies": {
+    "@types/node": "*"
+  }
 }

@@ -1897,14 +1897,13 @@ fn build_test_info<'js>(
       crate::bindings::convert::json_to_js(ctx, &info.config).map_err(se)?,
     )
     .map_err(se)?;
-  match &info.project_name {
-    Some(name) => {
-      let project = Object::new(ctx.clone()).map_err(se)?;
-      project.set("name", name.clone()).map_err(se)?;
-      obj.set("project", project).map_err(se)?;
-    },
-    None => obj.set("project", Value::new_null(ctx.clone())).map_err(se)?,
-  }
+  // A config without projects runs Playwright's one unnamed project, so
+  // `testInfo.project` is always there, its name empty.
+  let project = Object::new(ctx.clone()).map_err(se)?;
+  project
+    .set("name", info.project_name.clone().unwrap_or_default())
+    .map_err(se)?;
+  obj.set("project", project).map_err(se)?;
 
   // Live getters backed by the bridge: annotations grows via
   // `annotate()` and pushes, attachmentCount via `attach()`.

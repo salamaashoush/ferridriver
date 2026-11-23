@@ -90,7 +90,7 @@ test.describe('scope errors', () => {
 
   test('the static form still works inside a body', async ({ browserName }) => {
     // The condition form is unchanged by the callback support.
-    test.skip(browserName === 'no-such-browser', 'never true');
+    test.skip(browserName.length === 0, 'never true');
     expect(browserName.length).toBeGreaterThan(0);
   });
 });

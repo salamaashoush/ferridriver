@@ -408,9 +408,11 @@ fn tsconfig(
       "lib": ["ES2022", "DOM", "DOM.Iterable"],
       // The extension runs in QuickJS with the host's own globals, so
       // @types packages an author happens to have installed (node, bun)
-      // would describe an environment that is not there.
+      // would describe an environment that is not there. The only type
+      // root is the Node subset that runtime implements, which answers
+      // `@ferridriver/test`'s `/// <reference types="node" />`.
       "types": [],
-      "typeRoots": [],
+      "typeRoots": [types_root.join("@types").display().to_string()],
       "skipLibCheck": true,
       "verbatimModuleSyntax": true,
       "isolatedModules": true,

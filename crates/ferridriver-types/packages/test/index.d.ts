@@ -1,4 +1,4 @@
-/// <reference path="./node.d.ts" />
+/// <reference types="node" />
 // Type declarations for ferridriver's native TypeScript test runner.
 //
 // `import { test, describe, expect } from '@ferridriver/test'` resolves
@@ -45,7 +45,7 @@ export interface TestInfo {
   readonly outputDir: string;
   readonly snapshotDir: string;
   readonly snapshotSuffix: string;
-  readonly project: TestProject | null;
+  readonly project: TestProject;
   /** The resolved config this run used — Playwright's `FullConfig`. */
   readonly config: Record<string, unknown>;
   /** What the test declared and recorded; pushing onto it records the annotation, as in Playwright. */
@@ -77,7 +77,7 @@ export interface TestInfo {
    * `{ kind }` selects the matcher (`'snapshot'` by default).
    */
   snapshotPath(...name: string[]): string;
-  snapshotPath(name: string, options: { kind: 'snapshot' | 'screenshot' | 'aria' }): string;
+  snapshotPath(...nameThenOptions: [...name: string[], options: { kind: 'snapshot' | 'screenshot' | 'aria' }]): string;
 }
 
 /// Playwright's `Location` — a file plus a 1-based position in it.
@@ -128,12 +128,18 @@ export interface StepFunction {
   skip(title: string, body: (step: TestStepInfo) => any | Promise<any>, options?: StepOptions): Promise<void>;
 }
 
+/**
+ * The engine a project runs on: Playwright's three, and Safari, which
+ * ferridriver also drives through WebDriver.
+ */
+export type BrowserName = 'chromium' | 'firefox' | 'webkit' | 'safari';
+
 export interface TestFixtures {
   page: Page;
   context: BrowserContext;
   request: APIRequestContext;
   browser: Browser;
-  browserName: string;
+  browserName: BrowserName;
   headless: boolean;
   isMobile: boolean;
   hasTouch: boolean;
@@ -141,7 +147,7 @@ export interface TestFixtures {
   testInfo: TestInfo;
 }
 
-export type TestBody<TFixtures> = (fixtures: TFixtures, testInfoOrRow?: any) => void | Promise<void>;
+export type TestBody<TFixtures> = (fixtures: TFixtures, testInfo: TestInfo) => void | Promise<void>;
 
 export interface DescribeFunction {
   (title: string, body: () => void): void;
@@ -185,7 +191,7 @@ export interface FixtureOptions {
 export interface WorkerInfo {
   readonly workerIndex: number;
   readonly parallelIndex: number;
-  readonly project: TestProject | null;
+  readonly project: TestProject;
 }
 
 /// A test-scoped fixture's third argument is the running test's
@@ -1669,10 +1675,45 @@ export interface Mouse {
   wheel(deltaX: number, deltaY: number): Promise<void>;
 }
 
-export interface JSHandle {
-  jsonValue(): Promise<unknown>;
-  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
+/**
+ * Playwright's evaluate typing (`types/structs.d.ts`): the function a page
+ * runs receives its argument with every handle in it unwrapped to the
+ * value it points at, and returns a value or a promise of one, which is
+ * what the call resolves to.
+ */
+export type NoHandles<Arg> = Arg extends JSHandle ? never : Arg extends object ? { [Key in keyof Arg]: NoHandles<Arg[Key]> } : Arg;
+export type Unboxed<Arg> = Arg extends ElementHandle<infer T>
+  ? T
+  : Arg extends JSHandle<infer T>
+    ? T
+    : Arg extends NoHandles<Arg>
+      ? Arg
+      : Arg extends [infer A0]
+        ? [Unboxed<A0>]
+        : Arg extends [infer A0, infer A1]
+          ? [Unboxed<A0>, Unboxed<A1>]
+          : Arg extends [infer A0, infer A1, infer A2]
+            ? [Unboxed<A0>, Unboxed<A1>, Unboxed<A2>]
+            : Arg extends [infer A0, infer A1, infer A2, infer A3]
+              ? [Unboxed<A0>, Unboxed<A1>, Unboxed<A2>, Unboxed<A3>]
+              : Arg extends Array<infer T>
+                ? Array<Unboxed<T>>
+                : Arg extends object
+                  ? { [Key in keyof Arg]: Unboxed<Arg[Key]> }
+                  : Arg;
+export type PageFunction<Arg, R> = string | ((arg: Unboxed<Arg>) => R | Promise<R>);
+export type PageFunctionOn<On, Arg2, R> = string | ((on: On, arg2: Unboxed<Arg2>) => R | Promise<R>);
+// The evaluate family resolves to `Promise<NoInfer<R>>`: nested as
+// `expect(await page.evaluate('…'))`, `R` would otherwise be inferred from
+// what `expect`'s first overload wants (a Locator) rather than left as the
+// `unknown` a string expression gives.
+
+export interface JSHandle<T = any> {
+  jsonValue(): Promise<T>;
+  evaluate<R, Arg>(pageFunction: PageFunctionOn<T, Arg, R>, arg: Arg, options?: EvaluateOptions): Promise<NoInfer<R>>;
+  evaluate<R>(pageFunction: PageFunctionOn<T, void, R>, arg?: undefined, options?: EvaluateOptions): Promise<NoInfer<R>>;
+  evaluateHandle<R, Arg>(pageFunction: PageFunctionOn<T, Arg, R>, arg: Arg, options?: EvaluateOptions): Promise<JSHandle<R>>;
+  evaluateHandle<R>(pageFunction: PageFunctionOn<T, void, R>, arg?: undefined, options?: EvaluateOptions): Promise<JSHandle<R>>;
   getProperty(propertyName: string): Promise<JSHandle>;
   // Plain object rather than Playwright's Map<string, JSHandle> — the
   // documented ferridriver shape shared with the NAPI binding's
@@ -1683,7 +1724,7 @@ export interface JSHandle {
   dispose(): Promise<void>;
 }
 
-export interface ElementHandle extends JSHandle {
+export interface ElementHandle<T = SVGElement | HTMLElement> extends JSHandle<T> {
   asJSHandle(): JSHandle;
   click(options?: ClickOptions): Promise<void>;
   dblclick(options?: ClickOptions): Promise<void>;
@@ -1722,8 +1763,10 @@ export interface ElementHandle extends JSHandle {
   screenshot(options?: LocatorScreenshotOptions): Promise<Uint8Array>;
   $(selector: string): Promise<ElementHandle | null>;
   $$(selector: string): Promise<ElementHandle[]>;
-  $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  $eval<K extends keyof HTMLElementTagNameMap, R, Arg>(selector: K, pageFunction: PageFunctionOn<HTMLElementTagNameMap[K], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $eval<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(selector: string, pageFunction: PageFunctionOn<E, Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $$eval<K extends keyof HTMLElementTagNameMap, R, Arg>(selector: K, pageFunction: PageFunctionOn<HTMLElementTagNameMap[K][], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $$eval<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(selector: string, pageFunction: PageFunctionOn<E[], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
   ownerFrame(): Promise<Frame | null>;
   contentFrame(): Promise<Frame | null>;
   waitForElementState(
@@ -1799,9 +1842,12 @@ export interface Locator {
   isEditable(options?: TimeoutOption): Promise<boolean>;
   isAttached(options?: TimeoutOption): Promise<boolean>;
 
-  evaluate(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & EvaluateOptions): Promise<unknown>;
-  evaluateAll(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & EvaluateOptions): Promise<JSHandle>;
+  evaluate<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(pageFunction: PageFunctionOn<E, Arg, R>, arg: Arg, options?: TimeoutOption & EvaluateOptions): Promise<NoInfer<R>>;
+  evaluate<R, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(pageFunction: PageFunctionOn<E, void, R>, arg?: undefined, options?: TimeoutOption & EvaluateOptions): Promise<NoInfer<R>>;
+  evaluateAll<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(pageFunction: PageFunctionOn<E[], Arg, R>, arg: Arg): Promise<NoInfer<R>>;
+  evaluateAll<R, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(pageFunction: PageFunctionOn<E[], void, R>): Promise<NoInfer<R>>;
+  evaluateHandle<R, Arg>(pageFunction: PageFunctionOn<SVGElement | HTMLElement, Arg, R>, arg: Arg, options?: TimeoutOption & EvaluateOptions): Promise<JSHandle<R>>;
+  evaluateHandle<R>(pageFunction: PageFunctionOn<SVGElement | HTMLElement, void, R>, arg?: undefined, options?: TimeoutOption & EvaluateOptions): Promise<JSHandle<R>>;
   elementHandle(options?: TimeoutOption): Promise<ElementHandle>;
   elementHandles(): Promise<ElementHandle[]>;
   waitFor(options?: Omit<WaitForSelectorOptions, 'strict'>): Promise<void>;
@@ -1951,7 +1997,7 @@ export interface Response {
   headerValue(name: string): Promise<string | null>;
   headerValues(name: string): Promise<string[]>;
   httpVersion(): Promise<string>;
-  body(): Promise<Uint8Array>;
+  body(): Promise<Buffer>;
   text(): Promise<string>;
   json(): Promise<unknown>;
   request(): Request;
@@ -1987,12 +2033,16 @@ export interface Frame {
   /** The `<iframe>` or `<frame>` in the parent frame that holds this one. */
   frameElement(): Promise<ElementHandle>;
 
-  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
+  evaluate<R, Arg>(pageFunction: PageFunction<Arg, R>, arg: Arg, options?: EvaluateOptions): Promise<NoInfer<R>>;
+  evaluate<R>(pageFunction: PageFunction<void, R>, arg?: undefined, options?: EvaluateOptions): Promise<NoInfer<R>>;
+  evaluateHandle<R, Arg>(pageFunction: PageFunction<Arg, R>, arg: Arg, options?: EvaluateOptions): Promise<JSHandle<R>>;
+  evaluateHandle<R>(pageFunction: PageFunction<void, R>, arg?: undefined, options?: EvaluateOptions): Promise<JSHandle<R>>;
   $(selector: string, options?: { strict?: boolean }): Promise<ElementHandle | null>;
   $$(selector: string): Promise<ElementHandle[]>;
-  $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  $eval<K extends keyof HTMLElementTagNameMap, R, Arg>(selector: K, pageFunction: PageFunctionOn<HTMLElementTagNameMap[K], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $eval<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(selector: string, pageFunction: PageFunctionOn<E, Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $$eval<K extends keyof HTMLElementTagNameMap, R, Arg>(selector: K, pageFunction: PageFunctionOn<HTMLElementTagNameMap[K][], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $$eval<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(selector: string, pageFunction: PageFunctionOn<E[], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
 
   waitForSelector(selector: string, options?: WaitForSelectorOptions): Promise<ElementHandle | null>;
   waitForFunction(pageFunction: Function | string, arg?: unknown, options?: TimeoutOption & { polling?: number | 'raf' }): Promise<JSHandle>;
@@ -2176,13 +2226,58 @@ export interface CDPSession {
 export interface Worker {
   url(): string;
   /** Runs in the worker's global scope; `arg` crosses by value. */
-  evaluate(pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  evaluate<R, Arg>(pageFunction: PageFunction<Arg, R>, arg: Arg): Promise<NoInfer<R>>;
+  evaluate<R>(pageFunction: PageFunction<void, R>, arg?: undefined): Promise<NoInfer<R>>;
   waitForEvent(event: 'close', optionsOrTimeout?: number | { timeout?: number }): Promise<Worker>;
   on(event: 'close', listener: (worker: Worker) => void): this;
   addListener(event: 'close', listener: (worker: Worker) => void): this;
   once(event: 'close', listener: (worker: Worker) => void): this;
   off(event: 'close', listener?: (worker: Worker) => void): this;
   removeListener(event: 'close', listener?: (worker: Worker) => void): this;
+}
+
+/** What each page event hands its listeners and `waitForEvent`. */
+export interface PageEventMap {
+  close: Page;
+  console: ConsoleMessage;
+  crash: Page;
+  dialog: Dialog;
+  dialogclosed: Dialog;
+  domcontentloaded: Page;
+  download: Download;
+  filechooser: FileChooser;
+  frameattached: Frame;
+  framedetached: Frame;
+  framenavigated: Frame;
+  load: Page;
+  pageerror: Error;
+  popup: Page;
+  request: Request;
+  requestfailed: Request;
+  requestfinished: Request;
+  response: Response;
+  websocket: WebSocket;
+  worker: Worker;
+}
+
+/** What each context event hands its listeners and `waitForEvent`. */
+export interface BrowserContextEventMap {
+  close: BrowserContext;
+  console: ConsoleMessage;
+  dialog: Dialog;
+  dialogclosed: Dialog;
+  download: Download;
+  frameattached: Frame;
+  framedetached: Frame;
+  framenavigated: Frame;
+  page: Page;
+  pageclose: Page;
+  pageload: Page;
+  request: Request;
+  requestfailed: Request;
+  requestfinished: Request;
+  response: Response;
+  weberror: WebError;
 }
 
 export type BrowserContextEvent =
@@ -2307,8 +2402,10 @@ export interface Page {
   isChecked(selector: string, options?: SelectorReadOptions): Promise<boolean>;
   isEditable(selector: string, options?: SelectorReadOptions): Promise<boolean>;
 
-  evaluate(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<unknown>;
-  evaluateHandle(pageFunction: Function | string, arg?: unknown, options?: EvaluateOptions): Promise<JSHandle>;
+  evaluate<R, Arg>(pageFunction: PageFunction<Arg, R>, arg: Arg, options?: EvaluateOptions): Promise<NoInfer<R>>;
+  evaluate<R>(pageFunction: PageFunction<void, R>, arg?: undefined, options?: EvaluateOptions): Promise<NoInfer<R>>;
+  evaluateHandle<R, Arg>(pageFunction: PageFunction<Arg, R>, arg: Arg, options?: EvaluateOptions): Promise<JSHandle<R>>;
+  evaluateHandle<R>(pageFunction: PageFunction<void, R>, arg?: undefined, options?: EvaluateOptions): Promise<JSHandle<R>>;
   pause(): Promise<void>;
   requestGC(): Promise<void>;
   snapshotForAI(options?: { depth?: number; track?: string }): Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>;
@@ -2325,8 +2422,10 @@ export interface Page {
   // $/$$ (ferridriver extension).
   querySelector(selector: string, options?: { strict?: boolean }): Promise<ElementHandle | null>;
   querySelectorAll(selector: string): Promise<ElementHandle[]>;
-  $eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
-  $$eval(selector: string, pageFunction: Function | string, arg?: unknown): Promise<unknown>;
+  $eval<K extends keyof HTMLElementTagNameMap, R, Arg>(selector: K, pageFunction: PageFunctionOn<HTMLElementTagNameMap[K], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $eval<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(selector: string, pageFunction: PageFunctionOn<E, Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $$eval<K extends keyof HTMLElementTagNameMap, R, Arg>(selector: K, pageFunction: PageFunctionOn<HTMLElementTagNameMap[K][], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
+  $$eval<R, Arg, E extends SVGElement | HTMLElement = SVGElement | HTMLElement>(selector: string, pageFunction: PageFunctionOn<E[], Arg, R>, arg?: Arg): Promise<NoInfer<R>>;
   addInitScript(script: Function | string | { content?: string; path?: string }, arg?: unknown, options?: EvaluateOptions): Promise<Disposable>;
   addScriptTag(options?: { url?: string; path?: string; content?: string; type?: string }): Promise<ElementHandle>;
   addStyleTag(options?: { url?: string; path?: string; content?: string }): Promise<ElementHandle>;
@@ -2339,7 +2438,7 @@ export interface Page {
   waitForURL(url: string | RegExp | ((url: URL) => boolean | Promise<boolean>), options?: TimeoutOption & { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit' }): Promise<void>;
   waitForNavigation(options?: WaitForNavigationOptions): Promise<Response | null>;
   waitForTimeout(timeout: number): Promise<void>;
-  waitForEvent(event: PageEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
+  waitForEvent<K extends keyof PageEventMap>(event: K, optionsOrPredicate?: number | ((event: PageEventMap[K]) => boolean | Promise<boolean>) | { predicate?: (event: PageEventMap[K]) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }): Promise<PageEventMap[K]>;
   waitForRequest(urlOrPredicate: string | RegExp | ((request: Request) => boolean), options?: TimeoutOption): Promise<Request>;
   waitForResponse(urlOrPredicate: string | RegExp | ((response: Response) => boolean), options?: TimeoutOption): Promise<Response>;
 
@@ -2407,13 +2506,13 @@ export interface Page {
 
   // The Node emitter surface Playwright exposes: registrations chain,
   // removal is by function identity.
-  on(event: PageEvent, handler: (arg: unknown) => void): this;
-  addListener(event: PageEvent, handler: (arg: unknown) => void): this;
-  once(event: PageEvent, handler: (arg: unknown) => void): this;
-  prependListener(event: PageEvent, handler: (arg: unknown) => void): this;
-  prependOnceListener(event: PageEvent, handler: (arg: unknown) => void): this;
-  off(event: PageEvent, handler?: (arg: unknown) => void): this;
-  removeListener(event: PageEvent, handler?: (arg: unknown) => void): this;
+  on<K extends keyof PageEventMap>(event: K, handler: (arg: PageEventMap[K]) => void): this;
+  addListener<K extends keyof PageEventMap>(event: K, handler: (arg: PageEventMap[K]) => void): this;
+  once<K extends keyof PageEventMap>(event: K, handler: (arg: PageEventMap[K]) => void): this;
+  prependListener<K extends keyof PageEventMap>(event: K, handler: (arg: PageEventMap[K]) => void): this;
+  prependOnceListener<K extends keyof PageEventMap>(event: K, handler: (arg: PageEventMap[K]) => void): this;
+  off<K extends keyof PageEventMap>(event: K, handler?: (arg: PageEventMap[K]) => void): this;
+  removeListener<K extends keyof PageEventMap>(event: K, handler?: (arg: PageEventMap[K]) => void): this;
   removeAllListeners(event?: PageEvent): this;
   removeAllListeners(event: PageEvent | undefined, options: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   listeners(event: PageEvent): ((arg: unknown) => void)[];
@@ -2556,14 +2655,14 @@ export interface BrowserContext {
   routeWebSocket(url: string | RegExp | ((url: URL) => boolean), handler: (ws: WebSocketRoute) => void | Promise<void>): Promise<void>;
   unroute(url: string | RegExp | ((url: URL) => boolean), handler?: (route: Route, request: Request) => void | Promise<void>): Promise<void>;
   unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
-  waitForEvent(event: BrowserContextEvent, optionsOrPredicate?: number | ((event: unknown) => boolean) | { predicate?: (event: unknown) => boolean; timeout?: number; signal?: AbortSignal }): Promise<unknown>;
-  on(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
-  addListener(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
-  once(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
-  prependListener(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
-  prependOnceListener(event: BrowserContextEvent, handler: (arg: unknown) => void): this;
-  off(event: BrowserContextEvent, handler?: (arg: unknown) => void): this;
-  removeListener(event: BrowserContextEvent, handler?: (arg: unknown) => void): this;
+  waitForEvent<K extends keyof BrowserContextEventMap>(event: K, optionsOrPredicate?: number | ((event: BrowserContextEventMap[K]) => boolean | Promise<boolean>) | { predicate?: (event: BrowserContextEventMap[K]) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }): Promise<BrowserContextEventMap[K]>;
+  on<K extends keyof BrowserContextEventMap>(event: K, handler: (arg: BrowserContextEventMap[K]) => void): this;
+  addListener<K extends keyof BrowserContextEventMap>(event: K, handler: (arg: BrowserContextEventMap[K]) => void): this;
+  once<K extends keyof BrowserContextEventMap>(event: K, handler: (arg: BrowserContextEventMap[K]) => void): this;
+  prependListener<K extends keyof BrowserContextEventMap>(event: K, handler: (arg: BrowserContextEventMap[K]) => void): this;
+  prependOnceListener<K extends keyof BrowserContextEventMap>(event: K, handler: (arg: BrowserContextEventMap[K]) => void): this;
+  off<K extends keyof BrowserContextEventMap>(event: K, handler?: (arg: BrowserContextEventMap[K]) => void): this;
+  removeListener<K extends keyof BrowserContextEventMap>(event: K, handler?: (arg: BrowserContextEventMap[K]) => void): this;
   removeAllListeners(event?: string): this;
   removeAllListeners(event: string | undefined, options: { behavior?: 'wait' | 'ignoreErrors' | 'default' }): Promise<void>;
   listeners(event: string): ((arg: unknown) => void)[];
@@ -2818,7 +2917,7 @@ export interface APIResponse {
     responseStart: number;
     responseEnd: number;
   };
-  body(): Promise<Uint8Array>;
+  body(): Promise<Buffer>;
   text(): Promise<string>;
   json(): Promise<unknown>;
   dispose(): Promise<void>;
