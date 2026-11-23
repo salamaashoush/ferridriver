@@ -63,6 +63,7 @@ jobs:
       # written by hand rather than generated. A binding can ship with no
       # declaration and nothing else notices — `checkAccessibility` and
       # `strictSelectors` both did.
+      - run: bun install --frozen-lockfile
       - name: Typecheck
         working-directory: tests
         run: bun x tsc --noEmit -p tsconfig.json
