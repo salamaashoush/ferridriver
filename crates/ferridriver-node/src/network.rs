@@ -155,6 +155,10 @@ impl Request {
 }
 
 #[napi]
+#[expect(
+  clippy::unused_self,
+  reason = "Playwright declares these as instance methods, which napi-derive exposes only with a receiver"
+)]
 impl Request {
   /// Mirrors Playwright `request.url(): string`.
   #[napi]
@@ -263,7 +267,7 @@ impl Request {
   #[napi(ts_return_type = "Request | null")]
   pub fn redirected_from(&self) -> Option<Request> {
     self.inner.redirected_from().map(|r| match self.page.as_ref() {
-      Some(page) => Request::from_core_with_page(r, page.clone()),
+      Some(page) => Request::from_core_with_page(r, Arc::clone(page)),
       None => Request::from_core(r),
     })
   }
@@ -272,7 +276,7 @@ impl Request {
   #[napi(ts_return_type = "Request | null")]
   pub fn redirected_to(&self) -> Option<Request> {
     self.inner.redirected_to().map(|r| match self.page.as_ref() {
-      Some(page) => Request::from_core_with_page(r, page.clone()),
+      Some(page) => Request::from_core_with_page(r, Arc::clone(page)),
       None => Request::from_core(r),
     })
   }
@@ -286,7 +290,7 @@ impl Request {
       .await
       .map(|opt| {
         opt.map(|r| match self.page.as_ref() {
-          Some(page) => Response::from_core_with_page(r, page.clone()),
+          Some(page) => Response::from_core_with_page(r, Arc::clone(page)),
           None => Response::from_core(r),
         })
       })
@@ -298,13 +302,13 @@ impl Request {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn existing_response(&self) -> Option<Response> {
     self.inner.existing_response().await.map(|r| match self.page.as_ref() {
-      Some(page) => Response::from_core_with_page(r, page.clone()),
+      Some(page) => Response::from_core_with_page(r, Arc::clone(page)),
       None => Response::from_core(r),
     })
   }
 
   /// Mirrors Playwright `request.frame(): Frame`. Resolves the
-  /// initiating frame_id through the owning page's frame cache. Returns
+  /// initiating `frame_id` through the owning page's frame cache. Returns
   /// `null` when the request was emitted without a frame context (e.g.
   /// CDP main-target preload) or when the wrapper was created without a
   /// page reference.
@@ -493,7 +497,7 @@ impl Response {
   #[napi]
   pub fn request(&self) -> Request {
     match self.page.as_ref() {
-      Some(page) => Request::from_core_with_page(self.inner.request(), page.clone()),
+      Some(page) => Request::from_core_with_page(self.inner.request(), Arc::clone(page)),
       None => Request::from_core(self.inner.request()),
     }
   }
@@ -534,7 +538,7 @@ impl WebSocket {
 /// Playwright's `{ payload: string | Buffer }` for `'framesent'` and
 /// `'framereceived'`.
 #[napi(object)]
-pub struct WebSocketFrame {
+pub(crate) struct WebSocketFrame {
   #[napi(ts_type = "string | Buffer")]
   pub payload: Either<String, Buffer>,
 }
@@ -557,6 +561,7 @@ impl WebSocketEventArg {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for WebSocketEventArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> Result<napi::sys::napi_value> {
     match val {
@@ -565,15 +570,22 @@ impl ToNapiValue for WebSocketEventArg {
           WebSocketPayload::Text(text) => Either::A(text),
           WebSocketPayload::Binary(bytes) => Either::B(Buffer::from(bytes)),
         };
+        // SAFETY: `env` is the live environment napi-rs handed this conversion.
         unsafe { WebSocketFrame::to_napi_value(env, WebSocketFrame { payload }) }
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       WebSocketEventArg::Error(message) => unsafe { String::to_napi_value(env, message) },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       WebSocketEventArg::Close(socket) => unsafe { WebSocket::to_napi_value(env, WebSocket::from_core(socket)) },
     }
   }
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl WebSocket {
   /// Mirrors Playwright `webSocket.url(): string`.
   #[napi]
@@ -599,7 +611,7 @@ impl WebSocket {
     event: String,
     listener: Function<'_, WebSocketEventArg, ()>,
   ) -> Result<Object<'env>> {
-    self.register_listener(&event, listener, false)?;
+    self.register_listener(&event, &listener, false)?;
     Ok(this.object)
   }
 
@@ -628,7 +640,7 @@ impl WebSocket {
     event: String,
     listener: Function<'_, WebSocketEventArg, ()>,
   ) -> Result<Object<'env>> {
-    self.register_listener(&event, listener, true)?;
+    self.register_listener(&event, &listener, true)?;
     Ok(this.object)
   }
 
@@ -690,10 +702,9 @@ impl WebSocket {
     ts_args_type = "event: 'framesent' | 'framereceived' | 'socketerror' | 'close', optionsOrPredicate?: number | ((data: { payload: string | Buffer } | string | WebSocket) => boolean | Promise<boolean>) | { predicate?: (data: { payload: string | Buffer } | string | WebSocket) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }",
     ts_return_type = "Promise<{ payload: string | Buffer } | string | WebSocket>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_event(
     &self,
-    env: &Env,
+    env: Env,
     event: String,
     options_or_predicate: Option<Either3<f64, Function<'_, WebSocketEventArg, crate::page::PredReturn>, Object<'_>>>,
   ) -> Result<AsyncBlock<WebSocketEventArg>> {
@@ -765,12 +776,12 @@ impl WebSocket {
         }
       }
     }))
-    .build(env)
+    .build(&env)
   }
 }
 
 impl WebSocket {
-  fn register_listener(&self, event: &str, listener: Function<'_, WebSocketEventArg, ()>, once: bool) -> Result<()> {
+  fn register_listener(&self, event: &str, listener: &Function<'_, WebSocketEventArg, ()>, once: bool) -> Result<()> {
     let fn_ref = listener.create_ref()?;
     let tsfn = listener
       .build_threadsafe_function()

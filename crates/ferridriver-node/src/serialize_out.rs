@@ -27,6 +27,7 @@ impl TypeName for Evaluated {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for Evaluated {
   unsafe fn to_napi_value(raw_env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
     let env = Env::from_raw(raw_env);
@@ -39,12 +40,16 @@ impl ToNapiValue for Evaluated {
 /// arg that can be a JS string or a JS function — matches Playwright's
 /// `String(pageFunction)` + `typeof pageFunction === 'function'` check at
 /// `client/page.ts:515` / `client/frame.ts:196`.
-pub fn extract_fn_source(value: Unknown<'_>) -> Result<(String, Option<bool>)> {
+pub(crate) fn extract_fn_source(value: Unknown<'_>) -> Result<(String, Option<bool>)> {
   let is_fn = value.get_type()? == ValueType::Function;
   let s = value.coerce_to_string()?.into_utf8()?.into_owned()?;
   Ok((s, Some(is_fn)))
 }
 
+/// Runs only under [`Evaluated::to_napi_value`]: `env` is the live
+/// environment of that call, and every `napi_value` here and in the helpers
+/// below is a handle created in its scope.
+#[expect(unsafe_code, reason = "builds JS values through napi's C API")]
 fn rehydrate(
   env: &Env,
   value: &SerializedValue,
@@ -53,10 +58,10 @@ fn rehydrate(
   match value {
     SerializedValue::Bool(b) => {
       let mut out = ptr::null_mut();
-      check_status!(
-        unsafe { sys::napi_get_boolean(env.raw(), *b, &raw mut out) },
-        "get_boolean"
-      )?;
+      // SAFETY: `env` is the live environment of the conversion this runs
+      // under (see [`rehydrate`]); `out` is a writable out-parameter.
+      let status = unsafe { sys::napi_get_boolean(env.raw(), *b, &raw mut out) };
+      check_status!(status, "get_boolean")?;
       Ok(out)
     },
     SerializedValue::Number(n) => create_double(env, *n),
@@ -66,15 +71,18 @@ fn rehydrate(
     },
     SerializedValue::Special(SpecialValue::Null) => {
       let mut out = ptr::null_mut();
-      check_status!(unsafe { sys::napi_get_null(env.raw(), &raw mut out) }, "get_null")?;
+      // SAFETY: `env` is the live environment of the conversion this runs
+      // under (see [`rehydrate`]); `out` is a writable out-parameter.
+      let status = unsafe { sys::napi_get_null(env.raw(), &raw mut out) };
+      check_status!(status, "get_null")?;
       Ok(out)
     },
     SerializedValue::Special(SpecialValue::Undefined) => {
       let mut out = ptr::null_mut();
-      check_status!(
-        unsafe { sys::napi_get_undefined(env.raw(), &raw mut out) },
-        "get_undefined"
-      )?;
+      // SAFETY: `env` is the live environment of the conversion this runs
+      // under (see [`rehydrate`]); `out` is a writable out-parameter.
+      let status = unsafe { sys::napi_get_undefined(env.raw(), &raw mut out) };
+      check_status!(status, "get_undefined")?;
       Ok(out)
     },
     SerializedValue::Special(SpecialValue::NaN) => create_double(env, f64::NAN),
@@ -100,26 +108,26 @@ fn rehydrate(
     },
     SerializedValue::Array { id, items } => {
       let mut arr = ptr::null_mut();
-      check_status!(
-        unsafe { sys::napi_create_array_with_length(env.raw(), items.len(), &raw mut arr) },
-        "create_array"
-      )?;
+      // SAFETY: `env` is the live environment of the conversion this runs
+      // under (see [`rehydrate`]); `arr` is a writable out-parameter.
+      let status = unsafe { sys::napi_create_array_with_length(env.raw(), items.len(), &raw mut arr) };
+      check_status!(status, "create_array")?;
       refs.insert(*id, arr);
       for (i, item) in items.iter().enumerate() {
         let v = rehydrate(env, item, refs)?;
-        check_status!(
-          unsafe { sys::napi_set_element(env.raw(), arr, u32::try_from(i).unwrap_or(u32::MAX), v) },
-          "array set_element"
-        )?;
+        // SAFETY: `env` is the live environment of the conversion this runs
+        // under (see [`rehydrate`]); `arr` was created above and `v` rehydrated, both in this scope.
+        let status = unsafe { sys::napi_set_element(env.raw(), arr, u32::try_from(i).unwrap_or(u32::MAX), v) };
+        check_status!(status, "array set_element")?;
       }
       Ok(arr)
     },
     SerializedValue::Object { id, entries } => {
       let mut obj = ptr::null_mut();
-      check_status!(
-        unsafe { sys::napi_create_object(env.raw(), &raw mut obj) },
-        "create_object"
-      )?;
+      // SAFETY: `env` is the live environment of the conversion this runs
+      // under (see [`rehydrate`]); `obj` is a writable out-parameter.
+      let status = unsafe { sys::napi_create_object(env.raw(), &raw mut obj) };
+      check_status!(status, "create_object")?;
       refs.insert(*id, obj);
       for entry in entries {
         let v = rehydrate(env, &entry.v, refs)?;
@@ -142,12 +150,13 @@ fn rehydrate(
   }
 }
 
+#[expect(unsafe_code, reason = "builds JS values through napi's C API")]
 fn create_double(env: &Env, n: f64) -> Result<sys::napi_value> {
   let mut out = ptr::null_mut();
-  check_status!(
-    unsafe { sys::napi_create_double(env.raw(), n, &raw mut out) },
-    "create_double"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `out` is a writable out-parameter.
+  let status = unsafe { sys::napi_create_double(env.raw(), n, &raw mut out) };
+  check_status!(status, "create_double")?;
   Ok(out)
 }
 
@@ -156,52 +165,61 @@ fn create_str(env: &Env, s: &str) -> Result<sys::napi_value> {
   Ok(js.raw())
 }
 
+#[expect(unsafe_code, reason = "builds JS values through napi's C API")]
 fn global_property(env: &Env, name: &str) -> Result<sys::napi_value> {
   let mut global = ptr::null_mut();
-  check_status!(
-    unsafe { sys::napi_get_global(env.raw(), &raw mut global) },
-    "get_global"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `global` is a writable out-parameter.
+  let status = unsafe { sys::napi_get_global(env.raw(), &raw mut global) };
+  check_status!(status, "get_global")?;
   let key = env.create_string(name)?;
   let mut prop = ptr::null_mut();
-  check_status!(
-    unsafe { sys::napi_get_property(env.raw(), global, key.raw(), &raw mut prop) },
-    "get_global_property"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `global` and `key` were just created in this scope; `prop` is a
+  // writable out-parameter.
+  let status = unsafe { sys::napi_get_property(env.raw(), global, key.raw(), &raw mut prop) };
+  check_status!(status, "get_global_property")?;
   Ok(prop)
 }
 
+#[expect(unsafe_code, reason = "builds JS values through napi's C API")]
 fn call_constructor(env: &Env, ctor_name: &str, args: &[sys::napi_value]) -> Result<sys::napi_value> {
   let ctor = global_property(env, ctor_name)?;
   let mut out = ptr::null_mut();
-  check_status!(
-    unsafe { sys::napi_new_instance(env.raw(), ctor, args.len(), args.as_ptr(), &raw mut out) },
-    "new_instance"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `ctor` was just read in this scope and `args` holds `args.len()`
+  // handles from it; `out` is a writable out-parameter. A non-constructor
+  // comes back as a status.
+  let status = unsafe { sys::napi_new_instance(env.raw(), ctor, args.len(), args.as_ptr(), &raw mut out) };
+  check_status!(status, "new_instance")?;
   Ok(out)
 }
 
+#[expect(unsafe_code, reason = "builds JS values through napi's C API")]
 fn call_global_fn(env: &Env, fn_name: &str, args: &[sys::napi_value]) -> Result<sys::napi_value> {
   let func = global_property(env, fn_name)?;
   let mut global = ptr::null_mut();
-  check_status!(
-    unsafe { sys::napi_get_global(env.raw(), &raw mut global) },
-    "get_global"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `global` is a writable out-parameter.
+  let status = unsafe { sys::napi_get_global(env.raw(), &raw mut global) };
+  check_status!(status, "get_global")?;
   let mut out = ptr::null_mut();
-  check_status!(
-    unsafe { sys::napi_call_function(env.raw(), global, func, args.len(), args.as_ptr(), &raw mut out) },
-    "call_function"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `global` and `func` were just read in this scope and `args`
+  // holds `args.len()` handles from it; `out` is a writable out-parameter.
+  let status = unsafe { sys::napi_call_function(env.raw(), global, func, args.len(), args.as_ptr(), &raw mut out) };
+  check_status!(status, "call_function")?;
   Ok(out)
 }
 
+#[expect(unsafe_code, reason = "builds JS values through napi's C API")]
 fn set_named_property(env: &Env, obj: sys::napi_value, name: &str, value: sys::napi_value) -> Result<()> {
   let key = env.create_string(name)?;
-  check_status!(
-    unsafe { sys::napi_set_property(env.raw(), obj, key.raw(), value) },
-    "set_property"
-  )?;
+  // SAFETY: `env` is the live environment of the conversion this runs
+  // under (see [`rehydrate`]); `obj` is an object rehydrated in this scope and `key` and
+  // `value` are handles from it.
+  let status = unsafe { sys::napi_set_property(env.raw(), obj, key.raw(), value) };
+  check_status!(status, "set_property")?;
   Ok(())
 }
 

@@ -32,7 +32,7 @@ impl Worker {
   fn register_listener(
     &self,
     event: &str,
-    listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
+    listener: &napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
     once: bool,
   ) -> Result<()> {
     let fn_ref = listener.create_ref()?;
@@ -76,6 +76,10 @@ pub struct WorkerWaitOptions {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl Worker {
   /// Playwright: `worker.url(): string`.
   #[napi]
@@ -95,7 +99,7 @@ impl Worker {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, false)?;
+    self.register_listener(&event, &listener, false)?;
     Ok(this.object)
   }
 
@@ -124,7 +128,7 @@ impl Worker {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, crate::identity::WorkerObject, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, true)?;
+    self.register_listener(&event, &listener, true)?;
     Ok(this.object)
   }
 

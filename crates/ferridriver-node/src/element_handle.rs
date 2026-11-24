@@ -1,4 +1,4 @@
-//! ElementHandle class -- NAPI binding for `ferridriver::ElementHandle`.
+//! `ElementHandle` class -- NAPI binding for `ferridriver::ElementHandle`.
 //!
 //! Mirrors Playwright's `ElementHandle<T extends Node>` interface
 //! (`/tmp/playwright/packages/playwright-core/types/types.d.ts`).
@@ -50,7 +50,6 @@ impl ElementHandle {
     Self { inner }
   }
 
-  #[allow(dead_code)]
   pub(crate) fn inner_ref(&self) -> &ferridriver::ElementHandle {
     &self.inner
   }

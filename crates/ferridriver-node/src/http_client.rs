@@ -5,6 +5,7 @@ use crate::error::IntoNapi;
 use napi::Result;
 use napi::bindgen_prelude::PromiseRaw;
 use napi_derive::napi;
+use rustc_hash::FxHashMap;
 
 /// Playwright's `request.newContext(options?)` bag.
 #[napi(object, js_name = "NewContextOptions")]
@@ -18,7 +19,7 @@ pub struct HttpClientOptions {
   pub base_url: Option<String>,
   /// Headers every request sends.
   #[napi(js_name = "extraHTTPHeaders")]
-  pub extra_http_headers: Option<std::collections::HashMap<String, String>>,
+  pub extra_http_headers: Option<crate::types::HashMap<String, String>>,
   /// Default timeout in milliseconds.
   pub timeout: Option<f64>,
   /// Ignore HTTPS certificate errors.
@@ -56,16 +57,16 @@ pub struct FetchOptions {
   /// HTTP method override (`fetch` only; the verb helpers set it).
   pub method: Option<String>,
   /// Extra headers for this request.
-  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub headers: Option<crate::types::HashMap<String, String>>,
   /// Request body: a string is sent raw, any other serializable value
   /// is sent as JSON (Playwright's `data` routing).
   pub data: Option<serde_json::Value>,
   /// URL-encoded form data.
   #[napi(ts_type = "Record<string, string | number | boolean>")]
-  pub form: Option<std::collections::HashMap<String, serde_json::Value>>,
+  pub form: Option<FxHashMap<String, serde_json::Value>>,
   /// Query string parameters.
   #[napi(ts_type = "Record<string, string | number | boolean>")]
-  pub params: Option<std::collections::HashMap<String, serde_json::Value>>,
+  pub params: Option<FxHashMap<String, serde_json::Value>>,
   /// Timeout in milliseconds.
   pub timeout: Option<f64>,
   /// Fail with error on 4xx/5xx.
@@ -84,16 +85,13 @@ pub struct FetchOptions {
   #[napi(
     ts_type = "Record<string, string | number | boolean | { name: string, mimeType?: string, buffer: Buffer | string }>"
   )]
-  pub multipart: Option<std::collections::HashMap<String, serde_json::Value>>,
+  pub multipart: Option<FxHashMap<String, serde_json::Value>>,
 }
 
 /// Lower a Playwright `params` / `form` map through the ONE core
-/// implementation, so this binding and the QuickJS one cannot disagree
+/// implementation, so this binding and the `QuickJS` one cannot disagree
 /// about what a scalar bag means.
-fn scalar_map_to_pairs(
-  field: &str,
-  map: &std::collections::HashMap<String, serde_json::Value>,
-) -> Result<Vec<(String, String)>> {
+fn scalar_map_to_pairs(field: &str, map: &FxHashMap<String, serde_json::Value>) -> Result<Vec<(String, String)>> {
   ferridriver::http_client::RequestOptions::scalar_map_to_pairs(field, map.iter().map(|(k, v)| (k.clone(), v.clone())))
     .map_err(napi::Error::from_reason)
 }
@@ -115,9 +113,11 @@ impl FetchOptions {
         .as_ref()
         .map(|p| scalar_map_to_pairs("params", p))
         .transpose()?,
-      timeout: self.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
+      timeout: self
+        .timeout
+        .map(|t| std::time::Duration::from_millis(crate::types::f64_to_u64(t))),
       fail_on_status_code: self.fail_on_status_code,
-      max_redirects: self.max_redirects.map(|m| m as u32),
+      max_redirects: self.max_redirects.map(i32::cast_unsigned),
       redirect: self
         .redirect
         .as_deref()
@@ -125,7 +125,7 @@ impl FetchOptions {
         .transpose()
         .map_err(napi::Error::from_reason)?
         .unwrap_or_default(),
-      max_retries: self.max_retries.map(|m| m as u32),
+      max_retries: self.max_retries.map(i32::cast_unsigned),
       ignore_https_errors: self.ignore_https_errors,
       multipart: self
         .multipart
@@ -145,7 +145,7 @@ impl FetchOptions {
 
 /// Layer explicit `options` over a `Request`-derived base: anything the
 /// caller set wins, the rest falls through to the request's own values.
-/// Mirrors the QuickJS binding's `merge_over`.
+/// Mirrors the `QuickJS` binding's `merge_over`.
 fn merge_over(
   base: Option<ferridriver::http_client::RequestOptions>,
   options: Option<ferridriver::http_client::RequestOptions>,
@@ -192,6 +192,10 @@ where
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl HttpResponse {
   #[napi]
   pub fn redirected(&self) -> bool {
@@ -206,7 +210,7 @@ impl HttpResponse {
   /// Playwright: `apiResponse.status(): number`.
   #[napi]
   pub fn status(&self) -> i32 {
-    self.inner.status() as i32
+    i32::from(self.inner.status())
   }
 
   /// Playwright: `apiResponse.statusText(): string` (e.g. "OK").
@@ -336,8 +340,17 @@ impl HttpClient {
 
 /// Playwright: `request.newContext(options?): Promise<APIRequestContext>`,
 /// `request` being the module's `APIRequest`.
+///
+/// # Errors
+///
+/// When napi cannot create the promise; an option the client cannot honour
+/// rejects it instead.
 #[napi(namespace = "request", ts_return_type = "Promise<APIRequestContext>")]
-pub async fn new_context(options: Option<HttpClientOptions>) -> Result<HttpClient> {
+pub fn new_context(env: &napi::Env, options: Option<HttpClientOptions>) -> Result<PromiseRaw<'_, HttpClient>> {
+  env.spawn_future(async move { build_context(options) })
+}
+
+fn build_context(options: Option<HttpClientOptions>) -> Result<HttpClient> {
   let opts = options.unwrap_or_default();
   let proxy = opts.proxy.map(|p| ferridriver::options::ProxyConfig {
     server: p.server,
@@ -385,6 +398,10 @@ pub async fn new_context(options: Option<HttpClientOptions>) -> Result<HttpClien
 }
 
 #[napi]
+#[expect(
+  clippy::unused_self,
+  reason = "Playwright declares these as instance methods, which napi-derive exposes only with a receiver"
+)]
 impl HttpClient {
   /// Playwright: `apiRequestContext.storageState(options?)`.
   #[napi]
@@ -523,9 +540,9 @@ mod tests {
       client_certificates: Some(serde_json::json!([])),
       ..HttpClientOptions::default()
     };
-    let refused = new_context(Some(certificates)).await.err().map(|e| e.reason);
+    let refused = build_context(Some(certificates)).err().map(|e| e.reason);
     assert!(refused.is_some_and(|reason| reason.contains("clientCertificates is not supported")));
-    assert!(new_context(None).await.is_ok());
+    assert!(build_context(None).is_ok());
   }
 
   #[tokio::test]
@@ -539,11 +556,10 @@ mod tests {
       }),
       ..HttpClientOptions::default()
     };
-    let refused = new_context(Some(proxy("ftp://proxy.example.com")))
-      .await
+    let refused = build_context(Some(proxy("ftp://proxy.example.com")))
       .err()
       .map(|e| e.reason);
     assert!(refused.is_some_and(|reason| reason.contains("proxy")));
-    assert!(new_context(Some(proxy("http://proxy.example.com:3128"))).await.is_ok());
+    assert!(build_context(Some(proxy("http://proxy.example.com:3128"))).is_ok());
   }
 }

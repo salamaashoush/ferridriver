@@ -53,9 +53,8 @@ impl<K, T: 'static> Cache<K, T> {
       if keep(&self.entries[i].0) {
         i += 1;
       } else {
-        let (_, mut reference) = self.entries.remove(i);
-        // SAFETY: removed from the cache, so dropped exactly once, here.
-        unsafe { ManuallyDrop::drop(&mut reference) };
+        let (_, reference) = self.entries.remove(i);
+        drop(ManuallyDrop::into_inner(reference));
       }
     }
   }
@@ -87,23 +86,25 @@ pub struct FrameObject(pub ferridriver::Frame);
 /// `dialogclosed` events.
 pub struct DialogObject(pub ferridriver::dialog::Dialog);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for PageObject {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let js_env = Env::from_raw(env);
     let key = val.0.backend_page_id();
     let found = PAGES.with(|pages| pages.borrow().find(js_env, |p| p.backend_page_id() == key))?;
-    let reference = match found {
-      Some(reference) => reference,
-      None => {
-        let reference = Page::wrap(Arc::clone(&val.0)).into_reference(js_env)?;
-        PAGES.with(|pages| {
-          let mut pages = pages.borrow_mut();
-          pages.retain(|page| !page.is_closed());
-          pages.insert(js_env, val.0, &reference)
-        })?;
-        reference
-      },
+    let reference = if let Some(reference) = found {
+      reference
+    } else {
+      let reference = Page::wrap(Arc::clone(&val.0)).into_reference(js_env)?;
+      PAGES.with(|pages| {
+        let mut pages = pages.borrow_mut();
+        pages.retain(|page| !page.is_closed());
+        pages.insert(js_env, val.0, &reference)
+      })?;
+      reference
     };
+    // SAFETY: `env` is the live environment napi-rs handed this conversion,
+    // and `reference` was cloned or created against it on this thread.
     unsafe { Reference::to_napi_value(env, reference) }
   }
 }
@@ -113,22 +114,24 @@ impl ToNapiValue for PageObject {
 #[derive(Clone)]
 pub struct AndroidDeviceObject(pub ferridriver::android::AndroidDevice);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for AndroidDeviceObject {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let js_env = Env::from_raw(env);
     let found = ANDROID_DEVICES.with(|devices| devices.borrow().find(js_env, |device| *device == val.0))?;
-    let reference = match found {
-      Some(reference) => reference,
-      None => {
-        let reference = AndroidDevice::from_core(val.0.clone()).into_reference(js_env)?;
-        ANDROID_DEVICES.with(|devices| {
-          let mut devices = devices.borrow_mut();
-          devices.retain(|device| !device.is_closed());
-          devices.insert(js_env, val.0, &reference)
-        })?;
-        reference
-      },
+    let reference = if let Some(reference) = found {
+      reference
+    } else {
+      let reference = AndroidDevice::from_core(val.0.clone()).into_reference(js_env)?;
+      ANDROID_DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        devices.retain(|device| !device.is_closed());
+        devices.insert(js_env, val.0, &reference)
+      })?;
+      reference
     };
+    // SAFETY: `env` is the live environment napi-rs handed this conversion,
+    // and `reference` was cloned or created against it on this thread.
     unsafe { Reference::to_napi_value(env, reference) }
   }
 }
@@ -138,22 +141,24 @@ impl ToNapiValue for AndroidDeviceObject {
 #[derive(Clone)]
 pub struct AndroidWebViewObject(pub ferridriver::android::AndroidWebView);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for AndroidWebViewObject {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let js_env = Env::from_raw(env);
     let found = ANDROID_WEB_VIEWS.with(|views| views.borrow().find(js_env, |view| *view == val.0))?;
-    let reference = match found {
-      Some(reference) => reference,
-      None => {
-        let reference = AndroidWebView::from_core(val.0.clone()).into_reference(js_env)?;
-        ANDROID_WEB_VIEWS.with(|views| {
-          let mut views = views.borrow_mut();
-          views.retain(|view| !view.is_closed());
-          views.insert(js_env, val.0, &reference)
-        })?;
-        reference
-      },
+    let reference = if let Some(reference) = found {
+      reference
+    } else {
+      let reference = AndroidWebView::from_core(val.0.clone()).into_reference(js_env)?;
+      ANDROID_WEB_VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        views.retain(|view| !view.is_closed());
+        views.insert(js_env, val.0, &reference)
+      })?;
+      reference
     };
+    // SAFETY: `env` is the live environment napi-rs handed this conversion,
+    // and `reference` was cloned or created against it on this thread.
     unsafe { Reference::to_napi_value(env, reference) }
   }
 }
@@ -178,6 +183,7 @@ impl TypeName for AndroidDeviceObject {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for FrameObject {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let js_env = Env::from_raw(env);
@@ -187,45 +193,48 @@ impl ToNapiValue for FrameObject {
         f.id() == val.0.id() && f.page_arc().backend_page_id() == page_key
       })
     })?;
-    let reference = match found {
-      Some(reference) => reference,
-      None => {
-        let reference = Frame::wrap(val.0.clone()).into_reference(js_env)?;
-        FRAMES.with(|frames| {
-          let mut frames = frames.borrow_mut();
-          frames.retain(|frame| !frame.is_detached() && !frame.page_arc().is_closed());
-          frames.insert(js_env, val.0, &reference)
-        })?;
-        reference
-      },
+    let reference = if let Some(reference) = found {
+      reference
+    } else {
+      let reference = Frame::wrap(val.0.clone()).into_reference(js_env)?;
+      FRAMES.with(|frames| {
+        let mut frames = frames.borrow_mut();
+        frames.retain(|frame| !frame.is_detached() && !frame.page_arc().is_closed());
+        frames.insert(js_env, val.0, &reference)
+      })?;
+      reference
     };
+    // SAFETY: `env` is the live environment napi-rs handed this conversion,
+    // and `reference` was cloned or created against it on this thread.
     unsafe { Reference::to_napi_value(env, reference) }
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for DialogObject {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let js_env = Env::from_raw(env);
     let found = DIALOGS.with(|dialogs| dialogs.borrow().find(js_env, |d| d.is_same(&val.0)))?;
-    let reference = match found {
-      Some(reference) => reference,
-      None => {
-        let reference = Dialog::from_core(val.0.clone()).into_reference(js_env)?;
-        DIALOGS.with(|dialogs| {
-          let mut dialogs = dialogs.borrow_mut();
-          let mut closed = dialogs.entries.iter().filter(|(d, _)| d.is_closed()).count();
-          dialogs.retain(|dialog| {
-            if closed > MAX_CLOSED_DIALOGS && dialog.is_closed() {
-              closed -= 1;
-              return false;
-            }
-            true
-          });
-          dialogs.insert(js_env, val.0, &reference)
-        })?;
-        reference
-      },
+    let reference = if let Some(reference) = found {
+      reference
+    } else {
+      let reference = Dialog::from_core(val.0.clone()).into_reference(js_env)?;
+      DIALOGS.with(|dialogs| {
+        let mut dialogs = dialogs.borrow_mut();
+        let mut closed = dialogs.entries.iter().filter(|(d, _)| d.is_closed()).count();
+        dialogs.retain(|dialog| {
+          if closed > MAX_CLOSED_DIALOGS && dialog.is_closed() {
+            closed -= 1;
+            return false;
+          }
+          true
+        });
+        dialogs.insert(js_env, val.0, &reference)
+      })?;
+      reference
     };
+    // SAFETY: `env` is the live environment napi-rs handed this conversion,
+    // and `reference` was cloned or created against it on this thread.
     unsafe { Reference::to_napi_value(env, reference) }
   }
 }
@@ -264,22 +273,24 @@ impl TypeName for FrameObject {
 /// every `page.workers()` and its `close` wait.
 pub struct WorkerObject(pub ferridriver::worker::Worker);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for WorkerObject {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let js_env = Env::from_raw(env);
     let found = WORKERS.with(|workers| workers.borrow().find(js_env, |w| w.is_same(&val.0)))?;
-    let reference = match found {
-      Some(reference) => reference,
-      None => {
-        let reference = Worker::from_core(val.0.clone()).into_reference(js_env)?;
-        WORKERS.with(|workers| {
-          let mut workers = workers.borrow_mut();
-          workers.retain(|worker| !worker.is_closed());
-          workers.insert(js_env, val.0, &reference)
-        })?;
-        reference
-      },
+    let reference = if let Some(reference) = found {
+      reference
+    } else {
+      let reference = Worker::from_core(val.0.clone()).into_reference(js_env)?;
+      WORKERS.with(|workers| {
+        let mut workers = workers.borrow_mut();
+        workers.retain(|worker| !worker.is_closed());
+        workers.insert(js_env, val.0, &reference)
+      })?;
+      reference
     };
+    // SAFETY: `env` is the live environment napi-rs handed this conversion,
+    // and `reference` was cloned or created against it on this thread.
     unsafe { Reference::to_napi_value(env, reference) }
   }
 }

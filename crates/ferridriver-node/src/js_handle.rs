@@ -1,4 +1,4 @@
-//! JSHandle class -- NAPI binding for `ferridriver::JSHandle`.
+//! `JSHandle` class -- NAPI binding for `ferridriver::JSHandle`.
 //!
 //! Mirrors Playwright's `JSHandle<T>` interface
 //! (`/tmp/playwright/packages/playwright-core/types/types.d.ts`). The phase-C
@@ -29,7 +29,6 @@ impl JSHandle {
     Self { inner }
   }
 
-  #[allow(dead_code)]
   pub(crate) fn inner_ref(&self) -> &ferridriver::JSHandle {
     &self.inner
   }
@@ -87,7 +86,7 @@ impl JSHandle {
   /// shape ergonomic on the JS side while preserving the per-key
   /// handle identity.
   #[napi(ts_return_type = "Record<string, JSHandle>")]
-  pub async fn get_properties(&self) -> Result<std::collections::HashMap<String, JSHandle>> {
+  pub async fn get_properties(&self) -> Result<rustc_hash::FxHashMap<String, JSHandle>> {
     let pairs = self.inner.get_properties().await.into_napi()?;
     Ok(pairs.into_iter().map(|(k, h)| (k, JSHandle::wrap(h))).collect())
   }

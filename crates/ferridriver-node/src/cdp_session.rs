@@ -1,4 +1,4 @@
-//! `CDPSession` — NAPI binding for raw Chrome DevTools Protocol access.
+//! `CDPSession` — NAPI binding for raw Chrome `DevTools` Protocol access.
 //!
 //! Mirrors Playwright's `CDPSession` (`client/cdpSession.ts`):
 //! `send(method, params?)`, `detach()`, and per-protocol-event
@@ -38,6 +38,10 @@ impl CDPSession {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl CDPSession {
   /// Playwright: `cdpSession.send(method, params?)`. Sends a raw
   /// protocol command on this session and resolves with the result.
@@ -47,7 +51,7 @@ impl CDPSession {
       .inner
       .send(
         &method,
-        params.unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+        params.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
       )
       .await
       .into_napi()
@@ -69,7 +73,7 @@ impl CDPSession {
     event: String,
     listener: napi::bindgen_prelude::Function<'static, serde_json::Value, ()>,
   ) -> Result<()> {
-    self.register(event, listener, false)
+    self.register(&event, &listener, false)
   }
 
   /// One-shot variant of [`Self::on`].
@@ -79,17 +83,15 @@ impl CDPSession {
     event: String,
     listener: napi::bindgen_prelude::Function<'static, serde_json::Value, ()>,
   ) -> Result<()> {
-    self.register(event, listener, true)
+    self.register(&event, &listener, true)
   }
 
   /// Remove a previously registered listener (matched by function
   /// identity, like `page.off`).
   #[napi(ts_args_type = "event: string, listener: (params: any) => void")]
-  // napi-rs injects Env only as `&Env` (no by-value FromNapiValue).
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     event: String,
     listener: napi::bindgen_prelude::Function<'static, serde_json::Value, ()>,
   ) -> Result<()> {
@@ -98,8 +100,8 @@ impl CDPSession {
     let mut i = 0;
     while i < regs.len() {
       let matches = regs[i].event == event && {
-        let a = incoming.borrow_back(env)?;
-        let b = regs[i].fn_ref.borrow_back(env)?;
+        let a = incoming.borrow_back(&env)?;
+        let b = regs[i].fn_ref.borrow_back(&env)?;
         env.strict_equals(a, b)?
       };
       if matches {
@@ -116,8 +118,8 @@ impl CDPSession {
 impl CDPSession {
   fn register(
     &self,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'static, serde_json::Value, ()>,
+    event: &str,
+    listener: &napi::bindgen_prelude::Function<'static, serde_json::Value, ()>,
     once: bool,
   ) -> Result<()> {
     let fn_ref = listener.create_ref()?;
@@ -133,17 +135,21 @@ impl CDPSession {
         napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
       );
     });
-    let id = match (event.as_str(), once) {
+    let id = match (event, once) {
       ("event", false) => self.inner.on_any(callback),
       ("event", true) => self.inner.once_any(callback),
-      (_, false) => self.inner.on(&event, callback),
-      (_, true) => self.inner.once(&event, callback),
+      (_, false) => self.inner.on(event, callback),
+      (_, true) => self.inner.once(event, callback),
     };
     self
       .listeners
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(ListenerReg { event, id, fn_ref });
+      .push(ListenerReg {
+        event: event.to_owned(),
+        id,
+        fn_ref,
+      });
     Ok(())
   }
 }

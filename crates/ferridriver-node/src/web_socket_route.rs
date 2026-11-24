@@ -22,10 +22,13 @@ pub struct WebSocketCloseOptions {
 /// `string | Buffer` (text → string, binary → Buffer).
 pub struct WsMessageArg(WsMessage);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for WsMessageArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
     match val.0 {
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       WsMessage::Text(s) => unsafe { String::to_napi_value(env, s) },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       WsMessage::Binary(b) => unsafe { Buffer::to_napi_value(env, Buffer::from(b)) },
     }
   }
@@ -164,8 +167,10 @@ impl WebSocketRouteServer {
 /// `routeWebSocket` handler.
 pub struct WebSocketRouteArg(pub CoreRoute);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for WebSocketRouteArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+    // SAFETY: `env` is the live environment napi-rs handed this conversion.
     unsafe { WebSocketRoute::to_napi_value(env, WebSocketRoute::wrap(val.0)) }
   }
 }
@@ -176,7 +181,7 @@ impl ToNapiValue for WebSocketRouteArg {
 /// awaits the JS callback's synchronous body (where `onMessage` /
 /// `connectToServer` are wired up).
 pub(crate) fn build_ws_handler(
-  handler: Function<'_, WebSocketRouteArg, ()>,
+  handler: &Function<'_, WebSocketRouteArg, ()>,
 ) -> napi::Result<ferridriver::web_socket_route::WsHandler> {
   let tsfn: ThreadsafeFunction<WebSocketRouteArg, (), WebSocketRouteArg, napi::Status, false, false, 0> = handler
     .build_threadsafe_function()
@@ -186,7 +191,7 @@ pub(crate) fn build_ws_handler(
     .build()?;
   let tsfn = Arc::new(tsfn);
   Ok(Arc::new(move |route| {
-    let tsfn = tsfn.clone();
+    let tsfn = Arc::clone(&tsfn);
     Box::pin(async move {
       let _ = tsfn.call_async(WebSocketRouteArg(route)).await;
     })

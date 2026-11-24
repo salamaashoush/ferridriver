@@ -41,7 +41,7 @@ pub(crate) fn build_evaluate_argument(
 /// deliver the `Page` itself; `pageerror` a native `Error`; everything
 /// else its lifecycle class. Shared by `page.on` / `page.once`
 /// (threadsafe-function dispatch) and `page.waitForEvent`.
-pub type PageWaitForEventResult = napi::bindgen_prelude::Either11<
+pub(crate) type PageWaitForEventResult = napi::bindgen_prelude::Either11<
   crate::network::Request,
   crate::network::Response,
   crate::network::WebSocket,
@@ -62,9 +62,9 @@ fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEv
   use napi::bindgen_prelude::Either11;
   match ev {
     PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-      Either11::A(crate::network::Request::from_core_with_page(r, page.clone()))
+      Either11::A(crate::network::Request::from_core_with_page(r, Arc::clone(page)))
     },
-    PageEvent::Response(r) => Either11::B(crate::network::Response::from_core_with_page(r, page.clone())),
+    PageEvent::Response(r) => Either11::B(crate::network::Response::from_core_with_page(r, Arc::clone(page))),
     PageEvent::WebSocket(ws) => Either11::C(crate::network::WebSocket::from_core(ws)),
     PageEvent::Dialog(d) | PageEvent::DialogClosed(d) => Either11::D(crate::identity::DialogObject(d)),
     PageEvent::FileChooser(fc) => Either11::E(crate::file_chooser::FileChooser::from_core(fc)),
@@ -80,7 +80,7 @@ fn live_event_arg(page: &Arc<ferridriver::Page>, ev: ferridriver::events::PageEv
     },
     PageEvent::FrameDetached { frame_id } => Either11::I(crate::identity::FrameObject(page.frame_for_id(&frame_id))),
     PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close | PageEvent::Crash => {
-      Either11::J(crate::identity::PageObject(page.clone()))
+      Either11::J(crate::identity::PageObject(Arc::clone(page)))
     },
     PageEvent::Popup(popup) => Either11::J(crate::identity::PageObject(popup)),
     PageEvent::Worker(worker) => Either11::K(crate::identity::WorkerObject(worker)),
@@ -134,6 +134,7 @@ impl JsUrl {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for JsUrl {
   unsafe fn to_napi_value(raw_env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
     let env = napi::Env::from_raw(raw_env);
@@ -195,7 +196,7 @@ pub(crate) fn url_condition(url: UrlArg<'_>) -> Result<ferridriver::url_matcher:
   Ok(ferridriver::url_matcher::UrlCondition::predicate(move |url| {
     let predicate = Arc::clone(&predicate);
     async move {
-      let rejected = |e: napi::Error| ferridriver::FerriError::backend(e.reason.clone());
+      let rejected = |e: napi::Error| ferridriver::FerriError::backend(e.reason);
       match predicate.call_async_catch(JsUrl::new(url)).await.map_err(rejected)? {
         napi::Either::A(matched) => Ok(matched),
         napi::Either::B(promise) => promise.await.map_err(rejected),
@@ -264,7 +265,7 @@ impl Page {
       .weak::<true>()
       .max_queue_size::<0>()
       .build()?;
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
     let callback: ferridriver::events::EventCallback = std::sync::Arc::new(move |ev| {
       tsfn.call(
         live_event_arg(&page, ev),
@@ -286,13 +287,15 @@ impl Page {
         id: id.0,
         fn_ref,
       });
-    // ListenerId is a sequential counter; it will never exceed 2^53 (f64 mantissa precision).
-    #[allow(clippy::cast_precision_loss)]
-    Ok(id.0 as f64)
+    Ok(crate::types::u64_to_f64(id.0))
   }
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl Page {
   /// Playwright: `page.coverage`. Chromium only.
   #[napi(getter)]
@@ -420,7 +423,7 @@ impl Page {
       .bag(options)?
       .await
       .map_err(crate::error::to_napi)?;
-    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, Arc::clone(&self.inner))))
   }
 
   /// Navigate back in history. Returns the main-document `Response`
@@ -433,7 +436,7 @@ impl Page {
       .bag(options)?
       .await
       .map_err(crate::error::to_napi)?;
-    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, Arc::clone(&self.inner))))
   }
 
   /// Navigate forward in history. Returns the main-document
@@ -446,7 +449,7 @@ impl Page {
       .bag(options)?
       .await
       .map_err(crate::error::to_napi)?;
-    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, Arc::clone(&self.inner))))
   }
 
   /// Reload the current page. Returns the main-document `Response`
@@ -454,7 +457,7 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn reload(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let resp = self.inner.reload().bag(options)?.await.map_err(crate::error::to_napi)?;
-    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, Arc::clone(&self.inner))))
   }
 
   /// Playwright: `page.url(): string` — synchronous.
@@ -818,12 +821,9 @@ impl Page {
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
-  // napi-rs only injects `Env` as `&Env`, hence the pass-by-ref allow
-  // (same constraint as `wait_for_event` / `unroute`).
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off<'env>(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>>,
@@ -841,8 +841,8 @@ impl Page {
     let mut i = 0;
     while i < regs.len() {
       let hit = regs[i].event == event && {
-        let a = in_ref.borrow_back(env)?;
-        let b = regs[i].fn_ref.borrow_back(env)?;
+        let a = in_ref.borrow_back(&env)?;
+        let b = regs[i].fn_ref.borrow_back(&env)?;
         env.strict_equals(a, b)?
       };
       if hit {
@@ -860,10 +860,9 @@ impl Page {
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', listener?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Worker | Error) => void",
     ts_return_type = "this"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn remove_listener<'env>(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, PageWaitForEventResult, ()>>,
@@ -874,9 +873,7 @@ impl Page {
   /// Node's `listenerCount(type)`.
   #[napi]
   pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+    crate::types::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()` — every event with a listener attached.
@@ -891,19 +888,15 @@ impl Page {
     &self,
     this: napi::bindgen_prelude::This<'env>,
     max: f64,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self
-      .inner
-      .set_max_listeners(crate::types::f64_to_u64(max.max(0.0)) as usize);
-    Ok(this.object)
+  ) -> napi::bindgen_prelude::Object<'env> {
+    self.inner.set_max_listeners(crate::types::f64_to_usize(max));
+    this.object
   }
 
   /// Node's `getMaxListeners()`.
   #[napi]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::types::usize_to_f64(self.inner.max_listeners())
   }
 
   /// Remove event listeners — all of them, or only those for `event`
@@ -914,15 +907,12 @@ impl Page {
       .listener_regs
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match event {
-      Some(ev) => {
-        self.inner.remove_listeners_named(&ev);
-        regs.retain(|r| r.event != ev);
-      },
-      None => {
-        self.inner.remove_all_listeners();
-        regs.clear();
-      },
+    if let Some(ev) = event {
+      self.inner.remove_listeners_named(&ev);
+      regs.retain(|r| r.event != ev);
+    } else {
+      self.inner.remove_all_listeners();
+      regs.clear();
     }
   }
 
@@ -940,10 +930,9 @@ impl Page {
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'dialogclosed' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'crash' | 'pageerror' | 'popup' | 'worker', optionsOrPredicate?: number | ((data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>) | { predicate?: (data: ConsoleMessage | Request | Response | WebSocket | Dialog | FileChooser | Download | Frame | Page | Error) => boolean | Promise<boolean>; timeout?: number; signal?: AbortSignal }",
     ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Error | Frame | Page | Worker>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_event(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     event: String,
     options_or_predicate: Option<
       napi::bindgen_prelude::Either3<
@@ -987,7 +976,7 @@ impl Page {
     }
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
     let event_lc = event.to_ascii_lowercase();
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
 
     // `dialog` / `filechooser` / `download` bypass the broadcast when
     // there is no predicate — they register a one-shot handler on the
@@ -1026,7 +1015,7 @@ impl Page {
           _ => None,
         };
       if let Some(claimed) = claimed {
-        return napi::bindgen_prelude::AsyncBlockBuilder::new(crate::abort::race(signal, claimed)).build(env);
+        return napi::bindgen_prelude::AsyncBlockBuilder::new(crate::abort::race(signal, claimed)).build(&env);
       }
     }
 
@@ -1060,7 +1049,7 @@ impl Page {
         }
       }
     }))
-    .build(env)
+    .build(&env)
   }
 
   /// Wait for a network response matching a URL pattern.
@@ -1082,10 +1071,9 @@ impl Page {
     ts_args_type = "urlOrPredicate: string | RegExp | ((response: Response) => boolean | Promise<boolean>), timeoutMs?: number",
     ts_return_type = "Promise<Response>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_response(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either3<
       String,
       crate::types::JsRegExpLike,
@@ -1095,10 +1083,8 @@ impl Page {
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::network::Response>> {
     use napi::bindgen_prelude::Either3;
     let mut rx = self.inner.events().subscribe();
-    let timeout = timeout_ms
-      .map(crate::types::f64_to_u64)
-      .unwrap_or_else(|| self.inner.default_timeout());
-    let page = self.inner.clone();
+    let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::types::f64_to_u64);
+    let page = Arc::clone(&self.inner);
     let predicate = match &url {
       Either3::C(p) => Some(
         p.build_threadsafe_function::<crate::network::Response>()
@@ -1133,7 +1119,7 @@ impl Page {
             let hit = if let Some(m) = &matcher {
               m.matches(r.url())
             } else if let Some(tsfn) = &predicate {
-              let np = crate::network::Response::from_core_with_page(r.clone(), page.clone());
+              let np = crate::network::Response::from_core_with_page(r.clone(), Arc::clone(&page));
               let res = tsfn
                 .call_async(np)
                 .await
@@ -1154,7 +1140,7 @@ impl Page {
         }
       }
     })
-    .build(env)
+    .build(&env)
   }
 
   // ── Page-level actions ──────────────────────────────────────────────────
@@ -1306,7 +1292,10 @@ impl Page {
       .await
       .map_err(crate::error::to_napi)
   }
+}
 
+#[napi]
+impl Page {
   // ── Content ─────────────────────────────────────────────────────────────
 
   /// Playwright: `page.content(options?: { includeShadow?: boolean }): Promise<string>`.
@@ -1626,7 +1615,7 @@ impl Page {
     // Listening from the call: the navigation is usually started before
     // the promise is awaited.
     let navigation = self.inner.wait_for_navigation().bag(options);
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let resp = navigation?.await.map_err(crate::error::to_napi)?;
       Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
@@ -1773,7 +1762,10 @@ impl Page {
   pub async fn set_viewport_size(&self, size: crate::context::NapiViewportSize) -> Result<()> {
     self
       .inner
-      .set_viewport_size(size.width.max(0.0) as i64, size.height.max(0.0) as i64)
+      .set_viewport_size(
+        crate::types::f64_to_i64(size.width),
+        crate::types::f64_to_i64(size.height),
+      )
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1783,7 +1775,10 @@ impl Page {
   #[napi]
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.inner.click_at(x, y).await.map_err(crate::error::to_napi)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -1798,7 +1793,10 @@ impl Page {
       .click_at_opts(x, y, &button, count)
       .await
       .map_err(crate::error::to_napi)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -1806,7 +1804,10 @@ impl Page {
   #[napi]
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     self.inner.mouse().r#move(x, y).await.map_err(crate::error::to_napi)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -1827,7 +1828,10 @@ impl Page {
       .move_mouse_smooth(from_x, from_y, to_x, to_y, step_count)
       .await
       .map_err(crate::error::to_napi)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
+    *self
+      .mouse_position
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = (to_x, to_y);
     Ok(())
   }
 
@@ -1915,7 +1919,7 @@ impl Page {
   // ── Tracing ─────────────────────────────────────────────────────────────
 
   /// Start a Chrome performance trace. Omit `categories` to record the
-  /// set DevTools uses. Chromium only.
+  /// set `DevTools` uses. Chromium only.
   #[napi(ts_args_type = "categories?: Array<string>")]
   pub async fn start_tracing(&self, categories: Option<Vec<String>>) -> Result<()> {
     self
@@ -1936,7 +1940,16 @@ impl Page {
     let metrics = self.inner.metrics().await.map_err(crate::error::to_napi)?;
     Ok(metrics.iter().map(MetricData::from).collect())
   }
+}
 
+#[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  clippy::unused_async,
+  clippy::unused_async_trait_impl,
+  reason = "napi-derive takes JS strings, functions and option bags only by value, and turns only an async fn into the Promise the Playwright signature returns"
+)]
+impl Page {
   // ── Misc ────────────────────────────────────────────────────────────────
 
   #[napi]
@@ -1953,13 +1966,12 @@ impl Page {
 
   /// Playwright: `page.requests(): Promise<Request[]>`.
   #[napi]
-  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to expose the declared JS Promise.
   pub async fn requests(&self) -> Vec<crate::network::Request> {
     self
       .inner
       .requests()
       .into_iter()
-      .map(|request| crate::network::Request::from_core_with_page(request, self.inner.clone()))
+      .map(|request| crate::network::Request::from_core_with_page(request, Arc::clone(&self.inner)))
       .collect()
   }
 
@@ -1979,7 +1991,6 @@ impl Page {
   /// `since-navigation`, i.e. only messages logged after the last
   /// main-frame navigation.
   #[napi]
-  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to expose the declared JS Promise.
   pub async fn console_messages(
     &self,
     options: Option<crate::types::ObservedFilterOptions>,
@@ -2004,7 +2015,6 @@ impl Page {
   /// as a native JS `Error` (name / message / stack populated from the
   /// page-side exception).
   #[napi(ts_return_type = "Promise<Array<Error>>")]
-  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to expose the declared JS Promise.
   pub async fn page_errors(
     &self,
     options: Option<crate::types::ObservedFilterOptions>,
@@ -2028,14 +2038,14 @@ impl Page {
   /// area for the page's current origin.
   #[napi(getter)]
   pub fn local_storage(&self) -> crate::web_storage::WebStorage {
-    crate::web_storage::WebStorage::new(self.inner.clone(), ferridriver::options::WebStorageKind::Local)
+    crate::web_storage::WebStorage::new(Arc::clone(&self.inner), ferridriver::options::WebStorageKind::Local)
   }
 
   /// Playwright: `page.sessionStorage: WebStorage` — the `sessionStorage`
   /// area for the page's current origin.
   #[napi(getter)]
   pub fn session_storage(&self) -> crate::web_storage::WebStorage {
-    crate::web_storage::WebStorage::new(self.inner.clone(), ferridriver::options::WebStorageKind::Session)
+    crate::web_storage::WebStorage::new(Arc::clone(&self.inner), ferridriver::options::WebStorageKind::Session)
   }
 
   /// Close the page. Accepts the Playwright-identical
@@ -2130,14 +2140,13 @@ impl Page {
   /// spread call arguments and resolves to what it returns, or rejects
   /// with what it threw.
   #[napi(ts_args_type = "name: string, callback: Function", ts_return_type = "Promise<void>")]
-  #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
   pub fn expose_function(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     name: String,
     callback: napi::bindgen_prelude::Unknown<'_>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
-    let binding = crate::exposed::binding(*env, callback, false)?;
+    let binding = crate::exposed::binding(env, callback, false)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       inner
@@ -2145,7 +2154,7 @@ impl Page {
         .await
         .map_err(crate::error::to_napi)
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `page.exposeBinding(name, callback)`
@@ -2156,14 +2165,13 @@ impl Page {
     ts_args_type = "name: string, callback: (source: { context: BrowserContext, page: Page, frame: Frame }, ...args: any[]) => any",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
   pub fn expose_binding(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     name: String,
     callback: napi::bindgen_prelude::Unknown<'_>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
-    let binding = crate::exposed::binding(*env, callback, true)?;
+    let binding = crate::exposed::binding(env, callback, true)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       inner
@@ -2171,7 +2179,7 @@ impl Page {
         .await
         .map_err(crate::error::to_napi)
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `page.pause(): Promise<void>` (`client/page.ts:858`).
@@ -2261,16 +2269,15 @@ impl Page {
   /// `stopScreencast()` to halt.
   ///
   /// Backed on all backends: CDP-pipe / CDP-raw via
-  /// `Page.startScreencast`, BiDi and WebKit via their respective
+  /// `Page.startScreencast`, `BiDi` and `WebKit` via their respective
   /// screencast protocols.
   #[napi(
     ts_args_type = "quality: number, maxWidth: number, maxHeight: number, callback: (frame: { frame: Buffer; timestamp: number }) => void",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
   pub fn start_screencast(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     quality: u32,
     max_width: u32,
     max_height: u32,
@@ -2303,7 +2310,7 @@ impl Page {
       });
       Ok(())
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Stop the screencast started by `startScreencast`.
@@ -2345,14 +2352,10 @@ impl Page {
   }
 
   #[napi(js_name = "setExtraHTTPHeaders")]
-  pub async fn set_extra_http_headers(&self, headers: std::collections::HashMap<String, String>) -> Result<()> {
-    let mut fx = rustc_hash::FxHashMap::default();
-    for (k, v) in headers {
-      fx.insert(k, v);
-    }
+  pub async fn set_extra_http_headers(&self, headers: crate::types::HashMap<String, String>) -> Result<()> {
     self
       .inner
-      .set_extra_http_headers(&fx)
+      .set_extra_http_headers(&headers)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -2376,7 +2379,10 @@ impl Page {
       click_count: None,
     };
     mouse.down().options(opts).await.map_err(crate::error::to_napi)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -2389,7 +2395,10 @@ impl Page {
       click_count: None,
     };
     mouse.up().options(opts).await.map_err(crate::error::to_napi)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -2425,10 +2434,9 @@ impl Page {
     ts_args_type = "urlOrPredicate: string | RegExp | ((request: Request) => boolean | Promise<boolean>), timeoutMs?: number",
     ts_return_type = "Promise<Request>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_request(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either3<
       String,
       crate::types::JsRegExpLike,
@@ -2438,10 +2446,8 @@ impl Page {
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::network::Request>> {
     use napi::bindgen_prelude::Either3;
     let mut rx = self.inner.events().subscribe();
-    let timeout = timeout_ms
-      .map(crate::types::f64_to_u64)
-      .unwrap_or_else(|| self.inner.default_timeout());
-    let page = self.inner.clone();
+    let timeout = timeout_ms.map_or_else(|| self.inner.default_timeout(), crate::types::f64_to_u64);
+    let page = Arc::clone(&self.inner);
     let predicate = match &url {
       Either3::C(p) => Some(
         p.build_threadsafe_function::<crate::network::Request>()
@@ -2476,7 +2482,7 @@ impl Page {
             let hit = if let Some(m) = &matcher {
               m.matches(r.url())
             } else if let Some(tsfn) = &predicate {
-              let np = crate::network::Request::from_core_with_page(r.clone(), page.clone());
+              let np = crate::network::Request::from_core_with_page(r.clone(), Arc::clone(&page));
               let res = tsfn
                 .call_async(np)
                 .await
@@ -2497,15 +2503,12 @@ impl Page {
         }
       }
     })
-    .build(env)
+    .build(&env)
   }
 
   #[napi(getter)]
   pub fn default_timeout(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    {
-      self.inner.default_timeout() as f64
-    }
+    crate::types::u64_to_f64(self.inner.default_timeout())
   }
 
   // ── Network interception ─────────────────────────────────────────────
@@ -2542,10 +2545,9 @@ impl Page {
     ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void, options?: { times?: number }",
     ts_return_type = "Promise<Disposable>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn route(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either3<
       String,
       crate::types::JsRegExpLike,
@@ -2608,8 +2610,8 @@ impl Page {
         (
           MatcherSpec::Ready(m),
           std::sync::Arc::new(move |route| {
-            let ptsfn = std::sync::Arc::clone(&ptsfn);
-            let handler = std::sync::Arc::clone(&handler);
+            let ptsfn = Arc::clone(&ptsfn);
+            let handler = Arc::clone(&handler);
             let url = JsUrl(route.request().url.clone());
             tokio::spawn(async move {
               let truthy = match ptsfn.call_async(url).await {
@@ -2645,7 +2647,7 @@ impl Page {
         .map_err(crate::error::to_napi)?;
       Ok(crate::disposable::Disposable::wrap(disposable))
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `page.routeWebSocket(url, handler)`. Intercepts
@@ -2655,10 +2657,9 @@ impl Page {
     ts_args_type = "url: string | RegExp, handler: (ws: WebSocketRoute) => void",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn route_web_socket(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either<String, crate::types::JsRegExpLike>,
     handler: napi::bindgen_prelude::Function<'_, crate::web_socket_route::WebSocketRouteArg, ()>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
@@ -2670,7 +2671,7 @@ impl Page {
           .map_err(crate::error::to_napi)?
       },
     };
-    let rust_handler = crate::web_socket_route::build_ws_handler(handler)?;
+    let rust_handler = crate::web_socket_route::build_ws_handler(&handler)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       inner
@@ -2678,7 +2679,7 @@ impl Page {
         .await
         .map_err(crate::error::to_napi)
     })
-    .build(env)
+    .build(&env)
   }
 
   /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A
@@ -2688,10 +2689,9 @@ impl Page {
     ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler?: (route: Route) => void",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn unroute(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either3<
       String,
       crate::types::JsRegExpLike,
@@ -2711,8 +2711,8 @@ impl Page {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
       for reg in regs.iter() {
-        let a = in_ref.borrow_back(env)?;
-        let b = reg.handler_ref.borrow_back(env)?;
+        let a = in_ref.borrow_back(&env)?;
+        let b = reg.handler_ref.borrow_back(&env)?;
         if env.strict_equals(a, b)? {
           handler_id = Some(reg.handler_id);
           break;
@@ -2720,7 +2720,7 @@ impl Page {
       }
       drop(regs);
       if handler_id.is_none() {
-        return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(env);
+        return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(&env);
       }
     }
     let specs: Vec<MatcherSpec> = match url {
@@ -2742,8 +2742,8 @@ impl Page {
         let mut i = 0;
         while i < guard.len() {
           let same = {
-            let a = in_ref.borrow_back(env)?;
-            let b = guard[i].pred_ref.borrow_back(env)?;
+            let a = in_ref.borrow_back(&env)?;
+            let b = guard[i].pred_ref.borrow_back(&env)?;
             env.strict_equals(a, b)?
           };
           if same {
@@ -2763,7 +2763,7 @@ impl Page {
       }
       Ok(())
     })
-    .build(env)
+    .build(&env)
   }
 
   /// `page.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
@@ -2825,17 +2825,13 @@ impl Page {
       .build()?;
     let tsfn = std::sync::Arc::new(tsfn);
     let cb: ferridriver::locator_handler::LocatorHandlerFn = std::sync::Arc::new(move |loc| {
-      let tsfn = std::sync::Arc::clone(&tsfn);
+      let tsfn = Arc::clone(&tsfn);
       Box::pin(async move {
         let napi_loc = Locator::wrap(loc);
-        match tsfn.call_async(napi_loc).await {
-          Ok(napi::Either::A(())) => Ok(()),
-          Ok(napi::Either::B(p)) => {
-            let _ = p.await;
-            Ok(())
-          },
-          Err(_) => Ok(()),
+        if let Ok(napi::Either::B(p)) = tsfn.call_async(napi_loc).await {
+          let _ = p.await;
         }
+        Ok(())
       })
     });
     self
@@ -2896,7 +2892,7 @@ pub(crate) fn parse_unroute_behavior(behavior: &str) -> Result<ferridriver::opti
 }
 
 /// Playwright `routeFromHAR` options bag (shared by Page and
-/// BrowserContext).
+/// `BrowserContext`).
 #[napi(object)]
 pub struct RouteFromHarOptionsJs {
   /// Only serve/record requests whose URL matches this glob or `RegExp`.
@@ -3075,7 +3071,7 @@ impl Mouse {
       .options(opts)
       .await
       .map_err(crate::error::to_napi)?;
-    *self.position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self.position.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -3089,7 +3085,7 @@ impl Mouse {
       action = action.steps(steps);
     }
     action.await.map_err(crate::error::to_napi)?;
-    *self.position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self.position.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -3110,7 +3106,7 @@ impl Mouse {
       .options(opts)
       .await
       .map_err(crate::error::to_napi)?;
-    *self.position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self.position.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (x, y);
     Ok(())
   }
 
@@ -3187,7 +3183,7 @@ pub struct Touchscreen {
 impl Touchscreen {
   /// Playwright: `touchscreen.tap(x, y)`. Dispatches a real
   /// `TouchEvent` where the `Touch` constructor is usable; falls back
-  /// to a synthesized `PointerEvent` + click where it is not (WebKit on
+  /// to a synthesized `PointerEvent` + click where it is not (`WebKit` on
   /// Linux and macOS throws on `new Touch(...)`).
   #[napi]
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {

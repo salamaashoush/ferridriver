@@ -20,7 +20,7 @@ fn lower_options(options: Option<WebMcpOptions>) -> ferridriver::web_mcp::WebMcp
   }
 }
 
-/// Hints a page attaches to a WebMCP tool. Only hints that are set appear.
+/// Hints a page attaches to a `WebMCP` tool. Only hints that are set appear.
 #[napi(object)]
 pub struct WebMcpAnnotations {
   pub read_only: Option<bool>,
@@ -77,7 +77,7 @@ impl From<ferridriver::web_mcp::WebMcpTool> for WebMcpTool {
   }
 }
 
-/// The WebMCP tools a frame registers. A call that outlives its timeout is
+/// The `WebMCP` tools a frame registers. A call that outlives its timeout is
 /// canceled in the page: the tool's `AbortSignal` aborts.
 #[napi(js_name = "WebMCP")]
 pub struct WebMcp {
