@@ -224,8 +224,6 @@ pub async fn load(
   (gated, compiled, compile_failures)
 }
 
-/// [`load`], reduced to what a session VM needs, with every diagnostic
-/// logged. The shape three of the four hosts want.
 /// What the named packages contribute through `defineDefaults` under
 /// `host`, in load order, as `(package, payload)`.
 ///
@@ -236,6 +234,11 @@ pub async fn load(
 /// A package that fails to resolve or compile contributes nothing and
 /// is not reported here: the load that follows reports it, with the
 /// diagnostics it already has.
+///
+/// # Errors
+///
+/// When the operator's `[extensions.policy]` refuses a package, whether
+/// at compile time or while extracting under any host.
 pub async fn extension_defaults(
   specs: &[ExtensionSpec],
   env: &RequirementEnv<'_>,
@@ -281,6 +284,8 @@ pub async fn extension_defaults(
   )
 }
 
+/// [`load`], reduced to what a session VM needs, with every diagnostic
+/// logged. The shape three of the four hosts want.
 pub async fn load_bindings(
   specs: &[ExtensionSpec],
   env: &RequirementEnv<'_>,

@@ -587,7 +587,7 @@ impl JsBddSession {
       Arc::new(self.session.deadline()),
       Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&self.bundle),
-        Arc::clone(&self.cwd),
+        Arc::from(self.cwd.as_path()),
       )),
       Arc::from(self.cwd.as_path()),
       world.test_info().timeout,

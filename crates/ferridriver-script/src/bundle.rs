@@ -10,6 +10,7 @@ use std::sync::Arc;
 use ferrijs::rquickjs;
 use ferrijs_bundle::{BundlerOptions, BytecodeCache};
 use rquickjs::CatchResultExt;
+use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::type_error;
 use crate::error::ScriptError;
@@ -177,6 +178,11 @@ fn bundle_env_fingerprint() -> Result<u64, ScriptError> {
 /// rolldown-bundle + tree-shake + transpile the entry files (and their
 /// `node_modules`/shared imports) into a single ESM module. Exposed for
 /// diagnostics/tests; production uses [`bundle_and_compile`].
+///
+/// # Errors
+///
+/// When the module table cannot be built (an alias naming nothing) or
+/// rolldown fails (a parse error, an import that does not resolve).
 pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<BundledSource, ScriptError> {
   bundler()?.bundle(entry_paths, cwd).await
 }
@@ -184,6 +190,10 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<Bundle
 /// Bundle the step entry files (TypeScript ok; `node_modules` and
 /// shared utils resolved + tree-shaken) into one ESM module and compile
 /// it to bytecode. Done once, before workers spawn.
+///
+/// # Errors
+///
+/// The same as [`bundle_and_compile_named`].
 pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<CompiledBundle, ScriptError> {
   bundle_and_compile_named(entry_paths, cwd, "ferridriver-bdd-steps.js").await
 }
@@ -191,6 +201,11 @@ pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<C
 /// [`bundle_and_compile`] with a caller-chosen bundle module name, so
 /// error locations and stack frames carry a label matching the host
 /// (e.g. `ferridriver-tests.js` for the test runner).
+///
+/// # Errors
+///
+/// Everything [`bundle_source`] fails on, plus a module that fails to
+/// declare (an import the native loader cannot resolve) or to serialize.
 pub async fn bundle_and_compile_named(
   entry_paths: &[PathBuf],
   cwd: &Path,
@@ -221,6 +236,10 @@ pub async fn compile_bundled_source(
 
 /// Link + evaluate the bundled step module from precompiled bytecode in
 /// the given session. Top-level `Given`/`When`/`Then` run here.
+///
+/// # Errors
+///
+/// The same as [`eval_bundle_with`].
 pub async fn eval_bundle(vm: &ferrijs::VmHandle, bundle: &CompiledBundle) -> Result<(), ScriptError> {
   eval_bundle_with(vm, bundle, |_, _| Ok(())).await
 }
@@ -232,6 +251,11 @@ pub async fn eval_bundle(vm: &ferrijs::VmHandle, bundle: &CompiledBundle) -> Res
 /// class to instantiate -- needs the namespace, which `eval_bundle`
 /// drops. `after` runs on the VM loop with the namespace object, right
 /// after the module's top level has settled.
+///
+/// # Errors
+///
+/// When the VM is gone, the module's top level throws, the tool bindings
+/// it registered cannot be rebuilt, or `after` fails.
 pub async fn eval_bundle_with<F>(vm: &ferrijs::VmHandle, bundle: &CompiledBundle, after: F) -> Result<(), ScriptError>
 where
   F: for<'js> FnOnce(&rquickjs::Ctx<'js>, rquickjs::Object<'js>) -> Result<(), ScriptError> + Send + 'static,
@@ -331,17 +355,17 @@ impl CompiledBundleExt for CompiledBundle {
 }
 
 /// A compiled bundle as the runner's [`ferridriver_test::host::SourceMap`]:
-/// a position in the code QuickJS executed, answered as the file the
+/// a position in the code `QuickJS` executed, answered as the file the
 /// author wrote, resolved against the directory the bundle was built
 /// from.
 pub struct BundleSourceMap {
   bundle: Arc<CompiledBundle>,
-  cwd: Arc<PathBuf>,
+  cwd: Arc<Path>,
 }
 
 impl BundleSourceMap {
   #[must_use]
-  pub fn new(bundle: Arc<CompiledBundle>, cwd: Arc<PathBuf>) -> Self {
+  pub fn new(bundle: Arc<CompiledBundle>, cwd: Arc<Path>) -> Self {
     Self { bundle, cwd }
   }
 
@@ -529,7 +553,7 @@ pub struct CompiledExtension {
   pub files: Vec<PathBuf>,
   pub index: usize,
   pub bytecode: Arc<[u8]>,
-  /// The module name baked into `bytecode`, which is what QuickJS
+  /// The module name baked into `bytecode`, which is what `QuickJS`
   /// labels this extension's stack frames with — the key a session's
   /// source-map registry is looked up by.
   pub module_name: String,
@@ -592,7 +616,7 @@ struct CachedExtension {
 ///
 /// This is the hot in-process tier; `compile_and_extract_extensions` also
 /// consults the cross-process disk tier (the disk cache),
-/// whose ABI tag (QuickJS version, arch, endianness, pointer width) +
+/// whose ABI tag (`QuickJS` version, arch, endianness, pointer width) +
 /// transitive input hashes are what keep the `unsafe Module::load`
 /// paths sound for bytecode another process wrote.
 type ExtensionCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, CachedExtension>>;
@@ -620,7 +644,7 @@ fn remember_extension(
     cache.insert(
       key,
       CachedExtension {
-        bytecode: bytecode.clone(),
+        bytecode: Arc::clone(bytecode),
         snapshot: snapshot.clone(),
         module_name: module_name.to_string(),
         source_map_json: source_map_json.map(str::to_string),
@@ -634,7 +658,7 @@ fn remember_extension(
 /// Cache key: the file's canonical path (rolldown resolution + relative
 /// imports depend on it) plus its byte content, plus
 /// [`bundle_env_fingerprint`] (a shim/alias edit changes the output for
-/// the same input bytes). SipHash via the std default hasher — adequate
+/// the same input bytes). `SipHash` via the std default hasher — adequate
 /// for an in-process content cache, no dep.
 fn cache_key(group: &[PathBuf], bytes: &[u8], shims_fp: u64) -> u64 {
   use std::hash::{Hash, Hasher};
@@ -669,15 +693,10 @@ fn group_cwd(group: &[PathBuf]) -> PathBuf {
     .to_path_buf()
 }
 
-/// Bundle + compile + extract every extension file. The expensive
-/// per-file rolldown bundles run concurrently; bytecode compile +
-/// extraction share ONE throwaway runtime for the whole batch (the
-/// pre-migration path spun one full engine per file for extraction
-/// *and* one per file for bytecode). Unchanged files are served from
 /// A module name derived from the file's own identity rather than its
 /// position in the batch.
 ///
-/// Two bytecode modules can share a name — QuickJS creates a module at
+/// Two bytecode modules can share a name — `QuickJS` creates a module at
 /// `Module::load` and never looks one up by name — but the SOURCE MAP
 /// registry keys on it (`call_site::register_bundle` keeps one mapper
 /// per name), and every load path compiles whatever is cold in ITS
@@ -715,6 +734,11 @@ fn extension_cache_kind(group: &[PathBuf]) -> String {
   }
 }
 
+/// Bundle + compile + extract every extension file. The expensive
+/// per-file rolldown bundles run concurrently; bytecode compile +
+/// extraction share ONE throwaway runtime for the whole batch (the
+/// pre-migration path spun one full engine per file for extraction
+/// *and* one per file for bytecode). Unchanged files are served from
 /// the process content-hash cache with no bundle and no compile.
 ///
 /// Per-file failures (bundle, compile, or extraction) are returned
@@ -724,11 +748,6 @@ pub async fn compile_and_extract_extensions(
   groups: &[Vec<PathBuf>],
   policy: &ferridriver_config::ExtensionPolicyConfig,
 ) -> (Vec<CompiledExtension>, Vec<(PathBuf, ScriptError)>) {
-  // Per original position: a cache hit (bytecode + manifests), or a
-  // cache miss we must bundle, or an early failure. A miss carries both
-  // the in-memory content key and the disk-cache key so the compile step
-  // can populate both tiers.
-
   let shims_fp = match bundle_env_fingerprint() {
     Ok(fp) => fp,
     Err(e) => {
@@ -741,111 +760,14 @@ pub async fn compile_and_extract_extensions(
       );
     },
   };
-  let mut slots: Vec<Slot> = Vec::with_capacity(groups.len());
-  for group in groups {
-    match group_bytes(group) {
-      Ok(b) => {
-        let inmem_key = cache_key(group, &b, shims_fp);
-        let cached = extension_cache().lock().ok().and_then(|c| {
-          let hit = c.get(&inmem_key)?;
-          // Same question the disk tier asks: did ANY input change?
-          if ferrijs_bundle::cache::inputs_fingerprint(&hit.inputs) != Some(hit.inputs_fingerprint) {
-            return None;
-          }
-          Some(Loaded {
-            bytecode: hit.bytecode.clone(),
-            snapshot: hit.snapshot.clone(),
-            module_name: hit.module_name.clone(),
-            source_map_json: hit.source_map_json.clone(),
-          })
-        });
-        // A group bundles from its first entry's directory: a
-        // package's entries live together, and a loose file is its own
-        // group.
-        let ext_cwd = group_cwd(group);
-        let disk_key = ferrijs_bundle::cache::entry_key(&extension_cache_kind(group), group, &ext_cwd, shims_fp);
-        match cached {
-          // 1. In-memory (same process).
-          Some(hit) => slots.push(Slot::Hit(hit)),
-          // 2. Disk (cross-process), transitively validated. Promote into
-          //    the in-memory tier so later same-process loads stay hot.
-          // An entry whose payload this build cannot read is a MISS,
-          // not an empty snapshot.
-          None => match bytecode_cache().load(disk_key).and_then(|e| {
-            let snapshot = decode_aux(e.aux.as_deref())?;
-            Some((e.bytecode, e.module_name, e.source_map_json, e.inputs, snapshot))
-          }) {
-            Some((bytecode, module_name, source_map_json, inputs, snapshot)) => {
-              let bc: Arc<[u8]> = Arc::from(bytecode.into_boxed_slice());
-              // The map and the module name come back with the entry:
-              // dropping them here is what made a cache hit report
-              // bundled offsets where a cold compile reported the
-              // author's `.ts` line.
-              //
-              // Reuse the input set the disk manifest recorded rather
-              // than re-deriving it; it is what that bytecode's freshness
-              // was just validated against.
-              remember_extension(
-                inmem_key,
-                &bc,
-                &snapshot,
-                &module_name,
-                source_map_json.as_deref(),
-                inputs,
-              );
-              slots.push(Slot::Hit(Loaded {
-                bytecode: bc,
-                snapshot,
-                module_name,
-                source_map_json,
-              }));
-            },
-            // 3. Cold: bundle + compile below.
-            None => slots.push(Slot::Miss { inmem_key, disk_key }),
-          },
-        }
-      },
-      Err(e) => slots.push(Slot::Failed(e)),
-    }
-  }
+  let mut slots: Vec<Slot> = groups.iter().map(|group| lookup_slot(group, shims_fp)).collect();
 
-  // Bundle every cache-miss file concurrently (independent rolldown
-  // graphs; this is the dominant cold-start cost).
   let miss_idx: Vec<usize> = slots
     .iter()
     .enumerate()
     .filter_map(|(i, s)| matches!(s, Slot::Miss { .. }).then_some(i))
     .collect();
-  let bundles = futures::future::join_all(miss_idx.iter().map(|&i| {
-    let group = groups[i].clone();
-    async move {
-      let cwd = group_cwd(&group);
-      // One graph per GROUP: a package's entries share their helpers,
-      // and bundling them apart would inline a shared helper into each
-      // and give one module two states.
-      (i, Box::pin(bundle_source(&group, &cwd)).await)
-    }
-  }))
-  .await;
-
-  // Compiled code (+ source map for stack traces, + the module graph for
-  // the caches' transitive input set) per missed position. Absent = the
-  // bundle failed.
-  let mut bundled_code: rustc_hash::FxHashMap<usize, String> = rustc_hash::FxHashMap::default();
-  let mut bundled_map: rustc_hash::FxHashMap<usize, Option<String>> = rustc_hash::FxHashMap::default();
-  let mut bundled_modules: rustc_hash::FxHashMap<usize, Vec<PathBuf>> = rustc_hash::FxHashMap::default();
-  for (i, res) in bundles {
-    match res {
-      Ok(b) => {
-        bundled_code.insert(i, b.code);
-        bundled_map.insert(i, b.source_map_json);
-        let mut modules = b.modules;
-        modules.extend(b.config_inputs);
-        bundled_modules.insert(i, modules);
-      },
-      Err(e) => slots[i] = Slot::Failed(e),
-    }
-  }
+  let bundled = bundle_misses(groups, &miss_idx, &mut slots).await;
 
   // One throwaway runtime/context compiles + extracts every missed file.
   // Native resolver/loader for the same reason as `bundle_and_compile`:
@@ -874,123 +796,9 @@ pub async fn compile_and_extract_extensions(
           }
           return finish(slots, groups);
         };
-        let mut emitted: rustc_hash::FxHashMap<usize, Arc<[u8]>> = rustc_hash::FxHashMap::default();
-        for &i in &miss_idx {
-          let Some(code) = bundled_code.get(&i) else { continue };
-          let module_name = extension_module_name(&groups[i]);
-          match compiler.compile_source(code, &module_name, None).await {
-            Ok(module) => {
-              emitted.insert(i, module.bytecode);
-            },
-            Err(e) => slots[i] = Slot::Failed(e),
-          }
-        }
-
-        // One pass per host. What a file registers is a function of
-        // `ferridriver.host` — an extension that only calls `defineTool`
-        // under `mcp` and `Given` under `bdd` reported, under a
-        // single-host extraction, exactly half of itself.
-        //
-        // Within a pass: file order, hits included. A session evaluates
-        // every extension it was given into one VM, so extraction has to
-        // reach each file in a context where the earlier ones have
-        // already run. Stopping at the LAST miss costs nothing — a hit
-        // after it has no cold file left to observe what it would leave
-        // behind.
-        let last_miss = miss_idx.last().copied().unwrap_or(0);
-        let mut snapshots: rustc_hash::FxHashMap<usize, ExtensionSnapshot> = rustc_hash::FxHashMap::default();
-        for (host, rt) in &contexts {
-          for i in 0..=last_miss {
-            let (bytecode, label, is_miss) = match &slots[i] {
-              Slot::Hit(hit) => (Arc::clone(&hit.bytecode), hit.module_name.clone(), false),
-              Slot::Miss { .. } => match emitted.get(&i) {
-                Some(bc) => (Arc::clone(bc), extension_module_name(&groups[i]), true),
-                None => continue,
-              },
-              Slot::Failed(_) => continue,
-            };
-            match eval_and_slice(rt, &bytecode, &label).await {
-              Ok(registrations) => {
-                if is_miss {
-                  snapshots
-                    .entry(i)
-                    .or_default()
-                    .hosts
-                    .insert(host.as_str().to_string(), registrations);
-                }
-              },
-              // Recorded against THIS host, not against the file: a
-              // session installs per file per host and skips the pairing
-              // that throws, so condemning the file everywhere would
-              // report a package as broken that three hosts run fine.
-              Err(e) => {
-                tracing::warn!(
-                  target: "ferridriver::extensions",
-                  path = %group_label(&groups[i]),
-                  host = host.as_str(),
-                  error = %e.message,
-                  "extension.extract.host_failed: the file threw under this host"
-                );
-                if is_miss {
-                  snapshots.entry(i).or_default().hosts.insert(
-                    host.as_str().to_string(),
-                    HostRegistrations {
-                      error: Some(e.message.clone()),
-                      error_name: e.name.clone(),
-                      ..HostRegistrations::default()
-                    },
-                  );
-                }
-              },
-            }
-          }
-        }
-
-        // Persist what the passes found, in both cache tiers.
-        for &i in &miss_idx {
-          let Slot::Miss { inmem_key, disk_key } = slots[i] else {
-            continue;
-          };
-          let Some(bytecode) = emitted.get(&i) else { continue };
-          let snapshot = snapshots.remove(&i).unwrap_or_default();
-          // Throwing under one host is the file's business; throwing
-          // under EVERY host is a file that cannot work anywhere — a
-          // registration the operator ceiling refuses, say — and that is
-          // a failure, not a snapshot full of errors.
-          if !snapshot.hosts.is_empty() && snapshot.hosts.values().all(|h| h.error.is_some()) {
-            let (first, name) = snapshot
-              .hosts
-              .values()
-              .find_map(|h| h.error.clone().map(|message| (message, h.error_name.clone())))
-              .unwrap_or_else(|| ("extension failed under every host".to_string(), None));
-            // The thrown error's NAME decides whether the failure may be
-            // skipped, so rebuilding it as a plain internal error is how
-            // an `[extensions.policy]` refusal used to reach the loader
-            // as a skippable compile failure.
-            slots[i] = Slot::Failed(if name.as_deref() == Some(crate::error::EXTENSION_POLICY_ERROR) {
-              crate::error::policy_error(first)
-            } else {
-              ScriptError::internal(first)
-            });
-            continue;
-          }
-          let module_name = extension_module_name(&groups[i]);
-          // Inputs = this group's files plus their transitive imports
-          // (from the module graph), so an edited helper invalidates the
-          // entry in BOTH tiers.
-          let map = bundled_map.get(&i).cloned().flatten();
-          let modules = bundled_modules.get(&i).cloned().unwrap_or_default();
-          let inputs = ferrijs_bundle::cache::input_set(&groups[i], &modules);
-          let aux = encode_aux(&snapshot);
-          bytecode_cache().store(disk_key, bytecode, &module_name, map.as_deref(), Some(&aux), &inputs);
-          remember_extension(inmem_key, bytecode, &snapshot, &module_name, map.as_deref(), inputs);
-          slots[i] = Slot::Hit(Loaded {
-            bytecode: Arc::clone(bytecode),
-            snapshot,
-            module_name,
-            source_map_json: map,
-          });
-        }
+        let emitted = compile_misses(&compiler, groups, &miss_idx, &bundled, &mut slots).await;
+        let snapshots = extract_per_host(&contexts, groups, &miss_idx, &slots, &emitted).await;
+        persist_misses(groups, &miss_idx, &mut slots, &emitted, snapshots, &bundled);
       },
       Err(err) => {
         for s in &mut slots {
@@ -1003,6 +811,269 @@ pub async fn compile_and_extract_extensions(
   }
 
   finish(slots, groups)
+}
+
+/// Where one group's compiled form comes from: a cache hit (bytecode +
+/// manifests), a cache miss it must bundle, or an early failure. A miss
+/// carries both the in-memory content key and the disk-cache key so the
+/// compile step can populate both tiers.
+fn lookup_slot(group: &[PathBuf], shims_fp: u64) -> Slot {
+  let b = match group_bytes(group) {
+    Ok(b) => b,
+    Err(e) => return Slot::Failed(e),
+  };
+  let inmem_key = cache_key(group, &b, shims_fp);
+  let cached = extension_cache().lock().ok().and_then(|c| {
+    let hit = c.get(&inmem_key)?;
+    // Same question the disk tier asks: did ANY input change?
+    if ferrijs_bundle::cache::inputs_fingerprint(&hit.inputs) != Some(hit.inputs_fingerprint) {
+      return None;
+    }
+    Some(Loaded {
+      bytecode: Arc::clone(&hit.bytecode),
+      snapshot: hit.snapshot.clone(),
+      module_name: hit.module_name.clone(),
+      source_map_json: hit.source_map_json.clone(),
+    })
+  });
+  // A group bundles from its first entry's directory: a
+  // package's entries live together, and a loose file is its own
+  // group.
+  let ext_cwd = group_cwd(group);
+  let disk_key = ferrijs_bundle::cache::entry_key(&extension_cache_kind(group), group, &ext_cwd, shims_fp);
+  match cached {
+    // 1. In-memory (same process).
+    Some(hit) => Slot::Hit(hit),
+    // 2. Disk (cross-process), transitively validated. Promote into
+    //    the in-memory tier so later same-process loads stay hot.
+    // An entry whose payload this build cannot read is a MISS,
+    // not an empty snapshot.
+    None => match bytecode_cache().load(disk_key).and_then(|e| {
+      let snapshot = decode_aux(e.aux.as_deref())?;
+      Some((e.bytecode, e.module_name, e.source_map_json, e.inputs, snapshot))
+    }) {
+      Some((bytecode, module_name, source_map_json, inputs, snapshot)) => {
+        let bc: Arc<[u8]> = Arc::from(bytecode.into_boxed_slice());
+        // The map and the module name come back with the entry:
+        // dropping them here is what made a cache hit report
+        // bundled offsets where a cold compile reported the
+        // author's `.ts` line.
+        //
+        // Reuse the input set the disk manifest recorded rather
+        // than re-deriving it; it is what that bytecode's freshness
+        // was just validated against.
+        remember_extension(
+          inmem_key,
+          &bc,
+          &snapshot,
+          &module_name,
+          source_map_json.as_deref(),
+          inputs,
+        );
+        Slot::Hit(Loaded {
+          bytecode: bc,
+          snapshot,
+          module_name,
+          source_map_json,
+        })
+      },
+      // 3. Cold: bundle + compile below.
+      None => Slot::Miss { inmem_key, disk_key },
+    },
+  }
+}
+
+/// What rolldown produced for each missed position: the code, its source
+/// map for stack traces, and the module graph for the caches' transitive
+/// input set. Absent = the bundle failed.
+#[derive(Default)]
+struct Bundled {
+  code: FxHashMap<usize, String>,
+  map: FxHashMap<usize, Option<String>>,
+  modules: FxHashMap<usize, Vec<PathBuf>>,
+}
+
+/// Bundle every cache-miss file concurrently (independent rolldown
+/// graphs; this is the dominant cold-start cost). A failed bundle turns
+/// its slot into a failure.
+async fn bundle_misses(groups: &[Vec<PathBuf>], miss_idx: &[usize], slots: &mut [Slot]) -> Bundled {
+  let results = futures::future::join_all(miss_idx.iter().map(|&i| {
+    let group = groups[i].clone();
+    async move {
+      let cwd = group_cwd(&group);
+      // One graph per GROUP: a package's entries share their helpers,
+      // and bundling them apart would inline a shared helper into each
+      // and give one module two states.
+      (i, Box::pin(bundle_source(&group, &cwd)).await)
+    }
+  }))
+  .await;
+
+  let mut bundled = Bundled::default();
+  for (i, res) in results {
+    match res {
+      Ok(b) => {
+        bundled.code.insert(i, b.code);
+        bundled.map.insert(i, b.source_map_json);
+        let mut modules = b.modules;
+        modules.extend(b.config_inputs);
+        bundled.modules.insert(i, modules);
+      },
+      Err(e) => slots[i] = Slot::Failed(e),
+    }
+  }
+  bundled
+}
+
+/// Compile every bundled miss to bytecode. A failed compile turns its slot
+/// into a failure.
+async fn compile_misses(
+  compiler: &ferrijs_bundle::Bundler,
+  groups: &[Vec<PathBuf>],
+  miss_idx: &[usize],
+  bundled: &Bundled,
+  slots: &mut [Slot],
+) -> FxHashMap<usize, Arc<[u8]>> {
+  let mut emitted: FxHashMap<usize, Arc<[u8]>> = FxHashMap::default();
+  for &i in miss_idx {
+    let Some(code) = bundled.code.get(&i) else { continue };
+    let module_name = extension_module_name(&groups[i]);
+    match compiler.compile_source(code, &module_name, None).await {
+      Ok(module) => {
+        emitted.insert(i, module.bytecode);
+      },
+      Err(e) => slots[i] = Slot::Failed(e),
+    }
+  }
+  emitted
+}
+
+/// What every missed file registers under each host.
+///
+/// One pass per host. What a file registers is a function of
+/// `ferridriver.host` — an extension that only calls `defineTool`
+/// under `mcp` and `Given` under `bdd` reported, under a
+/// single-host extraction, exactly half of itself.
+///
+/// Within a pass: file order, hits included. A session evaluates
+/// every extension it was given into one VM, so extraction has to
+/// reach each file in a context where the earlier ones have
+/// already run. Stopping at the LAST miss costs nothing — a hit
+/// after it has no cold file left to observe what it would leave
+/// behind.
+async fn extract_per_host(
+  contexts: &[(crate::ExtensionHost, ferrijs::Runtime)],
+  groups: &[Vec<PathBuf>],
+  miss_idx: &[usize],
+  slots: &[Slot],
+  emitted: &FxHashMap<usize, Arc<[u8]>>,
+) -> FxHashMap<usize, ExtensionSnapshot> {
+  let last_miss = miss_idx.last().copied().unwrap_or(0);
+  let mut snapshots: FxHashMap<usize, ExtensionSnapshot> = FxHashMap::default();
+  for (host, rt) in contexts {
+    for i in 0..=last_miss {
+      let (bytecode, label, is_miss) = match &slots[i] {
+        Slot::Hit(hit) => (Arc::clone(&hit.bytecode), hit.module_name.clone(), false),
+        Slot::Miss { .. } => match emitted.get(&i) {
+          Some(bc) => (Arc::clone(bc), extension_module_name(&groups[i]), true),
+          None => continue,
+        },
+        Slot::Failed(_) => continue,
+      };
+      match eval_and_slice(rt, &bytecode, &label).await {
+        Ok(registrations) => {
+          if is_miss {
+            snapshots
+              .entry(i)
+              .or_default()
+              .hosts
+              .insert(host.as_str().to_string(), registrations);
+          }
+        },
+        // Recorded against THIS host, not against the file: a
+        // session installs per file per host and skips the pairing
+        // that throws, so condemning the file everywhere would
+        // report a package as broken that three hosts run fine.
+        Err(e) => {
+          tracing::warn!(
+            target: "ferridriver::extensions",
+            path = %group_label(&groups[i]),
+            host = host.as_str(),
+            error = %e.message,
+            "extension.extract.host_failed: the file threw under this host"
+          );
+          if is_miss {
+            snapshots.entry(i).or_default().hosts.insert(
+              host.as_str().to_string(),
+              HostRegistrations {
+                error: Some(e.message),
+                error_name: e.name,
+                ..HostRegistrations::default()
+              },
+            );
+          }
+        },
+      }
+    }
+  }
+  snapshots
+}
+
+/// Persist what the passes found, in both cache tiers, and turn each
+/// missed slot into a hit, or into a failure when the file threw under
+/// every host.
+fn persist_misses(
+  groups: &[Vec<PathBuf>],
+  miss_idx: &[usize],
+  slots: &mut [Slot],
+  emitted: &FxHashMap<usize, Arc<[u8]>>,
+  mut snapshots: FxHashMap<usize, ExtensionSnapshot>,
+  bundled: &Bundled,
+) {
+  for &i in miss_idx {
+    let Slot::Miss { inmem_key, disk_key } = slots[i] else {
+      continue;
+    };
+    let Some(bytecode) = emitted.get(&i) else { continue };
+    let snapshot = snapshots.remove(&i).unwrap_or_default();
+    // Throwing under one host is the file's business; throwing
+    // under EVERY host is a file that cannot work anywhere — a
+    // registration the operator ceiling refuses, say — and that is
+    // a failure, not a snapshot full of errors.
+    if !snapshot.hosts.is_empty() && snapshot.hosts.values().all(|h| h.error.is_some()) {
+      let (first, name) = snapshot
+        .hosts
+        .values()
+        .find_map(|h| h.error.clone().map(|message| (message, h.error_name.clone())))
+        .unwrap_or_else(|| ("extension failed under every host".to_string(), None));
+      // The thrown error's NAME decides whether the failure may be
+      // skipped, so rebuilding it as a plain internal error is how
+      // an `[extensions.policy]` refusal used to reach the loader
+      // as a skippable compile failure.
+      slots[i] = Slot::Failed(if name.as_deref() == Some(crate::error::EXTENSION_POLICY_ERROR) {
+        crate::error::policy_error(first)
+      } else {
+        ScriptError::internal(first)
+      });
+      continue;
+    }
+    let module_name = extension_module_name(&groups[i]);
+    // Inputs = this group's files plus their transitive imports
+    // (from the module graph), so an edited helper invalidates the
+    // entry in BOTH tiers.
+    let map = bundled.map.get(&i).cloned().flatten();
+    let modules = bundled.modules.get(&i).cloned().unwrap_or_default();
+    let inputs = ferrijs_bundle::cache::input_set(&groups[i], &modules);
+    let aux = encode_aux(&snapshot);
+    bytecode_cache().store(disk_key, bytecode, &module_name, map.as_deref(), Some(&aux), &inputs);
+    remember_extension(inmem_key, bytecode, &snapshot, &module_name, map.as_deref(), inputs);
+    slots[i] = Slot::Hit(Loaded {
+      bytecode: Arc::clone(bytecode),
+      snapshot,
+      module_name,
+      source_map_json: map,
+    });
+  }
 }
 
 /// What a position ended up with. `Hit` carries everything a caller
@@ -1169,7 +1240,7 @@ async fn eval_and_slice(rt: &ferrijs::Runtime, bytecode: &[u8], label: &str) -> 
       cfg_default.max_console_bytes,
       cfg_default.max_console_entry_bytes,
     ));
-    ferrijs::console_fmt::install_console(&ctx, console.clone())
+    ferrijs::console_fmt::install_console(&ctx, Arc::clone(&console))
       .map_err(|e| ScriptError::internal(format!("install console: {e}")))?;
 
     let marks = crate::bindings::registry::registry_marks(&ctx)?;

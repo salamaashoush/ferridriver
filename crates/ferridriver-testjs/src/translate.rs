@@ -521,7 +521,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let base_timeout = test_info.timeout;
       let source_map = Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&p.bundle),
-        Arc::clone(&p.cwd),
+        Arc::from(p.cwd.as_path()),
       ));
       let bridge = Arc::new(InfoBridge::new(
         Arc::clone(&test_info),
@@ -1033,7 +1033,7 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
       };
       let source_map = Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&bundle),
-        cwd.clone(),
+        Arc::from(cwd.as_path()),
       ));
       let bridge = Arc::new(InfoBridge::new(
         test_info,
