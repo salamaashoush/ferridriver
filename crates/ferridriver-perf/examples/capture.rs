@@ -10,6 +10,8 @@
 //! and neither Lighthouse nor the `DevTools` panel records them unless
 //! asked.
 
+use std::io::Write as _;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut args = std::env::args().skip(1);
@@ -90,16 +92,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let events = page.stop_tracing().await?;
 
   std::fs::write(&out, serde_json::to_vec(&events)?)?;
-  println!("wrote {} events to {out}", events.len());
+  let mut stdout = std::io::stdout().lock();
+  writeln!(stdout, "wrote {} events to {out}", events.len())?;
 
   let report = ferridriver_perf::analyze_values(&events);
-  println!("{}", serde_json::to_string_pretty(&report.metrics)?);
+  writeln!(stdout, "{}", serde_json::to_string_pretty(&report.metrics)?)?;
   for insight in &report.insights {
-    println!("[{:?}] {}", insight.severity, insight.title);
+    writeln!(stdout, "[{:?}] {}", insight.severity, insight.title)?;
     for check in &insight.checks {
-      println!("   {} {}", if check.passed { "ok" } else { "!!" }, check.detail);
+      writeln!(stdout, "   {} {}", if check.passed { "ok" } else { "!!" }, check.detail)?;
     }
   }
+  drop(stdout);
   browser.close().await?;
   Ok(())
 }

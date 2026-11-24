@@ -72,7 +72,8 @@ amortize real cost.
 
 Register your own with `#[fixture]`. The function takes a `TestContext`
 and returns `ferridriver_test::Result<T>`; the value is shared as
-`Arc<T>` and retrieved with `ctx.get::<T>("name")`. Use it for anything
+`Arc<T>` and retrieved with `ctx.get::<T>("name")`. Make it an `async fn`
+when it awaits something, and a plain `fn` otherwise. Use it for anything
 more specialized than the built-ins — seeded test data, a pre-configured
 API client, a logged-in session.
 
@@ -85,7 +86,7 @@ struct AdminUser {
 }
 
 #[fixture(scope = "test")]
-async fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
+fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
     Ok(AdminUser {
         name: "admin".into(),
         email: "admin@example.com".into(),

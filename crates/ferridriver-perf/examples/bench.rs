@@ -2,6 +2,8 @@
 //!
 //! `cargo run --release -p ferridriver-perf --example bench -- trace.json [iters]`
 
+use std::io::Write as _;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let path = std::env::args().nth(1).unwrap_or_else(|| "trace.json".into());
   let iters: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(100);
@@ -10,7 +12,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   // Parse once to report the shape, then time parse and analysis apart:
   // the JSON parse dominates, and conflating them hides that.
   let events = ferridriver_perf::event::parse(&bytes)?;
-  println!("{} bytes, {} events", bytes.len(), events.len());
+  let mut stdout = std::io::stdout().lock();
+  writeln!(stdout, "{} bytes, {} events", bytes.len(), events.len())?;
 
   let t = std::time::Instant::now();
   for _ in 0..iters {
@@ -40,9 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   }
   let from_values = t.elapsed() / iters;
 
-  println!("parse:   {parse:?}");
-  println!("from values (MCP path): {from_values:?}");
-  println!("analyze: {analyze:?}");
-  println!("total:   {:?}", parse + analyze);
+  writeln!(stdout, "parse:   {parse:?}")?;
+  writeln!(stdout, "from values (MCP path): {from_values:?}")?;
+  writeln!(stdout, "analyze: {analyze:?}")?;
+  writeln!(stdout, "total:   {:?}", parse + analyze)?;
   Ok(())
 }

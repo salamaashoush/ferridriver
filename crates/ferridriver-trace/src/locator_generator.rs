@@ -224,8 +224,8 @@ fn parse_selector_string(selector: &str) -> Parsed<SelectorStrings> {
   };
   let mut append = |part: &str| -> Parsed<()> {
     let part = part.trim();
-    let (mut name, body) = match part.find('=') {
-      Some(eq) if is_engine_name(part[..eq].trim()) => (part[..eq].trim().to_string(), part[eq + 1..].to_string()),
+    let (mut name, body) = match part.split_once('=') {
+      Some((engine, body)) if is_engine_name(engine.trim()) => (engine.trim().to_string(), body.to_string()),
       _ if part.len() > 1 && part.starts_with('"') && part.ends_with('"') => ("text".to_string(), part.to_string()),
       _ if part.len() > 1 && part.starts_with('\'') && part.ends_with('\'') => ("text".to_string(), part.to_string()),
       _ if part.trim_start_matches('(').starts_with("//") || part.starts_with("..") => {
@@ -252,32 +252,29 @@ fn parse_selector_string(selector: &str) -> Parsed<SelectorStrings> {
     return Ok(result);
   }
 
-  let bytes = selector.as_bytes();
-  let mut index = 0;
-  let mut start = 0;
-  let mut quote: Option<u8> = None;
-  while index < bytes.len() {
-    let c = bytes[index];
-    if c == b'\\' && index + 1 < bytes.len() {
-      index += 2;
+  let mut chars = selector.chars().peekable();
+  let mut current = String::new();
+  let mut quote: Option<char> = None;
+  while let Some(c) = chars.next() {
+    if c == '\\'
+      && let Some(escaped) = chars.next()
+    {
+      current.push(c);
+      current.push(escaped);
     } else if Some(c) == quote {
       quote = None;
-      index += 1;
-    } else if quote.is_none()
-      && matches!(c, b'"' | b'\'' | b'`')
-      && !is_text_selector_with_text(&selector[start..index])
-    {
+      current.push(c);
+    } else if quote.is_none() && matches!(c, '"' | '\'' | '`') && !is_text_selector_with_text(&current) {
       quote = Some(c);
-      index += 1;
-    } else if quote.is_none() && c == b'>' && bytes.get(index + 1) == Some(&b'>') {
-      append(&selector[start..index])?;
-      index += 2;
-      start = index;
+      current.push(c);
+    } else if quote.is_none() && c == '>' && chars.next_if_eq(&'>').is_some() {
+      append(&current)?;
+      current.clear();
     } else {
-      index += 1;
+      current.push(c);
     }
   }
-  append(&selector[start..])?;
+  append(&current)?;
   Ok(result)
 }
 
@@ -602,11 +599,11 @@ enum Kind {
 /// written with.
 fn detect_exact(text: &str) -> Parsed<(Text, Option<bool>)> {
   if let Some(body) = text.strip_prefix('/')
-    && let Some(slash) = body.rfind('/')
-    && body[slash + 1..].chars().all(|c| "dgimsuvy".contains(c))
+    && let Some((source, flags)) = body.rsplit_once('/')
+    && flags.chars().all(|c| "dgimsuvy".contains(c))
     && !body.chars().any(is_line_terminator)
   {
-    return Ok((Text::Regex(JsRegex::new(&body[..slash], &body[slash + 1..])), None));
+    return Ok((Text::Regex(JsRegex::new(source, flags)), None));
   }
   let json = |s: &str| serde_json::from_str::<String>(s).map_err(|e| e.to_string());
   if text.ends_with('"') {
@@ -1011,7 +1008,10 @@ fn normalize_escaped_regex_quotes(source: &str) -> String {
 /// `escapeWithQuotes(text, "'")`.
 fn quote(text: &str) -> String {
   let stringified = serde_json::to_string(text).unwrap_or_default();
-  let inner = &stringified[1..stringified.len().saturating_sub(1).max(1)];
+  let inner = stringified
+    .strip_prefix('"')
+    .and_then(|s| s.strip_suffix('"'))
+    .unwrap_or_default();
   format!("'{}'", inner.replace("\\\"", "\"").replace('\'', "\\'"))
 }
 

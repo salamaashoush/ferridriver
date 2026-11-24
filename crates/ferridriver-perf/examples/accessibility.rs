@@ -7,6 +7,8 @@
 //! it locked out. `scripts/perf-diff/compare-accessibility.py` checks
 //! the result against Lighthouse's own verdicts for the same page.
 
+use std::io::Write as _;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let url = std::env::args()
@@ -24,6 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   page.wait_for_load_state(None).await?;
   let report = page.check_accessibility().await?;
   browser.close().await?;
-  println!("{}", serde_json::to_string_pretty(&report)?);
+  writeln!(std::io::stdout().lock(), "{}", serde_json::to_string_pretty(&report)?)?;
   Ok(())
 }

@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! `ferridriver::audits::robots` against the package it is a port of.
 //!
 //! `is-crawlable` does not parse robots.txt itself. Lighthouse imports
@@ -44,15 +43,15 @@ struct Case {
   line: i64,
 }
 
-fn recording() -> Recording {
+fn recording() -> Result<Recording, String> {
   let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/robots.json");
-  let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-  serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+  let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+  serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 #[test]
-fn the_parser_answers_what_robots_parser_answers() {
-  let recording = recording();
+fn the_parser_answers_what_robots_parser_answers() -> Result<(), String> {
+  let recording = recording()?;
   let mut differences = Vec::new();
 
   for case in &recording.cases {
@@ -88,14 +87,15 @@ fn the_parser_answers_what_robots_parser_answers() {
     recording.cases.len(),
     differences.join("\n  ")
   );
+  Ok(())
 }
 
 /// A recording where everything is allowed would agree by finding
 /// nothing, the way the accessibility comparison did before a fixture
 /// existed that actually tripped rules.
 #[test]
-fn the_recording_still_covers_all_three_answers() {
-  let recording = recording();
+fn the_recording_still_covers_all_three_answers() -> Result<(), String> {
+  let recording = recording()?;
   let count = |want: Option<bool>| recording.cases.iter().filter(|case| case.allowed == want).count();
 
   assert!(count(Some(false)) >= 100, "too few blocked URLs to be evidence");
@@ -104,4 +104,5 @@ fn the_recording_still_covers_all_three_answers() {
     count(None) >= 20,
     "no case where the file governs another origin, which is the answer most easily confused with `allowed`"
   );
+  Ok(())
 }

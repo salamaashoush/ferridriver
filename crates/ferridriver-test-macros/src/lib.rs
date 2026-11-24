@@ -481,7 +481,6 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
 
   let expanded = quote! {
     #(#attrs)*
-    #[allow(clippy::unused_async)]
     #vis async fn #fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
       #(#binding_stmts)*
       #block
@@ -674,7 +673,6 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     let use_options_expr = use_options_expr.clone();
 
     submissions.push(quote! {
-      #[allow(clippy::unused_async)]
       async fn #inner_fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
         #(#binding_stmts)*
         #(#data_bindings)*
@@ -817,7 +815,8 @@ fn returns_fixture_guard(output: &syn::ReturnType) -> bool {
 ///
 /// The function takes fixture parameters like a test (`TestContext` for
 /// dynamic access, `Arc<T>` to resolve another fixture by parameter name)
-/// and returns `ferridriver_test::Result<T>`. The resolved value is shared
+/// and returns `ferridriver_test::Result<T>`; it is an `async fn`, or a
+/// plain `fn` when it awaits nothing. The resolved value is shared
 /// as `Arc<T>` and retrieved from a test (or another fixture) via a typed
 /// `Arc<T>` parameter or `ctx.get::<T>("fixture_name")`.
 ///
@@ -911,12 +910,11 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
     quote! { let __value = ::std::sync::Arc::new(__value); }
   };
 
+  // A fixture that awaits nothing can be a plain `fn`.
+  let await_value = input.sig.asyncness.map(|_| quote! { .await });
+
   let expanded = quote! {
-    // Keep the user's function callable. Fixtures are async by contract
-    // (most await a built-in or another fixture); a data-only fixture that
-    // never awaits is still valid, so silence the no-await lint here rather
-    // than forcing every author to add a workaround.
-    #[allow(clippy::unused_async)]
+    // Keep the user's function callable.
     #input
 
     #[doc(hidden)]
@@ -928,7 +926,7 @@ pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
         setup: ::std::sync::Arc::new(|__pool: ferridriver_test::fixture::FixturePool| {
           ::std::boxed::Box::pin(async move {
             #(#setup_stmts)*
-            let __value = #fn_name(#(#call_args),*).await.map_err(|__e| {
+            let __value = #fn_name(#(#call_args),*)#await_value.map_err(|__e| {
               ferridriver::error::FerriError::backend(::std::format!("fixture '{}' failed: {}", #fn_name_str, __e))
             })?;
             #unwrap_guard

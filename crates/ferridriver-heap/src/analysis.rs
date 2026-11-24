@@ -684,13 +684,13 @@ fn calculate_object_names(snapshot: &mut Snapshot) -> Vec<usize> {
 /// `<div id="a">` -> `<div>`, and the same for a detached one.
 fn element_tag(name: &str) -> Option<String> {
   for prefix in ["<", "Detached <"] {
-    if !name.starts_with(prefix) {
+    let Some(rest) = name.strip_prefix(prefix) else {
       continue;
-    }
-    let Some(space) = name[prefix.len() - 1..].find(' ').map(|at| at + prefix.len() - 1) else {
+    };
+    let Some((tag, _)) = rest.split_once(' ') else {
       return Some(name.to_string());
     };
-    return Some(format!("{}>", &name[..space]));
+    return Some(format!("{prefix}{tag}>"));
   }
   None
 }

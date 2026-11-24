@@ -120,7 +120,7 @@ pub fn add_cpu_nodes(
     cpu_nodes.push(node);
   }
 
-  let mut links = Links {
+  let links = Links {
     by_request_id,
     by_url,
     requests,
@@ -131,7 +131,7 @@ pub fn add_cpu_nodes(
   // `TimerFire` depends on whichever task installed the timer.
   let mut timers: FxHashMap<String, usize> = FxHashMap::default();
   for (position, task) in tasks.iter().enumerate() {
-    link_task(graph, &mut links, &tasks, &cpu_nodes, position, task, &mut timers);
+    link_task(graph, &links, &tasks, &cpu_nodes, position, task, &mut timers);
   }
 
   prune_short_tasks(graph, &tasks, &cpu_nodes);
@@ -168,7 +168,7 @@ struct Links<'a> {
 /// Wire one task to the requests it waited on and the ones it started.
 fn link_task(
   graph: &mut Graph,
-  links: &mut Links<'_>,
+  links: &Links<'_>,
   tasks: &[Task<'_>],
   cpu_nodes: &[NodeId],
   position: usize,

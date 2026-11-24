@@ -163,7 +163,10 @@ fn forms(value: &str) -> Vec<String> {
     }
   }
   if let Ok(quoted) = serde_json::to_string(value) {
-    let escaped = &quoted[1..quoted.len() - 1];
+    let escaped = quoted
+      .strip_prefix('"')
+      .and_then(|quoted| quoted.strip_suffix('"'))
+      .unwrap_or_default();
     forms.push(escaped.to_owned());
     forms.push(escaped.replace('/', "\\/"));
     let ascii = ascii_json(escaped);
@@ -178,7 +181,7 @@ fn forms(value: &str) -> Vec<String> {
   ] {
     forms.push(engine.encode(value));
   }
-  let mut seen = std::collections::HashSet::new();
+  let mut seen = rustc_hash::FxHashSet::default();
   forms.retain(|form| seen.insert(form.clone()));
   forms
 }
@@ -349,7 +352,7 @@ pub fn rewrite_zip(
   let parent = dst
     .parent()
     .filter(|parent| !parent.as_os_str().is_empty())
-    .unwrap_or(Path::new("."));
+    .unwrap_or_else(|| Path::new("."));
   let (file, tmp) = exclusive_temp(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
   let mut writer = zip::ZipWriter::new(file);
   let mut report = RewriteReport::default();

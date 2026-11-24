@@ -71,8 +71,16 @@ impl Parse for StepArgs {
 
 // ── Hook macro argument parsing ──
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HookScope {
+  All,
+  Feature,
+  Scenario,
+  Step,
+}
+
 struct HookArgs {
-  point: String,
+  point: HookScope,
   tags: Option<String>,
   order: i32,
 }
@@ -80,15 +88,18 @@ struct HookArgs {
 impl Parse for HookArgs {
   fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
     let point_ident: syn::Ident = input.parse()?;
-    let point = point_ident.to_string();
-
-    let valid = ["all", "feature", "scenario", "step"];
-    if !valid.contains(&point.as_str()) {
-      return Err(syn::Error::new_spanned(
-        &point_ident,
-        format!("expected one of: {}", valid.join(", ")),
-      ));
-    }
+    let point = match point_ident.to_string().as_str() {
+      "all" => HookScope::All,
+      "feature" => HookScope::Feature,
+      "scenario" => HookScope::Scenario,
+      "step" => HookScope::Step,
+      _ => {
+        return Err(syn::Error::new_spanned(
+          &point_ident,
+          "expected one of: all, feature, scenario, step",
+        ));
+      },
+    };
 
     let mut tags = None;
     let mut order = 0i32;
@@ -270,38 +281,37 @@ fn type_to_extraction(ty: &syn::Type, idx: usize) -> proc_macro2::TokenStream {
 
 // ── Hook macro codegen ──
 
-fn hook_point_tokens(prefix: &str, point: &str) -> proc_macro2::TokenStream {
+fn hook_point_tokens(prefix: &str, point: HookScope) -> proc_macro2::TokenStream {
   let before = prefix == "Before";
   match point {
-    "all" => {
+    HookScope::All => {
       if before {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeAll }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterAll }
       }
     },
-    "feature" => {
+    HookScope::Feature => {
       if before {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeFeature }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterFeature }
       }
     },
-    "scenario" => {
+    HookScope::Scenario => {
       if before {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeScenario }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterScenario }
       }
     },
-    "step" => {
+    HookScope::Step => {
       if before {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeStep }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterStep }
       }
     },
-    _ => unreachable!(),
   }
 }
 
@@ -315,7 +325,7 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
   let block = &input.block;
   let attrs = &input.attrs;
 
-  let point = &args.point;
+  let point = args.point;
   let order = args.order;
 
   let hook_point = hook_point_tokens(prefix, point);
@@ -325,7 +335,7 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
     .map_or_else(|| quote! { None }, |tags| quote! { Some(#tags.to_string()) });
 
   // Determine handler variant based on hook point.
-  let is_global = point == "all";
+  let is_global = point == HookScope::All;
   let has_world_param = input.sig.inputs.iter().any(|arg| {
     if let FnArg::Typed(_) = arg {
       return true;
@@ -541,7 +551,7 @@ pub fn after(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Register a custom parameter type for Cucumber expressions.
 ///
 /// Defines a new `{name}` placeholder that matches the given regex.
-/// Use it on a dummy function whose body is discarded — only the
+/// Use it on a dummy function, which the attribute consumes — only the
 /// attribute arguments matter.
 ///
 /// ```ignore
@@ -558,17 +568,10 @@ pub fn after(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn param_type(attr: TokenStream, item: TokenStream) -> TokenStream {
   let args = parse_macro_input!(attr as ParamTypeArgs);
-  let input = parse_macro_input!(item as ItemFn);
+  parse_macro_input!(item as ItemFn);
 
-  let fn_name = &input.sig.ident;
-  let fn_name_str = fn_name.to_string();
   let name = &args.name;
   let regex = &args.regex;
-
-  let _reg_name = syn::Ident::new(
-    &format!("__bdd_param_type_reg_{fn_name_str}"),
-    proc_macro2::Span::call_site(),
-  );
 
   let expanded = quote! {
     ferridriver_bdd::inventory::submit! {
@@ -578,10 +581,6 @@ pub fn param_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         transformer_factory: None,
       }
     }
-
-    // Keep the function (but it's a no-op marker).
-    #[allow(dead_code)]
-    fn #fn_name() {}
   };
 
   expanded.into()

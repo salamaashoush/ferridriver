@@ -13,7 +13,7 @@ use ferridriver_test::prelude::*;
 
 /// A custom fixture: seeded data shared per test, with cleanup.
 #[fixture(scope = "test")]
-async fn seeded_users(_ctx: TestContext) -> ferridriver_test::Result<Fixture<Vec<String>>> {
+fn seeded_users(_ctx: TestContext) -> ferridriver_test::Result<Fixture<Vec<String>>> {
   let users = vec!["alice".to_string(), "bob".to_string()];
   Ok(Fixture::new(users).on_teardown(|users| async move {
     // Real fixtures would release external resources here.

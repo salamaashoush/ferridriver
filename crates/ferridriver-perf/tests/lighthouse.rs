@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Our two live-page audits against Lighthouse's, on the fixture pages
 //! in `tests/fixtures/lighthouse/`.
 //!
@@ -98,9 +97,9 @@ fn fixtures_dir() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/lighthouse")
 }
 
-fn read_recording(path: &std::path::Path) -> Recording {
-  let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-  serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+fn read_recording(path: &std::path::Path) -> Result<Recording, String> {
+  let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+  serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 /// What Lighthouse said about a page, snapshot first.
@@ -112,14 +111,14 @@ fn read_recording(path: &std::path::Path) -> Recording {
 /// Lighthouse marks it notApplicable without a network log. Merging the
 /// other way would silently swap in verdicts reached under navigation's
 /// own emulation.
-fn recording(name: &str) -> Recording {
+fn recording(name: &str) -> Result<Recording, String> {
   let dir = fixtures_dir();
-  let mut snapshot = read_recording(&dir.join(format!("{name}.lighthouse.json")));
-  let navigation = read_recording(&dir.join(format!("{name}.navigation.json")));
+  let mut snapshot = read_recording(&dir.join(format!("{name}.lighthouse.json")))?;
+  let navigation = read_recording(&dir.join(format!("{name}.navigation.json")))?;
   for (id, audit) in navigation.audits {
     snapshot.audits.entry(id).or_insert(audit);
   }
-  snapshot
+  Ok(snapshot)
 }
 
 /// The status line and extra headers a `<name>.http` sidecar asks for.
@@ -148,10 +147,10 @@ fn response_head(page: &std::path::Path) -> (String, Vec<String>) {
 /// deliberately: a browser opens speculative connections that carry no
 /// request and hold them idle, and an accept loop that reads them one at
 /// a time starves the request that matters.
-fn serve() -> String {
+fn serve() -> Result<String, String> {
   let dir = fixtures_dir();
-  let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-  let addr = listener.local_addr().expect("local addr");
+  let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind loopback: {e}"))?;
+  let addr = listener.local_addr().map_err(|e| format!("local addr: {e}"))?;
   thread::spawn(move || {
     for stream in listener.incoming() {
       let Ok(mut stream) = stream else { continue };
@@ -199,19 +198,19 @@ fn serve() -> String {
       });
     }
   });
-  format!("http://{addr}")
+  Ok(format!("http://{addr}"))
 }
 
 /// Open a fixture page in a real Chromium and hand it to `read`.
-fn on_page<T, F>(page_name: &str, read: F) -> T
+fn on_page<T, F>(page_name: &str, read: F) -> Result<T, String>
 where
-  F: AsyncFnOnce(&std::sync::Arc<ferridriver::Page>) -> T,
+  F: AsyncFnOnce(&std::sync::Arc<ferridriver::Page>) -> Result<T, String>,
 {
-  let url = format!("{}/{page_name}", serve());
+  let url = format!("{}/{page_name}", serve()?);
   tokio::runtime::Builder::new_multi_thread()
     .enable_all()
     .build()
-    .expect("tokio runtime")
+    .map_err(|e| format!("tokio runtime: {e}"))?
     .block_on(async move {
       let browser = ferridriver::browser_type::chromium()
         .launch(ferridriver::options::LaunchOptions {
@@ -219,13 +218,16 @@ where
           ..Default::default()
         })
         .await
-        .expect("launch chromium");
-      let context = browser.new_context().await.expect("new context");
-      let page = context.new_page().await.expect("new page");
-      page.goto(&url).await.expect("goto fixture page");
-      page.wait_for_load_state(None).await.expect("load state");
+        .map_err(|e| format!("launch chromium: {e}"))?;
+      let context = browser.new_context().await.map_err(|e| format!("new context: {e}"))?;
+      let page = context.new_page().await.map_err(|e| format!("new page: {e}"))?;
+      page.goto(&url).await.map_err(|e| format!("goto fixture page: {e}"))?;
+      page
+        .wait_for_load_state(None)
+        .await
+        .map_err(|e| format!("load state: {e}"))?;
       let result = read(&page).await;
-      browser.close().await.expect("close browser");
+      browser.close().await.map_err(|e| format!("close browser: {e}"))?;
       result
     })
 }
@@ -246,14 +248,14 @@ struct Floor {
   failing: usize,
 }
 
-fn compare_accessibility(name: &str, floor: &Floor) {
-  let recording = recording(name);
+fn compare_accessibility(name: &str, floor: &Floor) -> Result<(), String> {
+  let recording = recording(name)?;
   let ours = on_page(&recording.page, async |page| {
     page
       .check_accessibility()
       .await
-      .expect("run the accessibility audit (is axe installed? `ferridriver install axe`)")
-  });
+      .map_err(|e| format!("run the accessibility audit (is axe installed? `ferridriver install axe`): {e}"))
+  })?;
 
   let failing: BTreeMap<&str, usize> = ours
     .violations
@@ -317,50 +319,57 @@ fn compare_accessibility(name: &str, floor: &Floor) {
     recording.page,
     floor.failing
   );
+  Ok(())
 }
 
 #[test]
-fn accessibility_on_a_page_full_of_barriers() {
+fn accessibility_on_a_page_full_of_barriers() -> Result<(), String> {
   compare_accessibility(
     "a11y-broken",
     &Floor {
       compared: 30,
       failing: 20,
     },
-  );
+  )?;
+  Ok(())
 }
 
 #[test]
-fn accessibility_on_a_page_with_nothing_wrong_with_it() {
+fn accessibility_on_a_page_with_nothing_wrong_with_it() -> Result<(), String> {
   compare_accessibility(
     "clean",
     &Floor {
       compared: 18,
       failing: 0,
     },
-  );
+  )?;
+  Ok(())
 }
 
 /// The page built to fail the SEO and best-practices audits, which
 /// should be clean here.
 #[test]
-fn accessibility_on_a_page_broken_in_the_other_dimension() {
+fn accessibility_on_a_page_broken_in_the_other_dimension() -> Result<(), String> {
   compare_accessibility(
     "quality-broken",
     &Floor {
       compared: 10,
       failing: 0,
     },
-  );
+  )?;
+  Ok(())
 }
 
 // ── Page quality ────────────────────────────────────────────────────────
 
-fn compare_page_quality(name: &str, expected_failures: usize) {
-  let recording = recording(name);
+fn compare_page_quality(name: &str, expected_failures: usize) -> Result<(), String> {
+  let recording = recording(name)?;
   let ours = on_page(&recording.page, async |page| {
-    page.check_page_quality().await.expect("run the page audits")
-  });
+    page
+      .check_page_quality()
+      .await
+      .map_err(|e| format!("run the page audits: {e}"))
+  })?;
 
   let mut differences = Vec::new();
   let (mut compared, mut failures) = (0usize, 0usize);
@@ -415,39 +424,45 @@ fn compare_page_quality(name: &str, expected_failures: usize) {
     "{} scored none of the ten, so this compared nothing",
     recording.page
   );
+  Ok(())
 }
 
 #[test]
-fn page_quality_on_a_page_failing_seven_of_the_ten() {
+fn page_quality_on_a_page_failing_seven_of_the_ten() -> Result<(), String> {
   // Not `canonical`, which a page with no canonical link scores as
   // notApplicable rather than a failure, and not either of the two that
   // read the response: this page is served 200 and blocks no crawler.
-  compare_page_quality("quality-broken", 7);
+  compare_page_quality("quality-broken", 7)?;
+  Ok(())
 }
 
 /// A relative canonical, which only navigation mode scores. Its own
 /// fixture because that is the whole point of the page.
 #[test]
-fn page_quality_on_a_page_with_a_relative_canonical() {
-  compare_page_quality("canonical-broken", 1);
+fn page_quality_on_a_page_with_a_relative_canonical() -> Result<(), String> {
+  compare_page_quality("canonical-broken", 1)?;
+  Ok(())
 }
 
 #[test]
-fn page_quality_on_a_page_with_nothing_wrong_with_it() {
-  compare_page_quality("clean", 0);
+fn page_quality_on_a_page_with_nothing_wrong_with_it() -> Result<(), String> {
+  compare_page_quality("clean", 0)?;
+  Ok(())
 }
 
 /// The page built to fail axe rules, which is a different set of
 /// mistakes: it has no meta description and its images are fine.
 #[test]
-fn page_quality_on_a_page_broken_in_the_other_dimension() {
-  compare_page_quality("a11y-broken", 1);
+fn page_quality_on_a_page_broken_in_the_other_dimension() -> Result<(), String> {
+  compare_page_quality("a11y-broken", 1)?;
+  Ok(())
 }
 
 /// `http-status-code`: the status is the only thing wrong with the page.
 #[test]
-fn page_quality_on_a_page_served_with_a_404() {
-  compare_page_quality("status-404", 1);
+fn page_quality_on_a_page_served_with_a_404() -> Result<(), String> {
+  compare_page_quality("status-404", 1)?;
+  Ok(())
 }
 
 // `is-crawlable` has three independent blocking sources and scores 0
@@ -456,8 +471,9 @@ fn page_quality_on_a_page_served_with_a_404() {
 // if two of the three were never read.
 
 #[test]
-fn page_quality_on_a_page_whose_meta_says_noindex() {
-  compare_page_quality("meta-robots-blocked", 1);
+fn page_quality_on_a_page_whose_meta_says_noindex() -> Result<(), String> {
+  compare_page_quality("meta-robots-blocked", 1)?;
+  Ok(())
 }
 
 /// Two `X-Robots-Tag` headers, so this also pins that a repeated header
@@ -465,11 +481,13 @@ fn page_quality_on_a_page_whose_meta_says_noindex() {
 /// `unavailable_after:` is read as a directive and not as a user-agent
 /// prefix.
 #[test]
-fn page_quality_on_a_page_whose_headers_block_indexing() {
-  compare_page_quality("x-robots-blocked", 1);
+fn page_quality_on_a_page_whose_headers_block_indexing() -> Result<(), String> {
+  compare_page_quality("x-robots-blocked", 1)?;
+  Ok(())
 }
 
 #[test]
-fn page_quality_on_a_page_disallowed_by_robots_txt() {
-  compare_page_quality("robots-blocked", 1);
+fn page_quality_on_a_page_disallowed_by_robots_txt() -> Result<(), String> {
+  compare_page_quality("robots-blocked", 1)?;
+  Ok(())
 }

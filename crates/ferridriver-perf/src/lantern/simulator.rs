@@ -52,6 +52,14 @@ struct Timing {
   estimated_time_elapsed: f64,
 }
 
+/// What one simulation run changes as it goes.
+struct Run {
+  state: FxHashMap<NodeId, State>,
+  timings: FxHashMap<NodeId, Timing>,
+  pool: ConnectionPool,
+  dns: DnsCache,
+}
+
 #[derive(Debug, Clone)]
 pub struct SimulationResult {
   /// Simulated wall time in milliseconds.
@@ -113,27 +121,30 @@ impl<'a> Simulator<'a> {
       });
     }
 
-    let mut pool = ConnectionPool::new(self.facts, self.analysis, self.rtt, self.throughput);
-    let mut dns = DnsCache::new(self.rtt);
-    let mut state: FxHashMap<NodeId, State> = reachable.iter().map(|n| (*n, State::NotReady)).collect();
-    let mut timings: FxHashMap<NodeId, Timing> = FxHashMap::default();
+    let mut run = Run {
+      state: reachable.iter().map(|n| (*n, State::NotReady)).collect(),
+      timings: FxHashMap::default(),
+      pool: ConnectionPool::new(self.facts, self.analysis, self.rtt, self.throughput),
+      dns: DnsCache::new(self.rtt),
+    };
     let mut total_elapsed = 0.0f64;
 
-    Self::mark_ready_if_possible(graph, &mut state, graph.root, total_elapsed, &mut timings);
+    run.mark_ready_if_possible(graph, graph.root, total_elapsed);
 
     for iteration in 0.. {
       if iteration > MAX_ITERATIONS {
         return Err(SimulationError::TooManyIterations);
       }
-      let ready: Vec<NodeId> = ordered(&state, State::Ready, graph, self.facts);
-      if ready.is_empty() && !state.values().any(|s| *s == State::InProgress) {
+      let ready: Vec<NodeId> = ordered(&run.state, State::Ready, graph, self.facts);
+      if ready.is_empty() && !run.state.values().any(|s| *s == State::InProgress) {
         break;
       }
 
       for node in ready {
-        self.start_if_possible(graph, node, total_elapsed, &mut state, &mut timings, &mut pool);
+        self.start_if_possible(graph, node, total_elapsed, &mut run);
       }
-      let in_progress: Vec<NodeId> = state
+      let in_progress: Vec<NodeId> = run
+        .state
         .iter()
         .filter(|(_, s)| **s == State::InProgress)
         .map(|(n, _)| *n)
@@ -148,12 +159,14 @@ impl<'a> Simulator<'a> {
         .filter(|n| matches!(graph.nodes[**n].kind, NodeKind::Network(_)))
         .count();
       if in_flight > 0 {
-        pool.set_shared_throughput(self.throughput / crate::units::len_to_f64(in_flight));
+        run
+          .pool
+          .set_shared_throughput(self.throughput / crate::units::len_to_f64(in_flight));
       }
 
       let minimum = in_progress
         .iter()
-        .map(|node| self.estimate_time_remaining(graph, *node, &mut timings, &mut pool, &mut dns))
+        .map(|node| self.estimate_time_remaining(graph, *node, &mut run))
         .fold(f64::INFINITY, f64::min);
       if !minimum.is_finite() {
         return Err(SimulationError::TooManyIterations);
@@ -161,104 +174,67 @@ impl<'a> Simulator<'a> {
       total_elapsed += minimum;
 
       for node in in_progress {
-        self.advance(
-          graph,
-          node,
-          minimum,
-          total_elapsed,
-          &mut state,
-          &mut timings,
-          &mut pool,
-          &mut dns,
-        );
+        self.advance(graph, node, minimum, total_elapsed, &mut run);
       }
       // A completed node may have unblocked others.
       for node in graph.reachable() {
-        if state.get(&node) == Some(&State::NotReady) {
-          Self::mark_ready_if_possible(graph, &mut state, node, total_elapsed, &mut timings);
+        if run.state.get(&node) == Some(&State::NotReady) {
+          run.mark_ready_if_possible(graph, node, total_elapsed);
         }
       }
     }
 
     Ok(SimulationResult {
       time_ms: total_elapsed,
-      node_timings: timings
+      node_timings: run
+        .timings
         .into_iter()
         .map(|(node, t)| (node, (t.start_time, t.end_time)))
         .collect(),
     })
   }
 
-  fn mark_ready_if_possible(
-    graph: &Graph,
-    state: &mut FxHashMap<NodeId, State>,
-    node: NodeId,
-    now: f64,
-    timings: &mut FxHashMap<NodeId, Timing>,
-  ) {
-    if graph.dependencies[node]
-      .iter()
-      .all(|d| state.get(d) == Some(&State::Complete))
-    {
-      state.insert(node, State::Ready);
-      timings.entry(node).or_default().start_time = now;
-    }
-  }
-
-  fn start_if_possible(
-    &self,
-    graph: &Graph,
-    node: NodeId,
-    now: f64,
-    state: &mut FxHashMap<NodeId, State>,
-    timings: &mut FxHashMap<NodeId, Timing>,
-    pool: &mut ConnectionPool,
-  ) {
-    let start = |state: &mut FxHashMap<NodeId, State>, timings: &mut FxHashMap<NodeId, Timing>| {
-      state.insert(node, State::InProgress);
-      let timing = timings.entry(node).or_default();
+  fn start_if_possible(&self, graph: &Graph, node: NodeId, now: f64, run: &mut Run) {
+    let start = |run: &mut Run| {
+      run.state.insert(node, State::InProgress);
+      let timing = run.timings.entry(node).or_default();
       timing.start_time = now;
     };
 
     match graph.nodes[node].kind {
       // One main thread, so one CPU task at a time.
       NodeKind::Cpu { .. } => {
-        if !state
+        if !run
+          .state
           .iter()
           .any(|(n, s)| *s == State::InProgress && matches!(graph.nodes[*n].kind, NodeKind::Cpu { .. }))
         {
-          start(state, timings);
+          start(run);
         }
       },
       NodeKind::Network(request) => {
         let fact = &self.facts[request];
         if fact.delivery.is_connectionless() {
-          start(state, timings);
+          start(run);
           return;
         }
-        let active = state
+        let active = run
+          .state
           .iter()
           .filter(|(n, s)| **s == State::InProgress && matches!(graph.nodes[**n].kind, NodeKind::Network(_)))
           .count();
         if active >= MAXIMUM_CONCURRENT_REQUESTS {
           return;
         }
-        if pool.acquire(request).is_some() {
-          start(state, timings);
+        if run.pool.acquire(request).is_some() {
+          start(run);
         }
       },
     }
   }
 
-  fn estimate_time_remaining(
-    &self,
-    graph: &Graph,
-    node: NodeId,
-    timings: &mut FxHashMap<NodeId, Timing>,
-    pool: &mut ConnectionPool,
-    dns: &mut DnsCache,
-  ) -> f64 {
-    let timing = timings.entry(node).or_default().clone();
+  fn estimate_time_remaining(&self, graph: &Graph, node: NodeId, run: &mut Run) -> f64 {
+    let timing = run.timings.entry(node).or_default().clone();
     let estimated = match graph.nodes[node].kind {
       NodeKind::Cpu {
         duration_us,
@@ -286,8 +262,8 @@ impl<'a> Simulator<'a> {
           let mb = crate::units::count_to_f64(fact.resource_size) / 1024.0 / 1024.0;
           2.0 + 10.0 * mb - timing.time_elapsed
         } else {
-          let dns_time = dns.time_until_resolution(&fact.host, timing.start_time, true);
-          let connection = pool.active(request);
+          let dns_time = run.dns.time_until_resolution(&fact.host, timing.start_time, true);
+          let connection = run.pool.active(request);
           let remaining = crate::units::count_to_f64(fact.transfer_size) - timing.bytes_downloaded;
           connection
             .simulate_download_until(
@@ -303,23 +279,12 @@ impl<'a> Simulator<'a> {
       },
     };
     let estimated = estimated + timing.time_elapsed_overshoot;
-    timings.entry(node).or_default().estimated_time_elapsed = estimated;
+    run.timings.entry(node).or_default().estimated_time_elapsed = estimated;
     estimated
   }
 
-  #[allow(clippy::too_many_arguments)]
-  fn advance(
-    &self,
-    graph: &Graph,
-    node: NodeId,
-    period: f64,
-    now: f64,
-    state: &mut FxHashMap<NodeId, State>,
-    timings: &mut FxHashMap<NodeId, Timing>,
-    pool: &mut ConnectionPool,
-    dns: &mut DnsCache,
-  ) {
-    let timing = timings.entry(node).or_default().clone();
+  fn advance(&self, graph: &Graph, node: NodeId, period: f64, now: f64, run: &mut Run) {
+    let timing = run.timings.entry(node).or_default().clone();
     // The node whose estimate set the period is the one that finishes.
     let finished = (timing.estimated_time_elapsed - period).abs() < f64::EPSILON;
 
@@ -333,9 +298,9 @@ impl<'a> Simulator<'a> {
 
     if connectionless {
       if finished {
-        Self::complete(node, now, state, timings);
+        run.complete(node, now);
       } else {
-        timings.entry(node).or_default().time_elapsed += period;
+        run.timings.entry(node).or_default().time_elapsed += period;
       }
       return;
     }
@@ -344,9 +309,9 @@ impl<'a> Simulator<'a> {
       return;
     };
     let fact = &self.facts[request];
-    let dns_time = dns.time_until_resolution(&fact.host, timing.start_time, true);
+    let dns_time = run.dns.time_until_resolution(&fact.host, timing.start_time, true);
     let remaining = crate::units::count_to_f64(fact.transfer_size) - timing.bytes_downloaded;
-    let calculation = pool.active(request).simulate_download_until(
+    let calculation = run.pool.active(request).simulate_download_until(
       remaining,
       DownloadOptions {
         dns_resolution_time: dns_time,
@@ -354,26 +319,38 @@ impl<'a> Simulator<'a> {
         maximum_time_to_elapse: period - timing.time_elapsed_overshoot,
       },
     );
-    pool.record_progress(
+    run.pool.record_progress(
       request,
       calculation.congestion_window,
       calculation.extra_bytes_downloaded,
     );
 
     if finished {
-      pool.release(request);
-      Self::complete(node, now, state, timings);
+      run.pool.release(request);
+      run.complete(node, now);
     } else {
-      let timing = timings.entry(node).or_default();
+      let timing = run.timings.entry(node).or_default();
       timing.time_elapsed += calculation.time_elapsed;
       timing.time_elapsed_overshoot += calculation.time_elapsed - period;
       timing.bytes_downloaded += calculation.bytes_downloaded;
     }
   }
+}
 
-  fn complete(node: NodeId, now: f64, state: &mut FxHashMap<NodeId, State>, timings: &mut FxHashMap<NodeId, Timing>) {
-    state.insert(node, State::Complete);
-    timings.entry(node).or_default().end_time = now;
+impl Run {
+  fn mark_ready_if_possible(&mut self, graph: &Graph, node: NodeId, now: f64) {
+    if graph.dependencies[node]
+      .iter()
+      .all(|d| self.state.get(d) == Some(&State::Complete))
+    {
+      self.state.insert(node, State::Ready);
+      self.timings.entry(node).or_default().start_time = now;
+    }
+  }
+
+  fn complete(&mut self, node: NodeId, now: f64) {
+    self.state.insert(node, State::Complete);
+    self.timings.entry(node).or_default().end_time = now;
   }
 }
 

@@ -93,6 +93,8 @@ sequenceDiagram
 Use the `#[fixture]` attribute to register a custom value. The body takes
 a `TestContext`, returns `ferridriver_test::Result<T>`, and the value is
 shared as `Arc<T>`. Retrieve it from a test with `ctx.get::<T>("name")`.
+The function is an `async fn` when it awaits something and a plain `fn`
+otherwise.
 
 ```rust
 use ferridriver_test::prelude::*;
@@ -103,7 +105,7 @@ struct AdminUser {
 }
 
 #[fixture(scope = "test")]
-async fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
+fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
     Ok(AdminUser {
         name: "admin".into(),
         email: "admin@example.com".into(),
