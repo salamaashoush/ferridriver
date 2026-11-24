@@ -51,17 +51,37 @@ pub struct BrowserContext {
   /// Made by `browser.newPage()` for that one page, so it closes when
   /// the page does, as Playwright's `Page._ownedContext` is.
   pub(crate) owned_by_page: bool,
-  /// How many popups this context has listed, and the latest of them. A
-  /// caller marks the count before a call and activates the latest popup
-  /// if it moved, so only a tab that call opened takes focus: a popup that
-  /// opens later must not change the page a later call acts on.
-  popups_listed: u64,
-  latest_popup: Option<AnyPage>,
+  /// Which page becomes active when the active one closes.
+  pub(crate) refocus: Refocus,
+}
+
+/// Which page a context makes active when its active page closes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Refocus {
+  /// The page that took the closed one's place in the list, else the last
+  /// one: Playwright MCP's `Context._onPageClosed`.
+  #[default]
+  Neighbour,
+  /// The first page left: Playwright's dashboard, which attaches
+  /// `context.pages()[0]` when the attached page closes
+  /// (`DashboardConnection._handleAttachedPageClose`).
+  First,
+}
+
+impl Refocus {
+  /// The index the active page moves to once the page at `place` closed,
+  /// in a list now `len` long.
+  fn index(self, place: usize, len: usize) -> usize {
+    match self {
+      Self::Neighbour => place.min(len.saturating_sub(1)),
+      Self::First => 0,
+    }
+  }
 }
 
 impl BrowserContext {
   /// Create a new empty context.
-  pub(crate) fn new(name: String) -> Self {
+  pub(crate) fn new(name: String, refocus: Refocus) -> Self {
     Self {
       pages: Vec::new(),
       active_page_idx: 0,
@@ -72,36 +92,33 @@ impl BrowserContext {
       name,
       cdp_context_id: None,
       owned_by_page: false,
-      popups_listed: 0,
-      latest_popup: None,
+      refocus,
     }
   }
 
-  /// List a popup without making it active.
+  /// List a page the browser opened. It becomes the active page only when
+  /// the context has none, as Playwright MCP's `Context._onPageCreated`
+  /// makes a new tab current only when there is no current tab: focus
+  /// moves when a caller selects a page, never because a page opened one.
   pub(crate) fn list_popup(&mut self, page: AnyPage) {
-    self.pages.push(page.clone());
-    self.popups_listed += 1;
-    self.latest_popup = Some(page);
-  }
-
-  pub(crate) fn popups_listed(&self) -> u64 {
-    self.popups_listed
-  }
-
-  /// Make the latest popup listed after `mark` the active page, when it
-  /// is still open. Returns whether one was.
-  pub(crate) fn activate_popup_since(&mut self, mark: u64) -> bool {
-    if self.popups_listed <= mark {
-      return false;
+    let had_active = self.active_page().is_some();
+    self.pages.push(page);
+    if !had_active {
+      self.active_page_idx = self.pages.len() - 1;
     }
-    let Some(latest) = self.latest_popup.as_ref().filter(|page| !page.is_closed()) else {
-      return false;
+  }
+
+  /// Drop the page at `index` from the list, moving the active index with
+  /// the page it pointed at, or by [`Refocus`] when that page was the one
+  /// dropped.
+  pub(crate) fn remove_page(&mut self, index: usize) -> AnyPage {
+    let page = self.pages.remove(index);
+    self.active_page_idx = match self.active_page_idx.cmp(&index) {
+      std::cmp::Ordering::Less => self.active_page_idx,
+      std::cmp::Ordering::Equal => self.refocus.index(index, self.pages.len()),
+      std::cmp::Ordering::Greater => self.active_page_idx - 1,
     };
-    let Some(index) = self.pages.iter().position(|page| page.same_backend_page(latest)) else {
-      return false;
-    };
-    self.active_page_idx = index;
-    true
+    page
   }
 
   /// Context name.
@@ -115,34 +132,42 @@ impl BrowserContext {
   /// A closed page is skipped: closing a tab (or losing its target) leaves the
   /// `AnyPage` in place, and handing that back sends every later command to a
   /// dead CDP session -- surfacing as `Session with given id not found` on the
-  /// next call rather than as a lost context. Falls back to the most recently
-  /// opened live page so a context that still has other tabs keeps working, and
-  /// reports `None` once nothing is open so callers can rebuild.
+  /// next call rather than as a lost context. The page [`Refocus`] picks among
+  /// the live ones stands in, the same one `Self::prune_closed_pages` makes
+  /// active once it drops the dead entry, and `None` once nothing is open so
+  /// callers can rebuild.
   ///
   /// Read-only, so it cannot drop the dead entries it skips;
   /// `Self::prune_closed_pages` does that at the `&mut` entry points
   /// (opening a page, refreshing the list).
   #[must_use]
   pub fn active_page(&self) -> Option<&AnyPage> {
-    if let Some(page) = self.pages.get(self.active_page_idx)
+    let index = self.active_page_idx;
+    if let Some(page) = self.pages.get(index)
       && !page.is_closed()
     {
       return Some(page);
     }
-    self.pages.iter().rev().find(|page| !page.is_closed())
+    let live = |page: &&AnyPage| !page.is_closed();
+    match self.refocus {
+      Refocus::First => self.pages.iter().find(live),
+      Refocus::Neighbour => self
+        .pages
+        .iter()
+        .skip(index.saturating_add(1))
+        .find(live)
+        .or_else(|| self.pages[..index.min(self.pages.len())].iter().rev().find(live)),
+    }
   }
 
   /// Drop closed pages, keeping the active index on the same page when it
-  /// survived and on the newest live one when it did not.
+  /// survived and moving it by [`Refocus`] when it did not.
   ///
   /// Closed pages were only ever removed by an explicit `close_page`, so a
   /// context whose tabs were closed in the browser UI (or by
   /// `window.close()`) grew a `Vec` of corpses for its whole life and paid
   /// a scan past them on every command.
   pub(crate) fn prune_closed_pages(&mut self) {
-    if self.latest_popup.as_ref().is_some_and(AnyPage::is_closed) {
-      self.latest_popup = None;
-    }
     if !self.pages.iter().any(AnyPage::is_closed) {
       return;
     }
@@ -155,7 +180,7 @@ impl BrowserContext {
     self.active_page_idx = if active_survives {
       live_before_active
     } else {
-      self.pages.len().saturating_sub(1)
+      self.refocus.index(live_before_active, self.pages.len())
     };
   }
 
@@ -486,23 +511,6 @@ impl ContextRef {
   #[must_use]
   pub fn name(&self) -> &str {
     &self.name
-  }
-
-  /// How many popups this context has listed: the mark to take before a
-  /// call, so that only a popup the call opened is activated after it.
-  pub async fn popups_listed(&self) -> u64 {
-    self.state.read().await.popups_listed(&self.key.to_composite())
-  }
-
-  /// Make the latest popup listed after `mark` the active page, and hand
-  /// it back; `None` when the call opened no popup that is still open.
-  pub async fn activate_popup_since(&self, mark: u64) -> Option<AnyPage> {
-    let composite = self.key.to_composite();
-    let mut state = self.state.write().await;
-    if !state.activate_popup_since(&composite, mark) {
-      return None;
-    }
-    state.active_page(&composite).ok().cloned()
   }
 
   /// Wait until every tab the browser opened before this call is listed

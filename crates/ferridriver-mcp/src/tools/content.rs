@@ -37,7 +37,7 @@ impl McpServer {
               let state = self.state.read().await;
               state.set_ref_map(&s, result.ref_map);
             }
-            let mut text = result.full;
+            let mut text = self.tabs_section(&s).await + &result.full;
             if let Some(inc) = result.incremental {
               text.push_str("\n### Changes since last snapshot\n");
               text.push_str(&inc);

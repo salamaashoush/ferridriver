@@ -5,8 +5,9 @@
 //! click, read state, mock a route, drive a whole flow — is a script, so the
 //! protocol carries a script rather than a table of verbs that would forever
 //! lag the scripting API behind it. The remaining verbs (`input`,
-//! `screencast`, `recorder.*`) watch and drive the browser from elsewhere,
-//! which is streaming and per-event work no script expresses well.
+//! `page.select`, `screencast`, `recorder.*`) watch and drive the browser
+//! from elsewhere, which is streaming and per-event work no script expresses
+//! well.
 //!
 //! Running the script is delegated to a [`ScriptHost`] supplied by a higher
 //! crate, because the scripting engine lives above this crate in the
@@ -20,10 +21,10 @@ use ferridriver::{Browser, Page};
 use tokio::sync::RwLock;
 
 use crate::dispatch::{Dispatcher, EventSink, ScriptHost};
-use crate::drive::Recordings;
+use crate::drive::{Recordings, Selections};
 use crate::protocol::{
-  Command, INPUT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_SECRET_VERB, RECORDER_START_VERB,
-  RECORDER_STOP_VERB, RUN_VERB, Response, SCREENCAST_VERB, ScriptRequest,
+  Command, INPUT_VERB, PAGE_SELECT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_SECRET_VERB,
+  RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB, Response, SCREENCAST_VERB, ScriptRequest,
 };
 
 /// Runs session commands against a live browser.
@@ -32,6 +33,7 @@ pub struct BrowserDispatcher {
   browser_name: String,
   script_host: Option<Arc<dyn ScriptHost>>,
   recordings: Recordings,
+  selections: Selections,
 }
 
 impl BrowserDispatcher {
@@ -43,6 +45,7 @@ impl BrowserDispatcher {
       browser_name: browser_name_for(browser).to_owned(),
       script_host: None,
       recordings: Recordings::default(),
+      selections: Selections::default(),
     }
   }
 
@@ -90,8 +93,13 @@ impl Dispatcher for BrowserDispatcher {
           Err(error) => Response::err(id, error),
         };
       },
+      PAGE_SELECT_VERB => {
+        let result = crate::drive::select(&self.browser, &context, command.args, &self.selections).await;
+        return json(result.and_then(|pages| to_json(&pages)));
+      },
       SCREENCAST_VERB => {
-        return match crate::drive::screencast(&self.browser, &context, command.args, &events).await {
+        let cast = crate::drive::screencast(&self.browser, &context, command.args, &events, &self.selections);
+        return match cast.await {
           Ok(()) => Response::ok(id, ""),
           Err(error) => Response::err(id, error),
         };
@@ -153,6 +161,7 @@ impl Dispatcher for BrowserDispatcher {
     vec![
       RUN_VERB,
       INPUT_VERB,
+      PAGE_SELECT_VERB,
       SCREENCAST_VERB,
       RECORDER_START_VERB,
       RECORDER_STOP_VERB,
@@ -198,8 +207,8 @@ pub fn dispatcher_for(browser: &Browser) -> BrowserDispatcher {
   BrowserDispatcher::new(browser)
 }
 
-/// Resolve a context name to a live `Page` on `state`, opening one on first
-/// use. Shared by every script host so "the session's page" means the same
+/// Resolve a context name to its selected `Page` on `state`, opening one on
+/// first use. Shared by every script host so "the session's page" means the same
 /// thing regardless of which crate asks.
 ///
 /// # Errors

@@ -4640,10 +4640,7 @@ impl Page {
         let context_pages = state.context_pages.clone();
         match state.context_mut_checked(&ctx.name) {
           Ok(browser_ctx) => {
-            browser_ctx.pages.retain(|p| !p.is_closed());
-            if browser_ctx.active_page_idx >= browser_ctx.pages.len() && !browser_ctx.pages.is_empty() {
-              browser_ctx.active_page_idx = browser_ctx.pages.len() - 1;
-            }
+            browser_ctx.prune_closed_pages();
             context_pages.set(&ctx.key.to_composite(), &browser_ctx.pages);
             browser_ctx.owned_by_page && browser_ctx.pages.is_empty()
           },

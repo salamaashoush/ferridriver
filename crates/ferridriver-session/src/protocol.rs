@@ -13,8 +13,15 @@
 //! are a [`ScriptRequest`] — anything a script can express goes through
 //! it. The other verbs carry what a script cannot do well: a stream of
 //! screencast frames ([`SCREENCAST_VERB`]), input relayed one event at a
-//! time with no compile step ([`INPUT_VERB`]), and a recorder whose actions
+//! time with no compile step ([`INPUT_VERB`]), the choice of the page both
+//! of those follow ([`PAGE_SELECT_VERB`]), and a recorder whose actions
 //! arrive as they happen ([`RECORDER_START_VERB`] and its siblings).
+//!
+//! Each context has one selected page, which `run`, `input` without a
+//! `page` and the screencast act on. It changes only when asked: a page a
+//! page opens (a popup) is listed and selected only when the context has no
+//! other, and when the selected page closes the first page left is selected,
+//! as Playwright's dashboard attaches `context.pages()[0]`.
 //!
 //! A command answers in order on its connection, and a long-running one
 //! (`screencast`, `recorder.start`) holds its connection until it ends, so
@@ -71,7 +78,13 @@ pub const AUTH_VERB: &str = "session.auth";
 /// Dispatch one [`InputEvent`] to a page of the context; args are an
 /// [`InputRequest`].
 pub const INPUT_VERB: &str = "input";
-/// Stream [`EventPayload::Frame`]s until the client hangs up; args are a
+/// Select a page of the context, the one `input` without a `page` and the
+/// screencast follow; args are a [`PageSelectRequest`], the response text
+/// the context's pages ([`PageEntry`] list) once it is selected.
+pub const PAGE_SELECT_VERB: &str = "page.select";
+/// Stream the selected page's [`EventPayload::Frame`]s, following the
+/// selection, and the context's [`EventPayload::Pages`] whenever they
+/// change, until the client hangs up or no page is left; args are a
 /// [`ScreencastRequest`].
 pub const SCREENCAST_VERB: &str = "screencast";
 /// Record the context's pages and their frames, streaming
@@ -150,7 +163,8 @@ fn first_click() -> u32 {
 /// [`INPUT_VERB`]'s arguments: the event's own fields, and beside them an
 /// optional `page`, the target id of the page the event goes to (the main
 /// frame id, which on Chromium is the CDP target id). Without one the event
-/// goes to the context's active page: the one opened last, popups included.
+/// goes to the context's selected page, which a popup never becomes by
+/// opening while another page is open: [`PAGE_SELECT_VERB`] moves it.
 ///
 /// `{"type": "mouse_down", "x": 10, "y": 20, "page": "8E1A..."}`
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +198,30 @@ impl<'de> Deserialize<'de> for InputRequest {
     let event = InputEvent::deserialize(value).map_err(D::Error::custom)?;
     Ok(Self { event, page })
   }
+}
+
+/// [`PAGE_SELECT_VERB`]'s arguments: the target id of the page to select,
+/// as [`InputRequest::page`] names one.
+///
+/// `{"page": "8E1A..."}`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageSelectRequest {
+  pub page: String,
+}
+
+/// One open page of a context, as [`EventPayload::Pages`] and
+/// [`PAGE_SELECT_VERB`] list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageEntry {
+  /// The target id [`InputRequest::page`] and [`PageSelectRequest::page`]
+  /// take.
+  pub page: String,
+  pub url: String,
+  #[serde(default)]
+  pub title: String,
+  /// The page `input` without a `page`, a `run` and the screencast act on.
+  #[serde(default)]
+  pub selected: bool,
 }
 
 /// [`SCREENCAST_VERB`]'s arguments. Frames are JPEG, scaled down to fit
@@ -440,6 +478,13 @@ pub enum EventPayload {
     name: String,
     value: String,
   },
+  /// The context's open pages in the order they opened, for
+  /// [`SCREENCAST_VERB`]: first when the stream starts, then whenever a page
+  /// opens, loads, navigates or closes, or the selection moves, as
+  /// Playwright's dashboard pushes `tabs`.
+  Pages {
+    pages: Vec<PageEntry>,
+  },
   /// The page the context is left on once the run finished. Sent once, after
   /// the last action, and only when the request set
   /// [`ScriptRequest::page_state`].
@@ -685,6 +730,52 @@ mod tests {
 
     let wrong = serde_json::from_value::<InputRequest>(serde_json::json!({"type": "key_up", "key": "a", "page": 3}));
     assert!(wrong.unwrap_err().to_string().contains("target id"));
+  }
+
+  #[test]
+  fn a_pages_event_and_a_select_request_use_their_wire_shapes() {
+    let wire = serde_json::to_value(ServerFrame::Event(Event {
+      id: 4,
+      payload: EventPayload::Pages {
+        pages: vec![
+          PageEntry {
+            page: "8E1A".into(),
+            url: "https://example.com/".into(),
+            title: "Shop".into(),
+            selected: true,
+          },
+          PageEntry {
+            page: "9F2B".into(),
+            url: "https://example.com/help".into(),
+            title: String::new(),
+            selected: false,
+          },
+        ],
+      },
+    }))
+    .unwrap();
+    let expected = serde_json::json!({
+      "type": "event",
+      "id": 4,
+      "event": "pages",
+      "pages": [
+        {"page": "8E1A", "url": "https://example.com/", "title": "Shop", "selected": true},
+        {"page": "9F2B", "url": "https://example.com/help", "title": "", "selected": false},
+      ],
+    });
+    assert_eq!(wire, expected);
+    let ServerFrame::Event(Event {
+      payload: EventPayload::Pages { pages },
+      ..
+    }) = serde_json::from_value::<ServerFrame>(expected).unwrap()
+    else {
+      panic!("a pages event decoded as another frame");
+    };
+    assert_eq!(pages.iter().filter(|page| page.selected).count(), 1);
+
+    let select: PageSelectRequest = serde_json::from_value(serde_json::json!({"page": "9F2B"})).unwrap();
+    assert_eq!(select.page, "9F2B");
+    assert!(serde_json::from_value::<PageSelectRequest>(serde_json::json!({})).is_err());
   }
 
   #[test]

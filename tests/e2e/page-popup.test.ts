@@ -121,4 +121,19 @@ test.describe('page popup event', () => {
     await expect.poll(() => seen.length).toBe(1);
     expect(await seen[0].opener()).toBe(page);
   });
+
+  // Playwright's tests/library/coverage.spec.ts CV-022: a popup closed by
+  // its own script emits `close` and leaves the context's pages.
+  test('a popup closed by window.close emits close', async ({ page, context }) => {
+    const [popup] = await Promise.all([
+      page.waitForEvent('popup') as Promise<Page>,
+      page.evaluate(() => { window.open('about:blank'); }),
+    ]);
+    await Promise.all([
+      popup.waitForEvent('close'),
+      popup.evaluate(() => { setTimeout(() => window.close(), 0); }),
+    ]);
+    expect(popup.isClosed()).toBe(true);
+    expect(context.pages()).toEqual([page]);
+  });
 });

@@ -395,6 +395,7 @@ async fn cancellation_during_eviction_retains_both_owners() {
     browser: allocated_browser(&endpoint, "old").await,
     contexts: HashMap::default(),
     generation: state.next_instance_generation(),
+    refocus: crate::context::Refocus::default(),
   };
   state.instances.insert("default".into(), old);
   state.connected.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -492,6 +493,7 @@ async fn successful_adoption_promotes_the_right_owner_after_cleanup_moves_entrie
       browser: allocated_browser(&endpoint, id).await,
       contexts: HashMap::default(),
       generation: state.next_instance_generation(),
+      refocus: crate::context::Refocus::default(),
     };
     state.pending_cleanup.push((name.into(), instance.into()));
   }

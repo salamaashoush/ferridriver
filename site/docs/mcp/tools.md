@@ -33,7 +33,9 @@ session: "staging:qa"     context "qa" on Chrome instance "staging"
   default `commit`).
 - **`page`** — manage pages / tabs. Parameters: `action` (`back` /
   `forward` / `reload` / `new` / `close` / `select` / `list` /
-  `close_browser`), `url?`, `page_index?`.
+  `close_browser`), `url?`, `page_index?`. A tab a page opens is listed
+  under `### Open tabs` in the next response and stays unselected until
+  `select` switches to it.
 
 ## Observation (4)
 

@@ -249,6 +249,28 @@ impl WebKitBrowser {
     Ok(())
   }
 
+  /// A page the browser closed, by `window.close()` or otherwise, is
+  /// closed here too, as `wkBrowser._onPageProxyDestroyed` closes it: the
+  /// page answers nothing again, and its `close` event is what tells the
+  /// context.
+  fn page_proxy_destroyed(&self, params: &serde_json::Value) {
+    let Some(proxy_id) = params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
+      return;
+    };
+    let gone = {
+      let mut pages = self
+        .inner
+        .pages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      let index = pages.iter().position(|page| page.page_proxy_id() == proxy_id);
+      index.map(|index| pages.remove(index))
+    };
+    if let Some(page) = gone {
+      page.dispose_local();
+    }
+  }
+
   /// Watch `Playwright.pageProxyCreated` for pages the BROWSER opened.
   /// `openerId` is only set for `window.open()` pages (protocol doc),
   /// so our own `Playwright.createPage` proxies — which fire the same
@@ -297,6 +319,10 @@ impl WebKitBrowser {
         };
         let Some(inner) = browser.upgrade() else { break };
         let browser = WebKitBrowser { inner };
+        if env.method.as_deref() == Some(protocol::EVT_PAGE_PROXY_DESTROYED) {
+          browser.page_proxy_destroyed(&env.params);
+          continue;
+        }
         if env.method.as_deref() != Some("Playwright.pageProxyCreated") {
           continue;
         }

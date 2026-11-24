@@ -1,5 +1,6 @@
 //! Watching and driving a bound browser from somewhere else: screencast
-//! frames out, input events in, and a recorder whose actions stream back.
+//! frames and the page list out, input events and page selection in, and a
+//! recorder whose actions stream back.
 //!
 //! These are verbs of their own rather than scripts because each is either a
 //! stream (`screencast`, `recorder.start`) or something sent many times a
@@ -21,8 +22,8 @@ use tokio::sync::watch;
 use crate::browser_dispatch::{context_key_for, page_for, page_with_target_id};
 use crate::dispatch::EventSink;
 use crate::protocol::{
-  EventPayload, InputEvent, InputRequest, PageAssertion, RecorderAssertRequest, RecorderModeRequest,
-  RecorderSecretRequest, RecorderStartRequest, RecordingResult, ScreencastRequest,
+  EventPayload, InputEvent, InputRequest, PageAssertion, PageEntry, PageSelectRequest, RecorderAssertRequest,
+  RecorderModeRequest, RecorderSecretRequest, RecorderStartRequest, RecordingResult, ScreencastRequest,
 };
 
 type Outcome<T> = std::result::Result<T, String>;
@@ -48,7 +49,7 @@ fn button(name: Option<&str>) -> Outcome<MouseButton> {
 
 /// Dispatch one input event through the page's own input devices, which
 /// speak the backend's input protocol directly (CDP `Input.*` on Chromium):
-/// to the page the request names, or else to the context's active page.
+/// to the page the request names, or else to the context's selected page.
 pub(crate) async fn input(browser: &Browser, context: &str, args: serde_json::Value) -> Outcome<()> {
   let InputRequest { event, page: target } = parse("input", args)?;
   let page = match target {
@@ -114,6 +115,164 @@ fn typed_without_a_key(key: &str) -> bool {
   key.chars().count() == 1 && ferridriver_types::keyboard::describe(key, false).is_none()
 }
 
+// ── pages ──
+
+/// Who has to hear that a context's selection moved: the screencasts
+/// following it. A page opening, loading or closing reaches them as a
+/// context event; a selection made over another connection does not.
+#[derive(Default)]
+pub(crate) struct Selections {
+  by_context: Mutex<FxHashMap<String, watch::Sender<u64>>>,
+}
+
+impl Selections {
+  fn sender(&self, key: &str) -> watch::Sender<u64> {
+    self
+      .by_context
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .entry(key.to_string())
+      .or_insert_with(|| watch::channel(0).0)
+      .clone()
+  }
+
+  fn subscribe(&self, key: &str) -> watch::Receiver<u64> {
+    self.sender(key).subscribe()
+  }
+
+  fn moved(&self, key: &str) {
+    self.sender(key).send_modify(|generation| *generation += 1);
+  }
+}
+
+/// The open pages of the context `key` names, in the order they opened,
+/// and the one selected.
+async fn open_pages(browser: &Browser, key: &str) -> Outcome<(Vec<Arc<Page>>, Option<usize>)> {
+  let (pages, selected) = browser
+    .state()
+    .write()
+    .await
+    .open_pages(key)
+    .map_err(|e| e.to_string())?;
+  let context = ferridriver::context::ContextRef::new_async(Arc::clone(browser.state()), key.to_string())
+    .await
+    .with_browser(browser.clone());
+  let pages = pages
+    .into_iter()
+    .map(|page| Page::with_context(page, context.clone()))
+    .collect();
+  Ok((pages, selected))
+}
+
+/// What a viewer is told about `pages`. The title is read from the
+/// backend page, so the read never shows in a traced run's actions.
+async fn entries(pages: &[Arc<Page>], selected: Option<usize>) -> Vec<PageEntry> {
+  let mut entries = Vec::with_capacity(pages.len());
+  for (index, page) in pages.iter().enumerate() {
+    entries.push(PageEntry {
+      page: page.main_frame().id().to_string(),
+      url: page.url(),
+      title: page.inner().title().await.ok().flatten().unwrap_or_default(),
+      selected: selected == Some(index),
+    });
+  }
+  entries
+}
+
+/// Select the page the request names and answer with the context's pages.
+pub(crate) async fn select(
+  browser: &Browser,
+  context: &str,
+  args: serde_json::Value,
+  selections: &Selections,
+) -> Outcome<Vec<PageEntry>> {
+  let PageSelectRequest { page: target } = parse("page.select", args)?;
+  let page = page_with_target_id(browser, context, &target)
+    .await
+    .map_err(|e| e.to_string())?;
+  let key = key(browser, context)?;
+  browser
+    .state()
+    .write()
+    .await
+    .select_open_page(&key, page.inner())
+    .map_err(|e| e.to_string())?;
+  selections.moved(&key);
+  // The selected page is the one in front, as the browser's own tab strip
+  // has it: a page behind another draws on a throttled clock, if at all,
+  // and its screencast with it.
+  page.inner().bring_to_front().await.map_err(|e| e.to_string())?;
+  let (pages, selected) = open_pages(browser, &key).await?;
+  Ok(entries(&pages, selected).await)
+}
+
+/// Tells a screencast that the context's page list may have changed, for
+/// as long as it is held, and keeps a wrapper of every listed page alive:
+/// a context event about a page is delivered only while one is.
+struct PagesWatch {
+  context: ferridriver::context::ContextRef,
+  listeners: Vec<ferridriver::events::ListenerId>,
+  changed: tokio::sync::mpsc::UnboundedReceiver<()>,
+  held: Vec<Arc<Page>>,
+}
+
+impl PagesWatch {
+  async fn start(browser: &Browser, key: &str) -> Self {
+    use ferridriver::events::ContextEvent;
+    let context = ferridriver::context::ContextRef::new_async(Arc::clone(browser.state()), key.to_string())
+      .await
+      .with_browser(browser.clone());
+    let (tx, changed) = tokio::sync::mpsc::unbounded_channel();
+    let listeners = ["page", "pageload", "pageclose", "framenavigated"]
+      .into_iter()
+      .map(|name| {
+        let tx = tx.clone();
+        context.on(
+          name,
+          Arc::new(move |event| {
+            let relevant = match &event {
+              ContextEvent::FrameNavigated { page, frame_id } => **page.main_frame().id() == **frame_id,
+              _ => true,
+            };
+            if relevant {
+              let _ = tx.send(());
+            }
+          }),
+        )
+      })
+      .collect();
+    let held = context.pages();
+    Self {
+      context,
+      listeners,
+      changed,
+      held,
+    }
+  }
+
+  /// Resolve once something changed, with every change queued so far
+  /// taken, so a burst of events costs one page list.
+  async fn changed(&mut self) {
+    if self.changed.recv().await.is_none() {
+      std::future::pending::<()>().await;
+    }
+    while self.changed.try_recv().is_ok() {}
+  }
+
+  fn hold(&mut self, pages: &[Arc<Page>]) {
+    self.held = pages.to_vec();
+  }
+}
+
+impl Drop for PagesWatch {
+  fn drop(&mut self) {
+    for listener in self.listeners.drain(..) {
+      self.context.off(listener);
+    }
+    self.held.clear();
+  }
+}
+
 // ── screencast ──
 
 /// The CSS-pixel viewport, which the frame events report so a viewer can
@@ -144,43 +303,144 @@ fn frame_millis(seconds: f64) -> u64 {
     .map_or(0, |clock| u64::try_from(clock.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Stream frames to `events` until the client hangs up or the page closes.
+/// The frames of one page.
+struct Cast {
+  page: Arc<Page>,
+  frames: ferridriver::page::ScreencastFrames,
+  viewport: (u32, u32),
+}
+
+impl Cast {
+  async fn start(page: Arc<Page>, request: &ScreencastRequest) -> Outcome<Self> {
+    let (viewport_width, viewport_height) = viewport(&page).await;
+    let frames = page
+      .screencast_frames(
+        request.quality.unwrap_or(80),
+        request.max_width.unwrap_or(viewport_width),
+        request.max_height.unwrap_or(viewport_height),
+      )
+      .await
+      .map_err(|e| format!("starting the screencast: {e}"))?;
+    Ok(Self {
+      page,
+      frames,
+      viewport: (viewport_width, viewport_height),
+    })
+  }
+
+  fn send(&self, events: &EventSink, (data, timestamp): (Vec<u8>, f64)) {
+    let (viewport_width, viewport_height) = self
+      .page
+      .viewport_size()
+      .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?)))
+      .unwrap_or(self.viewport);
+    events.send(EventPayload::Frame {
+      data: base64::engine::general_purpose::STANDARD.encode(data),
+      timestamp_ms: frame_millis(timestamp),
+      viewport_width,
+      viewport_height,
+    });
+  }
+}
+
+/// What a screencast does about the page list it just read.
+struct Watched {
+  pages: Vec<Arc<Page>>,
+  selected: Option<Arc<Page>>,
+}
+
+/// Read the page list, tell the client when it differs from the last one
+/// it was told, and name the page to cast.
+async fn watch_pages(
+  browser: &Browser,
+  key: &str,
+  events: &EventSink,
+  told: &mut Option<Vec<PageEntry>>,
+) -> Outcome<Watched> {
+  let (pages, selected) = open_pages(browser, key).await?;
+  let listed = entries(&pages, selected).await;
+  if told.as_ref() != Some(&listed) {
+    events.send(EventPayload::Pages { pages: listed.clone() });
+    *told = Some(listed);
+  }
+  let selected = selected.and_then(|index| pages.get(index).cloned());
+  Ok(Watched { pages, selected })
+}
+
+/// Stream the selected page's frames to `events`, moving to whichever page
+/// is selected next, with the page list each time it changes, until the
+/// client hangs up or no page is left.
 pub(crate) async fn screencast(
   browser: &Browser,
   context: &str,
   args: serde_json::Value,
   events: &EventSink,
+  selections: &Selections,
 ) -> Outcome<()> {
   let request: ScreencastRequest = parse("screencast", args)?;
-  let page = page(browser, context).await?;
-  let (viewport_width, viewport_height) = viewport(&page).await;
-  let mut frames = page
-    .screencast_frames(
-      request.quality.unwrap_or(80),
-      request.max_width.unwrap_or(viewport_width),
-      request.max_height.unwrap_or(viewport_height),
-    )
-    .await
-    .map_err(|e| format!("starting the screencast: {e}"))?;
+  let key = key(browser, context)?;
+  let mut watch = PagesWatch::start(browser, &key).await;
+  let mut selection = selections.subscribe(&key);
+  let mut told = None;
+  let mut cast = Cast::start(page(browser, context).await?, &request).await?;
+  let watched = watch_pages(browser, &key, events, &mut told).await?;
+  watch.hold(&watched.pages);
+  // Off while the cast page's frames have stopped and it is still listed,
+  // as a page whose close is not reported yet is: the list changing next
+  // says what to cast.
+  let mut casting = true;
   loop {
-    tokio::select! {
+    let ended = tokio::select! {
       () = events.closed() => break,
-      frame = frames.next() => {
-        let Some((data, timestamp)) = frame else { break };
-        let (viewport_width, viewport_height) = page
-          .viewport_size()
-          .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?)))
-          .unwrap_or((viewport_width, viewport_height));
-        events.send(EventPayload::Frame {
-          data: base64::engine::general_purpose::STANDARD.encode(data),
-          timestamp_ms: frame_millis(timestamp),
-          viewport_width,
-          viewport_height,
-        });
+      frame = cast.frames.next(), if casting => match frame {
+        Some(frame) => {
+          cast.send(events, frame);
+          continue;
+        },
+        None => true,
       },
+      () = watch.changed() => false,
+      changed = selection.changed() => {
+        if changed.is_err() {
+          break;
+        }
+        false
+      },
+    };
+    let watched = watch_pages(browser, &key, events, &mut told).await?;
+    watch.hold(&watched.pages);
+    let Some(next) = watched.selected else { break };
+    if next.inner().same_backend_page(cast.page.inner()) {
+      if ended {
+        casting = false;
+        continue;
+      }
+      if casting {
+        continue;
+      }
     }
+    cast.frames.stop().await;
+    // The page selected next may close before its frames start, as a
+    // page does that is closed right after the one before it: then the
+    // page selected after it is cast.
+    let mut next = next;
+    cast = loop {
+      match Cast::start(Arc::clone(&next), &request).await {
+        Ok(started) => break started,
+        Err(_) if next.is_closed() => {
+          let watched = watch_pages(browser, &key, events, &mut told).await?;
+          watch.hold(&watched.pages);
+          let Some(selected) = watched.selected else {
+            return Ok(());
+          };
+          next = selected;
+        },
+        Err(error) => return Err(error),
+      }
+    };
+    casting = true;
   }
-  frames.stop().await;
+  cast.frames.stop().await;
   Ok(())
 }
 

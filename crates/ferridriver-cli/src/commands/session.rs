@@ -531,6 +531,7 @@ pub async fn run_on_session(
       // A `run` streams none of these; they belong to the screencast and
       // recorder verbs.
       ferridriver_session::EventPayload::Frame { .. }
+      | ferridriver_session::EventPayload::Pages { .. }
       | ferridriver_session::EventPayload::Recorded { .. }
       | ferridriver_session::EventPayload::RecorderMode { .. }
       | ferridriver_session::EventPayload::Secret { .. } => {},
