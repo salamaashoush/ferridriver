@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-bdd"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-bdd-macros"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-config"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-expect"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "ferridriver",
  "ferridriver-config",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-fixtures"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-gate"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "rustix 1.1.6",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-heap"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "flate2",
  "regex",
@@ -1860,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-mcp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-node"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.23.1",
  "ferridriver",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-perf"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "ferridriver",
  "flate2",
@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-script"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-session"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-test"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-test-macros"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-testjs"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-trace"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.23.1",
  "rustc-hash",
@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-types"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "ferridriver-viewer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "axum",
  "bytes",
