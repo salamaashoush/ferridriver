@@ -10,10 +10,10 @@
 //! `Browser.bind(title, options)` / `Browser.unbind()` surface exposed by the
 //! `NAPI` and `QuickJS` bindings — they call straight into here.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ferridriver::Browser;
+use rustc_hash::FxHashMap;
 
 use crate::Result;
 use crate::browser_dispatch::{BrowserDispatcher, browser_name_for, dispatcher_for};
@@ -29,18 +29,18 @@ use crate::server::{Endpoint, SessionServer};
 /// the script returns. Parking the [`BoundSession`] here keeps it serving
 /// until an explicit `unbind` (or process exit), and lets `unbind` find the
 /// session by id from any handle.
-fn live_sessions() -> &'static Mutex<HashMap<String, BoundSession>> {
-  static SESSIONS: OnceLock<Mutex<HashMap<String, BoundSession>>> = OnceLock::new();
-  SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+fn live_sessions() -> &'static Mutex<FxHashMap<String, BoundSession>> {
+  static SESSIONS: OnceLock<Mutex<FxHashMap<String, BoundSession>>> = OnceLock::new();
+  SESSIONS.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Maps a browser's stable identity (the `Arc<RwLock<BrowserState>>` pointer)
 /// to the session id it is currently bound under. Lets `browser.unbind()`
 /// take no argument (Playwright parity) by recovering the id from the browser
 /// even after its JS wrapper has been rebuilt.
-fn browser_bindings() -> &'static Mutex<HashMap<usize, BrowserBinding>> {
-  static MAP: OnceLock<Mutex<HashMap<usize, BrowserBinding>>> = OnceLock::new();
-  MAP.get_or_init(|| Mutex::new(HashMap::new()))
+fn browser_bindings() -> &'static Mutex<FxHashMap<usize, BrowserBinding>> {
+  static MAP: OnceLock<Mutex<FxHashMap<usize, BrowserBinding>>> = OnceLock::new();
+  MAP.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 struct BrowserBinding {
@@ -489,7 +489,7 @@ mod tests {
     let mut session = bind_dispatcher(
       &registry,
       "safari",
-      dispatcher.clone(),
+      Arc::<RetryCleanup>::clone(&dispatcher),
       "safari".into(),
       BindOptions::default(),
     )

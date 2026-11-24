@@ -179,7 +179,8 @@ fn to_json<T: serde::Serialize>(value: &T) -> std::result::Result<serde_json::Va
 /// Normalize the reported browser product for the registry descriptor.
 #[must_use]
 pub fn browser_name_for(browser: &Browser) -> &str {
-  let product = browser.version().split('/').next().unwrap_or(browser.version());
+  let version = browser.version();
+  let product = version.split('/').next().unwrap_or(version);
   if ["Chrome", "HeadlessChrome", "Chromium"]
     .iter()
     .any(|name| product.eq_ignore_ascii_case(name))

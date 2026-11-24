@@ -182,7 +182,7 @@ pub(crate) mod test_support {
   /// A dispatcher used by server/client tests: echoes the verb and args back
   /// as text, fails the reserved verb `boom`, and emits console events for
   /// the reserved verb `chatty` before answering.
-  pub struct EchoDispatcher;
+  pub(crate) struct EchoDispatcher;
 
   #[async_trait]
   impl Dispatcher for EchoDispatcher {

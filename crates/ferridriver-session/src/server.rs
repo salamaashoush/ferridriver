@@ -565,9 +565,9 @@ mod tests {
       started: tokio::sync::Notify::new(),
       closed: std::sync::atomic::AtomicBool::new(false),
     });
-    let lifecycle = Arc::new(Lifecycle::new("local".into(), dispatcher.clone()).unwrap());
+    let lifecycle = Arc::new(Lifecycle::new("local".into(), Arc::<StreamingDispatcher>::clone(&dispatcher)).unwrap());
     let (server, mut client) = tokio::io::duplex(64);
-    let serving = tokio::spawn(serve_connection(server, lifecycle.clone()));
+    let serving = tokio::spawn(serve_connection(server, Arc::clone(&lifecycle)));
     write_frame(&mut client, &Command::new(1, "run", serde_json::json!({})))
       .await
       .unwrap();
@@ -605,13 +605,16 @@ mod tests {
       server: std::sync::OnceLock::new(),
     });
     let server = Arc::new(
-      SessionServer::bind(Endpoint::Tcp("127.0.0.1:0".into()), dispatcher.clone())
-        .await
-        .unwrap(),
+      SessionServer::bind(
+        Endpoint::Tcp("127.0.0.1:0".into()),
+        Arc::<DrainingDispatcher>::clone(&dispatcher),
+      )
+      .await
+      .unwrap(),
     );
     dispatcher.server.set(Arc::downgrade(&server)).unwrap();
     let serving = tokio::spawn({
-      let server = server.clone();
+      let server = Arc::clone(&server);
       async move { server.serve().await }
     });
     let mut client = SessionClient::connect(server.endpoint_string()).await.unwrap();
@@ -648,7 +651,7 @@ mod tests {
         .unwrap(),
     );
     let serving = tokio::spawn({
-      let server = server.clone();
+      let server = Arc::clone(&server);
       async move { server.serve().await }
     });
     assert!(

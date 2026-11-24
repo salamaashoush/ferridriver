@@ -603,7 +603,8 @@ impl Recordings {
       () = recording.stop.notified() => {},
       () = events.closed() => {},
     }
-    let finished = match recording.recorder.lock().await.take() {
+    let recorder = recording.recorder.lock().await.take();
+    let finished = match recorder {
       Some(recorder) => recorder.finish().await,
       None => ferridriver::codegen::recorder::Recorded::default(),
     };
