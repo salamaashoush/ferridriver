@@ -50,6 +50,11 @@ impl WebDriverPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::TargetClosed` if this window was closed, and otherwise the error of the
+  /// `WebDriver` request, such as a transport failure, a timeout, or an error status from the remote
+  /// end.
   pub async fn command(&self, command: Command) -> Result<Value> {
     self.ensure_open()?;
     self
@@ -58,6 +63,12 @@ impl WebDriverPage {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::TargetClosed` if this window was closed, and an error when the `WebDriver`
+  /// `POST /session/{id}/timeouts` or `POST /session/{id}/url` command fails or the load exceeds
+  /// `timeout_ms`. On `XCUITest` Safari a `data:` URL is typed into the address field instead, and
+  /// that native navigation's error is forwarded.
   pub async fn navigate(&self, url: &str, timeout_ms: u64) -> Result<()> {
     self.ensure_open()?;
     if super::capabilities::uses_xcuitest(&self.capabilities)
@@ -130,11 +141,22 @@ impl WebDriverPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `execute_script`: the `WebDriver` `POST /session/{id}/execute/sync`
+  /// command fails, the expression throws (`FerriError::Evaluation`), or the window is closed.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<Value>> {
     let value = self.execute_script(&format!("return ({expression});"), vec![]).await?;
     Ok(Some(value))
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::TargetClosed` if this window was closed, and an error when the `WebDriver`
+  /// `POST /session/{id}/execute/sync` command fails, including `FerriError::Evaluation` when the
+  /// script throws and a timeout when it overruns the script timeout. On `XCUITest` the script runs
+  /// through `execute/async`, which also returns `FerriError::Unsupported` when the budget is
+  /// unlimited or exceeds the provider's `webviewAtomWaitTimeout`.
   pub async fn execute_script(&self, script: &str, arguments: Vec<Value>) -> Result<Value> {
     if super::capabilities::uses_xcuitest(&self.capabilities) {
       return self.execute_callback_script(script, arguments).await;
@@ -212,6 +234,11 @@ impl WebDriverPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidSelector` when the selector matches no element, and an error when
+  /// the selector cannot be compiled or injecting the selector engine or the `WebDriver`
+  /// `POST /session/{id}/execute/sync` command fails.
   pub async fn find_element(&self, selector: &str) -> Result<super::element::WebDriverElement> {
     self.ensure_engine_injected().await?;
     let expression = crate::selectors::build_selone_js(selector, "window.__fd", false)?;
@@ -222,6 +249,11 @@ impl WebDriverPage {
     self.element_from_value(&value)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/execute/sync` command fails or the
+  /// expression throws, and `FerriError::Protocol` when the expression does not resolve to an
+  /// element.
   pub async fn evaluate_to_element(&self, expression: &str) -> Result<super::element::WebDriverElement> {
     let value = self.execute_script(&format!("return ({expression});"), vec![]).await?;
     self.element_from_value(&value)
@@ -235,6 +267,11 @@ impl WebDriverPage {
     Ok(super::element::WebDriverElement::new(self.clone(), id.to_owned()))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `find_element` when the frame element is not found, and returns an
+  /// error when switching into the frame to read `document.readyState` through the `WebDriver`
+  /// `POST /session/{id}/execute/sync` command fails.
   pub async fn child_frame(&self, selector: &str) -> Result<Self> {
     let element = self.find_element(selector).await?;
     let mut page = self.clone();
@@ -246,6 +283,10 @@ impl WebDriverPage {
     Ok(page)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `GET /session/{id}/screenshot` command fails or the window
+  /// is closed, and `FerriError::Protocol` when the response is not base64 PNG data.
   pub async fn screenshot_png(&self) -> Result<Vec<u8>> {
     use base64::Engine;
     let value = self.command(Command::get(&["screenshot"])).await?;
@@ -257,6 +298,10 @@ impl WebDriverPage {
       .map_err(|error| FerriError::protocol("WebDriver screenshot", error.to_string()))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `DELETE /session/{id}/window` command fails. Closing a
+  /// page that is already closed succeeds.
   pub async fn close(&self) -> Result<()> {
     if self.is_closed() {
       return Ok(());
@@ -290,6 +335,10 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `GET /session/{id}/title` command fails or the window is
+  /// closed, and `FerriError::Protocol` when the title is not a string.
   pub async fn title(&self) -> Result<Option<String>> {
     let value = self.command(Command::get(&["title"])).await?;
     value
@@ -298,6 +347,10 @@ impl WebDriverPage {
       .ok_or_else(|| FerriError::protocol("WebDriver title", "expected a string"))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `GET /session/{id}/url` command fails or the window is
+  /// closed, and `FerriError::Protocol` when the URL is not a string.
   pub async fn url(&self) -> Result<Option<String>> {
     let value = self.command(Command::get(&["url"])).await?;
     value
@@ -306,6 +359,10 @@ impl WebDriverPage {
       .ok_or_else(|| FerriError::protocol("WebDriver url", "expected a string"))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `GET /session/{id}/source` command fails or the window is
+  /// closed, and `FerriError::Protocol` when the source is not a string.
   pub async fn content(&self) -> Result<String> {
     let value = self.command(Command::get(&["source"])).await?;
     value
@@ -314,6 +371,10 @@ impl WebDriverPage {
       .ok_or_else(|| FerriError::protocol("WebDriver source", "expected a string"))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `execute_script` when the `WebDriver` `POST /session/{id}/execute/sync`
+  /// command that rewrites the document fails or the window is closed.
   pub async fn set_content(&self, html: &str) -> Result<()> {
     self
       .execute_script(
@@ -324,6 +385,10 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/execute/sync` command that injects the
+  /// selector engine fails or the window is closed.
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     self
       .execute_script(&crate::selectors::build_lazy_inject_js(), vec![])
@@ -331,11 +396,20 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `ensure_engine_injected`.
   pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
     Ok("window.__fd".into())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::TargetClosed` if this window was closed, and an error when the `WebDriver`
+  /// `POST /session/{id}/actions` command fails. On `XCUITest` it also returns
+  /// `FerriError::Unsupported` for wheel input or a non-primary button, and forwards failures
+  /// translating pointer coordinates in the native context.
   pub async fn perform_actions(&self, mut actions: Value) -> Result<()> {
     self.ensure_open()?;
     if super::capabilities::uses_xcuitest(&self.capabilities) {
@@ -398,10 +472,19 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.perform_actions(crate::backend::bidi::input::click("", x, y)).await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command. On `XCUITest`, a button other than the primary one returns
+  /// `FerriError::Unsupported`.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::click_button(
@@ -414,18 +497,31 @@ impl WebDriverPage {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command. On `XCUITest`, a button other than the primary one returns
+  /// `FerriError::Unsupported`.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendClickArgs) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::click_with_args("", x, y, args))
       .await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendHoverArgs) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::hover_with_args("", x, y, *args))
       .await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     self.perform_actions(crate::backend::bidi::input::tap("", x, y)).await
   }
@@ -434,12 +530,20 @@ impl WebDriverPage {
     &self.keyboard
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::pointer_move("", x, y))
       .await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command.
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::pointer_move_smooth(
@@ -448,6 +552,11 @@ impl WebDriverPage {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command. On `XCUITest`, wheel input returns
+  /// `FerriError::Unsupported`.
   pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::wheel_scroll("", x, y, delta_x, delta_y))
@@ -456,6 +565,12 @@ impl WebDriverPage {
 
   /// Classic `WebDriver` actions carry no click count either; see the `BiDi`
   /// backend's `mouse_down`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command. On `XCUITest`, a button other than the primary one returns
+  /// `FerriError::Unsupported`.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::mouse_down(
@@ -467,6 +582,11 @@ impl WebDriverPage {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `perform_actions`, which sends the `WebDriver`
+  /// `POST /session/{id}/actions` command. On `XCUITest`, a button other than the primary one returns
+  /// `FerriError::Unsupported`.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     self
       .perform_actions(crate::backend::bidi::input::mouse_up(
@@ -492,11 +612,19 @@ impl WebDriverPage {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/execute/sync` command fails, including
+  /// `FerriError::Evaluation` when no element has focus.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
     self.execute_script("const el = document.activeElement; if (!el) throw new Error('No focused element'); document.execCommand('insertText', false, arguments[0]);", vec![json!(text)]).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `DELETE /session/{id}/cookie` command fails or the window
+  /// is closed.
   pub async fn clear_cookies(&self) -> Result<()> {
     self
       .command(Command {

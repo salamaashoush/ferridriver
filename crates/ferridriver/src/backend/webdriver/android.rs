@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use super::WebDriverProtocol;
@@ -33,7 +35,7 @@ pub(crate) async fn connect_android_chrome(
     headers,
   )
   .await?;
-  let owner = created.session.clone();
+  let owner = Arc::clone(&created.session);
   let attach = attach(created, endpoint, headers, deadline, timeout_ms, protocol);
   let result = if timeout_ms == 0 {
     attach.await

@@ -37,6 +37,11 @@ pub struct WebDriverBrowser {
 }
 
 impl WebDriverBrowser {
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` off macOS, a timeout when safaridriver does not answer and
+  /// create a session within `timeout_ms` (30 seconds by default), and an error when
+  /// `/usr/bin/safaridriver` cannot be spawned, exits during startup, or `connect` fails.
   pub async fn launch_safari(env: &rustc_hash::FxHashMap<String, String>, timeout_ms: Option<u64>) -> Result<Self> {
     let timeout_ms = timeout_ms.unwrap_or(30_000);
     let (mut browser, group) = super::launcher::launch_safari(env, timeout_ms, |endpoint| async move {
@@ -52,6 +57,12 @@ impl WebDriverBrowser {
     self.version.clone()
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `capabilities` is not an object or the endpoint or
+  /// a header is invalid, and an error when the `WebDriver` `POST /session` command fails or the
+  /// session reports no browser name or version within `timeout_ms`. A session that fails after
+  /// creation is deleted first.
   pub async fn connect(
     endpoint: &str,
     browser_name: &str,
@@ -73,7 +84,7 @@ impl WebDriverBrowser {
     let client = super::http_client(headers)?;
     let created =
       WebDriverSession::create(client, super::session_url(endpoint)?, requested, timeout_ms, headers).await?;
-    let owner = created.session.clone();
+    let owner = Arc::clone(&created.session);
     match Self::from_created(created, deadline, timeout_ms).await {
       Ok(browser) => Ok(browser),
       Err(error) => {
@@ -124,6 +135,10 @@ impl WebDriverBrowser {
     })
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `GET /session/{id}/window/handles` command fails, and
+  /// `FerriError::Protocol` when the response is not an array of handle strings.
   pub async fn pages(&self) -> Result<Vec<WebDriverPage>> {
     list_windows(&self.session, &self.windows, &self.capabilities, self.timeout_ms, None).await
   }
@@ -137,7 +152,7 @@ impl WebDriverBrowser {
       let windows = Arc::downgrade(&self.windows);
       let capabilities = self.capabilities.clone();
       let timeout_ms = self.timeout_ms;
-      let taps = self.popup_taps.clone();
+      let taps = Arc::clone(&self.popup_taps);
       let in_flight = self.in_flight.clone();
       tokio::spawn(async move {
         loop {
@@ -156,7 +171,7 @@ impl WebDriverBrowser {
         }
       });
     }
-    self.popup_taps.clone()
+    Arc::clone(&self.popup_taps)
   }
 
   /// Resolves once every window the session has open is registered.
@@ -177,6 +192,11 @@ impl WebDriverBrowser {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::TargetClosed` when the session has no open window, and an error when
+  /// listing windows, the `WebDriver` `POST /session/{id}/window/new` command, or navigating the new
+  /// tab to `url` fails. A tab that fails to navigate is closed before the error returns.
   pub async fn new_page(&self, url: &str) -> Result<WebDriverPage> {
     let browser = self.clone();
     let url = url.to_owned();
@@ -229,6 +249,10 @@ impl WebDriverBrowser {
     Ok(page)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `DELETE /session/{id}` command fails, or when shutting
+  /// down a launched driver process or the iOS simulator fails.
   pub async fn close(&self) -> Result<()> {
     let browser = self.clone();
     tokio::spawn(async move { browser.close_owned().await })
@@ -258,7 +282,7 @@ impl WebDriverBrowser {
 
 fn window_page(session: &Arc<WebDriverSession>, capabilities: &Value, timeout_ms: u64, handle: &str) -> WebDriverPage {
   let mut page = WebDriverPage::new(
-    session.clone(),
+    Arc::clone(session),
     Target {
       appium_context: super::capabilities::uses_xcuitest(capabilities)
         .then(|| format!("WEBVIEW_{}", handle.trim_start_matches("WEBVIEW_"))),
@@ -512,7 +536,7 @@ mod tests {
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let cleaned = Arc::new(tokio::sync::Notify::new());
-    let signals = (started.clone(), release.clone(), cleaned.clone());
+    let signals = (Arc::clone(&started), Arc::clone(&release), Arc::clone(&cleaned));
     let server = tokio::spawn(async move {
       let mut selected = String::new();
       let mut deleted = Vec::new();

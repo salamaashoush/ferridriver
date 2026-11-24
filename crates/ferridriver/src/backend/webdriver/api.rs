@@ -59,6 +59,11 @@ impl WebDriverPage {
     self.target.window.clone().unwrap_or_default()
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `frame_id` is malformed or belongs to another
+  /// window, and an error when injecting the selector engine or the `WebDriver`
+  /// `POST /session/{id}/execute/sync` command fails.
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
     let page = self.in_frame(Some(frame_id))?;
     if expression.contains("window.__fd") {
@@ -67,6 +72,11 @@ impl WebDriverPage {
     page.evaluate(expression).await
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::TargetClosed` if this window was closed, and an error when switching to
+  /// the window for the `WebDriver` `GET /session/{id}/window` command fails. On `XCUITest`, forwards
+  /// the error from activating the page in the native context.
   pub async fn bring_to_front(&self) -> Result<()> {
     self.ensure_open()?;
     if super::capabilities::uses_xcuitest(&self.capabilities) {
@@ -79,6 +89,10 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/execute/sync` command fails in any
+  /// frame, and `FerriError::Protocol` when a frame's metadata lacks its URL or child frame list.
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     let mut pending = vec![(self.in_frame(None)?, None)];
     let mut frames = Vec::new();
@@ -111,6 +125,10 @@ impl WebDriverPage {
     Ok(frames)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/execute/sync` command that reads the
+  /// element's tag name fails, for example when the element reference is stale.
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     let element = json!({"element-6066-11e4-a52e-4f735466cecf":object_id});
     if self
@@ -128,6 +146,11 @@ impl WebDriverPage {
     Ok(Some(child.frame_id()))
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when either frame id is malformed or belongs to another
+  /// window, or `child_frame_id` names a main frame, and an error when the `WebDriver`
+  /// `POST /session/{id}/execute/sync` command in the parent frame fails.
   pub async fn mark_snapshot_iframe(
     &self,
     child_frame_id: &str,
@@ -150,11 +173,20 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `find_element`, including `FerriError::InvalidSelector` when no
+  /// element carries the matching `data-fdref` attribute.
   pub async fn resolve_backend_node(&self, backend_node_id: i64, _ref_id: &str) -> Result<AnyElement> {
     let selector = format!("[data-fdref='{backend_node_id}']");
     self.find_element(&selector).await.map(AnyElement::WebDriver)
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `referer` is set, and a timeout when navigating and
+  /// waiting for `lifecycle` exceed `timeout_ms`. Otherwise forwards the error from `navigate`
+  /// (`WebDriver` `POST /session/{id}/url`) or from reading the new document's state.
   pub async fn goto(
     &self,
     url: &str,
@@ -243,6 +275,9 @@ impl WebDriverPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns a timeout error when no `Load` page event arrives within the page's default timeout.
   pub async fn wait_for_navigation(&self) -> Result<()> {
     self
       .events
@@ -275,18 +310,37 @@ impl WebDriverPage {
     Ok(None)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/timeouts` or
+  /// `POST /session/{id}/refresh` command fails, or when reading the document state for `lifecycle`
+  /// fails or exceeds `timeout_ms`.
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     self.history_navigation("refresh", lifecycle, timeout_ms).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/timeouts` or `POST /session/{id}/back`
+  /// command fails, or when reading the document state for `lifecycle` fails or exceeds
+  /// `timeout_ms`.
   pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     self.history_navigation("back", lifecycle, timeout_ms).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/timeouts` or
+  /// `POST /session/{id}/forward` command fails, or when reading the document state for `lifecycle`
+  /// fails or exceeds `timeout_ms`.
   pub async fn go_forward(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     self.history_navigation("forward", lifecycle, timeout_ms).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `GET /session/{id}/cookie` command fails, and
+  /// `FerriError::Protocol` when the response is not an array of cookie objects.
   pub async fn get_cookies(&self) -> Result<Vec<crate::backend::CookieData>> {
     let cookies = self.command(Command::get(&["cookie"])).await?;
     let cookies = cookies
@@ -299,13 +353,18 @@ impl WebDriverPage {
         let object = cookie
           .as_object_mut()
           .ok_or_else(|| FerriError::protocol("get cookies", "expected a cookie object"))?;
-        let expiry = object.remove("expiry").unwrap_or(json!(-1));
+        let expiry = object.remove("expiry").unwrap_or_else(|| json!(-1));
         object.insert("expires".into(), expiry);
         serde_json::from_value(cookie).map_err(|error| FerriError::protocol("get cookies", error.to_string()))
       })
       .collect()
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/cookie` command fails. On `XCUITest` it
+  /// returns `FerriError::Unsupported` when the current document's host cannot hold a cookie for
+  /// `cookie.domain`, and forwards the error from reading that host.
   pub async fn set_cookie(&self, cookie: crate::backend::CookieData) -> Result<()> {
     if super::capabilities::uses_xcuitest(&self.capabilities) {
       // Appium writes the cookie through the document, which drops one for
@@ -317,7 +376,9 @@ impl WebDriverPage {
         || host
           .len()
           .checked_sub(domain.len() + 1)
-          .is_some_and(|dot| host.as_bytes()[dot] == b'.' && host[dot + 1..].eq_ignore_ascii_case(domain));
+          .and_then(|dot| host.get(dot..))
+          .and_then(|tail| tail.strip_prefix('.'))
+          .is_some_and(|tail| tail.eq_ignore_ascii_case(domain));
       if !held {
         return Err(FerriError::unsupported(format!(
           "Safari on iOS sets a cookie through the document it is on, and a document of {host:?} cannot hold one for {:?}",
@@ -340,6 +401,11 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `domain` is given and another visible cookie shares the
+  /// name, and an error when the `WebDriver` `GET /session/{id}/cookie` or
+  /// `DELETE /session/{id}/cookie/{name}` command fails.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     if let Some(domain) = domain {
       let cookies = self.get_cookies().await?;
@@ -368,6 +434,10 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `run_before_unload` is set, and otherwise forwards the
+  /// error from `close` (`WebDriver` `DELETE /session/{id}/window`).
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     if opts.run_before_unload == Some(true) {
       return Err(FerriError::unsupported(

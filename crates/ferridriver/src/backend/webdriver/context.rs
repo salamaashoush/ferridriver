@@ -6,6 +6,12 @@ use crate::error::{FerriError, Result};
 use crate::options::{BrowserContextOptions, ViewportConfig, ViewportOption};
 
 impl WebDriverPage {
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` for an option Classic `WebDriver` cannot change on an existing
+  /// session (such as `locale`, `geolocation` or `userAgent`), for an `ignore_https_errors` that
+  /// differs from the negotiated `acceptInsecureCerts`, and for device emulation on mobile Safari.
+  /// Otherwise forwards the error from `emulate_viewport`.
   pub async fn apply_context_options(&self, opts: &BrowserContextOptions) -> Result<()> {
     for (requested, name) in [
       (opts.bypass_csp.is_some(), "bypassCSP"),
@@ -49,6 +55,12 @@ impl WebDriverPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when the viewport asks for mobile, touch, landscape or a
+  /// device scale factor other than 1, or the session cannot resize windows, and an error when
+  /// reading the window chrome size or the `WebDriver` `POST /session/{id}/window/rect` command
+  /// fails.
   pub async fn emulate_viewport(&self, viewport: &ViewportConfig) -> Result<()> {
     if viewport.is_mobile
       || viewport.has_touch

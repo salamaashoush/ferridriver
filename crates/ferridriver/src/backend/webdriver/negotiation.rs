@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use super::browser::WebDriverBrowser;
@@ -92,7 +94,7 @@ pub(crate) async fn connect(
     headers,
   )
   .await?;
-  let owner = created.session.clone();
+  let owner = Arc::clone(&created.session);
   let attach = async {
     match created.capabilities.get("webSocketUrl") {
       Some(Value::String(url)) if !url.is_empty() && protocol != WebDriverProtocol::Classic => {

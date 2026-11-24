@@ -426,7 +426,7 @@ mod tests {
         }
       }
     });
-    let worker = session.clone();
+    let worker = Arc::clone(&session);
     let caller = tokio::spawn(async move {
       worker
         .native_navigate(
@@ -631,7 +631,7 @@ mod tests {
       }
       requests
     });
-    let worker = session.clone();
+    let worker = Arc::clone(&session);
     let caller = tokio::spawn(async move {
       worker
         .native_input_command(
@@ -703,7 +703,7 @@ mod tests {
     let endpoint = reqwest::Url::parse(&format!("http://{}/session", listener.local_addr().unwrap())).unwrap();
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), endpoint, "native").unwrap());
     let release = Arc::new(tokio::sync::Notify::new());
-    let wait_release = release.clone();
+    let wait_release = Arc::clone(&release);
     let (lookup_started, started) = tokio::sync::oneshot::channel();
     let (restored, wait_restored) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
@@ -747,7 +747,7 @@ mod tests {
       }
       requests
     });
-    let worker = session.clone();
+    let worker = Arc::clone(&session);
     let caller = tokio::spawn(async move {
       worker
         .native_pointer_position(
@@ -860,7 +860,7 @@ mod tests {
       }
       requests
     });
-    let worker = session.clone();
+    let worker = Arc::clone(&session);
     let caller = tokio::spawn(async move {
       worker
         .activate_native_page(
