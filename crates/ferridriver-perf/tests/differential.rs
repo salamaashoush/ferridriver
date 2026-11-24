@@ -136,13 +136,15 @@ const FIXTURES: [&str; 4] = [
 ];
 
 #[test]
-fn a_plain_load_agrees_with_devtools_frontend() {
-  compare("plain-load");
+fn a_plain_load_agrees_with_devtools_frontend() -> Result<(), String> {
+  compare("plain-load")?;
+  Ok(())
 }
 
 #[test]
-fn an_interaction_and_a_layout_thrash_agree_with_devtools_frontend() {
-  compare("interaction-and-thrash");
+fn an_interaction_and_a_layout_thrash_agree_with_devtools_frontend() -> Result<(), String> {
+  compare("interaction-and-thrash")?;
+  Ok(())
 }
 
 /// The two that need something a normal capture does not have: a font
@@ -152,8 +154,9 @@ fn an_interaction_and_a_layout_thrash_agree_with_devtools_frontend() {
 /// upstream's Lantern context fails to build and half the insights stop
 /// predicting anything.
 #[test]
-fn fonts_and_selector_statistics_agree_with_devtools_frontend() {
-  compare("fonts-and-selectors");
+fn fonts_and_selector_statistics_agree_with_devtools_frontend() -> Result<(), String> {
+  compare("fonts-and-selectors")?;
+  Ok(())
 }
 
 /// The one with data in it. The other two fixtures come from a page
@@ -162,13 +165,14 @@ fn fonts_and_selector_statistics_agree_with_devtools_frontend() {
 /// serves images an order of magnitude larger than it draws them and
 /// shifts its layout after load.
 #[test]
-fn a_redirect_and_a_layout_shift_agree_with_devtools_frontend() {
-  compare("redirect-and-shift");
+fn a_redirect_and_a_layout_shift_agree_with_devtools_frontend() -> Result<(), String> {
+  compare("redirect-and-shift")?;
+  Ok(())
 }
 
-fn compare(fixture: &str) {
-  let upstream = read_upstream(fixture);
-  let report = analyze(fixture);
+fn compare(fixture: &str) -> Result<(), String> {
+  let upstream = read_upstream(fixture)?;
+  let report = analyze(fixture)?;
   let mut differences: Vec<String> = Vec::new();
 
   let ours = page_metrics(&report.metrics);
@@ -247,7 +251,7 @@ fn compare(fixture: &str) {
     }
   }
 
-  compare_lantern(fixture, &upstream, &mut differences);
+  compare_lantern(fixture, &upstream, &mut differences)?;
 
   assert!(
     differences.is_empty(),
@@ -256,6 +260,7 @@ fn compare(fixture: &str) {
     differences.len(),
     differences.join("\n  ")
   );
+  Ok(())
 }
 
 /// The simulator's own inputs and outputs, which no insight exposes.
@@ -264,19 +269,19 @@ fn compare(fixture: &str) {
 /// round trip that is wrong in the same direction on both sides cancels
 /// and the insight comparison stays green while the model underneath is
 /// out. Comparing the analysis directly is what catches that.
-fn compare_lantern(fixture: &str, upstream: &Upstream, differences: &mut Vec<String>) {
+fn compare_lantern(fixture: &str, upstream: &Upstream, differences: &mut Vec<String>) -> Result<(), String> {
   let Some(lantern) = upstream.lantern.as_ref() else {
-    return;
+    return Ok(());
   };
   let (Some(rtt), Some(throughput)) = (lantern.rtt, lantern.throughput) else {
     // Upstream could not build a context for this trace. Neither should
     // we, and `the_recorded_traces_produce_a_full_report` already
     // asserts the report survives it.
-    return;
+    return Ok(());
   };
-  let Some(ours) = lantern_context(fixture) else {
+  let Some(ours) = lantern_context(fixture)? else {
     differences.push("lantern: upstream built a context, we did not".into());
-    return;
+    return Ok(());
   };
   let analysis = ours.network_analysis();
   if !agrees(analysis.rtt, rtt) {
@@ -290,15 +295,15 @@ fn compare_lantern(fixture: &str, upstream: &Upstream, differences: &mut Vec<Str
   }
 
   let Some(paints) = lantern.observed.as_ref() else {
-    return;
+    return Ok(());
   };
   if PAINT_ESTIMATE_GAPS.contains(&fixture) {
-    return;
+    return Ok(());
   }
   let observed = Throttling::observed(analysis.rtt, analysis.throughput);
   let Some(estimate) = ours.paint_estimate(observed) else {
     differences.push("lantern: upstream estimated the paints, we did not".into());
-    return;
+    return Ok(());
   };
   for (name, theirs, mine) in [
     (
@@ -316,24 +321,27 @@ fn compare_lantern(fixture: &str, upstream: &Upstream, differences: &mut Vec<Str
       differences.push(format!("lantern {name} estimate: upstream {theirs}, ours {mine}"));
     }
   }
+  Ok(())
 }
 
 /// Rebuild the graph the way `analyze` does, so the comparison above
 /// measures what the crate actually produces.
-fn lantern_context(fixture: &str) -> Option<Context> {
-  let bytes = read_trace(fixture);
-  let events = ferridriver_perf::event::parse(&bytes).ok()?;
+fn lantern_context(fixture: &str) -> Result<Option<Context>, String> {
+  let bytes = read_trace(fixture)?;
+  let Ok(events) = ferridriver_perf::event::parse(&bytes) else {
+    return Ok(None);
+  };
   let meta = Meta::from_events(&events);
   let requests = ferridriver_perf::handlers::network::from_events(&events);
   let metrics = PageLoadMetrics::from_events(&events, &meta);
   let at = |ms: Option<f64>| ms.map(|ms| meta.time_origin() + ferridriver_perf::units::ms_to_micros(ms));
-  Context::build(
+  Ok(Context::build(
     &requests,
     &meta.main_frame_url,
     &events,
     at(metrics.first_contentful_paint),
     at(metrics.largest_contentful_paint),
-  )
+  ))
 }
 
 /// Our metrics under the names upstream gives them.
@@ -375,24 +383,24 @@ fn fixture_path(name: &str, extension: &str) -> PathBuf {
     .join(format!("{name}.{extension}"))
 }
 
-fn read_trace(name: &str) -> Vec<u8> {
+fn read_trace(name: &str) -> Result<Vec<u8>, String> {
   let path = fixture_path(name, "json.gz");
-  let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
+  let file = std::fs::File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
   let mut trace = Vec::new();
   flate2::read::GzDecoder::new(file)
     .read_to_end(&mut trace)
-    .unwrap_or_else(|e| panic!("cannot decompress {}: {e}", path.display()));
-  trace
+    .map_err(|e| format!("cannot decompress {}: {e}", path.display()))?;
+  Ok(trace)
 }
 
-fn analyze(fixture: &str) -> Report {
-  ferridriver_perf::analyze_json(&read_trace(fixture)).unwrap_or_else(|e| panic!("{fixture} is not a trace: {e}"))
+fn analyze(fixture: &str) -> Result<Report, String> {
+  ferridriver_perf::analyze_json(&read_trace(fixture)?).map_err(|e| format!("{fixture} is not a trace: {e}"))
 }
 
-fn read_upstream(name: &str) -> Upstream {
+fn read_upstream(name: &str) -> Result<Upstream, String> {
   let path = fixture_path(name, "upstream.json");
-  let recorded = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
-  serde_json::from_slice(&recorded).unwrap_or_else(|e| panic!("{} is not a recording: {e}", path.display()))
+  let recorded = std::fs::read(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+  serde_json::from_slice(&recorded).map_err(|e| format!("{} is not a recording: {e}", path.display()))
 }
 
 /// A trace read from disk and the same trace handed over as already-
@@ -405,9 +413,9 @@ fn read_upstream(name: &str) -> Upstream {
 /// a divergence here would be invisible to every other test in the crate
 /// and visible to every user of the tool.
 #[test]
-fn a_trace_analyses_the_same_from_bytes_as_from_values() {
+fn a_trace_analyses_the_same_from_bytes_as_from_values() -> Result<(), String> {
   for fixture in FIXTURES {
-    let bytes = read_trace(fixture);
+    let bytes = read_trace(fixture)?;
     let values: Vec<serde_json::Value> = match serde_json::from_slice(&bytes).expect("fixture is JSON") {
       serde_json::Value::Array(events) => events,
       serde_json::Value::Object(mut file) => match file.remove("traceEvents") {
@@ -416,18 +424,19 @@ fn a_trace_analyses_the_same_from_bytes_as_from_values() {
       },
       _ => panic!("{fixture} is not a trace"),
     };
-    let from_bytes = serde_json::to_value(analyze(fixture)).expect("report serializes");
+    let from_bytes = serde_json::to_value(analyze(fixture)?).expect("report serializes");
     let from_values = serde_json::to_value(ferridriver_perf::analyze_values(&values)).expect("report serializes");
     assert_eq!(from_bytes, from_values, "{fixture} analysed differently from values");
   }
+  Ok(())
 }
 
 /// The report is what everything above reads; if its shape drifts the
 /// comparison silently stops covering things.
 #[test]
-fn the_recorded_traces_produce_a_full_report() {
+fn the_recorded_traces_produce_a_full_report() -> Result<(), String> {
   for fixture in FIXTURES {
-    let report = analyze(fixture);
+    let report = analyze(fixture)?;
     assert_eq!(
       report.insights.len(),
       19,
@@ -439,4 +448,5 @@ fn the_recorded_traces_produce_a_full_report() {
       "{fixture} should name the page it loaded"
     );
   }
+  Ok(())
 }

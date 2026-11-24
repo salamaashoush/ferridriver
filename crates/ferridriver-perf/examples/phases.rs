@@ -7,6 +7,7 @@
 //!
 //! `cargo run --release -p ferridriver-perf --example phases -- trace.json [iters]`
 
+use std::io::Write as _;
 use std::time::Instant;
 
 use ferridriver_perf::handlers::{meta::Meta, page_load::PageLoadMetrics, page_signals, paint, renderer};
@@ -20,7 +21,7 @@ macro_rules! phase {
     for _ in 0..$iters {
       out = Some(std::hint::black_box($body));
     }
-    println!("{:32} {:?}", $name, started.elapsed() / $iters);
+    writeln!(std::io::stdout(), "{:32} {:?}", $name, started.elapsed() / $iters)?;
     out
   }};
 }
@@ -37,7 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .max(1);
   let bytes = std::fs::read(path)?;
   let events = ferridriver_perf::event::parse(&bytes)?;
-  println!("{} bytes, {} events, {iters} iterations\n", bytes.len(), events.len());
+  writeln!(
+    std::io::stdout(),
+    "{} bytes, {} events, {iters} iterations\n",
+    bytes.len(),
+    events.len()
+  )?;
 
   let meta = phase!("meta", iters, Meta::from_events(&events)).unwrap_or_default();
   let requests = phase!(
@@ -84,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ferridriver_perf::lantern::Context::build(&requests, &meta.main_frame_url, &events, fcp, lcp)
   );
 
-  println!();
+  writeln!(std::io::stdout())?;
   phase!("whole analysis", iters, ferridriver_perf::analyze(&events));
   Ok(())
 }

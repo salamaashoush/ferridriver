@@ -46,12 +46,15 @@ fn request(id: &str, url: &str, mime: &str, blocking: &str, start_us: i64, body_
   ]
 }
 
-fn insight<'a>(report: &'a ferridriver_perf::Report, key: &str) -> &'a ferridriver_perf::insights::Insight {
+fn insight<'a>(
+  report: &'a ferridriver_perf::Report,
+  key: &str,
+) -> Result<&'a ferridriver_perf::insights::Insight, String> {
   report
     .insights
     .iter()
     .find(|i| i.key == key)
-    .unwrap_or_else(|| panic!("no {key} insight"))
+    .ok_or_else(|| format!("no {key} insight"))
 }
 
 #[test]
@@ -83,7 +86,7 @@ fn the_page_url_comes_from_the_navigation_not_the_initial_frame_tree() {
 }
 
 #[test]
-fn server_response_time_is_receive_headers_start_minus_send_end() {
+fn server_response_time_is_receive_headers_start_minus_send_end() -> Result<(), String> {
   let events = trace(request(
     "1",
     "https://site.example/",
@@ -94,13 +97,14 @@ fn server_response_time_is_receive_headers_start_minus_send_end() {
   ));
   let report = ferridriver_perf::analyze_values(&events);
   // receiveHeadersStart 51ms - sendEnd 1ms = 50ms.
-  let doc = insight(&report, "DocumentLatency");
+  let doc = insight(&report, "DocumentLatency")?;
   let (_, value) = doc.metrics.iter().find(|(k, _)| k == "serverResponseTimeMs").unwrap();
   assert!((value - 50.0).abs() < 1.0, "expected ~50ms, got {value}");
+  Ok(())
 }
 
 #[test]
-fn a_slow_server_fails_the_document_latency_check() {
+fn a_slow_server_fails_the_document_latency_check() -> Result<(), String> {
   let mut events = trace(vec![]);
   let mut req = request("1", "https://site.example/", "text/html", "blocking", 3000, 500);
   // receiveHeadersStart 700ms past sendEnd: over the 600ms line.
@@ -109,14 +113,15 @@ fn a_slow_server_fails_the_document_latency_check() {
   events.extend(req);
 
   let report = ferridriver_perf::analyze_values(&events);
-  let doc = insight(&report, "DocumentLatency");
+  let doc = insight(&report, "DocumentLatency")?;
   assert_eq!(doc.severity, Severity::Fail);
   let check = doc.checks.iter().find(|c| c.name == "serverResponseIsFast").unwrap();
   assert!(!check.passed, "{}", check.detail);
+  Ok(())
 }
 
 #[test]
-fn an_uncompressed_text_document_is_reported_with_its_estimated_saving() {
+fn an_uncompressed_text_document_is_reported_with_its_estimated_saving() -> Result<(), String> {
   let mut events = trace(vec![]);
   // 100 KB of HTML with no content-encoding: 67% of it is the estimate.
   events.extend(request(
@@ -129,7 +134,7 @@ fn an_uncompressed_text_document_is_reported_with_its_estimated_saving() {
   ));
   let report = ferridriver_perf::analyze_values(&events);
 
-  let doc = insight(&report, "DocumentLatency");
+  let doc = insight(&report, "DocumentLatency")?;
   let check = doc.checks.iter().find(|c| c.name == "usesCompression").unwrap();
   assert!(!check.passed, "{}", check.detail);
   let (_, savings) = doc
@@ -138,11 +143,12 @@ fn an_uncompressed_text_document_is_reported_with_its_estimated_saving() {
     .find(|(k, _)| k == "uncompressedResponseBytes")
     .unwrap();
   assert!((savings - 67_000.0).abs() < 1.0, "expected ~67000, got {savings}");
+  Ok(())
 }
 
 /// Under the 1400-byte floor there is nothing worth telling anyone.
 #[test]
-fn a_tiny_uncompressed_document_is_not_flagged() {
+fn a_tiny_uncompressed_document_is_not_flagged() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -153,23 +159,25 @@ fn a_tiny_uncompressed_document_is_not_flagged() {
     200,
   ));
   let report = ferridriver_perf::analyze_values(&events);
-  let doc = insight(&report, "DocumentLatency");
+  let doc = insight(&report, "DocumentLatency")?;
   assert!(doc.checks.iter().find(|c| c.name == "usesCompression").unwrap().passed);
+  Ok(())
 }
 
 #[test]
-fn a_compressed_document_passes() {
+fn a_compressed_document_passes() -> Result<(), String> {
   let mut events = trace(vec![]);
   let mut req = request("1", "https://site.example/", "text/html", "blocking", 3000, 100_000);
   req[1]["args"]["data"]["headers"] = json!([{"name":"content-encoding","value":"gzip"}]);
   events.extend(req);
   let report = ferridriver_perf::analyze_values(&events);
-  let doc = insight(&report, "DocumentLatency");
+  let doc = insight(&report, "DocumentLatency")?;
   assert!(doc.checks.iter().find(|c| c.name == "usesCompression").unwrap().passed);
+  Ok(())
 }
 
 #[test]
-fn a_stylesheet_finishing_before_first_paint_is_render_blocking() {
+fn a_stylesheet_finishing_before_first_paint_is_render_blocking() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -190,15 +198,16 @@ fn a_stylesheet_finishing_before_first_paint_is_render_blocking() {
   ));
   let report = ferridriver_perf::analyze_values(&events);
 
-  let rb = insight(&report, "RenderBlocking");
+  let rb = insight(&report, "RenderBlocking")?;
   assert_eq!(rb.severity, Severity::Fail);
   assert!(rb.items.iter().any(|i| i.label.ends_with("a.css")), "{:?}", rb.items);
+  Ok(())
 }
 
 /// A request that lands after the paint it supposedly blocked did not
 /// block it.
 #[test]
-fn a_stylesheet_finishing_after_first_paint_is_not_render_blocking() {
+fn a_stylesheet_finishing_after_first_paint_is_not_render_blocking() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -218,15 +227,16 @@ fn a_stylesheet_finishing_after_first_paint_is_not_render_blocking() {
   ));
   let report = ferridriver_perf::analyze_values(&events);
   assert!(
-    !insight(&report, "RenderBlocking")
+    !insight(&report, "RenderBlocking")?
       .items
       .iter()
       .any(|i| i.label.contains("late"))
   );
+  Ok(())
 }
 
 #[test]
-fn requests_on_the_page_own_registrable_domain_are_not_third_party() {
+fn requests_on_the_page_own_registrable_domain_are_not_third_party() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -254,9 +264,10 @@ fn requests_on_the_page_own_registrable_domain_are_not_third_party() {
   ));
 
   let report = ferridriver_perf::analyze_values(&events);
-  let tp = insight(&report, "ThirdParties");
+  let tp = insight(&report, "ThirdParties")?;
   assert_eq!(tp.items.len(), 1, "{:?}", tp.items);
   assert_eq!(tp.items[0].label, "tracker.other");
+  Ok(())
 }
 
 /// CLS is the worst session window, not the sum. Three shifts spaced
@@ -292,7 +303,7 @@ fn a_shift_after_user_input_is_excluded() {
 }
 
 #[test]
-fn an_origin_needs_six_http1_requests_before_it_is_flagged() {
+fn an_origin_needs_six_http1_requests_before_it_is_flagged() -> Result<(), String> {
   let mut few = trace(vec![]);
   for i in 0..5 {
     few.extend(request(
@@ -305,7 +316,7 @@ fn an_origin_needs_six_http1_requests_before_it_is_flagged() {
     ));
   }
   assert!(
-    insight(&ferridriver_perf::analyze_values(&few), "ModernHTTP")
+    insight(&ferridriver_perf::analyze_values(&few), "ModernHTTP")?
       .items
       .is_empty()
   );
@@ -322,9 +333,10 @@ fn an_origin_needs_six_http1_requests_before_it_is_flagged() {
     ));
   }
   let many_report = ferridriver_perf::analyze_values(&many);
-  let flagged = insight(&many_report, "ModernHTTP");
+  let flagged = insight(&many_report, "ModernHTTP")?;
   assert_eq!(flagged.severity, Severity::Fail);
   assert_eq!(flagged.items[0].label, "https://slow.example");
+  Ok(())
 }
 
 #[test]
@@ -372,7 +384,7 @@ fn text_lcp() -> serde_json::Value {
 }
 
 #[test]
-fn a_text_lcp_breaks_into_ttfb_and_render_delay() {
+fn a_text_lcp_breaks_into_ttfb_and_render_delay() -> Result<(), String> {
   let mut events = trace(vec![text_lcp()]);
   events.extend(request(
     "1",
@@ -384,16 +396,17 @@ fn a_text_lcp_breaks_into_ttfb_and_render_delay() {
   ));
   let report = ferridriver_perf::analyze_values(&events);
 
-  let lcp = insight(&report, "LCPBreakdown");
+  let lcp = insight(&report, "LCPBreakdown")?;
   let labels: Vec<&str> = lcp.items.iter().map(|i| i.label.as_str()).collect();
   assert_eq!(labels, vec!["Time to first byte", "Element render delay"]);
   assert!(lcp.checks[0].detail.starts_with("Text LCP"), "{}", lcp.checks[0].detail);
+  Ok(())
 }
 
 /// The image request is recovered from the candidate's load timings,
 /// because Chrome no longer puts the URL on the candidate.
 #[test]
-fn an_image_lcp_breaks_into_four_parts_and_finds_its_request() {
+fn an_image_lcp_breaks_into_four_parts_and_finds_its_request() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -417,7 +430,7 @@ fn an_image_lcp_breaks_into_four_parts_and_finds_its_request() {
   events.push(image_lcp(100.0, 180.0, "eager"));
 
   let report = ferridriver_perf::analyze_values(&events);
-  let lcp = insight(&report, "LCPBreakdown");
+  let lcp = insight(&report, "LCPBreakdown")?;
   let labels: Vec<&str> = lcp.items.iter().map(|i| i.label.as_str()).collect();
   assert_eq!(
     labels,
@@ -433,10 +446,11 @@ fn an_image_lcp_breaks_into_four_parts_and_finds_its_request() {
     "{}",
     lcp.checks[0].detail
   );
+  Ok(())
 }
 
 #[test]
-fn a_lazy_loaded_lcp_image_without_a_priority_hint_is_flagged() {
+fn a_lazy_loaded_lcp_image_without_a_priority_hint_is_flagged() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -460,12 +474,13 @@ fn a_lazy_loaded_lcp_image_without_a_priority_hint_is_flagged() {
   events.push(image_lcp(100.0, 180.0, "lazy"));
 
   let report = ferridriver_perf::analyze_values(&events);
-  let d = insight(&report, "LCPDiscovery");
+  let d = insight(&report, "LCPDiscovery")?;
   let check = |name: &str| d.checks.iter().find(|c| c.name == name).unwrap();
   assert!(!check("priorityHinted").passed);
   // Parser-initiated from the main document, so the scanner did see it.
   assert!(check("requestDiscoverable").passed);
   assert!(!check("eagerlyLoaded").passed, "lazy should be flagged");
+  Ok(())
 }
 
 /// A text LCP has no request to discover, so there is no checklist to
@@ -474,7 +489,7 @@ fn a_lazy_loaded_lcp_image_without_a_priority_hint_is_flagged() {
 /// where every other page has nineteen. The differential against
 /// devtools-frontend is what caught it.
 #[test]
-fn lcp_discovery_passes_with_no_checks_for_a_text_lcp() {
+fn lcp_discovery_passes_with_no_checks_for_a_text_lcp() -> Result<(), String> {
   let mut events = trace(vec![text_lcp()]);
   events.extend(request(
     "1",
@@ -485,9 +500,10 @@ fn lcp_discovery_passes_with_no_checks_for_a_text_lcp() {
     500,
   ));
   let report = ferridriver_perf::analyze_values(&events);
-  let discovery = insight(&report, "LCPDiscovery");
+  let discovery = insight(&report, "LCPDiscovery")?;
   assert_eq!(discovery.severity, Severity::Pass);
   assert!(discovery.checks.is_empty());
+  Ok(())
 }
 
 fn static_asset(id: &str, url: &str, cache_control: Option<&str>, bytes: i64) -> Vec<serde_json::Value> {
@@ -502,7 +518,7 @@ fn static_asset(id: &str, url: &str, cache_control: Option<&str>, bytes: i64) ->
 }
 
 #[test]
-fn a_short_cache_lifetime_is_flagged_and_a_long_one_is_not() {
+fn a_short_cache_lifetime_is_flagged_and_a_long_one_is_not() -> Result<(), String> {
   let mut short = trace(vec![]);
   short.extend(static_asset(
     "1",
@@ -511,7 +527,7 @@ fn a_short_cache_lifetime_is_flagged_and_a_long_one_is_not() {
     50_000,
   ));
   assert_eq!(
-    insight(&ferridriver_perf::analyze_values(&short), "Cache").items.len(),
+    insight(&ferridriver_perf::analyze_values(&short), "Cache")?.items.len(),
     1
   );
 
@@ -523,15 +539,16 @@ fn a_short_cache_lifetime_is_flagged_and_a_long_one_is_not() {
     50_000,
   ));
   assert!(
-    insight(&ferridriver_perf::analyze_values(&long), "Cache")
+    insight(&ferridriver_perf::analyze_values(&long), "Cache")?
       .items
       .is_empty()
   );
+  Ok(())
 }
 
 /// Opting out of caching is a decision, not a defect.
 #[test]
-fn a_no_store_response_is_not_a_cache_finding() {
+fn a_no_store_response_is_not_a_cache_finding() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(static_asset(
     "1",
@@ -540,16 +557,17 @@ fn a_no_store_response_is_not_a_cache_finding() {
     50_000,
   ));
   assert!(
-    insight(&ferridriver_perf::analyze_values(&events), "Cache")
+    insight(&ferridriver_perf::analyze_values(&events), "Cache")?
       .items
       .is_empty()
   );
+  Ok(())
 }
 
 /// Documents and XHR are not static assets, so their lifetime is not
 /// this insight's business.
 #[test]
-fn a_non_static_resource_is_not_a_cache_finding() {
+fn a_non_static_resource_is_not_a_cache_finding() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(request(
     "1",
@@ -560,10 +578,11 @@ fn a_non_static_resource_is_not_a_cache_finding() {
     50_000,
   ));
   assert!(
-    insight(&ferridriver_perf::analyze_values(&events), "Cache")
+    insight(&ferridriver_perf::analyze_values(&events), "Cache")?
       .items
       .is_empty()
   );
+  Ok(())
 }
 
 /// `url`, `display` and `id` sit directly on `args`, NOT under
@@ -576,7 +595,7 @@ fn font(url: &str, display: &str) -> serde_json::Value {
 }
 
 #[test]
-fn a_blocking_font_display_is_flagged_and_swap_is_not() {
+fn a_blocking_font_display_is_flagged_and_swap_is_not() -> Result<(), String> {
   let mut blocking = trace(vec![font("https://site.example/f.woff2", "block")]);
   blocking.extend(request(
     "1",
@@ -587,7 +606,7 @@ fn a_blocking_font_display_is_flagged_and_swap_is_not() {
     20_000,
   ));
   assert_eq!(
-    insight(&ferridriver_perf::analyze_values(&blocking), "FontDisplay")
+    insight(&ferridriver_perf::analyze_values(&blocking), "FontDisplay")?
       .items
       .len(),
     1
@@ -603,32 +622,35 @@ fn a_blocking_font_display_is_flagged_and_swap_is_not() {
     20_000,
   ));
   assert!(
-    insight(&ferridriver_perf::analyze_values(&swap), "FontDisplay")
+    insight(&ferridriver_perf::analyze_values(&swap), "FontDisplay")?
       .items
       .is_empty()
   );
+  Ok(())
 }
 
 #[test]
-fn a_non_mobile_optimized_frame_fails_the_viewport_check() {
+fn a_non_mobile_optimized_frame_fails_the_viewport_check() -> Result<(), String> {
   let frame = |optimized: bool| {
     json!({"name":"BeginCommitCompositorFrame","ph":"I","ts":50_000,"pid":1,"tid":1,
            "args":{"frame":"FRAME1","is_mobile_optimized":optimized}})
   };
   let bad = ferridriver_perf::analyze_values(&trace(vec![frame(false)]));
-  assert_eq!(insight(&bad, "Viewport").severity, Severity::Fail);
+  assert_eq!(insight(&bad, "Viewport")?.severity, Severity::Fail);
 
   let good = ferridriver_perf::analyze_values(&trace(vec![frame(true)]));
-  assert_eq!(insight(&good, "Viewport").severity, Severity::Pass);
+  assert_eq!(insight(&good, "Viewport")?.severity, Severity::Pass);
+  Ok(())
 }
 
 /// Without a committed frame the trace simply does not say.
 #[test]
-fn viewport_is_not_judged_without_a_compositor_frame() {
+fn viewport_is_not_judged_without_a_compositor_frame() -> Result<(), String> {
   let report = ferridriver_perf::analyze_values(&trace(vec![]));
-  let v = insight(&report, "Viewport");
+  let v = insight(&report, "Viewport")?;
   assert_eq!(v.severity, Severity::Informative);
   assert!(v.checks[0].detail.contains("Not evaluated"));
+  Ok(())
 }
 
 // ── interactions, DOM size, forced reflow ──────────────────────────────
@@ -654,14 +676,14 @@ fn event_timing(
 }
 
 #[test]
-fn inp_breaks_the_longest_interaction_into_three_phases() {
+fn inp_breaks_the_longest_interaction_into_three_phases() -> Result<(), String> {
   let mut events = trace(vec![]);
   // timeStamp 100, handler runs 110..150, total 300ms.
   events.extend(event_timing(7, "click", 500_000, 100.0, 110.0, 150.0, 300.0));
   let report = ferridriver_perf::analyze_values(&events);
 
   assert_eq!(report.metrics.interaction_to_next_paint, Some(300.0));
-  let inp = insight(&report, "INPBreakdown");
+  let inp = insight(&report, "INPBreakdown")?;
   let by = |label: &str| inp.items.iter().find(|i| i.label == label).unwrap().value;
   assert!((by("Input delay") - 10.0).abs() < 0.01);
   assert!((by("Processing duration") - 40.0).abs() < 0.01);
@@ -673,20 +695,21 @@ fn inp_breaks_the_longest_interaction_into_three_phases() {
   assert_eq!(inp.severity, Severity::Informative);
   let (_, inp_ms) = inp.metrics.iter().find(|(k, _)| k == "inpMs").unwrap();
   assert!((inp_ms - 300.0).abs() < 0.01);
+  Ok(())
 }
 
 /// A tap emits pointerdown, pointerup and click under one interactionId.
 /// Treating them as separate interactions, or letting the last overwrite
 /// the first, both give the wrong breakdown.
 #[test]
-fn events_sharing_an_interaction_id_merge_into_one_interaction() {
+fn events_sharing_an_interaction_id_merge_into_one_interaction() -> Result<(), String> {
   let mut events = trace(vec![]);
   events.extend(event_timing(9, "pointerdown", 500_000, 100.0, 110.0, 115.0, 80.0));
   events.extend(event_timing(9, "pointerup", 501_000, 102.0, 116.0, 120.0, 80.0));
   events.extend(event_timing(9, "click", 502_000, 102.0, 120.0, 160.0, 80.0));
 
   let report = ferridriver_perf::analyze_values(&events);
-  let inp = insight(&report, "INPBreakdown");
+  let inp = insight(&report, "INPBreakdown")?;
   // One interaction, named for the click, spanning the widest window:
   // earliest timeStamp 100, earliest processingStart 110, latest
   // processingEnd 160.
@@ -694,6 +717,7 @@ fn events_sharing_an_interaction_id_merge_into_one_interaction() {
   let by = |label: &str| inp.items.iter().find(|i| i.label == label).unwrap().value;
   assert!((by("Input delay") - 10.0).abs() < 0.01);
   assert!((by("Processing duration") - 50.0).abs() < 0.01);
+  Ok(())
 }
 
 #[test]
@@ -708,7 +732,7 @@ fn an_interaction_chrome_did_not_count_is_ignored() {
 /// puts it directly on `args`. Reading `args.data` for either, as every
 /// other event in the trace does, silently finds nothing.
 #[test]
-fn large_layout_and_style_updates_are_read_from_their_own_arg_shapes() {
+fn large_layout_and_style_updates_are_read_from_their_own_arg_shapes() -> Result<(), String> {
   let events = trace(vec![
     json!({"name":"Layout","ph":"X","ts":50_000,"dur":60_000,"pid":1,"tid":1,
            "args":{"beginData":{"dirtyObjects":500}}}),
@@ -719,32 +743,34 @@ fn large_layout_and_style_updates_are_read_from_their_own_arg_shapes() {
   ]);
   let report = ferridriver_perf::analyze_values(&events);
 
-  let dom = insight(&report, "DOMSize");
+  let dom = insight(&report, "DOMSize")?;
   // A large DOM is a cost to weigh, not a rule broken.
   assert_eq!(dom.severity, Severity::Informative);
   assert_eq!(dom.items.len(), 2, "{:?}", dom.items);
   let (_, total) = dom.metrics.iter().find(|(k, _)| k == "totalElements").unwrap();
   assert!((total - 4200.0).abs() < f64::EPSILON);
+  Ok(())
 }
 
 /// Small or quick updates are not a DOM-size problem.
 #[test]
-fn a_fast_layout_is_not_a_dom_size_finding() {
+fn a_fast_layout_is_not_a_dom_size_finding() -> Result<(), String> {
   let events = trace(vec![
     json!({"name":"Layout","ph":"X","ts":50_000,"dur":5000,"pid":1,"tid":1,
                                  "args":{"beginData":{"dirtyObjects":5000}}}),
   ]);
   assert!(
-    insight(&ferridriver_perf::analyze_values(&events), "DOMSize")
+    insight(&ferridriver_perf::analyze_values(&events), "DOMSize")?
       .items
       .is_empty()
   );
+  Ok(())
 }
 
 /// A layout nested inside a script was forced by that script. Below the
 /// 30ms per-task threshold it is noise, above it is a finding.
 #[test]
-fn reflow_inside_a_script_is_forced_only_once_it_crosses_the_threshold() {
+fn reflow_inside_a_script_is_forced_only_once_it_crosses_the_threshold() -> Result<(), String> {
   let build = |reflow_us: i64| {
     trace(vec![
       json!({"name":"RunTask","ph":"X","ts":50_000,"dur":100_000,"pid":1,"tid":1,"args":{}}),
@@ -754,25 +780,27 @@ fn reflow_inside_a_script_is_forced_only_once_it_crosses_the_threshold() {
     ])
   };
   let quiet = ferridriver_perf::analyze_values(&build(5_000));
-  assert_eq!(insight(&quiet, "ForcedReflow").severity, Severity::Pass);
+  assert_eq!(insight(&quiet, "ForcedReflow")?.severity, Severity::Pass);
 
   let loud = ferridriver_perf::analyze_values(&build(40_000));
-  assert_eq!(insight(&loud, "ForcedReflow").severity, Severity::Fail);
+  assert_eq!(insight(&loud, "ForcedReflow")?.severity, Severity::Fail);
+  Ok(())
 }
 
 /// The same layout outside any script is the browser doing its normal
 /// work, not a forced reflow.
 #[test]
-fn reflow_outside_a_script_is_not_forced() {
+fn reflow_outside_a_script_is_not_forced() -> Result<(), String> {
   let events = trace(vec![
     json!({"name":"RunTask","ph":"X","ts":50_000,"dur":100_000,"pid":1,"tid":1,"args":{}}),
     json!({"name":"Layout","ph":"X","ts":52_000,"dur":40_000,"pid":1,"tid":1,
            "args":{"beginData":{"dirtyObjects":10}}}),
   ]);
   assert_eq!(
-    insight(&ferridriver_perf::analyze_values(&events), "ForcedReflow").severity,
+    insight(&ferridriver_perf::analyze_values(&events), "ForcedReflow")?.severity,
     Severity::Pass
   );
+  Ok(())
 }
 
 // ── images, dependency chains, layout shift causes ─────────────────────
@@ -790,7 +818,7 @@ fn paint_image(url: &str, src: (i64, i64), displayed: (i64, i64), is_css: bool) 
 }
 
 #[test]
-fn an_image_heavier_than_its_pixels_justify_is_flagged() {
+fn an_image_heavier_than_its_pixels_justify_is_flagged() -> Result<(), String> {
   let mut events = trace(vec![paint_image(
     "https://site.example/big.png",
     (600, 400),
@@ -815,14 +843,15 @@ fn an_image_heavier_than_its_pixels_justify_is_flagged() {
   ));
 
   let report = ferridriver_perf::analyze_values(&events);
-  let img = insight(&report, "ImageDelivery");
+  let img = insight(&report, "ImageDelivery")?;
   assert_eq!(img.severity, Severity::Fail);
   assert!(img.items[0].label.contains("modern format"), "{}", img.items[0].label);
+  Ok(())
 }
 
 /// A well-compressed image is not a finding, however large the picture.
 #[test]
-fn a_well_compressed_image_is_not_flagged() {
+fn a_well_compressed_image_is_not_flagged() -> Result<(), String> {
   let mut events = trace(vec![paint_image(
     "https://site.example/ok.png",
     (600, 400),
@@ -845,15 +874,16 @@ fn a_well_compressed_image_is_not_flagged() {
     5000,
   ));
   assert!(
-    insight(&ferridriver_perf::analyze_values(&events), "ImageDelivery")
+    insight(&ferridriver_perf::analyze_values(&events), "ImageDelivery")?
       .items
       .is_empty()
   );
+  Ok(())
 }
 
 /// An image served far larger than it is drawn wastes the difference.
 #[test]
-fn an_oversized_image_is_flagged_for_responsive_serving() {
+fn an_oversized_image_is_flagged_for_responsive_serving() -> Result<(), String> {
   let mut events = trace(vec![paint_image(
     "https://site.example/huge.png",
     (2000, 2000),
@@ -878,17 +908,18 @@ fn an_oversized_image_is_flagged_for_responsive_serving() {
   ));
 
   let report = ferridriver_perf::analyze_values(&events);
-  let img = insight(&report, "ImageDelivery");
+  let img = insight(&report, "ImageDelivery")?;
   assert!(
     img.items.iter().any(|i| i.label.contains("responsive images")),
     "{:?}",
     img.items
   );
+  Ok(())
 }
 
 /// CSS backgrounds are exempt from the responsive advice upstream.
 #[test]
-fn an_oversized_css_background_is_not_flagged_for_responsive_serving() {
+fn an_oversized_css_background_is_not_flagged_for_responsive_serving() -> Result<(), String> {
   let mut events = trace(vec![paint_image(
     "https://site.example/bg.png",
     (2000, 2000),
@@ -911,12 +942,13 @@ fn an_oversized_css_background_is_not_flagged_for_responsive_serving() {
     5000,
   ));
   let report = ferridriver_perf::analyze_values(&events);
-  let img = insight(&report, "ImageDelivery");
+  let img = insight(&report, "ImageDelivery")?;
   assert!(!img.items.iter().any(|i| i.label.contains("responsive images")));
+  Ok(())
 }
 
 #[test]
-fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
+fn a_long_chain_of_critical_requests_is_reported_with_its_depth() -> Result<(), String> {
   // The LCP is what gives the analysis a graph to walk; without one
   // there is no dependency tree to report, upstream included.
   let mut events = trace(vec![text_lcp()]);
@@ -942,7 +974,7 @@ fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
   chained("4", "https://site.example/c.js", "https://site.example/b.js", 200_000);
 
   let report = ferridriver_perf::analyze_values(&events);
-  let tree = insight(&report, "NetworkDependencyTree");
+  let tree = insight(&report, "NetworkDependencyTree")?;
   assert_eq!(tree.severity, Severity::Fail);
   let (_, depth) = tree.metrics.iter().find(|(k, _)| k == "maxChainLength").unwrap();
   assert!(
@@ -951,13 +983,14 @@ fn a_long_chain_of_critical_requests_is_reported_with_its_depth() {
   );
   // Root first, so the document heads the list.
   assert_eq!(tree.items[0].label.trim(), "https://site.example/");
+  Ok(())
 }
 
 /// Upstream fails at a chain of two, so the document plus one critical
 /// resource already counts. What separates a healthy page from a bad one
 /// is the DEPTH, so that is what this pins.
 #[test]
-fn parser_found_requests_stay_at_depth_two_however_many_there_are() {
+fn parser_found_requests_stay_at_depth_two_however_many_there_are() -> Result<(), String> {
   let mut events = trace(vec![text_lcp()]);
   events.extend(request(
     "1",
@@ -981,12 +1014,13 @@ fn parser_found_requests_stay_at_depth_two_however_many_there_are() {
     events.extend(req);
   }
   let report = ferridriver_perf::analyze_values(&events);
-  let tree = insight(&report, "NetworkDependencyTree");
+  let tree = insight(&report, "NetworkDependencyTree")?;
   let (_, depth) = tree.metrics.iter().find(|(k, _)| k == "maxChainLength").unwrap();
   assert!(
     (depth - 2.0).abs() < f64::EPSILON,
     "four parser-found scripts should stay two deep, got {depth}"
   );
+  Ok(())
 }
 
 fn shift(ts: i64, score: f64) -> serde_json::Value {
@@ -995,42 +1029,45 @@ fn shift(ts: i64, score: f64) -> serde_json::Value {
 }
 
 #[test]
-fn a_shift_is_blamed_on_a_cause_that_finished_just_before_it() {
+fn a_shift_is_blamed_on_a_cause_that_finished_just_before_it() -> Result<(), String> {
   let events = trace(vec![
     json!({"name":"LayoutImageUnsized","ph":"I","ts":900_000,"pid":1,"tid":1,
            "args":{"data":{"nodeName":"IMG"}}}),
     shift(1_000_000, 0.3),
   ]);
   let report = ferridriver_perf::analyze_values(&events);
-  let cls = insight(&report, "CLSCulprits");
+  let cls = insight(&report, "CLSCulprits")?;
   assert_eq!(cls.severity, Severity::Fail);
   assert!(
     cls.items[0].label.starts_with("Unsized image"),
     "{}",
     cls.items[0].label
   );
+  Ok(())
 }
 
 /// The half-second window is what stops an unrelated event elsewhere in
 /// the load being blamed for a shift.
 #[test]
-fn a_cause_outside_the_root_cause_window_is_not_blamed() {
+fn a_cause_outside_the_root_cause_window_is_not_blamed() -> Result<(), String> {
   let events = trace(vec![
     json!({"name":"LayoutImageUnsized","ph":"I","ts":100_000,"pid":1,"tid":1,
            "args":{"data":{"nodeName":"IMG"}}}),
     shift(2_000_000, 0.3),
   ]);
   let report = ferridriver_perf::analyze_values(&events);
-  let cls = insight(&report, "CLSCulprits");
+  let cls = insight(&report, "CLSCulprits")?;
   assert_eq!(cls.severity, Severity::Fail, "the page still moved");
   assert!(cls.items.is_empty(), "but nothing should be blamed: {:?}", cls.items);
   assert!(cls.checks[0].detail.contains("no cause identified"));
+  Ok(())
 }
 
 #[test]
-fn a_page_that_never_moved_passes_cls_culprits() {
+fn a_page_that_never_moved_passes_cls_culprits() -> Result<(), String> {
   let report = ferridriver_perf::analyze_values(&trace(vec![]));
-  assert_eq!(insight(&report, "CLSCulprits").severity, Severity::Pass);
+  assert_eq!(insight(&report, "CLSCulprits")?.severity, Severity::Pass);
+  Ok(())
 }
 
 // ── charset, scripts, selectors ────────────────────────────────────────
@@ -1045,21 +1082,22 @@ fn script_source(script_id: i64, url: &str, source: &str) -> serde_json::Value {
 }
 
 #[test]
-fn a_charset_in_the_content_type_header_passes() {
+fn a_charset_in_the_content_type_header_passes() -> Result<(), String> {
   let mut events = trace(vec![]);
   let mut req = request("1", "https://site.example/", "text/html", "blocking", 3000, 500);
   req[1]["args"]["data"]["headers"] = json!([{"name":"content-type","value":"text/html; charset=utf-8"}]);
   events.extend(req);
 
   let report = ferridriver_perf::analyze_values(&events);
-  let cs = insight(&report, "CharacterSet");
+  let cs = insight(&report, "CharacterSet")?;
   assert_eq!(cs.severity, Severity::Pass);
   assert!(cs.checks.iter().find(|c| c.name == "httpCharset").unwrap().passed);
+  Ok(())
 }
 
 /// An early meta tag is enough on its own.
 #[test]
-fn an_early_meta_charset_passes_without_the_header() {
+fn an_early_meta_charset_passes_without_the_header() -> Result<(), String> {
   let mut events = trace(vec![
     json!({"name":"MetaCharsetCheck","ph":"I","ts":50_000,"pid":1,"tid":1,
                                      "args":{"data":{"disposition":"found-in-first-1024-bytes"}}}),
@@ -1073,11 +1111,12 @@ fn an_early_meta_charset_passes_without_the_header() {
     500,
   ));
   let report = ferridriver_perf::analyze_values(&events);
-  assert_eq!(insight(&report, "CharacterSet").severity, Severity::Pass);
+  assert_eq!(insight(&report, "CharacterSet")?.severity, Severity::Pass);
+  Ok(())
 }
 
 #[test]
-fn a_late_meta_charset_and_no_header_fails() {
+fn a_late_meta_charset_and_no_header_fails() -> Result<(), String> {
   let mut events = trace(vec![
     json!({"name":"MetaCharsetCheck","ph":"I","ts":50_000,"pid":1,"tid":1,
                                      "args":{"data":{"disposition":"found-after-first-1024-bytes"}}}),
@@ -1091,15 +1130,16 @@ fn a_late_meta_charset_and_no_header_fails() {
     500,
   ));
   let report = ferridriver_perf::analyze_values(&events);
-  let cs = insight(&report, "CharacterSet");
+  let cs = insight(&report, "CharacterSet")?;
   assert_eq!(cs.severity, Severity::Fail);
   assert!(cs.checks.iter().any(|c| c.detail.contains("after the first 1024")));
+  Ok(())
 }
 
 /// Detection only runs on scripts over the 5000-byte floor, so the
 /// fixture is padded past it. A smaller script is covered separately.
 #[test]
-fn core_js_polyfills_and_babel_transforms_are_detected() {
+fn core_js_polyfills_and_babel_transforms_are_detected() -> Result<(), String> {
   let source = format!(
     "function _classCallCheck(a,n){{if(!(a instanceof n))throw new TypeError(\
      \"Cannot call a class as a function\");}}\n\
@@ -1116,74 +1156,80 @@ fn core_js_polyfills_and_babel_transforms_are_detected() {
   let events = trace(vec![script_source(1, "https://site.example/bundle.js", source)]);
   let report = ferridriver_perf::analyze_values(&events);
 
-  let legacy = insight(&report, "LegacyJavaScript");
+  let legacy = insight(&report, "LegacyJavaScript")?;
   assert_eq!(legacy.severity, Severity::Fail);
   let label = &legacy.items[0].label;
   assert!(label.contains("Array.prototype.at"), "{label}");
   assert!(label.contains("Object.fromEntries"), "{label}");
   assert!(label.contains("@babel/plugin-transform-classes"), "{label}");
+  Ok(())
 }
 
 /// A few hundred bytes of hand-written compatibility code is not a
 /// bundling problem, and reporting it as one is a false positive. Both
 /// the script size and the estimated saving have to clear 5000 bytes.
 #[test]
-fn a_small_script_with_a_polyfill_is_below_the_reporting_floor() {
+fn a_small_script_with_a_polyfill_is_below_the_reporting_floor() -> Result<(), String> {
   let source = "Array.prototype.at = function(i){return this[i];};\n";
   let events = trace(vec![script_source(1, "https://site.example/tiny.js", source)]);
   let report = ferridriver_perf::analyze_values(&events);
-  assert_eq!(insight(&report, "LegacyJavaScript").severity, Severity::Pass);
+  assert_eq!(insight(&report, "LegacyJavaScript")?.severity, Severity::Pass);
+  Ok(())
 }
 
 /// Modern source must not be flagged; a false positive here tells people
 /// to remove code they need.
 #[test]
-fn modern_javascript_is_not_flagged_as_legacy() {
+fn modern_javascript_is_not_flagged_as_legacy() -> Result<(), String> {
   let source = "const x = [1,2,3].at(-1);\nconst y = Object.fromEntries(new Map());\nclass A { b() {} }\n";
   let events = trace(vec![script_source(1, "https://site.example/modern.js", source)]);
   let report = ferridriver_perf::analyze_values(&events);
-  assert_eq!(insight(&report, "LegacyJavaScript").severity, Severity::Pass);
+  assert_eq!(insight(&report, "LegacyJavaScript")?.severity, Severity::Pass);
+  Ok(())
 }
 
 #[test]
-fn the_same_bundle_served_from_two_urls_is_duplicated() {
+fn the_same_bundle_served_from_two_urls_is_duplicated() -> Result<(), String> {
   let source = "x".repeat(4096);
   let events = trace(vec![
     script_source(1, "https://site.example/a/vendor.js", &source),
     script_source(2, "https://site.example/b/vendor.js", &source),
   ]);
   let report = ferridriver_perf::analyze_values(&events);
-  let dup = insight(&report, "DuplicatedJavaScript");
+  let dup = insight(&report, "DuplicatedJavaScript")?;
   assert_eq!(dup.severity, Severity::Fail);
   // One redundant copy, so one bundle's worth of bytes.
   let (_, wasted) = dup.metrics.iter().find(|(k, _)| k == "wastedBytes").unwrap();
   assert!((wasted - 4096.0).abs() < f64::EPSILON, "got {wasted}");
+  Ok(())
 }
 
 /// One script fetched twice is a caching question, not duplication.
 #[test]
-fn the_same_url_seen_twice_is_not_duplicated() {
+fn the_same_url_seen_twice_is_not_duplicated() -> Result<(), String> {
   let source = "y".repeat(4096);
   let events = trace(vec![
     script_source(1, "https://site.example/vendor.js", &source),
     script_source(2, "https://site.example/vendor.js", &source),
   ]);
   let report = ferridriver_perf::analyze_values(&events);
-  assert_eq!(insight(&report, "DuplicatedJavaScript").severity, Severity::Pass);
+  assert_eq!(insight(&report, "DuplicatedJavaScript")?.severity, Severity::Pass);
+  Ok(())
 }
 
 /// Selector stats need profiling turned on. Absent them the answer is
 /// "not measured", which is not the same claim as "fast".
 #[test]
-fn selector_costs_are_reported_as_unmeasured_without_stats() {
+fn selector_costs_are_reported_as_unmeasured_without_stats() -> Result<(), String> {
   let report = ferridriver_perf::analyze_values(&trace(vec![]));
-  let sel = insight(&report, "SlowCSSSelector");
+  let sel = insight(&report, "SlowCSSSelector")?;
   assert_eq!(sel.severity, Severity::Informative);
   assert!(sel.checks[0].detail.contains("Not measured"));
+  Ok(())
 }
 
 #[test]
-fn a_slow_selector_is_reported_when_stats_are_present() {
+fn a_slow_selector_is_reported_when_stats_are_present() -> Result<(), String> {
   let events = trace(vec![
     json!({"name":"SelectorStats","ph":"X","ts":60_000,"dur":100,"pid":1,"tid":1,
     "args":{"selector_stats":{"selector_timings":[
@@ -1192,10 +1238,11 @@ fn a_slow_selector_is_reported_when_stats_are_present() {
     ]}}}),
   ]);
   let report = ferridriver_perf::analyze_values(&events);
-  let sel = insight(&report, "SlowCSSSelector");
+  let sel = insight(&report, "SlowCSSSelector")?;
   // Informative, never a failure: there is no cost at which a selector
   // is wrong, only one at which it is worth looking at.
   assert_eq!(sel.severity, Severity::Informative);
   assert_eq!(sel.items.len(), 1, "only the slow one: {:?}", sel.items);
   assert!(sel.items[0].label.starts_with("div > .a *"));
+  Ok(())
 }
