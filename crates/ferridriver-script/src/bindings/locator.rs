@@ -45,7 +45,7 @@ fn get_text_matcher<'js>(
   if v.is_undefined() || v.is_null() {
     return Ok(None);
   }
-  crate::bindings::page::options::string_or_regex_from_js(v)
+  crate::bindings::page::options::string_or_regex_from_js(&v)
     .map(Some)
     .map_err(|_| type_error(obj.ctx(), format!("filter options: {key}: expected string | RegExp")))
 }
@@ -552,10 +552,14 @@ impl LocatorJs {
   #[qjs(rename = "getByText")]
   pub fn get_by_text(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
     let opts = crate::bindings::page::parse_text_options(options);
     Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
   }
@@ -568,10 +572,14 @@ impl LocatorJs {
   #[qjs(rename = "getByLabel")]
   pub fn get_by_label(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
     let opts = crate::bindings::page::parse_text_options(options);
     Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
   }
@@ -584,10 +592,14 @@ impl LocatorJs {
   #[qjs(rename = "getByPlaceholder")]
   pub fn get_by_placeholder(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
     let opts = crate::bindings::page::parse_text_options(options);
     Ok(LocatorJs::new(
       self.inner.get_by_placeholder(t).options(opts).into_locator(),
@@ -602,10 +614,14 @@ impl LocatorJs {
   #[qjs(rename = "getByAltText")]
   pub fn get_by_alt_text(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
     let opts = crate::bindings::page::parse_text_options(options);
     Ok(LocatorJs::new(
       self.inner.get_by_alt_text(t).options(opts).into_locator(),
@@ -620,10 +636,14 @@ impl LocatorJs {
   #[qjs(rename = "getByTitle")]
   pub fn get_by_title(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
     let opts = crate::bindings::page::parse_text_options(options);
     Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
   }
@@ -634,8 +654,15 @@ impl LocatorJs {
   ///
   /// Throws a `TypeError` when `testId` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByTestId")]
-  pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(test_id)?;
+  pub fn get_by_test_id(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    test_id: rquickjs::Value<'_>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(&test_id)?;
     Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
   }
 

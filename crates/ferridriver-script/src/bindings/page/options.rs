@@ -143,7 +143,7 @@ pub(crate) fn parse_wait_for_navigation_options<'js>(
       if url.is_undefined() || url.is_null() {
         None
       } else {
-        Some(url_value_to_matcher(ctx, url)?)
+        Some(url_value_to_matcher(ctx, &url)?)
       }
     },
     None => None,
@@ -245,7 +245,7 @@ pub(crate) fn parse_har_options<'js>(
   let Some(obj) = v.as_object() else { return Ok(out) };
   let url: rquickjs::Value<'js> = obj.get("url")?;
   if !url.is_undefined() && !url.is_null() {
-    out.url = Some(url_value_to_matcher(ctx, url)?);
+    out.url = Some(url_value_to_matcher(ctx, &url)?);
   }
   let nf: rquickjs::Value<'_> = obj.get("notFound")?;
   if let Some(s) = nf.as_string() {
@@ -485,12 +485,12 @@ pub(crate) fn parse_pdf_options<'js>(
 }
 
 /// Lower a JS `string | RegExp` value into a [`UrlMatcher`]. Mirrors
-/// the NAPI `JsRegExpLike` shape — the JS RegExp's `source` and
+/// the NAPI `JsRegExpLike` shape — the JS `RegExp`'s `source` and
 /// `flags` getters drive `UrlMatcher::regex_from_source`. Plain
 /// strings go through `UrlMatcher::glob`.
 pub(crate) fn url_value_to_matcher<'js>(
   ctx: &rquickjs::Ctx<'js>,
-  value: rquickjs::Value<'js>,
+  value: &rquickjs::Value<'js>,
 ) -> rquickjs::Result<ferridriver::url_matcher::UrlMatcher> {
   if let Some(s) = value.as_string() {
     let glob = s.to_string()?;
@@ -505,17 +505,16 @@ pub(crate) fn url_value_to_matcher<'js>(
       return ferridriver::url_matcher::UrlMatcher::regex_from_source(&source, &flags).into_js_with(ctx);
     }
   }
-  let _ = ctx;
   Err(type_error(ctx, "url: expected string | RegExp"))
 }
 
 /// Lower a JS `string | RegExp` value into a Rust
 /// [`ferridriver::options::StringOrRegex`] for every `getBy*` matcher
-/// and `RoleOptions.name`. Reads `source` / `flags` via the RegExp
+/// and `RoleOptions.name`. Reads `source` / `flags` via the `RegExp`
 /// prototype getters (same technique as NAPI's `JsRegExpLike`), so a
 /// real JS `RegExp` round-trips without a wire-shape escape.
 pub(crate) fn string_or_regex_from_js(
-  value: rquickjs::Value<'_>,
+  value: &rquickjs::Value<'_>,
 ) -> rquickjs::Result<ferridriver::options::StringOrRegex> {
   if let Some(s) = value.as_string() {
     return Ok(ferridriver::options::StringOrRegex::String(s.to_string()?));
@@ -564,12 +563,12 @@ pub(crate) fn parse_role_options<'js>(
   };
   let name_val: Option<rquickjs::Value<'js>> = obj.get("name").ok();
   let name = match name_val {
-    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(val)?),
+    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(&val)?),
     _ => None,
   };
   let description_val: Option<rquickjs::Value<'js>> = obj.get("description").ok();
   let description = match description_val {
-    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(val)?),
+    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(&val)?),
     _ => None,
   };
   let exact: Option<bool> = obj.get("exact").ok();

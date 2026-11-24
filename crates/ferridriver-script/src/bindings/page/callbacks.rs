@@ -57,7 +57,7 @@ impl SavedCallback {
 }
 
 /// Native registry for every page JS callback dispatched cross-task
-/// (outside the QuickJS context, from a backend tokio task): `page.route`
+/// (outside the `QuickJS` context, from a backend tokio task): `page.route`
 /// handlers + URL predicates (keyed by registration id), `page.exposeFunction`
 /// callbacks (keyed by binding name), and the single `page.startScreencast`
 /// frame callback. All kept as `Persistent<Function>` in context
@@ -449,7 +449,7 @@ pub(crate) const PAGE_EVENT_PUMP_CAPACITY: usize = 1024;
 pub(crate) struct PageEventPumpUd(tokio::sync::mpsc::Sender<PageEventMsg>);
 
 /// Get (or lazily start) this context's page-event pump and return its
-/// sender. The pump future lives on the QuickJS runtime executor,
+/// sender. The pump future lives on the `QuickJS` runtime executor,
 /// polled by the session's VM event loop — so events keep flowing while
 /// a script is parked on an await and between executes.
 pub(crate) fn ensure_event_pump(ctx: &rquickjs::Ctx<'_>) -> tokio::sync::mpsc::Sender<PageEventMsg> {

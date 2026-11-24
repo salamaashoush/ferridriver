@@ -250,7 +250,9 @@ fn parse_start_har_options<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rqu
     _ => None,
   };
   let url_filter = match obj.get::<_, Option<Value<'js>>>("urlFilter")? {
-    Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::page::options::url_value_to_matcher(ctx, v)?),
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      Some(crate::bindings::page::options::url_value_to_matcher(ctx, &v)?)
+    },
     _ => None,
   };
   let resources_dir = obj

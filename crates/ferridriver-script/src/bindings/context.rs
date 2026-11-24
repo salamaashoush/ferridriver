@@ -517,6 +517,10 @@ impl BrowserContextJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
     #[expect(
@@ -544,7 +548,7 @@ impl BrowserContextJs {
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
-      (url_value_to_matcher(&ctx, url)?, None, None)
+      (url_value_to_matcher(&ctx, &url)?, None, None)
     };
 
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
@@ -615,6 +619,10 @@ impl BrowserContextJs {
   pub fn route_web_socket<'js>(
     &self,
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
@@ -625,7 +633,7 @@ impl BrowserContextJs {
         "context.routeWebSocket requires the script engine's VM handle",
       ));
     };
-    let matcher = url_value_to_matcher(&ctx, url)?;
+    let matcher = url_value_to_matcher(&ctx, &url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Context(self.inner.name().to_string());
     // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
@@ -714,7 +722,7 @@ impl BrowserContextJs {
           }
           return Ok(());
         }
-        let matcher = url_value_to_matcher(&ctx, url)?;
+        let matcher = url_value_to_matcher(&ctx, &url)?;
         self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
@@ -1482,7 +1490,7 @@ pub(crate) fn clear_cookie_options<'js>(
     if value.is_undefined() || value.is_null() {
       return Ok(None);
     }
-    crate::bindings::page::options::string_or_regex_from_js(value).map(Some)
+    crate::bindings::page::options::string_or_regex_from_js(&value).map(Some)
   };
   Ok(Some(ferridriver::backend::ClearCookieOptions {
     name: field("name")?,

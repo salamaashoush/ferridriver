@@ -1036,7 +1036,7 @@ fn record_har_url_filter<'js>(
   if filter.is_undefined() || filter.is_null() {
     return Ok(None);
   }
-  crate::bindings::page::options::url_value_to_matcher(ctx, filter).map(Some)
+  crate::bindings::page::options::url_value_to_matcher(ctx, &filter).map(Some)
 }
 
 /// A `BrowserContextOptions` bag as `newContext` and `newPage` take it.
