@@ -65,6 +65,12 @@ the layer you are about to change.
   evaluates in the utility world, where page globals such as the WebSocket
   mock's `__pwWebSocketDispatch` do not exist. Track `type == "normal"` only,
   mirroring the CDP tracker's `isDefault` filter.
+- **A page the browser closes is reported only by
+  `Playwright.pageProxyDestroyed`**, on the browser session. `window.close()`
+  sends nothing on the page's own sessions that says the page is gone, so
+  without that event the page stays open to ferridriver, never emits
+  `close`, and stays in `context.pages()`. Mirrors
+  `wkBrowser._onPageProxyDestroyed`.
 - **`callFunctionOn` is synthesised through an inline `evaluate`.** Every handle
   is reachable from page-side JS through the page-side handle registry, so no
   extra protocol method is needed.
