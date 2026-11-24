@@ -30,3 +30,8 @@ disallowed-methods = [
   { path = "rquickjs::Error::new_into_js_message", reason = "cut at 255 bytes and mislabelled; use convert::type_error or throw_named" },
   { path = "rquickjs::Error::new_into_js", reason = "mislabelled conversion error; use convert::type_error or throw_named" },
 ]
+stack-size-threshold = 65536
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "FxHashMap is the workspace map", replacement = "rustc_hash::FxHashMap" },
+  { path = "std::collections::HashSet", reason = "FxHashSet is the workspace set", replacement = "rustc_hash::FxHashSet" },
+]
