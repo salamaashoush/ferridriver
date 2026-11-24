@@ -364,7 +364,7 @@ pub fn provided_modules() -> std::sync::Arc<ProvidedModuleTable> {
 ///
 /// One module instance per specifier group falls out of this: the
 /// provider's bytecode is loaded under the target's name, and every
-/// alias normalises to that name before QuickJS looks the module up.
+/// alias normalises to that name before `QuickJS` looks the module up.
 #[must_use]
 pub fn canonical_provided_name(specifier: &str) -> Option<String> {
   let table = provided_modules();

@@ -1,24 +1,3 @@
-#![allow(
-  clippy::missing_errors_doc,
-  clippy::missing_panics_doc,
-  clippy::must_use_candidate,
-  clippy::module_name_repetitions,
-  clippy::cast_possible_truncation,
-  clippy::cast_precision_loss,
-  clippy::cast_sign_loss,
-  clippy::too_many_lines,
-  clippy::uninlined_format_args,
-  clippy::needless_pass_by_value,
-  clippy::doc_markdown,
-  clippy::missing_fields_in_debug,
-  // rquickjs method wrappers intentionally produce new Locator instances that
-  // JS is free to discard (e.g. fluent chains like `loc.nth(0)` used directly).
-  clippy::return_self_not_must_use,
-  // Some web-API classes (TextEncoder, etc.) are legitimately stateless per
-  // their WHATWG spec, but `#[rquickjs::methods]` instance methods must still
-  // take `&self` to be callable on `new TextEncoder()` — not a fixable smell.
-  clippy::unused_self
-)]
 //! ferridriver-script: the `QuickJS` scripting engine.
 //!
 //! Exposes a `ScriptEngine` that runs user-provided JS against ferridriver's

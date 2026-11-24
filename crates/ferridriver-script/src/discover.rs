@@ -124,8 +124,9 @@ impl ResolvedExtension {
 /// otherwise from Node's own single-entry chain (`exports` / `module` /
 /// `main` / `index`).
 ///
-/// CommonJS package entries are rejected. Extension packages should be ESM
+/// `CommonJS` package entries are rejected. Extension packages should be ESM
 /// (`exports`, `module`, `.mjs`/`.mts`, or `type: "module"` for `.js`).
+#[must_use]
 pub fn resolve_extension_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, Vec<(String, ScriptError)>) {
   let owned: Vec<ExtensionSpec> = specs
     .iter()
@@ -146,6 +147,7 @@ pub fn resolve_extension_specs(specs: &[String], cwd: &Path) -> (Vec<PathBuf>, V
 /// ran in a different repository.
 ///
 /// Pair the specs with [`ferridriver_config::FerridriverConfig::extension_specs`].
+#[must_use]
 pub fn resolve_extension_specs_with_bases(specs: &[ExtensionSpec]) -> (Vec<PathBuf>, Vec<(String, ScriptError)>) {
   let (resolved, errors) = resolve_extensions(specs);
   let mut files: Vec<PathBuf> = Vec::new();
@@ -165,6 +167,7 @@ pub fn resolve_extension_specs_with_bases(specs: &[ExtensionSpec]) -> (Vec<PathB
 /// Like [`resolve_extension_specs_with_bases`], but keeping each spec's
 /// package identity and [`ExtensionManifest`] so a host can check the
 /// package's declared preconditions before loading it.
+#[must_use]
 pub fn resolve_extensions(specs: &[ExtensionSpec]) -> (Vec<ResolvedExtension>, Vec<(String, ScriptError)>) {
   let mut resolved = Vec::new();
   let mut errors = Vec::new();
@@ -205,7 +208,7 @@ fn resolve_extension_spec(spec: &str, cwd: &Path) -> Result<SpecResolution, Scri
     let p = if Path::new(spec).is_absolute() {
       PathBuf::from(spec)
     } else {
-      tidy(cwd.join(spec))
+      tidy(&cwd.join(spec))
     };
     return resolve_path_spec(&p);
   }
@@ -231,7 +234,7 @@ fn looks_like_path(spec: &str) -> bool {
 /// components` already skips interior `.`, so re-collecting is what
 /// actually rewrites the string; a leading `.` survives as `CurDir` and
 /// is dropped here.)
-fn tidy(path: PathBuf) -> PathBuf {
+fn tidy(path: &Path) -> PathBuf {
   let cleaned: PathBuf = path
     .components()
     .filter(|c| !matches!(c, std::path::Component::CurDir))
@@ -363,7 +366,7 @@ fn resolve_manifest_entry(pkg_dir: &Path, entry: &str, type_module: bool) -> Res
   if Path::new(entry).is_absolute() {
     return Err(bad("must be a path relative to the package directory".to_string()));
   }
-  let path = tidy(pkg_dir.join(entry));
+  let path = tidy(&pkg_dir.join(entry));
   if path.is_dir() {
     let found = walk_source_files(&path);
     if found.is_empty() {

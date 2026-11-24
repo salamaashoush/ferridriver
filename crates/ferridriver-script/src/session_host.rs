@@ -62,14 +62,8 @@ pub struct SessionScriptHost {
 /// The live scripting environment, stashed in VM userdata so a script calling
 /// `browser.bind()` can publish a session that scripts with the same roots,
 /// caps and extensions it has itself.
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct ScriptEnvUd(pub(crate) Arc<SessionScriptConfig>);
-
-// SAFETY: holds only owned config data behind an `Arc` — no borrowed JS
-// values — so restating the unused `'js` lifetime is sound.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for ScriptEnvUd {
-  type Changed<'to> = ScriptEnvUd;
-}
 
 impl SessionScriptHost {
   /// Build a host over the browser state behind a bound [`ferridriver::Browser`].
@@ -146,7 +140,7 @@ impl ScriptHost for SessionScriptHost {
     let context = key.context.as_ref();
     let router = self.router_for(context);
     let mut engine = self.config.engine.clone();
-    engine.console_sink = Some(router.clone() as Arc<dyn ConsoleSink>);
+    engine.console_sink = Some(Arc::clone(&router) as Arc<dyn ConsoleSink>);
 
     let options = RunOptions {
       timeout: request.timeout_ms.map(std::time::Duration::from_millis),

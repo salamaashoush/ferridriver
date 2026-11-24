@@ -14,13 +14,13 @@
 //! scrubbed to `PATH` plus the spec's declared passthrough names — a
 //! command never inherits ambient server secrets.
 
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ferridriver::backend::process::ChildGroup;
+use rustc_hash::FxHashMap;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -145,8 +145,13 @@ fn shape(stdout: &[u8], mode: CommandOutput) -> Result<serde_json::Value, String
   }
 }
 
-/// Run a one-shot command to completion. Errors on non-zero exit
-/// (message carries stderr), timeout, or output past the cap.
+/// Run a one-shot command to completion and shape its stdout per the
+/// declared output mode.
+///
+/// # Errors
+///
+/// Everything [`exec_oneshot`] fails on, plus a non-zero exit (the message
+/// carries stderr) and `json` output that does not parse.
 pub async fn run_oneshot(rc: &ResolvedCommand) -> Result<serde_json::Value, String> {
   SessionProcs::default().run_oneshot(rc).await
 }
@@ -160,6 +165,14 @@ pub struct CommandResult {
   pub stderr: String,
 }
 
+/// Run a one-shot command to completion and report its exit code and
+/// output, whatever the exit code was.
+///
+/// # Errors
+///
+/// When the command is declared `persistent`, cannot be spawned, outlives
+/// its timeout, writes more than the output cap to either stream, or its
+/// process group cannot be cleaned up.
 pub async fn exec_oneshot(rc: &ResolvedCommand) -> Result<CommandResult, String> {
   SessionProcs::default().exec_oneshot(rc).await
 }
@@ -224,11 +237,13 @@ async fn wait_process(
   mut failure: tokio::sync::watch::Receiver<Option<String>>,
 ) -> Result<i32, String> {
   loop {
-    if let Some(code) = *exit.borrow_and_update() {
+    let exited = *exit.borrow_and_update();
+    if let Some(code) = exited {
       return Ok(code);
     }
-    if let Some(error) = failure.borrow_and_update().as_ref() {
-      return Err(error.clone());
+    let failed = failure.borrow_and_update().clone();
+    if let Some(error) = failed {
+      return Err(error);
     }
     tokio::select! {
       result = exit.changed() => result.map_err(|e| e.to_string())?,
@@ -315,7 +330,7 @@ async fn own_process(
 
 /// Per-session process registry, retained independently of the script VM.
 pub struct SessionProcs {
-  inner: Mutex<HashMap<String, Proc>>,
+  inner: Mutex<FxHashMap<String, Proc>>,
   closing: std::sync::atomic::AtomicBool,
   jobs: Mutex<Vec<Job>>,
 }
@@ -323,7 +338,7 @@ pub struct SessionProcs {
 impl Default for SessionProcs {
   fn default() -> Self {
     Self {
-      inner: Mutex::new(HashMap::new()),
+      inner: Mutex::new(FxHashMap::default()),
       closing: std::sync::atomic::AtomicBool::new(false),
       jobs: Mutex::new(Vec::new()),
     }
@@ -331,6 +346,13 @@ impl Default for SessionProcs {
 }
 
 impl SessionProcs {
+  /// [`run_oneshot`], with the child tracked by this registry so closing
+  /// the session reaps it.
+  ///
+  /// # Errors
+  ///
+  /// Everything [`Self::exec_oneshot`] fails on, plus a non-zero exit (the
+  /// message carries stderr) and `json` output that does not parse.
   pub async fn run_oneshot(&self, rc: &ResolvedCommand) -> Result<serde_json::Value, String> {
     let result = self.exec_oneshot(rc).await?;
     if !result.success {
@@ -340,6 +362,15 @@ impl SessionProcs {
     shape(result.stdout.as_bytes(), rc.output)
   }
 
+  /// [`exec_oneshot`], with the child tracked by this registry so closing
+  /// the session reaps it.
+  ///
+  /// # Errors
+  ///
+  /// When the command is declared `persistent`, the session is closing, the
+  /// command cannot be spawned, it outlives its timeout, it writes more than
+  /// the output cap to either stream, or its process group cannot be
+  /// cleaned up.
   pub async fn exec_oneshot(&self, rc: &ResolvedCommand) -> Result<CommandResult, String> {
     if rc.persistent {
       return Err("this command is declared `persistent`: use commands.start/status/stop, not run".into());
@@ -428,10 +459,22 @@ impl SessionProcs {
 
   /// Start (or no-op if already running) a persistent command. Returns
   /// the pid.
+  ///
+  /// # Errors
+  ///
+  /// When the command is not declared `persistent`, the session is closing,
+  /// a running process of that name has failed cleanup, the session already
+  /// runs the maximum number of persistent processes, or the spawn fails.
   pub fn start(&self, name: &str, rc: &ResolvedCommand) -> Result<i32, String> {
     self.spawn(name, rc, false)
   }
 
+  /// [`Self::start`] with stdin and stdout piped for [`Self::write`] and
+  /// [`Self::read`]. Returns the pid.
+  ///
+  /// # Errors
+  ///
+  /// The same as [`Self::start`].
   pub fn open(&self, name: &str, rc: &ResolvedCommand) -> Result<i32, String> {
     self.spawn(name, rc, true)
   }
@@ -482,11 +525,11 @@ impl SessionProcs {
         pending: Vec::new(),
       })))
     } else {
-      pumps.push(pump(pipe, stdout.clone(), Some(output_w)));
+      pumps.push(pump(pipe, Arc::clone(&stdout), Some(output_w)));
       None
     };
     if let Some(e) = child.stderr.take() {
-      pumps.push(pump(e, stderr.clone(), None));
+      pumps.push(pump(e, Arc::clone(&stderr), None));
     }
     tokio::spawn(own_process(
       ChildGroup::unregistered(child),
@@ -514,6 +557,14 @@ impl SessionProcs {
     Ok(pid)
   }
 
+  /// Wait until the process's captured stdout contains `text`, and return
+  /// that output.
+  ///
+  /// # Errors
+  ///
+  /// When no process of that name exists, it was opened interactively (its
+  /// stdout belongs to [`Self::read`]), or it closes stdout before printing
+  /// `text`.
   pub async fn wait_for_output(&self, name: &str, text: &str) -> Result<String, String> {
     let (stdout, mut changed) = {
       let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -521,7 +572,7 @@ impl SessionProcs {
       if process.output.is_some() {
         return Err("use commands.read for interactive stdout".into());
       }
-      (process.stdout.clone(), process.output_changed.clone())
+      (Arc::clone(&process.stdout), process.output_changed.clone())
     };
     loop {
       changed.borrow_and_update();
@@ -536,14 +587,18 @@ impl SessionProcs {
     }
   }
 
+  /// Write `data` to the process's stdin, or close stdin when `data` is
+  /// `None`.
+  ///
+  /// # Errors
+  ///
+  /// When no process of that name exists, its stdin is already closed (or
+  /// was never piped), or the write fails.
   pub async fn write(&self, name: &str, data: Option<String>) -> Result<(), String> {
     let input = {
       let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      map
-        .get(name)
-        .ok_or_else(|| format!("no process `{name}`"))?
-        .input
-        .clone()
+      let process = map.get(name).ok_or_else(|| format!("no process `{name}`"))?;
+      Arc::clone(&process.input)
     };
     let mut input = input.lock().await;
     if let Some(data) = data {
@@ -559,6 +614,13 @@ impl SessionProcs {
     }
   }
 
+  /// Read the next line of an interactive process's stdout, without its
+  /// newline. `None` once stdout is closed and drained.
+  ///
+  /// # Errors
+  ///
+  /// When no process of that name exists, it was not opened interactively,
+  /// the read fails, a line exceeds the output cap, or a line is not UTF-8.
   pub async fn read(&self, name: &str) -> Result<Option<String>, String> {
     let output = {
       let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -595,6 +657,12 @@ impl SessionProcs {
       .map_err(|e| e.to_string())
   }
 
+  /// Wait for the process to exit and return its exit code (`-1` when it
+  /// was stopped or ended by a signal).
+  ///
+  /// # Errors
+  ///
+  /// When no process of that name exists, or its cleanup failed.
   pub async fn wait(&self, name: &str) -> Result<i32, String> {
     let (exit, failure) = {
       let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -604,6 +672,12 @@ impl SessionProcs {
     wait_process(exit, failure).await
   }
 
+  /// The process's pid, whether it runs, its exit code, uptime and the
+  /// captured tails of stdout and stderr.
+  ///
+  /// # Errors
+  ///
+  /// When no process of that name was started in this session.
   pub fn status(&self, name: &str) -> Result<serde_json::Value, String> {
     let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let p = map
@@ -615,12 +689,17 @@ impl SessionProcs {
       "pid": p.pid,
       "running": exit.is_none(),
       "exitCode": exit,
-      "uptimeMs": p.started.elapsed().as_millis() as u64,
+      "uptimeMs": u64::try_from(p.started.elapsed().as_millis()).unwrap_or(u64::MAX),
       "stdout": p.stdout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).text(),
       "stderr": p.stderr.lock().unwrap_or_else(std::sync::PoisonError::into_inner).text(),
     }))
   }
 
+  /// Stop the process's whole group and forget it.
+  ///
+  /// # Errors
+  ///
+  /// When no process of that name exists, or its cleanup fails.
   pub async fn stop(&self, name: &str) -> Result<(), String> {
     let (control, exit) = {
       let map = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -640,6 +719,12 @@ impl SessionProcs {
     Ok(())
   }
 
+  /// Refuse new processes, then stop every persistent process and every
+  /// one-shot command still running.
+  ///
+  /// # Errors
+  ///
+  /// When any process's cleanup fails; the message names each one.
   pub async fn close(&self) -> Result<(), String> {
     self.begin_close();
     let processes = {
@@ -797,7 +882,8 @@ mod tests {
     });
     let job = tokio::time::timeout(Duration::from_secs(3), async {
       loop {
-        if let Some(job) = procs.jobs.lock().expect("jobs").first().cloned() {
+        let first = procs.jobs.lock().expect("jobs").first().cloned();
+        if let Some(job) = first {
           break job;
         }
         tokio::task::yield_now().await;

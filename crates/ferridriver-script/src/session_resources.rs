@@ -41,6 +41,13 @@ struct Running<'a, F> {
 }
 
 impl SessionResources {
+  /// Build a [`Session`] whose browsers and processes these resources own.
+  ///
+  /// # Errors
+  ///
+  /// `TargetClosedError` when these resources are closing before the VM
+  /// is built or by the time it is, and any failure building the VM
+  /// itself.
   pub async fn create(
     self: &Arc<Self>,
     config: ScriptEngineConfig,
@@ -67,6 +74,11 @@ impl SessionResources {
     }
   }
 
+  /// Close every browser, then stop every process these resources own.
+  ///
+  /// # Errors
+  ///
+  /// When closing a browser or stopping a process fails.
   pub async fn close(&self) -> Result<(), ScriptError> {
     self.close_browsers().await?;
     self.procs.close().await.map_err(ScriptError::internal)?;

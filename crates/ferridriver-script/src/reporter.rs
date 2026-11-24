@@ -81,14 +81,8 @@ struct ReporterState {
   preprocessing: bool,
 }
 
+#[derive(JsLifetime)]
 struct ReporterUd(RefCell<ReporterState>);
-
-// SAFETY: holds only `'static` data (`Persistent` handles and owned
-// values), the same rationale as the extension registry's userdata.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ReporterUd {
-  type Changed<'to> = ReporterUd;
-}
 
 fn state<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ReporterState) -> R) -> Result<R, ScriptError> {
   let ud = ctx
@@ -731,8 +725,14 @@ fn case_obj<'js>(ctx: &Ctx<'js>, case: &api::Case) -> rquickjs::Result<Object<'j
   obj.set("results", Vec::<Value<'js>>::new())?;
   let title_path = case.title_path.clone();
   obj.set("titlePath", Function::new(ctx.clone(), move || title_path.clone())?)?;
-  obj.set("outcome", Function::new(ctx.clone(), case_outcome)?)?;
-  obj.set("ok", Function::new(ctx.clone(), case_ok)?)?;
+  obj.set(
+    "outcome",
+    Function::new(ctx.clone(), |this: This<Object<'js>>| case_outcome(&this.0))?,
+  )?;
+  obj.set(
+    "ok",
+    Function::new(ctx.clone(), |this: This<Object<'js>>| case_ok(&this.0))?,
+  )?;
   Ok(obj)
 }
 
@@ -751,13 +751,13 @@ fn case_verdict(this: &Object<'_>) -> (Vec<String>, String) {
   (statuses, expected)
 }
 
-fn case_outcome(this: This<Object<'_>>) -> String {
-  let (statuses, expected) = case_verdict(&this.0);
+fn case_outcome(case: &Object<'_>) -> String {
+  let (statuses, expected) = case_verdict(case);
   api::outcome_of(&statuses, &expected).to_string()
 }
 
-fn case_ok(this: This<Object<'_>>) -> bool {
-  let (statuses, expected) = case_verdict(&this.0);
+fn case_ok(case: &Object<'_>) -> bool {
+  let (statuses, expected) = case_verdict(case);
   api::ok_of(&statuses, &expected)
 }
 
@@ -773,9 +773,18 @@ fn suite_obj<'js>(ctx: &Ctx<'js>, suite: &api::Suite, index: &Object<'js>) -> rq
   }
   let title_path = suite.title_path.clone();
   obj.set("titlePath", Function::new(ctx.clone(), move || title_path.clone())?)?;
-  obj.set("entries", Function::new(ctx.clone(), suite_entries)?)?;
-  obj.set("allTests", Function::new(ctx.clone(), suite_all_tests)?)?;
-  obj.set("project", Function::new(ctx.clone(), suite_project)?)?;
+  obj.set(
+    "entries",
+    Function::new(ctx.clone(), |this: This<Object<'js>>| suite_entries(&this.0))?,
+  )?;
+  obj.set(
+    "allTests",
+    Function::new(ctx.clone(), |this: This<Object<'js>>| suite_all_tests(&this.0))?,
+  )?;
+  obj.set(
+    "project",
+    Function::new(ctx.clone(), |this: This<Object<'js>>| suite_project(&this.0))?,
+  )?;
 
   let children: Vec<Object<'js>> = suite
     .suites
@@ -803,9 +812,9 @@ fn suite_obj<'js>(ctx: &Ctx<'js>, suite: &api::Suite, index: &Object<'js>) -> rq
 }
 
 /// Playwright's `Suite.entries()`: child suites, then loose tests.
-fn suite_entries<'js>(this: This<Object<'js>>) -> Vec<Value<'js>> {
-  let mut entries: Vec<Value<'js>> = this.0.get("suites").unwrap_or_default();
-  entries.extend(this.0.get::<_, Vec<Value<'js>>>("tests").unwrap_or_default());
+fn suite_entries<'js>(suite: &Object<'js>) -> Vec<Value<'js>> {
+  let mut entries: Vec<Value<'js>> = suite.get("suites").unwrap_or_default();
+  entries.extend(suite.get::<_, Vec<Value<'js>>>("tests").unwrap_or_default());
   entries
 }
 
@@ -818,16 +827,16 @@ fn collect_cases<'js>(suite: &Object<'js>, out: &mut Vec<Value<'js>>) {
 
 /// Playwright's `Suite.allTests()`: every case in the subtree, in
 /// `entries()` order.
-fn suite_all_tests(this: This<Object<'_>>) -> Vec<Value<'_>> {
+fn suite_all_tests<'js>(suite: &Object<'js>) -> Vec<Value<'js>> {
   let mut out = Vec::new();
-  collect_cases(&this.0, &mut out);
+  collect_cases(suite, &mut out);
   out
 }
 
 /// Playwright's `Suite.project()`: the `FullProject` of the enclosing
 /// project-level suite, if there is one.
-fn suite_project<'js>(this: This<Object<'js>>) -> Value<'js> {
-  let mut node = Some(this.0.clone());
+fn suite_project<'js>(suite: &Object<'js>) -> Value<'js> {
+  let mut node = Some(suite.clone());
   while let Some(current) = node {
     if let Ok(project) = current.get::<_, Value<'js>>("_project")
       && !project.is_undefined()
@@ -836,7 +845,7 @@ fn suite_project<'js>(this: This<Object<'js>>) -> Value<'js> {
     }
     node = current.get::<_, Value<'js>>("parent").ok().and_then(Value::into_object);
   }
-  Value::new_undefined(this.0.ctx().clone())
+  Value::new_undefined(suite.ctx().clone())
 }
 
 // ── Driving the hooks ──

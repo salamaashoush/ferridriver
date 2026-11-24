@@ -390,38 +390,23 @@ pub fn allows_whole_env(allow_env: &[String]) -> bool {
 /// Re-installed (same `Arc`) on every VM (re)build by
 /// [`crate::session_table::BrowserSession::run`], so a persistent
 /// process outlives a VM rebuild but dies with the session record.
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct SessionProcsUd(pub(crate) std::sync::Arc<crate::session_procs::SessionProcs>);
-
-// SAFETY: holds only an owned `Arc` (`'static`; no borrowed JS values).
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SessionProcsUd {
-  type Changed<'to> = SessionProcsUd;
-}
 
 /// The session key this VM serves plus the operator's per-extension
 /// settings, stashed as userdata so `tools.<name>` dispatch can build a
 /// handler's `session` / `settings` without threading them through every
 /// call.
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct ExtensionEnvUd {
   pub(crate) session: Option<String>,
   pub(crate) settings: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-// SAFETY: owned data only; no borrowed JS values.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for ExtensionEnvUd {
-  type Changed<'to> = ExtensionEnvUd;
-}
-
 /// The session's `fetch` backend, stashed as userdata so a tool
 /// dispatch can hand its handler an attenuated copy.
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct SessionFetchUd(pub(crate) Arc<crate::bindings::net_policy::SessionFetch>);
-
-// SAFETY: owned `Arc` only.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SessionFetchUd {
-  type Changed<'to> = SessionFetchUd;
-}
 
 /// Sandboxed `QuickJS` scripting engine.
 pub struct ScriptEngine {
@@ -564,7 +549,7 @@ impl ferrijs::Extension for FerridriverExtension {
     &self,
     ctx: Ctx<'js>,
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
-    let vars = self.vars.clone();
+    let vars = Arc::clone(&self.vars);
     let artifacts = self.artifacts.clone();
     let host = self.host;
     let caps = self.caps.clone();
@@ -621,7 +606,7 @@ impl ferrijs::Extension for FerridriverExtension {
       install_vars(&ctx, vars)?;
       crate::bindings::runtime::mirror_global(&ctx, "fs")?;
       crate::bindings::runtime::mirror_global(&ctx, "process")?;
-      let _ = ctx.store_userdata(SessionProcsUd(procs.clone()));
+      let _ = ctx.store_userdata(SessionProcsUd(Arc::clone(&procs)));
       install_commands(&ctx, &caps, Some(procs))?;
       if let Some(artifacts) = artifacts {
         crate::bindings::install_artifacts(&ctx, artifacts)?;
@@ -692,7 +677,7 @@ impl Session {
   /// Boxed at the definition: the future carries the whole engine
   /// config, and every caller that awaits it would otherwise carry it
   /// too (`clippy::large_futures`). One allocation next to building a
-  /// QuickJS runtime is noise.
+  /// `QuickJS` runtime is noise.
   pub fn create(
     config: ScriptEngineConfig,
     context: &RunContext,
@@ -740,7 +725,7 @@ impl Session {
       });
       let extension = FerridriverExtension {
         resources: Arc::clone(&resources),
-        vars: context.vars.clone(),
+        vars: Arc::clone(&context.vars),
         artifacts: context.artifacts.clone(),
         host: context.host,
         caps: context.caps.clone(),
@@ -791,6 +776,11 @@ impl Session {
     Arc::clone(&self.resources)
   }
 
+  /// Close the session's browsers, then stop its processes.
+  ///
+  /// # Errors
+  ///
+  /// When closing a browser or stopping a process fails.
   pub async fn close(&self) -> Result<(), ScriptError> {
     self.resources.close().await
   }
@@ -844,7 +834,7 @@ impl Session {
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
-      default_request: self.default_request.clone(),
+      default_request: Arc::clone(&self.default_request),
       browser: context.browser.clone(),
       vm: self.rt.handle(),
       fetch: Arc::clone(&self.fetch),
@@ -1024,11 +1014,11 @@ fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()>
   let obj = Object::new(ctx.clone())?;
 
   {
-    let v = vars.clone();
+    let v = Arc::clone(&vars);
     obj.set("get", Func::from(move |name: String| v.get(&name)))?;
   }
   {
-    let v = vars.clone();
+    let v = Arc::clone(&vars);
     obj.set(
       "set",
       Func::from(move |name: String, value: String| {
@@ -1037,11 +1027,11 @@ fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()>
     )?;
   }
   {
-    let v = vars.clone();
+    let v = Arc::clone(&vars);
     obj.set("has", Func::from(move |name: String| v.has(&name)))?;
   }
   {
-    let v = vars.clone();
+    let v = Arc::clone(&vars);
     obj.set(
       "delete",
       Func::from(move |name: String| {
@@ -1049,10 +1039,7 @@ fn install_vars(ctx: &Ctx<'_>, vars: Arc<dyn VarsStore>) -> rquickjs::Result<()>
       }),
     )?;
   }
-  {
-    let v = vars.clone();
-    obj.set("keys", Func::from(move || v.keys()))?;
-  }
+  obj.set("keys", Func::from(move || vars.keys()))?;
 
   ctx.globals().set("vars", obj)?;
   crate::bindings::runtime::mirror_global(ctx, "vars")?;

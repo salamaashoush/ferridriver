@@ -175,7 +175,7 @@ pub fn install_default(mode: DebugMode, overrides: &mut CliOverrides) -> Result<
   install(
     mode,
     crate::SessionScriptConfig {
-      script_root: cwd.clone(),
+      script_root: cwd,
       artifacts: Some(artifacts),
       caps: crate::ScriptCaps::default(),
       extensions: Vec::new(),
@@ -187,6 +187,7 @@ pub fn install_default(mode: DebugMode, overrides: &mut CliOverrides) -> Result<
 }
 
 impl SessionDebugHook {
+  #[must_use]
   pub fn new(script: crate::SessionScriptConfig, mode: DebugMode) -> Self {
     Self {
       script: Arc::new(script),
@@ -207,7 +208,7 @@ impl SessionDebugHook {
     };
 
     let mut engine = self.script.engine.clone();
-    engine.test_debug = Some(stopped.clone() as Arc<dyn TestDebugControl>);
+    engine.test_debug = Some(Arc::clone(&stopped) as Arc<dyn TestDebugControl>);
     // The gate skips calls made by this session's own scripts: the client
     // inspecting a stopped test drives the same context it is stopped in,
     // and stopping the inspector would leave nobody to resume it.
@@ -260,7 +261,7 @@ impl DebugHook for SessionDebugHook {
       release: watch::channel(0).0,
       done: AtomicBool::new(false),
     });
-    let Some(published) = self.publish(&test, stopped.clone()).await else {
+    let Some(published) = self.publish(&test, Arc::clone(&stopped)).await else {
       return;
     };
     print_banner(&test, &published.id, "starting");
@@ -288,7 +289,7 @@ impl DebugHook for SessionDebugHook {
       release: watch::channel(0).0,
       done: AtomicBool::new(false),
     });
-    let Some(published) = self.publish(&test, stopped.clone()).await else {
+    let Some(published) = self.publish(&test, Arc::clone(&stopped)).await else {
       return;
     };
     print_banner(&test, &published.id, "failed");

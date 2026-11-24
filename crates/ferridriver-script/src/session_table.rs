@@ -66,6 +66,12 @@ impl BrowserSession {
     }
   }
 
+  /// End this session: drop its VM, close its browsers and stop its
+  /// processes.
+  ///
+  /// # Errors
+  ///
+  /// When closing a browser or stopping a process fails.
   pub async fn close(&mut self) -> Result<(), ScriptError> {
     self.resources.begin_close();
     self.vm = None;
@@ -78,7 +84,7 @@ impl BrowserSession {
   /// The caller threads this into the `RunContext` for [`Self::run`].
   #[must_use]
   pub fn vars(&self) -> Arc<InMemoryVars> {
-    self.vars.clone()
+    Arc::clone(&self.vars)
   }
 
   /// The session-scoped HTTP client. Same durability contract as
@@ -86,7 +92,7 @@ impl BrowserSession {
   /// record. The caller threads this into the `RunContext`.
   #[must_use]
   pub fn request(&self) -> Arc<ferridriver::http_client::HttpClient> {
-    self.request.clone()
+    Arc::clone(&self.request)
   }
 
   fn has_vm(&self) -> bool {
@@ -276,6 +282,12 @@ impl SessionTable {
   /// returned slot's [`AsyncMutex`] is the per-session execution guard:
   /// `lock().await` it, build a `RunContext` with its `vars()`, then
   /// call [`BrowserSession::run`].
+  ///
+  /// # Errors
+  ///
+  /// `TargetClosedError` when the table is closing or closes during the
+  /// acquisition, or the session's own resources are closing; and any
+  /// failure closing a session the idle reap ends.
   pub async fn acquire(&self, name: &str) -> Result<Arc<AsyncMutex<BrowserSession>>, ScriptError> {
     let generation = {
       let admission = self.admission.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -348,7 +360,7 @@ impl SessionTable {
         errors.push(format!("{name}: {}", error.message));
       }
     }
-    cleanup_result(errors)
+    cleanup_result(&errors)
   }
 
   fn snapshot(&self, pred: impl Fn(&str) -> bool) -> Vec<(String, SessionEntry)> {
@@ -373,6 +385,11 @@ impl SessionTable {
     Ok(())
   }
 
+  /// End the session `name`. A name with no session is a no-op.
+  ///
+  /// # Errors
+  ///
+  /// When closing the session's browsers or stopping its processes fails.
   pub async fn remove(&self, name: &str) -> Result<(), ScriptError> {
     let Some(entry) = self.map.get(name).map(|entry| entry.value().clone()) else {
       return Ok(());
@@ -394,6 +411,10 @@ impl SessionTable {
   /// End every session whose name satisfies `pred`. Used when a whole
   /// browser instance closes and every session routed to it — under
   /// names only the caller can map — has to go with it.
+  ///
+  /// # Errors
+  ///
+  /// When closing any matched session fails; the message names each one.
   pub async fn remove_matching(&self, pred: impl Fn(&str) -> bool) -> Result<(), ScriptError> {
     let entries = self.snapshot(pred);
     for (_, entry) in &entries {
@@ -402,14 +423,30 @@ impl SessionTable {
     self.close_entries(entries).await
   }
 
+  /// End every session. The table admits new sessions again afterwards.
+  ///
+  /// # Errors
+  ///
+  /// When closing any session fails; the message names each one.
   pub async fn clear(&self) -> Result<(), ScriptError> {
     self.clear_after(std::future::ready(Ok(()))).await
   }
 
+  /// End every session and admit no new ones.
+  ///
+  /// # Errors
+  ///
+  /// When closing any session fails; the message names each one.
   pub async fn close(&self) -> Result<(), ScriptError> {
     self.close_after(std::future::ready(Ok(()))).await
   }
 
+  /// [`Self::clear`], once `release` has finished. A failed `release`
+  /// drops every VM and leaves the sessions in place.
+  ///
+  /// # Errors
+  ///
+  /// `release`'s error, or a failure closing any session.
   pub async fn clear_after(
     &self,
     release: impl std::future::Future<Output = Result<(), ScriptError>>,
@@ -417,6 +454,12 @@ impl SessionTable {
     self.close_all(false, release).await
   }
 
+  /// [`Self::close`], once `release` has finished. A failed `release`
+  /// drops every VM and leaves the sessions in place.
+  ///
+  /// # Errors
+  ///
+  /// `release`'s error, or a failure closing any session.
   pub async fn close_after(
     &self,
     release: impl std::future::Future<Output = Result<(), ScriptError>>,
@@ -466,7 +509,7 @@ impl SessionTable {
         errors.push(format!("{name}: {}", error.message));
       }
     }
-    cleanup_result(errors)?;
+    cleanup_result(&errors)?;
     let mut errors = Vec::new();
     for (name, entry) in entries {
       let mut session = entry.session.lock().await;
@@ -474,7 +517,7 @@ impl SessionTable {
         errors.push(format!("{name}: {}", error.message));
       }
     }
-    cleanup_result(errors)
+    cleanup_result(&errors)
   }
 
   /// Discard every live VM while keeping each session's durable tier
@@ -523,7 +566,7 @@ impl SessionTable {
   }
 }
 
-fn cleanup_result(errors: Vec<String>) -> Result<(), ScriptError> {
+fn cleanup_result(errors: &[String]) -> Result<(), ScriptError> {
   if errors.is_empty() {
     Ok(())
   } else {
@@ -572,9 +615,9 @@ mod tests {
   }
 
   #[track_caller]
-  fn assert_ok(actual: &ScriptResult, expected: serde_json::Value) {
+  fn assert_ok(actual: &ScriptResult, expected: &serde_json::Value) {
     match &actual.outcome {
-      crate::result::Outcome::Ok { success } => assert_eq!(success.value, expected, "unexpected script value"),
+      crate::result::Outcome::Ok { success } => assert_eq!(&success.value, expected, "unexpected script value"),
       crate::result::Outcome::Error { error } => panic!("expected ok {expected}, got error: {error:?}"),
     }
   }
@@ -692,7 +735,7 @@ mod tests {
           None,
         )
         .await,
-        serde_json::json!("safari/contract"),
+        &serde_json::json!("safari/contract"),
       );
       polled.await.unwrap();
       if poison {
@@ -718,7 +761,7 @@ mod tests {
       assert!(!slot.lock().await.has_vm());
       assert_ok(
         &run(&slot, "return typeof globalThis.nested;", None).await,
-        serde_json::json!("undefined"),
+        &serde_json::json!("undefined"),
       );
       let resources = Arc::clone(&slot.lock().await.resources);
       let mut closing = Box::pin(resources.close());
@@ -748,14 +791,14 @@ mod tests {
     let r = run(&slot, "globalThis.k = 7; vars.set('v', 'keep'); return 'a';", Some(1)).await;
     assert!(r.is_ok(), "{r:?}");
     let r = run(&slot, "return globalThis.k ?? 'gone';", Some(1)).await;
-    assert_ok(&r, serde_json::json!(7));
+    assert_ok(&r, &serde_json::json!(7));
 
     // Browser relaunched (epoch change): VM rebuilt, globalThis gone,
     // durable vars survive.
     let r = run(&slot, "return globalThis.k ?? 'gone';", Some(2)).await;
-    assert_ok(&r, serde_json::json!("gone"));
+    assert_ok(&r, &serde_json::json!("gone"));
     let r = run(&slot, "return vars.get('v') ?? 'missing';", Some(2)).await;
-    assert_ok(&r, serde_json::json!("keep"));
+    assert_ok(&r, &serde_json::json!("keep"));
   }
 
   #[tokio::test(flavor = "multi_thread")]
@@ -779,9 +822,9 @@ mod tests {
 
     // "a" rebuilds on next use: globalThis gone, durable vars intact.
     let r = run(&a, "return globalThis.g ?? 'rebuilt';", None).await;
-    assert_ok(&r, serde_json::json!("rebuilt"));
+    assert_ok(&r, &serde_json::json!("rebuilt"));
     let r = run(&a, "return vars.get('tok') ?? 'lost';", None).await;
-    assert_ok(&r, serde_json::json!("abc"));
+    assert_ok(&r, &serde_json::json!("abc"));
   }
 
   #[tokio::test(flavor = "multi_thread")]
@@ -881,7 +924,7 @@ mod tests {
       assert!(!s.has_vm(), "timeout must poison (discard) the VM");
     }
     let r = run(&slot, "return globalThis.before ?? 'fresh';", None).await;
-    assert_ok(&r, serde_json::json!("fresh"));
+    assert_ok(&r, &serde_json::json!("fresh"));
   }
   #[tokio::test]
   async fn delayed_remove_does_not_remove_a_replacement_session() {
@@ -900,7 +943,7 @@ mod tests {
     second.await.unwrap();
     assert!(Arc::ptr_eq(&table.acquire("sashoush").await.unwrap(), &replacement));
     assert!(run(&original, "return 1;", None).await.is_err());
-    assert_ok(&run(&replacement, "return 42;", None).await, serde_json::json!(42));
+    assert_ok(&run(&replacement, "return 42;", None).await, &serde_json::json!(42));
     table.close().await.unwrap();
   }
 
@@ -996,7 +1039,7 @@ mod tests {
         None,
       )
       .await,
-      serde_json::json!("safari/contract"),
+      &serde_json::json!("safari/contract"),
     );
     slot
   }
@@ -1164,7 +1207,7 @@ mod tests {
       closing.await.unwrap();
       let replacement = table.acquire("sashoush").await.unwrap();
       assert!(!Arc::ptr_eq(&slot, &replacement));
-      assert_ok(&run(&replacement, "return 42;", None).await, serde_json::json!(42));
+      assert_ok(&run(&replacement, "return 42;", None).await, &serde_json::json!(42));
       table.close().await.unwrap();
     }
   }
@@ -1261,7 +1304,7 @@ mod tests {
         None,
       )
       .await,
-      serde_json::json!({"old":"undefined","kept":"yes"}),
+      &serde_json::json!({"old":"undefined","kept":"yes"}),
     );
     table.close().await.unwrap();
     assert!(resources.procs.status("sashoush").is_err());
