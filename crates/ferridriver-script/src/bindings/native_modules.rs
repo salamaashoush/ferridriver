@@ -3,7 +3,7 @@
 //! table beside the Node modules the standard library serves. Bundles
 //! mark these specifiers EXTERNAL, so the emitted chunk keeps the bare
 //! `import ... from 'ferridriver'` and the written bytecode re-links by
-//! NAME against whatever realm loads it. QuickJS resolves the module
+//! NAME against whatever realm loads it. `QuickJS` resolves the module
 //! graph EAGERLY at declare time, so the compile realms read the same
 //! table.
 //!
@@ -86,6 +86,7 @@ fn namespace_group(specifier: &str) -> String {
 
 /// Every specifier served natively, ferridriver's own plus the standard
 /// library's.
+#[must_use]
 pub fn native_module_names() -> Vec<&'static str> {
   let mut names: Vec<&'static str> = FERRIDRIVER_MODULE_NAMES.to_vec();
   for module in ferrijs::std::modules::modules() {
@@ -325,7 +326,7 @@ pub fn provided_externals() -> Vec<String> {
 ///
 /// The provider's own bytecode is loaded under the specifier's name, so
 /// accepting it here is all that stands between an importer and the one
-/// module instance QuickJS already holds -- no facade, no re-export. An
+/// module instance `QuickJS` already holds -- no facade, no re-export. An
 /// alias answers with its target's name, which is what keeps `x` and
 /// `x/sub` one module rather than two copies of the provider's state.
 /// The loader IS reached in the throwaway compile realms, which only
@@ -427,7 +428,7 @@ fn fd_prop<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Value<'js>> {
 
 /// A native module's exports as one plain object. Single source of
 /// truth for BOTH the ESM `evaluate` path and the synchronous
-/// CommonJS [`install_require`] path, so `require('…')` can never see a
+/// `CommonJS` [`install_require`] path, so `require('…')` can never see a
 /// different surface from `import … from '…'`.
 ///
 /// # Errors

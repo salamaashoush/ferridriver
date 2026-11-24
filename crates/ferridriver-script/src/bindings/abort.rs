@@ -74,7 +74,14 @@ fn reason_text(reason: &Value<'_>) -> String {
     .map_or_else(|_| ferridriver::abort::ABORTED.to_string(), |text| text.0)
 }
 
-fn arm<'js>(ctx: Ctx<'js>, signal: Object<'js>) -> rquickjs::Result<()> {
+fn arm<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  signal: Object<'js>,
+) -> rquickjs::Result<()> {
   let core = if signal.get::<_, bool>("aborted")? {
     ferridriver::abort::AbortSignal::refused(reason_text(&signal.get("reason")?))
   } else {
@@ -110,6 +117,11 @@ fn wrap<'js, C: JsClass<'js>>(ctx: &Ctx<'js>, patch: &Function<'js>) -> rquickjs
 }
 
 /// Wrap the methods of every class whose calls take an option bag.
+///
+/// # Errors
+///
+/// When the wrapper script fails to evaluate or throws while patching a
+/// class prototype.
 pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let _ = ctx.store_userdata(Pending(RefCell::new(None)));
   let patch: Function<'_> = ctx.eval(WRAP_METHODS)?;

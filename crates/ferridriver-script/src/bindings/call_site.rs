@@ -20,7 +20,7 @@
 //! `Promise.all([a.click(), b.click()])` has two call sites in flight at
 //! once, and a slot would report the second for both.
 //!
-//! Positions arrive as coordinates in the bundle QuickJS actually ran, so
+//! Positions arrive as coordinates in the bundle `QuickJS` actually ran, so
 //! they are mapped back through that bundle's source map before anyone
 //! sees them: `--debug`'s `pauseAt` matches what the user typed, and the
 //! trace viewer's Source tab needs a file that exists on disk.

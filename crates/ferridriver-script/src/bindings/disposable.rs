@@ -1,4 +1,4 @@
-//! QuickJS binding for `ferridriver::Disposable` — mirrors Playwright's
+//! `QuickJS` binding for `ferridriver::Disposable` — mirrors Playwright's
 //! `Disposable` / `DisposableStub` (`client/disposable.ts`). Returned from
 //! `page.route` / `page.addInitScript` (and context equivalents); `dispose()`
 //! reverses the registration, `remove()` is an alias.
@@ -23,6 +23,11 @@ impl DisposableJs {
 #[rquickjs::methods]
 impl DisposableJs {
   /// Reverse the registration. Idempotent — repeat calls are no-ops.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name when the
+  /// backend fails to reverse the registration.
   #[qjs(rename = "dispose")]
   pub async fn dispose(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     let inner = Arc::clone(&self.inner);
@@ -30,6 +35,10 @@ impl DisposableJs {
   }
 
   /// Alias for `dispose()`.
+  ///
+  /// # Errors
+  ///
+  /// As `dispose()`.
   #[qjs(rename = "remove")]
   pub async fn remove(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     let inner = Arc::clone(&self.inner);

@@ -161,6 +161,7 @@ fn effective_net(declared: Vec<String>, ceiling: Option<&[String]>) -> Option<st
 /// host; a wildcard `*.suffix` only when a ceiling wildcard's domain
 /// space contains its whole space (an exact ceiling entry can never
 /// subsume a wildcard).
+#[must_use]
 pub fn net_entry_subsumed(entry: &str, ceiling: &[String]) -> bool {
   if let Some(suffix) = entry.strip_prefix("*.") {
     ceiling.iter().any(|c| {
@@ -394,6 +395,10 @@ pub struct CollectedTool {
 /// Snapshot every registered tool manifest, in registration order.
 /// Synchronous (`&Ctx`) so the bundle/extraction path can call it inside
 /// its own `async_with!` without a second context hop.
+///
+/// # Errors
+///
+/// When the extension registry is not installed in `ctx`.
 pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> {
   with_registry(ctx, |reg| {
     reg
@@ -419,6 +424,10 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
 
 /// Number of tools registered so far — lets the loader slice each
 /// bundled file's contributions out of the shared registry.
+///
+/// # Errors
+///
+/// When the extension registry is not installed in `ctx`.
 pub fn tools_len(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   with_registry(ctx, |reg| reg.tools.len())
 }
@@ -437,6 +446,10 @@ pub struct RegistryMarks {
 }
 
 /// Snapshot the position of every registry.
+///
+/// # Errors
+///
+/// When the extension or test registry is not installed in `ctx`.
 pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
   let (tools, steps, hooks, param_types, defaults) = with_registry(ctx, |reg| {
     (
@@ -465,6 +478,10 @@ pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
 /// Tools used to be the only registry sliced, so an extension that
 /// contributes steps, hooks, parameter types or fixtures reported an
 /// empty manifest — the same answer as a `defineTool` that never ran.
+///
+/// # Errors
+///
+/// When the extension or test registry is not installed in `ctx`.
 pub fn registrations_since(
   ctx: &Ctx<'_>,
   marks: RegistryMarks,
@@ -523,6 +540,10 @@ pub fn registrations_since(
 /// indices. A file that registered some of them and then threw leaves
 /// the VM holding entries nobody can address, so the count before and
 /// after an install is what says whether skipping it is safe.
+///
+/// # Errors
+///
+/// When the extension or test registry is not installed in `ctx`.
 pub fn registration_counts(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   let own = with_registry(ctx, |reg| {
     reg.tools.len() + reg.steps.len() + reg.hooks.len() + reg.param_types.len()
@@ -532,6 +553,10 @@ pub fn registration_counts(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
 
 /// The ordered tool names — drives building the native `tools.<name>`
 /// surface.
+///
+/// # Errors
+///
+/// When the extension registry is not installed in `ctx`.
 pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
   with_registry(ctx, |reg| reg.tools.iter().map(|t| t.name.clone()).collect())
 }
@@ -566,7 +591,7 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
         (
           t.name.clone(),
           t.handler.clone(),
-          t.allowed_commands.clone(),
+          std::sync::Arc::clone(&t.allowed_commands),
           t.allowed_net.clone(),
           t.timeout_ms,
         )
@@ -596,7 +621,14 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
 /// `ferridriver-config`, which checks the payload against the one
 /// schema every layer is checked against and refuses a key an extension
 /// may not set.
-fn define_defaults<'js>(ctx: Ctx<'js>, defaults: Value<'js>) -> rquickjs::Result<()> {
+fn define_defaults<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  defaults: Value<'js>,
+) -> rquickjs::Result<()> {
   let permitted = ctx.userdata::<ExtensionPolicyUd>().is_none_or(|p| p.0.config_defaults);
   if !permitted {
     return Err(throw_script_error(

@@ -19,6 +19,12 @@ impl WebMcpJs {
 
 #[rquickjs::methods]
 impl WebMcpJs {
+  /// The tools the page registered over `WebMCP`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, or with the
+  /// core error under its Playwright name when listing fails.
   pub async fn tools<'js>(
     &self,
     call_site: crate::bindings::CallSite,
@@ -41,6 +47,12 @@ impl WebMcpJs {
       .await
   }
 
+  /// Call the page's `WebMCP` tool `name` with `input`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for an `input` that cannot be serialized or a
+  /// malformed `options` bag, or with the core error when the call fails.
   #[qjs(rename = "callTool")]
   pub async fn call_tool<'js>(
     &self,
@@ -65,6 +77,12 @@ impl WebMcpJs {
       .await
   }
 
+  /// Wait until the page registers the `WebMCP` tool `name`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, or with the
+  /// core error (`TimeoutError` when the wait runs out).
   #[qjs(rename = "waitForTool")]
   pub async fn wait_for_tool<'js>(
     &self,

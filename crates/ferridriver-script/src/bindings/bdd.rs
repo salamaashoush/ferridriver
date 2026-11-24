@@ -1,10 +1,10 @@
-//! Cucumber step-definition surface for the shared QuickJS engine.
+//! Cucumber step-definition surface for the shared `QuickJS` engine.
 //!
 //! The same VM that runs `ferridriver run` scripts and MCP `run_script`
 //! also loads cucumber-js-shaped `.js` step files. `Given`/`When`/
 //! `Then`/`Before`/`After`/`defineParameterType`/... are native Rust
 //! functions (no JS glue); registrations land in a Rust `ExtensionRegistry`
-//! held as context userdata (the QuickJS context is single-threaded, so
+//! held as context userdata (the `QuickJS` context is single-threaded, so
 //! a `RefCell` is the right interior mutability — no `Arc`/`Mutex`).
 //! Step bodies are kept as `Persistent` functions and called back by
 //! the Rust `ferridriver-bdd` core. Every body receives the scenario's
@@ -127,19 +127,32 @@ pub struct DataTableJs {
 impl DataTableJs {
   /// Every row including the header.
   #[qjs(rename = "raw")]
+  #[must_use]
   pub fn raw(&self) -> Vec<Vec<String>> {
     self.rows.clone()
   }
 
   /// All rows except the header.
   #[qjs(rename = "rows")]
+  #[must_use]
   pub fn data_rows(&self) -> Vec<Vec<String>> {
     self.rows.iter().skip(1).cloned().collect()
   }
 
   /// One object per data row keyed by the header row.
+  ///
+  /// # Errors
+  ///
+  /// When the table cannot be converted to a JS value.
   #[qjs(rename = "hashes")]
-  pub fn hashes<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn hashes<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let header = self.rows.first().cloned().unwrap_or_default();
     let out: Vec<serde_json::Map<String, serde_json::Value>> = self
       .rows
@@ -157,8 +170,19 @@ impl DataTableJs {
   }
 
   /// First column as keys, second as values.
+  ///
+  /// # Errors
+  ///
+  /// When the table cannot be converted to a JS value.
   #[qjs(rename = "rowsHash")]
-  pub fn rows_hash<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn rows_hash<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let map: serde_json::Map<String, serde_json::Value> = self
       .rows
       .iter()
@@ -169,6 +193,10 @@ impl DataTableJs {
   }
 
   /// Rows and columns swapped.
+  ///
+  /// # Errors
+  ///
+  /// When the `DataTable` instance cannot be created.
   #[qjs(rename = "transpose")]
   pub fn transpose<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, DataTableJs>> {
     let cols = self.rows.iter().map(Vec::len).max().unwrap_or(0);
@@ -391,6 +419,10 @@ fn register_attachment(args: &[Value<'_>], is_log: bool) -> rquickjs::Result<()>
 /// Drain the scenario's queued attachments (and clear the queue). The
 /// BDD layer calls this after each scenario and forwards them into the
 /// test result so the reporters surface them.
+///
+/// # Errors
+///
+/// When the VM has shut down or the BDD registry is not installed in it.
 pub async fn drain_attachments(vm: &ferrijs::VmHandle) -> Result<Vec<ScriptAttachment>, ScriptError> {
   crate::vm_with!(vm => |ctx| {
     with_registry(&ctx, |reg| std::mem::take(&mut reg.attachments))
@@ -401,6 +433,11 @@ pub async fn drain_attachments(vm: &ferrijs::VmHandle) -> Result<Vec<ScriptAttac
 /// Install the native cucumber + MCP-tool surface and the shared
 /// extension registry as context userdata. Idempotent; called once at
 /// `Session::create`.
+///
+/// # Errors
+///
+/// When the extension registry cannot be installed, or creating a
+/// function or setting a global fails.
 pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // Shared extension registry + native `defineTool`/`tool` contribution
   // point. `None` back means it was already installed — the cucumber
@@ -425,41 +462,7 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // chain a step resolves its first parameter from, so
   // `Given('...', async ({ myFixture }) => …)` works for a suite that
   // built that fixture with `test.extend` / `mergeTests`.
-  let bind_steps = Function::new(
-    ctx.clone(),
-    |ctx: Ctx<'js>, test: Value<'js>| -> rquickjs::Result<Object<'js>> {
-      let Some(set) = crate::bindings::test::fixture_set_of(&ctx, &test) else {
-        return Err(throw_script_error(&ctx, &ScriptError::internal(
-          "bindSteps() accepts a \"test\" function as its parameter.\nDid you mean to pass the object `test.extend()`            returned?"
-            .to_string(),
-        )));
-      };
-      let bound = Object::new(ctx.clone())?;
-      for (name, kind) in [
-        ("Given", StepKind::Given),
-        ("When", StepKind::When),
-        ("Then", StepKind::Then),
-        ("Step", StepKind::Step),
-        ("defineStep", StepKind::Step),
-        ("And", StepKind::Step),
-        ("But", StepKind::Step),
-      ] {
-        // Captures the set index and the keyword — plain data, never a
-        // JS value.
-        let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
-          register_step_in(kind, &args.0, Some(set))
-        })?;
-        bound.set(name, f)?;
-      }
-      for hook in CUCUMBER_HOOKS.iter().copied() {
-        let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
-          register_hook_in(hook, &args.0, Some(set))
-        })?;
-        bound.set(hook, f)?;
-      }
-      Ok(bound)
-    },
-  )?;
+  let bind_steps = make_bind_steps_fn(ctx)?;
   bind_steps.set_name("bindSteps")?;
   g.set("bindSteps", bind_steps.clone())?;
   bdd.set("bindSteps", bind_steps)?;
@@ -470,46 +473,13 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     bdd.set(hook, f)?;
   }
 
-  let define_parameter_type = Function::new(ctx.clone(), |def: Object<'_>| -> rquickjs::Result<()> {
-    let ctx = def.ctx().clone();
-    let name: String = def
-      .get("name")
-      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
-    let rx_val: Value<'_> = def
-      .get("regexp")
-      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
-    let regexp = if let Some(s) = rx_val.as_string() {
-      s.to_string()
-        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?
-    } else if let Some(o) = rx_val.as_object() {
-      o.get::<_, String>("source")
-        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?
-    } else {
-      return Err(throw_script_error(
-        &ctx,
-        &ScriptError::internal("parameter type regexp must be string or RegExp".to_string()),
-      ));
-    };
-    let transformer = def
-      .get::<_, Value<'_>>("transformer")
-      .ok()
-      .and_then(|v| v.as_function().cloned())
-      .map(|f| Persistent::save(&ctx, f));
-    with_registry(&ctx, |reg| {
-      reg.param_types.push(ParamTypeReg {
-        name,
-        regexp,
-        transformer,
-      });
-    })
-    .map_err(|e| throw_script_error(&ctx, &e))
-  })?;
+  let define_parameter_type = make_define_parameter_type_fn(ctx)?;
   g.set("defineParameterType", define_parameter_type.clone())?;
   bdd.set("defineParameterType", define_parameter_type)?;
 
   let set_default_timeout = Function::new(ctx.clone(), |ctx: Ctx<'_>, ms: f64| -> rquickjs::Result<()> {
     with_registry(&ctx, |reg| {
-      reg.default_timeout_ms = crate::bindings::convert::f64_to_u64(ms)
+      reg.default_timeout_ms = crate::bindings::convert::f64_to_u64(ms);
     })
     .map_err(|e| throw_script_error(&ctx, &e))
   })?;
@@ -552,6 +522,83 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   fd.set("defineDefaults", define_defaults)?;
 
   Ok(())
+}
+
+/// `bindSteps(test)`.
+fn make_bind_steps_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, test: Value<'js>| -> rquickjs::Result<Object<'js>> {
+      let Some(set) = crate::bindings::test::fixture_set_of(&ctx, &test) else {
+        return Err(throw_script_error(&ctx, &ScriptError::internal(
+          "bindSteps() accepts a \"test\" function as its parameter.\nDid you mean to pass the object `test.extend()`            returned?"
+            .to_string(),
+        )));
+      };
+      let bound = Object::new(ctx.clone())?;
+      for (name, kind) in [
+        ("Given", StepKind::Given),
+        ("When", StepKind::When),
+        ("Then", StepKind::Then),
+        ("Step", StepKind::Step),
+        ("defineStep", StepKind::Step),
+        ("And", StepKind::Step),
+        ("But", StepKind::Step),
+      ] {
+        // Captures the set index and the keyword — plain data, never a
+        // JS value.
+        let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
+          register_step_in(kind, &args.0, Some(set))
+        })?;
+        bound.set(name, f)?;
+      }
+      for hook in CUCUMBER_HOOKS.iter().copied() {
+        let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
+          register_hook_in(hook, &args.0, Some(set))
+        })?;
+        bound.set(hook, f)?;
+      }
+      Ok(bound)
+    },
+  )
+}
+
+/// `defineParameterType({ name, regexp, transformer? })`.
+fn make_define_parameter_type_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  Function::new(ctx.clone(), |def: Object<'_>| -> rquickjs::Result<()> {
+    let ctx = def.ctx().clone();
+    let name: String = def
+      .get("name")
+      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
+    let rx_val: Value<'_> = def
+      .get("regexp")
+      .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?;
+    let regexp = if let Some(s) = rx_val.as_string() {
+      s.to_string()
+        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?
+    } else if let Some(o) = rx_val.as_object() {
+      o.get::<_, String>("source")
+        .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))?
+    } else {
+      return Err(throw_script_error(
+        &ctx,
+        &ScriptError::internal("parameter type regexp must be string or RegExp".to_string()),
+      ));
+    };
+    let transformer = def
+      .get::<_, Value<'_>>("transformer")
+      .ok()
+      .and_then(|v| v.as_function().cloned())
+      .map(|f| Persistent::save(&ctx, f));
+    with_registry(&ctx, |reg| {
+      reg.param_types.push(ParamTypeReg {
+        name,
+        regexp,
+        transformer,
+      });
+    })
+    .map_err(|e| throw_script_error(&ctx, &e))
+  })
 }
 
 /// Step metadata read back by the `ferridriver-bdd` core to build its
@@ -627,6 +674,10 @@ impl CollectedRegistry {
 }
 
 /// Snapshot the registry after the step `.js` files evaluated.
+///
+/// # Errors
+///
+/// When the VM has shut down or the BDD or test registry is not installed in it.
 pub async fn collect_registry(vm: &ferrijs::VmHandle) -> Result<CollectedRegistry, ScriptError> {
   crate::vm_with!(vm => |ctx| {
     let (fixture_sets, fixtures) = crate::bindings::test::with_test_registry(&ctx, |r| {
@@ -758,6 +809,11 @@ fn install_world_surface<'js>(
 /// That one object is both `this` and the first argument of every step
 /// and hook in the scenario, so `({ signingRequest, page }, table) => …`
 /// destructures and `function (world) { world.page }` still reads.
+///
+/// # Errors
+///
+/// When the VM has shut down, a registry is missing, building the World
+/// surface fails, or resolving a custom fixture fails.
 pub async fn begin_scenario(
   vm: &ferrijs::VmHandle,
   spec: ScenarioSpec,
@@ -795,6 +851,11 @@ pub async fn begin_scenario(
 /// order (the teardown half of every `use()`) and drop the per-scenario
 /// object. Attachments stay queued for the host to drain into the test
 /// result; the next [`begin_scenario`] clears them.
+///
+/// # Errors
+///
+/// When the VM has shut down, a registry is missing, or a fixture's
+/// teardown fails.
 pub async fn end_scenario(vm: &ferrijs::VmHandle) -> Result<(), ScriptError> {
   crate::vm_with!(vm => |ctx| {
     let teardown = crate::bindings::test::teardown_test_fixtures(&ctx).await;
@@ -809,6 +870,11 @@ pub async fn end_scenario(vm: &ferrijs::VmHandle) -> Result<(), ScriptError> {
 /// Those hooks run with no scenario — no page, no fixture bag — so they
 /// get the World surface alone (`parameters`, `attach`, `log`, `skip`,
 /// and the `setWorldConstructor` instance as prototype).
+///
+/// # Errors
+///
+/// When the VM has shut down, the registry is missing, or building the
+/// World surface fails.
 pub async fn set_hook_world(vm: &ferrijs::VmHandle, parameters: &serde_json::Value) -> Result<(), ScriptError> {
   let parameters = parameters.clone();
   crate::vm_with!(vm => |ctx| {
@@ -851,6 +917,12 @@ pub enum StepOutcome {
 /// Invoke step `idx` with cucumber-extracted args, the optional data
 /// table and doc string, against the current World. A thrown JS error
 /// becomes a [`ScriptError`] carrying the `.js` location.
+///
+/// # Errors
+///
+/// When the VM has shut down, `idx` is out of range, the step (or a
+/// parameter transformer or definition-function wrapper) throws, or the step
+/// runs past its timeout. A step that skips itself returns `Skipped`.
 pub async fn invoke_step(
   vm: &ferrijs::VmHandle,
   idx: usize,
@@ -911,34 +983,7 @@ pub async fn invoke_step(
         JsArg::Str(s) => args.push_arg(s.as_str()).map_err(|e| ScriptError::internal(e.to_string()))?,
         JsArg::Int(i) => args.push_arg(*i).map_err(|e| ScriptError::internal(e.to_string()))?,
         JsArg::Float(f) => args.push_arg(*f).map_err(|e| ScriptError::internal(e.to_string()))?,
-        JsArg::Custom { type_name, raw } => {
-          // Apply the parameter type's JS `transformer` (if any) here,
-          // in the live ctx, at step invocation — same place cucumber-js
-          // transforms. No transformer ⇒ pass the raw string.
-          let tx = with_registry(&ctx, |reg| {
-            reg
-              .param_types
-              .iter()
-              .find(|pt| &pt.name == type_name)
-              .and_then(|pt| pt.transformer.clone())
-          })?;
-          match tx {
-            Some(saved) => {
-              let f = saved.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
-              let call: rquickjs::Result<rquickjs::promise::MaybePromise<'_>> = f.call((raw.as_str(),));
-              let mp = call.catch(&ctx).map_err(|e| caught_to_script_error(e, &source))?;
-              let v: Value<'_> = mp
-                .into_future::<Value<'_>>()
-                .await
-                .catch(&ctx)
-                .map_err(|e| caught_to_script_error(e, &source))?;
-              args.push_arg(v).map_err(|e| ScriptError::internal(e.to_string()))?;
-            },
-            None => args
-              .push_arg(raw.as_str())
-              .map_err(|e| ScriptError::internal(e.to_string()))?,
-          }
-        },
+        JsArg::Custom { type_name, raw } => push_custom_arg(&ctx, &mut args, type_name, raw, &source).await?,
       }
     }
     if let Some(rows) = data_table {
@@ -985,7 +1030,46 @@ pub async fn invoke_step(
   .await?
 }
 
+/// Push a custom parameter, through its parameter type's JS `transformer`
+/// when it has one. This happens here, in the live ctx at step invocation,
+/// the same place cucumber-js transforms; no transformer passes the raw
+/// string.
+async fn push_custom_arg<'js>(
+  ctx: &Ctx<'js>,
+  args: &mut Args<'js>,
+  type_name: &str,
+  raw: &str,
+  source: &str,
+) -> Result<(), ScriptError> {
+  let tx = with_registry(ctx, |reg| {
+    reg
+      .param_types
+      .iter()
+      .find(|pt| pt.name == type_name)
+      .and_then(|pt| pt.transformer.clone())
+  })?;
+  match tx {
+    Some(saved) => {
+      let f = saved.restore(ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
+      let call: rquickjs::Result<rquickjs::promise::MaybePromise<'_>> = f.call((raw,));
+      let mp = call.catch(ctx).map_err(|e| caught_to_script_error(e, source))?;
+      let v: Value<'_> = mp
+        .into_future::<Value<'_>>()
+        .await
+        .catch(ctx)
+        .map_err(|e| caught_to_script_error(e, source))?;
+      args.push_arg(v).map_err(|e| ScriptError::internal(e.to_string()))
+    },
+    None => args.push_arg(raw).map_err(|e| ScriptError::internal(e.to_string())),
+  }
+}
+
 /// Invoke hook `idx`. Same bridge as [`invoke_step`].
+///
+/// # Errors
+///
+/// When the VM has shut down, `idx` is out of range, the hook throws, or
+/// it runs past its timeout.
 pub async fn invoke_hook(
   vm: &ferrijs::VmHandle,
   idx: usize,

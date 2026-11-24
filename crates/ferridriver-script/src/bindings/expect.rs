@@ -1,4 +1,4 @@
-//! QuickJS bindings for the `expect` API — Jest-style value matchers,
+//! `QuickJS` bindings for the `expect` API — Jest-style value matchers,
 //! Playwright web-first matchers, asymmetric matchers, and polling.
 //!
 //! All matcher logic delegates to [`ferridriver_expect`] so the Rust
@@ -849,7 +849,7 @@ fn u64_array_field(obj: Option<&Object<'_>>, key: &str) -> Option<Vec<u64>> {
   (!out.is_empty()).then_some(out)
 }
 
-/// True when the value is a string or a RegExp instance — the shapes
+/// True when the value is a string or a `RegExp` instance — the shapes
 /// Playwright treats as an expected text value rather than an options
 /// bag in overloads like `toHaveAttribute(name, value?, options?)`.
 fn is_string_or_regex(value: &Value<'_>) -> bool {
@@ -908,17 +908,19 @@ fn parse_string_or_regex_array<'js>(
 impl ExpectJs {
   // ── modifiers ────────────────────────────────────────────────────
 
-  /// `.not` getter — returns a new ExpectJs with the negation flag
+  /// `.not` getter — returns a new `ExpectJs` with the negation flag
   /// toggled. Implemented as a method so `expect(x).not.toBe(y)` reads
   /// naturally; the JS-side `Object.defineProperty` shim in
   /// `install_expect` adapts it into a getter on the class prototype.
   #[qjs(rename = "_notInner")]
+  #[must_use]
   pub fn not_inner(&self) -> ExpectJs {
     self.clone_with(|e| e.is_not = !e.is_not)
   }
 
   /// `.soft` modifier.
   #[qjs(rename = "soft")]
+  #[must_use]
   pub fn soft(&self) -> ExpectJs {
     self.clone_with(|e| e.is_soft = true)
   }
@@ -926,12 +928,14 @@ impl ExpectJs {
   /// Override the timeout for web-first matchers on this assertion
   /// (milliseconds).
   #[qjs(rename = "withTimeout")]
+  #[must_use]
   pub fn with_timeout(&self, timeout_ms: u32) -> ExpectJs {
     self.clone_with(|e| e.timeout = Duration::from_millis(u64::from(timeout_ms)))
   }
 
   /// Attach a custom failure-message prefix.
   #[qjs(rename = "withMessage")]
+  #[must_use]
   pub fn with_message(&self, msg: String) -> ExpectJs {
     self.clone_with(|e| e.message = Some(msg))
   }
@@ -941,8 +945,22 @@ impl ExpectJs {
   /// Playwright: `Object.is` equality (jest `expectLibrary.ts:623`) —
   /// two structurally equal objects are NOT `toBe`-equal, and a
   /// reference IS `toBe`-equal to itself.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBe")]
-  pub fn to_be<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_be<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     let expected = JsLive(expected);
     self
@@ -951,8 +969,23 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toEqual`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toEqual")]
-  pub fn to_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_equal<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let (actual, expected) = (self.live(&ctx)?, JsLive(expected));
     let ev = self.evaluator(&ctx);
     self
@@ -964,8 +997,23 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toStrictEqual`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toStrictEqual")]
-  pub fn to_strict_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_strict_equal<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let (actual, expected) = (self.live(&ctx)?, JsLive(expected));
     let ev = self.evaluator(&ctx);
     self
@@ -977,8 +1025,22 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeNull`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeNull")]
-  pub fn to_be_null(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_null(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -986,8 +1048,22 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeUndefined`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeUndefined")]
-  pub fn to_be_undefined(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_undefined(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -995,8 +1071,22 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeDefined`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeDefined")]
-  pub fn to_be_defined(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_defined(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -1004,8 +1094,22 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeTruthy`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeTruthy")]
-  pub fn to_be_truthy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_truthy(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -1013,8 +1117,22 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeFalsy`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeFalsy")]
-  pub fn to_be_falsy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_falsy(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -1022,8 +1140,22 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeNaN`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeNaN")]
-  pub fn to_be_nan(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_nan(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -1031,40 +1163,120 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toBeCloseTo`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` when the
+  /// subject cannot be serialized.
   #[qjs(rename = "toBeCloseTo")]
-  pub fn to_be_close_to(&self, ctx: Ctx<'_>, expected: f64, digits: Opt<u8>) -> rquickjs::Result<()> {
+  pub fn to_be_close_to(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    expected: f64,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    digits: Opt<u8>,
+  ) -> rquickjs::Result<()> {
     self
       .build_value_expect(&ctx)?
       .to_be_close_to(expected, digits.0)
       .or_else(|e| self.fail(&ctx, e))
   }
 
+  /// Playwright: `toBeGreaterThan`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` when the
+  /// subject cannot be serialized.
   #[qjs(rename = "toBeGreaterThan")]
-  pub fn to_be_greater_than(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_greater_than(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    expected: f64,
+  ) -> rquickjs::Result<()> {
     self
       .build_value_expect(&ctx)?
       .to_be_greater_than(expected)
       .or_else(|e| self.fail(&ctx, e))
   }
 
+  /// Playwright: `toBeGreaterThanOrEqual`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` when the
+  /// subject cannot be serialized.
   #[qjs(rename = "toBeGreaterThanOrEqual")]
-  pub fn to_be_greater_than_or_equal(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_greater_than_or_equal(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    expected: f64,
+  ) -> rquickjs::Result<()> {
     self
       .build_value_expect(&ctx)?
       .to_be_greater_than_or_equal(expected)
       .or_else(|e| self.fail(&ctx, e))
   }
 
+  /// Playwright: `toBeLessThan`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` when the
+  /// subject cannot be serialized.
   #[qjs(rename = "toBeLessThan")]
-  pub fn to_be_less_than(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_less_than(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    expected: f64,
+  ) -> rquickjs::Result<()> {
     self
       .build_value_expect(&ctx)?
       .to_be_less_than(expected)
       .or_else(|e| self.fail(&ctx, e))
   }
 
+  /// Playwright: `toBeLessThanOrEqual`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` when the
+  /// subject cannot be serialized.
   #[qjs(rename = "toBeLessThanOrEqual")]
-  pub fn to_be_less_than_or_equal(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_be_less_than_or_equal(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    expected: f64,
+  ) -> rquickjs::Result<()> {
     self
       .build_value_expect(&ctx)?
       .to_be_less_than_or_equal(expected)
@@ -1074,8 +1286,22 @@ impl ExpectJs {
   /// Playwright: substring for a string receiver, otherwise
   /// `[...received].indexOf(expected)` — strict equality over the live
   /// items, so a structurally equal copy is NOT contained.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toContain")]
-  pub fn to_contain<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_contain<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     let expected = JsLive(expected);
     self
@@ -1084,8 +1310,23 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toContainEqual`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toContainEqual")]
-  pub fn to_contain_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_contain_equal<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    expected: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let (actual, expected) = (self.live(&ctx)?, JsLive(expected));
     let ev = self.evaluator(&ctx);
     self
@@ -1099,8 +1340,22 @@ impl ExpectJs {
 
   /// Playwright reads the receiver's own `.length`, so a function's
   /// arity and a typed array's length answer here too.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toHaveLength")]
-  pub fn to_have_length(&self, ctx: Ctx<'_>, expected: f64) -> rquickjs::Result<()> {
+  pub fn to_have_length(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    expected: f64,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     self
       .live_expect(&actual)
@@ -1108,10 +1363,25 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toHaveProperty`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a
+  /// malformed property path or a value the matcher cannot compare.
   #[qjs(rename = "toHaveProperty")]
   pub fn to_have_property<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     path: Value<'js>,
     expected: Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
@@ -1132,8 +1402,27 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toMatch`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` when the
+  /// subject cannot be serialized or `pattern` is not a string or `RegExp`.
   #[qjs(rename = "toMatch")]
-  pub fn to_match<'js>(&self, ctx: Ctx<'js>, pattern: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_match<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    pattern: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let pat = parse_string_or_regex(&ctx, &pattern)?;
     self
       .build_value_expect(&ctx)?
@@ -1141,8 +1430,23 @@ impl ExpectJs {
       .or_else(|e| self.fail(&ctx, e))
   }
 
+  /// Playwright: `toMatchObject`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toMatchObject")]
-  pub fn to_match_object<'js>(&self, ctx: Ctx<'js>, subset: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_match_object<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    subset: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let (actual, subset) = (self.live(&ctx)?, JsLive(subset));
     let ev = self.evaluator(&ctx);
     self
@@ -1157,8 +1461,22 @@ impl ExpectJs {
   /// Playwright: the real `instanceof` operator (jest
   /// `expectLibrary.ts:789`) — a subclass instance IS an instance of
   /// its base, which a constructor-name comparison cannot see.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the assertion fails (a soft assertion
+  /// records the failure and returns instead), or a `TypeError` for a value
+  /// the matcher cannot compare.
   #[qjs(rename = "toBeInstanceOf")]
-  pub fn to_be_instance_of<'js>(&self, ctx: Ctx<'js>, ctor: Value<'js>) -> rquickjs::Result<()> {
+  pub fn to_be_instance_of<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    ctor: Value<'js>,
+  ) -> rquickjs::Result<()> {
     let actual = self.live(&ctx)?;
     let ctor = JsLive(ctor);
     self
@@ -1167,6 +1485,13 @@ impl ExpectJs {
       .or_else(|e| self.live_fail(&ctx, e))
   }
 
+  /// Playwright: `toThrow`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the function's outcome does not
+  /// match, or a `TypeError` when the subject is not a function or `matcher`
+  /// is an invalid `RegExp` or an unserializable object.
   #[qjs(rename = "toThrow")]
   pub async fn to_throw<'js>(
     &self,
@@ -1215,6 +1540,12 @@ impl ExpectJs {
   // counterpart assertion, mirroring Playwright's matcher lowering.
 
   /// Playwright: `toBeVisible(options?: { timeout?, visible? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeVisible")]
   pub async fn to_be_visible<'js>(
     &self,
@@ -1236,6 +1567,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeHidden(options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeHidden")]
   pub async fn to_be_hidden<'js>(
     &self,
@@ -1257,6 +1594,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeEnabled(options?: { enabled?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeEnabled")]
   pub async fn to_be_enabled<'js>(
     &self,
@@ -1278,6 +1621,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeDisabled(options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeDisabled")]
   pub async fn to_be_disabled<'js>(
     &self,
@@ -1299,6 +1648,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeChecked(options?: { checked?, indeterminate?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeChecked")]
   pub async fn to_be_checked<'js>(
     &self,
@@ -1326,6 +1681,12 @@ impl ExpectJs {
   /// Playwright: `toBeEditable(options?: { editable?, timeout? })`.
   /// `editable: false` maps to the readonly assertion, matching
   /// Playwright's `to.be.readonly` lowering (not a plain negation).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeEditable")]
   pub async fn to_be_editable<'js>(
     &self,
@@ -1347,6 +1708,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeAttached(options?: { attached?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeAttached")]
   pub async fn to_be_attached<'js>(
     &self,
@@ -1368,6 +1735,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeEmpty(options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeEmpty")]
   pub async fn to_be_empty<'js>(
     &self,
@@ -1389,6 +1762,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeFocused(options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeFocused")]
   pub async fn to_be_focused<'js>(
     &self,
@@ -1410,6 +1789,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toBeInViewport(options?: { ratio?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toBeInViewport")]
   pub async fn to_be_in_viewport<'js>(
     &self,
@@ -1436,6 +1821,13 @@ impl ExpectJs {
   /// Playwright: `toHaveText(expected: string | RegExp | (string | RegExp)[],
   /// options?: { ignoreCase?, timeout?, useInnerText? })`. The array
   /// form asserts over EVERY element the locator resolves to.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveText")]
   pub async fn to_have_text<'js>(
     &self,
@@ -1468,6 +1860,13 @@ impl ExpectJs {
 
   /// Playwright: `toContainText(expected: string | RegExp | (string | RegExp)[],
   /// options?: { ignoreCase?, timeout?, useInnerText? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toContainText")]
   pub async fn to_contain_text<'js>(
     &self,
@@ -1499,6 +1898,13 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveValue(value: string | RegExp, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveValue")]
   pub async fn to_have_value<'js>(
     &self,
@@ -1523,6 +1929,13 @@ impl ExpectJs {
 
   /// Playwright: `toHaveValues(values: Array<string | RegExp>,
   /// options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveValues")]
   pub async fn to_have_values<'js>(
     &self,
@@ -1549,6 +1962,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveCount(count: number, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toHaveCount")]
   pub async fn to_have_count<'js>(
     &self,
@@ -1575,6 +1994,13 @@ impl ExpectJs {
   /// `toHaveAttribute(name, options?: { timeout? })` (presence check).
   /// A second argument that is a string/RegExp is the expected value;
   /// any other object is the options bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveAttribute")]
   pub async fn to_have_attribute<'js>(
     &self,
@@ -1615,6 +2041,13 @@ impl ExpectJs {
   /// Playwright: `toHaveClass(expected: string | RegExp | (string | RegExp)[],
   /// options?: { timeout? })`. The array form asserts one class list per
   /// element.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveClass")]
   pub async fn to_have_class<'js>(
     &self,
@@ -1638,6 +2071,13 @@ impl ExpectJs {
   }
 
   /// Playwright: `toContainClass(expected: string | string[], options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toContainClass")]
   pub async fn to_contain_class<'js>(
     &self,
@@ -1681,6 +2121,13 @@ impl ExpectJs {
 
   /// Playwright: `toHaveCSS(name: string, value: string | RegExp,
   /// options?: { pseudo?: 'before' | 'after', timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveCSS")]
   pub async fn to_have_css<'js>(
     &self,
@@ -1717,6 +2164,13 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveId(id: string | RegExp, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveId")]
   pub async fn to_have_id<'js>(
     &self,
@@ -1740,6 +2194,12 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveRole(role: string, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// or an `Error` when the subject is not a `Locator`.
   #[qjs(rename = "toHaveRole")]
   pub async fn to_have_role<'js>(
     &self,
@@ -1763,6 +2223,13 @@ impl ExpectJs {
 
   /// Playwright: `toHaveJSProperty(name: string, value: any,
   /// options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveJSProperty")]
   pub async fn to_have_js_property<'js>(
     &self,
@@ -1788,6 +2255,13 @@ impl ExpectJs {
 
   /// Playwright: `toHaveAccessibleName(name: string | RegExp,
   /// options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveAccessibleName")]
   pub async fn to_have_accessible_name<'js>(
     &self,
@@ -1813,6 +2287,13 @@ impl ExpectJs {
 
   /// Playwright: `toHaveAccessibleDescription(description: string | RegExp,
   /// options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveAccessibleDescription")]
   pub async fn to_have_accessible_description<'js>(
     &self,
@@ -1838,6 +2319,13 @@ impl ExpectJs {
 
   /// Playwright: `toHaveAccessibleErrorMessage(errorMessage: string | RegExp,
   /// options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Locator`, or a `TypeError` for an
+  /// expected value of the wrong shape.
   #[qjs(rename = "toHaveAccessibleErrorMessage")]
   pub async fn to_have_accessible_error_message<'js>(
     &self,
@@ -1864,6 +2352,13 @@ impl ExpectJs {
   // ── Page web-first matchers (delegated) ───────────────────────────
 
   /// Playwright: `toHaveTitle(title: string | RegExp, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Page`, or a `TypeError` when the
+  /// expected value is not a string or `RegExp`.
   #[qjs(rename = "toHaveTitle")]
   pub async fn to_have_title<'js>(
     &self,
@@ -1887,6 +2382,13 @@ impl ExpectJs {
   }
 
   /// Playwright: `toHaveURL(url: string | RegExp, options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the assertion does not hold within
+  /// the timeout (a soft assertion records the failure and resolves instead),
+  /// an `Error` when the subject is not a `Page`, or a `TypeError` when the
+  /// expected value is not a string or `RegExp`.
   #[qjs(rename = "toHaveURL")]
   pub async fn to_have_url<'js>(
     &self,
@@ -1917,6 +2419,12 @@ impl ExpectJs {
   /// (unbounded, Playwright parity); intervals default to
   /// `[100, 250, 500, 1000]`. With `.not`, passes as soon as the callback
   /// throws.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when the callback is still throwing
+  /// (or, with `.not`, still passing) at the timeout, or a `TypeError` when the
+  /// subject is not a function.
   #[qjs(rename = "toPass")]
   pub async fn to_pass<'js>(
     &self,
@@ -2003,6 +2511,13 @@ impl ExpectJs {
   /// synchronous, as upstream; a `Buffer` holding an image is compared as
   /// one. A locator compares its text content (a ferridriver extension,
   /// so that form alone returns a promise).
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` outside a running test, an `AssertionError` on a
+  /// mismatch (a soft assertion records it instead), or a `TypeError` for an
+  /// unresolved promise, an unsupported subject or a malformed `options`; for a
+  /// `Locator` the returned promise rejects with those instead.
   #[qjs(rename = "toMatchSnapshot")]
   pub fn to_match_snapshot<'js>(
     &self,
@@ -2067,6 +2582,12 @@ impl ExpectJs {
 
   /// Playwright: `toHaveScreenshot(name?: string | string[], options?)` /
   /// `toHaveScreenshot(options?)` on a locator or page, `.not` included.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` outside a running test, a `TypeError` for an
+  /// unsupported subject or a malformed `options`, or an `AssertionError` on a
+  /// mismatch (a soft assertion records it and resolves instead).
   #[qjs(rename = "toHaveScreenshot")]
   pub async fn to_have_screenshot<'js>(
     &self,
@@ -2107,6 +2628,13 @@ impl ExpectJs {
 
   /// Playwright: `toMatchAriaSnapshot(expected: string, options?: { timeout? })`
   /// on a locator or page.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` outside a running test, a `TypeError` for an
+  /// unsupported subject, or an `AssertionError` when the snapshot does not
+  /// match within the timeout (a soft assertion records it and resolves
+  /// instead).
   #[qjs(rename = "toMatchAriaSnapshot")]
   pub async fn to_match_aria_snapshot<'js>(
     &self,
@@ -2162,8 +2690,22 @@ impl ExpectJs {
 
   // ── APIResponse matcher (delegated) ──────────────────────────────
 
+  /// Playwright: `toBeOK`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `AssertionError` when the status is outside 200-299 (inside
+  /// it under `.not`; a soft assertion records the failure and returns
+  /// instead), or an `Error` when the subject is not an `APIResponse`.
   #[qjs(rename = "toBeOK")]
-  pub fn to_be_ok(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn to_be_ok(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     self
       .build_api_response_expect(&ctx, "toBeOK")?
       .to_be_ok()
@@ -2249,6 +2791,7 @@ pub struct ExpectPollJs {
 #[rquickjs::methods]
 impl ExpectPollJs {
   #[qjs(rename = "withTimeout")]
+  #[must_use]
   pub fn with_timeout(&self, timeout_ms: u32) -> ExpectPollJs {
     ExpectPollJs {
       generator: self.generator.clone(),
@@ -2262,8 +2805,20 @@ impl ExpectPollJs {
 
   /// What the generic matchers on `expect.poll` read to poll the way the
   /// native ones do.
+  ///
+  /// # Errors
+  ///
+  /// When the generator cannot be restored into this context or the object
+  /// cannot be built.
   #[qjs(rename = "_pollInfo")]
-  pub fn poll_info<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  pub fn poll_info<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Object<'js>> {
     let info = Object::new(ctx.clone())?;
     info.set("generator", self.generator.clone().restore(&ctx)?)?;
     info.set(
@@ -2283,6 +2838,7 @@ impl ExpectPollJs {
   }
 
   #[qjs(rename = "_notInner")]
+  #[must_use]
   pub fn not_inner(&self) -> ExpectPollJs {
     ExpectPollJs {
       generator: self.generator.clone(),
@@ -2294,6 +2850,12 @@ impl ExpectPollJs {
     }
   }
 
+  /// Playwright: `toSatisfy`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `AssertionError` when `predicate` still fails at the
+  /// timeout, or with whatever the generator or `predicate` throws.
   #[qjs(rename = "toSatisfy")]
   pub async fn to_satisfy<'js>(
     &self,
@@ -2445,6 +3007,11 @@ fn make_asymmetric<'js>(ctx: &Ctx<'js>, tag: &str, payload: Object<'js>) -> rqui
 /// - Asymmetric matchers: `any`, `anything`, `arrayContaining`,
 ///   `objectContaining`, `stringContaining`, `stringMatching`,
 ///   `closeTo`, plus the `expect.not.*` shorthand.
+///
+/// # Errors
+///
+/// When defining the classes, building `expect` or setting the globals
+/// fails.
 pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // Define the class prototype once so `expect(x)` can return
   // `ExpectJs` instances JS can call methods on.
@@ -2511,10 +3078,42 @@ fn create_expect<'js>(
   )?;
   expect_fn.set_name("expect")?;
 
-  // Playwright: `expect.poll(actual, messageOrOptions?: string |
-  // { message?, timeout?, intervals? })`.
+  // expect.not.<asym>(...) — wraps an asymmetric matcher in a NOT
+  // tag. Mirrors Jest's `expect.not.objectContaining` etc. The wrappers
+  // resolve `expect.<name>` from globals at call time (see the no-capture
+  // rule below).
+  let not_obj = Object::new(ctx.clone())?;
+  install_not_asym(ctx, &not_obj, "any")?;
+  install_not_asym(ctx, &not_obj, "anything")?;
+  install_not_asym(ctx, &not_obj, "arrayContaining")?;
+  install_not_asym(ctx, &not_obj, "objectContaining")?;
+  install_not_asym(ctx, &not_obj, "stringContaining")?;
+  install_not_asym(ctx, &not_obj, "stringMatching")?;
+  install_not_asym(ctx, &not_obj, "closeTo")?;
+  install_not_asym(ctx, &not_obj, "arrayOf")?;
+
+  // Attach the helpers to expect()'s own properties.
+  let expect_obj = expect_fn
+    .as_object()
+    .ok_or_else(|| type_error(ctx, "expect.install: expect Function has no object representation"))?;
+  expect_obj.set("poll", make_poll_fn(ctx, meta)?)?;
+  install_asymmetric_factories(ctx, expect_obj)?;
+  expect_obj.set("not", not_obj.clone())?;
+  // Playwright publishes every custom matcher as an asymmetric one too
+  // (`buildCustomAsymmetricMatcher`), so `expect.toBeX()` can stand in
+  // for a value inside `toEqual`.
+  for name in table_names(ctx, table)? {
+    install_custom_asym(ctx, expect_obj, &not_obj, &name)?;
+  }
+  install_expect_meta(ctx, expect_obj, meta, table)?;
+  Ok(expect_fn)
+}
+
+/// Playwright: `expect.poll(actual, messageOrOptions?: string |
+/// { message?, timeout?, intervals? })`.
+fn make_poll_fn<'js>(ctx: &Ctx<'js>, meta: &ferridriver_expect::ExpectMeta<()>) -> rquickjs::Result<Function<'js>> {
   let poll_meta = meta.clone();
-  let poll_fn = Function::new(
+  Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, generator: Function<'js>, opts: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
       let o = opts_obj(&opts);
@@ -2539,9 +3138,11 @@ fn create_expect<'js>(
         with_generic_poll_matchers(&ctx, val)
       }
     },
-  )?;
+  )
+}
 
-  // Asymmetric matcher factories.
+/// The asymmetric matcher factories (`expect.any`, `expect.closeTo`, ...) on `target`.
+fn install_asymmetric_factories<'js>(ctx: &Ctx<'js>, target: &Object<'js>) -> rquickjs::Result<()> {
   let any_fn = Function::new(
     ctx.clone(),
     |ctx: Ctx<'js>, ctor: Value<'js>| -> rquickjs::Result<Object<'js>> {
@@ -2592,7 +3193,7 @@ fn create_expect<'js>(
         let source = re_obj.get::<_, rquickjs::Value<'js>>("source")?;
         let flags = re_obj
           .get::<_, rquickjs::Value<'js>>("flags")
-          .unwrap_or(Value::new_undefined(ctx.clone()));
+          .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
         if let Some(s) = source.as_string() {
           obj.set("regex", s.to_string()?)?;
         }
@@ -2625,42 +3226,15 @@ fn create_expect<'js>(
     },
   )?;
 
-  // expect.not.<asym>(...) — wraps an asymmetric matcher in a NOT
-  // tag. Mirrors Jest's `expect.not.objectContaining` etc. The wrappers
-  // resolve `expect.<name>` from globals at call time (see the no-capture
-  // rule below).
-  let not_obj = Object::new(ctx.clone())?;
-  install_not_asym(ctx, &not_obj, "any")?;
-  install_not_asym(ctx, &not_obj, "anything")?;
-  install_not_asym(ctx, &not_obj, "arrayContaining")?;
-  install_not_asym(ctx, &not_obj, "objectContaining")?;
-  install_not_asym(ctx, &not_obj, "stringContaining")?;
-  install_not_asym(ctx, &not_obj, "stringMatching")?;
-  install_not_asym(ctx, &not_obj, "closeTo")?;
-  install_not_asym(ctx, &not_obj, "arrayOf")?;
-
-  // Attach the helpers to expect()'s own properties.
-  let expect_obj = expect_fn
-    .as_object()
-    .ok_or_else(|| type_error(ctx, "expect.install: expect Function has no object representation"))?;
-  expect_obj.set("poll", poll_fn)?;
-  expect_obj.set("any", any_fn)?;
-  expect_obj.set("anything", anything_fn)?;
-  expect_obj.set("arrayContaining", array_containing_fn)?;
-  expect_obj.set("objectContaining", object_containing_fn)?;
-  expect_obj.set("stringContaining", string_containing_fn)?;
-  expect_obj.set("stringMatching", string_matching_fn)?;
-  expect_obj.set("closeTo", close_to_fn)?;
-  expect_obj.set("arrayOf", array_of_fn)?;
-  expect_obj.set("not", not_obj.clone())?;
-  // Playwright publishes every custom matcher as an asymmetric one too
-  // (`buildCustomAsymmetricMatcher`), so `expect.toBeX()` can stand in
-  // for a value inside `toEqual`.
-  for name in table_names(ctx, table)? {
-    install_custom_asym(ctx, expect_obj, &not_obj, &name)?;
-  }
-  install_expect_meta(ctx, expect_obj, meta, table)?;
-  Ok(expect_fn)
+  target.set("any", any_fn)?;
+  target.set("anything", anything_fn)?;
+  target.set("arrayContaining", array_containing_fn)?;
+  target.set("objectContaining", object_containing_fn)?;
+  target.set("stringContaining", string_containing_fn)?;
+  target.set("stringMatching", string_matching_fn)?;
+  target.set("closeTo", close_to_fn)?;
+  target.set("arrayOf", array_of_fn)?;
+  Ok(())
 }
 
 /// `extend` / `configure` / `getState` / `soft`, plus the hidden state
@@ -2807,6 +3381,11 @@ fn extend_expect<'js>(
 /// `mergeExpects(...expects)` — fold every argument's matchers into one
 /// expect, left to right. A foreign expect (no table of ours) is
 /// skipped, as upstream.
+///
+/// # Errors
+///
+/// When reading an argument's matcher table or building the merged
+/// `expect` fails.
 pub fn merge_expects<'js>(ctx: &Ctx<'js>, expects: Vec<Value<'js>>) -> rquickjs::Result<Function<'js>> {
   let merged = Object::new(ctx.clone())?;
   for e in expects {
@@ -3269,7 +3848,7 @@ fn call_user_matcher<'js>(
 type SettledFuture<'js> = std::pin::Pin<Box<dyn std::future::Future<Output = rquickjs::Result<()>> + 'js>>;
 
 /// Where the settled-matcher object keeps the assertion it came from.
-/// Non-enumerable, and a plain property so QuickJS traces it — a native
+/// Non-enumerable, and a plain property so `QuickJS` traces it — a native
 /// closure must never capture a JS value.
 const SETTLED_SOURCE: &str = "_expect";
 const SETTLED_NEGATED: &str = "_not";
