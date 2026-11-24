@@ -125,7 +125,7 @@ pub fn not_a_matcher_message(name: &str, type_of: &str) -> String {
 ///
 /// Returns an [`AssertionFailure`] carrying the matcher's message when `result.pass` equals
 /// `cx.is_not`, unless the assertion is soft and the running test's sink records it.
-pub fn finalize(cx: &MatcherContext, matcher: &str, result: &MatcherResult) -> Result<(), AssertionFailure> {
+pub fn finalize(cx: &MatcherContext, result: &MatcherResult) -> Result<(), AssertionFailure> {
   if result.pass != cx.is_not {
     return Ok(());
   }
@@ -143,7 +143,6 @@ pub fn finalize(cx: &MatcherContext, matcher: &str, result: &MatcherResult) -> R
     Some(prefix) => format!("{prefix}\n\n{message}"),
     None => message,
   };
-  let _ = matcher;
   crate::soft::absorb(AssertionFailure::new(message, body).with_soft(cx.is_soft))
 }
 
@@ -435,13 +434,12 @@ impl<M: Clone> ExpectMeta<M> {
 /// [`finalize`].
 pub fn run_value_matcher(
   cx: &MatcherContext,
-  name: &str,
   matcher: &ValueMatcher,
   actual: &Value,
   args: &[Value],
 ) -> Result<(), AssertionFailure> {
   let result = matcher(cx, actual, args);
-  finalize(cx, name, &result)
+  finalize(cx, &result)
 }
 
 /// Names registered more than once across a merge, for a host that wants
@@ -483,8 +481,8 @@ mod tests {
   fn a_rust_matcher_passes_and_fails_like_a_builtin() {
     let m = matcher(within);
     let cx = MatcherContext::default();
-    run_value_matcher(&cx, "toBeWithin", &m, &json!(5), &[json!(0), json!(10)]).unwrap();
-    let err = run_value_matcher(&cx, "toBeWithin", &m, &json!(50), &[json!(0), json!(10)]).unwrap_err();
+    run_value_matcher(&cx, &m, &json!(5), &[json!(0), json!(10)]).unwrap();
+    let err = run_value_matcher(&cx, &m, &json!(50), &[json!(0), json!(10)]).unwrap_err();
     assert!(err.message.contains("to be within 0..10"), "{}", err.message);
     assert!(err.diff.unwrap().contains("Received: 50"));
   }
@@ -497,8 +495,8 @@ mod tests {
       ..Default::default()
     };
     // The matcher still reports what it saw; `.not` inverts the verdict.
-    run_value_matcher(&not, "toBeWithin", &m, &json!(50), &[json!(0), json!(10)]).unwrap();
-    let err = run_value_matcher(&not, "toBeWithin", &m, &json!(5), &[json!(0), json!(10)]).unwrap_err();
+    run_value_matcher(&not, &m, &json!(50), &[json!(0), json!(10)]).unwrap();
+    let err = run_value_matcher(&not, &m, &json!(5), &[json!(0), json!(10)]).unwrap_err();
     assert!(err.message.contains("not to be within"), "{}", err.message);
   }
 
@@ -508,13 +506,13 @@ mod tests {
       custom_message: Some("ids match".into()),
       ..Default::default()
     };
-    let err = finalize(&cx, "toBeWithin", &MatcherResult::new(false).with_message("nope")).unwrap_err();
+    let err = finalize(&cx, &MatcherResult::new(false).with_message("nope")).unwrap_err();
     assert_eq!(err.message, "ids match\n\nnope");
   }
 
   #[test]
   fn a_matcher_without_a_message_says_so() {
-    let err = finalize(&MatcherContext::default(), "toBeX", &MatcherResult::new(false)).unwrap_err();
+    let err = finalize(&MatcherContext::default(), &MatcherResult::new(false)).unwrap_err();
     assert_eq!(err.message, NO_MESSAGE);
   }
 
@@ -523,7 +521,7 @@ mod tests {
     let result = MatcherResult::new(false)
       .with_message("nope")
       .with_log(vec!["locator resolved to <div>".into()]);
-    let err = finalize(&MatcherContext::default(), "toBeX", &result).unwrap_err();
+    let err = finalize(&MatcherContext::default(), &result).unwrap_err();
     assert!(err.diff.unwrap().contains("Call log:\nlocator resolved to <div>"));
   }
 

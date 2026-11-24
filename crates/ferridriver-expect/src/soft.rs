@@ -160,7 +160,7 @@ mod tests {
       );
       crate::expect_value(serde_json::json!(1))
         .soft()
-        .matches("toBeX", &m, &[])
+        .matches(&m, &[])
         .expect("a soft custom matcher must not surface");
       assert_eq!(taken.0.lock().expect("lock").as_slice(), ["nope"]);
     })

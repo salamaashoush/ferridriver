@@ -3243,12 +3243,12 @@ fn call_user_matcher<'js>(
     let fut: SettledFuture<'js> = Box::pin(async move {
       let settled: Value<'js> = promise.into_future().await?;
       let result = parse_matcher_result(&ctx_owned, &name, &settled)?;
-      ferridriver_expect::finalize(&cx, &name, &result).or_else(|e| base.fail(&ctx_owned, e))
+      ferridriver_expect::finalize(&cx, &result).or_else(|e| base.fail(&ctx_owned, e))
     });
     return rquickjs::promise::Promised::from(fut).into_js(ctx);
   }
   let result = parse_matcher_result(ctx, name, &outcome)?;
-  ferridriver_expect::finalize(&cx, name, &result).or_else(|e| base.fail(ctx, e))?;
+  ferridriver_expect::finalize(&cx, &result).or_else(|e| base.fail(ctx, e))?;
   Ok(Value::new_undefined(ctx.clone()))
 }
 

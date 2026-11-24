@@ -298,12 +298,7 @@ impl ExpectValue {
   ///
   /// Returns an [`AssertionFailure`] when the custom matcher's verdict, after `.not()`, is a
   /// failure; see [`crate::extend::finalize`]. See [the failure rules](ExpectValue#failures).
-  pub fn matches(
-    &self,
-    name: &str,
-    matcher: &crate::extend::ValueMatcher,
-    args: &[Value],
-  ) -> Result<(), AssertionFailure> {
+  pub fn matches(&self, matcher: &crate::extend::ValueMatcher, args: &[Value]) -> Result<(), AssertionFailure> {
     let cx = crate::extend::MatcherContext {
       is_not: self.is_not,
       is_soft: self.is_soft,
@@ -311,7 +306,7 @@ impl ExpectValue {
       timeout: crate::poll::default_expect_timeout(),
       custom_message: self.message.clone(),
     };
-    crate::extend::run_value_matcher(&cx, name, matcher, &self.actual, args)
+    crate::extend::run_value_matcher(&cx, matcher, &self.actual, args)
   }
 
   // ── primitive equality ──────────────────────────────────────────
@@ -517,6 +512,7 @@ impl ExpectValue {
   ///
   /// Returns an [`AssertionFailure`] when `actual` is greater than `expected`; outright when
   /// `actual` is not a number. See [the failure rules](ExpectValue#failures).
+  #[track_caller]
   pub fn to_be_less_than_or_equal(&self, expected: f64) -> Result<(), AssertionFailure> {
     let actual = self.numeric_or_fail("toBeLessThanOrEqual", expected)?;
     self.check(
