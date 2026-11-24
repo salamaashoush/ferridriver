@@ -193,6 +193,11 @@ pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) 
 /// Spawn the Playwright `WebKit` child with `--inspector-pipe`, its C
 /// runtime descriptors 3 and 4 the child's ends of `theirs_read` /
 /// `theirs_write`, as Node hands them over for Playwright.
+///
+/// # Errors
+///
+/// Returns `LaunchError::Io` when the user data directory cannot be created, `NUL` or the output
+/// pipe cannot be opened, or the child process fails to spawn.
 #[cfg(windows)]
 pub fn spawn(
   binary: &Path,

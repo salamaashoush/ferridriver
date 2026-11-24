@@ -1702,6 +1702,7 @@ mod tests {
     assert!(context.contains("line 59"));
   }
 
+  #[cfg(unix)]
   use super::test_support::test_process_ends;
   use super::*;
 
