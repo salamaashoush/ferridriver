@@ -37,7 +37,7 @@ categories = ["development-tools::testing", "web-programming"]
 
 [workspace.lints.rust]
 unsafe_code = "warn"
-rust_2018_idioms = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
 unsafe_op_in_unsafe_fn = "deny"
 missing_unsafe_on_extern = "deny"
 unsafe_attr_outside_unsafe = "deny"
