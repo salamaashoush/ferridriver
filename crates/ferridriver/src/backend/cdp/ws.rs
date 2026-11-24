@@ -26,11 +26,16 @@ impl WsTransport {
   ///
   /// Returns an error if the WebSocket connection fails.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    Box::pin(Self::connect_with_headers(ws_url, &std::collections::HashMap::new())).await
+    Box::pin(Self::connect_with_headers(ws_url, &rustc_hash::FxHashMap::default())).await
   }
 
   /// Connect with custom HTTP headers (Playwright's `connectOptions.headers`).
-  pub async fn connect_with_headers(ws_url: &str, headers: &std::collections::HashMap<String, String>) -> Result<Self> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `ws_url` is not a valid WebSocket request, a header name or value is invalid, or the
+  /// connection fails.
+  pub async fn connect_with_headers(ws_url: &str, headers: &rustc_hash::FxHashMap<String, String>) -> Result<Self> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http;
     let mut request = ws_url
@@ -59,7 +64,7 @@ impl WsTransport {
       write, write_rx, stopping,
     ));
 
-    let dispatcher2 = dispatcher.clone();
+    let dispatcher2 = Arc::clone(&dispatcher);
     let reader_ended = shutdown.clone();
     let reader = tokio::spawn(async move {
       let mut read = read;
@@ -122,7 +127,7 @@ impl WsTransport {
     // `Command` because arbitrary code runs post-fork; our closure is
     // trivially sound.
     #[cfg(unix)]
-    #[allow(unsafe_code)]
+    #[expect(unsafe_code, reason = "pre_exec has no safe form")]
     unsafe {
       command.pre_exec(super::super::process::setsid_pre_exec());
     }
@@ -321,7 +326,7 @@ mod tests {
     let (write_tx, queued) = tokio::sync::mpsc::channel(1);
     let transport = WsTransport {
       write_tx: write_tx.clone(),
-      dispatcher: dispatcher.clone(),
+      dispatcher: Arc::clone(&dispatcher),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
       endpoint: Arc::from("ws://127.0.0.1:9/devtools/browser/test"),
     };

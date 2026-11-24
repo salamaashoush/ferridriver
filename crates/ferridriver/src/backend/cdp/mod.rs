@@ -1,4 +1,3 @@
-#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 //! Unified CDP backend -- Chrome `DevTools` Protocol over pipes or WebSocket.
 //!
 //! Generic over transport: `CdpBrowser<PipeTransport>` for pipe-based,
@@ -203,6 +202,11 @@ impl<T: CdpTransport> CdpBrowser<T> {
   /// Every cookie of a browser context, without a page: Playwright's
   /// `CRBrowserContext.doGetCookies` (`Storage.getCookies` on the
   /// browser session). `None` is the default context.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Storage.getCookies`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn context_cookies(&self, browser_context_id: Option<&str>) -> Result<Vec<CookieData>> {
     let result = self
       .transport
@@ -218,6 +222,11 @@ impl<T: CdpTransport> CdpBrowser<T> {
   }
 
   /// Playwright's `CRBrowserContext.addCookies`: `Storage.setCookies`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Storage.setCookies`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn add_context_cookies(&self, browser_context_id: Option<&str>, cookies: &[CookieData]) -> Result<()> {
     let mut params = context_params(browser_context_id);
     params["cookies"] = cookies.iter().map(cookie_to_cdp).collect();
@@ -226,6 +235,11 @@ impl<T: CdpTransport> CdpBrowser<T> {
   }
 
   /// Playwright's `CRBrowserContext.doClearCookies`: `Storage.clearCookies`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Storage.clearCookies`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn clear_context_cookies(&self, browser_context_id: Option<&str>) -> Result<()> {
     self
       .transport
@@ -963,8 +977,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
     };
     page.transport.register_lifecycle_tracker(
       page.session_id.as_deref().unwrap_or(""),
-      page.lifecycle.clone(),
-      page.lifecycle_notify.clone(),
+      Arc::clone(&page.lifecycle),
+      Arc::clone(&page.lifecycle_notify),
       page.frame_observer(),
     );
     let _ = page.main_frame_id.set(page.target_id.to_string());
@@ -1012,6 +1026,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// The open pages of the browser's default context, attaching to any
   /// not yet tracked. A page of a context some other client created is
   /// that client's, and is neither listed nor attached to.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Target.getTargets` or `Target.attachToTarget`, the target has
+  /// closed, or the command outlives its time budget. Also fails when enabling a newly attached page's
+  /// domains fails, or a lock is poisoned.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let created = created_browser_contexts(&*self.transport).await?;
     let result = self
@@ -1087,7 +1107,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
     CdpPage {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: sid.map(Arc::from),
       setup: Arc::default(),
       target_id: Arc::from(target_id),
@@ -1111,8 +1131,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
-      lifecycle: lc_state.clone(),
-      lifecycle_notify: lc_notify.clone(),
+      lifecycle: lc_state,
+      lifecycle_notify: lc_notify,
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
@@ -1141,6 +1161,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// Per-context `proxy` wires through `proxyServer` + `proxyBypassList`
   /// mirroring `crBrowser.ts::doCreateNewContext` at
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:121`.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`FerriError::Unsupported`] on a browser without isolated contexts (Android Chrome), and an
+  /// error if `Target.createBrowserContext` fails or its answer carries no `browserContextId`.
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     if !self.isolated_contexts {
       return Err(FerriError::unsupported(
@@ -1178,6 +1203,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
   }
 
   /// Dispose a browser context. Matches Playwright's `context.close()`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Target.disposeBrowserContext`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     self.forget_spare(browser_context_id);
     self
@@ -1258,6 +1288,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Ok((target_id, sid))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if creating or adopting the page's target fails, enabling its protocol domains fails, a
+  /// lock is poisoned, or the initial navigation to `url` fails.
   pub async fn new_page(
     &self,
     url: &str,
@@ -1308,7 +1342,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .injected
       .store(true, std::sync::atomic::Ordering::Relaxed);
     let page = CdpPage {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: sid.map(Arc::from),
       setup: Arc::default(),
       target_id: Arc::from(target_id),
@@ -1336,8 +1370,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       context_screen: Arc::new(std::sync::Mutex::new(None)),
       seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
       last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
-      lifecycle: lc_state.clone(),
-      lifecycle_notify: lc_notify.clone(),
+      lifecycle: Arc::clone(&lc_state),
+      lifecycle_notify: Arc::clone(&lc_notify),
       injected_script,
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
@@ -1363,8 +1397,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
     page.transport.register_lifecycle_tracker(
       page.session_id.as_deref().unwrap_or(""),
-      page.lifecycle.clone(),
-      page.lifecycle_notify.clone(),
+      Arc::clone(&page.lifecycle),
+      Arc::clone(&page.lifecycle_notify),
       page.frame_observer(),
     );
 
@@ -1389,7 +1423,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ///
   /// Caller-owned profiles must flush before exit. Throwaway profiles
   /// can be killed directly because their contents are being discarded.
-  pub async fn close(&mut self) -> Result<()> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the profile did not flush before the browser exited, closing the attached
+  /// `WebDriver` or Android session fails, or closing the transport fails.
+  pub async fn close(&self) -> Result<()> {
     self.attach_tasks.abort();
     let mut child = self.child.lock().await;
     if let Some(group) = child.as_mut() {
@@ -1446,6 +1485,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
 impl CdpBrowser<pipe::PipeTransport> {
   /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch, or the
+  /// first protocol handshake fails.
   pub async fn launch(chromium_path: &str) -> Result<Self> {
     Self::launch_with_flags(
       chromium_path,
@@ -1456,6 +1500,11 @@ impl CdpBrowser<pipe::PipeTransport> {
   }
 
   /// Launch Chrome with custom flags and communicate over fd 3/4.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch, or the
+  /// first protocol handshake fails.
   pub async fn launch_with_flags(
     chromium_path: &str,
     flags: &[String],
@@ -1481,6 +1530,11 @@ impl CdpBrowser<pipe::PipeTransport> {
   /// [`crate::BrowserType::launch_persistent_context`] to ensure
   /// cookies / `localStorage` / `IndexedDB` persist across re-launches
   /// against the same directory.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `user_data_dir` cannot be prepared, Chrome fails to launch, or the first protocol
+  /// handshake fails.
   pub async fn launch_with_flags_in_dir(
     chromium_path: &str,
     flags: &[String],
@@ -1505,6 +1559,11 @@ impl CdpBrowser<ws::WsTransport> {
   }
 
   /// Launch Chrome with `--remote-debugging-port` and communicate over WebSocket.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch or expose
+  /// its WebSocket, or the first protocol handshake fails.
   pub async fn launch(chromium_path: &str) -> Result<Self> {
     Box::pin(Self::launch_with_flags(
       chromium_path,
@@ -1515,6 +1574,11 @@ impl CdpBrowser<ws::WsTransport> {
   }
 
   /// Launch Chrome with custom flags and communicate over WebSocket.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch or expose
+  /// its WebSocket, or the first protocol handshake fails.
   pub async fn launch_with_flags(
     chromium_path: &str,
     flags: &[String],
@@ -1543,6 +1607,11 @@ impl CdpBrowser<ws::WsTransport> {
   /// Launch Chrome over WebSocket with a caller-supplied
   /// `--user-data-dir`. See `launch_with_flags_in_dir` on the pipe
   /// flavour for the persistence rationale.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `user_data_dir` cannot be prepared, Chrome fails to launch or expose its WebSocket,
+  /// or the first protocol handshake fails.
   pub async fn launch_with_flags_in_dir(
     chromium_path: &str,
     flags: &[String],
@@ -1595,13 +1664,17 @@ impl CdpBrowser<ws::WsTransport> {
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the WebSocket connection fails or the first protocol handshake fails.
   pub async fn connect(ws_url: &str) -> Result<Self> {
-    Self::connect_with_headers(ws_url, &std::collections::HashMap::new()).await
+    Self::connect_with_headers(ws_url, &FxHashMap::default()).await
   }
 
   pub(crate) async fn connect_owned_webdriver(
     ws_url: &str,
-    headers: &std::collections::HashMap<String, String>,
+    headers: &FxHashMap<String, String>,
     session: Arc<super::webdriver::session::WebDriverSession>,
   ) -> Result<Self> {
     let mut browser = Self::connect_with_headers(ws_url, headers).await?;
@@ -1609,10 +1682,7 @@ impl CdpBrowser<ws::WsTransport> {
     Ok(browser)
   }
 
-  pub(crate) async fn connect_with_headers(
-    ws_url: &str,
-    headers: &std::collections::HashMap<String, String>,
-  ) -> Result<Self> {
+  pub(crate) async fn connect_with_headers(ws_url: &str, headers: &FxHashMap<String, String>) -> Result<Self> {
     let transport = Arc::new(Box::pin(ws::WsTransport::connect_with_headers(ws_url, headers)).await?);
 
     // Capture product version for `browser.version()` — same handshake
@@ -1952,38 +2022,31 @@ fn value_to_plain_string(value: &serde_json::Value) -> String {
 /// the separator is the first `': '` occurrence; if absent, `name` is
 /// empty and `message` is the full input.
 fn split_error_message(message: &str) -> (String, String) {
-  if let Some(idx) = message.find(':') {
-    let name = message[..idx].to_string();
-    // Playwright requires the separator to be `': '` — the `+ 2`
-    // offset below mirrors `separationIdx + 2` in
-    // `splitErrorMessage`. When the char after ':' is not a space,
-    // fall back to the full message (keeps parity with the TS
-    // `separationIdx + 2 <= message.length` guard).
-    if message.as_bytes().get(idx + 1) == Some(&b' ') && idx + 2 <= message.len() {
-      let msg = message[idx + 2..].to_string();
-      return (name, msg);
-    }
+  // Playwright requires the separator to be `': '` — stripping the
+  // space mirrors `separationIdx + 2` in `splitErrorMessage`. When the
+  // char after ':' is not a space, fall back to the full message (keeps
+  // parity with the TS `separationIdx + 2 <= message.length` guard).
+  if let Some((name, rest)) = message.split_once(':')
+    && let Some(msg) = rest.strip_prefix(' ')
+  {
+    return (name.to_string(), msg.to_string());
   }
   (String::new(), message.to_string())
 }
 
+/// One context option's label and the command that applies it.
+type ContextOptionCommand<'a> = (&'static str, futures::future::BoxFuture<'a, Result<()>>);
+
 /// CDP `timestamp` is fractional milliseconds. Non-finite / negative
 /// values collapse to `0`; representable positives saturate at
-/// `u64::MAX`. Works around clippy's unguarded f64-to-u64 cast lint.
+/// `u64::MAX`.
+#[expect(
+  clippy::cast_possible_truncation,
+  clippy::cast_sign_loss,
+  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
+)]
 fn f64_to_u64_saturating(n: f64) -> u64 {
-  #[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-  )]
-  let clamped = if !n.is_finite() || n < 0.0 {
-    0_u64
-  } else if n >= u64::MAX as f64 {
-    u64::MAX
-  } else {
-    n as u64
-  };
-  clamped
+  n as u64
 }
 
 fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
@@ -2591,52 +2654,52 @@ impl InjectedScriptManager {
 impl<T: CdpTransport> Clone for CdpPage<T> {
   fn clone(&self) -> Self {
     Self {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
-      setup: self.setup.clone(),
-      target_id: self.target_id.clone(),
+      setup: Arc::clone(&self.setup),
+      target_id: Arc::clone(&self.target_id),
       browser_context_id: self.browser_context_id.clone(),
       events: self.events.clone(),
-      frame_contexts: self.frame_contexts.clone(),
-      utility_contexts: self.utility_contexts.clone(),
-      frame_contexts_notify: self.frame_contexts_notify.clone(),
-      renderers: self.renderers.clone(),
-      exposed_fns: self.exposed_fns.clone(),
-      binding_initialized: self.binding_initialized.clone(),
-      closed: self.closed.clone(),
-      routes: self.routes.clone(),
-      fetch: self.fetch.clone(),
-      http_credentials: self.http_credentials.clone(),
-      proxy_credentials: self.proxy_credentials.clone(),
-      main_frame_id: self.main_frame_id.clone(),
-      last_metrics_params: self.last_metrics_params.clone(),
+      frame_contexts: Arc::clone(&self.frame_contexts),
+      utility_contexts: Arc::clone(&self.utility_contexts),
+      frame_contexts_notify: Arc::clone(&self.frame_contexts_notify),
+      renderers: Arc::clone(&self.renderers),
+      exposed_fns: Arc::clone(&self.exposed_fns),
+      binding_initialized: Arc::clone(&self.binding_initialized),
+      closed: Arc::clone(&self.closed),
+      routes: Arc::clone(&self.routes),
+      fetch: Arc::clone(&self.fetch),
+      http_credentials: Arc::clone(&self.http_credentials),
+      proxy_credentials: Arc::clone(&self.proxy_credentials),
+      main_frame_id: Arc::clone(&self.main_frame_id),
+      last_metrics_params: Arc::clone(&self.last_metrics_params),
       headful: self.headful,
-      window_id: self.window_id.clone(),
-      context_screen: self.context_screen.clone(),
-      seeded_frame_tree: self.seeded_frame_tree.clone(),
-      last_cursor_pos: self.last_cursor_pos.clone(),
-      lifecycle: self.lifecycle.clone(),
-      lifecycle_notify: self.lifecycle_notify.clone(),
-      injected_script: self.injected_script.clone(),
+      window_id: Arc::clone(&self.window_id),
+      context_screen: Arc::clone(&self.context_screen),
+      seeded_frame_tree: Arc::clone(&self.seeded_frame_tree),
+      last_cursor_pos: Arc::clone(&self.last_cursor_pos),
+      lifecycle: Arc::clone(&self.lifecycle),
+      lifecycle_notify: Arc::clone(&self.lifecycle_notify),
+      injected_script: Arc::clone(&self.injected_script),
       nav_request_slot: self.nav_request_slot.clone(),
       dialog_manager: self.dialog_manager.clone(),
       file_chooser_manager: self.file_chooser_manager.clone(),
-      file_chooser_intercept_enabled: self.file_chooser_intercept_enabled.clone(),
+      file_chooser_intercept_enabled: Arc::clone(&self.file_chooser_intercept_enabled),
       download_manager: self.download_manager.clone(),
       screencast_hub: self.screencast_hub.clone(),
       screen_recorder: self.screen_recorder.clone(),
-      download_behavior_enabled: self.download_behavior_enabled.clone(),
-      accept_downloads: self.accept_downloads.clone(),
-      downloads_dir: self.downloads_dir.clone(),
+      download_behavior_enabled: Arc::clone(&self.download_behavior_enabled),
+      accept_downloads: Arc::clone(&self.accept_downloads),
+      downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: self.page_backref.clone(),
-      frame_cache: self.frame_cache.clone(),
-      media_emulation: self.media_emulation.clone(),
-      frame_listener_started: self.frame_listener_started.clone(),
-      observed: self.observed.clone(),
-      network_idle: self.network_idle.clone(),
-      listener_tasks: self.listener_tasks.clone(),
-      drag_manager: self.drag_manager.clone(),
-      keyboard: self.keyboard.clone(),
+      frame_cache: Arc::clone(&self.frame_cache),
+      media_emulation: Arc::clone(&self.media_emulation),
+      frame_listener_started: Arc::clone(&self.frame_listener_started),
+      observed: Arc::clone(&self.observed),
+      network_idle: Arc::clone(&self.network_idle),
+      listener_tasks: Arc::clone(&self.listener_tasks),
+      drag_manager: Arc::clone(&self.drag_manager),
+      keyboard: Arc::clone(&self.keyboard),
     }
   }
 }
@@ -2645,8 +2708,8 @@ impl<T: CdpWrap> CdpPage<T> {
   async fn initialize_adopted_frame(&self) -> Result<()> {
     self.transport.register_lifecycle_tracker(
       self.session_id.as_deref().unwrap_or(""),
-      self.lifecycle.clone(),
-      self.lifecycle_notify.clone(),
+      Arc::clone(&self.lifecycle),
+      Arc::clone(&self.lifecycle_notify),
       self.frame_observer(),
     );
     let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
@@ -2844,6 +2907,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// leaves `page.goto` blocked past its own timeout — the request has
   /// not committed a document yet, so the lifecycle wait has not
   /// started.
+  ///
+  /// # Errors
+  ///
+  /// Returns a timeout error when the navigation does not reach `lifecycle` within `timeout_ms` (0 waits
+  /// without limit), and an error if `Page.navigate` fails or reports a navigation error.
   pub async fn goto(
     &self,
     url: &str,
@@ -2986,6 +3054,10 @@ impl<T: CdpWrap> CdpPage<T> {
       .clone()
   }
 
+  /// # Errors
+  ///
+  /// Returns [`FerriError::TargetClosed`] if the target crashes while waiting. A document that does not reach
+  /// `load` within 30 seconds ends the wait without an error.
   pub async fn wait_for_navigation(&self) -> Result<()> {
     let pre_loader_id = {
       let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3039,11 +3111,20 @@ impl<T: CdpWrap> CdpPage<T> {
 
   /// Force a GC pass in the page's JS engine. Mirrors Playwright's
   /// `crPage.requestGC` (`HeapProfiler.collectGarbage`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `HeapProfiler.collectGarbage`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn request_gc(&self) -> Result<()> {
     self.cmd("HeapProfiler.collectGarbage", serde_json::json!({})).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.bringToFront`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn bring_to_front(&self) -> Result<()> {
     self.cmd("Page.bringToFront", serde_json::json!({})).await?;
     Ok(())
@@ -3056,6 +3137,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// capture is what only the tab in front answers, so one pixel of one
   /// is the evidence, and the request is made again until it arrives.
   /// When it never does, the caller's capture reports its own timeout.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.bringToFront` or `Page.captureScreenshot`, the target has
+  /// closed, or the command outlives its time budget.
   pub async fn bring_to_front_drawn(&self) -> Result<()> {
     let pixel = serde_json::json!({
       "format": "png",
@@ -3071,6 +3157,11 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.reload`, the target has closed, or the command outlives its
+  /// time budget. Also returns [`FerriError::TargetClosed`] if the target crashes before the new document
+  /// reaches `lifecycle`.
   pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     // See `goto`: the registered init script persists across reloads;
     // no need to reset and re-fire `Page.addScriptToEvaluateOnNewDocument`.
@@ -3097,10 +3188,20 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.getNavigationHistory` or `Page.navigateToHistoryEntry`, the
+  /// target has closed, or the command outlives its time budget. Also returns [`FerriError::TargetClosed`] if
+  /// the target crashes before the entry commits.
   pub async fn go_back(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.history_go(-1, lifecycle, timeout_ms).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.getNavigationHistory` or `Page.navigateToHistoryEntry`, the
+  /// target has closed, or the command outlives its time budget. Also returns [`FerriError::TargetClosed`] if
+  /// the target crashes before the entry commits.
   pub async fn go_forward(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.history_go(1, lifecycle, timeout_ms).await
   }
@@ -3277,6 +3378,10 @@ impl<T: CdpWrap> CdpPage<T> {
     self.main_frame_id.get().cloned()
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.evaluate`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn url(&self) -> Result<Option<String>> {
     let result = self
       .cmd(
@@ -3296,6 +3401,10 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.evaluate`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn title(&self) -> Result<Option<String>> {
     let result = self
       .cmd(
@@ -3342,6 +3451,9 @@ impl<T: CdpWrap> CdpPage<T> {
       .copied()
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if the injected script cannot be installed in the page.
   pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
     Ok("window.__fd".to_string())
@@ -3349,6 +3461,10 @@ impl<T: CdpWrap> CdpPage<T> {
 
   /// Ensures the selector engine is injected into the current execution context.
   /// Idempotent and navigation-aware.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the injected script cannot be installed in the page.
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     self.injected_script.ensure(self).await
   }
@@ -3359,6 +3475,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// the CDP command is a no-op until any test path needs file
   /// chooser events, at which point this method is called and the
   /// command fires once. Subsequent calls are no-ops.
+  ///
+  /// # Errors
+  ///
+  /// Never fails: a rejected `Page.setInterceptFileChooserDialog` is ignored, and the `Result` keeps the
+  /// signature every backend shares.
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     if self
       .file_chooser_intercept_enabled
@@ -3379,6 +3500,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// events flow. Mirrors Playwright's per-context download config
   /// (`/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:354`)
   /// but lazy: not fired until a test path actually needs downloads.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Browser.setDownloadBehavior`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn enable_download_behavior(&self) -> Result<()> {
     if self
       .download_behavior_enabled
@@ -3413,6 +3539,11 @@ impl<T: CdpWrap> CdpPage<T> {
     self.cmd("Browser.setDownloadBehavior", params).await.map(|_| ())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.evaluate`, the target has closed, or the command outlives
+  /// its time budget. Also returns [`FerriError::Backend`] carrying the exception text when the expression
+  /// throws.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     let result = self
       .cmd(
@@ -3454,13 +3585,7 @@ impl<T: CdpWrap> CdpPage<T> {
       let notified = self.frame_contexts_notify.notified();
       tokio::pin!(notified);
       notified.as_mut().enable();
-      if let Some(id) = self
-        .frame_contexts
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(frame_id)
-        .copied()
-      {
+      if let Some(id) = self.peek_frame_context(frame_id) {
         return Ok(id);
       }
       if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -3855,6 +3980,10 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Frames ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.getFrameTree`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>> {
     // Consume the seeded tree captured during the per-page parallel
     // `enable_domains` batch. Skips the per-call `Page.getFrameTree`
@@ -3914,6 +4043,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Deterministic iframe-element -> content-frame id via
   /// `DOM.describeNode` on the element's remote object. Replaces the
   /// fragile name/url cache heuristic for unnamed / `srcdoc` iframes.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.describeNode`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     let res = self
       .cmd("DOM.describeNode", serde_json::json!({ "objectId": object_id }))
@@ -3932,6 +4066,12 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `crPage.ts::getFrameElement`: `DOM.getFrameOwner` →
   /// `DOM.resolveNode` into the parent's main-world context →
   /// `Runtime.callFunctionOn` with the element as `this`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.getFrameOwner`, `DOM.resolveNode` or `Runtime.callFunctionOn`,
+  /// the target has closed, or the command outlives its time budget. Also fails when the frame owner has no
+  /// backend node or does not resolve to an object.
   pub async fn mark_snapshot_iframe(
     &self,
     child_frame_id: &str,
@@ -3981,6 +4121,11 @@ impl<T: CdpWrap> CdpPage<T> {
     call.map(|_| ())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.evaluate`, the target has closed, or the command outlives
+  /// its time budget. Also fails when the frame has no execution context within 2 seconds, or the expression
+  /// throws.
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     if let Some(renderer) = self.page_for_frame(frame_id).await? {
       return Box::pin(renderer.evaluate_in_frame(expression, frame_id)).await;
@@ -4025,6 +4170,11 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Elements ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.getDocument` or `DOM.querySelector`, the target has closed, or
+  /// the command outlives its time budget. Returns [`FerriError::InvalidSelector`] when nothing matches
+  /// `selector`.
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     let doc = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await?;
     let root_id = doc
@@ -4050,7 +4200,7 @@ impl<T: CdpWrap> CdpPage<T> {
     }
 
     Ok(T::wrap_element(CdpElement {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
         node_id: Some(node_id),
@@ -4068,7 +4218,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `object_id` slot directly.
   pub(crate) fn element_from_object_id(&self, object_id: Arc<str>, session_id: Option<Arc<str>>) -> CdpElement<T> {
     CdpElement {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id,
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
         node_id: None,
@@ -4081,6 +4231,12 @@ impl<T: CdpWrap> CdpPage<T> {
   /// page when `frame_id` is `None`) and return the resulting DOM
   /// element. Used by `Locator` to scope action-method resolution to
   /// the locator's bound `Frame` — Playwright parity.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.evaluate`, the target has closed, or the command outlives
+  /// its time budget. Also fails when the frame has no execution context within 2 seconds, the script throws,
+  /// or it does not return a DOM element.
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     if let Some(frame) = frame_id
       && let Some(renderer) = self.page_for_frame(frame).await?
@@ -4143,7 +4299,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "JS did not return a DOM element"))?;
 
     Ok(T::wrap_element(CdpElement {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
         node_id: None,
@@ -4154,6 +4310,10 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Content ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.evaluate`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn content(&self) -> Result<String> {
     let result = self
       .cmd(
@@ -4174,6 +4334,10 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.getFrameTree` or `Page.setDocumentContent`, the target has
+  /// closed, or the command outlives its time budget. Also fails when the frame tree has no main frame.
   pub async fn set_content(&self, html: &str) -> Result<()> {
     let frame_id = self
       .main_frame_id
@@ -4203,6 +4367,11 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- Screenshots ----
 
   /// `crPage.ts::setBackgroundColor`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Emulation.setDefaultBackgroundColorOverride`, the target has closed,
+  /// or the command outlives its time budget.
   pub async fn set_background_color(&self, color: Option<BackgroundColor>) -> Result<()> {
     let params = match color {
       Some(c) => serde_json::json!({ "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a } }),
@@ -4213,6 +4382,13 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// `crPage.ts::takeScreenshot`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.getLayoutMetrics`, `Runtime.evaluate`, `Page.captureScreenshot`
+  /// or `Emulation.setTouchEmulationEnabled`, the target has closed, or the command outlives its time budget.
+  /// Also fails when there is no rectangle to capture, the paint wait throws, or the answer carries no valid
+  /// base64 image.
   pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
     let metric = |object: &str, key: &str| {
@@ -4309,6 +4485,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `Page.stopScreencast` and the shutdown signal, then drops the
   /// frame sender so the consumer's `recv()` returns `None`. This is
   /// deterministic: no `sleep` hack to "give frames time to arrive".
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.startScreencast`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn start_screencast(
     &self,
     quality: u8,
@@ -4326,7 +4507,7 @@ impl<T: CdpWrap> CdpPage<T> {
     // exiting with "Output file does not contain any stream".
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    Self::spawn_screencast_listener(self.transport.clone(), self.session_id.clone(), tx, shutdown_rx);
+    Self::spawn_screencast_listener(Arc::clone(&self.transport), self.session_id.clone(), tx, shutdown_rx);
 
     self
       .cmd(
@@ -4345,6 +4526,11 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Stop CDP screencast.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.stopScreencast`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn stop_screencast(&self) -> Result<()> {
     self.cmd("Page.stopScreencast", serde_json::json!({})).await?;
     Ok(())
@@ -4391,7 +4577,7 @@ impl<T: CdpWrap> CdpPage<T> {
             // sees end-of-stream.
             loop {
               match rx.try_recv() {
-                Ok(ev) => Self::process_screencast_event(&ev, &session_id, &transport, &frame_tx),
+                Ok(ev) => Self::process_screencast_event(&ev, session_id.as_ref(), &transport, &frame_tx),
                 // Lagged only reports the overwritten frames — newer
                 // ones are still buffered behind it, keep draining.
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {},
@@ -4401,18 +4587,14 @@ impl<T: CdpWrap> CdpPage<T> {
             break;
           },
         };
-        Self::process_screencast_event(&event, &session_id, &transport, &frame_tx);
+        Self::process_screencast_event(&event, session_id.as_ref(), &transport, &frame_tx);
       }
     });
   }
 
-  #[allow(
-    clippy::ref_option,
-    reason = "matches caller signature inside spawn_screencast_listener"
-  )]
   fn process_screencast_event(
     event: &serde_json::Value,
-    session_id: &Option<Arc<str>>,
+    session_id: Option<&Arc<str>>,
     transport: &Arc<T>,
     frame_tx: &tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
   ) {
@@ -4442,8 +4624,8 @@ impl<T: CdpWrap> CdpPage<T> {
       let _ = frame_tx.send((jpeg_bytes, timestamp));
     }
     let ack_id = params.get("sessionId").and_then(serde_json::Value::as_i64).unwrap_or(0);
-    let t = transport.clone();
-    let sid = session_id.clone();
+    let t = Arc::clone(transport);
+    let sid = session_id.cloned();
     tokio::spawn(async move {
       let _ = t
         .send_command(
@@ -4466,6 +4648,12 @@ impl<T: CdpWrap> CdpPage<T> {
   /// to inches via [`crate::options::PdfSize::to_inches`]. Margins default
   /// to `0` per side and are converted the same way. Every optional field
   /// falls back to Playwright's default when `None`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.printToPDF`, the target has closed, or the command outlives its
+  /// time budget. Returns [`FerriError::InvalidArgument`] for an unknown paper `format`, and an error when
+  /// the answer carries no data or the data is not valid base64.
   pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     let mut paper_width = 8.5_f64;
     let mut paper_height = 11.0_f64;
@@ -4526,10 +4714,18 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Accessibility ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Accessibility.getFullAXTree`, the target has closed, or the command
+  /// outlives its time budget. Also fails when it returns no nodes.
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     self.accessibility_tree_with_depth(-1).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Accessibility.getFullAXTree`, the target has closed, or the command
+  /// outlives its time budget. Also fails when it returns no nodes.
   pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     let result = self
       .cmd("Accessibility.getFullAXTree", serde_json::json!({"depth": depth}))
@@ -4589,6 +4785,10 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Input ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.click_at_opts(x, y, "left", 1).await
   }
@@ -4597,6 +4797,10 @@ impl<T: CdpWrap> CdpPage<T> {
     &self.keyboard
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let mods = self.keyboard.modifiers();
     let press = self.cmd(
@@ -4661,6 +4865,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// bag: `button`, `click_count`, delay between press/release, and
   /// `steps` interpolated mousemoves from the last cursor position to
   /// the target, every event carrying the held modifiers.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<()> {
     let button = args.button.as_cdp();
     let mods = self.keyboard.modifiers();
@@ -4758,6 +4967,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
   /// events with the held modifiers on each, ending at `(x, y)` exactly.
   /// No `mousePressed` / `mouseReleased`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<()> {
     let mods = self.keyboard.modifiers();
     let steps = args.steps.max(1);
@@ -4807,6 +5021,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// listener fires. Playwright's `BrowserContextOptions.hasTouch` wires
   /// this on context creation; we opt in lazily on first tap so callers
   /// who never tap pay nothing.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Emulation.setTouchEmulationEnabled` or `Input.dispatchTouchEvent`,
+  /// the target has closed, or the command outlives its time budget.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     let mods = self.keyboard.modifiers();
     self
@@ -4859,7 +5078,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let mut rx = self
       .transport
       .tap_event_methods(&["Input.dragIntercepted"], self.session_id.as_deref());
-    let dm = self.drag_manager.clone();
+    let dm = Arc::clone(&self.drag_manager);
     let task = tokio::spawn(async move {
       while let Some(evt) = rx.recv().await {
         if let Some(data) = evt.get("params").and_then(|p| p.get("data")).cloned() {
@@ -5031,13 +5250,18 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(true)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent` or `Input.dispatchDragEvent`, the target
+  /// has closed, or the command outlives its time budget.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     // Route through the drag manager (Playwright `RawMouse.move` →
     // `DragManager.interceptDragCausedByMove`): while a native drag is
     // in flight the move is re-dispatched as `dragOver`; while the left
     // button is held it runs under an interception window that captures
     // a starting native drag.
-    if let Some(data) = self.drag_manager.drag_data.lock().await.clone() {
+    let drag_data = self.drag_manager.drag_data.lock().await.clone();
+    if let Some(data) = drag_data {
       self
         .cmd(
           "Input.dispatchDragEvent",
@@ -5070,6 +5294,10 @@ impl<T: CdpWrap> CdpPage<T> {
     self.intercept_drag_caused_by_move(x, y, mask).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent` or `Input.dispatchDragEvent` for any step,
+  /// the target has closed, or the command outlives its time budget.
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     let steps = steps.max(1);
     for i in 1..=steps {
@@ -5084,6 +5312,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .cmd(
@@ -5101,6 +5333,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let mask = self.drag_manager.update_buttons(|m| *m |= cdp_button_bit(button));
     // Playwright skips the protocol press while a native drag is in
@@ -5128,11 +5364,16 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent` or `Input.dispatchDragEvent`, the target
+  /// has closed, or the command outlives its time budget.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let mask = self.drag_manager.update_buttons(|m| *m &= !cdp_button_bit(button));
     // An in-flight intercepted drag ends in a `drop`, not a
     // `mouseReleased` (`crInput.ts::RawMouseImpl.up`).
-    if let Some(data) = self.drag_manager.drag_data.lock().await.take() {
+    let drag_data = self.drag_manager.drag_data.lock().await.take();
+    if let Some(data) = drag_data {
       self
         .cmd(
           "Input.dispatchDragEvent",
@@ -5160,6 +5401,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.insertText`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
@@ -5187,6 +5432,10 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Cookies ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Storage.getCookies`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     // Playwright's `context.cookies()` returns EVERY cookie in the
     // browser context (`Storage.getCookies`), not just the current
@@ -5214,11 +5463,19 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(cookies.iter().map(cookie_from_cdp).collect())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Network.setCookie`, the target has closed, or the command outlives
+  /// its time budget.
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
     self.cmd("Network.setCookie", cookie_to_cdp(&cookie)).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Network.deleteCookies`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     let mut params = serde_json::json!({"name": name});
     if let Some(d) = domain {
@@ -5230,6 +5487,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Storage.getCookies` or `Network.deleteCookies`, the target has
+  /// closed, or the command outlives its time budget.
   pub async fn clear_cookies(&self) -> Result<()> {
     // Use Network.getCookies + Network.deleteCookies (session-scoped)
     // instead of Storage.clearCookies (browser-scoped) to correctly
@@ -5258,17 +5519,20 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `crPage._updateXxx()` family in
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:520`
   /// but folded into one call so `ContextRef::new_page` dispatches
-  /// once and every command ships in parallel via [`tokio::join!`].
+  /// once and every command ships in parallel via
+  /// [`futures::future::join_all`].
   ///
   /// Any field whose `Option` is `None` is skipped; `MediaOverride`
   /// fields with `Unchanged` are skipped. Errors from individual
   /// commands fold into a single aggregated error listing every
   /// field that failed — matches Playwright's `Promise.all` failure
   /// mode.
-  #[allow(clippy::too_many_lines)]
+  ///
+  /// # Errors
+  ///
+  /// Returns [`FerriError::Backend`] naming every field whose command
+  /// failed, after all of them have run.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
-    use futures::future::OptionFuture;
-
     // Stash the context's screen BEFORE the viewport override goes out:
     // the two travel in one `setDeviceMetricsOverride`, and every later
     // `setViewportSize` reads it back from here.
@@ -5279,14 +5543,42 @@ impl<T: CdpWrap> CdpPage<T> {
       }
     }
 
+    let mut pending = Vec::new();
+    self.queue_emulation_options(opts, &mut pending);
+    self.queue_session_options(opts, &mut pending);
+    let results = futures::future::join_all(
+      pending
+        .into_iter()
+        .map(|(label, fut)| async move { (label, fut.await) }),
+    )
+    .await;
+
+    // Aggregate errors — one failure per field, each labelled.
+    let errs: Vec<String> = results
+      .into_iter()
+      .filter_map(|(label, r)| r.err().map(|e| format!("{label}: {e}")))
+      .collect();
+    if errs.is_empty() {
+      Ok(())
+    } else {
+      Err(FerriError::Backend(errs.join("; ")))
+    }
+  }
+
+  /// Queue the commands for viewport, user agent, locale, timezone,
+  /// JavaScript, CSP and TLS, in the order their failures are reported.
+  fn queue_emulation_options<'a>(
+    &'a self,
+    opts: &'a crate::options::BrowserContextOptions,
+    pending: &mut Vec<ContextOptionCommand<'a>>,
+  ) {
     // `viewport` composes over the `ViewportConfig` helper that
     // `Page::set_viewport_size` also calls, so it keeps a dedicated
     // method. Media is layered with the page's own overrides by
     // `AnyPage::apply_context_options`.
-    let viewport_fut: OptionFuture<_> = opts
-      .resolved_viewport()
-      .map(|vp| async move { self.emulate_viewport(&vp).await })
-      .into();
+    if let Some(vp) = opts.resolved_viewport() {
+      pending.push(("viewport", Box::pin(async move { self.emulate_viewport(&vp).await })));
+    }
 
     // Every remaining field is a direct CDP command — inlined below
     // so no `set_*` helper lives on the backend.
@@ -5294,221 +5586,161 @@ impl<T: CdpWrap> CdpPage<T> {
     // a locale the agent rides in the locale's command below. Two
     // concurrent overrides leave whichever lands last, and one carrying
     // only `acceptLanguage` resets the agent to the browser's default.
-    let ua_fut: OptionFuture<_> = opts
-      .user_agent
-      .as_deref()
-      .filter(|_| opts.locale.is_none())
-      .map(|ua| async move {
-        self
-          .configure("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
-          .await
-      })
-      .into();
-    let locale_fut: OptionFuture<_> = opts
-      .locale
-      .as_deref()
-      .map(|l| async move {
-        let _ = self
-          .configure("Emulation.setLocaleOverride", serde_json::json!({"locale": l}))
-          .await;
-        self
-          .configure(
-            "Network.setUserAgentOverride",
-            serde_json::json!({"userAgent": opts.user_agent.as_deref().unwrap_or(""), "acceptLanguage": l}),
-          )
-          .await
-      })
-      .into();
-    let tz_fut: OptionFuture<_> = opts
-      .timezone_id
-      .as_deref()
-      .map(|tz| async move {
-        self
-          .configure("Emulation.setTimezoneOverride", serde_json::json!({"timezoneId": tz}))
-          .await
-      })
-      .into();
-    let js_fut: OptionFuture<_> = opts
-      .java_script_enabled
-      .map(|v| async move {
-        self
-          .configure("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))
-          .await
-      })
-      .into();
-    let csp_fut: OptionFuture<_> = opts
-      .bypass_csp
-      .map(|v| async move {
-        self
-          .configure("Page.setBypassCSP", serde_json::json!({"enabled": v}))
-          .await
-      })
-      .into();
-    let tls_fut: OptionFuture<_> = opts
-      .ignore_https_errors
-      .map(|v| async move {
-        self
-          .configure("Security.setIgnoreCertificateErrors", serde_json::json!({"ignore": v}))
-          .await
-      })
-      .into();
-    let creds_fut: OptionFuture<_> = opts
-      .http_credentials
-      .clone()
-      .map(|c| async move {
-        *self.http_credentials.write().await = Some(c);
-        self.ensure_fetch_enabled().await
-      })
-      .into();
-    let sw_fut: OptionFuture<_> = opts
-      .service_workers
-      .map(|p| async move {
-        if matches!(p, crate::options::ServiceWorkerPolicy::Block) {
+    if let Some(ua) = opts.user_agent.as_deref().filter(|_| opts.locale.is_none()) {
+      pending.push((
+        "userAgent",
+        Box::pin(self.configure("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))),
+      ));
+    }
+    if let Some(l) = opts.locale.as_deref() {
+      pending.push((
+        "locale",
+        Box::pin(async move {
+          let _ = self
+            .configure("Emulation.setLocaleOverride", serde_json::json!({"locale": l}))
+            .await;
           self
             .configure(
-              "Page.addScriptToEvaluateOnNewDocument",
-              serde_json::json!({
-                "source": "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}"
-              }),
+              "Network.setUserAgentOverride",
+              serde_json::json!({"userAgent": opts.user_agent.as_deref().unwrap_or(""), "acceptLanguage": l}),
             )
             .await
-        } else {
-          Ok(())
-        }
-      })
-      .into();
+        }),
+      ));
+    }
+    if let Some(tz) = opts.timezone_id.as_deref() {
+      pending.push((
+        "timezoneId",
+        Box::pin(self.configure("Emulation.setTimezoneOverride", serde_json::json!({"timezoneId": tz}))),
+      ));
+    }
+    if let Some(v) = opts.java_script_enabled {
+      pending.push((
+        "javaScriptEnabled",
+        Box::pin(self.configure("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))),
+      ));
+    }
+    if let Some(v) = opts.bypass_csp {
+      pending.push((
+        "bypassCSP",
+        Box::pin(self.configure("Page.setBypassCSP", serde_json::json!({"enabled": v}))),
+      ));
+    }
+    if let Some(v) = opts.ignore_https_errors {
+      pending.push((
+        "ignoreHTTPSErrors",
+        Box::pin(self.configure("Security.setIgnoreCertificateErrors", serde_json::json!({"ignore": v}))),
+      ));
+    }
+  }
+
+  /// Queue the commands for credentials, service workers, downloads,
+  /// headers, geolocation, permissions, network conditions and CPU
+  /// throttling, in the order their failures are reported.
+  fn queue_session_options<'a>(
+    &'a self,
+    opts: &'a crate::options::BrowserContextOptions,
+    pending: &mut Vec<ContextOptionCommand<'a>>,
+  ) {
+    if let Some(c) = opts.http_credentials.clone() {
+      pending.push((
+        "httpCredentials",
+        Box::pin(async move {
+          *self.http_credentials.write().await = Some(c);
+          self.ensure_fetch_enabled().await
+        }),
+      ));
+    }
+    if opts.service_workers == Some(crate::options::ServiceWorkerPolicy::Block) {
+      pending.push((
+        "serviceWorkers",
+        Box::pin(self.configure(
+          "Page.addScriptToEvaluateOnNewDocument",
+          serde_json::json!({
+            "source": "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}"
+          }),
+        )),
+      ));
+    }
     // Record rather than send: `enable_download_behavior` owns the one
     // `Browser.setDownloadBehavior` this context gets, so the lazy latch
     // cannot overwrite an explicit `deny`. Denial is applied eagerly
     // because the browser's own default is to allow, so waiting for
     // something to show interest in downloads would let the first one
     // through; acceptance stays lazy and keeps saving that round trip.
-    let dl_fut: OptionFuture<_> = opts
-      .accept_downloads
-      .map(|accept| async move {
-        self
-          .accept_downloads
-          .store(accept, std::sync::atomic::Ordering::Relaxed);
-        self.download_manager.set_accept_downloads(accept);
-        if accept {
+    if let Some(accept) = opts.accept_downloads {
+      pending.push((
+        "acceptDownloads",
+        Box::pin(async move {
+          self
+            .accept_downloads
+            .store(accept, std::sync::atomic::Ordering::Relaxed);
+          self.download_manager.set_accept_downloads(accept);
+          if accept {
+            Ok(())
+          } else {
+            self.enable_download_behavior().await
+          }
+        }),
+      ));
+    }
+    if let Some(h) = opts.extra_http_headers.as_ref() {
+      let pairs: serde_json::Map<String, serde_json::Value> = h
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+      pending.push((
+        "extraHTTPHeaders",
+        Box::pin(self.configure("Network.setExtraHTTPHeaders", serde_json::json!({"headers": pairs}))),
+      ));
+    }
+    if let Some(g) = opts.geolocation {
+      pending.push((
+        "geolocation",
+        Box::pin(self.configure(
+          "Emulation.setGeolocationOverride",
+          serde_json::json!({"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}),
+        )),
+      ));
+    }
+    if opts.permissions.is_some() || !opts.origin_permissions.is_empty() {
+      pending.push((
+        "permissions",
+        Box::pin(async move {
+          if let Some(permissions) = &opts.permissions {
+            self.grant_permissions(None, permissions).await?;
+          }
+          for (origin, permissions) in &opts.origin_permissions {
+            self.grant_permissions(Some(origin), permissions).await?;
+          }
           Ok(())
-        } else {
-          self.enable_download_behavior().await
-        }
-      })
-      .into();
-    let headers_fut: OptionFuture<_> = opts
-      .extra_http_headers
-      .as_ref()
-      .map(|h| async move {
-        let pairs: serde_json::Map<String, serde_json::Value> = h
-          .iter()
-          .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-          .collect();
-        self
-          .configure("Network.setExtraHTTPHeaders", serde_json::json!({"headers": pairs}))
-          .await
-      })
-      .into();
-    let geo_fut: OptionFuture<_> = opts
-      .geolocation
-      .map(|g| async move {
-        self
-          .configure(
-            "Emulation.setGeolocationOverride",
-            serde_json::json!({"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}),
-          )
-          .await
-      })
-      .into();
-    let perms_fut: OptionFuture<_> = (opts.permissions.is_some() || !opts.origin_permissions.is_empty())
-      .then_some(async move {
-        if let Some(permissions) = &opts.permissions {
-          self.grant_permissions(None, permissions).await?;
-        }
-        for (origin, permissions) in &opts.origin_permissions {
-          self.grant_permissions(Some(origin), permissions).await?;
-        }
-        Ok(())
-      })
-      .into();
+        }),
+      ));
+    }
     // One command carries both, so each must be sent with the other's
     // current value or setting one would undo the other.
-    let network_fut: OptionFuture<_> = (opts.offline.is_some() || opts.network_conditions.is_some())
-      .then(|| {
-        let conditions = opts
-          .network_conditions
-          .unwrap_or(crate::options::NetworkConditions::NONE);
-        let offline = opts.offline.unwrap_or(false);
-        async move {
-          self
-            .configure(
-              "Network.emulateNetworkConditions",
-              serde_json::json!({
-                "offline": offline,
-                "latency": conditions.latency,
-                "downloadThroughput": conditions.download_throughput.unwrap_or(-1.0),
-                "uploadThroughput": conditions.upload_throughput.unwrap_or(-1.0),
-              }),
-            )
-            .await
-        }
-      })
-      .into();
-    let cpu_fut: OptionFuture<_> = opts
-      .cpu_throttling_rate
-      .map(|rate| async move {
-        self
-          .configure("Emulation.setCPUThrottlingRate", serde_json::json!({ "rate": rate }))
-          .await
-      })
-      .into();
-
-    let (r_vp, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_geo, r_perm, r_net, r_cpu) = tokio::join!(
-      viewport_fut,
-      ua_fut,
-      locale_fut,
-      tz_fut,
-      js_fut,
-      csp_fut,
-      tls_fut,
-      creds_fut,
-      sw_fut,
-      dl_fut,
-      headers_fut,
-      geo_fut,
-      perms_fut,
-      network_fut,
-      cpu_fut,
-    );
-
-    // Aggregate errors — one failure per field, each labelled.
-    let mut errs: Vec<String> = Vec::new();
-    for (label, r) in [
-      ("viewport", r_vp),
-      ("userAgent", r_ua),
-      ("locale", r_loc),
-      ("timezoneId", r_tz),
-      ("javaScriptEnabled", r_js),
-      ("bypassCSP", r_csp),
-      ("ignoreHTTPSErrors", r_tls),
-      ("httpCredentials", r_cred),
-      ("serviceWorkers", r_sw),
-      ("acceptDownloads", r_dl),
-      ("extraHTTPHeaders", r_hdr),
-      ("geolocation", r_geo),
-      ("permissions", r_perm),
-      ("offline/networkConditions", r_net),
-      ("cpuThrottling", r_cpu),
-    ] {
-      if let Some(Err(e)) = r {
-        errs.push(format!("{label}: {e}"));
-      }
+    if opts.offline.is_some() || opts.network_conditions.is_some() {
+      let conditions = opts
+        .network_conditions
+        .unwrap_or(crate::options::NetworkConditions::NONE);
+      pending.push((
+        "offline/networkConditions",
+        Box::pin(self.configure(
+          "Network.emulateNetworkConditions",
+          serde_json::json!({
+            "offline": opts.offline.unwrap_or(false),
+            "latency": conditions.latency,
+            "downloadThroughput": conditions.download_throughput.unwrap_or(-1.0),
+            "uploadThroughput": conditions.upload_throughput.unwrap_or(-1.0),
+          }),
+        )),
+      ));
     }
-    if errs.is_empty() {
-      Ok(())
-    } else {
-      Err(FerriError::Backend(errs.join("; ")))
+    if let Some(rate) = opts.cpu_throttling_rate {
+      pending.push((
+        "cpuThrottling",
+        Box::pin(self.configure("Emulation.setCPUThrottlingRate", serde_json::json!({ "rate": rate }))),
+      ));
     }
   }
 
@@ -5571,6 +5803,11 @@ impl<T: CdpWrap> CdpPage<T> {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Emulation.setDeviceMetricsOverride` or
+  /// `Emulation.setTouchEmulationEnabled`, the target has closed, or the command outlives its time budget.
+  /// Also fails when resizing the window for a headful page fails.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     let screen = match self.context_screen.lock() {
       Ok(g) => *g,
@@ -5621,6 +5858,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Emulation.setEmulatedMedia`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     use crate::options::MediaOverride;
     // `Emulation.setEmulatedMedia` replaces the emulation state per call.
@@ -5684,6 +5925,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `grantPermissions` — called from
   /// [`crate::ContextRef::clear_permissions`] (`Playwright
   /// browserContext.clearPermissions`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Browser.resetPermissions`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn reset_permissions(&self) -> Result<()> {
     // Scope to this page's CDP browser context (see `apply_context_options`
     // for why grant must ship `browserContextId`). `Browser.resetPermissions`
@@ -5704,6 +5950,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `page.setExtraHTTPHeaders(headers)`). The `apply_context_options`
   /// path inlines the same command separately so both entry points
   /// land independently.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Network.setExtraHTTPHeaders`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<()> {
     let pairs: serde_json::Map<String, serde_json::Value> = headers
       .iter()
@@ -5721,6 +5972,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `browserContext.setHTTPCredentials(creds | null)`). Passing `None`
   /// clears stored credentials so future 401 challenges surface as the
   /// browser's native auth dialog (`CancelAuth`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Fetch.enable` on this page or one of its renderers, the target has
+  /// closed, or the command outlives its time budget.
   pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     *self.http_credentials.write().await = creds;
     // Re-arm Fetch so `handleAuthRequests` tracks the new state.
@@ -5732,6 +5988,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// (`Target.createBrowserContext({ proxyServer })`); Playwright passes
   /// `proxyCredentials()` beside the site credentials to
   /// `crNetworkManager.authenticate`, and either arms `handleAuthRequests`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Fetch.enable` when the proxy carries credentials, the target has
+  /// closed, or the command outlives its time budget.
   pub async fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> Result<()> {
     let creds = proxy.as_ref().and_then(crate::options::ProxyConfig::credentials);
     let arm = creds.is_some();
@@ -5766,6 +6027,11 @@ impl<T: CdpWrap> CdpPage<T> {
   /// objects came back with new ids. `DevTools` keeps the domain
   /// enabled for as long as the Memory panel is open, and so does this.
   /// The cost is the id map staying alive, which is what a diff is.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects a `HeapProfiler` command, the target has closed, or the command
+  /// outlives its time budget. Also fails when the snapshot arrives empty.
   pub async fn take_heap_snapshot(&self) -> Result<String> {
     let mut rx = self
       .transport
@@ -5812,6 +6078,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Err(FerriError::protocol("Tracing", "trace stream has no traceEvents array"))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Tracing.start`, the target has closed, or the command outlives its
+  /// time budget.
   pub async fn start_tracing(&self, categories: Option<&[String]>) -> Result<()> {
     let categories = match categories {
       Some(c) if !c.is_empty() => c.join(","),
@@ -5837,6 +6107,12 @@ impl<T: CdpWrap> CdpPage<T> {
   /// stream handle on the event channel while the command response is in
   /// flight. The stream is then consumed with IO.read, matching the
   /// `ReturnAsStream` path used by Playwright.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Tracing.end`, the target has closed, or the command outlives its
+  /// time budget. Also fails when `Tracing.tracingComplete` does not arrive within 30 seconds or names no
+  /// stream, or the stream cannot be read.
   pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     let mut rx = self
       .transport
@@ -5857,6 +6133,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Self::parse_trace_events(&trace)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Performance.enable` or `Performance.getMetrics`, the target has
+  /// closed, or the command outlives its time budget.
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     // Chrome only populates Performance.getMetrics after the domain is
     // enabled. The command is idempotent, so keeping this at the read
@@ -5881,6 +6161,10 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Ref resolution ----
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.resolveNode`, the target has closed, or the command outlives its
+  /// time budget. Also fails when the node is gone and `ref_id` no longer resolves.
   pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     let resolve_result = self
       .cmd("DOM.resolveNode", serde_json::json!({"backendNodeId": backend_node_id}))
@@ -5900,7 +6184,7 @@ impl<T: CdpWrap> CdpPage<T> {
     // `CdpElement::node_id()`; everywhere else, the cached
     // `Runtime` objectId is sufficient and bypasses the DOM agent.
     Ok(T::wrap_element(CdpElement {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
         node_id: None,
@@ -5917,7 +6201,7 @@ impl<T: CdpWrap> CdpPage<T> {
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {
-    let transport = self.transport.clone();
+    let transport = Arc::clone(&self.transport);
     let session_id = self.session_id.clone();
     let emitter1 = self.events.clone();
     let emitter2 = self.events.clone();
@@ -5943,9 +6227,9 @@ impl<T: CdpWrap> CdpPage<T> {
       &self.events,
     ));
     tasks.push(Self::spawn_network_listener(
-      transport.clone(),
-      session_id.clone(),
-      self.target_id.clone(),
+      transport,
+      session_id,
+      Arc::clone(&self.target_id),
       network_log,
       emitter2,
       self.nav_request_slot.clone(),
@@ -5966,7 +6250,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let _ = self.download_manager.register_emitter_bridge(self.events.clone());
 
     tasks.push(Self::spawn_dialog_listener(
-      self.transport.clone(),
+      Arc::clone(&self.transport),
       self.session_id.clone(),
       dialog_log,
       emitter3,
@@ -5980,11 +6264,11 @@ impl<T: CdpWrap> CdpPage<T> {
       self.page_backref.clone(),
     ));
     tasks.push(Self::spawn_download_listener(
-      self.transport.clone(),
+      Arc::clone(&self.transport),
       self.session_id.clone(),
       self.browser_context_id.clone(),
       self.download_manager.clone(),
-      self.downloads_dir.clone(),
+      Arc::clone(&self.downloads_dir),
       self.page_backref.clone(),
     ));
     tasks.extend(self.spawn_renderer_tracker());
@@ -6038,7 +6322,11 @@ impl<T: CdpWrap> CdpPage<T> {
         for arg in &args_json {
           let backing = cdp_remote_object_to_backing(arg, session_id.clone());
           let is_node = arg.get("subtype").and_then(|v| v.as_str()) == Some("node");
-          args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing, is_node));
+          args.push(crate::js_handle::JSHandle::from_backing(
+            Arc::clone(&page),
+            backing,
+            is_node,
+          ));
         }
         let location = cdp_stack_trace_to_location(params.get("stackTrace"));
         let timestamp = params
@@ -6081,7 +6369,7 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<&Arc<str>>,
     emitter: &crate::events::EventEmitter,
   ) -> Vec<tokio::task::AbortHandle> {
-    let transport = transport.clone();
+    let transport = Arc::clone(transport);
     let session_id = session_id.cloned();
     let emitter = emitter.clone();
     // Tapped here, not in the task: the tap delivers only what arrives
@@ -6127,7 +6415,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// browser-wide attach listener resumes them; this one announces each
   /// as a [`crate::worker::Worker`] and closes it when its session goes.
   fn spawn_worker_listener(&self) -> tokio::task::AbortHandle {
-    let transport = self.transport.clone();
+    let transport = Arc::clone(&self.transport);
     let emitter = self.events.clone();
     let mut rx = self.transport.tap_event_methods(
       &["Target.attachedToTarget", "Target.detachedFromTarget"],
@@ -6528,7 +6816,8 @@ impl<T: CdpWrap> CdpPage<T> {
             // has the same guard and silently returns.
             return;
           };
-          let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(page_clone.clone(), element).await
+          let Ok(handle) =
+            crate::element_handle::ElementHandle::from_any_element(Arc::clone(&page_clone), element).await
           else {
             return;
           };
@@ -6566,7 +6855,6 @@ impl<T: CdpWrap> CdpPage<T> {
   /// main-frame id, we accept it optimistically — matches Playwright's
   /// `_findOwningPage` behaviour, which also falls through when it
   /// cannot resolve the frame.
-  #[allow(clippy::too_many_lines)]
   fn spawn_download_listener(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
@@ -6603,96 +6891,20 @@ impl<T: CdpWrap> CdpPage<T> {
         {
           continue;
         }
-        let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        match method {
-          "Browser.downloadWillBegin" => {
-            let Some(params) = event.get("params") else {
-              continue;
-            };
-            let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if guid.is_empty() {
-              continue;
-            }
-            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let suggested = params
-              .get("suggestedFilename")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-
-            let Some(page) = page_backref.upgrade() else {
-              continue;
-            };
-
-            // Build the canceler that issues `Browser.cancelDownload`.
-            let transport_c = transport.clone();
-            let session_c = session_id.clone();
-            let ctx_c = browser_context_id.clone();
-            let guid_for_cancel = guid.clone();
-            let canceler: crate::download::DownloadCanceler = Arc::new(move || {
-              let transport = transport_c.clone();
-              let session = session_c.clone();
-              let ctx = ctx_c.clone();
-              let guid = guid_for_cancel.clone();
-              Box::pin(async move {
-                let mut params = serde_json::json!({ "guid": guid });
-                if let Some(c) = ctx.as_deref() {
-                  params["browserContextId"] = serde_json::Value::String(c.to_string());
-                }
-                transport
-                  .send_command(session.as_deref(), "Browser.cancelDownload", &params)
-                  .await
-                  .map(|_| ())
-                  .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e.to_string()))
-              })
-            });
-
-            let download = crate::download::Download::new(
-              &page,
-              guid,
-              url,
-              suggested,
-              downloads_dir.path().to_path_buf(),
-              canceler,
-            );
-            download_manager.did_open(&download);
-          },
-          "Browser.downloadProgress" => {
-            let Some(params) = event.get("params") else {
-              continue;
-            };
-            let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if guid.is_empty() {
-              continue;
-            }
-            let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("inProgress");
-            match state {
-              "completed" => {
-                if let Some(d) = download_manager.take_for_guid(&guid) {
-                  match downloads_dir.remote.get() {
-                    None => d.report_finished(None, None),
-                    // The file is on the browser's machine. It is brought
-                    // here before the download counts as finished, off
-                    // this task so later events are not held up.
-                    Some(remote) => {
-                      let fetched = (remote.fetch)(guid.clone(), downloads_dir.path().join(&guid));
-                      tokio::spawn(async move {
-                        let error = fetched.await.err().map(|error| error.to_string());
-                        d.report_finished(None, error);
-                      });
-                    },
-                  }
-                }
-              },
-              "canceled" => {
-                if let Some(d) = download_manager.take_for_guid(&guid) {
-                  download_manager.report_canceled(&d, "canceled");
-                }
-              },
-              // "inProgress" — no-op; we only surface terminal state.
-              _ => {},
-            }
-          },
+        let Some(params) = event.get("params") else {
+          continue;
+        };
+        match event.get("method").and_then(|m| m.as_str()) {
+          Some("Browser.downloadWillBegin") => Self::on_download_will_begin(
+            params,
+            &transport,
+            session_id.as_ref(),
+            browser_context_id.as_ref(),
+            &download_manager,
+            &downloads_dir,
+            &page_backref,
+          ),
+          Some("Browser.downloadProgress") => Self::on_download_progress(params, &download_manager, &downloads_dir),
           _ => {},
         }
       }
@@ -6700,10 +6912,106 @@ impl<T: CdpWrap> CdpPage<T> {
     .abort_handle()
   }
 
+  fn on_download_will_begin(
+    params: &serde_json::Value,
+    transport: &Arc<T>,
+    session_id: Option<&Arc<str>>,
+    browser_context_id: Option<&Arc<str>>,
+    download_manager: &crate::download::DownloadManager,
+    downloads_dir: &DownloadsDir,
+    page_backref: &crate::backend::PageBackref,
+  ) {
+    let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if guid.is_empty() {
+      return;
+    }
+    let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let suggested = params
+      .get("suggestedFilename")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .to_string();
+
+    let Some(page) = page_backref.upgrade() else {
+      return;
+    };
+
+    // Build the canceler that issues `Browser.cancelDownload`.
+    let transport_c = Arc::clone(transport);
+    let session_c = session_id.cloned();
+    let ctx_c = browser_context_id.cloned();
+    let guid_for_cancel = guid.clone();
+    let canceler: crate::download::DownloadCanceler = Arc::new(move || {
+      let transport = Arc::clone(&transport_c);
+      let session = session_c.clone();
+      let ctx = ctx_c.clone();
+      let guid = guid_for_cancel.clone();
+      Box::pin(async move {
+        let mut params = serde_json::json!({ "guid": guid });
+        if let Some(c) = ctx.as_deref() {
+          params["browserContextId"] = serde_json::Value::String(c.to_string());
+        }
+        transport
+          .send_command(session.as_deref(), "Browser.cancelDownload", &params)
+          .await
+          .map(|_| ())
+          .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e.to_string()))
+      })
+    });
+
+    let download = crate::download::Download::new(
+      &page,
+      guid,
+      url,
+      suggested,
+      downloads_dir.path().to_path_buf(),
+      canceler,
+    );
+    download_manager.did_open(&download);
+  }
+
+  fn on_download_progress(
+    params: &serde_json::Value,
+    download_manager: &crate::download::DownloadManager,
+    downloads_dir: &DownloadsDir,
+  ) {
+    let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if guid.is_empty() {
+      return;
+    }
+    let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("inProgress");
+    match state {
+      "completed" => {
+        if let Some(d) = download_manager.take_for_guid(&guid) {
+          match downloads_dir.remote.get() {
+            None => d.report_finished(None, None),
+            // The file is on the browser's machine. It is brought
+            // here before the download counts as finished, off
+            // this task so later events are not held up.
+            Some(remote) => {
+              let fetched = (remote.fetch)(guid.clone(), downloads_dir.path().join(&guid));
+              tokio::spawn(async move {
+                let error = fetched.await.err().map(|error| error.to_string());
+                d.report_finished(None, error);
+              });
+            },
+          }
+        }
+      },
+      "canceled" => {
+        if let Some(d) = download_manager.take_for_guid(&guid) {
+          download_manager.report_canceled(&d, "canceled");
+        }
+      },
+      // "inProgress" — no-op; we only surface terminal state.
+      _ => {},
+    }
+  }
+
   fn context_observer(&self) -> transport::FrameStateObserver {
     let (binding_tx, mut binding_rx) = tokio::sync::mpsc::unbounded_channel::<BindingCall>();
     let transport = Arc::downgrade(&self.transport);
-    let exposed_fns = self.exposed_fns.clone();
+    let exposed_fns = Arc::clone(&self.exposed_fns);
     let session_id = self.session_id.clone();
     let worker = tokio::spawn(async move {
       while let Some(call) = binding_rx.recv().await {
@@ -6716,10 +7024,10 @@ impl<T: CdpWrap> CdpPage<T> {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .push(worker.abort_handle());
-    let contexts = self.frame_contexts.clone();
-    let utility = self.utility_contexts.clone();
-    let notify = self.frame_contexts_notify.clone();
-    let target = self.target_id.clone();
+    let contexts = Arc::clone(&self.frame_contexts);
+    let utility = Arc::clone(&self.utility_contexts);
+    let notify = Arc::clone(&self.frame_contexts_notify);
+    let target = Arc::clone(&self.target_id);
     Arc::new(move |raw, method| {
       if matches!(
         method,
@@ -6831,10 +7139,16 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Init Scripts ----
 
+  /// # Errors
+  ///
+  /// Returns an error if `Page.addScriptToEvaluateOnNewDocument` fails on any of the page's renderers.
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
     self.install_init_script(source).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if `Page.removeScriptToEvaluateOnNewDocument` fails on any of the page's renderers.
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
     self.uninstall_init_script(identifier).await
   }
@@ -6966,7 +7280,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     // `__fd_bc` controller; delivering to the main frame's default
     // context would leave an iframe caller's promise pending forever.
     let deliver = {
-      let transport = transport.clone();
+      let transport = Arc::clone(transport);
       let sid = session_id.cloned();
       move |deliver_js: String| {
         let mut eval_params = serde_json::json!({"expression": deliver_js});
@@ -7000,6 +7314,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if the binding channel cannot be set up, or registering the binding as an init script
+  /// or in the current frames fails.
   pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -7050,6 +7368,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global:
   /// the callback behind a function passed as an argument.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the binding channel cannot be set up.
   pub async fn expose_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -7077,6 +7399,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     self.exposed_fns.write().await.remove(name);
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if removing the binding from the current frames fails.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     self.exposed_fns.write().await.remove(name);
     let js = format!(
@@ -7113,6 +7438,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   // ---- Lifecycle ----
 
+  /// # Errors
+  ///
+  /// Never fails: a rejected `Page.close` or `Target.closeTarget` is ignored, since the page is being torn
+  /// down either way, and the `Result` keeps the signature every backend shares.
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
       self.dispose_local();
@@ -7226,12 +7555,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
 
     let handle = Self::spawn_fetch_listener(
-      self.transport.clone(),
+      Arc::clone(&self.transport),
       self.session_id.clone(),
-      self.routes.clone(),
+      Arc::clone(&self.routes),
       Credentials {
-        server: self.http_credentials.clone(),
-        proxy: self.proxy_credentials.clone(),
+        server: Arc::clone(&self.http_credentials),
+        proxy: Arc::clone(&self.proxy_credentials),
       },
     );
     // Dedicated slot so the disable path can abort exactly this loop;
@@ -7326,7 +7655,6 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
   }
 
-  #[allow(clippy::too_many_lines)]
   async fn handle_fetch_events(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
@@ -7342,155 +7670,166 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           continue;
         }
       }
-      let method = event.get("method").and_then(|m| m.as_str());
-
-      // ── Handle Fetch.authRequired — respond with stored credentials ──
-      // Playwright answers with the first entry bound to no origin or to
-      // the request's (`crNetworkManager.ts::_onAuthRequired`). When none
-      // matches, the browser's default stands and the 401 surfaces, rather
-      // than credentials going to a host they were not meant for. A
-      // challenge from the proxy is answered only with the proxy's own
-      // credentials, never the website's, and each source gets one attempt
-      // per request.
-      if method == Some("Fetch.authRequired") {
-        let Some(params) = event.get("params") else { continue };
-        let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-        let req_url = params
-          .get("request")
-          .and_then(|r| r.get("url"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-        let from_proxy = params
-          .get("authChallenge")
-          .and_then(|c| c.get("source"))
-          .and_then(|v| v.as_str())
-          == Some("Proxy");
-        let attempt = format!("{request_id}:{}", if from_proxy { "proxy" } else { "server" });
-        let challenge = if from_proxy {
-          match credentials.proxy.read().await.clone() {
-            Some(_) if !attempted_auth.insert(attempt) => serde_json::json!({ "response": "CancelAuth" }),
-            Some(entry) => serde_json::json!({
-              "response": "ProvideCredentials",
-              "username": entry.username,
-              "password": entry.password,
-            }),
-            None => serde_json::json!({ "response": "Default" }),
-          }
-        } else {
-          let creds = credentials.server.read().await;
-          match creds.as_deref() {
-            Some(list) => match crate::options::matching_http_credentials(list, req_url) {
-              // A second challenge for one request means the credentials
-              // were refused; answering again would never end.
-              Some(_) if !attempted_auth.insert(attempt) => {
-                serde_json::json!({ "response": "CancelAuth" })
-              },
-              Some(entry) => serde_json::json!({
-                "response": "ProvideCredentials",
-                "username": entry.username,
-                "password": entry.password,
-              }),
-              None => serde_json::json!({ "response": "Default" }),
-            },
-            None => serde_json::json!({ "response": "CancelAuth" }),
-          }
-        };
-        let response = serde_json::json!({ "requestId": request_id, "authChallengeResponse": challenge });
-        // Spawned so the auth round-trip never stalls the loop —
-        // while this listener is blocked the broadcast buffer fills,
-        // and a lapped `Fetch.requestPaused` is a request Chrome
-        // holds paused forever.
-        let transport2 = Arc::clone(&transport);
-        let sid2 = session_id.clone();
-        tokio::spawn(async move {
-          let _ = transport2
-            .send_command(sid2.as_deref(), "Fetch.continueWithAuth", &response)
-            .await;
-        });
-        continue;
-      }
-
-      if method != Some("Fetch.requestPaused") {
-        continue;
-      }
       let Some(params) = event.get("params") else { continue };
-      let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
-      let req_obj = params.get("request");
-      // Borrow URL directly from the JSON event — zero allocation for matching.
-      let url = req_obj
-        .and_then(|r| r.get("url"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+      match event.get("method").and_then(|m| m.as_str()) {
+        Some("Fetch.authRequired") => {
+          let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+          let challenge = Self::auth_challenge_response(params, &credentials, &mut attempted_auth).await;
+          let response = serde_json::json!({ "requestId": request_id, "authChallengeResponse": challenge });
+          // Spawned so the auth round-trip never stalls the loop —
+          // while this listener is blocked the broadcast buffer fills,
+          // and a lapped `Fetch.requestPaused` is a request Chrome
+          // holds paused forever.
+          let transport2 = Arc::clone(&transport);
+          let sid2 = session_id.clone();
+          tokio::spawn(async move {
+            let _ = transport2
+              .send_command(sid2.as_deref(), "Fetch.continueWithAuth", &response)
+              .await;
+          });
+        },
+        Some("Fetch.requestPaused") => {
+          Self::on_request_paused(params, &transport, session_id.as_ref(), &routes).await;
+        },
+        _ => {},
+      }
+    }
+  }
 
-      // Cheap pre-check under a read lock — the full request payload is
-      // only parsed when at least one live route matches.
-      let has_match = {
-        let guard = routes.read().await;
-        crate::route::any_matching_route(&guard, url)
+  /// The `authChallengeResponse` for a `Fetch.authRequired`.
+  ///
+  /// Playwright answers with the first entry bound to no origin or to
+  /// the request's (`crNetworkManager.ts::_onAuthRequired`). When none
+  /// matches, the browser's default stands and the 401 surfaces, rather
+  /// than credentials going to a host they were not meant for. A
+  /// challenge from the proxy is answered only with the proxy's own
+  /// credentials, never the website's, and each source gets one attempt
+  /// per request.
+  async fn auth_challenge_response(
+    params: &serde_json::Value,
+    credentials: &Credentials,
+    attempted_auth: &mut rustc_hash::FxHashSet<String>,
+  ) -> serde_json::Value {
+    let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+    let req_url = params
+      .get("request")
+      .and_then(|r| r.get("url"))
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+    let from_proxy = params
+      .get("authChallenge")
+      .and_then(|c| c.get("source"))
+      .and_then(|v| v.as_str())
+      == Some("Proxy");
+    let attempt = format!("{request_id}:{}", if from_proxy { "proxy" } else { "server" });
+    if from_proxy {
+      let proxy = credentials.proxy.read().await.clone();
+      return match proxy {
+        Some(_) if !attempted_auth.insert(attempt) => serde_json::json!({ "response": "CancelAuth" }),
+        Some(entry) => serde_json::json!({
+          "response": "ProvideCredentials",
+          "username": entry.username,
+          "password": entry.password,
+        }),
+        None => serde_json::json!({ "response": "Default" }),
+      };
+    }
+    let creds = credentials.server.read().await;
+    let Some(list) = creds.as_deref() else {
+      return serde_json::json!({ "response": "CancelAuth" });
+    };
+    match crate::options::matching_http_credentials(list, req_url) {
+      // A second challenge for one request means the credentials
+      // were refused; answering again would never end.
+      Some(_) if !attempted_auth.insert(attempt) => serde_json::json!({ "response": "CancelAuth" }),
+      Some(entry) => serde_json::json!({
+        "response": "ProvideCredentials",
+        "username": entry.username,
+        "password": entry.password,
+      }),
+      None => serde_json::json!({ "response": "Default" }),
+    }
+  }
+
+  async fn on_request_paused(
+    params: &serde_json::Value,
+    transport: &Arc<T>,
+    session_id: Option<&Arc<str>>,
+    routes: &Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
+  ) {
+    let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+    let req_obj = params.get("request");
+    // Borrow URL directly from the JSON event — zero allocation for matching.
+    let url = req_obj
+      .and_then(|r| r.get("url"))
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+
+    // Cheap pre-check under a read lock — the full request payload is
+    // only parsed when at least one live route matches.
+    let has_match = {
+      let guard = routes.read().await;
+      crate::route::any_matching_route(&guard, url)
+    };
+
+    let transport2 = Arc::clone(transport);
+    let sid2 = session_id.cloned();
+    let request_id_owned = request_id.to_string();
+    if has_match {
+      let method = req_obj
+        .and_then(|r| r.get("method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET");
+      let resource_type = params.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+      let post_data = req_obj.and_then(|r| r.get("postData")).and_then(|v| v.as_str());
+      let headers: FxHashMap<String, String> = req_obj
+        .and_then(|r| r.get("headers"))
+        .and_then(|h| h.as_object())
+        .map(|obj| {
+          obj
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect()
+        })
+        .unwrap_or_default();
+
+      let intercepted = crate::route::InterceptedRequest {
+        request_id: request_id.to_string(),
+        url: url.to_string(),
+        method: method.to_string(),
+        headers,
+        post_data: post_data.map(str::to_string),
+        resource_type: resource_type.to_string(),
       };
 
-      if has_match {
-        let method = req_obj
-          .and_then(|r| r.get("method"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("GET");
-        let resource_type = params.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
-        let post_data = req_obj.and_then(|r| r.get("postData")).and_then(|v| v.as_str());
-        let headers: FxHashMap<String, String> = req_obj
-          .and_then(|r| r.get("headers"))
-          .and_then(|h| h.as_object())
-          .map(|obj| {
-            obj
-              .iter()
-              .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-              .collect()
-          })
-          .unwrap_or_default();
-
-        let intercepted = crate::route::InterceptedRequest {
-          request_id: request_id.to_string(),
-          url: url.to_string(),
-          method: method.to_string(),
-          headers,
-          post_data: post_data.map(str::to_string),
-          resource_type: resource_type.to_string(),
-        };
-
-        // Each paused request is resolved on its own task. Running the
-        // user handler + resolution round-trip inline serialized every
-        // intercepted request behind the slowest handler AND stalled
-        // this listener — once the broadcast buffer lapped, a dropped
-        // `Fetch.requestPaused` was a request that never continued
-        // (permanent page hang). `run_route_chain` consumes each
-        // handler's `times` budget under the routes write lock, so the
-        // budget stays correct across concurrent requests. WebKit's
-        // interception listener spawns the same way
-        // (`webkit/events.rs::handle_request_intercepted`).
-        let transport2 = Arc::clone(&transport);
-        let sid2 = session_id.clone();
-        let request_id_owned = request_id.to_string();
-        let routes2 = Arc::clone(&routes);
-        tokio::spawn(async move {
-          let action = crate::route::run_route_chain(&routes2, intercepted).await;
-          Self::execute_route_action(&transport2, sid2.as_deref(), &request_id_owned, Some(action)).await;
-        });
-      } else {
-        // No matching route — continue on a spawned task so even the
-        // plain-continue round-trip can't back the listener up under
-        // a request burst.
-        let transport2 = Arc::clone(&transport);
-        let sid2 = session_id.clone();
-        let request_id_owned = request_id.to_string();
-        tokio::spawn(async move {
-          let _ = transport2
-            .send_command(
-              sid2.as_deref(),
-              "Fetch.continueRequest",
-              &serde_json::json!({"requestId": request_id_owned}),
-            )
-            .await;
-        });
-      }
+      // Each paused request is resolved on its own task. Running the
+      // user handler + resolution round-trip inline serialized every
+      // intercepted request behind the slowest handler AND stalled
+      // this listener — once the broadcast buffer lapped, a dropped
+      // `Fetch.requestPaused` was a request that never continued
+      // (permanent page hang). `run_route_chain` consumes each
+      // handler's `times` budget under the routes write lock, so the
+      // budget stays correct across concurrent requests. WebKit's
+      // interception listener spawns the same way
+      // (`webkit/events.rs::handle_request_intercepted`).
+      let routes2 = Arc::clone(routes);
+      tokio::spawn(async move {
+        let action = crate::route::run_route_chain(&routes2, intercepted).await;
+        Self::execute_route_action(&transport2, sid2.as_deref(), &request_id_owned, Some(action)).await;
+      });
+    } else {
+      // No matching route — continue on a spawned task so even the
+      // plain-continue round-trip can't back the listener up under
+      // a request burst.
+      tokio::spawn(async move {
+        let _ = transport2
+          .send_command(
+            sid2.as_deref(),
+            "Fetch.continueRequest",
+            &serde_json::json!({"requestId": request_id_owned}),
+          )
+          .await;
+      });
     }
   }
 
@@ -7599,11 +7938,18 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     (Arc::clone(&self.transport), &self.target_id)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Fetch.enable` on this page or one of its renderers, the target has
+  /// closed, or the command outlives its time budget.
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     self.routes.write().await.push(route);
     self.ensure_fetch_enabled().await
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` keeps the signature every backend shares.
   pub async fn unroute(
     &self,
     matcher: &crate::url_matcher::UrlMatcher,
@@ -7623,6 +7969,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` keeps the signature every backend shares.
   pub async fn unroute_all(
     &self,
     _behavior: crate::options::UnrouteBehavior,
@@ -7668,6 +8017,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       .map(|_| ())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.releaseObject`, the target has closed, or the command
+  /// outlives its time budget.
   pub async fn release_object(&self, object_id: &str) -> Result<()> {
     self
       .cmd("Runtime.releaseObject", serde_json::json!({"objectId": object_id}))
@@ -7692,9 +8045,9 @@ struct CdpElementHandles {
 impl<T: CdpTransport> Clone for CdpElement<T> {
   fn clone(&self) -> Self {
     Self {
-      transport: self.transport.clone(),
+      transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
-      handles: self.handles.clone(),
+      handles: Arc::clone(&self.handles),
     }
   }
 }
@@ -7758,7 +8111,7 @@ impl<T: CdpTransport> CdpElement<T> {
     let node_id = {
       let handles = self.handles.lock().await;
       if let Some(object_id) = &handles.object_id {
-        return Ok(object_id.clone());
+        return Ok(Arc::clone(object_id));
       }
       handles.node_id
     };
@@ -7768,7 +8121,7 @@ impl<T: CdpTransport> CdpElement<T> {
     };
     let object_id = self.resolve_object_id_from_node(node_id).await?;
     let mut handles = self.handles.lock().await;
-    handles.object_id = Some(object_id.clone());
+    handles.object_id = Some(Arc::clone(&object_id));
     Ok(object_id)
   }
 
@@ -7811,6 +8164,11 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok((f64::midpoint(x1, x3), f64::midpoint(y1, y3)))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.callFunctionOn`, the target has closed, or the command
+  /// outlives its time budget. Also fails when the element cannot be resolved to an object, or the function
+  /// throws.
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>> {
     let object_id = self.object_id().await?;
     let result = self
@@ -7844,6 +8202,12 @@ impl<T: CdpTransport> CdpElement<T> {
   /// trips that find the element's frame and ask for its world are then
   /// skipped. A context that has gone since (the document navigated) is
   /// refused by the browser, and the long way is taken.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.callFunctionOn`, `DOM.describeNode` or
+  /// `Page.createIsolatedWorld`, the target has closed, or the command outlives its time budget. Also fails
+  /// when the element cannot be resolved, has no document or frame, or the function throws.
   pub async fn call_js_fn_value_in_utility(
     &self,
     function: &str,
@@ -7933,6 +8297,11 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent` or `Runtime.callFunctionOn`, the target
+  /// has closed, or the command outlives its time budget. Also fails when the element cannot be resolved or
+  /// scrolled into view.
   pub async fn click(&self) -> Result<()> {
     // `Input.dispatchMouseEvent` uses top-level page coordinates. Walk
     // up the frame chain (`window.frameElement.getBoundingClientRect()`)
@@ -7983,6 +8352,11 @@ impl<T: CdpTransport> CdpElement<T> {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.dispatchMouseEvent` or `Runtime.callFunctionOn`, the target
+  /// has closed, or the command outlives its time budget. Also fails when the element cannot be resolved or
+  /// scrolled into view.
   pub async fn dblclick(&self) -> Result<()> {
     let center = self.call_js_fn_value(
             "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
@@ -8030,6 +8404,11 @@ impl<T: CdpTransport> CdpElement<T> {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.scrollIntoViewIfNeeded`, `DOM.getBoxModel` or
+  /// `Input.dispatchMouseEvent`, the target has closed, or the command outlives its time budget. Also fails
+  /// when the element cannot be resolved.
   pub async fn hover(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y) = self.get_center().await?;
@@ -8049,6 +8428,11 @@ impl<T: CdpTransport> CdpElement<T> {
   /// frame's context immediately before this call, so a stale node
   /// surfaces as a retryable protocol error and the locator funnel
   /// re-resolves instead of reusing a dead reference.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.setFileInputFiles`, the target has closed, or the command
+  /// outlives its time budget. Also fails when the element cannot be resolved.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
     let object_id = self.object_id().await?;
     self
@@ -8060,12 +8444,20 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Input.insertText`, the target has closed, or the command outlives
+  /// its time budget. Also fails when clicking the element to focus it fails.
   pub async fn type_str(&self, text: &str) -> Result<()> {
     self.click().await?;
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Runtime.callFunctionOn`, the target has closed, or the command
+  /// outlives its time budget. Also fails when the element cannot be resolved.
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     let object_id = self.object_id().await?;
     let result = self
@@ -8080,6 +8472,10 @@ impl<T: CdpTransport> CdpElement<T> {
     thrown_in_page(&result)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `DOM.scrollIntoViewIfNeeded`, the target has closed, or the command
+  /// outlives its time budget. Also fails when the element cannot be resolved.
   pub async fn scroll_into_view(&self) -> Result<()> {
     // Prefer `objectId` over `nodeId`. CDP's `DOM.scrollIntoViewIfNeeded`
     // accepts either, but the DOM agent's `nodeId` map is keyed on the
@@ -8241,7 +8637,8 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       raw_headers_fn: Some(raw_headers_fn),
     });
 
-    if let Some(extras) = self.pending_request_extra.lock().await.remove(&request_id) {
+    let extras = self.pending_request_extra.lock().await.remove(&request_id);
+    if let Some(extras) = extras {
       new_request.set_raw_headers(extras).await;
     }
 
@@ -8273,11 +8670,10 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       return;
     };
     let raw = parse_raw_headers(params.get("headers"));
-    let requests = self.requests.lock().await;
-    if let Some(req) = requests.get(request_id) {
+    let req = self.requests.lock().await.get(request_id).cloned();
+    if let Some(req) = req {
       req.set_raw_headers(raw).await;
     } else {
-      drop(requests);
       self
         .pending_request_extra
         .lock()
@@ -8298,7 +8694,8 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       return;
     };
     let response = self.build_response_from_value(req.clone(), resp_value, &request_id);
-    if let Some(extras) = self.pending_response_extra.lock().await.remove(&request_id) {
+    let extras = self.pending_response_extra.lock().await.remove(&request_id);
+    if let Some(extras) = extras {
       response.set_raw_headers(extras).await;
     }
     self.responses.lock().await.insert(request_id, response.clone());
@@ -8311,11 +8708,10 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       return;
     };
     let raw = parse_raw_headers(params.get("headers"));
-    let responses = self.responses.lock().await;
-    if let Some(resp) = responses.get(request_id) {
+    let resp = self.responses.lock().await.get(request_id).cloned();
+    if let Some(resp) = resp {
       resp.set_raw_headers(raw).await;
     } else {
-      drop(responses);
       self
         .pending_response_extra
         .lock()
@@ -8341,14 +8737,13 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       // value as response body size for `responseBodySize` and
       // queries `getResponseBody` for the actual body byte length on
       // demand. We mirror that: store raw transfer length here.
-      #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-      let response_body = total_encoded as u64;
       req.update_sizes(RequestSizes {
-        response_body,
+        response_body: f64_to_u64_saturating(total_encoded),
         ..RequestSizes::default()
       });
     }
-    if let Some(resp) = self.responses.lock().await.get(request_id).cloned() {
+    let resp = self.responses.lock().await.get(request_id).cloned();
+    if let Some(resp) = resp {
       resp.finish_success().await;
     }
     emitter.emit(crate::events::PageEvent::RequestFinished(req));
@@ -8367,7 +8762,8 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       .unwrap_or("net::ERR_FAILED")
       .to_string();
     req.set_failure(error_text.clone());
-    if let Some(resp) = self.responses.lock().await.get(request_id).cloned() {
+    let resp = self.responses.lock().await.get(request_id).cloned();
+    if let Some(resp) = resp {
       resp.finish_failure(error_text).await;
     }
     emitter.emit(crate::events::PageEvent::RequestFailed(req));
@@ -8425,7 +8821,8 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
     let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) else {
       return;
     };
-    if let Some(ws) = self.websockets.lock().await.remove(request_id) {
+    let ws = self.websockets.lock().await.remove(request_id);
+    if let Some(ws) = ws {
       ws.emit_close();
     }
   }
@@ -8504,11 +8901,11 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
   }
 
   fn make_response_body_fn(self: &Arc<Self>, request_id: &str) -> BodyFn {
-    let transport = self.transport.clone();
+    let transport = Arc::clone(&self.transport);
     let session_id = self.session_id.clone();
     let request_id = request_id.to_string();
     Arc::new(move || {
-      let transport = transport.clone();
+      let transport = Arc::clone(&transport);
       let session_id = session_id.clone();
       let request_id = request_id.clone();
       Box::pin(async move {
@@ -8540,10 +8937,10 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
   }
 
   fn make_request_raw_headers_fn(self: &Arc<Self>, request_id: &str) -> RawHeadersFn {
-    let tracker = self.clone();
+    let tracker = Arc::clone(self);
     let request_id = request_id.to_string();
     Arc::new(move || {
-      let tracker = tracker.clone();
+      let tracker = Arc::clone(&tracker);
       let request_id = request_id.clone();
       Box::pin(async move {
         // Fall back to whatever headers the request currently has if no
@@ -8562,10 +8959,10 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
   }
 
   fn make_response_raw_headers_fn(self: &Arc<Self>, request_id: &str) -> RawHeadersFn {
-    let tracker = self.clone();
+    let tracker = Arc::clone(self);
     let request_id = request_id.to_string();
     Arc::new(move || {
-      let tracker = tracker.clone();
+      let tracker = Arc::clone(&tracker);
       let request_id = request_id.clone();
       Box::pin(async move {
         // Provisional, split, for the reason the request fallback is.

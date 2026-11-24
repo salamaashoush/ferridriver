@@ -49,7 +49,7 @@ async fn closing_an_attached_browser_disconnects_retained_protocol_handles() {
     }
     methods
   });
-  let mut browser = CdpBrowser::<WsTransport>::connect(&endpoint).await.unwrap();
+  let browser = CdpBrowser::<WsTransport>::connect(&endpoint).await.unwrap();
   let retained = Arc::clone(&browser.transport);
   browser.close().await.unwrap();
   assert!(

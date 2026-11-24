@@ -93,11 +93,11 @@ impl CdpTransport for Wire {
 // them wraps anything, and there is no `AnyPage` for a wire with no browser.
 impl super::CdpWrap for Wire {
   fn wrap_page(_page: CdpPage<Self>) -> crate::backend::AnyPage {
-    unreachable!("a listener wraps no page")
+    panic!("a listener wraps no page")
   }
 
   fn wrap_element(_element: super::CdpElement<Self>) -> crate::backend::AnyElement {
-    unreachable!("a listener wraps no element")
+    panic!("a listener wraps no element")
   }
 }
 
