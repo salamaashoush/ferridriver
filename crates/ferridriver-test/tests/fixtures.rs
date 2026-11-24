@@ -12,7 +12,7 @@ use ferridriver_test::prelude::*;
 
 /// A plain data fixture — no browser needed.
 #[fixture(scope = "test")]
-async fn seeded_users(_ctx: TestContext) -> ferridriver_test::Result<Vec<String>> {
+fn seeded_users(_ctx: TestContext) -> ferridriver_test::Result<Vec<String>> {
   Ok(vec!["alice".to_string(), "bob".to_string()])
 }
 
@@ -25,13 +25,13 @@ async fn first_user(ctx: TestContext) -> ferridriver_test::Result<String> {
 
 /// A worker-scoped fixture, to prove the scope argument round-trips.
 #[fixture(scope = "worker")]
-async fn worker_token(_ctx: TestContext) -> ferridriver_test::Result<String> {
+fn worker_token(_ctx: TestContext) -> ferridriver_test::Result<String> {
   Ok("worker-secret".to_string())
 }
 
 /// Depends on `seeded_users` via a typed parameter (name = fixture name).
 #[fixture(scope = "test")]
-async fn user_count(seeded_users: Arc<Vec<String>>) -> ferridriver_test::Result<usize> {
+fn user_count(seeded_users: Arc<Vec<String>>) -> ferridriver_test::Result<usize> {
   Ok(seeded_users.len())
 }
 
@@ -59,7 +59,7 @@ static TORN_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 
 /// A fixture with cleanup: returns `Fixture<T>` with an `on_teardown`.
 #[fixture(scope = "test")]
-async fn tracked_resource(_ctx: TestContext) -> ferridriver_test::Result<Fixture<String>> {
+fn tracked_resource(_ctx: TestContext) -> ferridriver_test::Result<Fixture<String>> {
   Ok(Fixture::new("resource".to_string()).on_teardown(|value| async move {
     assert_eq!(&*value, "resource");
     TORN_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
