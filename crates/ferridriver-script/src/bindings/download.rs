@@ -1,4 +1,4 @@
-//! `DownloadJs` — QuickJS binding for
+//! `DownloadJs` — `QuickJS` binding for
 //! [`ferridriver::download::Download`].
 //!
 //! Mirrors Playwright's client-side `Download` class from
@@ -30,12 +30,14 @@ impl DownloadJs {
 impl DownloadJs {
   /// Playwright: `download.url(): string`.
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
   }
 
   /// Playwright: `download.suggestedFilename(): string`.
   #[qjs(rename = "suggestedFilename")]
+  #[must_use]
   pub fn suggested_filename(&self) -> String {
     self.inner.suggested_filename()
   }
@@ -43,9 +45,17 @@ impl DownloadJs {
   /// Playwright: `download.page(): Page`. Answers `null` only when the
   /// owning page has already been closed (the Rust weak-backref model
   /// surfaces that case; Playwright's TS type is non-nullable).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page's object cannot be created or restored in this context.
   #[qjs(rename = "page")]
   pub fn page<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::page::PageJs>>> {
     let page = self.inner.page();
@@ -57,6 +67,10 @@ impl DownloadJs {
   }
 
   /// Playwright: `download.path(): Promise<string>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the download failed or was cancelled.
   #[qjs(rename = "path")]
   pub async fn path(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
     let p = self.inner.path().await.into_js_with(&ctx)?;
@@ -64,6 +78,11 @@ impl DownloadJs {
   }
 
   /// Playwright: `download.saveAs(path): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `PermissionDeniedError` when the realm's write grant refuses `path`, or the core
+  /// error when the download failed or the copy cannot be written.
   #[qjs(rename = "saveAs")]
   pub async fn save_as(&self, ctx: rquickjs::Ctx<'_>, path: String) -> rquickjs::Result<()> {
     crate::bindings::convert::writable(&ctx, std::path::Path::new(&path))?;
@@ -75,12 +94,20 @@ impl DownloadJs {
   }
 
   /// Playwright: `download.cancel(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the download cannot be cancelled.
   #[qjs(rename = "cancel")]
   pub async fn cancel(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.cancel().await.into_js_with(&ctx)
   }
 
   /// Playwright: `download.delete(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the downloaded file cannot be deleted.
   #[qjs(rename = "delete")]
   pub async fn delete(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.delete().await.into_js_with(&ctx)

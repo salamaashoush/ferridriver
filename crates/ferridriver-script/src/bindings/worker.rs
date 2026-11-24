@@ -93,9 +93,17 @@ impl WorkerJs {
   }
 
   /// Playwright: `worker.on('close', listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing from this context.
   #[qjs(rename = "on")]
   pub fn on<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
     event: String,
     handler: rquickjs::Function<'js>,
@@ -105,6 +113,10 @@ impl WorkerJs {
   }
 
   /// Node's `addListener`, an alias of `on`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing from this context.
   #[qjs(rename = "addListener")]
   pub fn add_listener<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
@@ -116,9 +128,17 @@ impl WorkerJs {
   }
 
   /// One-shot `on`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing from this context.
   #[qjs(rename = "once")]
   pub fn once<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
     event: String,
     handler: rquickjs::Function<'js>,
@@ -129,11 +149,28 @@ impl WorkerJs {
 
   /// Remove `handler` from `event`, or every listener of `event`
   /// registered through this worker.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing or a saved listener cannot be restored into
+  /// this context.
   #[qjs(rename = "off")]
   pub fn off<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     handler: Opt<rquickjs::Function<'js>>,
   ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
     {
@@ -162,6 +199,11 @@ impl WorkerJs {
   }
 
   /// Node's `removeListener`, an alias of `off`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing or a saved listener cannot be restored into
+  /// this context.
   #[qjs(rename = "removeListener")]
   pub fn remove_listener<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
@@ -173,6 +215,11 @@ impl WorkerJs {
   }
 
   /// Playwright: `worker.evaluate(pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` naming where a function sat in `arg`, a `TypeError` for an `arg` that
+  /// cannot be serialized, or the core error when the evaluation throws or the worker is gone.
   #[qjs(rename = "evaluate")]
   pub async fn evaluate<'js>(
     &self,
@@ -192,6 +239,11 @@ impl WorkerJs {
 
   /// Playwright: `worker.waitForEvent('close', optionsOrPredicate?)`. The
   /// second argument is a timeout in ms or a `{ timeout? }` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for an event other than `close`, or a `TimeoutError` when the worker
+  /// is still open when the timeout runs out.
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,

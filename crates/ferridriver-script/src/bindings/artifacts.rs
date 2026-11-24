@@ -31,8 +31,8 @@ impl ArtifactsJs {
     Self { sandbox }
   }
 
-  fn io_err(ctx: &Ctx<'_>, op: &'static str, msg: String) -> rquickjs::Error {
-    throw_named(ctx, "Error", format!("artifacts.{op}: {msg}"))
+  fn io_err(ctx: &Ctx<'_>, op: &'static str, err: &std::io::Error) -> rquickjs::Error {
+    throw_named(ctx, "Error", format!("artifacts.{op}: {err}"))
   }
 
   fn path_err(ctx: &Ctx<'_>, err: &ScriptError) -> rquickjs::Error {
@@ -44,6 +44,7 @@ impl ArtifactsJs {
 impl ArtifactsJs {
   /// Absolute path to the artifacts root (read-only).
   #[qjs(get, rename = "root")]
+  #[must_use]
   pub fn root(&self) -> String {
     self.sandbox.root().to_string_lossy().into_owned()
   }
@@ -54,13 +55,19 @@ impl ArtifactsJs {
   /// *relative* `.ferridriver/artifacts`, resolved against the server
   /// process's working directory rather than the caller's, so a bare "ok" left
   /// no way to find the file from a shell.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` escapes the artifacts root or the write fails.
   #[qjs(rename = "write")]
   pub async fn write(&self, ctx: Ctx<'_>, name: String, contents: String) -> rquickjs::Result<String> {
-    let sb = self.sandbox.clone();
-    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&ctx, &e))?;
+    let resolved = self
+      .sandbox
+      .resolve_write(&name)
+      .map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::write(&resolved, contents)
       .await
-      .map_err(|e| Self::io_err(&ctx, "write", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "write", &e))?;
     Ok(resolved.to_string_lossy().into_owned())
   }
 
@@ -69,67 +76,86 @@ impl ArtifactsJs {
   ///
   /// Returns the absolute path written, for the same reason [`Self::write`]
   /// does.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` escapes the artifacts root or the write fails.
   #[qjs(rename = "writeBytes")]
   pub async fn write_bytes(&self, ctx: Ctx<'_>, name: String, bytes: Vec<u8>) -> rquickjs::Result<String> {
-    let sb = self.sandbox.clone();
-    let resolved = sb.resolve_write(&name).map_err(|e| Self::path_err(&ctx, &e))?;
+    let resolved = self
+      .sandbox
+      .resolve_write(&name)
+      .map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::write(&resolved, bytes)
       .await
-      .map_err(|e| Self::io_err(&ctx, "writeBytes", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "writeBytes", &e))?;
     Ok(resolved.to_string_lossy().into_owned())
   }
 
   /// Read `name` as UTF-8 text.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` escapes the artifacts root or the file cannot be read as
+  /// UTF-8 text.
   #[qjs(rename = "read")]
   pub async fn read(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<String> {
-    let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&ctx, &e))?;
+    let resolved = self.sandbox.resolve_read(&name).map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::read_to_string(&resolved)
       .await
-      .map_err(|e| Self::io_err(&ctx, "read", e.to_string()))
+      .map_err(|e| Self::io_err(&ctx, "read", &e))
   }
 
-  /// Read `name` as raw bytes (Uint8Array in JS).
+  /// Read `name` as raw bytes (`Uint8Array` in JS).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` escapes the artifacts root or the file cannot be read.
   #[qjs(rename = "readBytes")]
   pub async fn read_bytes(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<Vec<u8>> {
-    let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&name).map_err(|e| Self::path_err(&ctx, &e))?;
+    let resolved = self.sandbox.resolve_read(&name).map_err(|e| Self::path_err(&ctx, &e))?;
     tokio::fs::read(&resolved)
       .await
-      .map_err(|e| Self::io_err(&ctx, "readBytes", e.to_string()))
+      .map_err(|e| Self::io_err(&ctx, "readBytes", &e))
   }
 
   /// List entries at the artifacts root (or a subdirectory).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when the root cannot be listed.
   #[qjs(rename = "list")]
   pub async fn list(&self, ctx: Ctx<'_>) -> rquickjs::Result<Vec<String>> {
     let root = self.sandbox.root().to_path_buf();
     let mut entries = tokio::fs::read_dir(&root)
       .await
-      .map_err(|e| Self::io_err(&ctx, "list", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "list", &e))?;
     let mut names = Vec::new();
-    while let Some(entry) = entries
-      .next_entry()
-      .await
-      .map_err(|e| Self::io_err(&ctx, "list", e.to_string()))?
-    {
+    while let Some(entry) = entries.next_entry().await.map_err(|e| Self::io_err(&ctx, "list", &e))? {
       names.push(entry.file_name().to_string_lossy().into_owned());
     }
     Ok(names)
   }
 
   /// List entries in a subdirectory of the artifacts root.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `subpath` escapes the artifacts root or cannot be listed.
   #[qjs(rename = "readdir")]
   pub async fn readdir(&self, ctx: Ctx<'_>, subpath: String) -> rquickjs::Result<Vec<String>> {
-    let sb = self.sandbox.clone();
-    let resolved = sb.resolve_read(&subpath).map_err(|e| Self::path_err(&ctx, &e))?;
+    let resolved = self
+      .sandbox
+      .resolve_read(&subpath)
+      .map_err(|e| Self::path_err(&ctx, &e))?;
     let mut entries = tokio::fs::read_dir(&resolved)
       .await
-      .map_err(|e| Self::io_err(&ctx, "readdir", e.to_string()))?;
+      .map_err(|e| Self::io_err(&ctx, "readdir", &e))?;
     let mut names = Vec::new();
     while let Some(entry) = entries
       .next_entry()
       .await
-      .map_err(|e| Self::io_err(&ctx, "readdir", e.to_string()))?
+      .map_err(|e| Self::io_err(&ctx, "readdir", &e))?
     {
       names.push(entry.file_name().to_string_lossy().into_owned());
     }
@@ -142,24 +168,27 @@ impl ArtifactsJs {
   /// exception thrown) so probing code can discover presence without having
   /// to try/catch sandbox errors.
   #[qjs(rename = "exists")]
-  pub async fn exists(&self, name: String) -> rquickjs::Result<bool> {
+  pub async fn exists(&self, name: String) -> bool {
     match self.sandbox.resolve_read(&name) {
-      Ok(resolved) => Ok(tokio::fs::try_exists(&resolved).await.unwrap_or(false)),
-      Err(_) => Ok(false),
+      Ok(resolved) => tokio::fs::try_exists(&resolved).await.unwrap_or(false),
+      Err(_) => false,
     }
   }
 
   /// Remove a file at `name`. Returns `false` if the file did not exist.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when an existing file cannot be removed.
   #[qjs(rename = "remove")]
   pub async fn remove(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<bool> {
-    let sb = self.sandbox.clone();
-    let Ok(resolved) = sb.resolve_read(&name) else {
+    let Ok(resolved) = self.sandbox.resolve_read(&name) else {
       return Ok(false);
     };
     match tokio::fs::remove_file(&resolved).await {
       Ok(()) => Ok(true),
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-      Err(e) => Err(Self::io_err(&ctx, "remove", e.to_string())),
+      Err(e) => Err(Self::io_err(&ctx, "remove", &e)),
     }
   }
 }

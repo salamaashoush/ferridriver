@@ -56,6 +56,11 @@ impl MouseJs {
 #[rquickjs::methods]
 impl MouseJs {
   /// `mouse.click(x, y, options?: { button?, clickCount? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when the page cannot
+  /// dispatch the mouse events.
   #[qjs(rename = "click")]
   pub async fn click<'js>(
     &self,
@@ -77,6 +82,11 @@ impl MouseJs {
   }
 
   /// `mouse.move(x, y, options?: { steps? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when the page cannot
+  /// dispatch the mouse events.
   #[qjs(rename = "move")]
   pub async fn move_<'js>(
     &self,
@@ -102,6 +112,11 @@ impl MouseJs {
   }
 
   /// `mouse.dblclick(x, y, options?: { button? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when the page cannot
+  /// dispatch the mouse events.
   #[qjs(rename = "dblclick")]
   pub async fn dblclick<'js>(
     &self,
@@ -123,6 +138,11 @@ impl MouseJs {
   }
 
   /// `mouse.down(options?: { button?, clickCount? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when the page cannot
+  /// dispatch the mouse events.
   #[qjs(rename = "down")]
   pub async fn down<'js>(
     &self,
@@ -141,6 +161,11 @@ impl MouseJs {
   }
 
   /// `mouse.up(options?: { button?, clickCount? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when the page cannot
+  /// dispatch the mouse events.
   #[qjs(rename = "up")]
   pub async fn up<'js>(
     &self,
@@ -159,6 +184,10 @@ impl MouseJs {
   }
 
   /// `mouse.wheel(deltaX, deltaY)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the page cannot dispatch the wheel event.
   #[qjs(rename = "wheel")]
   pub async fn wheel(
     &self,

@@ -1,4 +1,4 @@
-//! `WebErrorJs` — QuickJS binding for
+//! `WebErrorJs` — `QuickJS` binding for
 //! [`ferridriver::web_error::WebError`].
 //!
 //! Mirrors Playwright's client-side `WebError` class from
@@ -35,18 +35,33 @@ impl WebErrorJs {
   /// `Error`** instance constructed via the global `Error`
   /// constructor so `instanceof Error === true` and the value is a
   /// throwable object with a real engine-captured `stack`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the global `Error` constructor is missing or cannot build the instance.
   #[qjs(rename = "error")]
-  pub fn error<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+  pub fn error<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
     build_native_error(&ctx, self.inner.error())
   }
 
   /// Playwright: `webError.location(): { url, line, column }` (0-based
   /// `line` / `column`, distinct from `ConsoleMessage.location()`'s
   /// `lineNumber` / `columnNumber`).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the location object cannot be created.
   #[qjs(rename = "location")]
   pub fn location<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let loc = self.inner.location();
-    let obj = rquickjs::Object::new(ctx.clone())?;
+    let obj = rquickjs::Object::new(ctx)?;
     obj.set("url", loc.url.clone())?;
     obj.set("line", loc.line_number)?;
     obj.set("column", loc.column_number)?;
@@ -63,6 +78,10 @@ impl WebErrorJs {
 /// (`rquickjs::function::Constructor::construct`, the same call-as-new
 /// path `page.route` uses for `new URL(...)`), then sets `name` and a
 /// non-empty `stack` on the instance. No `ctx.eval` of a JS factory.
+///
+/// # Errors
+///
+/// When the global `Error` constructor is missing or cannot build the instance.
 pub fn build_native_error<'js>(
   ctx: &rquickjs::Ctx<'js>,
   details: &ErrorDetails,

@@ -37,6 +37,11 @@ fn options<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Js
 #[rquickjs::methods]
 impl CoverageJs {
   /// Playwright: `coverage.startJSCoverage(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when coverage is already
+  /// running, the browser is not Chromium, or the protocol fails.
   #[qjs(rename = "startJSCoverage")]
   pub async fn start_js_coverage<'js>(&self, ctx: Ctx<'js>, options_bag: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let options = options(&ctx, options_bag)?;
@@ -52,6 +57,10 @@ impl CoverageJs {
   }
 
   /// Playwright: `coverage.stopJSCoverage(): Promise<JSCoverageEntry[]>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the protocol fails while collecting.
   #[qjs(rename = "stopJSCoverage")]
   pub async fn stop_js_coverage<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let entries = self.inner.stop_js_coverage().await.into_js_with(&ctx)?;
@@ -59,6 +68,11 @@ impl CoverageJs {
   }
 
   /// Playwright: `coverage.startCSSCoverage(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when coverage is already
+  /// running, the browser is not Chromium, or the protocol fails.
   #[qjs(rename = "startCSSCoverage")]
   pub async fn start_css_coverage<'js>(&self, ctx: Ctx<'js>, options_bag: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let options = options(&ctx, options_bag)?;
@@ -73,6 +87,10 @@ impl CoverageJs {
   }
 
   /// Playwright: `coverage.stopCSSCoverage(): Promise<CSSCoverageEntry[]>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the protocol fails while collecting.
   #[qjs(rename = "stopCSSCoverage")]
   pub async fn stop_css_coverage<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let entries = self.inner.stop_css_coverage().await.into_js_with(&ctx)?;

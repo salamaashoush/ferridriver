@@ -1,4 +1,4 @@
-//! `VideoJs` — QuickJS binding for [`ferridriver::Video`].
+//! `VideoJs` — `QuickJS` binding for [`ferridriver::Video`].
 //!
 //! Mirrors Playwright's client-side `Video` class from
 //! `/tmp/playwright/packages/playwright-core/src/client/video.ts` and
@@ -31,6 +31,10 @@ impl VideoJs {
 #[rquickjs::methods]
 impl VideoJs {
   /// Playwright: `video.path(): Promise<string>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the recording failed or its page is gone without one.
   #[qjs(rename = "path")]
   pub async fn path(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
     let path = self.inner.path().await.into_js_with(&ctx)?;
@@ -38,6 +42,11 @@ impl VideoJs {
   }
 
   /// Playwright: `video.saveAs(path: string): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `PermissionDeniedError` when the realm's write grant refuses `path`, or the core
+  /// error when the recording cannot be copied there.
   #[qjs(rename = "saveAs")]
   pub async fn save_as(&self, ctx: rquickjs::Ctx<'_>, path: String) -> rquickjs::Result<()> {
     crate::bindings::convert::writable(&ctx, std::path::Path::new(&path))?;
@@ -45,6 +54,10 @@ impl VideoJs {
   }
 
   /// Playwright: `video.delete(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the recording cannot be deleted.
   #[qjs(rename = "delete")]
   pub async fn delete(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.delete().await.into_js_with(&ctx)

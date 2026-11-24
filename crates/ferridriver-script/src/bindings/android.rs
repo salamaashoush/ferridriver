@@ -1,4 +1,4 @@
-//! `_android` — QuickJS binding for [`ferridriver::android::Android`].
+//! `_android` — `QuickJS` binding for [`ferridriver::android::Android`].
 //!
 //! Mirrors Playwright's `client/android.ts`: `_android.devices(options?)`
 //! and, on an `AndroidDevice`, `serial()`, `model()`, `shell(command)`,
@@ -138,6 +138,11 @@ impl AndroidJs {
   /// Playwright: `android.connect(endpoint, options?): Promise<AndroidDevice>`.
   /// Refused: the endpoint is a Playwright server.
   #[qjs(rename = "connect")]
+  #[must_use]
+  #[expect(
+    clippy::unused_self,
+    reason = "a JS instance method: `&self` is what makes rquickjs check `this` is an `Android`"
+  )]
   pub fn connect<'js>(
     &self,
     ctx: Ctx<'js>,
@@ -152,6 +157,11 @@ impl AndroidJs {
   /// Playwright: `android.launchServer(options?): Promise<BrowserServer>`.
   /// Refused, for the same reason.
   #[qjs(rename = "launchServer")]
+  #[must_use]
+  #[expect(
+    clippy::unused_self,
+    reason = "a JS instance method: `&self` is what makes rquickjs check `this` is an `Android`"
+  )]
   pub fn launch_server<'js>(
     &self,
     ctx: Ctx<'js>,
@@ -162,6 +172,11 @@ impl AndroidJs {
 
   /// Playwright: `android.devices(options?: { host?, port?,
   /// omitDriverInstall? }): Promise<AndroidDevice[]>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, a `PermissionDeniedError` when the realm's
+  /// network grant refuses the ADB server's host and port, or the core error when listing devices fails.
   #[qjs(rename = "devices")]
   pub async fn devices<'js>(
     &self,
@@ -316,7 +331,7 @@ impl AndroidDeviceJs {
   }
 
   /// Start delivering the device's events to its listeners, once.
-  fn pump(&self, ctx: &Ctx<'_>) {
+  fn pump(&self, ctx: Ctx<'_>) {
     if self.pumping.replace(true) {
       return;
     }
@@ -324,7 +339,6 @@ impl AndroidDeviceJs {
     let device = self.inner.clone();
     let listeners = Rc::clone(&self.listeners);
     let views = Rc::clone(&self.views);
-    let ctx = ctx.clone();
     ctx.clone().spawn(async move {
       loop {
         match events.recv().await {
@@ -362,6 +376,10 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.shell(command: string): Promise<Buffer>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when ADB cannot run the command.
   #[qjs(rename = "shell")]
   pub async fn shell(&self, ctx: Ctx<'_>, command: String) -> rquickjs::Result<Vec<u8>> {
     self.inner.shell(&command).await.into_js_with(&ctx)
@@ -369,6 +387,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.screenshot(options?: { path?: string }):
   /// Promise<Buffer>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, a `PermissionDeniedError` when the realm's
+  /// write grant refuses `path`, or the core error when the capture or the write fails.
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Vec<u8>> {
     #[derive(serde::Deserialize, Default)]
@@ -384,6 +407,12 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.push(file: string | Buffer, path: string,
   /// options?: { mode?: number }): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag or a `file` that is neither a path nor
+  /// bytes, a `PermissionDeniedError` when the realm's read grant refuses the path, or the core error
+  /// when the push fails.
   #[qjs(rename = "push")]
   pub async fn push<'js>(
     &self,
@@ -403,6 +432,12 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.installApk(file: string | Buffer,
   /// options?: { args?: string[] }): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag or a `file` that is neither a path nor
+  /// bytes, a `PermissionDeniedError` when the realm's read grant refuses the path, or the core error
+  /// when the install fails.
   #[qjs(rename = "installApk")]
   pub async fn install_apk<'js>(
     &self,
@@ -423,19 +458,40 @@ impl AndroidDeviceJs {
   #[qjs(rename = "on")]
   pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
     self.listeners.add(&ctx, event, listener, false);
-    self.pump(&ctx);
+    self.pump(ctx);
   }
 
   /// Playwright: `androidDevice.once(event, listener)`.
   #[qjs(rename = "once")]
   pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
     self.listeners.add(&ctx, event, listener, true);
-    self.pump(&ctx);
+    self.pump(ctx);
   }
 
   /// Playwright: `androidDevice.off(event, listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a saved listener cannot be restored into this context.
   #[qjs(rename = "off")]
-  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) -> rquickjs::Result<()> {
+  pub fn off<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    listener: Function<'js>,
+  ) -> rquickjs::Result<()> {
     self.listeners.remove(&ctx, &event, &listener)
   }
 
@@ -526,8 +582,19 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.webViews(): AndroidWebView[]`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a web view's object cannot be created or restored in this context.
   #[qjs(rename = "webViews")]
-  pub fn web_views<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Vec<Class<'js, AndroidWebViewJs>>> {
+  pub fn web_views<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Vec<Class<'js, AndroidWebViewJs>>> {
     self
       .inner
       .web_views()
@@ -538,6 +605,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.webView(selector: { pkg?, socketName? },
   /// options?: { timeout? }): Promise<AndroidWebView>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when no
+  /// matching web view is found in time.
   #[qjs(rename = "webView")]
   pub async fn web_view<'js>(
     &self,
@@ -568,6 +640,10 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.open(command: string): Promise<AndroidSocket>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the device cannot open the socket.
   #[qjs(rename = "open")]
   pub async fn open<'js>(&self, ctx: Ctx<'js>, command: String) -> rquickjs::Result<Class<'js, AndroidSocketJs>> {
     let socket = self.inner.open(&command).await.into_js_with(&ctx)?;
@@ -588,6 +664,10 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.input: AndroidInput`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the `AndroidInput` object cannot be created.
   #[qjs(get, rename = "input")]
   pub fn input<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, AndroidInputJs>> {
     Class::instance(
@@ -600,6 +680,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.wait(selector, options?: { state?: 'gone',
   /// timeout? }): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag or a `state` other than
+  /// `'gone'`, or the core error when the wait fails or times out.
   #[qjs(rename = "wait")]
   pub async fn wait<'js>(&self, ctx: Ctx<'js>, target: Value<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let target = selector(&ctx, &target)?;
@@ -617,6 +702,11 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.fill(selector, text, options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when the
+  /// action fails or times out.
   #[qjs(rename = "fill")]
   pub async fn fill<'js>(
     &self,
@@ -635,6 +725,11 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.press(selector, key, options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when the
+  /// action fails or times out.
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
@@ -654,6 +749,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.tap(selector, options?: { duration?,
   /// timeout? }): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when the
+  /// action fails or times out.
   #[qjs(rename = "tap")]
   pub async fn tap<'js>(&self, ctx: Ctx<'js>, target: Value<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let target = selector(&ctx, &target)?;
@@ -666,6 +766,11 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.longTap(selector, options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when the
+  /// action fails or times out.
   #[qjs(rename = "longTap")]
   pub async fn long_tap<'js>(
     &self,
@@ -680,6 +785,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.drag(selector, dest, options?: { speed?,
   /// timeout? }): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector, destination point or options bag, or the
+  /// core error when the drag fails or times out.
   #[qjs(rename = "drag")]
   pub async fn drag<'js>(
     &self,
@@ -699,6 +809,11 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.fling(selector, direction, options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error for an
+  /// unknown `direction` or when the gesture fails or times out.
   #[qjs(rename = "fling")]
   pub async fn fling<'js>(
     &self,
@@ -718,6 +833,11 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.pinchClose(selector, percent, options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when the
+  /// action fails or times out.
   #[qjs(rename = "pinchClose")]
   pub async fn pinch_close<'js>(
     &self,
@@ -736,6 +856,11 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.pinchOpen(selector, percent, options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error when the
+  /// action fails or times out.
   #[qjs(rename = "pinchOpen")]
   pub async fn pinch_open<'js>(
     &self,
@@ -755,6 +880,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.scroll(selector, direction, percent,
   /// options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error for an
+  /// unknown `direction` or when the gesture fails or times out.
   #[qjs(rename = "scroll")]
   pub async fn scroll<'js>(
     &self,
@@ -776,6 +906,11 @@ impl AndroidDeviceJs {
 
   /// Playwright: `androidDevice.swipe(selector, direction, percent,
   /// options?): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector or options bag, or the core error for an
+  /// unknown `direction` or when the gesture fails or times out.
   #[qjs(rename = "swipe")]
   pub async fn swipe<'js>(
     &self,
@@ -796,6 +931,10 @@ impl AndroidDeviceJs {
   }
 
   /// Playwright: `androidDevice.info(selector): Promise<AndroidElementInfo>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed selector, or the core error when the lookup fails.
   #[qjs(rename = "info")]
   pub async fn info<'js>(&self, ctx: Ctx<'js>, target: Value<'js>) -> rquickjs::Result<Value<'js>> {
     let target = selector(&ctx, &target)?;
@@ -804,6 +943,12 @@ impl AndroidDeviceJs {
   }
   /// Playwright: `androidDevice.launchBrowser(options?: BrowserContextOptions
   /// & { pkg?: string, args?: string[] }): Promise<BrowserContext>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, a `PermissionDeniedError` when a path the
+  /// context options name is outside the realm's grants, or the core error when the browser cannot be
+  /// launched.
   #[qjs(rename = "launchBrowser")]
   pub async fn launch_browser<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     #[derive(serde::Deserialize, Default)]
@@ -859,14 +1004,13 @@ pub struct AndroidWebViewJs {
 }
 
 impl AndroidWebViewJs {
-  fn listen<'js>(&self, ctx: &Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
-    self.listeners.add(ctx, event, listener, once);
+  fn listen<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
+    self.listeners.add(&ctx, event, listener, once);
     if self.pumping.replace(true) {
       return;
     }
     let view = self.inner.clone();
     let listeners = Rc::clone(&self.listeners);
-    let ctx = ctx.clone();
     ctx.clone().spawn(async move {
       view.closed().await;
       listeners.emit(&ctx, "close", Value::new_undefined(ctx.clone())).await;
@@ -889,6 +1033,10 @@ impl AndroidWebViewJs {
   }
 
   /// Playwright: `androidWebView.page(): Promise<Page>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the web view's page cannot be attached.
   #[qjs(rename = "page")]
   pub async fn page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, crate::bindings::page::PageJs>> {
     let page = self.inner.page().await.into_js_with(&ctx)?;
@@ -898,18 +1046,39 @@ impl AndroidWebViewJs {
   /// Playwright: `androidWebView.on('close', listener)`.
   #[qjs(rename = "on")]
   pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
-    self.listen(&ctx, event, listener, false);
+    self.listen(ctx, event, listener, false);
   }
 
   /// Playwright: `androidWebView.once('close', listener)`.
   #[qjs(rename = "once")]
   pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
-    self.listen(&ctx, event, listener, true);
+    self.listen(ctx, event, listener, true);
   }
 
   /// Playwright: `androidWebView.off('close', listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a saved listener cannot be restored into this context.
   #[qjs(rename = "off")]
-  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) -> rquickjs::Result<()> {
+  pub fn off<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    listener: Function<'js>,
+  ) -> rquickjs::Result<()> {
     self.listeners.remove(&ctx, &event, &listener)
   }
 }
@@ -929,14 +1098,13 @@ pub struct AndroidSocketJs {
 impl AndroidSocketJs {
   /// What the device sent is held until the first listener asks, then
   /// delivered in order: `data` a chunk at a time, `close` at the end.
-  fn listen<'js>(&self, ctx: &Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
-    self.listeners.add(ctx, event, listener, once);
+  fn listen<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>, once: bool) {
+    self.listeners.add(&ctx, event, listener, once);
     if self.pumping.replace(true) {
       return;
     }
     let socket = Rc::clone(&self.inner);
     let listeners = Rc::clone(&self.listeners);
-    let ctx = ctx.clone();
     ctx.clone().spawn(async move {
       while let Some(chunk) = socket.next_data().await {
         if let Ok(data) = rquickjs::IntoJs::into_js(chunk, &ctx) {
@@ -951,6 +1119,11 @@ impl AndroidSocketJs {
 #[rquickjs::methods]
 impl AndroidSocketJs {
   /// Playwright: `androidSocket.write(data: Buffer): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `data` is not a buffer source, or the core error when the write
+  /// fails.
   #[qjs(rename = "write")]
   pub async fn write<'js>(&self, ctx: Ctx<'js>, data: Value<'js>) -> rquickjs::Result<()> {
     let data = ferrijs::std::node::bytes::value_to_bytes(&ctx, &data, None)?;
@@ -966,18 +1139,39 @@ impl AndroidSocketJs {
   /// Playwright: `androidSocket.on(event: 'data' | 'close', listener)`.
   #[qjs(rename = "on")]
   pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
-    self.listen(&ctx, event, listener, false);
+    self.listen(ctx, event, listener, false);
   }
 
   /// Playwright: `androidSocket.once(event, listener)`.
   #[qjs(rename = "once")]
   pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) {
-    self.listen(&ctx, event, listener, true);
+    self.listen(ctx, event, listener, true);
   }
 
   /// Playwright: `androidSocket.off(event, listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a saved listener cannot be restored into this context.
   #[qjs(rename = "off")]
-  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, listener: Function<'js>) -> rquickjs::Result<()> {
+  pub fn off<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    listener: Function<'js>,
+  ) -> rquickjs::Result<()> {
     self.listeners.remove(&ctx, &event, &listener)
   }
 }
@@ -993,18 +1187,30 @@ pub struct AndroidInputJs {
 #[rquickjs::methods]
 impl AndroidInputJs {
   /// Playwright: `androidInput.type(text: string): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the device refuses the input.
   #[qjs(rename = "type")]
   pub async fn type_text(&self, ctx: Ctx<'_>, text: String) -> rquickjs::Result<()> {
     self.inner.type_text(&text).await.into_js_with(&ctx)
   }
 
   /// Playwright: `androidInput.press(key: AndroidKey): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the device refuses the input.
   #[qjs(rename = "press")]
   pub async fn press(&self, ctx: Ctx<'_>, key: String) -> rquickjs::Result<()> {
     self.inner.press(&key).await.into_js_with(&ctx)
   }
 
   /// Playwright: `androidInput.tap(point: { x, y }): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed point, or the core error when the tap fails.
   #[qjs(rename = "tap")]
   pub async fn tap<'js>(&self, ctx: Ctx<'js>, at: Value<'js>) -> rquickjs::Result<()> {
     let at = point(&ctx, at)?;
@@ -1012,6 +1218,11 @@ impl AndroidInputJs {
   }
 
   /// Playwright: `androidInput.swipe(from, segments, steps): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed point or segment list, or the core error when the swipe
+  /// fails.
   #[qjs(rename = "swipe")]
   pub async fn swipe<'js>(
     &self,
@@ -1026,6 +1237,10 @@ impl AndroidInputJs {
   }
 
   /// Playwright: `androidInput.drag(from, to, steps): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed point, or the core error when the drag fails.
   #[qjs(rename = "drag")]
   pub async fn drag<'js>(&self, ctx: Ctx<'js>, from: Value<'js>, to: Value<'js>, steps: u32) -> rquickjs::Result<()> {
     let from = point(&ctx, from)?;
@@ -1035,6 +1250,10 @@ impl AndroidInputJs {
 }
 
 /// Install the `_android` global, Playwright's `playwright._android`.
+///
+/// # Errors
+///
+/// When defining a class or setting the `_android` global fails.
 pub fn install_android(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<AndroidJs>::define(&ctx.globals())?;
   Class::<AndroidDeviceJs>::define(&ctx.globals())?;

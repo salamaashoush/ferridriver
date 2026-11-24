@@ -1,4 +1,4 @@
-//! `WebStorageJs`: QuickJS binding for the page-scoped `WebStorage`
+//! `WebStorageJs`: `QuickJS` binding for the page-scoped `WebStorage`
 //! accessor.
 //!
 //! Mirrors Playwright's client-side `WebStorage`
@@ -35,6 +35,10 @@ impl WebStorageJs {
 #[rquickjs::methods]
 impl WebStorageJs {
   /// Playwright: `webStorage.items(): Promise<{ name, value }[]>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the page-side storage call throws or the protocol fails.
   #[qjs(rename = "items")]
   pub async fn items<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let items = self.page.web_storage_items(self.kind).await.into_js_with(&ctx)?;
@@ -42,6 +46,10 @@ impl WebStorageJs {
   }
 
   /// Playwright: `webStorage.getItem(name): Promise<string | null>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the page-side storage call throws or the protocol fails.
   #[qjs(rename = "getItem")]
   pub async fn get_item(
     &self,
@@ -58,6 +66,10 @@ impl WebStorageJs {
   }
 
   /// Playwright: `webStorage.setItem(name, value): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the page-side storage call throws or the protocol fails.
   #[qjs(rename = "setItem")]
   pub async fn set_item(&self, ctx: rquickjs::Ctx<'_>, name: String, value: String) -> rquickjs::Result<()> {
     self
@@ -68,6 +80,10 @@ impl WebStorageJs {
   }
 
   /// Playwright: `webStorage.removeItem(name): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the page-side storage call throws or the protocol fails.
   #[qjs(rename = "removeItem")]
   pub async fn remove_item(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<()> {
     self
@@ -78,6 +94,10 @@ impl WebStorageJs {
   }
 
   /// Playwright: `webStorage.clear(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the page-side storage call throws or the protocol fails.
   #[qjs(rename = "clear")]
   pub async fn clear(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.page.web_storage_clear(self.kind).await.into_js_with(&ctx)

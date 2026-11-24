@@ -1,4 +1,4 @@
-//! `ConsoleMessageJs` — QuickJS binding for
+//! `ConsoleMessageJs` — `QuickJS` binding for
 //! [`ferridriver::console_message::ConsoleMessage`].
 //!
 //! Mirrors Playwright's client-side `ConsoleMessage` class from
@@ -30,17 +30,23 @@ impl ConsoleMessageJs {
 impl ConsoleMessageJs {
   /// Playwright: `consoleMessage.type(): string`.
   #[qjs(rename = "type")]
+  #[must_use]
   pub fn type_str(&self) -> String {
     self.inner.type_str().to_string()
   }
 
   /// Playwright: `consoleMessage.text(): string`.
   #[qjs(rename = "text")]
+  #[must_use]
   pub fn text(&self) -> String {
     self.inner.text().to_string()
   }
 
   /// Playwright: `consoleMessage.args(): JSHandle[]`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a `JSHandle` object cannot be created in this context.
   #[qjs(rename = "args")]
   pub fn args<'js>(
     &self,
@@ -59,27 +65,32 @@ impl ConsoleMessageJs {
   }
 
   /// Playwright: `consoleMessage.location(): { url, lineNumber, columnNumber }`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the location object cannot be created.
   #[qjs(rename = "location")]
-  pub fn location<'js>(
+  pub fn location<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let loc = self.inner.location();
+    let obj = rquickjs::Object::new(ctx)?;
+    obj.set("url", loc.url.clone())?;
+    obj.set("lineNumber", loc.line_number)?;
+    obj.set("columnNumber", loc.column_number)?;
+    Ok(obj.into_value())
+  }
+
+  /// Playwright: `consoleMessage.page(): Page | null`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page's object cannot be created or restored in this context.
+  #[qjs(rename = "page")]
+  pub fn page<'js>(
     &self,
     #[expect(
       clippy::needless_pass_by_value,
       reason = "rquickjs hands a method its `Ctx` by value"
     )]
-    ctx: rquickjs::Ctx<'js>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let loc = self.inner.location();
-    let obj = rquickjs::Object::new(ctx.clone())?;
-    obj.set("url", loc.url.clone())?;
-    obj.set("lineNumber", loc.line_number)?;
-    obj.set("columnNumber", loc.column_number)?;
-    rquickjs::IntoJs::into_js(obj, &ctx)
-  }
-
-  /// Playwright: `consoleMessage.page(): Page | null`.
-  #[qjs(rename = "page")]
-  pub fn page<'js>(
-    &self,
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<Class<'js, crate::bindings::page::PageJs>>> {
     self
@@ -92,6 +103,7 @@ impl ConsoleMessageJs {
 
   /// Playwright: `consoleMessage.timestamp(): number`.
   #[qjs(rename = "timestamp")]
+  #[must_use]
   pub fn timestamp(&self) -> f64 {
     crate::bindings::convert::u64_to_f64(self.inner.timestamp())
   }
