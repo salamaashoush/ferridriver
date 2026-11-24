@@ -351,13 +351,9 @@ impl McpServer {
       let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &bundle_cwd)
         .await
         .map_err(|e| McpServer::err(format!("run_script bundle {}: {}", entry.display(), e.message)))?;
-      self
-        .run_module_on_session_vm(&session, &guard, &bundle, &args, options, context)
-        .await
+      Box::pin(self.run_module_on_session_vm(&session, &guard, &bundle, &args, options, context)).await
     } else {
-      self
-        .run_on_session_vm(&session, &guard, &source, &args, options, context)
-        .await
+      Box::pin(self.run_on_session_vm(&session, &guard, &source, &args, options, context)).await
     };
 
     // Dropping the guard here (rather than at end of scope) unregisters the
