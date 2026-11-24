@@ -1,6 +1,6 @@
 //! Synchronous `toThrow` matcher (Jest's `expect(fn).toThrow(...)`).
 //!
-//! The QuickJS binding invokes the user function in try/catch and
+//! The `QuickJS` binding invokes the user function in try/catch and
 //! constructs the [`ThrownError`] (or `None`) before delegating here —
 //! this module does not own any JS invocation, only the matching logic.
 
@@ -51,6 +51,10 @@ pub fn expect_fn(caught: Option<ThrownError>) -> ExpectFn {
 
 impl ExpectFn {
   #[must_use]
+  #[expect(
+    clippy::should_implement_trait,
+    reason = "Playwright's `.not`: inherent so callers and generated tests chain it without importing `std::ops::Not`"
+  )]
   pub fn not(mut self) -> Self {
     self.is_not = !self.is_not;
     self
@@ -68,10 +72,15 @@ impl ExpectFn {
     self
   }
 
+  #[must_use]
   pub fn is_soft(&self) -> bool {
     self.is_soft
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the function returned without throwing or threw something
+  /// `matcher` rejects (the reverse under `.not()`).
   #[track_caller]
   pub fn to_throw(&self, matcher: Option<&ThrowMatcher>) -> Result<(), AssertionFailure> {
     let location = Location::caller();
@@ -130,7 +139,7 @@ mod tests {
   use super::*;
 
   fn err(r: Result<(), AssertionFailure>) {
-    assert!(r.is_err(), "expected err");
+    r.expect_err("expected err");
   }
 
   #[test]

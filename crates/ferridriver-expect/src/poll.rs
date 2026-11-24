@@ -6,14 +6,16 @@ use std::time::Duration;
 
 use crate::AssertionFailure;
 
+const DEFAULT_EXPECT_TIMEOUT_MILLIS: u64 = 5_000;
+
 /// Default expect timeout (5 seconds, matching Playwright).
-pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_millis(DEFAULT_EXPECT_TIMEOUT_MILLIS);
 
 /// Process-wide default `expect()` timeout in ms — the runner sets this
 /// from the config's `expectTimeout` before tests start (Playwright's
 /// `config.expect.timeout`). Per-assertion `with_timeout` still wins.
 static DEFAULT_EXPECT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
-  std::sync::atomic::AtomicU64::new(DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
+  std::sync::atomic::AtomicU64::new(DEFAULT_EXPECT_TIMEOUT_MILLIS);
 
 tokio::task_local! {
   /// The resolved `expect` block of the test currently running on this
@@ -101,6 +103,12 @@ pub struct ExpectContext {
 /// Poll a condition until it passes or timeout. Produces a
 /// Playwright-style error message with method name, locator,
 /// expected/received, and call log.
+///
+/// # Errors
+///
+/// Returns an [`AssertionFailure`] built from the last [`MatchError`] when `check` has not passed
+/// by `timeout` or the abort signal fired, unless `ctx.is_soft` and the running test's sink records
+/// it.
 pub async fn poll_until<F, Fut>(timeout: Duration, ctx: ExpectContext, mut check: F) -> Result<(), AssertionFailure>
 where
   F: FnMut() -> Fut,
@@ -184,6 +192,10 @@ where
 /// `page`'s context — the assertion appears in the trace with before /
 /// after DOM snapshots, mirroring Playwright's expect tracing. Costs
 /// nothing when the context is not being traced.
+///
+/// # Errors
+///
+/// As [`poll_until`].
 pub async fn poll_traced<F, Fut>(
   page: Option<&ferridriver::Page>,
   params: serde_json::Value,

@@ -639,7 +639,7 @@ pub fn settle_outside_host(result: Result<Option<String>, TestFailure>) -> Resul
   match result? {
     None => Ok(()),
     Some(message) => {
-      let failure = ferridriver_expect::AssertionFailure::new(message.clone(), None).as_soft();
+      let failure = ferridriver_expect::AssertionFailure::new(message.clone(), None).with_soft(true);
       if ferridriver_expect::soft::record_non_retriable(&failure) {
         Ok(())
       } else {

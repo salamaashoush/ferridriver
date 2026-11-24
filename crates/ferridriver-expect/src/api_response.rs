@@ -9,6 +9,10 @@ use crate::AssertionFailure;
 use crate::builder::Expect;
 
 impl<R: Borrow<HttpResponse>> Expect<'_, R> {
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the status is outside `200..=299` (inside it under
+  /// `.not()`).
   pub fn to_be_ok(&self) -> Result<(), AssertionFailure> {
     let resp: &HttpResponse = self.subject.borrow();
     let status = resp.status();

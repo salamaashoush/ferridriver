@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::value::StringOrRegex;
 
-/// Wire-protocol marker key shared with the QuickJS binding.
+/// Wire-protocol marker key shared with the `QuickJS` binding.
 pub const ASYM_TAG_KEY: &str = "@@asym";
 
 #[derive(Debug, Clone)]
@@ -57,6 +57,7 @@ pub enum TypeTag {
 }
 
 impl TypeTag {
+  #[must_use]
   pub fn from_name(name: &str) -> Self {
     match name {
       "String" => Self::String,
@@ -69,20 +70,21 @@ impl TypeTag {
     }
   }
 
+  #[must_use]
   pub fn matches_value(&self, v: &Value) -> bool {
     match self {
       Self::String => v.is_string(),
       Self::Number => v.is_number(),
       Self::Boolean => v.is_boolean(),
-      Self::Object => v.is_object(),
+      Self::Object | Self::Custom(_) => v.is_object(),
       Self::Array => v.is_array(),
       // Functions don't survive JSON serialization.
       Self::Function => false,
       Self::Null => v.is_null(),
-      Self::Custom(_) => v.is_object(),
     }
   }
 
+  #[must_use]
   pub fn description(&self) -> String {
     match self {
       Self::String => "Any<String>".into(),
@@ -135,7 +137,7 @@ impl Asymmetric {
         let digits = obj.get("digits").and_then(Value::as_u64).unwrap_or(2);
         Some(Self::CloseTo {
           value,
-          digits: digits as u8,
+          digits: u8::try_from(digits).unwrap_or(u8::MAX),
         })
       },
       "arrayOf" => Some(Self::ArrayOf(Box::new(obj.get("sample")?.clone()))),
@@ -154,10 +156,12 @@ impl Asymmetric {
 
   /// Match without a host: a custom matcher cannot run, so it never
   /// matches (the host that registered it is not the one comparing).
+  #[must_use]
   pub fn matches(&self, actual: &Value) -> bool {
     self.matches_with(actual, None)
   }
 
+  #[must_use]
   pub fn matches_with(&self, actual: &Value, ev: Evaluator<'_>) -> bool {
     match self {
       Self::Anything => !actual.is_null(),
@@ -188,6 +192,10 @@ impl Asymmetric {
 
   /// Match against a LIVE value rather than its JSON view — the same
   /// rules, over whatever the host can describe.
+  ///
+  /// # Errors
+  ///
+  /// Propagates the host's error when reading `actual` throws (a getter or an iterator).
   pub fn matches_live<V: crate::subject::LiveValue>(&self, actual: &V, ev: Evaluator<'_>) -> Result<bool, V::Error> {
     use crate::subject::{JsType, Shape};
     Ok(match self {
@@ -246,6 +254,7 @@ impl Asymmetric {
     })
   }
 
+  #[must_use]
   pub fn description(&self) -> String {
     match self {
       Self::Anything => "Anything".into(),
@@ -262,6 +271,7 @@ impl Asymmetric {
   }
 }
 
+#[must_use]
 pub fn close_enough(a: f64, b: f64, digits: u8) -> bool {
   if !a.is_finite() || !b.is_finite() {
     return float_bit_eq(a, b);
@@ -272,22 +282,31 @@ pub fn close_enough(a: f64, b: f64, digits: u8) -> bool {
 
 /// `Object.is`-style equality: NaN equals itself, `+0 != -0`. Used to
 /// sidestep `clippy::float_cmp` without losing the Jest semantic.
+#[must_use]
 pub fn float_bit_eq(a: f64, b: f64) -> bool {
   a.to_bits() == b.to_bits()
 }
 
+#[must_use]
 pub fn json_short(v: &Value) -> String {
   let s = v.to_string();
-  if s.len() > 80 { format!("{}…", &s[..80]) } else { s }
+  if s.len() > 80 {
+    let (head, _) = s.split_at(s.floor_char_boundary(80));
+    format!("{head}…")
+  } else {
+    s
+  }
 }
 
 /// Deep equality treating any [`Asymmetric`] embedded in `expected` as
 /// a matcher rather than a literal.
+#[must_use]
 pub fn deep_equal(actual: &Value, expected: &Value) -> bool {
   deep_equal_with(actual, expected, None)
 }
 
 /// [`deep_equal`] with a host that can run custom asymmetric matchers.
+#[must_use]
 pub fn deep_equal_with(actual: &Value, expected: &Value, ev: Evaluator<'_>) -> bool {
   if let Some(asym) = Asymmetric::from_value(expected) {
     return asym.matches_with(actual, ev);
@@ -314,11 +333,13 @@ pub fn deep_equal_with(actual: &Value, expected: &Value, ev: Evaluator<'_>) -> b
 }
 
 /// Subset equality (Jest's `toMatchObject`).
+#[must_use]
 pub fn match_object(actual: &Value, subset: &Value) -> bool {
   match_object_with(actual, subset, None)
 }
 
 /// [`match_object`] with a host that can run custom asymmetric matchers.
+#[must_use]
 pub fn match_object_with(actual: &Value, subset: &Value, ev: Evaluator<'_>) -> bool {
   if let Some(asym) = Asymmetric::from_value(subset) {
     return asym.matches_with(actual, ev);
@@ -409,9 +430,17 @@ mod tests {
     assert!(deep_equal_with(&json!(2), &exp, ev));
     assert!(!deep_equal_with(&json!(3), &exp, ev));
     // And it composes inside a structure, and under `not`.
-    assert!(deep_equal_with(&json!({"n": 2}), &json!({"n": exp.clone()}), ev));
-    let inverted = json!({ASYM_TAG_KEY: "not", "inner": exp.clone()});
+    assert!(deep_equal_with(&json!({"n": 2}), &json!({"n": exp}), ev));
+    let inverted = json!({ASYM_TAG_KEY: "not", "inner": exp});
     assert!(deep_equal_with(&json!(3), &inverted, ev));
+  }
+
+  #[test]
+  fn json_short_cuts_on_a_char_boundary() {
+    let long = format!("{}é tail", "a".repeat(78));
+    let short = json_short(&json!(long));
+    assert_eq!(short, format!("\"{}…", "a".repeat(78)));
+    assert_eq!(json_short(&json!("a".repeat(100))), format!("\"{}…", "a".repeat(79)));
   }
 
   #[test]

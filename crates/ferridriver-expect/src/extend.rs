@@ -4,7 +4,7 @@
 //! here: the context its body reads, the result it returns, the pass /
 //! fail decision, the failure text, and the rules by which a set of
 //! matchers composes. A Rust test registers a plain function and gets
-//! the same behaviour a JS suite gets from `expect.extend`; the QuickJS
+//! the same behaviour a JS suite gets from `expect.extend`; the `QuickJS`
 //! binding only marshals values across, and owns none of this.
 
 use std::collections::BTreeSet;
@@ -120,6 +120,11 @@ pub fn not_a_matcher_message(name: &str, type_of: &str) -> String {
 /// Playwright's finalizer is `result.pass === !!info.isNot` — the
 /// matcher's own message is used verbatim, with the `expect(value, msg)`
 /// prefix in front of it.
+///
+/// # Errors
+///
+/// Returns an [`AssertionFailure`] carrying the matcher's message when `result.pass` equals
+/// `cx.is_not`, unless the assertion is soft and the running test's sink records it.
 pub fn finalize(cx: &MatcherContext, matcher: &str, result: &MatcherResult) -> Result<(), AssertionFailure> {
   if result.pass != cx.is_not {
     return Ok(());
@@ -151,8 +156,8 @@ pub fn default_failure(cx: &MatcherContext, matcher: &str, expected: &str, recei
     cx.custom_message.as_deref(),
     cx.is_not,
     matcher,
-    expected.to_string(),
-    received.to_string(),
+    expected,
+    received,
     None,
   )
 }
@@ -162,7 +167,7 @@ pub fn default_failure(cx: &MatcherContext, matcher: &str, expected: &str, recei
 /// returns (Playwright's "legacy behavior" comment,
 /// `matchers/expect.ts:288-297`).
 ///
-/// The QuickJS binding asserts its own prototype covers this list, so
+/// The `QuickJS` binding asserts its own prototype covers this list, so
 /// the two cannot drift.
 pub const BUILTIN_MATCHER_NAMES: &[&str] = &[
   "toBe",
@@ -229,8 +234,8 @@ pub fn is_builtin_matcher(name: &str) -> bool {
 /// An ordered, immutable set of custom matcher names.
 ///
 /// Generic over what a host stores per name: a Rust caller keeps the
-/// function itself, while the QuickJS binding keeps `()` because the
-/// function lives in a JS object that QuickJS traces. Both get the same
+/// function itself, while the `QuickJS` binding keeps `()` because the
+/// function lives in a JS object that `QuickJS` traces. Both get the same
 /// composition rules.
 #[derive(Debug, Clone)]
 pub struct MatcherSet<M> {
@@ -423,6 +428,11 @@ impl<M: Clone> ExpectMeta<M> {
 
 /// Run a Rust matcher against a JSON subject and apply the assertion's
 /// negation — the whole path a Rust test takes to a custom matcher.
+///
+/// # Errors
+///
+/// Returns an [`AssertionFailure`] when the matcher's verdict, after `.not()`, is a failure; see
+/// [`finalize`].
 pub fn run_value_matcher(
   cx: &MatcherContext,
   name: &str,

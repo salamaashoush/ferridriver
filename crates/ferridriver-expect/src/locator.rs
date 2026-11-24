@@ -1,5 +1,5 @@
 //! Locator web-first matchers — single source of truth shared by the
-//! test runner (`ferridriver-test`) and the QuickJS binding
+//! test runner (`ferridriver-test`) and the `QuickJS` binding
 //! (`ferridriver-script`). Screenshot / aria-snapshot / value-snapshot
 //! matchers stay in `ferridriver-test` because they pull in image and
 //! aria-YAML infrastructure that does not belong in this lightweight
@@ -102,11 +102,20 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   // ── Visibility / State ──
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not visible by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_visible(&self) -> Result<(), AssertionFailure> {
     self.to_be_visible_with(true).await
   }
 
   /// Playwright: `toBeVisible(options?: { visible?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not visible (not hidden when `visible` is
+  /// false) by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_be_visible_with(&self, visible: bool) -> Result<(), AssertionFailure> {
     let (expression, expected, arg) = if visible {
       ("to.be.visible", "visible", "")
@@ -116,17 +125,30 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     self.truthy("toBeVisible", self.params(expression), expected, arg).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not hidden by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_hidden(&self) -> Result<(), AssertionFailure> {
     self
       .truthy("toBeHidden", self.params("to.be.hidden"), "hidden", "")
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not enabled by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_enabled(&self) -> Result<(), AssertionFailure> {
     self.to_be_enabled_with(true).await
   }
 
   /// Playwright: `toBeEnabled(options?: { enabled?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not enabled (not disabled when `enabled`
+  /// is false) by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_be_enabled_with(&self, enabled: bool) -> Result<(), AssertionFailure> {
     let (expression, expected, arg) = if enabled {
       ("to.be.enabled", "enabled", "")
@@ -136,18 +158,32 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     self.truthy("toBeEnabled", self.params(expression), expected, arg).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not disabled by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_disabled(&self) -> Result<(), AssertionFailure> {
     self
       .truthy("toBeDisabled", self.params("to.be.disabled"), "disabled", "")
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not checked by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_checked(&self) -> Result<(), AssertionFailure> {
     self.to_be_checked_with(CheckedOptions::default()).await
   }
 
   /// Playwright: `toBeChecked(options?: { checked?, indeterminate?, timeout? })`.
   /// The engine refuses `indeterminate` together with `checked`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not in the state `options` names, or at
+  /// once when `options` sets `indeterminate` together with `checked`, which the engine refuses;
+  /// otherwise as [the failure rules](Expect#failures) describe.
   pub async fn to_be_checked_with(&self, options: CheckedOptions) -> Result<(), AssertionFailure> {
     let mut params = self.params("to.be.checked");
     let mut expected_value = serde_json::Map::new();
@@ -168,6 +204,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     self.truthy("toBeChecked", params, expected, arg).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not editable by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_editable(&self) -> Result<(), AssertionFailure> {
     self.to_be_editable_with(true).await
   }
@@ -175,6 +215,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   /// Playwright: `toBeEditable(options?: { editable?, timeout? })`.
   /// `editable: false` is `to.be.readonly`, which the engine judges as
   /// "not editable", so a disabled input satisfies it too.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not editable (not read-only when
+  /// `editable` is false) by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_be_editable_with(&self, editable: bool) -> Result<(), AssertionFailure> {
     let (expression, expected, arg) = if editable {
       ("to.be.editable", "editable", "")
@@ -186,15 +231,28 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not read-only by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_readonly(&self) -> Result<(), AssertionFailure> {
     self.to_be_editable_with(false).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not attached by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_attached(&self) -> Result<(), AssertionFailure> {
     self.to_be_attached_with(true).await
   }
 
   /// Playwright: `toBeAttached(options?: { attached?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not attached (not detached when `attached`
+  /// is false) by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_be_attached_with(&self, attached: bool) -> Result<(), AssertionFailure> {
     let (expression, expected, arg) = if attached {
       ("to.be.attached", "attached", "")
@@ -206,20 +264,37 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not empty by the timeout; see [the failure
+  /// rules](Expect#failures).
   pub async fn to_be_empty(&self) -> Result<(), AssertionFailure> {
     self.truthy("toBeEmpty", self.params("to.be.empty"), "empty", "").await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element is not focused by the timeout; see [the
+  /// failure rules](Expect#failures).
   pub async fn to_be_focused(&self) -> Result<(), AssertionFailure> {
     self
       .truthy("toBeFocused", self.params("to.be.focused"), "focused", "")
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when no part of the element is in the viewport by the timeout;
+  /// see [the failure rules](Expect#failures).
   pub async fn to_be_in_viewport(&self) -> Result<(), AssertionFailure> {
     self.to_be_in_viewport_with(InViewportOptions::default()).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when less than `options.ratio` of the element is in the
+  /// viewport (none of it when `ratio` is `None`) by the timeout; see [the failure
+  /// rules](Expect#failures).
   pub async fn to_be_in_viewport_with(&self, options: InViewportOptions) -> Result<(), AssertionFailure> {
     let mut params = self.params("to.be.in.viewport");
     params.expected_number = options.ratio;
@@ -228,10 +303,18 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   // ── Text / Value ──
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's whitespace-normalized text does not match
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_text(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_text_with(expected, TextMatchOptions::default()).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's whitespace-normalized text does not match
+  /// `expected` under `options` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_text_with(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -251,10 +334,18 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's whitespace-normalized text does not contain
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_text(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_contain_text_with(expected, TextMatchOptions::default()).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's whitespace-normalized text does not contain
+  /// `expected` under `options` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_text_with(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -276,6 +367,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   /// Playwright: `toHaveText(expected: (string | RegExp)[], …)`: as many
   /// elements as expectations, matched in order.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the elements' texts do not match `expected` one for one,
+  /// in order by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_text_array_with(
     &self,
     expected: &[StringOrRegex],
@@ -298,6 +394,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   /// Playwright: `toContainText(expected: (string | RegExp)[], …)`: the
   /// expectations appear, each as a substring, in order among the
   /// elements.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `expected` does not appear, in order, among the elements'
+  /// texts as substrings by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_text_array_with(
     &self,
     expected: &[StringOrRegex],
@@ -317,6 +418,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's value does not match `expected` by the
+  /// timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_value(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self
       .text(
@@ -332,6 +437,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   /// Playwright: `toHaveValues(values: (string | RegExp)[], options?)` on a
   /// `<select multiple>`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the selected options' values do not match `expected` one
+  /// for one by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_values(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
     let expected = expected.iter().map(|e| e.clone().into()).collect();
     self
@@ -348,10 +458,18 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   // ── Attributes ──
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when attribute `name` is missing or does not match `value` by
+  /// the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_attribute(&self, name: &str, value: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_attribute_with(name, value, false).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when attribute `name` is missing or does not match `value` by
+  /// the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_attribute_with(
     &self,
     name: &str,
@@ -373,12 +491,21 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   }
 
   /// Playwright: `toHaveAttribute(name, options?)`, the presence check.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element has no attribute `name` by the timeout; see
+  /// [the failure rules](Expect#failures).
   pub async fn to_have_attribute_exists(&self, name: &str) -> Result<(), AssertionFailure> {
     let mut params = self.params("to.have.attribute");
     params.expression_arg = Some(name.into());
     self.truthy("toHaveAttribute", params, "have attribute", "").await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's `class` attribute does not match `expected`
+  /// by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_class(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self
       .text(
@@ -394,6 +521,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   /// Playwright: `toHaveClass(expected: (string | RegExp)[])`, one class
   /// list per element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the elements' `class` attributes do not match `expected`
+  /// one for one by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_class_array(&self, expected: &[StringOrRegex]) -> Result<(), AssertionFailure> {
     self
       .texts(
@@ -407,6 +539,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element does not carry every class in `expected` by
+  /// the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_class(&self, expected: &str) -> Result<(), AssertionFailure> {
     self
       .text(
@@ -422,6 +558,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   /// Playwright: `toContainClass(expected: string[])`, one entry per
   /// element, each a set of classes the element must carry.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when an element does not carry every class its `expected`
+  /// entry lists by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_class_array(&self, expected: &[impl AsRef<str>]) -> Result<(), AssertionFailure> {
     let expected = expected
       .iter()
@@ -439,10 +580,18 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when computed style `property` does not match `value` by the
+  /// timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_css(&self, property: &str, value: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_css_with(property, value, HaveCssOptions::default()).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when computed style `property` (of `options.pseudo`, when set)
+  /// does not match `value` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_css_with(
     &self,
     property: &str,
@@ -455,6 +604,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
     self.text("toHaveCSS", params, value.into(), false, false, None).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's `id` does not match `expected` by the
+  /// timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_id(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self
       .text(
@@ -470,6 +623,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   /// Playwright: `toHaveRole(role: string, options?)`. The role is a
   /// string; a pattern is refused as upstream refuses it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's ARIA role is not `expected`, or at once
+  /// when `expected` is a pattern; otherwise as [the failure rules](Expect#failures) describe.
   pub async fn to_have_role(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = expected.into();
     if matches!(expected, StringOrRegex::Regex { .. }) {
@@ -483,11 +641,20 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's accessible name does not match `expected`
+  /// by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_accessible_name(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_accessible_name_with(expected, false).await
   }
 
   /// Playwright: `toHaveAccessibleName(name, options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's accessible name does not match `expected`
+  /// by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_accessible_name_with(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -505,6 +672,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's accessible description does not match
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_accessible_description(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -513,6 +684,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   }
 
   /// Playwright: `toHaveAccessibleDescription(description, options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's accessible description does not match
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_accessible_description_with(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -530,6 +706,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's accessible error message does not match
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_accessible_error_message(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -538,6 +718,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   }
 
   /// Playwright: `toHaveAccessibleErrorMessage(message, options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the element's accessible error message does not match
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_accessible_error_message_with(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -557,6 +742,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   /// Playwright: `toHaveJSProperty(name, value)`. A dotted name walks
   /// into nested objects.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when JS property `name` does not equal `value` by the timeout;
+  /// see [the failure rules](Expect#failures).
   pub async fn to_have_js_property(&self, name: &str, value: serde_json::Value) -> Result<(), AssertionFailure> {
     let mut params = self.params("to.have.property");
     params.expression_arg = Some(name.into());
@@ -572,6 +762,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   /// ferridriver-only alias kept for the Rust E2E surface. Playwright
   /// spells this `toHaveText([...])`, so it delegates rather than
   /// carrying a second implementation.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the elements' texts do not match `expected` one for one,
+  /// in order by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
     self
@@ -580,6 +775,11 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
   }
 
   /// ferridriver-only alias for `toContainText([...])`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `expected` does not appear, in order, among the elements'
+  /// texts as substrings by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
     self
@@ -589,6 +789,10 @@ impl<L: Borrow<Locator>> Expect<'_, L> {
 
   // ── Count ──
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the locator does not match exactly `expected` elements by
+  /// the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_count(&self, expected: usize) -> Result<(), AssertionFailure> {
     let mut params = self.params("to.have.count");
     let expected = f64::from(u32::try_from(expected).unwrap_or(u32::MAX));

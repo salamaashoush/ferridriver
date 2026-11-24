@@ -1,4 +1,4 @@
-//! `Expect<T>` builder shared by every consumer (test runner, QuickJS
+//! `Expect<T>` builder shared by every consumer (test runner, `QuickJS`
 //! binding, plain Rust callers). Targets are subjects of web-first
 //! matchers — `&Locator`, `&Arc<Page>`, `&HttpResponse`. Value matchers
 //! live on [`crate::ExpectValue`] instead.
@@ -88,6 +88,15 @@ pub fn expect_configured<T>(subject: &T, timeout: Duration) -> Expect<'_, T> {
 }
 
 /// Auto-retrying assertion builder.
+///
+/// # Failures
+///
+/// A web-first matcher returns an [`AssertionFailure`] when its expectation, inverted by
+/// [`Expect::not`], still does not hold at the timeout or when the running test's abort signal
+/// fires. It fails at once, without retrying, when the page rejects the selector or the expression,
+/// the locator matches several elements under strict mode, or the page closes. A failure from an
+/// assertion marked [`Expect::soft`] is recorded by the running test's sink and the matcher returns
+/// `Ok`.
 pub struct Expect<'a, T> {
   pub subject: &'a T,
   pub timeout: Duration,
@@ -99,6 +108,10 @@ pub struct Expect<'a, T> {
 impl<T> Expect<'_, T> {
   /// Invert the assertion (Playwright's `.not`).
   #[must_use]
+  #[expect(
+    clippy::should_implement_trait,
+    reason = "Playwright's `.not`: inherent so callers and generated tests chain it without importing `std::ops::Not`"
+  )]
   pub fn not(mut self) -> Self {
     self.is_not = !self.is_not;
     self
@@ -182,6 +195,10 @@ where
   }
 
   /// Invert the matcher (`expect.poll(fn).not`).
+  #[expect(
+    clippy::should_implement_trait,
+    reason = "Playwright's `.not`: inherent so callers and generated tests chain it without importing `std::ops::Not`"
+  )]
   pub fn not(mut self) -> Self {
     self.is_not = !self.is_not;
     self
@@ -189,7 +206,7 @@ where
 
   /// Poll until `pass(actual)` (or its negation under `.not()`) holds, or
   /// fail at the deadline with the last value received.
-  async fn poll(self, method: &str, expected: String, pass: impl Fn(&T) -> bool) -> Result<(), AssertionFailure> {
+  async fn poll(&self, method: &str, expected: String, pass: impl Fn(&T) -> bool) -> Result<(), AssertionFailure> {
     let deadline = tokio::time::Instant::now() + self.timeout;
     let mut interval_idx = 0;
     loop {
@@ -223,7 +240,12 @@ where
   }
 
   /// Assert the polled value equals `expected`.
-  pub async fn to_equal(self, expected: T) -> Result<(), AssertionFailure>
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the polled value still does not equal `expected` at the
+  /// timeout (the reverse under `.not()`).
+  pub async fn to_equal(&self, expected: T) -> Result<(), AssertionFailure>
   where
     T: PartialEq,
   {
@@ -233,12 +255,22 @@ where
 
   /// Assert the polled value satisfies `predicate`, described in the
   /// failure as `description`.
-  pub async fn to_satisfy(self, predicate: impl Fn(&T) -> bool, description: &str) -> Result<(), AssertionFailure> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the polled value still does not satisfy `predicate` at
+  /// the timeout (the reverse under `.not()`).
+  pub async fn to_satisfy(&self, predicate: impl Fn(&T) -> bool, description: &str) -> Result<(), AssertionFailure> {
     self.poll("toSatisfy", description.to_string(), predicate).await
   }
 
   /// Assert the polled value is `> expected`.
-  pub async fn to_be_greater_than(self, expected: T) -> Result<(), AssertionFailure>
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the polled value is still not greater than `expected` at
+  /// the timeout (the reverse under `.not()`).
+  pub async fn to_be_greater_than(&self, expected: T) -> Result<(), AssertionFailure>
   where
     T: PartialOrd,
   {
@@ -249,7 +281,12 @@ where
   }
 
   /// Assert the polled value is `>= expected`.
-  pub async fn to_be_greater_than_or_equal(self, expected: T) -> Result<(), AssertionFailure>
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the polled value is still less than `expected` at the
+  /// timeout (the reverse under `.not()`).
+  pub async fn to_be_greater_than_or_equal(&self, expected: T) -> Result<(), AssertionFailure>
   where
     T: PartialOrd,
   {
@@ -260,7 +297,12 @@ where
   }
 
   /// Assert the polled value is `< expected`.
-  pub async fn to_be_less_than(self, expected: T) -> Result<(), AssertionFailure>
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the polled value is still not less than `expected` at the
+  /// timeout (the reverse under `.not()`).
+  pub async fn to_be_less_than(&self, expected: T) -> Result<(), AssertionFailure>
   where
     T: PartialOrd,
   {
@@ -271,7 +313,12 @@ where
   }
 
   /// Assert the polled value is `<= expected`.
-  pub async fn to_be_less_than_or_equal(self, expected: T) -> Result<(), AssertionFailure>
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the polled value is still greater than `expected` at the
+  /// timeout (the reverse under `.not()`).
+  pub async fn to_be_less_than_or_equal(&self, expected: T) -> Result<(), AssertionFailure>
   where
     T: PartialOrd,
   {
@@ -311,6 +358,11 @@ impl Default for ToPassOptions {
 
 /// Retry an async block until it passes or timeout (Playwright's
 /// `expect(fn).toPass()`).
+///
+/// # Errors
+///
+/// Returns the last attempt's [`AssertionFailure`], its message prefixed with the attempt count,
+/// when `body` has not passed by `timeout`.
 pub async fn to_pass<F, Fut>(timeout: Duration, body: F) -> Result<(), AssertionFailure>
 where
   F: Fn() -> Fut,
@@ -326,6 +378,10 @@ where
   .await
 }
 
+/// # Errors
+///
+/// Returns the last attempt's [`AssertionFailure`], its message prefixed with `options.message` (or
+/// `toPass()`) and the attempt count, when `body` has not passed by `options.timeout`.
 pub async fn to_pass_with_options<F, Fut>(body: F, options: ToPassOptions) -> Result<(), AssertionFailure>
 where
   F: Fn() -> Fut,
@@ -379,7 +435,7 @@ mod poll_tests {
 
   fn counter() -> (Arc<AtomicU32>, impl Fn() -> std::future::Ready<u32>) {
     let calls = Arc::new(AtomicU32::new(0));
-    let seen = calls.clone();
+    let seen = Arc::clone(&calls);
     (calls, move || {
       std::future::ready(seen.fetch_add(1, Ordering::SeqCst) + 1)
     })

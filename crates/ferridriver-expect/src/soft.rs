@@ -8,7 +8,7 @@
 //! fails loudly rather than vanishing.
 //!
 //! The sink itself is per-host: the Rust runner installs one backed by
-//! the test's `TestInfo` around the test body, and the QuickJS binding
+//! the test's `TestInfo` around the test body, and the `QuickJS` binding
 //! routes through the per-test host bridge it already holds.
 
 use std::sync::Arc;
@@ -62,6 +62,10 @@ pub fn record_non_retriable(failure: &AssertionFailure) -> bool {
 
 /// The one place the soft rule is applied: a soft failure a sink took
 /// is not an error; anything else passes through unchanged.
+///
+/// # Errors
+///
+/// Returns `failure` unchanged unless it is soft and the running test's sink records it.
 pub fn absorb(failure: AssertionFailure) -> Result<(), AssertionFailure> {
   if failure.soft && record(&failure) {
     return Ok(());
@@ -70,6 +74,10 @@ pub fn absorb(failure: AssertionFailure) -> Result<(), AssertionFailure> {
 }
 
 /// `absorb` for a matcher's result.
+///
+/// # Errors
+///
+/// Returns the failure in `result` unless [`absorb`] takes it.
 pub fn absorb_result(result: Result<(), AssertionFailure>) -> Result<(), AssertionFailure> {
   match result {
     Ok(()) => Ok(()),
@@ -93,7 +101,7 @@ mod tests {
   }
 
   fn soft_failure(message: &str) -> AssertionFailure {
-    AssertionFailure::new(message, None).as_soft()
+    AssertionFailure::new(message, None).with_soft(true)
   }
 
   #[tokio::test]

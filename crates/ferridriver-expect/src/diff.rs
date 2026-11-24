@@ -1,7 +1,7 @@
 //! Unified-diff rendering for assertion failures.
 //!
 //! Produces a plain-text diff (no ANSI) so it survives the
-//! Rust → QuickJS → JS error round trip. Printers add color at output
+//! Rust → `QuickJS` → JS error round trip. Printers add color at output
 //! time. The format matches the GNU `diff -u` shape — `-` for expected
 //! lines (what we asked for), `+` for received (what the test got),
 //! ` ` for context.
@@ -13,6 +13,7 @@ use crate::asymmetric::Asymmetric;
 /// Render a `serde_json::Value` as multi-line pretty JSON with
 /// asymmetric matchers rendered as `<Description>` placeholders so the
 /// diff highlights the matcher rather than its tagged wire shape.
+#[must_use]
 pub fn pretty_json(v: &serde_json::Value) -> String {
   let humanized = humanize_asymmetric(v);
   serde_json::to_string_pretty(&humanized).unwrap_or_else(|_| humanized.to_string())
@@ -37,6 +38,7 @@ fn humanize_asymmetric(v: &serde_json::Value) -> serde_json::Value {
 
 /// Unified diff between two pretty-printed strings. Lines are prefixed
 /// with `-` / `+` / ` `; empty when the two inputs are byte-identical.
+#[must_use]
 pub fn unified_diff(expected: &str, received: &str) -> String {
   let diff = TextDiff::from_lines(expected, received);
   let mut out = String::new();
@@ -57,6 +59,7 @@ pub fn unified_diff(expected: &str, received: &str) -> String {
 /// Render `expected` vs `received` as pretty JSON + a unified diff.
 /// Suitable for `toEqual` / `toMatchObject` / `toContainEqual` where
 /// the full structural shape matters.
+#[must_use]
 pub fn json_diff(expected: &serde_json::Value, received: &serde_json::Value) -> String {
   let expected_str = pretty_json(expected);
   let received_str = pretty_json(received);

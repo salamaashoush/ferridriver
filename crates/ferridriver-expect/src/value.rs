@@ -22,12 +22,13 @@ pub use ferridriver::options::{StringOrRegex, normalize_white_space};
 ///   `diff`    = the body (Expected/Received, plus an optional unified
 ///               diff) printed below the title.
 /// A JS throw concatenates the two; reporters print them in sequence.
+#[must_use]
 pub fn format_failure(
   prefix: Option<&str>,
   is_not: bool,
   method: &str,
-  expected: String,
-  received: String,
+  expected: &str,
+  received: &str,
   rich_diff: Option<String>,
 ) -> AssertionFailure {
   let not = if is_not { ".not" } else { "" };
@@ -47,6 +48,15 @@ fn engine(actual: &Value, expected: &Value, mode: crate::equality::Mode, ev: cra
   crate::equality::equals(actual, expected, mode, ev).unwrap_or(false)
 }
 
+/// A synchronous assertion over a JSON value.
+///
+/// # Failures
+///
+/// A matcher returns an [`AssertionFailure`] when its expectation, inverted by [`ExpectValue::not`],
+/// does not hold; a failure from an assertion marked [`ExpectValue::soft`] is recorded by the
+/// running test's sink and the matcher returns `Ok`. A matcher that fails outright, because the
+/// value or the argument is not one it can judge, returns its failure whatever `.not()` and
+/// `.soft()` say.
 pub struct ExpectValue {
   actual: Value,
   is_not: bool,
@@ -67,6 +77,10 @@ pub fn expect_value(actual: Value) -> ExpectValue {
 
 impl ExpectValue {
   #[must_use]
+  #[expect(
+    clippy::should_implement_trait,
+    reason = "Playwright's `.not`: inherent so callers and generated tests chain it without importing `std::ops::Not`"
+  )]
   pub fn not(mut self) -> Self {
     self.is_not = !self.is_not;
     self
@@ -84,10 +98,12 @@ impl ExpectValue {
     self
   }
 
+  #[must_use]
   pub fn is_soft(&self) -> bool {
     self.is_soft
   }
 
+  #[must_use]
   pub fn actual(&self) -> &Value {
     &self.actual
   }
@@ -104,8 +120,8 @@ impl ExpectValue {
       self.message.as_deref(),
       self.is_not,
       method,
-      expected.into(),
-      received.into(),
+      &expected.into(),
+      &received.into(),
       rich_diff,
     )
     .with_soft(self.is_soft);
@@ -151,6 +167,11 @@ impl ExpectValue {
   /// The structural matchers, with a host that can run custom
   /// asymmetric matchers (`expect.toBeX()` standing in for a value).
   /// The plain forms delegate here with no evaluator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not deeply equal `expected`. See [the
+  /// failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
     let pass = engine(&self.actual, expected, crate::equality::Mode::Loose, ev);
@@ -165,6 +186,10 @@ impl ExpectValue {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not strictly equal `expected`. See [the
+  /// failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_strict_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
     let pass = engine(&self.actual, expected, crate::equality::Mode::Strict, ev);
@@ -179,6 +204,10 @@ impl ExpectValue {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not contain `subset`. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_match_object_with(&self, subset: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
     let pass = engine(&self.actual, subset, crate::equality::Mode::Subset, ev);
@@ -196,6 +225,10 @@ impl ExpectValue {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not an array with an item deeply equal to
+  /// `expected`. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_contain_equal_with(&self, expected: &Value, ev: crate::Evaluator<'_>) -> Result<(), AssertionFailure> {
     let pass = match &self.actual {
@@ -223,6 +256,11 @@ impl ExpectValue {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the property at `path` is missing or differs from
+  /// `expected`; outright when `path` is neither a dotted string nor an array of keys and indexes.
+  /// See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_have_property_with(
     &self,
@@ -255,6 +293,11 @@ impl ExpectValue {
   /// `expect.extend`. The assertion's `.not`, `.soft` and message flow
   /// into the matcher's context, and the verdict is inverted and
   /// rendered by the same code a JS custom matcher goes through.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the custom matcher's verdict, after `.not()`, is a
+  /// failure; see [`crate::extend::finalize`]. See [the failure rules](ExpectValue#failures).
   pub fn matches(
     &self,
     name: &str,
@@ -275,6 +318,11 @@ impl ExpectValue {
 
   /// `toBe(expected)` — strict-equality of primitives. Object/array
   /// values are rejected with guidance to use `toEqual`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` differs from `expected`; outright when either is
+  /// an object or an array. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be(&self, expected: &Value) -> Result<(), AssertionFailure> {
     if self.actual.is_object() || self.actual.is_array() || expected.is_object() || expected.is_array() {
@@ -292,6 +340,11 @@ impl ExpectValue {
 
   /// `toEqual(expected)` — recursive equality. Honours asymmetric
   /// matchers embedded in `expected`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not deeply equal `expected`. See [the
+  /// failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_equal(&self, expected: &Value) -> Result<(), AssertionFailure> {
     self.to_equal_with(expected, None)
@@ -300,6 +353,11 @@ impl ExpectValue {
   /// `toStrictEqual(expected)` — the constructor check and array
   /// sparseness it adds have no JSON meaning, but the engine is the
   /// same one the live values use.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not strictly equal `expected`. See [the
+  /// failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_strict_equal(&self, expected: &Value) -> Result<(), AssertionFailure> {
     self.to_strict_equal_with(expected, None)
@@ -307,13 +365,22 @@ impl ExpectValue {
 
   // ── nullishness ──────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not `null`. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_null(&self) -> Result<(), AssertionFailure> {
     self.check(self.actual.is_null(), "toBeNull", "null", json_short(&self.actual))
   }
 
   /// `toBeUndefined` is satisfied by `null` because `serde_json` cannot
-  /// distinguish — the QuickJS binding emits both as `Value::Null`.
+  /// distinguish — the `QuickJS` binding emits both as `Value::Null`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not `null`, which is how JSON carries
+  /// `undefined`. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_undefined(&self) -> Result<(), AssertionFailure> {
     self.check(
@@ -324,6 +391,10 @@ impl ExpectValue {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is `null`. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_defined(&self) -> Result<(), AssertionFailure> {
     self.check(
@@ -336,6 +407,10 @@ impl ExpectValue {
 
   // ── truthiness ───────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is falsy. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_truthy(&self) -> Result<(), AssertionFailure> {
     self.check(
@@ -346,6 +421,10 @@ impl ExpectValue {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is truthy. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_falsy(&self) -> Result<(), AssertionFailure> {
     self.check(!is_truthy(&self.actual), "toBeFalsy", "falsy", json_short(&self.actual))
@@ -353,12 +432,21 @@ impl ExpectValue {
 
   // ── numeric ──────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not `NaN`. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_nan(&self) -> Result<(), AssertionFailure> {
     let pass = self.actual.as_f64().is_some_and(f64::is_nan);
     self.check(pass, "toBeNaN", "NaN", json_short(&self.actual))
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not within half of `10^-digits` of
+  /// `expected`; outright when `actual` is not a number. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_close_to(&self, expected: f64, digits: Option<u8>) -> Result<(), AssertionFailure> {
     let digits = digits.unwrap_or(2);
@@ -380,6 +468,10 @@ impl ExpectValue {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not greater than `expected`; outright when
+  /// `actual` is not a number. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_greater_than(&self, expected: f64) -> Result<(), AssertionFailure> {
     let actual = self.numeric_or_fail("toBeGreaterThan", expected)?;
@@ -391,6 +483,10 @@ impl ExpectValue {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is less than `expected`; outright when `actual`
+  /// is not a number. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_greater_than_or_equal(&self, expected: f64) -> Result<(), AssertionFailure> {
     let actual = self.numeric_or_fail("toBeGreaterThanOrEqual", expected)?;
@@ -402,6 +498,10 @@ impl ExpectValue {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not less than `expected`; outright when
+  /// `actual` is not a number. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_less_than(&self, expected: f64) -> Result<(), AssertionFailure> {
     let actual = self.numeric_or_fail("toBeLessThan", expected)?;
@@ -413,6 +513,10 @@ impl ExpectValue {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is greater than `expected`; outright when
+  /// `actual` is not a number. See [the failure rules](ExpectValue#failures).
   pub fn to_be_less_than_or_equal(&self, expected: f64) -> Result<(), AssertionFailure> {
     let actual = self.numeric_or_fail("toBeLessThanOrEqual", expected)?;
     self.check(
@@ -440,6 +544,11 @@ impl ExpectValue {
   // ── containment ──────────────────────────────────────────────────
 
   /// `toContain` — primitive membership in array, substring in string.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is neither an array holding `expected` nor a
+  /// string containing it. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_contain(&self, expected: &Value) -> Result<(), AssertionFailure> {
     let pass = match (&self.actual, expected) {
@@ -456,6 +565,11 @@ impl ExpectValue {
   }
 
   /// Deep `toContain` — every element compared by `deep_equal`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` is not an array with an item deeply equal to
+  /// `expected`. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_contain_equal(&self, expected: &Value) -> Result<(), AssertionFailure> {
     let pass = match &self.actual {
@@ -483,6 +597,10 @@ impl ExpectValue {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the length differs from `expected`; outright when
+  /// `actual` is neither an array nor a string. See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_have_length(&self, expected: usize) -> Result<(), AssertionFailure> {
     let actual_len = match &self.actual {
@@ -509,6 +627,12 @@ impl ExpectValue {
 
   /// `toHaveProperty(path, value?)` — `path` may be `"a.b.c"` or a
   /// JSON array of keys / indexes.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the property at `path` is missing or differs from
+  /// `expected`; outright when `path` is neither a dotted string nor an array of keys and indexes.
+  /// See [the failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_have_property(&self, path: &Value, expected: Option<&Value>) -> Result<(), AssertionFailure> {
     let loc = Location::caller();
@@ -535,19 +659,22 @@ impl ExpectValue {
   /// Jest's `toMatch(string)` is substring containment; `toMatch(/re/)`
   /// is regex. Differs from [`StringOrRegex::matches`] (which is
   /// exact-equality for the string variant).
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not contain the string or match the
+  /// pattern; outright when `actual` is not a string or the pattern cannot compile. See [the
+  /// failure rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_match(&self, pattern: &StringOrRegex) -> Result<(), AssertionFailure> {
-    let actual = match self.actual.as_str() {
-      Some(s) => s,
-      None => {
-        return Err(self.fail(
-          "toMatch",
-          format!("matching {}", pattern.description()),
-          format!("non-string {}", json_short(&self.actual)),
-          None,
-          Some(Location::caller()),
-        ));
-      },
+    let Some(actual) = self.actual.as_str() else {
+      return Err(self.fail(
+        "toMatch",
+        format!("matching {}", pattern.description()),
+        format!("non-string {}", json_short(&self.actual)),
+        None,
+        Some(Location::caller()),
+      ));
     };
     let pass = match (pattern, pattern.compile()) {
       (StringOrRegex::String(needle), _) => actual.contains(needle.as_str()),
@@ -567,6 +694,10 @@ impl ExpectValue {
     self.check(pass, "toMatch", pattern.description(), format!("{actual:?}"))
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when `actual` does not contain `subset`. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_match_object(&self, subset: &Value) -> Result<(), AssertionFailure> {
     let pass = engine(&self.actual, subset, crate::equality::Mode::Subset, None);
@@ -588,6 +719,11 @@ impl ExpectValue {
   /// constructor name (`Class.name`). When `actual_ctor_name` is
   /// `None`, falls back to the inferred built-in (e.g. `Array` for an
   /// array value).
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the constructor name is not `ctor_name`. See [the failure
+  /// rules](ExpectValue#failures).
   #[track_caller]
   pub fn to_be_instance_of(&self, ctor_name: &str, actual_ctor_name: Option<&str>) -> Result<(), AssertionFailure> {
     let actual_name = actual_ctor_name.unwrap_or_else(|| infer_builtin_ctor(&self.actual));
@@ -649,7 +785,7 @@ fn parse_property_path(path: &Value) -> Result<Vec<PropSegment>, String> {
         Value::String(s) => Ok(PropSegment::Key(s.clone())),
         Value::Number(n) => n
           .as_u64()
-          .map(|i| PropSegment::Index(i as usize))
+          .map(|i| PropSegment::Index(usize::try_from(i).unwrap_or(usize::MAX)))
           .ok_or_else(|| "property path index must be a non-negative integer".to_string()),
         other => Err(format!(
           "property path segment must be string or integer; got {}",
@@ -708,7 +844,7 @@ mod tests {
     }
   }
   fn err(r: Result<(), AssertionFailure>) {
-    assert!(r.is_err(), "expected err");
+    r.expect_err("expected err");
   }
 
   #[test]

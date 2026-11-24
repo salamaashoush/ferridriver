@@ -114,6 +114,10 @@ pub trait LiveValue: Sized {
   fn js_type(&self) -> JsType;
 
   /// `Object.is(self, other)`.
+  ///
+  /// # Errors
+  ///
+  /// The host's error when it cannot read either value.
   fn same_value(&self, other: &Self) -> Result<bool, Self::Error>;
 
   /// Deep equality over the host's structural view of both values —
@@ -132,13 +136,25 @@ pub trait LiveValue: Sized {
   fn text(&self) -> Option<String>;
 
   /// The value's `.length`, when it has one and it is a number.
+  ///
+  /// # Errors
+  ///
+  /// The host's error when reading `.length` throws (a getter).
   fn length(&self) -> Result<Option<f64>, Self::Error>;
 
   /// `[...self]`, or `None` when the value is not iterable.
+  ///
+  /// # Errors
+  ///
+  /// The host's error when iterating throws.
   fn spread(&self) -> Result<Option<Vec<Self>>, Self::Error>;
 
   /// `self instanceof ctor`. The caller has already checked that `ctor`
   /// is a function.
+  ///
+  /// # Errors
+  ///
+  /// The host's error when `instanceof` throws (a `Symbol.hasInstance` that throws).
   fn instance_of(&self, ctor: &Self) -> Result<bool, Self::Error>;
 
   /// How the value prints in a failure message.
@@ -146,6 +162,10 @@ pub trait LiveValue: Sized {
 
   /// The value's structure, for a deep comparison. One call so a host
   /// walks the value once rather than answering six questions about it.
+  ///
+  /// # Errors
+  ///
+  /// The host's error when walking the value throws (a getter or an iterator).
   fn shape(&self) -> Result<Shape<Self>, Self::Error>;
 
   /// The constructor's name, for `toStrictEqual`'s type check — `None`
@@ -168,6 +188,10 @@ pub trait LiveValue: Sized {
   ///
   /// The default derives from [`Self::shape`], which is enough for a
   /// host whose values are plain data.
+  ///
+  /// # Errors
+  ///
+  /// The host's error when the read throws (a getter); the default propagates [`Self::shape`]'s.
   fn get_prop(&self, key: &str) -> Result<Option<Self>, Self::Error> {
     Ok(match self.shape()? {
       Shape::Object(entries) => entries.into_iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -192,6 +216,10 @@ pub trait LiveValue: Sized {
   /// `Object.is` in exactly two places — `NaN` is never equal to itself,
   /// and `-0` equals `+0` (adding `+0.0` normalizes the sign bit, so one
   /// bit comparison still covers both zeros).
+  ///
+  /// # Errors
+  ///
+  /// Propagates [`Self::same_value`]'s error.
   fn strict_equals(&self, other: &Self) -> Result<bool, Self::Error> {
     if let (Some(a), Some(b)) = (self.number(), other.number()) {
       return Ok(!a.is_nan() && !b.is_nan() && float_bit_eq(a + 0.0, b + 0.0));
@@ -262,8 +290,8 @@ pub fn promise_failure(
     prefix,
     is_not,
     &format!("{}.{matcher}", mode.as_str()),
-    expected,
-    received,
+    &expected,
+    &received,
     None,
   )
 }
@@ -336,6 +364,13 @@ fn descend_live<V: LiveValue>(root: &V, path: &[PropSegment]) -> Result<Option<V
 
 /// A live-value assertion. Mirrors [`crate::ExpectValue`]'s builder and
 /// produces byte-identical failure text.
+///
+/// # Failures
+///
+/// A matcher returns [`LiveError::Failed`] when its expectation, inverted by [`ExpectLive::not`],
+/// does not hold, unless the assertion is soft and the running test's sink records it;
+/// [`LiveError::BadInput`] for a receiver or argument the matcher cannot work on, which `.not()`
+/// does not flip; and [`LiveError::Host`] for an error the host raised while reading a value.
 pub struct ExpectLive<'a, V: LiveValue> {
   actual: &'a V,
   is_not: bool,
@@ -355,6 +390,10 @@ pub fn expect_live<V: LiveValue>(actual: &V) -> ExpectLive<'_, V> {
 
 impl<'a, V: LiveValue> ExpectLive<'a, V> {
   #[must_use]
+  #[expect(
+    clippy::should_implement_trait,
+    reason = "Playwright's `.not`: inherent so callers and generated tests chain it without importing `std::ops::Not`"
+  )]
   pub fn not(mut self) -> Self {
     self.is_not = !self.is_not;
     self
@@ -372,10 +411,12 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
     self
   }
 
+  #[must_use]
   pub fn is_soft(&self) -> bool {
     self.is_soft
   }
 
+  #[must_use]
   pub fn actual(&self) -> &'a V {
     self.actual
   }
@@ -392,8 +433,8 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
       self.message.as_deref(),
       self.is_not,
       method,
-      expected.into(),
-      received.into(),
+      &expected.into(),
+      &received.into(),
       rich_diff,
     )
     .with_soft(self.is_soft);
@@ -447,6 +488,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   /// `expectLibrary.ts::toBe`). Two structurally equal objects are NOT
   /// equal here; the failure says so and names the matcher that would
   /// pass.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is not `Object.is` to `expected`; [`LiveError::Host`] when
+  /// the host comparison fails. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be(&self, expected: &V) -> Result<(), LiveError<V::Error>> {
     let pass = self.actual.same_value(expected).map_err(LiveError::Host)?;
@@ -457,6 +503,12 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
 
   /// `toBeInstanceOf(ctor)` — the real `instanceof` operator. A
   /// non-function argument is a `TypeError`, not a failure.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::BadInput`] when `ctor` is not a function; [`LiveError::Failed`] when `actual` is
+  /// not an instance of it; [`LiveError::Host`] when `instanceof` throws. See [the failure
+  /// rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_instance_of(&self, ctor: &V) -> Result<(), LiveError<V::Error>> {
     if ctor.js_type() != JsType::Function {
@@ -479,6 +531,13 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   /// `toContain(expected)` — substring for a string receiver, otherwise
   /// `[...received].indexOf(expected)`, i.e. strict equality over the
   /// live items (jest `expectLibrary.ts::toContain`).
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::BadInput`] when `actual` is `null` or `undefined`, is a string while `expected`
+  /// is not, or is neither a string nor iterable; [`LiveError::Failed`] when `expected` is not in
+  /// it; [`LiveError::Host`] when iterating or comparing throws. See [the failure
+  /// rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_contain(&self, expected: &V) -> Result<(), LiveError<V::Error>> {
     if self.actual.js_type().is_nullish() {
@@ -539,6 +598,12 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   /// `toHaveLength(expected)` — reads the receiver's own `.length`, so a
   /// function's arity and a `TypedArray`'s length work as they do
   /// upstream. A receiver without a numeric `.length` is a `TypeError`.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::BadInput`] when `expected` is not a non-negative integer or `actual` has no
+  /// numeric `.length`; [`LiveError::Failed`] when the length differs; [`LiveError::Host`] when
+  /// reading `.length` throws. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_have_length(&self, expected: f64) -> Result<(), LiveError<V::Error>> {
     if !expected.is_finite() || expected < 0.0 || expected.fract() != 0.0 {
@@ -571,6 +636,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   // what they mean in Playwright.
 
   /// `toEqual(expected)` — jest's non-strict deep equality.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` does not deeply equal `expected`; [`LiveError::Host`] when
+  /// reading either value throws. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_equal(&self, expected: &V, ev: crate::asymmetric::Evaluator<'_>) -> Result<(), LiveError<V::Error>> {
     self.structural(expected, "toEqual", crate::equality::Mode::Loose, ev)
@@ -578,12 +648,22 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
 
   /// `toStrictEqual(expected)` — adds the constructor check, array
   /// sparseness, and `undefined`-valued keys.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` does not strictly equal `expected`; [`LiveError::Host`]
+  /// when reading either value throws. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_strict_equal(&self, expected: &V, ev: crate::asymmetric::Evaluator<'_>) -> Result<(), LiveError<V::Error>> {
     self.structural(expected, "toStrictEqual", crate::equality::Mode::Strict, ev)
   }
 
   /// `toMatchObject(subset)`.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` does not contain `subset`; [`LiveError::Host`] when
+  /// reading either value throws. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_match_object(&self, subset: &V, ev: crate::asymmetric::Evaluator<'_>) -> Result<(), LiveError<V::Error>> {
     self.structural(subset, "toMatchObject", crate::equality::Mode::Subset, ev)
@@ -608,6 +688,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   }
 
   /// `toContainEqual(expected)` — deep equality against each item.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when no item of `actual` deeply equals `expected`; [`LiveError::Host`]
+  /// when reading a value throws. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_contain_equal(
     &self,
@@ -636,6 +721,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
 
   /// `toHaveProperty(path, value?)` — walks the live value, so a getter
   /// or a class field answers as it would in the page.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `path` is missing or its value differs from `expected`;
+  /// [`LiveError::Host`] when a property read throws. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_have_property(
     &self,
@@ -667,6 +757,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
 
   /// `toBeNull()` — `received === null`, which a snapshot cannot tell
   /// from `undefined`.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is not `null`. See [the failure
+  /// rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_null(&self) -> Result<(), LiveError<V::Error>> {
     self.check(
@@ -678,6 +773,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   }
 
   /// `toBeUndefined()` — `received === undefined`.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is not `undefined`. See [the failure
+  /// rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_undefined(&self) -> Result<(), LiveError<V::Error>> {
     self.check(
@@ -689,6 +789,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
   }
 
   /// `toBeDefined()` — `received !== undefined`. `null` IS defined.
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is `undefined`. See [the failure
+  /// rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_defined(&self) -> Result<(), LiveError<V::Error>> {
     self.check(
@@ -699,11 +804,17 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
     )
   }
 
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is falsy. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_truthy(&self) -> Result<(), LiveError<V::Error>> {
     self.check(self.actual.truthy(), "toBeTruthy", "truthy", self.actual.describe())
   }
 
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is truthy. See [the failure rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_falsy(&self) -> Result<(), LiveError<V::Error>> {
     self.check(!self.actual.truthy(), "toBeFalsy", "falsy", self.actual.describe())
@@ -711,6 +822,11 @@ impl<'a, V: LiveValue> ExpectLive<'a, V> {
 
   /// `toBeNaN()` — `Number.isNaN(received)`, so a non-number never
   /// passes (a snapshot turns `NaN` into `null` and loses the case).
+  ///
+  /// # Errors
+  ///
+  /// [`LiveError::Failed`] when `actual` is not `NaN`. See [the failure
+  /// rules](ExpectLive#failures).
   #[track_caller]
   pub fn to_be_nan(&self) -> Result<(), LiveError<V::Error>> {
     let pass = self.actual.number().is_some_and(f64::is_nan);
@@ -794,8 +910,8 @@ mod tests {
 
     fn length(&self) -> Result<Option<f64>, Self::Error> {
       Ok(match self {
-        Self::Arr(items) => Some(items.len() as f64),
-        Self::Str(s) => Some(s.chars().count() as f64),
+        Self::Arr(items) => Some(f64::from(u32::try_from(items.len()).unwrap())),
+        Self::Str(s) => Some(f64::from(u32::try_from(s.chars().count()).unwrap())),
         Self::Fun { arity, .. } => Some(*arity),
         _ => None,
       })
@@ -848,7 +964,7 @@ mod tests {
 
     fn as_json(&self) -> Option<serde_json::Value> {
       match self {
-        Self::Undefined => None,
+        Self::Undefined | Self::Fun { .. } => None,
         Self::Null => Some(serde_json::Value::Null),
         Self::Bool(b) => Some(serde_json::json!(b)),
         Self::Num(n) => Some(serde_json::json!(n)),
@@ -859,7 +975,6 @@ mod tests {
         Self::Obj { shape, .. } => Some(serde_json::Value::Object(
           shape.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect(),
         )),
-        Self::Fun { .. } => None,
       }
     }
 

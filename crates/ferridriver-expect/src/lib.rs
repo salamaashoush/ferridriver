@@ -1,30 +1,6 @@
-#![allow(
-  clippy::missing_errors_doc,
-  clippy::missing_panics_doc,
-  clippy::must_use_candidate,
-  clippy::module_name_repetitions,
-  clippy::cast_possible_truncation,
-  clippy::cast_precision_loss,
-  clippy::cast_sign_loss,
-  clippy::cast_possible_wrap,
-  clippy::uninlined_format_args,
-  clippy::needless_pass_by_value,
-  clippy::doc_markdown,
-  clippy::match_same_arms,
-  clippy::should_implement_trait,
-  clippy::manual_let_else,
-  clippy::too_many_lines,
-  clippy::return_self_not_must_use,
-  // `to_*` builders that consume `self` are the conventional shape for
-  // poll-style terminal matchers (`.to_equal()` consumes the
-  // `ExpectPoll` to drop the closure).
-  clippy::wrong_self_convention,
-  clippy::redundant_closure_for_method_calls
-)]
-
 //! Value matchers (Jest-compatible) and asymmetric matchers for
 //! ferridriver's `expect()` API. Shared between the test runner
-//! (`ferridriver-test`) and the QuickJS scripting layer
+//! (`ferridriver-test`) and the `QuickJS` scripting layer
 //! (`ferridriver-script`) so both surfaces dispatch through the same
 //! Rust core (per [the Rust-is-the-source-of-truth rule]).
 //!
@@ -135,13 +111,6 @@ impl AssertionFailure {
       soft: false,
       error_context: None,
     }
-  }
-
-  /// Mark this failure as belonging to a soft assertion.
-  #[must_use]
-  pub fn as_soft(mut self) -> Self {
-    self.soft = true;
-    self
   }
 
   /// Mark it soft only when the assertion was.

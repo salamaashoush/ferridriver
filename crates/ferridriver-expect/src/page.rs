@@ -38,6 +38,11 @@ impl<P: Borrow<Page>> Expect<'_, P> {
 
   /// Playwright: `toHaveTitle(titleOrRegExp, options?)`. The title is
   /// compared with its whitespace normalized.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the page title, whitespace-normalized, does not match
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_have_title(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self
       .page_text("toHaveTitle", "to.have.title", expected.into(), false, true, None)
@@ -45,17 +50,32 @@ impl<P: Borrow<Page>> Expect<'_, P> {
   }
 
   /// ferridriver-only: the title contains `expected`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the page title, whitespace-normalized, does not contain
+  /// `expected` by the timeout; see [the failure rules](Expect#failures).
   pub async fn to_contain_title(&self, expected: &str) -> Result<(), AssertionFailure> {
     self
       .page_text("toContainTitle", "to.have.title", expected.into(), true, true, None)
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the page URL does not match `expected` by the timeout;
+  /// see [the failure rules](Expect#failures).
   pub async fn to_have_url(&self, expected: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_url_with(expected, false).await
   }
 
   /// Playwright: `toHaveURL(urlOrRegExp, options?: { ignoreCase?, timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the page URL does not match `expected`
+  /// (case-insensitively when `ignore_case`) by the timeout; see [the failure
+  /// rules](Expect#failures).
   pub async fn to_have_url_with(
     &self,
     expected: impl Into<StringOrRegex>,
@@ -74,6 +94,11 @@ impl<P: Borrow<Page>> Expect<'_, P> {
   }
 
   /// ferridriver-only: the URL contains `expected`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`AssertionFailure`] when the page URL does not contain `expected` by the timeout;
+  /// see [the failure rules](Expect#failures).
   pub async fn to_contain_url(&self, expected: &str) -> Result<(), AssertionFailure> {
     self
       .page_text("toContainURL", "to.have.url", expected.into(), true, false, None)

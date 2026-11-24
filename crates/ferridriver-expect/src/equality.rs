@@ -47,6 +47,10 @@ impl Mode {
 }
 
 /// Deep equality of two live values.
+///
+/// # Errors
+///
+/// Propagates the host's error when reading either value throws (a getter or an iterator).
 pub fn equals<V: LiveValue>(actual: &V, expected: &V, mode: Mode, ev: Evaluator<'_>) -> Result<bool, V::Error> {
   let mut seen = Vec::new();
   compare(actual, expected, mode, ev, &mut seen)
@@ -129,8 +133,7 @@ fn compare_uncycled<V: LiveValue>(
   }
 
   match (a_shape, e_shape) {
-    (Shape::Primitive, Shape::Primitive) => actual.same_value(expected),
-    (Shape::Function, Shape::Function) => actual.same_value(expected),
+    (Shape::Primitive, Shape::Primitive) | (Shape::Function, Shape::Function) => actual.same_value(expected),
     // Two dates are equal when they name the same instant; two invalid
     // dates are equal to each other, as `getTime()` NaNs compare in jest.
     (Shape::Date(a), Shape::Date(b)) => Ok(crate::asymmetric::float_bit_eq(a, b) || (a.is_nan() && b.is_nan())),
@@ -335,6 +338,12 @@ fn compare_sets<V: LiveValue>(
 
 // ── serde_json, so a Rust caller runs the same engine ────────────────
 
+/// A length as the JS number it stands for. A JS array's length is a `u32` and `QuickJS` caps a
+/// string below that, so nothing a page hands over saturates.
+fn js_length(len: usize) -> f64 {
+  f64::from(u32::try_from(len).unwrap_or(u32::MAX))
+}
+
 impl LiveValue for JsonValue {
   /// JSON cannot fail to describe itself.
   type Error = std::convert::Infallible;
@@ -386,8 +395,8 @@ impl LiveValue for JsonValue {
 
   fn length(&self) -> Result<Option<f64>, Self::Error> {
     Ok(match self {
-      Self::Array(a) => Some(a.len() as f64),
-      Self::String(s) => Some(s.encode_utf16().count() as f64),
+      Self::Array(a) => Some(js_length(a.len())),
+      Self::String(s) => Some(js_length(s.encode_utf16().count())),
       _ => None,
     })
   }
@@ -472,7 +481,7 @@ mod tests {
   #[test]
   fn an_asymmetric_matcher_decides_wherever_it_appears() {
     let any_number = json!({ASYM_TAG_KEY: "any", "name": "Number"});
-    assert!(eq(&json!({"id": 7}), &json!({"id": any_number.clone()}), Mode::Loose));
+    assert!(eq(&json!({"id": 7}), &json!({"id": any_number}), Mode::Loose));
     assert!(!eq(&json!({"id": "7"}), &json!({"id": any_number}), Mode::Loose));
   }
 
