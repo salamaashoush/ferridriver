@@ -24,6 +24,7 @@
 pub mod driver;
 pub mod tele;
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,7 +143,10 @@ impl Events {
 
   /// Send one protocol event (`report`, `stdio`, `testFilesChanged`, …).
   pub fn send(&self, method: &str, params: Value) {
-    let message = json!({ "method": method, "params": params }).to_string();
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("method".to_string(), Value::from(method));
+    envelope.insert("params".to_string(), params);
+    let message = Value::Object(envelope).to_string();
     let mut clients = self.clients.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Disconnected clients are dropped here rather than tracked
     // separately — a send to a closed queue is how we learn of them.
@@ -266,7 +270,7 @@ fn guid() -> String {
   for _ in 0..2 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_usize(std::process::id() as usize);
-    out.push_str(&format!("{:016x}", hasher.finish()));
+    let _ = write!(out, "{:016x}", hasher.finish());
   }
   out
 }
@@ -325,7 +329,7 @@ async fn session(socket: WebSocket, state: Arc<ServerState>) {
     let (Some(id), Some(method)) = (value.get("id").cloned(), value.get("method").and_then(Value::as_str)) else {
       continue;
     };
-    let params = value.get("params").cloned().unwrap_or(json!({}));
+    let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
     let (reply_tx, reply_rx) = oneshot::channel();
     let request = Request {
       method: method.to_string(),

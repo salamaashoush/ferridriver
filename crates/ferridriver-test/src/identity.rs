@@ -153,8 +153,8 @@ mod tests {
     moved.anchor(&elsewhere);
     assert_eq!(id_of(&from_root), id_of(&moved));
 
-    std::fs::remove_dir_all(&root).ok();
-    std::fs::remove_dir_all(&elsewhere).ok();
+    std::fs::remove_dir_all(&root).expect("remove the test directory");
+    std::fs::remove_dir_all(&elsewhere).expect("remove the test directory");
   }
 
   #[test]

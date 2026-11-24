@@ -24,7 +24,6 @@ pub fn worst(a: i32, b: i32) -> i32 {
   fn rank(code: i32) -> u8 {
     match code {
       PASSED => 0,
-      FAILED => 1,
       USAGE => 2,
       INFRASTRUCTURE => 3,
       INTERRUPTED => 4,

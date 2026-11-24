@@ -1,6 +1,6 @@
-//! TeamCity reporter — JetBrains service messages, streamed live.
+//! `TeamCity` reporter — `JetBrains` service messages, streamed live.
 //!
-//! TeamCity and the IntelliJ/WebStorm test runners build their test tree
+//! `TeamCity` and the IntelliJ/WebStorm test runners build their test tree
 //! from `##teamcity[...]` lines on stdout as they arrive, so this
 //! reporter emits per event rather than at finalize: the tree fills in
 //! while the run is still going, and a killed run keeps whatever it
@@ -22,7 +22,7 @@ pub struct TeamCityReporter {
   /// Suite currently open, so a file change closes the previous one.
   open_suite: Option<String>,
   /// `flowId` keeps parallel workers' messages from interleaving into
-  /// one another's test in the TeamCity tree.
+  /// one another's test in the `TeamCity` tree.
   screen: Screen,
 }
 
@@ -53,7 +53,7 @@ impl Default for TeamCityReporter {
   }
 }
 
-/// Service-message escaping: the five characters TeamCity reserves.
+/// Service-message escaping: the five characters `TeamCity` reserves.
 fn tc(value: &str) -> String {
   let mut out = String::with_capacity(value.len());
   for c in base::strip_ansi(value).chars() {
@@ -84,7 +84,7 @@ fn message(name: &str, attrs: &[(&str, String)]) -> String {
   format!("##teamcity[{name} {body}]")
 }
 
-/// Flat `test.step` titles, reported as TeamCity's stdout stream so the
+/// Flat `test.step` titles, reported as `TeamCity`'s stdout stream so the
 /// step trail shows under a failing test.
 fn step_lines(steps: &[TestStep], depth: usize, out: &mut String) {
   for step in steps.iter().filter(|s| s.category.is_visible()) {
@@ -100,6 +100,100 @@ fn step_lines(steps: &[TestStep], depth: usize, out: &mut String) {
   }
 }
 
+impl TeamCityReporter {
+  /// The service messages a test start sends: the file's suite opened
+  /// (and the previous one closed) when the file changes, then the test.
+  fn test_started_block(&mut self, test_id: &crate::model::TestId) -> String {
+    let mut block = String::new();
+    if self.open_suite.as_deref() != Some(test_id.file.as_str()) {
+      if let Some(open) = self.open_suite.take() {
+        let _ = writeln!(block, "{}", message("testSuiteFinished", &[("name", open)]));
+      }
+      let _ = writeln!(
+        block,
+        "{}",
+        message("testSuiteStarted", &[("name", test_id.file.clone())])
+      );
+      self.open_suite = Some(test_id.file.clone());
+    }
+    let _ = writeln!(
+      block,
+      "{}",
+      message(
+        "testStarted",
+        &[
+          ("name", test_id.full_name()),
+          ("captureStandardOutput", "false".to_string()),
+        ],
+      )
+    );
+    block
+  }
+
+  /// The service messages a finished test sends: ignored, or its output
+  /// and failure, then finished.
+  fn test_finished_block(&self, outcome: &crate::model::TestOutcome) -> String {
+    let name = outcome.test_id.full_name();
+    let mut block = String::new();
+
+    if outcome.status == TestStatus::Skipped {
+      let reason = outcome
+        .error
+        .as_ref()
+        .map_or_else(|| "skipped".to_string(), |e| e.message.clone());
+      let _ = writeln!(
+        block,
+        "{}",
+        message("testIgnored", &[("name", name.clone()), ("message", reason)])
+      );
+    } else {
+      let mut stdout = outcome.stdout.clone();
+      if !outcome.steps.is_empty() {
+        step_lines(&outcome.steps, 0, &mut stdout);
+      }
+      if !stdout.is_empty() {
+        let _ = writeln!(
+          block,
+          "{}",
+          message("testStdOut", &[("name", name.clone()), ("out", stdout)])
+        );
+      }
+      if !outcome.stderr.is_empty() {
+        let _ = writeln!(
+          block,
+          "{}",
+          message("testStdErr", &[("name", name.clone()), ("out", outcome.stderr.clone())])
+        );
+      }
+      if let Some(error) = base::attempt_errors(outcome).into_iter().next() {
+        let mut attrs = vec![
+          ("name", name.clone()),
+          ("message", error.message.lines().next().unwrap_or_default().to_string()),
+          ("details", base::format_error(self.screen, error)),
+        ];
+        // A diff turns the failure into a TeamCity comparison
+        // failure, which renders side-by-side in the UI.
+        if let Some((expected, actual)) = comparison(error) {
+          attrs.push(("type", "comparisonFailure".to_string()));
+          attrs.push(("expected", expected));
+          attrs.push(("actual", actual));
+        }
+        let _ = writeln!(block, "{}", message("testFailed", &attrs));
+      }
+    }
+
+    let _ = writeln!(
+      block,
+      "{}",
+      message(
+        "testFinished",
+        &[("name", name), ("duration", outcome.duration.as_millis().to_string()),],
+      )
+    );
+    block
+  }
+}
+
 #[async_trait::async_trait]
 impl Reporter for TeamCityReporter {
   fn prints_to_stdio(&self) -> bool {
@@ -110,91 +204,12 @@ impl Reporter for TeamCityReporter {
     self.collector.observe(event);
     match event {
       ReporterEvent::TestStarted { test_id, .. } => {
-        let mut block = String::new();
-        if self.open_suite.as_deref() != Some(test_id.file.as_str()) {
-          if let Some(open) = self.open_suite.take() {
-            let _ = writeln!(block, "{}", message("testSuiteFinished", &[("name", open)]));
-          }
-          let _ = writeln!(
-            block,
-            "{}",
-            message("testSuiteStarted", &[("name", test_id.file.clone())])
-          );
-          self.open_suite = Some(test_id.file.clone());
-        }
-        let _ = writeln!(
-          block,
-          "{}",
-          message(
-            "testStarted",
-            &[
-              ("name", test_id.full_name()),
-              ("captureStandardOutput", "false".to_string()),
-            ],
-          )
-        );
+        let block = self.test_started_block(test_id);
         self.out.write_raw(&block);
       },
 
       ReporterEvent::TestFinished { outcome } => {
-        let name = outcome.test_id.full_name();
-        let mut block = String::new();
-
-        if outcome.status == TestStatus::Skipped {
-          let reason = outcome
-            .error
-            .as_ref()
-            .map(|e| e.message.clone())
-            .unwrap_or_else(|| "skipped".to_string());
-          let _ = writeln!(
-            block,
-            "{}",
-            message("testIgnored", &[("name", name.clone()), ("message", reason)])
-          );
-        } else {
-          let mut stdout = outcome.stdout.clone();
-          if !outcome.steps.is_empty() {
-            step_lines(&outcome.steps, 0, &mut stdout);
-          }
-          if !stdout.is_empty() {
-            let _ = writeln!(
-              block,
-              "{}",
-              message("testStdOut", &[("name", name.clone()), ("out", stdout)])
-            );
-          }
-          if !outcome.stderr.is_empty() {
-            let _ = writeln!(
-              block,
-              "{}",
-              message("testStdErr", &[("name", name.clone()), ("out", outcome.stderr.clone())])
-            );
-          }
-          if let Some(error) = base::attempt_errors(outcome).into_iter().next() {
-            let mut attrs = vec![
-              ("name", name.clone()),
-              ("message", error.message.lines().next().unwrap_or_default().to_string()),
-              ("details", base::format_error(self.screen, error)),
-            ];
-            // A diff turns the failure into a TeamCity comparison
-            // failure, which renders side-by-side in the UI.
-            if let Some((expected, actual)) = comparison(error) {
-              attrs.push(("type", "comparisonFailure".to_string()));
-              attrs.push(("expected", expected));
-              attrs.push(("actual", actual));
-            }
-            let _ = writeln!(block, "{}", message("testFailed", &attrs));
-          }
-        }
-
-        let _ = writeln!(
-          block,
-          "{}",
-          message(
-            "testFinished",
-            &[("name", name), ("duration", outcome.duration.as_millis().to_string()),],
-          )
-        );
+        let block = self.test_finished_block(outcome);
         self.out.write_raw(&block);
       },
 
@@ -242,7 +257,7 @@ impl Reporter for TeamCityReporter {
 }
 
 /// The `Expected:` / `Received:` pair out of a rendered assertion body,
-/// so TeamCity can show its diff view.
+/// so `TeamCity` can show its diff view.
 fn comparison(failure: &crate::model::TestFailure) -> Option<(String, String)> {
   // Matchers render the pair into the diff when there is one and inline
   // into the message otherwise; both spellings should light up the

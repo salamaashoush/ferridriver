@@ -5,6 +5,7 @@
 //! configured server — static directories and `command`-launched dev
 //! servers alike.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -47,12 +48,14 @@ impl TestServer {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let handle = tokio::spawn(async move {
-      axum::serve(listener, app)
+      if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async {
           let _ = shutdown_rx.await;
         })
         .await
-        .ok();
+      {
+        tracing::error!("static web server stopped: {e}");
+      }
     });
 
     Ok(Self {
@@ -237,9 +240,6 @@ async fn start_server(config: &crate::config::WebServerConfig) -> ferridriver::e
 /// Playwright's processLauncher.
 async fn kill_tree(child: &mut tokio::process::Child) {
   if let Some(pid) = child.id() {
-    #[cfg(unix)]
-    send_signal_to_group(pid, libc::SIGKILL);
-    #[cfg(windows)]
     ferridriver::backend::process::kill_process_group(pid);
   }
   let _ = child.kill().await;
@@ -307,39 +307,36 @@ async fn stop_child(child: &mut tokio::process::Child, name: &str, graceful: Opt
 }
 
 #[cfg(unix)]
-fn parse_signal(name: &str) -> libc::c_int {
+fn parse_signal(name: &str) -> rustix::process::Signal {
   match name.trim().to_ascii_uppercase().as_str() {
-    "SIGINT" => libc::SIGINT,
-    "SIGKILL" => libc::SIGKILL,
-    _ => libc::SIGTERM,
+    "SIGINT" => rustix::process::Signal::INT,
+    "SIGKILL" => rustix::process::Signal::KILL,
+    _ => rustix::process::Signal::TERM,
   }
+}
+
+/// The group `pid` leads. Pid 0 would address our own group, and a pid
+/// past `i32::MAX` names no process.
+#[cfg(unix)]
+fn process_group(pid: u32) -> Option<rustix::process::Pid> {
+  i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw)
 }
 
 /// Whether any process is left in the group `pid` led.
 #[cfg(unix)]
-#[allow(unsafe_code)]
 fn group_alive(pid: u32) -> bool {
-  #[allow(clippy::cast_possible_wrap)]
-  let pid_i = pid as libc::pid_t;
-  // SAFETY: signal 0 only checks for existence and permission; nothing is
-  // delivered.
-  unsafe { libc::kill(-pid_i, 0) == 0 }
+  process_group(pid).is_some_and(|group| rustix::process::test_kill_process_group(group).is_ok())
 }
 
 /// Signal the process group `pid` leads.
 #[cfg(unix)]
-#[allow(unsafe_code)]
-fn send_signal_to_group(pid: u32, signum: libc::c_int) {
-  // Cast is safe: child PIDs from `tokio::process::Child::id()` fit in
-  // i32 on every Unix we target.
-  #[allow(clippy::cast_possible_wrap)]
-  let pid_i = pid as libc::pid_t;
-  // SAFETY: `kill` is async-signal-safe. The PID came from
-  // `Child::id()` for a process we spawned as its group leader, so the
-  // negative PID names that group; a group that no longer exists, or one
-  // we do not own, makes the call a no-op (ESRCH or EPERM).
-  unsafe {
-    libc::kill(-pid_i, signum);
+fn send_signal_to_group(pid: u32, signal: rustix::process::Signal) {
+  let Some(group) = process_group(pid) else {
+    return;
+  };
+  // ESRCH means the group already exited, which is what stopping it wants.
+  if let Err(e) = rustix::process::kill_process_group(group, signal) {
+    tracing::debug!("signalling process group {pid}: {e}");
   }
 }
 
@@ -446,7 +443,7 @@ fn exit_message(name: &str, status: std::process::ExitStatus, tail: &[String]) -
   if !tail.is_empty() {
     message.push_str("; its last output:");
     for line in tail {
-      message.push_str(&format!("\n[{name}] {line}"));
+      let _ = write!(message, "\n[{name}] {line}");
     }
   }
   message
@@ -471,7 +468,14 @@ fn drain_output(
         .trim_end_matches(['\r', '\n'])
         .to_string();
       match &forward {
-        Some((Stream::Stdout, name)) => println!("[{name}] {line}"),
+        Some((Stream::Stdout, name)) => {
+          use std::io::Write as _;
+          // A closed stdout must not stop the reader: the tail below is
+          // what a startup failure is reported with.
+          if let Err(e) = writeln!(std::io::stdout().lock(), "[{name}] {line}") {
+            tracing::debug!("could not forward web server output to stdout: {e}");
+          }
+        },
         Some((Stream::Stderr, name)) => eprintln!("[{name}] {line}"),
         None => {},
       }
@@ -602,11 +606,11 @@ while True:
     }
   }
 
-  fn sigterm() -> Option<GracefulShutdown> {
-    Some(GracefulShutdown {
+  fn sigterm() -> GracefulShutdown {
+    GracefulShutdown {
       signal: "SIGTERM".into(),
       timeout: 5_000,
-    })
+    }
   }
 
   async fn answers(port: u16) -> bool {
@@ -672,7 +676,7 @@ while True:
     // The trailing `true` keeps the shell from exec'ing the server, so the
     // shell dies of the signal while the server is still shutting down.
     let config = WebServerConfig {
-      graceful_shutdown: sigterm(),
+      graceful_shutdown: Some(sigterm()),
       ..serving(format!("python3 server.py {port}; true"), port, dir.path())
     };
     let manager = WebServerManager::start(&[config]).await.unwrap();
@@ -686,7 +690,7 @@ while True:
 
   #[tokio::test]
   async fn stopping_takes_the_servers_children_too() {
-    for graceful in [None, sigterm()] {
+    for graceful in [None, Some(sigterm())] {
       let (dir, port) = workspace().unwrap();
       // The server is the shell's child, not ours.
       let config = WebServerConfig {

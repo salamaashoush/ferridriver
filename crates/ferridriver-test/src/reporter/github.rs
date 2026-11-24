@@ -59,6 +59,7 @@ impl GithubReporter {
   }
 
   /// Force the annotations on/off — for tests.
+  #[must_use]
   pub fn with_enabled(mut self, enabled: bool) -> Self {
     self.enabled = enabled;
     self

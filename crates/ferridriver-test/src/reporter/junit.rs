@@ -1,4 +1,4 @@
-//! JUnit XML reporter for CI integration.
+//! `JUnit` XML reporter for CI integration.
 //!
 //! Mirrors `/tmp/playwright/packages/playwright/src/reporters/junit.ts`:
 //! one `<testsuite>` per file per project, `<properties>` carrying the
@@ -14,6 +14,10 @@ use crate::model::{TestOutcome, TestOutcomeKind, TestStatus};
 use crate::reporter::base::{self, ResultCollector, Screen, TestRecord};
 use crate::reporter::{Reporter, ReporterEvent};
 
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "Playwright's JUnit reporter options: includeProjectInTestName, includeRetries, stripANSIControlSequences and omitting tags are independent switches, not states of one thing"
+)]
 pub struct JUnitReporter {
   output_path: PathBuf,
   collector: ResultCollector,
@@ -27,6 +31,7 @@ pub struct JUnitReporter {
 }
 
 impl JUnitReporter {
+  #[must_use]
   pub fn new(output_path: PathBuf) -> Self {
     Self {
       output_path,
@@ -205,18 +210,14 @@ impl JUnitReporter {
         children.push_str(&self.render_retry_entry(attempt, retry_kind));
       }
       // A test that recovered on retry counts as passing: no <failure>.
-      if !record.ok()
-        && let Some(entry) = self.render_failure(record, suite)
-      {
-        children.push_str(&entry);
+      if !record.ok() {
+        children.push_str(&self.render_failure(record, suite));
       }
     } else {
       let all: Vec<&std::sync::Arc<TestOutcome>> = record.attempts.iter().collect();
       children.push_str(&self.render_stdio(&all));
-      if !record.ok()
-        && let Some(entry) = self.render_failure(record, suite)
-      {
-        children.push_str(&entry);
+      if !record.ok() {
+        children.push_str(&self.render_failure(record, suite));
       }
     }
 
@@ -232,8 +233,8 @@ impl JUnitReporter {
     xml
   }
 
-  /// Annotations as `<properties>` — the Xray JUnit extension, and the
-  /// only standard slot a JUnit consumer has for test metadata.
+  /// Annotations as `<properties>` — the Xray `JUnit` extension, and the
+  /// only standard slot a `JUnit` consumer has for test metadata.
   fn render_properties(&self, outcome: &TestOutcome) -> String {
     let mut rows = String::new();
     for annotation in &outcome.annotations {
@@ -256,7 +257,7 @@ impl JUnitReporter {
     format!("      <properties>\n{rows}      </properties>\n")
   }
 
-  fn render_failure(&self, record: &TestRecord, suite: &mut Totals) -> Option<String> {
+  fn render_failure(&self, record: &TestRecord, suite: &mut Totals) -> String {
     let info = record
       .attempts
       .iter()
@@ -283,13 +284,13 @@ impl JUnitReporter {
       suite.failures += 1;
     }
     let body = base::format_failure(Screen::plain(), record, None);
-    Some(format!(
+    format!(
       "      <{element} message=\"{message}\" type=\"{kind}\">{body}</{element}>\n",
       element = info.element,
       message = self.attr(&info.message),
       kind = self.attr(&info.kind),
       body = self.cdata(&body),
-    ))
+    )
   }
 
   fn render_retry_entry(&self, attempt: &TestOutcome, prefix: &str) -> String {
@@ -397,7 +398,7 @@ struct ErrorInfo {
   message: String,
 }
 
-/// Split an error into JUnit's two buckets: a failed assertion is a
+/// Split an error into `JUnit`'s two buckets: a failed assertion is a
 /// `<failure>` typed by the matcher, anything else is an `<error>`
 /// typed by the exception class.
 fn classify_error(outcome: &TestOutcome) -> Option<ErrorInfo> {
@@ -428,13 +429,11 @@ fn classify_error(outcome: &TestOutcome) -> Option<ErrorInfo> {
 }
 
 /// `expect(...).toHaveText` → `expect.toHaveText`, `expect(...).not.toBe`
-/// → `expect.not.toBe`. Names the assertion that failed as the JUnit
+/// → `expect.not.toBe`. Names the assertion that failed as the `JUnit`
 /// `type`, which is how test-management tools group failures.
 fn matcher_name(message: &str) -> Option<String> {
-  let start = message.find("expect(")?;
-  let rest = &message[start..];
-  let close = rest.find(").")?;
-  let after = &rest[close + 2..];
+  let (_, rest) = message.split_once("expect(")?;
+  let (_, after) = rest.split_once(").")?;
   let (negated, after) = match after.strip_prefix("not.") {
     Some(tail) => ("not.", tail),
     None => ("", after),
@@ -505,7 +504,7 @@ impl Reporter for JUnitReporter {
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     let xml = self.render();
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).ok();
+      std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&self.output_path, xml)?;
     tracing::info!("JUnit report written to {}", self.output_path.display());

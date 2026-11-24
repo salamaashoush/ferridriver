@@ -238,26 +238,23 @@ pub trait Reporter: Send + Sync {
 // ── Reporter Set (multiplexer) ──
 
 /// Multiplexes events to multiple reporters.
+#[derive(Default)]
 pub struct ReporterSet {
   reporters: Vec<Box<dyn Reporter>>,
 }
 
-impl Default for ReporterSet {
-  fn default() -> Self {
-    Self { reporters: Vec::new() }
-  }
-}
-
 impl ReporterSet {
+  #[must_use]
   pub fn new(reporters: Vec<Box<dyn Reporter>>) -> Self {
     Self { reporters }
   }
 
+  #[must_use]
   pub fn is_empty(&self) -> bool {
     self.reporters.is_empty()
   }
 
-  /// Append an additional reporter (e.g., NAPI ResultCollector).
+  /// Append an additional reporter (e.g., NAPI `ResultCollector`).
   pub fn add(&mut self, reporter: Box<dyn Reporter>) {
     self.reporters.push(reporter);
   }
@@ -329,6 +326,7 @@ impl Default for EventBusBuilder {
 }
 
 impl EventBusBuilder {
+  #[must_use]
   pub fn new() -> Self {
     Self {
       subscribers: Vec::new(),
@@ -344,6 +342,7 @@ impl EventBusBuilder {
   }
 
   /// Finalize the bus. No more subscribers can be added after this.
+  #[must_use]
   pub fn build(self) -> EventBus {
     let has_subscribers = !self.subscribers.is_empty();
     EventBus {
@@ -377,6 +376,7 @@ struct EventBusInner {
 }
 
 impl EventBus {
+  #[must_use]
   pub fn has_subscribers(&self) -> bool {
     self.inner.has_subscribers
   }
@@ -387,15 +387,20 @@ impl EventBus {
     if !self.inner.has_subscribers {
       return;
     }
-    let subs = self.inner.subscribers.read().expect("EventBus RwLock poisoned");
-    if subs.is_empty() {
+    // The list is only ever read or cleared whole, so a panic while the
+    // lock was held cannot have left it half-written.
+    let subs = self
+      .inner
+      .subscribers
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some((last, rest)) = subs.split_last() else {
       return;
-    }
-    let last = subs.len() - 1;
-    for sub in &subs[..last] {
+    };
+    for sub in rest {
       let _ = sub.send(event.clone());
     }
-    let _ = subs[last].send(event);
+    let _ = last.send(event);
   }
 
   /// Explicitly close all sender channels.
@@ -404,7 +409,7 @@ impl EventBus {
       .inner
       .subscribers
       .write()
-      .expect("EventBus RwLock poisoned")
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
       .clear();
   }
 }
@@ -423,6 +428,7 @@ pub struct ReporterDriver {
 }
 
 impl ReporterDriver {
+  #[must_use]
   pub fn new(reporters: ReporterSet, subscription: Subscription) -> Self {
     Self {
       reporters,
@@ -495,6 +501,7 @@ pub enum ReporterMode {
 /// `names` is passed separately from `config.reporter` because a caller
 /// may run one set of reporters over a config that declares another
 /// (the test server drives per-request reporters).
+#[must_use]
 pub fn create_reporters_pub(
   names: &[crate::config::ReporterConfig],
   config: &crate::config::TestConfig,
@@ -503,6 +510,7 @@ pub fn create_reporters_pub(
 }
 
 /// [`create_reporters_pub`] for a caller that is not running tests.
+#[must_use]
 pub fn create_reporters_mode(
   names: &[crate::config::ReporterConfig],
   config: &crate::config::TestConfig,
@@ -561,6 +569,123 @@ pub(crate) fn create_reporters(
   build_reporters(names, config, ReporterMode::Test)
 }
 
+/// A built-in reporter that writes to the terminal, or none at all.
+fn console_reporter(
+  entry: &crate::config::ReporterConfig,
+  quiet: bool,
+  report_slow_tests: Option<&ferridriver_config::test::ReportSlowTestsConfig>,
+) -> Option<Box<dyn Reporter>> {
+  let slow = || report_slow_tests.cloned();
+  Some(match entry.name.as_str() {
+    "dot" => Box::new(dot::DotReporter::new().with_slow_tests_config(slow())),
+    "null" | "empty" => Box::new(empty::EmptyReporter),
+    "github" => {
+      // Wraps the terminal reporter so users see human-readable
+      // output AND the CI annotations from a single flag. The
+      // wrapped reporter respects `quiet`.
+      let inner: Box<dyn Reporter> = if quiet {
+        Box::new(empty::EmptyReporter)
+      } else {
+        Box::new(terminal::TerminalReporter::new().with_slow_tests_config(slow()))
+      };
+      let mut reporter = github::GithubReporter::new(inner);
+      if let Some(force) = entry.options.get("enabled").and_then(serde_json::Value::as_bool) {
+        reporter = reporter.with_enabled(force);
+      }
+      Box::new(reporter)
+    },
+    "tap" => Box::new(tap::TapReporter::new(tap::TapStyle::Nested)),
+    "tap-flat" => Box::new(tap::TapReporter::new(tap::TapStyle::Flat)),
+    "teamcity" => Box::new(teamcity::TeamCityReporter::new()),
+    "progress" => Box::new(progress::ProgressReporter::new().with_slow_tests_config(slow())),
+    "usage" => Box::new(bdd::usage::UsageReporter::new()),
+    _ => return None,
+  })
+}
+
+/// A built-in reporter that writes a document or a stream to a file.
+fn document_reporter(
+  entry: &crate::config::ReporterConfig,
+  config: &crate::config::TestConfig,
+) -> Option<Box<dyn Reporter>> {
+  let output_dir = config.output_dir.as_path();
+  let opts = &entry.options;
+  let out = |default_name: &str| base::resolve_output_file(&entry.name, opts, output_dir, default_name);
+  Some(match entry.name.as_str() {
+    "json" => Box::new(json::JsonReporter::new(out("results.json")).with_config(config)),
+    "junit" => Box::new(
+      junit::JUnitReporter::new(out("junit.xml"))
+        .with_include_project_in_test_name(base::bool_option(opts, "junit", "includeProjectInTestName"))
+        .with_include_retries(base::bool_option(opts, "junit", "includeRetries"))
+        .with_strip_ansi(base::bool_option(opts, "junit", "stripANSIControlSequences"))
+        .with_omit_tags(base::bool_option(opts, "junit", "omitTags"))
+        .with_suite_id(base::str_option(opts, "suiteId").unwrap_or_default())
+        .with_suite_name(base::str_option(opts, "suiteName").unwrap_or_default()),
+    ),
+    "blob" => {
+      // `path` is the historical option name; `outputFile` is the one
+      // every other file reporter takes. A shard writes its own file,
+      // so shards collected into one directory do not overwrite each
+      // other.
+      let shard = shard_option(opts);
+      let default_name = shard.map_or_else(
+        || "report.zip".to_string(),
+        |(current, _)| format!("report-{current}.zip"),
+      );
+      let path = base::str_option(opts, "path").map_or_else(|| out(&default_name), std::path::PathBuf::from);
+      let mut reporter = blob::BlobReporter::new(path);
+      if let Some((current, total)) = shard {
+        reporter = reporter.with_shard(current, total);
+      }
+      Box::new(reporter)
+    },
+    "stream" => {
+      let target = std::env::var("FERRIDRIVER_STREAM_OUTPUT_FILE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| base::str_option(opts, "outputFile"))
+        .or_else(|| base::str_option(opts, "output_file"))
+        .unwrap_or_default();
+      let mut reporter = stream::StreamReporter::new(stream::StreamTarget::parse(&target), output_dir);
+      if let Some((current, total)) = shard_option(opts) {
+        reporter = reporter.with_shard(current, total);
+      }
+      Box::new(reporter)
+    },
+    "html" => {
+      let mut reporter =
+        html::HtmlReporter::new(out("report.html")).with_merge_files(base::bool_option(opts, "html", "mergeFiles"));
+      if let Some(open) = base::str_option(opts, "open") {
+        reporter = reporter.with_open_mode(html::OpenMode::parse(&open));
+      }
+      Box::new(reporter)
+    },
+    "ctrf" => Box::new(ctrf::CtrfReporter::new(out("ctrf-report.json"))),
+    "markdown" => Box::new(markdown::MarkdownReporter::new(out("report.md"))),
+    "perfetto" => Box::new(
+      perfetto::PerfettoReporter::new(out("perfetto.json")).with_root_dir(config.test_dir.as_deref().unwrap_or(".")),
+    ),
+    "allure" => {
+      let dir = base::str_option(opts, "output_dir")
+        .or_else(|| base::str_option(opts, "outputDir"))
+        .map_or_else(|| output_dir.join("allure-results"), std::path::PathBuf::from);
+      let mut reporter = allure::AllureReporter::new(dir);
+      if let Some(title) = base::str_option(opts, "suite_title").or_else(|| base::str_option(opts, "suiteTitle")) {
+        reporter = reporter.with_suite_title(title);
+      }
+      Box::new(reporter)
+    },
+    "rerun" => Box::new(rerun::RerunReporter::new(out("@rerun.txt"))),
+    "cucumber-json" | "cucumber" => {
+      Box::new(bdd::cucumber_json::CucumberJsonReporter::new(out("cucumber.json")).with_options(opts, config))
+    },
+    "messages" | "ndjson" => Box::new(bdd::messages::CucumberMessagesReporter::new(out(
+      "cucumber-messages.ndjson",
+    ))),
+    _ => return None,
+  })
+}
+
 fn build_reporters(
   names: &[crate::config::ReporterConfig],
   config: &crate::config::TestConfig,
@@ -578,8 +703,6 @@ fn build_reporters(
   let mut has_terminal = false;
 
   for entry in names {
-    let opts = &entry.options;
-    let out = |default_name: &str| base::resolve_output_file(&entry.name, opts, output_dir, default_name);
     match entry.name.as_str() {
       // Terminal reporter handles both E2E and BDD — detects BDD by step metadata.
       "terminal" | "list" | "bdd" | "default" | "" => {
@@ -597,134 +720,6 @@ fn build_reporters(
           ));
         }
       },
-      "json" => {
-        reporters.push(Box::new(
-          json::JsonReporter::new(out("results.json")).with_config(config),
-        ));
-      },
-      "junit" => {
-        reporters.push(Box::new(
-          junit::JUnitReporter::new(out("junit.xml"))
-            .with_include_project_in_test_name(base::bool_option(opts, "junit", "includeProjectInTestName"))
-            .with_include_retries(base::bool_option(opts, "junit", "includeRetries"))
-            .with_strip_ansi(base::bool_option(opts, "junit", "stripANSIControlSequences"))
-            .with_omit_tags(base::bool_option(opts, "junit", "omitTags"))
-            .with_suite_id(base::str_option(opts, "suiteId").unwrap_or_default())
-            .with_suite_name(base::str_option(opts, "suiteName").unwrap_or_default()),
-        ));
-      },
-      "dot" => {
-        reporters.push(Box::new(
-          dot::DotReporter::new().with_slow_tests_config(report_slow_tests.clone()),
-        ));
-      },
-      "null" | "empty" => {
-        reporters.push(Box::new(empty::EmptyReporter));
-      },
-      "blob" => {
-        // `path` is the historical option name; `outputFile` is the one
-        // every other file reporter takes. A shard writes its own file,
-        // so shards collected into one directory do not overwrite each
-        // other.
-        let shard = shard_option(opts);
-        let default_name = shard.map_or_else(
-          || "report.zip".to_string(),
-          |(current, _)| format!("report-{current}.zip"),
-        );
-        let path = base::str_option(opts, "path")
-          .map(std::path::PathBuf::from)
-          .unwrap_or_else(|| out(&default_name));
-        let mut reporter = blob::BlobReporter::new(path);
-        if let Some((current, total)) = shard {
-          reporter = reporter.with_shard(current, total);
-        }
-        reporters.push(Box::new(reporter));
-      },
-      "stream" => {
-        let target = std::env::var("FERRIDRIVER_STREAM_OUTPUT_FILE")
-          .ok()
-          .filter(|v| !v.is_empty())
-          .or_else(|| base::str_option(opts, "outputFile"))
-          .or_else(|| base::str_option(opts, "output_file"))
-          .unwrap_or_default();
-        let mut reporter = stream::StreamReporter::new(stream::StreamTarget::parse(&target), output_dir);
-        if let Some((current, total)) = shard_option(opts) {
-          reporter = reporter.with_shard(current, total);
-        }
-        reporters.push(Box::new(reporter));
-      },
-      "github" => {
-        // Wraps the terminal reporter so users see human-readable
-        // output AND the CI annotations from a single flag. The
-        // wrapped reporter respects `quiet`.
-        let inner: Box<dyn Reporter> = if quiet {
-          Box::new(empty::EmptyReporter)
-        } else {
-          Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone()))
-        };
-        let mut reporter = github::GithubReporter::new(inner);
-        if let Some(force) = opts.get("enabled").and_then(serde_json::Value::as_bool) {
-          reporter = reporter.with_enabled(force);
-        }
-        reporters.push(Box::new(reporter));
-      },
-
-      // ── Shared reporters (same for both modes) ──
-      "html" => {
-        let mut reporter =
-          html::HtmlReporter::new(out("report.html")).with_merge_files(base::bool_option(opts, "html", "mergeFiles"));
-        if let Some(open) = base::str_option(opts, "open") {
-          reporter = reporter.with_open_mode(html::OpenMode::parse(&open));
-        }
-        reporters.push(Box::new(reporter));
-      },
-      "tap" => {
-        reporters.push(Box::new(tap::TapReporter::new(tap::TapStyle::Nested)));
-      },
-      "tap-flat" => {
-        reporters.push(Box::new(tap::TapReporter::new(tap::TapStyle::Flat)));
-      },
-      "teamcity" => {
-        reporters.push(Box::new(teamcity::TeamCityReporter::new()));
-      },
-      "ctrf" => {
-        reporters.push(Box::new(ctrf::CtrfReporter::new(out("ctrf-report.json"))));
-      },
-      "markdown" => {
-        reporters.push(Box::new(markdown::MarkdownReporter::new(out("report.md"))));
-      },
-      "perfetto" => {
-        reporters.push(Box::new(
-          perfetto::PerfettoReporter::new(out("perfetto.json"))
-            .with_root_dir(config.test_dir.as_deref().unwrap_or(".")),
-        ));
-      },
-      "allure" => {
-        let dir = base::str_option(opts, "output_dir")
-          .or_else(|| base::str_option(opts, "outputDir"))
-          .map(std::path::PathBuf::from)
-          .unwrap_or_else(|| output_dir.join("allure-results"));
-        let mut reporter = allure::AllureReporter::new(dir);
-        if let Some(title) = base::str_option(opts, "suite_title").or_else(|| base::str_option(opts, "suiteTitle")) {
-          reporter = reporter.with_suite_title(title);
-        }
-        reporters.push(Box::new(reporter));
-      },
-      "progress" => {
-        reporters.push(Box::new(
-          progress::ProgressReporter::new().with_slow_tests_config(report_slow_tests.clone()),
-        ));
-      },
-      "rerun" => {
-        reporters.push(Box::new(rerun::RerunReporter::new(out("@rerun.txt"))));
-      },
-
-      // ── BDD-specific reporters (usable in any mode) ──
-      "cucumber-json" | "cucumber" => {
-        reporters.push(Box::new(
-          bdd::cucumber_json::CucumberJsonReporter::new(out("cucumber.json")).with_options(opts, config),
-        ));
-      },
       // Named rather than swallowed by the unknown-reporter warning:
       // the document is the same one, and the HTML is produced from it
       // by the tool that owns the format.
@@ -735,17 +730,11 @@ fn build_reporters(
            reads exactly that file"
         );
       },
-      "messages" | "ndjson" => {
-        reporters.push(Box::new(bdd::messages::CucumberMessagesReporter::new(out(
-          "cucumber-messages.ndjson",
-        ))));
-      },
-      "usage" => {
-        reporters.push(Box::new(bdd::usage::UsageReporter::new()));
-      },
-
       other => {
-        if let Some(reporter) = factory.as_ref().and_then(|f| f.create(entry, config)) {
+        if let Some(reporter) = console_reporter(entry, quiet, report_slow_tests.as_ref())
+          .or_else(|| document_reporter(entry, config))
+          .or_else(|| factory.as_ref().and_then(|f| f.create(entry, config)))
+        {
           reporters.push(reporter);
         } else {
           tracing::warn!(
@@ -765,9 +754,9 @@ fn build_reporters(
     // CI, dot on it, and FIRST — a reporter that stalls in `onEnd`
     // must not be able to swallow the output.
     let fallback: Box<dyn Reporter> = if std::env::var_os("CI").is_some() {
-      Box::new(dot::DotReporter::new().with_slow_tests_config(report_slow_tests.clone()))
+      Box::new(dot::DotReporter::new().with_slow_tests_config(report_slow_tests))
     } else {
-      Box::new(line::LineReporter::new().with_slow_tests_config(report_slow_tests.clone()))
+      Box::new(line::LineReporter::new().with_slow_tests_config(report_slow_tests))
     };
     reporters.insert(0, fallback);
   }

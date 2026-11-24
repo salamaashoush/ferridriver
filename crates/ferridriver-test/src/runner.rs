@@ -143,8 +143,11 @@ pub struct ProjectStream {
 #[derive(Default)]
 pub struct ProjectHooks<'a> {
   pub stream: Option<&'a (dyn Fn(&str) -> ProjectStream + Send + Sync)>,
-  pub narrow: Option<&'a (dyn Fn(&str, &mut TestPlan) + Send + Sync)>,
+  pub narrow: Option<&'a PlanNarrower>,
 }
+
+/// Narrows a named project's plan in place.
+pub type PlanNarrower = dyn Fn(&str, &mut TestPlan) + Send + Sync;
 
 /// Aggregate outcome of one `execute()` pass. The multi-project orchestrator
 /// sums these across concurrently-run projects to emit a single `RunFinished`.
@@ -292,14 +295,23 @@ impl RunStop {
   }
 }
 
+fn announce_ui_url(url: &str) -> std::io::Result<()> {
+  use std::io::Write as _;
+  let mut out = std::io::stdout().lock();
+  writeln!(out, "\n  ferridriver UI mode\n\n  {url}\n")?;
+  out.flush()
+}
+
 impl TestRunner {
   /// Build a runner with no programmatic suite hooks. For runners that need
   /// `before_all` / `after_all` closures, use [`TestRunner::with_hooks`].
+  #[must_use]
   pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
     Self::with_hooks(config, TestHooks::default(), overrides)
   }
 
   /// Build a runner with programmatic suite hooks supplied at construction.
+  #[must_use]
   pub fn with_hooks(config: TestConfig, hooks: TestHooks, overrides: CliOverrides) -> Self {
     let reporters = crate::reporter::create_reporters(&config.reporter, &config);
     Self {
@@ -397,11 +409,12 @@ impl TestRunner {
 
   /// Handle for cancelling an in-flight `execute` cooperatively (see
   /// [`RunStop`]).
+  #[must_use]
   pub fn stop_handle(&self) -> RunStop {
     self.run_stop.clone()
   }
 
-  /// Append an additional reporter after construction (e.g., NAPI ResultCollector).
+  /// Append an additional reporter after construction (e.g., NAPI `ResultCollector`).
   pub fn add_reporter(&mut self, reporter: Box<dyn crate::reporter::Reporter>) {
     self.reporters.add(reporter);
   }
@@ -524,18 +537,14 @@ impl TestRunner {
     }
   }
 
-  /// Export the configured `baseUrl` as `FERRIDRIVER_BASE_URL` so
+  /// Publish the configured `baseUrl` through
+  /// [`crate::config::run_base_url`] so
   /// URL-resolving consumers outside the config path (BDD step
   /// definitions) see it. When no `baseUrl` is configured, the
   /// webServer startup path exports the first server's URL instead.
-  fn export_base_url_env(&self) {
+  fn publish_base_url(&self) {
     if let Some(url) = &self.config.base_url {
-      // SAFETY: called from the single-threaded run entry points before
-      // any worker threads spawn.
-      #[allow(unsafe_code)]
-      unsafe {
-        std::env::set_var("FERRIDRIVER_BASE_URL", url);
-      }
+      crate::config::publish_run_base_url(url);
     }
   }
 
@@ -566,7 +575,7 @@ impl TestRunner {
       ferridriver_config::test::StableCheck::Playwright => ferridriver::actions::StableCheck::Playwright,
       ferridriver_config::test::StableCheck::Frame => ferridriver::actions::StableCheck::Frame,
     });
-    self.export_base_url_env();
+    self.publish_base_url();
     // A fresh run numbers its workers from zero again (watch and UI
     // sessions run many).
     self.worker_ids.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -738,176 +747,47 @@ impl TestRunner {
         };
       },
     };
-
-    // Pre-compute each scheduled project's prerequisites and whether it is a
-    // teardown. The ready-set scheduler spawns a project once all its
-    // prerequisites have reached a terminal state.
-    //
-    // - A normal project requires every `dependencies` entry to have PASSED.
-    //   If any dependency failed/was skipped, the project is itself skipped.
-    // - A teardown project (referenced by another project's `teardown` field)
-    //   requires only that its declaring parent reached a terminal state — it
-    //   runs even if the parent failed (Playwright teardown semantics).
-    // - The CLI-supplied teardown requires every other selected project to be
-    //   terminal.
-    let teardown_parent: FxHashMap<usize, usize> = projects
-      .iter()
-      .enumerate()
-      .filter_map(|(parent_idx, p)| {
-        p.teardown
-          .as_deref()
-          .and_then(|name| projects.iter().position(|q| q.name == name))
-          .map(|td_idx| (td_idx, parent_idx))
-      })
-      .collect();
-
-    // Prerequisites by index: (prereq_idx, must_pass).
-    let prereqs: FxHashMap<usize, Vec<(usize, bool)>> = scheduled
-      .iter()
-      .map(|&idx| {
-        let mut reqs: Vec<(usize, bool)> = Vec::new();
-        // Normal dependencies must pass.
-        for dep_name in &projects[idx].dependencies {
-          if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name)
-            && scheduled.contains(&dep_idx)
-          {
-            reqs.push((dep_idx, true));
-          }
-        }
-        // Teardown parent must merely be terminal.
-        if let Some(&parent_idx) = teardown_parent.get(&idx)
-          && scheduled.contains(&parent_idx)
-        {
-          reqs.push((parent_idx, false));
-        }
-        // CLI-supplied teardown waits on every other scheduled project.
-        if Some(idx) == cli_teardown_idx {
-          for &other in &scheduled {
-            if other != idx {
-              reqs.push((other, false));
-            }
-          }
-        }
-        (idx, reqs)
-      })
-      .collect();
+    let prereqs = project_prerequisites(&projects, &scheduled, cli_teardown_idx);
 
     // ── Hoist web servers out of per-project execute ──
     // `merge_project` copies the top-level `web_server` list onto every
     // project; starting/stopping the same servers per project would bind the
     // same ports concurrently. Start them once here and clear the per-project
     // copies so each project's `execute()` skips its web-server lifecycle.
-    let web_server_manager = if self.config.web_server.is_empty() {
-      None
-    } else {
-      match crate::server::WebServerManager::start(&self.config.web_server).await {
-        Ok(mgr) => {
-          if let Some(url) = mgr.first_url()
-            && self.config.base_url.is_none()
-          {
-            // SAFETY: set once here before any worker threads spawn.
-            #[allow(unsafe_code)]
-            unsafe {
-              std::env::set_var("FERRIDRIVER_BASE_URL", &url)
-            };
-            tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
-          }
-          Some(mgr)
-        },
-        Err(e) => {
-          tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
-          bus.emit(ReporterEvent::RunError {
-            error: Box::new(crate::model::TestFailure::msg(format!("webServer start failed: {e}"))),
-          });
-          bus.emit(ReporterEvent::RunFinished {
-            total: 0,
-            passed: 0,
-            failed: 0,
-            skipped: 0,
-            flaky: 0,
-            duration: std::time::Duration::ZERO,
-            status: crate::reporter::RunStatus::Failed,
-          });
-          return ExecuteSummary {
-            exit_code: exit::INFRASTRUCTURE,
-            ..Default::default()
-          };
-        },
-      }
+    let web_server_manager = match self.start_shared_web_servers(&bus).await {
+      Ok(manager) => manager,
+      Err(summary) => return summary,
     };
 
-    // Build each project's merged config + filtered plan up front so we can
-    // both report an accurate aggregate total and reuse them when spawning.
-    let mut merged: FxHashMap<usize, Arc<TestConfig>> = FxHashMap::default();
-    let mut plans: FxHashMap<usize, TestPlan> = FxHashMap::default();
-    let mut total_tests = 0usize;
-    // A project others depend on runs whole, and only when one of them
-    // has tests (see `dependents_of`); dependents are planned first.
-    let dependents = dependents_of(&projects, &scheduled);
-    let exempt_overrides = without_file_filters(&self.overrides);
-    let exempt_runner = self.with_run_options(Arc::clone(&self.config), exempt_overrides.clone());
-    let mut exempt: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
-    for &idx in scheduled.iter().rev() {
-      let mut mc = self.config.merge_project(&projects[idx]);
-      mc.web_server = Vec::new();
-      let mut p = self
-        .project_plans
-        .get(&projects[idx].name)
-        .map_or_else(|| plan.clone(), |own| (*own).clone());
-      filter_plan_for_project(&mut p, &mc, &projects[idx]);
-      let needed_by = dependents.get(&idx).map_or(&[][..], Vec::as_slice);
-      let filters = if needed_by.is_empty() {
-        self
-      } else {
-        exempt.insert(idx);
-        &exempt_runner
-      };
-      if let Err(message) = filters.apply_run_filters(&mut p, &projects[idx].name) {
+    let (planning, mut plans) = match self.plan_projects(&plan, &projects, &scheduled, &hooks) {
+      Ok(planned) => planned,
+      Err(message) => {
         eprintln!("Error: {message}");
         return ExecuteSummary {
           exit_code: exit::USAGE,
           ..Default::default()
         };
-      }
-      if !needed_by.is_empty()
-        && needed_by
-          .iter()
-          .all(|other| plans.get(other).is_none_or(|plan| plan.total_tests == 0))
-      {
-        p.suites.clear();
-        p.total_tests = 0;
-      }
-      p.expand_repetitions(mc.repeat_each);
-      if let Some(narrow) = hooks.narrow {
-        narrow(&projects[idx].name, &mut p);
-      }
-      total_tests += p.total_tests;
-      merged.insert(idx, Arc::new(mc));
-      plans.insert(idx, p);
-    }
-
-    let output_dirs: std::collections::BTreeSet<_> = merged
-      .values()
-      .filter(|config| config.preserve_output == "never")
-      .map(|config| &config.output_dir)
-      .collect();
-    for output_dir in output_dirs {
-      let _ = std::fs::remove_dir_all(output_dir);
-    }
+      },
+    };
+    let total_tests = planning.total_tests;
 
     // ── Single aggregate run boundary ──
     let reporting_enabled = bus.has_subscribers();
 
     // `workers` is the global concurrency budget; never launch more workers
     // than tests across all projects in flight.
-    let num_workers = (self.config.worker_count() as usize).min(total_tests.max(1)).max(1) as u32;
+    let num_workers = self
+      .config
+      .worker_count()
+      .min(u32::try_from(total_tests).unwrap_or(u32::MAX))
+      .max(1);
     if reporting_enabled {
       let project_plans: Vec<crate::reporter::api::ProjectPlan<'_>> = scheduled
         .iter()
         .filter_map(|idx| {
           Some(crate::reporter::api::ProjectPlan {
             name: projects[*idx].name.as_str(),
-            config: merged.get(idx)?.as_ref(),
+            config: planning.merged.get(idx)?.as_ref(),
             project: Some(&projects[*idx]),
             plan: plans.get(idx)?,
           })
@@ -923,214 +803,18 @@ impl TestRunner {
     }
     let run_start = Instant::now();
 
-    // ── Ready-set scheduler ──
-    // `max_parallel_projects == 0` means unbounded (cap at the number of
-    // scheduled projects). Spawn every dependency-ready project up to the cap,
-    // drive completions via a JoinSet, and re-evaluate readiness on each
-    // completion. Dependency ordering, teardown ordering, and dep-failure
-    // skipping are all preserved by the prerequisite model above.
-    let cap = if self.config.max_parallel_projects == 0 {
-      scheduled.len().max(1)
-    } else {
-      self.config.max_parallel_projects as usize
-    };
-
-    let mut passed_projects: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
-    let mut terminal: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
-    let mut remaining: Vec<usize> = scheduled.clone();
-    let mut join_set: tokio::task::JoinSet<(usize, Option<ExecuteSummary>)> = tokio::task::JoinSet::new();
-    let mut in_flight = 0usize;
-    // Every project running draws its workers from these, the one with
-    // the longest critical path first: its own expected work, and the
-    // work of the projects that wait for it to finish.
-    let worker_slots = crate::dispatcher::RunSlots::new(num_workers);
-    let timings = Arc::new(crate::timings::Timings::load(&crate::identity::root(&self.config)));
-    let cap_of = |idx: usize| {
-      merged
-        .get(&idx)
-        .map_or_else(|| self.config.worker_count(), |config| config.worker_count())
-        .clamp(1, num_workers)
-    };
-    let mut planned: FxHashMap<usize, Vec<u64>> = plans
-      .iter()
-      .map(|(&idx, plan)| {
-        let name = projects[idx].name.as_str();
-        let tests = plan.suites.iter().flat_map(|suite| &suite.tests);
-        (idx, tests.map(|test| timings.expected([test], name)).collect())
-      })
-      .collect();
-    let after = work_waiting_on(&projects, &scheduled, |idx| {
-      planned
-        .get(&idx)
-        .map_or(0, |work| work.iter().sum::<u64>() / u64::from(cap_of(idx)))
-    });
-    let mut rosters: FxHashMap<usize, Arc<crate::dispatcher::WorkerRoster>> = FxHashMap::default();
-
-    let mut exit_code = 0i32;
-    let mut agg = ExecuteSummary::default();
-
-    loop {
-      // Launch every ready project up to the parallelism cap. Skips (no tests
-      // or dependency failed) resolve immediately and may unblock others, so
-      // keep scanning until no further progress is possible this round.
-      // A stop (a signal, the UI's Stop) lets running projects finish their
-      // current tests and starts nothing new.
-      while in_flight < cap && !self.run_stop.is_requested() {
-        // Find a not-yet-started project whose prerequisites are all terminal.
-        let next = remaining.iter().copied().find(|&idx| {
-          prereqs
-            .get(&idx)
-            .map(|rs| rs.iter().all(|(dep, _)| terminal.contains(dep)))
-            .unwrap_or(true)
-        });
-        let Some(idx) = next else { break };
-        remaining.retain(|&i| i != idx);
-
-        // Skip a normal project whose passing-required prerequisites did not
-        // pass (dependency failure). Teardowns are never skipped this way.
-        let blocked = prereqs
-          .get(&idx)
-          .map(|rs| {
-            rs.iter()
-              .any(|&(dep, must_pass)| must_pass && !passed_projects.contains(&dep))
-          })
-          .unwrap_or(false);
-        if blocked {
-          tracing::warn!(
-            target: "ferridriver::runner",
-            project = projects[idx].name,
-            "skipping — dependency failed",
-          );
-          terminal.insert(idx);
-          exit_code = exit::worst(exit_code, exit::FAILED);
-          continue;
-        }
-
-        let Some(project_plan) = plans.remove(&idx) else {
-          terminal.insert(idx);
-          passed_projects.insert(idx);
-          continue;
-        };
-        if project_plan.total_tests == 0 {
-          tracing::debug!(
-            target: "ferridriver::runner",
-            project = projects[idx].name,
-            "no tests matched, skipping",
-          );
-          terminal.insert(idx);
-          passed_projects.insert(idx);
-          continue;
-        }
-
-        tracing::info!(
-          target: "ferridriver::runner",
-          project = projects[idx].name,
-          tests = project_plan.total_tests,
-          "running project",
-        );
-
-        let mut project_config = merged
-          .get(&idx)
-          .map_or_else(|| (*self.config).clone(), |c| (**c).clone());
-        // A project's `workers` caps how many of the run's slots it holds
-        // at once, as in Playwright; which ones it gets is decided test by
-        // test, not up front.
-        project_config.workers = Some(
-          project_config
-            .worker_count()
-            .max(1)
-            .min(num_workers)
-            .min(u32::try_from(project_plan.total_tests).unwrap_or(u32::MAX)),
-        );
-        let overrides = if exempt.contains(&idx) {
-          exempt_overrides.clone()
-        } else {
-          self.overrides.clone()
-        };
-        let mut sub_runner = self.with_run_options(Arc::new(project_config), overrides);
-        sub_runner.suppress_run_boundary = true;
-        sub_runner.run_slots = Some(Arc::clone(&worker_slots));
-        let roster = crate::dispatcher::WorkerRoster::planned(
-          cap_of(idx).min(sub_runner.config.worker_count()) as usize,
-          num_workers as usize,
-          after.get(&idx).copied().unwrap_or_default(),
-          planned.remove(&idx).unwrap_or_default(),
-        );
-        worker_slots.starting(&roster);
-        rosters.insert(idx, Arc::clone(&roster));
-        sub_runner.project_roster = Some(roster);
-        sub_runner.timings = Some(Arc::clone(&timings));
-        let (project_bus, drains) = match hooks.stream {
-          Some(stream) => {
-            let stream = stream(&projects[idx].name);
-            (stream.bus, stream.drains)
-          },
-          None => (bus.clone(), Vec::new()),
-        };
-        let owns_bus = hooks.stream.is_some();
-        join_set.spawn(async move {
-          let summary = sub_runner.execute_with_summary(project_plan, project_bus.clone()).await;
-          // A bus of this project's own is this project's to close: its
-          // drains must finish before the caller calls the run over.
-          if owns_bus {
-            project_bus.close();
-            for drain in drains {
-              let _ = drain.await;
-            }
-          }
-          (idx, Some(summary))
-        });
-        in_flight += 1;
-      }
-
-      // Nothing running and nothing launchable — done (or a cycle the topo
-      // sort already rejected, so `remaining` is unreachable prereqs).
-      if in_flight == 0 {
-        break;
-      }
-
-      // Await the next completion, then loop to launch newly-ready projects.
-      if let Some(joined) = join_set.join_next().await {
-        in_flight -= 1;
-        match joined {
-          Ok((idx, Some(summary))) => {
-            if let Some(roster) = rosters.get(&idx) {
-              worker_slots.started(roster);
-            }
-            terminal.insert(idx);
-            if summary.exit_code == exit::PASSED {
-              passed_projects.insert(idx);
-            } else {
-              exit_code = exit::worst(exit_code, summary.exit_code);
-            }
-            agg.passed += summary.passed;
-            agg.failed += summary.failed;
-            agg.skipped += summary.skipped;
-            agg.flaky += summary.flaky;
-          },
-          Ok((idx, None)) => {
-            if let Some(roster) = rosters.get(&idx) {
-              worker_slots.started(roster);
-            }
-            terminal.insert(idx);
-            exit_code = exit::worst(exit_code, exit::FAILED);
-          },
-          Err(e) => {
-            tracing::error!(target: "ferridriver::runner", "project task panicked: {e}");
-            // Which project it was is gone with it; none may hold slots
-            // back for a start that will not come.
-            for roster in rosters.values() {
-              worker_slots.started(roster);
-            }
-            exit_code = exit::worst(exit_code, exit::INFRASTRUCTURE);
-          },
-        }
-      }
-    }
-
-    if let Err(error) = timings.save() {
-      tracing::warn!(target: "ferridriver::runner", "could not keep test durations: {error}");
-    }
+    let mut agg = Box::pin(self.schedule_projects(
+      ProjectRunContext {
+        projects: &projects,
+        planning: &planning,
+        num_workers,
+        hooks: &hooks,
+        bus: &bus,
+      },
+      &mut plans,
+      ProjectSchedule::new(prereqs, scheduled),
+    ))
+    .await;
 
     // ── Single aggregate RunFinished ──
     if reporting_enabled {
@@ -1159,11 +843,300 @@ impl TestRunner {
     crate::artifacts::sweep(&self.config.output_dir);
 
     if self.run_stop.is_requested() {
-      exit_code = exit::worst(exit_code, exit::INTERRUPTED);
+      agg.exit_code = exit::worst(agg.exit_code, exit::INTERRUPTED);
     }
-    agg.exit_code = exit_code;
     agg.total = total_tests;
     agg
+  }
+
+  /// The ready-set scheduler: spawn every dependency-ready project up to
+  /// the parallelism cap, drive completions through a `JoinSet`, and
+  /// re-evaluate readiness on each completion. Dependency ordering,
+  /// teardown ordering and dependency-failure skipping all follow from
+  /// the prerequisites in `schedule`.
+  async fn schedule_projects(
+    &self,
+    cx: ProjectRunContext<'_>,
+    plans: &mut FxHashMap<usize, TestPlan>,
+    mut schedule: ProjectSchedule,
+  ) -> ExecuteSummary {
+    // `max_parallel_projects == 0` means unbounded (cap at the number of
+    // scheduled projects).
+    let cap = if self.config.max_parallel_projects == 0 {
+      schedule.remaining.len().max(1)
+    } else {
+      self.config.max_parallel_projects as usize
+    };
+    let mut join_set: tokio::task::JoinSet<(usize, Option<ExecuteSummary>)> = tokio::task::JoinSet::new();
+    let mut in_flight = 0usize;
+    // Every project running draws its workers from these, the one with
+    // the longest critical path first: its own expected work, and the
+    // work of the projects that wait for it to finish.
+    let worker_slots = crate::dispatcher::RunSlots::new(cx.num_workers);
+    let timings = Arc::new(crate::timings::Timings::load(&crate::identity::root(&self.config)));
+    let mut planned: FxHashMap<usize, Vec<u64>> = plans
+      .iter()
+      .map(|(&idx, plan)| {
+        let name = cx.projects[idx].name.as_str();
+        let tests = plan.suites.iter().flat_map(|suite| &suite.tests);
+        (idx, tests.map(|test| timings.expected([test], name)).collect())
+      })
+      .collect();
+    let after = work_waiting_on(cx.projects, &schedule.remaining, |idx| {
+      planned.get(&idx).map_or(0, |work| {
+        work.iter().sum::<u64>() / u64::from(self.project_cap(&cx, idx))
+      })
+    });
+    let mut rosters: FxHashMap<usize, Arc<crate::dispatcher::WorkerRoster>> = FxHashMap::default();
+
+    loop {
+      // Launch every ready project up to the parallelism cap. Skips (no tests
+      // or dependency failed) resolve immediately and may unblock others, so
+      // keep scanning until no further progress is possible this round.
+      // A stop (a signal, the UI's Stop) lets running projects finish their
+      // current tests and starts nothing new.
+      while in_flight < cap && !self.run_stop.is_requested() {
+        let Some(idx) = schedule.next_ready() else { break };
+        let name = cx.projects[idx].name.as_str();
+
+        // Skip a normal project whose passing-required prerequisites did not
+        // pass (dependency failure). Teardowns are never skipped this way.
+        if schedule.is_blocked(idx) {
+          tracing::warn!(target: "ferridriver::runner", project = name, "skipping — dependency failed");
+          schedule.terminal.insert(idx);
+          schedule.exit_code = exit::worst(schedule.exit_code, exit::FAILED);
+          continue;
+        }
+
+        let Some(project_plan) = plans.remove(&idx).filter(|plan| plan.total_tests > 0) else {
+          tracing::debug!(target: "ferridriver::runner", project = name, "no tests matched, skipping");
+          schedule.terminal.insert(idx);
+          schedule.passed.insert(idx);
+          continue;
+        };
+
+        tracing::info!(
+          target: "ferridriver::runner",
+          project = name,
+          tests = project_plan.total_tests,
+          "running project",
+        );
+
+        let mut sub_runner = self.project_runner(&cx, idx, project_plan.total_tests);
+        let roster = crate::dispatcher::WorkerRoster::planned(
+          self.project_cap(&cx, idx).min(sub_runner.config.worker_count()) as usize,
+          cx.num_workers as usize,
+          after.get(&idx).copied().unwrap_or_default(),
+          planned.remove(&idx).unwrap_or_default(),
+        );
+        worker_slots.starting(&roster);
+        rosters.insert(idx, Arc::clone(&roster));
+        sub_runner.run_slots = Some(Arc::clone(&worker_slots));
+        sub_runner.project_roster = Some(roster);
+        sub_runner.timings = Some(Arc::clone(&timings));
+        let (project_bus, drains) = match cx.hooks.stream {
+          Some(stream) => {
+            let stream = stream(name);
+            (stream.bus, stream.drains)
+          },
+          None => (cx.bus.clone(), Vec::new()),
+        };
+        let owns_bus = cx.hooks.stream.is_some();
+        join_set.spawn(async move {
+          let summary = sub_runner.execute_with_summary(project_plan, project_bus.clone()).await;
+          // A bus of this project's own is this project's to close: its
+          // drains must finish before the caller calls the run over.
+          if owns_bus {
+            project_bus.close();
+            for drain in drains {
+              let _ = drain.await;
+            }
+          }
+          (idx, Some(summary))
+        });
+        in_flight += 1;
+      }
+
+      // Nothing running and nothing launchable — done (or a cycle the topo
+      // sort already rejected, so `remaining` is unreachable prereqs).
+      if in_flight == 0 {
+        break;
+      }
+
+      // Await the next completion, then loop to launch newly-ready projects.
+      if let Some(joined) = join_set.join_next().await {
+        in_flight -= 1;
+        schedule.finished(joined, &rosters, &worker_slots);
+      }
+    }
+
+    if let Err(error) = timings.save() {
+      tracing::warn!(target: "ferridriver::runner", "could not keep test durations: {error}");
+    }
+    let mut agg = schedule.agg;
+    agg.exit_code = schedule.exit_code;
+    agg
+  }
+
+  /// How many of the run's worker slots project `idx` may hold at once.
+  fn project_cap(&self, cx: &ProjectRunContext<'_>, idx: usize) -> u32 {
+    cx.planning
+      .merged
+      .get(&idx)
+      .map_or_else(|| self.config.worker_count(), |config| config.worker_count())
+      .clamp(1, cx.num_workers)
+  }
+
+  /// The runner one project runs on: its merged config, its overrides,
+  /// and no run boundary of its own.
+  fn project_runner(&self, cx: &ProjectRunContext<'_>, idx: usize, total_tests: usize) -> Self {
+    let mut project_config = cx
+      .planning
+      .merged
+      .get(&idx)
+      .map_or_else(|| (*self.config).clone(), |c| (**c).clone());
+    // A project's `workers` caps how many of the run's slots it holds
+    // at once, as in Playwright; which ones it gets is decided test by
+    // test, not up front.
+    project_config.workers = Some(
+      project_config
+        .worker_count()
+        .max(1)
+        .min(cx.num_workers)
+        .min(u32::try_from(total_tests).unwrap_or(u32::MAX)),
+    );
+    let overrides = if cx.planning.exempt.contains(&idx) {
+      cx.planning.exempt_overrides.clone()
+    } else {
+      self.overrides.clone()
+    };
+    let mut sub_runner = self.with_run_options(Arc::new(project_config), overrides);
+    sub_runner.suppress_run_boundary = true;
+    sub_runner
+  }
+
+  /// Start the run's web servers once for every project, publishing the
+  /// first one's URL as the base URL when none is configured.
+  ///
+  /// # Errors
+  ///
+  /// Returns the summary of a run that could not start: the failure is
+  /// reported on `bus` as a run error and an empty finished run.
+  async fn start_shared_web_servers(
+    &self,
+    bus: &EventBus,
+  ) -> Result<Option<crate::server::WebServerManager>, ExecuteSummary> {
+    if self.config.web_server.is_empty() {
+      return Ok(None);
+    }
+    match crate::server::WebServerManager::start(&self.config.web_server).await {
+      Ok(mgr) => {
+        if let Some(url) = mgr.first_url()
+          && self.config.base_url.is_none()
+        {
+          crate::config::publish_run_base_url(&url);
+          tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
+        }
+        Ok(Some(mgr))
+      },
+      Err(e) => {
+        tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
+        bus.emit(ReporterEvent::RunError {
+          error: Box::new(crate::model::TestFailure::msg(format!("webServer start failed: {e}"))),
+        });
+        bus.emit(ReporterEvent::RunFinished {
+          total: 0,
+          passed: 0,
+          failed: 0,
+          skipped: 0,
+          flaky: 0,
+          duration: std::time::Duration::ZERO,
+          status: crate::reporter::RunStatus::Failed,
+        });
+        Err(ExecuteSummary {
+          exit_code: exit::INFRASTRUCTURE,
+          ..Default::default()
+        })
+      },
+    }
+  }
+
+  /// Each scheduled project's merged config and filtered plan, built up
+  /// front so the run can report an accurate aggregate total and reuse
+  /// them when it spawns the projects. The output directories of projects
+  /// that never preserve output are cleared on the way.
+  ///
+  /// # Errors
+  ///
+  /// Returns the message of a run filter that does not apply.
+  fn plan_projects(
+    &self,
+    plan: &TestPlan,
+    projects: &[ProjectConfig],
+    scheduled: &[usize],
+    hooks: &ProjectHooks<'_>,
+  ) -> Result<(ProjectPlanning, FxHashMap<usize, TestPlan>), String> {
+    // Build each project's merged config + filtered plan up front so we can
+    // both report an accurate aggregate total and reuse them when spawning.
+    let mut merged: FxHashMap<usize, Arc<TestConfig>> = FxHashMap::default();
+    let mut plans: FxHashMap<usize, TestPlan> = FxHashMap::default();
+    let mut total_tests = 0usize;
+    // A project others depend on runs whole, and only when one of them
+    // has tests (see `dependents_of`); dependents are planned first.
+    let dependents = dependents_of(projects, scheduled);
+    let exempt_overrides = without_file_filters(&self.overrides);
+    let exempt_runner = self.with_run_options(Arc::clone(&self.config), exempt_overrides.clone());
+    let mut exempt: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+    for &idx in scheduled.iter().rev() {
+      let mut mc = self.config.merge_project(&projects[idx]);
+      mc.web_server = Vec::new();
+      let mut p = self
+        .project_plans
+        .get(&projects[idx].name)
+        .map_or_else(|| plan.clone(), |own| (*own).clone());
+      filter_plan_for_project(&mut p, &mc, &projects[idx]);
+      let needed_by = dependents.get(&idx).map_or(&[][..], Vec::as_slice);
+      let filters = if needed_by.is_empty() {
+        self
+      } else {
+        exempt.insert(idx);
+        &exempt_runner
+      };
+      filters.apply_run_filters(&mut p, &projects[idx].name)?;
+      if !needed_by.is_empty()
+        && needed_by
+          .iter()
+          .all(|other| plans.get(other).is_none_or(|plan| plan.total_tests == 0))
+      {
+        p.suites.clear();
+        p.total_tests = 0;
+      }
+      p.expand_repetitions(mc.repeat_each);
+      if let Some(narrow) = hooks.narrow {
+        narrow(&projects[idx].name, &mut p);
+      }
+      total_tests += p.total_tests;
+      merged.insert(idx, Arc::new(mc));
+      plans.insert(idx, p);
+    }
+
+    let output_dirs: std::collections::BTreeSet<_> = merged
+      .values()
+      .filter(|config| config.preserve_output == "never")
+      .map(|config| &config.output_dir)
+      .collect();
+    for output_dir in output_dirs {
+      let _ = std::fs::remove_dir_all(output_dir);
+    }
+    Ok((
+      ProjectPlanning {
+        merged,
+        total_tests,
+        exempt,
+        exempt_overrides,
+      },
+      plans,
+    ))
   }
 
   /// The projects a multi-project run schedules, in dependency order: the
@@ -1328,9 +1301,12 @@ impl TestRunner {
   /// listing document, and exit without running it.
   fn print_list(&self, plan: &TestPlan) -> i32 {
     match self.list(plan) {
-      Ok(listed) => {
-        crate::listing::print(&listed, &[], self.overrides.list_json);
-        exit::PASSED
+      Ok(listed) => match crate::listing::print(&listed, &[], self.overrides.list_json) {
+        Ok(()) => exit::PASSED,
+        Err(e) => {
+          eprintln!("Error: could not write the listing: {e}");
+          exit::INFRASTRUCTURE
+        },
       },
       Err(message) => {
         eprintln!("Error: {message}");
@@ -1446,46 +1422,8 @@ impl TestRunner {
   #[tracing::instrument(skip_all, fields(workers = self.config.worker_count(), tests = plan.total_tests))]
   pub async fn execute_with_summary(&self, mut plan: TestPlan, event_bus: EventBus) -> ExecuteSummary {
     let project = self.config.name.clone().unwrap_or_default();
-
-    // ── Forbid-only check, before `.only` narrows the plan ──
-    if self.config.forbid_only || self.overrides.forbid_only {
-      let mut candidates = plan.clone();
-      if let Err(message) = self.apply_run_filters(&mut candidates, &project) {
-        eprintln!("Error: {message}");
-        return ExecuteSummary {
-          exit_code: exit::USAGE,
-          ..Default::default()
-        };
-      }
-      if let Err(e) = crate::discovery::check_forbid_only(&candidates) {
-        eprint!("{e}");
-        return ExecuteSummary {
-          exit_code: exit::FAILED,
-          ..Default::default()
-        };
-      }
-    }
-
-    if let Err(message) = self.select_tests(&mut plan, &project) {
-      eprintln!("Error: {message}");
-      return ExecuteSummary {
-        exit_code: exit::USAGE,
-        ..Default::default()
-      };
-    }
-
-    // ── preserve_output: "never" — wipe output_dir at run start ──
-    if self.config.preserve_output == "never" && !self.suppress_run_boundary {
-      let _ = std::fs::remove_dir_all(&self.config.output_dir);
-    }
-
-    // Worker scratch directories are per-run: whatever is left is from a
-    // run that was killed before it could zip its traces. Only the
-    // outermost runner may do this — projects run concurrently and share
-    // one output directory, so a project sweeping here would delete the
-    // trace another project is still writing.
-    if !self.suppress_run_boundary {
-      crate::artifacts::sweep(&self.config.output_dir);
+    if let Err(summary) = self.prepare_plan(&mut plan, &project) {
+      return summary;
     }
 
     let total_tests = plan.total_tests;
@@ -1501,98 +1439,25 @@ impl TestRunner {
     }
 
     // Never launch more workers than tests — extra workers launch browsers for nothing.
-    let num_workers = (self.config.worker_count() as usize).min(total_tests).max(1) as u32;
+    let num_workers = self
+      .config
+      .worker_count()
+      .min(u32::try_from(total_tests).unwrap_or(u32::MAX))
+      .max(1);
 
     // Custom `#[fixture]` definitions, collected once and seeded into every
     // worker's fixture pool so tests can resolve them via `ctx.get`.
     let custom_fixtures = crate::discovery::collect_rust_fixtures();
-
-    // ── Validate fixture DAG ──
-    {
-      let mut fixture_defs = match builtin_fixtures(&self.config.browser) {
-        Ok(definitions) => definitions,
-        Err(error) => {
-          tracing::error!("invalid browser selection: {error}");
-          eprintln!("Error: invalid browser selection: {error}");
-          return ExecuteSummary {
-            exit_code: exit::USAGE,
-            total: total_tests,
-            failed: total_tests,
-            ..Default::default()
-          };
-        },
-      };
-      for (name, def) in &custom_fixtures {
-        fixture_defs.insert(name.clone(), def.clone());
-      }
-      if let Err(e) = validate_dag(&fixture_defs) {
-        tracing::error!(target: "ferridriver::fixture", "fixture DAG error: {e}");
-        // Nothing has run yet; without this the run exits non-zero with
-        // no output at all, the reason only reachable through RUST_LOG.
-        event_bus.emit(ReporterEvent::RunError {
-          error: Box::new(crate::model::TestFailure::msg(format!("Invalid fixtures: {e}"))),
-        });
-        return ExecuteSummary {
-          exit_code: exit::FAILED,
-          total: total_tests,
-          failed: total_tests,
-          ..Default::default()
-        };
-      }
+    if let Err(summary) = self.check_fixtures(&custom_fixtures, &event_bus, total_tests) {
+      return summary;
     }
 
     // ── Web server lifecycle ──
-    // Follows Playwright's pattern: start servers, set FERRIDRIVER_BASE_URL env var.
-    let web_server_manager = if !self.config.web_server.is_empty() {
-      match crate::server::WebServerManager::start(&self.config.web_server).await {
-        Ok(mgr) => {
-          if let Some(url) = mgr.first_url()
-            && self.config.base_url.is_none()
-          {
-            // SAFETY: set_var is called before worker threads are spawned,
-            // so no concurrent reads can race.
-            #[allow(unsafe_code)]
-            unsafe {
-              std::env::set_var("FERRIDRIVER_BASE_URL", &url)
-            };
-            tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
-          }
-          Some(mgr)
-        },
-        Err(e) => {
-          tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
-          // Before the run boundary: only the error itself is known,
-          // and a report with no tests and this error beats a silent one.
-          event_bus.emit(ReporterEvent::RunError {
-            error: Box::new(crate::model::TestFailure::msg(format!("webServer start failed: {e}"))),
-          });
-          return ExecuteSummary {
-            exit_code: exit::INFRASTRUCTURE,
-            total: total_tests,
-            failed: total_tests,
-            ..Default::default()
-          };
-        },
-      }
-    } else {
-      None
+    // Follows Playwright's pattern: start servers, publish the base URL.
+    let web_server_manager = match self.start_web_servers(&event_bus, total_tests).await {
+      Ok(manager) => manager,
+      Err(summary) => return summary,
     };
-
-    // Compose `metadata` with optional git info per `captureGitInfo`.
-    // Cloned once here so each downstream emit sees the same JSON.
-    let mut run_metadata = with_shuffle_seed(self.config.metadata.clone(), self.overrides.shuffle.as_deref());
-    if self.config.capture_git_info {
-      let info = crate::git_info::GitInfo::capture();
-      let git_value = serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
-      match &mut run_metadata {
-        serde_json::Value::Object(map) => {
-          map.insert("git".into(), git_value);
-        },
-        other => {
-          *other = serde_json::json!({ "git": git_value });
-        },
-      }
-    }
 
     let reporting_enabled = event_bus.has_subscribers();
     // Boundary events (`RunStarted` / `RunFinished`) are emitted once per
@@ -1610,7 +1475,7 @@ impl TestRunner {
       event_bus.emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
-        metadata: run_metadata,
+        metadata: self.run_metadata(),
         start_time: std::time::SystemTime::now(),
         preamble: Arc::new(crate::reporter::api::RunPreamble::build(&self.config, &project_plans)),
       });
@@ -1619,45 +1484,386 @@ impl TestRunner {
     let start = Instant::now();
 
     // ── Global setup ──
-    if !self.hooks.global_setup_fns.is_empty() {
-      let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
-      for setup_fn in &self.hooks.global_setup_fns {
-        if let Err(e) = setup_fn(global_pool.clone()).await {
-          tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
-          if emit_boundary {
-            // A setup failure belongs to no test; without this channel
-            // every report would show a run of zero failures.
-            event_bus.emit(ReporterEvent::RunError {
-              error: Box::new(crate::model::TestFailure {
-                message: format!("global setup failed: {e}"),
-                stack: e.stack.clone(),
-                diff: None,
-                screenshot: None,
-                error_context: None,
-              }),
-            });
-            event_bus.emit(ReporterEvent::RunFinished {
-              total: total_tests,
-              passed: 0,
-              failed: total_tests,
-              skipped: 0,
-              flaky: 0,
-              duration: start.elapsed(),
-              status: crate::reporter::RunStatus::Failed,
-            });
-          }
-          return ExecuteSummary {
-            exit_code: 1,
-            total: total_tests,
-            failed: total_tests,
-            ..Default::default()
-          };
-        }
+    if let Err(e) = self.run_global_setup().await {
+      Self::report_global_setup_failure(e, &event_bus, emit_boundary, total_tests, start);
+      return ExecuteSummary {
+        exit_code: 1,
+        total: total_tests,
+        failed: total_tests,
+        ..Default::default()
+      };
+    }
+
+    let workers = match Box::pin(self.run_workers(&plan, &event_bus, custom_fixtures, num_workers, &project)).await {
+      Ok(workers) => workers,
+      Err(summary) => return summary,
+    };
+
+    // ── Global teardown (always runs, even if tests failed) ──
+    self.run_global_teardown().await;
+
+    let duration = start.elapsed();
+    let counts = RunCounts::of(&workers.attempt_history);
+    self.drop_passing_output(&workers.attempt_history);
+
+    // ── Web server teardown ──
+    if let Some(mgr) = web_server_manager {
+      mgr.stop().await;
+    }
+
+    // The loose trace files were only interesting while their tests were
+    // running; the ones worth keeping are zipped into each test's own
+    // output directory by now. Outermost runner only, for the reason
+    // above.
+    if !self.suppress_run_boundary {
+      crate::artifacts::sweep(&self.config.output_dir);
+    }
+
+    if emit_boundary {
+      event_bus.emit(ReporterEvent::RunFinished {
+        total: total_tests,
+        passed: counts.passed,
+        failed: counts.failed,
+        skipped: counts.skipped,
+        flaky: counts.flaky,
+        duration,
+        status: self.run_status(counts.failed > 0 || workers.infrastructure_failed),
+      });
+    }
+
+    ExecuteSummary {
+      exit_code: self.run_exit_code(&counts, workers.infrastructure_failed || workers.launch_failed),
+      total: total_tests,
+      passed: counts.passed,
+      failed: counts.failed,
+      skipped: counts.skipped,
+      flaky: counts.flaky,
+    }
+  }
+
+  /// Queue the plan's work and run it on workers that come and go with
+  /// it, collecting every result.
+  ///
+  /// # Errors
+  ///
+  /// Returns the summary of a run whose browser selection or connection
+  /// is invalid; nothing ran.
+  async fn run_workers(
+    &self,
+    plan: &TestPlan,
+    event_bus: &EventBus,
+    custom_fixtures: FxHashMap<String, crate::fixture::FixtureDef>,
+    num_workers: u32,
+    project: &str,
+  ) -> Result<WorkersRun, ExecuteSummary> {
+    let (launch_plan, connection) = match self.browser_launch() {
+      Ok(launch) => launch,
+      Err(message) => {
+        eprintln!("Error: {message}");
+        return Err(ExecuteSummary {
+          exit_code: exit::USAGE,
+          ..ExecuteSummary::default()
+        });
+      },
+    };
+
+    let dispatcher = Arc::new(Dispatcher::new());
+    let (timings, owns_timings) = match &self.timings {
+      Some(timings) => (Arc::clone(timings), false),
+      None => (
+        Arc::new(crate::timings::Timings::load(&crate::identity::root(&self.config))),
+        true,
+      ),
+    };
+    let (slots, roster) = self.queue_work(Self::work_units(plan), &dispatcher, &timings, num_workers);
+
+    // ── Spawn workers with lazy browser launch ──
+    // Each worker holds a `BrowserHandle` that launches the browser on first
+    // fixture access. Tests that never resolve `browser`/`context`/`page`
+    // (config-only tests, request-only tests) skip the launch entirely —
+    // critical in CI where Chromium's first-launch can exceed 30s.
+    let (result_tx, result_rx) = mpsc::channel::<WorkerTestResult>(256);
+    let spawner = WorkerSpawner {
+      config: Arc::clone(&self.config),
+      event_bus: event_bus.has_subscribers().then(|| event_bus.clone()),
+      live_traces: self.live_traces,
+      worker_ids: Arc::clone(&self.worker_ids),
+      dispatcher: Arc::clone(&dispatcher),
+      result_tx,
+      custom_fixtures,
+      shared_browser: self.matching_shared_browser(&launch_plan, &connection),
+      launch_plan,
+      connection,
+      // Set by any worker whose browser failed to launch: the tests it
+      // could not run fail, and the run reports an infrastructure failure
+      // rather than a verdict on them.
+      launch_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      slots,
+      roster: Arc::clone(&roster),
+    };
+    let mut worker_handles: Vec<_> = roster
+      .enlist(&dispatcher.receiver())
+      .into_iter()
+      .map(|place| spawner.spawn(place))
+      .collect();
+
+    let attempt_history = Box::pin(self.collect_results(
+      ResultCollection {
+        dispatcher: &dispatcher,
+        roster: &roster,
+        timings: &timings,
+        project,
+        total_tests: plan.total_tests,
+        spawner: &spawner,
+      },
+      result_rx,
+      &mut worker_handles,
+    ))
+    .await;
+
+    if owns_timings && let Err(error) = timings.save() {
+      tracing::warn!(target: "ferridriver::runner", "could not keep test durations: {error}");
+    }
+
+    let infrastructure_failed = join_workers(worker_handles, event_bus).await;
+    Ok(WorkersRun {
+      attempt_history,
+      infrastructure_failed,
+      launch_failed: spawner.launch_failed.load(std::sync::atomic::Ordering::SeqCst),
+    })
+  }
+
+  /// Narrow `plan` to what this run executes, after the `--forbid-only`
+  /// check, and clear what a fresh run starts without.
+  ///
+  /// # Errors
+  ///
+  /// Returns the summary of a run that cannot start: a filter that does
+  /// not apply, or an `.only` that `--forbid-only` refuses.
+  fn prepare_plan(&self, plan: &mut TestPlan, project: &str) -> Result<(), ExecuteSummary> {
+    let refused = |exit_code| ExecuteSummary {
+      exit_code,
+      ..Default::default()
+    };
+    // ── Forbid-only check, before `.only` narrows the plan ──
+    if self.config.forbid_only || self.overrides.forbid_only {
+      let mut candidates = plan.clone();
+      if let Err(message) = self.apply_run_filters(&mut candidates, project) {
+        eprintln!("Error: {message}");
+        return Err(refused(exit::USAGE));
+      }
+      if let Err(e) = crate::discovery::check_forbid_only(&candidates) {
+        eprint!("{e}");
+        return Err(refused(exit::FAILED));
       }
     }
 
+    if let Err(message) = self.select_tests(plan, project) {
+      eprintln!("Error: {message}");
+      return Err(refused(exit::USAGE));
+    }
+
+    // ── preserve_output: "never" — wipe output_dir at run start ──
+    if self.config.preserve_output == "never" && !self.suppress_run_boundary {
+      let _ = std::fs::remove_dir_all(&self.config.output_dir);
+    }
+
+    // Worker scratch directories are per-run: whatever is left is from a
+    // run that was killed before it could zip its traces. Only the
+    // outermost runner may do this — projects run concurrently and share
+    // one output directory, so a project sweeping here would delete the
+    // trace another project is still writing.
+    if !self.suppress_run_boundary {
+      crate::artifacts::sweep(&self.config.output_dir);
+    }
+    Ok(())
+  }
+
+  /// Validate the fixture graph the run's tests will resolve against.
+  ///
+  /// # Errors
+  ///
+  /// Returns the summary of a run that cannot start: a browser selection
+  /// the built-in fixtures reject, or fixtures that do not form a DAG.
+  fn check_fixtures(
+    &self,
+    custom_fixtures: &FxHashMap<String, crate::fixture::FixtureDef>,
+    event_bus: &EventBus,
+    total_tests: usize,
+  ) -> Result<(), ExecuteSummary> {
+    let mut fixture_defs = match builtin_fixtures(&self.config.browser) {
+      Ok(definitions) => definitions,
+      Err(error) => {
+        tracing::error!("invalid browser selection: {error}");
+        eprintln!("Error: invalid browser selection: {error}");
+        return Err(ExecuteSummary {
+          exit_code: exit::USAGE,
+          total: total_tests,
+          failed: total_tests,
+          ..Default::default()
+        });
+      },
+    };
+    for (name, def) in custom_fixtures {
+      fixture_defs.insert(name.clone(), def.clone());
+    }
+    if let Err(e) = validate_dag(&fixture_defs) {
+      tracing::error!(target: "ferridriver::fixture", "fixture DAG error: {e}");
+      // Nothing has run yet; without this the run exits non-zero with
+      // no output at all, the reason only reachable through RUST_LOG.
+      event_bus.emit(ReporterEvent::RunError {
+        error: Box::new(crate::model::TestFailure::msg(format!("Invalid fixtures: {e}"))),
+      });
+      return Err(ExecuteSummary {
+        exit_code: exit::FAILED,
+        total: total_tests,
+        failed: total_tests,
+        ..Default::default()
+      });
+    }
+    Ok(())
+  }
+
+  /// Start the configured web servers, publishing the first one's URL as
+  /// the base URL when none is configured.
+  ///
+  /// # Errors
+  ///
+  /// Returns the summary of a run whose servers did not come up; the
+  /// failure is reported on `event_bus`.
+  async fn start_web_servers(
+    &self,
+    event_bus: &EventBus,
+    total_tests: usize,
+  ) -> Result<Option<crate::server::WebServerManager>, ExecuteSummary> {
+    if self.config.web_server.is_empty() {
+      return Ok(None);
+    }
+    match crate::server::WebServerManager::start(&self.config.web_server).await {
+      Ok(mgr) => {
+        if let Some(url) = mgr.first_url()
+          && self.config.base_url.is_none()
+        {
+          crate::config::publish_run_base_url(&url);
+          tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
+        }
+        Ok(Some(mgr))
+      },
+      Err(e) => {
+        tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
+        // Before the run boundary: only the error itself is known,
+        // and a report with no tests and this error beats a silent one.
+        event_bus.emit(ReporterEvent::RunError {
+          error: Box::new(crate::model::TestFailure::msg(format!("webServer start failed: {e}"))),
+        });
+        Err(ExecuteSummary {
+          exit_code: exit::INFRASTRUCTURE,
+          total: total_tests,
+          failed: total_tests,
+          ..Default::default()
+        })
+      },
+    }
+  }
+
+  /// The run's `metadata`, with the shuffle seed and, per
+  /// `captureGitInfo`, the git state.
+  fn run_metadata(&self) -> serde_json::Value {
+    let mut run_metadata = with_shuffle_seed(self.config.metadata.clone(), self.overrides.shuffle.as_deref());
+    if self.config.capture_git_info {
+      let info = crate::git_info::GitInfo::capture();
+      let git_value = serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
+      match &mut run_metadata {
+        serde_json::Value::Object(map) => {
+          map.insert("git".into(), git_value);
+        },
+        other => {
+          *other = serde_json::json!({ "git": git_value });
+        },
+      }
+    }
+    run_metadata
+  }
+
+  /// Run every global setup function in order.
+  ///
+  /// # Errors
+  ///
+  /// Returns the first setup failure; the ones after it do not run.
+  async fn run_global_setup(&self) -> Result<(), crate::model::TestFailure> {
+    if self.hooks.global_setup_fns.is_empty() {
+      return Ok(());
+    }
+    let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
+    for setup_fn in &self.hooks.global_setup_fns {
+      setup_fn(global_pool.clone()).await?;
+    }
+    Ok(())
+  }
+
+  /// Report a global setup failure: logged, and on the run's own
+  /// boundary as a run error and a run of nothing but failures.
+  fn report_global_setup_failure(
+    e: crate::model::TestFailure,
+    event_bus: &EventBus,
+    emit_boundary: bool,
+    total_tests: usize,
+    start: Instant,
+  ) {
+    tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
+    if !emit_boundary {
+      return;
+    }
+    // A setup failure belongs to no test; without this channel
+    // every report would show a run of zero failures.
+    event_bus.emit(ReporterEvent::RunError {
+      error: Box::new(crate::model::TestFailure {
+        message: format!("global setup failed: {e}"),
+        stack: e.stack,
+        diff: None,
+        screenshot: None,
+        error_context: None,
+      }),
+    });
+    event_bus.emit(ReporterEvent::RunFinished {
+      total: total_tests,
+      passed: 0,
+      failed: total_tests,
+      skipped: 0,
+      flaky: 0,
+      duration: start.elapsed(),
+      status: crate::reporter::RunStatus::Failed,
+    });
+  }
+
+  /// How a run that has finished reads: failed, stopped, or passed.
+  fn run_status(&self, failed: bool) -> crate::reporter::RunStatus {
+    if failed {
+      crate::reporter::RunStatus::Failed
+    } else if self.run_stop.is_requested() {
+      crate::reporter::RunStatus::Interrupted
+    } else {
+      crate::reporter::RunStatus::Passed
+    }
+  }
+
+  /// Run every global teardown function, logging the ones that fail.
+  async fn run_global_teardown(&self) {
+    if self.hooks.global_teardown_fns.is_empty() {
+      return;
+    }
+    let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
+    for teardown_fn in &self.hooks.global_teardown_fns {
+      if let Err(e) = teardown_fn(global_pool.clone()).await {
+        tracing::error!(target: "ferridriver::runner", "global teardown error: {e}");
+      }
+    }
+  }
+
+  /// The plan as work items: one per parallel test, one batch per serial
+  /// group.
+  fn work_units(plan: &TestPlan) -> Vec<crate::dispatcher::WorkItem> {
     // ── Dispatcher — enqueue suites with hooks + mode context ──
-    let dispatcher = Arc::new(Dispatcher::new());
     let mut units: Vec<crate::dispatcher::WorkItem> = Vec::new();
     // Serial suites sharing a scope (a `describe` nested in a serial one)
     // are one group: one batch, one worker, in declaration order.
@@ -1691,7 +1897,7 @@ impl TestRunner {
           units.extend(
             assign(crate::model::SuiteMode::Parallel)
               .into_iter()
-              .map(crate::dispatcher::WorkItem::Single),
+              .map(|assignment| crate::dispatcher::WorkItem::Single(Box::new(assignment))),
           );
         },
         Some(label) => {
@@ -1720,13 +1926,20 @@ impl TestRunner {
           .sort_by_key(|assignment| assignment.test.id.line.unwrap_or(usize::MAX));
       }
     }
-    let (timings, owns_timings) = match &self.timings {
-      Some(timings) => (Arc::clone(timings), false),
-      None => (
-        Arc::new(crate::timings::Timings::load(&crate::identity::root(&self.config))),
-        true,
-      ),
-    };
+    units
+  }
+
+  /// Order the work (shuffled, or longest first) and queue it on
+  /// `dispatcher` through this run's roster, which is returned with the
+  /// slots its workers draw from.
+  fn queue_work(
+    &self,
+    mut units: Vec<crate::dispatcher::WorkItem>,
+    dispatcher: &Dispatcher,
+    timings: &crate::timings::Timings,
+    num_workers: u32,
+  ) -> (Arc<crate::dispatcher::RunSlots>, Arc<crate::dispatcher::WorkerRoster>) {
+    let project = self.config.name.clone().unwrap_or_default();
     if let Some(seed) = &self.overrides.shuffle {
       shuffle_work(&mut units, seed);
     } else {
@@ -1750,54 +1963,40 @@ impl TestRunner {
     roster.begin(num_workers as usize);
     for unit in units {
       roster.enqueue(timings.expected(unit.tests(), &project), || match unit {
-        crate::dispatcher::WorkItem::Single(assignment) => dispatcher.enqueue_single(assignment),
+        crate::dispatcher::WorkItem::Single(assignment) => dispatcher.enqueue_single(*assignment),
         crate::dispatcher::WorkItem::Serial(batch) => dispatcher.enqueue_serial(batch),
       });
     }
     slots.started(&roster);
+    (slots, roster)
+  }
 
-    // ── Spawn workers with lazy browser launch ──
-    // Each worker holds a `BrowserHandle` that launches the browser on first
-    // fixture access. Tests that never resolve `browser`/`context`/`page`
-    // (config-only tests, request-only tests) skip the launch entirely —
-    // critical in CI where Chromium's first-launch can exceed 30s.
-    let (result_tx, mut result_rx) = mpsc::channel::<WorkerTestResult>(256);
-
-    let launch_plan = match build_launch_plan(&self.config.browser) {
-      Ok(plan) => plan,
-      Err(message) => {
-        eprintln!("Error: {message}");
-        return ExecuteSummary {
-          exit_code: exit::USAGE,
-          ..ExecuteSummary::default()
-        };
-      },
-    };
+  /// The launch plan and connection the configured browser resolves to.
+  ///
+  /// # Errors
+  ///
+  /// Returns the reason the browser selection or connection is invalid.
+  fn browser_launch(&self) -> Result<(LaunchPlan, ConnectMode), String> {
+    let launch_plan = build_launch_plan(&self.config.browser)?;
     let connection = match self.config.browser.resolve_instance() {
       Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
       Err(error) => {
         tracing::error!("invalid browser connection: {error}");
-        eprintln!("Error: invalid browser connection: {error}");
-        return ExecuteSummary {
-          exit_code: exit::USAGE,
-          ..Default::default()
-        };
+        return Err(format!("invalid browser connection: {error}"));
       },
     };
-    // Set by any worker whose browser failed to launch: the tests it
-    // could not run fail, and the run reports an infrastructure failure
-    // rather than a verdict on them.
-    let launch_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let worker_event_bus = reporting_enabled.then(|| event_bus.clone());
+    Ok((launch_plan, connection))
+  }
 
-    // A session's browser is only this run's browser when this run would
-    // have launched the same one: projects differ in backend, channel and
-    // headedness, and borrowing the session's Chromium for a WebKit
-    // project would run the tests on the wrong engine.
+  /// A session's browser is only this run's browser when this run would
+  /// have launched the same one: projects differ in backend, channel and
+  /// headedness, and borrowing the session's Chromium for a `WebKit`
+  /// project would run the tests on the wrong engine.
+  fn matching_shared_browser(&self, launch_plan: &LaunchPlan, connection: &ConnectMode) -> Option<Arc<Browser>> {
     let shared_browser = self
       .shared_browser
       .as_ref()
-      .filter(|shared| shared.connection == connection && same_launch(&shared.plan, &launch_plan))
+      .filter(|shared| shared.connection == *connection && same_launch(&shared.plan, launch_plan))
       .map(|shared| Arc::clone(&shared.browser));
     if shared_browser.is_none() && self.shared_browser.is_some() {
       tracing::debug!(
@@ -1806,79 +2005,29 @@ impl TestRunner {
         "session browser does not match this run's launch plan; launching its own",
       );
     }
+    shared_browser
+  }
 
-    // Worker numbers are handed out per RUN, not per runner: projects
-    // execute concurrently, and two workers numbered 0 would share a
-    // scratch directory, a `.playwright-artifacts-0` the UI reads, and —
-    // via the per-worker script session — the "test currently running"
-    // that `test.step()` and `test.info()` resolve against.
-    //
-    // Workers come and go with the work, as Playwright's do: one leaves
-    // once the queue is empty, handing its slot to a project still
-    // running, and work queued later (a retry) enlists new ones.
-    let spawn_worker = |place: crate::dispatcher::RosterPlace| {
-      let config = Arc::clone(&self.config);
-      let event_bus = worker_event_bus.clone();
-      let live_traces = self.live_traces;
-      let worker_ids = Arc::clone(&self.worker_ids);
-      let rx = dispatcher.receiver();
-      let tx = result_tx.clone();
-      let custom_fixtures = custom_fixtures.clone();
-      let shared = shared_browser.clone();
-      let plan = launch_plan.clone();
-      let connection = connection.clone();
-      let stop_flag = dispatcher.stop_flag();
-      let launch_failed = Arc::clone(&launch_failed);
-      let slots = Arc::clone(&slots);
-      let roster = Arc::clone(&roster);
-
-      tokio::spawn(async move {
-        // Held until the browser has closed: giving the slot back at the
-        // last test would overlap the next worker's launch with a live
-        // browser.
-        let lease = slots.take(&roster).await;
-        let mut pending = None;
-        loop {
-          let id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-          let worker = Worker::new(id, lease.index(), Arc::clone(&config), event_bus.clone(), live_traces);
-          let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
-          let browser_handle = if let Some(b) = &shared {
-            Arc::new(BrowserHandle::from_shared(Arc::clone(b)))
-          } else {
-            Arc::new(
-              BrowserHandle::with_connection(plan.clone(), connection.clone())
-                .reporting_launch_failure(Arc::clone(&launch_failed))
-                .recycling_contexts(config.context_reuse),
-            )
-          };
-          pending = Box::pin(worker.run(
-            browser_handle,
-            custom_pool,
-            rx.clone(),
-            &place,
-            tx.clone(),
-            Arc::clone(&stop_flag),
-            pending,
-          ))
-          .await?;
-          if pending.is_none() || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
-          }
-        }
-        Ok::<(), ferridriver::FerriError>(())
-      })
-    };
-    let mut worker_handles: Vec<_> = roster
-      .enlist(&dispatcher.receiver())
-      .into_iter()
-      .map(&spawn_worker)
-      .collect();
-
-    // ── Collect results with retry re-dispatch ──
-    // Statuses plus what the test was declared to end in: a `test.fail()`
-    // test that fails is a pass, and only the pair says so.
-    let mut attempt_history: FxHashMap<crate::model::TestId, (Vec<TestStatus>, crate::model::ExpectedStatus)> =
-      FxHashMap::default();
+  /// Collect results as workers send them, re-dispatching retries and
+  /// enlisting workers as the queue needs them, until every worker has
+  /// left. Returns every test's statuses with what it was declared to
+  /// end in: a `test.fail()` test that fails is a pass, and only the pair
+  /// says so.
+  async fn collect_results(
+    &self,
+    cx: ResultCollection<'_>,
+    mut result_rx: mpsc::Receiver<WorkerTestResult>,
+    worker_handles: &mut Vec<tokio::task::JoinHandle<ferridriver::Result<()>>>,
+  ) -> AttemptHistory {
+    let ResultCollection {
+      dispatcher,
+      roster,
+      timings,
+      project,
+      total_tests,
+      spawner,
+    } = cx;
+    let mut attempt_history = AttemptHistory::default();
     let mut final_count = 0usize;
     let mut failure_count = 0usize;
     let max_failures = if self.config.fail_fast {
@@ -1891,22 +2040,7 @@ impl TestRunner {
     // either finished or joined it, then they run one at a time.
     let isolated = self.config.retry_strategy == crate::config::RetryStrategy::Isolated;
     let mut waiting_retries: std::collections::VecDeque<WorkerTestResult> = std::collections::VecDeque::new();
-    let retry = |result: WorkerTestResult| {
-      let expected = timings.expected(
-        std::iter::once(&result.test).chain(result.serial_tail.iter().map(|tail| &tail.test)),
-        &project,
-      );
-      roster.enqueue(expected, || {
-        dispatcher.retry_shared(crate::dispatcher::Retry {
-          test: result.test,
-          attempt: result.outcome.attempt + 1,
-          suite_key: result.suite_key,
-          hooks: result.hooks,
-          suite_mode: result.suite_mode,
-          serial_tail: result.serial_tail,
-        });
-      });
-    };
+    let retry = |result: WorkerTestResult| requeue(dispatcher, roster, timings, project, result);
 
     let mut stop_requested = false;
     loop {
@@ -1932,15 +2066,7 @@ impl TestRunner {
         },
       };
       let Some(result) = result else { break };
-      let test_key = result.outcome.test_id.clone();
-      let entry = attempt_history
-        .entry(test_key)
-        .or_insert_with(|| (Vec::new(), result.outcome.expected_status));
-      entry.0.push(result.outcome.status);
-      entry.1 = result.outcome.expected_status;
-      if result.outcome.status != TestStatus::Skipped {
-        timings.record(result.outcome.test_id.stable_id(&project), result.outcome.duration);
-      }
+      record_attempt(&mut attempt_history, timings, project, &result.outcome);
 
       if result.should_retry {
         tracing::debug!(
@@ -1990,132 +2116,90 @@ impl TestRunner {
         retry(next);
       }
       if !dispatcher.is_stopped() {
-        worker_handles.extend(roster.enlist(&dispatcher.receiver()).into_iter().map(&spawn_worker));
+        worker_handles.extend(
+          roster
+            .enlist(&dispatcher.receiver())
+            .into_iter()
+            .map(|place| spawner.spawn(place)),
+        );
       }
     }
+    attempt_history
+  }
 
-    if owns_timings && let Err(error) = timings.save() {
-      tracing::warn!(target: "ferridriver::runner", "could not keep test durations: {error}");
+  /// `preserve_output: "failures-only"`: delete the output directories of
+  /// the tests that did not fail.
+  fn drop_passing_output(&self, attempt_history: &AttemptHistory) {
+    if self.config.preserve_output != "failures-only" {
+      return;
     }
-
-    let mut infrastructure_failed = false;
-    for handle in worker_handles {
-      let outcome = handle
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|result| result.map_err(|error| error.to_string()));
-      if let Err(error) = outcome {
-        infrastructure_failed = true;
-        event_bus.emit(ReporterEvent::RunError {
-          error: Box::new(crate::model::TestFailure::msg(format!(
-            "worker cleanup failed: {error}"
-          ))),
-        });
-      }
-    }
-
-    // ── Global teardown (always runs, even if tests failed) ──
-    if !self.hooks.global_teardown_fns.is_empty() {
-      let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
-      for teardown_fn in &self.hooks.global_teardown_fns {
-        if let Err(e) = teardown_fn(global_pool.clone()).await {
-          tracing::error!(target: "ferridriver::runner", "global teardown error: {e}");
+    for (test_key, (attempts, expected)) in attempt_history {
+      if crate::model::outcome_kind(attempts, *expected) != crate::model::TestOutcomeKind::Unexpected {
+        let test_output_dir = self.config.output_dir.join(crate::worker::test_artifact_dir_name(
+          test_key,
+          self.config.name.as_deref().unwrap_or_default(),
+        ));
+        if test_output_dir.exists() {
+          let _ = std::fs::remove_dir_all(&test_output_dir);
         }
       }
     }
+  }
 
-    let duration = start.elapsed();
-
-    // ── Final stats with flaky detection ──
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut flaky = 0usize;
-
-    for (attempts, expected) in attempt_history.values() {
-      match crate::model::outcome_kind(attempts, *expected) {
-        crate::model::TestOutcomeKind::Expected => passed += 1,
-        crate::model::TestOutcomeKind::Flaky => {
-          flaky += 1;
-          passed += 1;
-        },
-        crate::model::TestOutcomeKind::Skipped => skipped += 1,
-        crate::model::TestOutcomeKind::Unexpected => failed += 1,
-      }
-    }
-
-    // ── preserve_output: "failures-only" — delete output dirs for passing tests ──
-    if self.config.preserve_output == "failures-only" {
-      for (test_key, (attempts, expected)) in &attempt_history {
-        if crate::model::outcome_kind(attempts, *expected) != crate::model::TestOutcomeKind::Unexpected {
-          let test_output_dir = self.config.output_dir.join(crate::worker::test_artifact_dir_name(
-            test_key,
-            self.config.name.as_deref().unwrap_or_default(),
-          ));
-          if test_output_dir.exists() {
-            let _ = std::fs::remove_dir_all(&test_output_dir);
-          }
-        }
-      }
-    }
-
-    // ── Web server teardown ──
-    if let Some(mgr) = web_server_manager {
-      mgr.stop().await;
-    }
-
-    // The loose trace files were only interesting while their tests were
-    // running; the ones worth keeping are zipped into each test's own
-    // output directory by now. Outermost runner only, for the reason
-    // above.
-    if !self.suppress_run_boundary {
-      crate::artifacts::sweep(&self.config.output_dir);
-    }
-
-    if emit_boundary {
-      event_bus.emit(ReporterEvent::RunFinished {
-        total: total_tests,
-        passed,
-        failed,
-        skipped,
-        flaky,
-        duration,
-        status: if failed > 0 || infrastructure_failed {
-          crate::reporter::RunStatus::Failed
-        } else if self.run_stop.is_requested() {
-          crate::reporter::RunStatus::Interrupted
-        } else {
-          crate::reporter::RunStatus::Passed
-        },
-      });
-    }
-
-    let mut exit_code = if failed > 0 || (self.config.fail_on_flaky_tests && flaky > 0) {
+  /// The run's exit status from its counts and how it ended.
+  fn run_exit_code(&self, counts: &RunCounts, infrastructure_failed: bool) -> i32 {
+    let mut exit_code = if counts.failed > 0 || (self.config.fail_on_flaky_tests && counts.flaky > 0) {
       exit::FAILED
     } else {
       exit::PASSED
     };
-    if infrastructure_failed || launch_failed.load(std::sync::atomic::Ordering::SeqCst) {
+    if infrastructure_failed {
       exit_code = exit::worst(exit_code, exit::INFRASTRUCTURE);
     }
     if self.run_stop.is_requested() {
       exit_code = exit::worst(exit_code, exit::INTERRUPTED);
     }
-    if exit_code == exit::FAILED && failed == 0 && flaky > 0 && self.config.fail_on_flaky_tests {
+    if exit_code == exit::FAILED && counts.failed == 0 && counts.flaky > 0 && self.config.fail_on_flaky_tests {
+      let flaky = counts.flaky;
       tracing::warn!(
         target: "ferridriver::runner",
         flaky,
         "fail_on_flaky_tests: flagging exit 1 for {flaky} flaky test(s)",
       );
     }
-    ExecuteSummary {
-      exit_code,
-      total: total_tests,
-      passed,
-      failed,
-      skipped,
-      flaky,
-    }
+    exit_code
+  }
+
+  /// Launch the browser a watch or UI session reuses across its runs,
+  /// reporting why when it cannot.
+  async fn launch_session_browser(&mut self) -> Option<Arc<Browser>> {
+    let launch_plan = match build_launch_plan(&self.config.browser) {
+      Ok(plan) => plan,
+      Err(message) => {
+        eprintln!("Error: {message}");
+        return None;
+      },
+    };
+    let connection = match self.config.browser.resolve_instance() {
+      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
+      Err(error) => {
+        tracing::error!("invalid browser connection: {error}");
+        return None;
+      },
+    };
+    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
+      Ok(b) => Arc::new(b),
+      Err(e) => {
+        eprintln!("Failed to launch browser: {e}");
+        return None;
+      },
+    };
+    self.shared_browser = Some(SharedBrowser {
+      browser: Arc::clone(&browser),
+      plan: launch_plan,
+      connection,
+    });
+    Some(browser)
   }
 
   /// Run in watch mode: re-run tests on file changes with interactive keyboard controls.
@@ -2132,35 +2216,12 @@ impl TestRunner {
   pub async fn run_watch(&mut self, plan_factory: WatchPlanFactory, watch_root: std::path::PathBuf) -> i32 {
     use crate::watch::FileWatcher;
 
-    self.export_base_url_env();
+    self.publish_base_url();
 
     // Launch browser once — reuse across all watch cycles.
-    let launch_plan = match build_launch_plan(&self.config.browser) {
-      Ok(plan) => plan,
-      Err(message) => {
-        eprintln!("Error: {message}");
-        return 1;
-      },
+    let Some(browser) = Box::pin(self.launch_session_browser()).await else {
+      return 1;
     };
-    let connection = match self.config.browser.resolve_instance() {
-      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
-      Err(error) => {
-        tracing::error!("invalid browser connection: {error}");
-        return 1;
-      },
-    };
-    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
-      Ok(b) => Arc::new(b),
-      Err(e) => {
-        eprintln!("Failed to launch browser: {e}");
-        return 1;
-      },
-    };
-    self.shared_browser = Some(SharedBrowser {
-      browser: Arc::clone(&browser),
-      plan: launch_plan,
-      connection,
-    });
 
     // Start file watcher — uses test_match globs for classification, test_ignore for filtering.
     let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
@@ -2378,7 +2439,7 @@ impl TestRunner {
     use crate::ui_server::{UiCommand, UiServer};
     use crate::watch::FileWatcher;
 
-    self.export_base_url_env();
+    self.publish_base_url();
 
     // The UI follows each test's trace while it is being recorded, which
     // only works if events reach the file as they happen.
@@ -2406,35 +2467,15 @@ impl TestRunner {
       state,
       mut commands,
     } = server;
-    println!("\n  ferridriver UI mode\n\n  http://{addr}\n");
+    if let Err(e) = announce_ui_url(&format!("http://{addr}")) {
+      eprintln!("Error: could not write the UI address: {e}");
+      return 1;
+    }
 
     // Launch browser once — reuse across all UI-triggered runs.
-    let launch_plan = match build_launch_plan(&self.config.browser) {
-      Ok(plan) => plan,
-      Err(message) => {
-        eprintln!("Error: {message}");
-        return 1;
-      },
+    let Some(browser) = Box::pin(self.launch_session_browser()).await else {
+      return 1;
     };
-    let connection = match self.config.browser.resolve_instance() {
-      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
-      Err(error) => {
-        tracing::error!("invalid browser connection: {error}");
-        return 1;
-      },
-    };
-    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
-      Ok(b) => Arc::new(b),
-      Err(e) => {
-        eprintln!("Failed to launch browser: {e}");
-        return 1;
-      },
-    };
-    self.shared_browser = Some(SharedBrowser {
-      browser: Arc::clone(&browser),
-      plan: launch_plan,
-      connection,
-    });
 
     let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
       Ok(w) => w,
@@ -2525,7 +2566,7 @@ impl TestRunner {
   ) -> i32 {
     use crate::test_server::{TestServerOptions, driver, start};
 
-    self.export_base_url_env();
+    self.publish_base_url();
 
     // The UI shows each test's trace, including while it runs.
     self.live_traces = true;
@@ -2554,34 +2595,14 @@ impl TestRunner {
 
     // One browser for every run the UI asks for: a launch per click is
     // most of the wait in a UI session.
-    let launch_plan = match build_launch_plan(&self.config.browser) {
-      Ok(plan) => plan,
-      Err(message) => {
-        eprintln!("Error: {message}");
-        return 1;
-      },
+    let Some(browser) = Box::pin(self.launch_session_browser()).await else {
+      return 1;
     };
-    let connection = match self.config.browser.resolve_instance() {
-      Ok(connection) => connection.unwrap_or(ConnectMode::Launch),
-      Err(error) => {
-        tracing::error!("invalid browser connection: {error}");
-        return 1;
-      },
-    };
-    let browser = match Box::pin(launch_with_plan(launch_plan.clone(), connection.clone())).await {
-      Ok(browser) => Arc::new(browser),
-      Err(e) => {
-        eprintln!("Failed to launch browser: {e}");
-        return 1;
-      },
-    };
-    self.shared_browser = Some(SharedBrowser {
-      browser: Arc::clone(&browser),
-      plan: launch_plan,
-      connection,
-    });
 
-    println!("\n  ferridriver UI mode\n\n  {}\n", server.url);
+    if let Err(e) = announce_ui_url(&server.url) {
+      eprintln!("Error: could not write the UI address: {e}");
+      return 1;
+    }
     // Asking for a host or a port means "serve it, I will connect" — the
     // window is for the default, local case (Playwright splits the same
     // way in `runUIMode`).
@@ -2614,7 +2635,7 @@ impl TestRunner {
   /// refreshed full test list as a side effect. Returns `None` when
   /// nothing matches or the command needs no run (idle `Stop`).
   async fn plan_for_ui_command(
-    &mut self,
+    &self,
     plan_factory: &WatchPlanFactory,
     cmd: crate::ui_server::UiCommand,
     state: &Arc<crate::ui_server::UiState>,
@@ -2634,8 +2655,7 @@ impl TestRunner {
         // plan in place).
         let rerun_path = self.config.output_dir.join("@rerun.txt");
         let has_failures = std::fs::read_to_string(&rerun_path)
-          .map(|contents| contents.lines().any(|line| !line.trim().is_empty()))
-          .unwrap_or(false);
+          .is_ok_and(|contents| contents.lines().any(|line| !line.trim().is_empty()));
         if !has_failures {
           return None;
         }
@@ -2938,12 +2958,376 @@ fn wildcard_matches(pattern: &str, text: &str) -> bool {
     return remaining.is_empty();
   };
   for part in middle {
-    match remaining.find(part) {
-      Some(at) => remaining = &remaining[at + part.len()..],
+    match remaining.split_once(*part) {
+      Some((_, after)) => remaining = after,
       None => return false,
     }
   }
   remaining.len() >= last.len() && remaining.ends_with(last)
+}
+
+/// Queue a failed test again for its next attempt, with the serial tests
+/// that never started behind it.
+fn requeue(
+  dispatcher: &Dispatcher,
+  roster: &crate::dispatcher::WorkerRoster,
+  timings: &crate::timings::Timings,
+  project: &str,
+  result: WorkerTestResult,
+) {
+  let expected = timings.expected(
+    std::iter::once(&result.test).chain(result.serial_tail.iter().map(|tail| &tail.test)),
+    project,
+  );
+  roster.enqueue(expected, || {
+    dispatcher.retry_shared(crate::dispatcher::Retry {
+      test: result.test,
+      attempt: result.outcome.attempt + 1,
+      suite_key: result.suite_key,
+      hooks: result.hooks,
+      suite_mode: result.suite_mode,
+      serial_tail: result.serial_tail,
+    });
+  });
+}
+
+/// Add an attempt to its test's history, and its duration to the
+/// timings unless it was skipped.
+fn record_attempt(
+  attempt_history: &mut AttemptHistory,
+  timings: &crate::timings::Timings,
+  project: &str,
+  outcome: &crate::model::TestOutcome,
+) {
+  let entry = attempt_history
+    .entry(outcome.test_id.clone())
+    .or_insert_with(|| (Vec::new(), outcome.expected_status));
+  entry.0.push(outcome.status);
+  entry.1 = outcome.expected_status;
+  if outcome.status != TestStatus::Skipped {
+    timings.record(outcome.test_id.stable_id(project), outcome.duration);
+  }
+}
+
+/// Wait for every worker to finish. Returns whether any failed to clean
+/// up, each failure reported on `event_bus` as a run error.
+async fn join_workers(
+  worker_handles: Vec<tokio::task::JoinHandle<ferridriver::Result<()>>>,
+  event_bus: &EventBus,
+) -> bool {
+  let mut infrastructure_failed = false;
+  for handle in worker_handles {
+    let outcome = handle
+      .await
+      .map_err(|error| error.to_string())
+      .and_then(|result| result.map_err(|error| error.to_string()));
+    if let Err(error) = outcome {
+      infrastructure_failed = true;
+      event_bus.emit(ReporterEvent::RunError {
+        error: Box::new(crate::model::TestFailure::msg(format!(
+          "worker cleanup failed: {error}"
+        ))),
+      });
+    }
+  }
+  infrastructure_failed
+}
+
+/// What a run's workers did.
+struct WorkersRun {
+  attempt_history: AttemptHistory,
+  /// A worker failed to clean up.
+  infrastructure_failed: bool,
+  /// A worker's browser failed to launch.
+  launch_failed: bool,
+}
+
+/// Every test's statuses, with what it was declared to end in.
+type AttemptHistory = FxHashMap<crate::model::TestId, (Vec<TestStatus>, crate::model::ExpectedStatus)>;
+
+/// The final tally of a run, flaky detection included.
+struct RunCounts {
+  passed: usize,
+  failed: usize,
+  skipped: usize,
+  flaky: usize,
+}
+
+impl RunCounts {
+  fn of(attempt_history: &AttemptHistory) -> Self {
+    let mut counts = Self {
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      flaky: 0,
+    };
+    for (attempts, expected) in attempt_history.values() {
+      match crate::model::outcome_kind(attempts, *expected) {
+        crate::model::TestOutcomeKind::Expected => counts.passed += 1,
+        crate::model::TestOutcomeKind::Flaky => {
+          counts.flaky += 1;
+          counts.passed += 1;
+        },
+        crate::model::TestOutcomeKind::Skipped => counts.skipped += 1,
+        crate::model::TestOutcomeKind::Unexpected => counts.failed += 1,
+      }
+    }
+    counts
+  }
+}
+
+/// What [`TestRunner::collect_results`] reads while the run goes.
+struct ResultCollection<'a> {
+  dispatcher: &'a Arc<Dispatcher>,
+  roster: &'a Arc<crate::dispatcher::WorkerRoster>,
+  timings: &'a Arc<crate::timings::Timings>,
+  project: &'a str,
+  total_tests: usize,
+  spawner: &'a WorkerSpawner,
+}
+
+/// Starts the run's workers. Worker numbers are handed out per RUN, not
+/// per runner: projects execute concurrently, and two workers numbered 0
+/// would share a scratch directory, a `.playwright-artifacts-0` the UI
+/// reads, and — via the per-worker script session — the "test currently
+/// running" that `test.step()` and `test.info()` resolve against.
+///
+/// Workers come and go with the work, as Playwright's do: one leaves once
+/// the queue is empty, handing its slot to a project still running, and
+/// work queued later (a retry) enlists new ones.
+struct WorkerSpawner {
+  config: Arc<TestConfig>,
+  event_bus: Option<EventBus>,
+  live_traces: bool,
+  worker_ids: Arc<std::sync::atomic::AtomicU32>,
+  dispatcher: Arc<Dispatcher>,
+  result_tx: mpsc::Sender<WorkerTestResult>,
+  custom_fixtures: FxHashMap<String, crate::fixture::FixtureDef>,
+  shared_browser: Option<Arc<Browser>>,
+  launch_plan: LaunchPlan,
+  connection: ConnectMode,
+  launch_failed: Arc<std::sync::atomic::AtomicBool>,
+  slots: Arc<crate::dispatcher::RunSlots>,
+  roster: Arc<crate::dispatcher::WorkerRoster>,
+}
+
+impl WorkerSpawner {
+  fn spawn(&self, place: crate::dispatcher::RosterPlace) -> tokio::task::JoinHandle<ferridriver::Result<()>> {
+    let config = Arc::clone(&self.config);
+    let event_bus = self.event_bus.clone();
+    let live_traces = self.live_traces;
+    let worker_ids = Arc::clone(&self.worker_ids);
+    let rx = self.dispatcher.receiver();
+    let tx = self.result_tx.clone();
+    let custom_fixtures = self.custom_fixtures.clone();
+    let shared = self.shared_browser.clone();
+    let plan = self.launch_plan.clone();
+    let connection = self.connection.clone();
+    let stop_flag = self.dispatcher.stop_flag();
+    let launch_failed = Arc::clone(&self.launch_failed);
+    let slots = Arc::clone(&self.slots);
+    let roster = Arc::clone(&self.roster);
+
+    tokio::spawn(async move {
+      // Held until the browser has closed: giving the slot back at the
+      // last test would overlap the next worker's launch with a live
+      // browser.
+      let lease = slots.take(&roster).await;
+      let mut pending = None;
+      loop {
+        let id = worker_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let worker = Worker::new(id, lease.index(), Arc::clone(&config), event_bus.clone(), live_traces);
+        let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
+        let browser_handle = if let Some(b) = &shared {
+          Arc::new(BrowserHandle::from_shared(Arc::clone(b)))
+        } else {
+          Arc::new(
+            BrowserHandle::with_connection(plan.clone(), connection.clone())
+              .reporting_launch_failure(Arc::clone(&launch_failed))
+              .recycling_contexts(config.context_reuse),
+          )
+        };
+        pending = Box::pin(worker.run(
+          browser_handle,
+          custom_pool,
+          rx.clone(),
+          &place,
+          tx.clone(),
+          Arc::clone(&stop_flag),
+          pending,
+        ))
+        .await?;
+        if pending.is_none() || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+          break;
+        }
+      }
+      Ok::<(), ferridriver::FerriError>(())
+    })
+  }
+}
+
+/// The planned projects of a multi-project run.
+struct ProjectPlanning {
+  merged: FxHashMap<usize, Arc<TestConfig>>,
+  total_tests: usize,
+  /// Projects others depend on, which run whole: no file filters.
+  exempt: rustc_hash::FxHashSet<usize>,
+  exempt_overrides: CliOverrides,
+}
+
+/// What every project of a multi-project run is launched with.
+struct ProjectRunContext<'a> {
+  projects: &'a [ProjectConfig],
+  planning: &'a ProjectPlanning,
+  num_workers: u32,
+  hooks: &'a ProjectHooks<'a>,
+  bus: &'a EventBus,
+}
+
+/// Where the ready-set scheduler stands.
+struct ProjectSchedule {
+  /// Each project's prerequisites, as `(project, must_pass)`.
+  prereqs: FxHashMap<usize, Vec<(usize, bool)>>,
+  remaining: Vec<usize>,
+  passed: rustc_hash::FxHashSet<usize>,
+  terminal: rustc_hash::FxHashSet<usize>,
+  exit_code: i32,
+  agg: ExecuteSummary,
+}
+
+impl ProjectSchedule {
+  fn new(prereqs: FxHashMap<usize, Vec<(usize, bool)>>, scheduled: Vec<usize>) -> Self {
+    Self {
+      prereqs,
+      remaining: scheduled,
+      passed: rustc_hash::FxHashSet::default(),
+      terminal: rustc_hash::FxHashSet::default(),
+      exit_code: exit::PASSED,
+      agg: ExecuteSummary::default(),
+    }
+  }
+
+  /// Take a not-yet-started project whose prerequisites are all terminal.
+  fn next_ready(&mut self) -> Option<usize> {
+    let idx = self.remaining.iter().copied().find(|&idx| {
+      self
+        .prereqs
+        .get(&idx)
+        .is_none_or(|rs| rs.iter().all(|(dep, _)| self.terminal.contains(dep)))
+    })?;
+    self.remaining.retain(|&i| i != idx);
+    Some(idx)
+  }
+
+  /// A prerequisite that had to pass did not.
+  fn is_blocked(&self, idx: usize) -> bool {
+    self.prereqs.get(&idx).is_some_and(|rs| {
+      rs.iter()
+        .any(|&(dep, must_pass)| must_pass && !self.passed.contains(&dep))
+    })
+  }
+
+  /// Record a project that finished, releasing what it held back.
+  fn finished(
+    &mut self,
+    joined: Result<(usize, Option<ExecuteSummary>), tokio::task::JoinError>,
+    rosters: &FxHashMap<usize, Arc<crate::dispatcher::WorkerRoster>>,
+    worker_slots: &Arc<crate::dispatcher::RunSlots>,
+  ) {
+    match joined {
+      Ok((idx, Some(summary))) => {
+        if let Some(roster) = rosters.get(&idx) {
+          worker_slots.started(roster);
+        }
+        self.terminal.insert(idx);
+        if summary.exit_code == exit::PASSED {
+          self.passed.insert(idx);
+        } else {
+          self.exit_code = exit::worst(self.exit_code, summary.exit_code);
+        }
+        self.agg.passed += summary.passed;
+        self.agg.failed += summary.failed;
+        self.agg.skipped += summary.skipped;
+        self.agg.flaky += summary.flaky;
+      },
+      Ok((idx, None)) => {
+        if let Some(roster) = rosters.get(&idx) {
+          worker_slots.started(roster);
+        }
+        self.terminal.insert(idx);
+        self.exit_code = exit::worst(self.exit_code, exit::FAILED);
+      },
+      Err(e) => {
+        tracing::error!(target: "ferridriver::runner", "project task panicked: {e}");
+        // Which project it was is gone with it; none may hold slots
+        // back for a start that will not come.
+        for roster in rosters.values() {
+          worker_slots.started(roster);
+        }
+        self.exit_code = exit::worst(self.exit_code, exit::INFRASTRUCTURE);
+      },
+    }
+  }
+}
+
+/// Each scheduled project's prerequisites, as `(project, must_pass)`.
+fn project_prerequisites(
+  projects: &[ProjectConfig],
+  scheduled: &[usize],
+  cli_teardown_idx: Option<usize>,
+) -> FxHashMap<usize, Vec<(usize, bool)>> {
+  // Pre-compute each scheduled project's prerequisites and whether it is a
+  // teardown. The ready-set scheduler spawns a project once all its
+  // prerequisites have reached a terminal state.
+  //
+  // - A normal project requires every `dependencies` entry to have PASSED.
+  //   If any dependency failed/was skipped, the project is itself skipped.
+  // - A teardown project (referenced by another project's `teardown` field)
+  //   requires only that its declaring parent reached a terminal state — it
+  //   runs even if the parent failed (Playwright teardown semantics).
+  // - The CLI-supplied teardown requires every other selected project to be
+  //   terminal.
+  let teardown_parent: FxHashMap<usize, usize> = projects
+    .iter()
+    .enumerate()
+    .filter_map(|(parent_idx, p)| {
+      p.teardown
+        .as_deref()
+        .and_then(|name| projects.iter().position(|q| q.name == name))
+        .map(|td_idx| (td_idx, parent_idx))
+    })
+    .collect();
+
+  // Prerequisites by index: (prereq_idx, must_pass).
+  scheduled
+    .iter()
+    .map(|&idx| {
+      let mut reqs: Vec<(usize, bool)> = Vec::new();
+      // Normal dependencies must pass.
+      for dep_name in &projects[idx].dependencies {
+        if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name)
+          && scheduled.contains(&dep_idx)
+        {
+          reqs.push((dep_idx, true));
+        }
+      }
+      // Teardown parent must merely be terminal.
+      if let Some(&parent_idx) = teardown_parent.get(&idx)
+        && scheduled.contains(&parent_idx)
+      {
+        reqs.push((parent_idx, false));
+      }
+      // CLI-supplied teardown waits on every other scheduled project.
+      if Some(idx) == cli_teardown_idx {
+        for &other in scheduled {
+          if other != idx {
+            reqs.push((other, false));
+          }
+        }
+      }
+      (idx, reqs)
+    })
+    .collect()
 }
 
 /// Topologically sort projects by `dependencies`. Returns indices in execution order.
@@ -3116,7 +3500,7 @@ fn without_file_filters(overrides: &CliOverrides) -> CliOverrides {
   overrides
 }
 
-/// Applies project-level test_dir, test_match, test_ignore, grep, grep_invert, and tag filters.
+/// Applies project-level `test_dir`, `test_match`, `test_ignore`, grep, `grep_invert`, and tag filters.
 fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &ProjectConfig) {
   // Filter by test_dir: only keep suites whose file lives under it.
   // `testDir` is anchored to the config file it was written in, so it
@@ -3375,11 +3759,11 @@ mod browser_launch_ownership_tests {
     let release = Arc::new(Notify::new());
     let deleted = Arc::new(AtomicBool::new(false));
     let create = {
-      let entered = entered.clone();
-      let release = release.clone();
+      let entered = Arc::clone(&entered);
+      let release = Arc::clone(&release);
       move || {
-        let entered = entered.clone();
-        let release = release.clone();
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
         async move {
           entered.notify_one();
           release.notified().await;
@@ -3390,9 +3774,9 @@ mod browser_launch_ownership_tests {
       }
     };
     let delete = {
-      let deleted = deleted.clone();
+      let deleted = Arc::clone(&deleted);
       move || {
-        let deleted = deleted.clone();
+        let deleted = Arc::clone(&deleted);
         async move {
           deleted.store(true, Ordering::Release);
           Json(json!({"value":null}))
@@ -3425,7 +3809,7 @@ mod browser_launch_ownership_tests {
       },
     ));
     let setup = tokio::spawn({
-      let handle = handle.clone();
+      let handle = Arc::clone(&handle);
       async move { handle.get().await }
     });
     entered.notified().await;
@@ -3445,6 +3829,7 @@ mod browser_launch_ownership_tests {
 }
 
 impl BrowserHandle {
+  #[must_use]
   pub fn new(plan: LaunchPlan) -> Self {
     Self::with_connection(plan, ConnectMode::Launch)
   }
@@ -3478,6 +3863,7 @@ impl BrowserHandle {
 
   /// Wrap a pre-launched browser (watch-mode shared) — `close()` is a
   /// no-op so the shared browser survives across runs.
+  #[must_use]
   pub fn from_shared(browser: Arc<Browser>) -> Self {
     let cell = tokio::sync::OnceCell::new();
     let _ = cell.set(browser);
@@ -3502,6 +3888,13 @@ impl BrowserHandle {
     self.cell.get().cloned()
   }
 
+  /// The browser, launching it on the first call; concurrent callers
+  /// share the one launch.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`ferridriver::FerriError::TargetClosed`] once the handle is
+  /// closed, or the launch or connection failure.
   pub async fn get(&self) -> ferridriver::error::Result<Arc<Browser>> {
     use futures::FutureExt;
     let pending = {
@@ -3510,20 +3903,20 @@ impl BrowserHandle {
         return Err(ferridriver::FerriError::TargetClosed { reason: None });
       }
       if let Some(browser) = self.cell.get() {
-        return Ok(browser.clone());
+        return Ok(Arc::clone(browser));
       }
       state
         .pending
         .get_or_insert_with(|| {
           let plan = self.plan.clone();
           let connection = self.connection.clone();
-          let cell = self.cell.clone();
+          let cell = Arc::clone(&self.cell);
           let recycle_contexts = self.recycle_contexts;
           // A cancelled fixture must not abandon a session still being created by the driver.
           let task = tokio::spawn(async move {
             let browser = Arc::new(launch_with_plan(plan, connection).await?);
             browser.set_context_recycling(recycle_contexts).await;
-            let _ = cell.set(browser.clone());
+            let _ = cell.set(Arc::clone(&browser));
             Ok(browser)
           });
           async move {
@@ -3553,6 +3946,13 @@ impl BrowserHandle {
     self.cell.get().cloned()
   }
 
+  /// Close the browser this handle launched; a shared browser is left to
+  /// its owner.
+  ///
+  /// # Errors
+  ///
+  /// Returns the launch failure of a launch still in flight, or the
+  /// browser's close failure.
   pub async fn close(&self) -> ferridriver::Result<()> {
     if self.shared {
       return Ok(());

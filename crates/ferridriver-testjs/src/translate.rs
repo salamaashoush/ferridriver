@@ -440,7 +440,7 @@ async fn build_world_data(
           pool
             .get("page")
             .await
-            .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?,
+            .map_err(|e| TestFailure::wrap("fixture 'page' failed", &e))?,
         );
       },
       "context" => {
@@ -448,7 +448,7 @@ async fn build_world_data(
           pool
             .get("context")
             .await
-            .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?,
+            .map_err(|e| TestFailure::wrap("fixture 'context' failed", &e))?,
         );
       },
       "request" => {
@@ -456,7 +456,7 @@ async fn build_world_data(
           pool
             .get("request")
             .await
-            .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?,
+            .map_err(|e| TestFailure::wrap("fixture 'request' failed", &e))?,
         );
       },
       "browser" => {
@@ -464,7 +464,7 @@ async fn build_world_data(
           pool
             .get("browser")
             .await
-            .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?,
+            .map_err(|e| TestFailure::wrap("fixture 'browser' failed", &e))?,
         );
       },
       _ => {},
@@ -503,7 +503,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let test_info: Arc<TestInfo> = pool
         .get("test_info")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", &e))?;
 
       let session = p
         .sessions
@@ -514,7 +514,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let modifiers = pool
         .get("__test_modifiers")
         .await
-        .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", &e))?;
 
       let world = build_world_data(&pool, &test_info, &p).await?;
 
@@ -528,7 +528,7 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
         modifiers,
         Arc::new(session.session().deadline()),
         source_map.clone(),
-        Arc::clone(&p.cwd),
+        Arc::from(p.cwd.as_path()),
         base_timeout,
         (*p.static_annotations).clone(),
       ));
@@ -1040,7 +1040,7 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
         modifiers,
         Arc::new(session.session().deadline()),
         source_map.clone(),
-        cwd.clone(),
+        Arc::from(cwd.as_path()),
         Duration::from_secs(30),
         Vec::new(),
       ));

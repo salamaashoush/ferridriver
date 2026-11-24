@@ -3,7 +3,7 @@
 //! Built-in fixtures: `browser` (worker scope), `context` (test scope), `page` (test scope).
 //! Custom fixtures can depend on built-ins and each other, forming a DAG.
 //!
-//! Uses lock-free DashMap for fixture values — zero contention on concurrent reads.
+//! Uses lock-free `DashMap` for fixture values — zero contention on concurrent reads.
 
 use std::any::Any;
 use std::future::Future;
@@ -101,8 +101,10 @@ struct Teardown {
 /// tears down (reverse setup order, like Playwright fixture cleanup).
 pub struct Fixture<T> {
   value: T,
-  teardown: Option<Box<dyn FnOnce(Arc<T>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>>,
+  teardown: Option<FixtureTeardown<T>>,
 }
+
+type FixtureTeardown<T> = Box<dyn FnOnce(Arc<T>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 impl<T: Any + Send + Sync> Fixture<T> {
   pub fn new(value: T) -> Self {
@@ -174,7 +176,7 @@ pub struct FixtureDef {
 
 /// Runtime cache of instantiated fixtures with scoped lifecycle management.
 ///
-/// Uses lock-free DashMap for fixture values — concurrent reads never block.
+/// Uses lock-free `DashMap` for fixture values — concurrent reads never block.
 /// Each scope level (global, worker, test) has its own pool instance.
 /// Child pools inherit from parent pools for cross-scope fixture access.
 #[derive(Clone)]
@@ -191,8 +193,8 @@ struct FixturePoolInner {
   /// them, so ordering, cycles, auto fixtures and the scope rule are
   /// decided by `fixture_graph` here exactly as they are for a JS
   /// `test.extend` chain or a BDD scenario.
-  slots: Arc<Vec<crate::fixture_graph::FixtureSlot>>,
-  /// Teardown stack: LIFO order for cleanup. std::sync::Mutex — only locked briefly.
+  slots: Arc<[crate::fixture_graph::FixtureSlot]>,
+  /// Teardown stack: LIFO order for cleanup. `std::sync::Mutex` — only locked briefly.
   teardown_stack: std::sync::Mutex<Vec<Arc<Teardown>>>,
   teardown_lock: tokio::sync::Mutex<()>,
   /// Parent pool (for cross-scope access).
@@ -203,8 +205,9 @@ struct FixturePoolInner {
 
 impl FixturePool {
   /// Create a new root fixture pool.
+  #[must_use]
   pub fn new(defs: FxHashMap<String, FixtureDef>, scope: FixtureScope) -> Self {
-    let slots = Arc::new(slots_of(&defs));
+    let slots: Arc<[_]> = slots_of(&defs).into();
     Self {
       inner: Arc::new(FixturePoolInner {
         values: DashMap::new(),
@@ -219,6 +222,7 @@ impl FixturePool {
   }
 
   /// Create a child pool that inherits parent fixtures for cross-scope access.
+  #[must_use]
   pub fn child(&self, scope: FixtureScope) -> Self {
     Self {
       inner: Arc::new(FixturePoolInner {
@@ -256,10 +260,11 @@ impl FixturePool {
   /// This is the core building block for per-test fixture graphs: worker/global
   /// fixtures live in the parent pool, while test-scoped fixtures can be
   /// specialized for a single test execution without mutating shared state.
+  #[must_use]
   pub fn child_with_defs(&self, defs: FxHashMap<String, FixtureDef>, scope: FixtureScope) -> Self {
     let mut merged = (*self.inner.defs).clone();
     merged.extend(defs);
-    let slots = Arc::new(slots_of(&merged));
+    let slots: Arc<[_]> = slots_of(&merged).into();
     Self {
       inner: Arc::new(FixturePoolInner {
         values: DashMap::new(),
@@ -310,7 +315,7 @@ impl FixturePool {
   /// The value of `name` if this pool or any parent has resolved it.
   fn cached_value(&self, name: &str) -> Option<ArcValue> {
     if let Some(val) = self.inner.values.get(name) {
-      return Some(val.value().clone());
+      return Some(Arc::clone(val.value()));
     }
     self.inner.parent.as_ref().and_then(|p| p.cached_value(name))
   }
@@ -330,11 +335,12 @@ impl FixturePool {
 
   /// Synchronously get an already-resolved fixture from the cache.
   /// Returns None if the fixture hasn't been resolved yet.
-  /// Lock-free DashMap read — no async needed.
+  /// Lock-free `DashMap` read — no async needed.
   /// Used by NAPI lazy fixture getters to avoid redundant async resolution.
+  #[must_use]
   pub fn try_get_cached<T: Any + Send + Sync>(&self, name: &str) -> Option<Arc<T>> {
     if let Some(val) = self.inner.values.get(name) {
-      val.value().clone().downcast::<T>().ok()
+      Arc::clone(val.value()).downcast::<T>().ok()
     } else if let Some(parent) = &self.inner.parent {
       parent.try_get_cached::<T>(name)
     } else {
@@ -343,12 +349,18 @@ impl FixturePool {
   }
 
   /// Inject a pre-created fixture value into the pool (skips setup).
-  /// Lock-free DashMap insert — no async needed.
+  /// Lock-free `DashMap` insert — no async needed.
   pub fn inject<T: Any + Send + Sync>(&self, name: &str, value: Arc<T>) {
     self.inner.values.insert(name.to_string(), value as ArcValue);
   }
 
   /// Resolve a fixture by name without knowing its concrete type.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when no fixture is registered as `name`, when its
+  /// dependencies form a cycle or name a missing fixture, or when its
+  /// setup or a dependency's fails or times out.
   pub async fn resolve(&self, name: &str) -> ferridriver::error::Result<()> {
     ensure_resolved(self, name).await
   }
@@ -387,6 +399,11 @@ impl FixturePool {
   }
 
   /// Tear down all fixtures in this pool (reverse order).
+  ///
+  /// # Errors
+  ///
+  /// Returns the first teardown failure; the fixtures still on the stack
+  /// stay there for a later call.
   pub async fn teardown_all(&self) -> ferridriver::Result<()> {
     let _cleanup = self.inner.teardown_lock.lock().await;
     loop {
@@ -511,7 +528,12 @@ async fn set_up(pool: &FixturePool, name: &str) -> ferridriver::error::Result<()
   } else {
     ferridriver::pause::run_within(timeout, setup(pool.clone()))
       .await
-      .map_err(|_| FerriError::timeout(format!("fixture '{known_as}' setup"), timeout.as_millis() as u64))?
+      .map_err(|_| {
+        FerriError::timeout(
+          format!("fixture '{known_as}' setup"),
+          u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        )
+      })?
   };
   let arc_val = result.map_err(|e| FerriError::backend(format!("fixture '{known_as}' setup failed: {e}")))?;
 
@@ -562,7 +584,7 @@ const INJECTED_FIXTURES: &[(&str, FixtureScope)] =
 ///
 /// The reason from [`crate::fixture_graph`], which is the same text a JS
 /// chain or a BDD scenario would report for the same shape.
-pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> {
+pub(crate) fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> {
   let mut slots = slots_of(defs);
   for (name, scope) in INJECTED_FIXTURES {
     if !defs.contains_key(*name) {
@@ -585,68 +607,7 @@ pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> 
 /// Rejects an invalid browser selection before creating fixture definitions.
 pub fn builtin_fixtures(browser_config: &BrowserConfig) -> ferridriver::error::Result<FxHashMap<String, FixtureDef>> {
   let mut defs = FxHashMap::default();
-
-  let (backend, kind) = browser_config.resolve_kinds()?;
-  let headless = browser_config.headless;
-  let executable_path = browser_config.executable_path.clone();
-  let args = browser_config.args.clone();
-  let firefox_user_prefs: Option<FxHashMap<String, serde_json::Value>> =
-    (!browser_config.firefox_user_prefs.is_empty())
-      .then(|| browser_config.firefox_user_prefs.clone().into_iter().collect());
-  let viewport = browser_config
-    .viewport
-    .as_ref()
-    .map_or_else(
-      || Some(crate::config::ViewportConfig::default()),
-      ferridriver_config::browser::ViewportOverride::size,
-    )
-    .map(|v| ferridriver::options::ViewportConfig {
-      width: v.width,
-      height: v.height,
-      ..Default::default()
-    });
-
-  // browser (Worker scope)
-  defs.insert(
-    "browser".into(),
-    FixtureDef {
-      name: "browser".into(),
-      scope: FixtureScope::Worker,
-      dependencies: vec![],
-      setup: Arc::new(move |_pool| {
-        let exec = executable_path.clone();
-        let extra_args = args.clone();
-        let vp = viewport.clone();
-        let prefs = firefox_user_prefs.clone();
-        Box::pin(async move {
-          let plan = LaunchPlan {
-            backend,
-            kind,
-            headless,
-            executable_path: exec,
-            args: extra_args,
-            default_viewport: vp,
-            firefox_user_prefs: prefs,
-            ..Default::default()
-          };
-          let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
-          Box::pin(state.ensure_browser()).await?;
-          let browser = Browser::from_state(state);
-          Ok(Arc::new(browser) as ArcValue)
-        })
-      }),
-      teardown: Some(Arc::new(|val| {
-        Box::pin(async move {
-          let browser = val
-            .downcast::<Browser>()
-            .map_err(|_| ferridriver::FerriError::backend("browser fixture has the wrong value type"))?;
-          browser.close().await
-        })
-      })),
-      timeout: Duration::from_secs(30),
-      auto: false,
-    },
-  );
+  defs.insert("browser".into(), browser_fixture(browser_config)?);
 
   // context (Test scope, depends on browser)
   defs.insert(
@@ -698,6 +659,67 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> ferridriver::error::R
   Ok(defs)
 }
 
+/// The worker-scoped `browser`, launched from `browser_config`.
+fn browser_fixture(browser_config: &BrowserConfig) -> ferridriver::error::Result<FixtureDef> {
+  let (backend, kind) = browser_config.resolve_kinds()?;
+  let headless = browser_config.headless;
+  let executable_path = browser_config.executable_path.clone();
+  let args = browser_config.args.clone();
+  let firefox_user_prefs: Option<FxHashMap<String, serde_json::Value>> =
+    (!browser_config.firefox_user_prefs.is_empty())
+      .then(|| browser_config.firefox_user_prefs.clone().into_iter().collect());
+  let viewport = browser_config
+    .viewport
+    .as_ref()
+    .map_or_else(
+      || Some(crate::config::ViewportConfig::default()),
+      ferridriver_config::browser::ViewportOverride::size,
+    )
+    .map(|v| ferridriver::options::ViewportConfig {
+      width: v.width,
+      height: v.height,
+      ..Default::default()
+    });
+
+  Ok(FixtureDef {
+    name: "browser".into(),
+    scope: FixtureScope::Worker,
+    dependencies: vec![],
+    setup: Arc::new(move |_pool| {
+      let exec = executable_path.clone();
+      let extra_args = args.clone();
+      let vp = viewport.clone();
+      let prefs = firefox_user_prefs.clone();
+      Box::pin(async move {
+        let plan = LaunchPlan {
+          backend,
+          kind,
+          headless,
+          executable_path: exec,
+          args: extra_args,
+          default_viewport: vp,
+          firefox_user_prefs: prefs,
+          ..Default::default()
+        };
+        let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
+        Box::pin(state.ensure_browser()).await?;
+        let browser = Browser::from_state(state);
+        Ok(Arc::new(browser) as ArcValue)
+      })
+    }),
+    teardown: Some(Arc::new(|val| {
+      Box::pin(async move {
+        let browser = val
+          .downcast::<Browser>()
+          .map_err(|_| ferridriver::FerriError::backend("browser fixture has the wrong value type"))?;
+        browser.close().await
+      })
+    })),
+    timeout: Duration::from_secs(30),
+    auto: false,
+  })
+}
+
 #[cfg(test)]
 mod setup_tests {
   use super::*;
@@ -706,13 +728,13 @@ mod setup_tests {
   #[tokio::test]
   async fn worker_prerequisites_are_lazy_shared_and_outside_the_body_budget() {
     let starts = Arc::new(AtomicUsize::new(0));
-    let count = starts.clone();
+    let count = Arc::clone(&starts);
     let worker = FixtureDef {
       name: "browser".into(),
       scope: FixtureScope::Worker,
       dependencies: vec![],
       setup: Arc::new(move |_| {
-        let count = count.clone();
+        let count = Arc::clone(&count);
         Box::pin(async move {
           tokio::time::sleep(Duration::from_millis(200)).await;
           count.fetch_add(1, Ordering::SeqCst);

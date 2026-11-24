@@ -72,7 +72,7 @@ impl StreamTarget {
 /// Inline artifact bytes, written to files and referenced by path.
 struct FileResources {
   dir: PathBuf,
-  seen: std::collections::HashSet<PathBuf>,
+  seen: rustc_hash::FxHashSet<PathBuf>,
 }
 
 impl ResourceSink for FileResources {
@@ -81,7 +81,7 @@ impl ResourceSink for FileResources {
     let path = self.dir.join(format!(
       "{}-{}{}",
       sanitize(name_hint),
-      &digest[..16],
+      crate::model::hex_prefix(&digest, 16),
       extension_for(content_type)
     ));
     if !self.seen.contains(&path) {
@@ -117,7 +117,7 @@ impl StreamReporter {
       failed: false,
       resources: FileResources {
         dir,
-        seen: std::collections::HashSet::new(),
+        seen: rustc_hash::FxHashSet::default(),
       },
       shard: None,
       line: Vec::new(),
@@ -165,9 +165,8 @@ impl StreamReporter {
 #[async_trait]
 impl Reporter for StreamReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
-    if let Some(wire) = WireEvent::from_runtime(event, &mut self.resources) {
-      self.write(&wire);
-    }
+    let wire = WireEvent::from_runtime(event, &mut self.resources);
+    self.write(&wire);
   }
 
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
@@ -274,6 +273,6 @@ mod tests {
       outcome.error.as_ref().and_then(|e| e.screenshot.clone()),
       Some(vec![1, 2, 3])
     );
-    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir).expect("remove the test directory");
   }
 }

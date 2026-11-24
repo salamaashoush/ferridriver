@@ -199,32 +199,40 @@ pub fn report(listed: &[ListedTest], errors: &[ListError]) -> ListReport {
 
 /// Print the listing: the JSON document on stdout, or the text form, one
 /// test per line (`[project] ` in front when there is one) and a count.
-pub fn print(listed: &[ListedTest], errors: &[ListError], json: bool) {
+///
+/// # Errors
+///
+/// Returns the error when stdout cannot be written, or when the listing
+/// document cannot be serialized.
+pub fn print(listed: &[ListedTest], errors: &[ListError], json: bool) -> std::io::Result<()> {
+  use std::io::Write as _;
+  let mut out = std::io::stdout().lock();
   if json {
-    match serde_json::to_string_pretty(&report(listed, errors)) {
-      Ok(text) => println!("{text}"),
-      Err(e) => eprintln!("Error: could not serialize the listing: {e}"),
-    }
-    return;
+    let text = serde_json::to_string_pretty(&report(listed, errors)).map_err(std::io::Error::other)?;
+    writeln!(out, "{text}")?;
+    return out.flush();
   }
   for test in listed {
     let project = &test.record.project;
     if project.is_empty() {
-      println!("  {}", test.id.full_name());
+      writeln!(out, "  {}", test.id.full_name())?;
     } else {
-      println!("  [{project}] {}", test.id.full_name());
+      writeln!(out, "  [{project}] {}", test.id.full_name())?;
     }
     for issue in &test.record.step_issues {
-      println!(
+      writeln!(
+        out,
         "      {} step at line {}: {}{}",
         issue.kind, issue.line, issue.keyword, issue.text
-      );
+      )?;
     }
   }
-  println!("\n  {} test(s) found", listed.len());
+  writeln!(out, "\n  {} test(s) found", listed.len())?;
+  out.flush()?;
   for error in errors {
     eprintln!("Error: {}", error.message);
   }
+  Ok(())
 }
 
 #[cfg(test)]

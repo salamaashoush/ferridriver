@@ -37,10 +37,17 @@ pub struct TestRegistration {
   pub retries: Option<u32>,
   /// Raw JSON string for fixture/context overrides (viewport, locale, etc.)
   pub use_options: Option<&'static str>,
-  pub test_fn: fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>,
+  pub test_fn: RegisteredSuiteFn,
 }
 
 inventory::collect!(TestRegistration);
+
+/// The future a registered test or hook body returns.
+pub type RegisteredFuture = Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>;
+/// A registered test body, or a `before_all` / `after_all` hook.
+pub type RegisteredSuiteFn = fn(FixturePool) -> RegisteredFuture;
+/// A registered `before_each` / `after_each` hook.
+pub type RegisteredEachFn = fn(FixturePool, Arc<TestInfo>) -> RegisteredFuture;
 
 /// Hook kind tag for inventory registration (no closures — just the discriminant).
 #[derive(Debug, Clone, Copy)]
@@ -56,11 +63,10 @@ pub struct HookRegistration {
   pub module_path: &'static str,
   /// Hooks of one kind run in the order they are written.
   pub line: u32,
-  /// For before_all/after_all: `fn(FixturePool) -> Future<Result<(), TestFailure>>`
-  pub suite_hook_fn: Option<fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
-  /// For before_each/after_each: `fn(FixturePool, Arc<TestInfo>) -> Future<Result<(), TestFailure>>`
-  pub each_hook_fn:
-    Option<fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
+  /// For `before_all/after_all`: `fn(FixturePool) -> Future<Result<(), TestFailure>>`
+  pub suite_hook_fn: Option<RegisteredSuiteFn>,
+  /// For `before_each/after_each`: `fn(FixturePool, Arc<TestInfo>) -> Future<Result<(), TestFailure>>`
+  pub each_hook_fn: Option<RegisteredEachFn>,
   pub kind: HookKindTag,
 }
 
@@ -90,6 +96,7 @@ inventory::collect!(SuiteModeRegistration);
 /// Collect every `#[fixture]`-registered custom fixture into a defs map,
 /// keyed by fixture name. Merged into the worker fixture pool so tests and
 /// other fixtures can resolve them via `ctx.get::<T>(name)`.
+#[must_use]
 pub fn collect_rust_fixtures() -> rustc_hash::FxHashMap<String, crate::fixture::FixtureDef> {
   let mut defs = rustc_hash::FxHashMap::default();
   for reg in inventory::iter::<FixtureRegistration> {
@@ -123,7 +130,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
     let file = reg.file.to_string();
     // Derive suite name from module_path: strip the last segment (fn name).
     let suite_name = suite_from_module_path(reg.module_path);
-    let suite_key = format!("{}::{}", file, suite_name);
+    let suite_key = format!("{file}::{suite_name}");
 
     let test_fn_ptr = reg.test_fn;
     let test_case: TestCase = TestCase {
@@ -247,7 +254,7 @@ pub fn find_test_files(root: &str, patterns: &[String], ignore: &[String]) -> Re
       // Check ignore patterns.
       let ignored = ignore
         .iter()
-        .any(|ig| glob::Pattern::new(ig).map(|p| p.matches(&path_str)).unwrap_or(false));
+        .any(|ig| glob::Pattern::new(ig).is_ok_and(|p| p.matches(&path_str)));
 
       if !ignored {
         files.push(path_str);
@@ -270,12 +277,9 @@ fn apply_filters(mut plan: TestPlan, _config: &TestConfig) -> TestPlan {
 
 /// Filter a test plan by grep pattern.
 pub fn filter_by_grep(plan: &mut TestPlan, pattern: &str, invert: bool) {
-  let matcher = grep_matcher(pattern);
+  let is_match = grep_matcher(pattern);
   for suite in &mut plan.suites {
-    suite.tests.retain(|test| {
-      let matches = matcher(&test.id.full_name());
-      if invert { !matches } else { matches }
-    });
+    suite.tests.retain(|test| is_match(&test.id.full_name()) != invert);
   }
   plan.suites.retain(|s| !s.tests.is_empty());
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
@@ -313,6 +317,11 @@ impl fmt::Display for ForbidOnlyError {
 
 /// Check that no tests or suites have `Only` annotations.
 /// Returns `Err` listing all offending tests if any are found.
+///
+/// # Errors
+///
+/// Returns a [`ForbidOnlyError`] naming every test that is, or sits in a
+/// suite that is, marked `only`.
 pub fn check_forbid_only(plan: &TestPlan) -> Result<(), ForbidOnlyError> {
   let mut only_tests: Vec<String> = Vec::new();
 
@@ -593,7 +602,7 @@ mod tests {
     assert_eq!(plan.total_tests, 1);
     assert_eq!(plan.suites[0].tests[0].id.name, "match");
 
-    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir).expect("remove the test directory");
   }
 
   #[test]
@@ -614,7 +623,7 @@ mod tests {
     filter_by_rerun(&mut plan, &rerun_path);
     assert_eq!(plan.total_tests, 2);
 
-    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir).expect("remove the test directory");
   }
 
   #[test]
@@ -629,7 +638,7 @@ mod tests {
     assert_eq!(plan.total_tests, 1);
     assert_eq!(plan.suites[0].tests[0].id.name, "focused");
 
-    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir).expect("remove the test directory");
   }
 }
 

@@ -192,7 +192,7 @@ fn dry_run_fn(scenario: Arc<ScenarioExecution>, issues: Arc<Vec<StepIssue>>, str
       let test_info: Arc<TestInfo> = pool
         .get("test_info")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", &e))?;
       let feature_path = scenario.feature_path.display().to_string();
       let mut failure: Option<String> = None;
       for step in &scenario.steps {
@@ -209,13 +209,13 @@ fn dry_run_fn(scenario: Arc<ScenarioExecution>, issues: Arc<Vec<StepIssue>>, str
         }));
         let issue = issues.iter().find(|issue| issue.line == step.line);
         match issue {
-          _ if failure.is_some() => handle.skip(Some("skipped due to previous failure".into())).await,
-          Some(issue) if issue.kind == "undefined" && !strict => handle.pending(Some(issue.message.clone())).await,
+          _ if failure.is_some() => handle.skip(Some("skipped due to previous failure".into())),
+          Some(issue) if issue.kind == "undefined" && !strict => handle.pending(Some(issue.message.clone())),
           Some(issue) => {
-            handle.end(Some(issue.message.clone())).await;
+            handle.end(Some(issue.message.clone()));
             failure = Some(issue.message.clone());
           },
-          None => handle.skip(None).await,
+          None => handle.skip(None),
         }
       }
       match failure {

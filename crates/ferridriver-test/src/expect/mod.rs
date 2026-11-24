@@ -181,7 +181,9 @@ impl ExpectStep {
     if self.matcher == "toHaveScreenshot"
       && let Some(name) = self.expected.as_ref().and_then(screenshot_step_name)
     {
-      title.push_str(&format!("({name})"));
+      title.push('(');
+      title.push_str(&name);
+      title.push(')');
     }
     // `escapeWithQuotes(title, '"')` is exactly a JSON string literal.
     format!("Expect {}", serde_json::Value::String(title))

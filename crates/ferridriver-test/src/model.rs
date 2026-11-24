@@ -112,8 +112,13 @@ impl TestId {
       let _ = write!(expression, " (repeat:{})", self.repeat_each_index);
     }
     let test_id = ferridriver::tracing::sha1_hex(expression.as_bytes());
-    format!("{}-{}", &file_id[..20], &test_id[..20])
+    format!("{}-{}", hex_prefix(&file_id, 20), hex_prefix(&test_id, 20))
   }
+}
+
+/// The first `len` characters of a hex digest, or all of it when shorter.
+pub(crate) fn hex_prefix(digest: &str, len: usize) -> &str {
+  digest.get(..len).unwrap_or(digest)
 }
 
 impl fmt::Display for TestId {
@@ -222,7 +227,7 @@ impl TestSuite {
 }
 
 /// Lifecycle hooks attached to a suite.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Hooks {
   /// Runs once per suite per worker (no test context).
   pub before_all: Vec<SuiteHookFn>,
@@ -234,23 +239,12 @@ pub struct Hooks {
   pub after_each: Vec<HookFn>,
 }
 
-impl Default for Hooks {
-  fn default() -> Self {
-    Self {
-      before_all: Vec::new(),
-      after_all: Vec::new(),
-      before_each: Vec::new(),
-      after_each: Vec::new(),
-    }
-  }
-}
-
-/// Suite-scoped hook (before_all / after_all). Receives only the fixture pool.
+/// Suite-scoped hook (`before_all` / `after_all`). Receives only the fixture pool.
 /// Runs once per suite per worker, no test context available.
 pub type SuiteHookFn =
   Arc<dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>> + Send + Sync>;
 
-/// Test-scoped hook (before_each / after_each). Receives fixture pool + `TestInfo`.
+/// Test-scoped hook (`before_each` / `after_each`). Receives fixture pool + `TestInfo`.
 /// `TestInfo` provides access to test tags, name, step API, and event bus.
 pub type HookFn = Arc<
   dyn Fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>> + Send + Sync,
@@ -413,6 +407,7 @@ impl Default for TestPlanBuilder {
 }
 
 impl TestPlanBuilder {
+  #[must_use]
   pub fn new() -> Self {
     Self {
       tests: Vec::new(),
@@ -438,6 +433,7 @@ impl TestPlanBuilder {
   /// Tests are grouped by `id.suite` (matching `SuiteDef.id`).
   /// Tests without a suite go into a default parallel suite.
   /// Hooks are attached to their matching suite by `suite_id`.
+  #[must_use]
   pub fn build(self) -> TestPlan {
     use rustc_hash::FxHashMap;
 
@@ -517,13 +513,13 @@ impl TestPlanBuilder {
 pub struct TestInfo {
   /// Test ID.
   pub test_id: TestId,
-  /// Title path: ["suite", "subsuite", "test name"].
+  /// Title path: `["suite", "subsuite", "test name"]`.
   pub title_path: Vec<String>,
   /// Current retry attempt (0-indexed).
   pub retry: u32,
   /// Worker index (0-based).
   pub worker_index: u32,
-  /// Parallel index (same as worker_index for now).
+  /// Parallel index (same as `worker_index` for now).
   pub parallel_index: u32,
   /// repeatEach index (0-based).
   pub repeat_each_index: u32,
@@ -604,7 +600,7 @@ pub struct TestInfo {
   /// the worker once tracing starts on the test's context. Steps opened
   /// while this is `Some` are mirrored into the trace as action events.
   pub trace_composite: Arc<std::sync::Mutex<Option<String>>>,
-  /// step_id -> trace call id, so child steps nest under their parent
+  /// `step_id` -> trace call id, so child steps nest under their parent
   /// in the trace viewer's action tree.
   pub trace_step_calls: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, String>>>,
   /// Steps opened and not yet ended — where a nested step finds its
@@ -665,7 +661,8 @@ impl TestInfo {
     format!("worker {}: {}", self.worker_index, self.test_id.execution_key())
   }
 
-  /// Create a minimal TestInfo for non-test-runner contexts (MCP, standalone).
+  /// Create a minimal `TestInfo` for non-test-runner contexts (MCP, standalone).
+  #[must_use]
   pub fn new_anonymous() -> Self {
     Self {
       test_id: TestId {
@@ -699,10 +696,10 @@ impl TestInfo {
       project: None,
       config_snapshot: None,
       expect: Arc::new(crate::config::ExpectConfig::default()),
-      config_dir: Default::default(),
-      test_dir: Default::default(),
-      snapshot_names: Default::default(),
-      aria_snapshot_names: Default::default(),
+      config_dir: PathBuf::default(),
+      test_dir: PathBuf::default(),
+      snapshot_names: Arc::default(),
+      aria_snapshot_names: Arc::default(),
       timeout: Duration::from_secs(30),
       tags: Vec::new(),
       start_time: Instant::now(),
@@ -842,7 +839,11 @@ impl TestInfo {
   /// Synchronous on purpose: a soft failure is recorded from inside a
   /// matcher, and the value matchers have no `await` to spend.
   pub fn add_soft_error(&self, error: TestFailure) {
-    self.soft_errors.lock().unwrap_or_else(|e| e.into_inner()).push(error);
+    self
+      .soft_errors
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(error);
   }
 
   /// Keep this test from being retried after this attempt.
@@ -851,38 +852,46 @@ impl TestInfo {
   }
 
   /// Check if any soft errors have been collected.
+  #[must_use]
   pub fn has_soft_errors(&self) -> bool {
-    !self.soft_errors.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    !self
+      .soft_errors
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .is_empty()
   }
 
   /// Drain all soft errors for final reporting.
+  #[must_use]
   pub fn drain_soft_errors(&self) -> Vec<TestFailure> {
     self
       .soft_errors
       .lock()
-      .unwrap_or_else(|e| e.into_inner())
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
       .drain(..)
       .collect()
   }
 
   /// The failures a soft assertion has recorded so far, without
   /// draining them — what `testInfo.errors` reads.
+  #[must_use]
   pub fn soft_error_messages(&self) -> Vec<String> {
     self
       .soft_errors
       .lock()
-      .unwrap_or_else(|e| e.into_inner())
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
       .iter()
       .map(|e| e.message.clone())
       .collect()
   }
 
   /// Record a test step.
-  pub async fn push_step(&self, step: TestStep) {
+  pub fn push_step(&self, step: TestStep) {
     lock(&self.steps).push(step);
   }
 
   /// Get elapsed time since test start.
+  #[must_use]
   pub fn elapsed(&self) -> Duration {
     self.start_time.elapsed()
   }
@@ -1016,7 +1025,7 @@ impl TestInfo {
 
   /// Record a step that already executed elsewhere but still needs to flow
   /// through reporter events and the stored step tree.
-  pub async fn record_step(&self, step: RecordedStep) {
+  pub fn record_step(&self, step: RecordedStep) {
     let RecordedStep {
       title,
       category,
@@ -1245,6 +1254,7 @@ impl TestInfo {
   ///
   /// The one place a step's parent, location and title path are decided,
   /// for every host and for the runner's own action observer.
+  #[must_use]
   pub fn open_step_now(&self, spec: crate::step::StepSpec, nests: bool) -> crate::step::StepStarted {
     let frames: Vec<StepLocation> = spec
       .frames
@@ -1522,7 +1532,7 @@ pub struct StepHandle {
 
 impl StepHandle {
   /// Complete this step. Pass `None` for success, `Some(msg)` for failure.
-  pub async fn end(self, error: Option<String>) {
+  pub fn end(self, error: Option<String>) {
     let status = if error.is_some() {
       StepStatus::Failed
     } else {
@@ -1532,12 +1542,12 @@ impl StepHandle {
   }
 
   /// Complete this step as skipped.
-  pub async fn skip(self, reason: Option<String>) {
+  pub fn skip(self, reason: Option<String>) {
     self.finish_with_status(StepStatus::Skipped, reason);
   }
 
   /// Complete this step as pending (not yet implemented).
-  pub async fn pending(self, reason: Option<String>) {
+  pub fn pending(self, reason: Option<String>) {
     self.finish_with_status(StepStatus::Pending, reason);
   }
 
@@ -1665,7 +1675,7 @@ pub enum StepStatus {
 /// Category of a test step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepCategory {
-  /// User-defined step via test.step().
+  /// User-defined step via `test.step()`.
   TestStep,
   /// Expect assertion.
   Expect,
@@ -1679,8 +1689,9 @@ pub enum StepCategory {
 
 impl StepCategory {
   /// Whether this step category is visible in standard reporter output.
-  /// TestStep and Hook are always shown. Expect, Fixture, PwApi are hidden
+  /// `TestStep` and Hook are always shown. Expect, Fixture, `PwApi` are hidden
   /// unless verbose mode is enabled.
+  #[must_use]
   pub fn is_visible(&self) -> bool {
     matches!(self, Self::TestStep | Self::Hook)
   }
@@ -1812,7 +1823,7 @@ impl fmt::Display for TestStatus {
 
 impl TestStatus {
   /// Playwright's `TestStatus` spelling — the one every serialized
-  /// report (JSON, blob, CTRF, TeamCity) and every consumer of them
+  /// report (JSON, blob, CTRF, `TeamCity`) and every consumer of them
   /// uses. `Display` prints the same strings so the two never drift.
   #[must_use]
   pub fn as_str(self) -> &'static str {
@@ -1991,7 +2002,7 @@ impl TestOutcome {
   }
 
   /// ISO-8601 rendering of [`Self::start_time`], the form Playwright's
-  /// JSON report and JUnit's `timestamp` attribute both use.
+  /// JSON report and `JUnit`'s `timestamp` attribute both use.
   #[must_use]
   pub fn start_iso8601(&self) -> String {
     ferridriver::tracing::epoch_ms_to_iso8601(self.start_epoch_ms())
@@ -2054,7 +2065,7 @@ impl TestFailure {
   /// variants and `"<prefix>: <message>"` for unnamed ones, so consumers
   /// that match on `TimeoutError:` still see the marker after the prefix.
   #[must_use]
-  pub fn wrap(prefix: impl fmt::Display, err: ferridriver::FerriError) -> Self {
+  pub fn wrap(prefix: impl fmt::Display, err: &ferridriver::FerriError) -> Self {
     Self::msg(format!("{prefix}: {}", err.display_named()))
   }
 
@@ -2071,7 +2082,7 @@ impl TestFailure {
   /// message, so the TS bridge can re-hydrate a real class instance from
   /// the `<Name>: <message>` shape, the convention
   /// `ferridriver-node::error::to_napi` uses on the NAPI surface.
-  fn from_ferri(err: ferridriver::FerriError) -> Self {
+  fn from_ferri(err: &ferridriver::FerriError) -> Self {
     Self::msg(err.display_named())
   }
 
@@ -2108,7 +2119,7 @@ where
       .downcast_mut::<Option<ferridriver::FerriError>>()
       .and_then(Option::take)
     {
-      return Self::from_ferri(ferri);
+      return Self::from_ferri(&ferri);
     }
     if let Some(assertion) = any
       .downcast_mut::<Option<ferridriver_expect::AssertionFailure>>()
@@ -2225,7 +2236,7 @@ impl From<&std::path::Path> for AttachmentBody {
 /// Unified fixture bag for test/step/hook callbacks.
 ///
 /// E2E tests and hooks get browser/page/context/request/testInfo.
-/// BDD steps additionally get args/data_table/doc_string.
+/// BDD steps additionally get `args/data_table/doc_string`.
 /// BDD hooks get the E2E fields with BDD fields as None.
 #[derive(Clone)]
 pub struct TestFixtures {
@@ -2415,7 +2426,7 @@ mod tests {
 
   #[test]
   fn testfailure_wrap_preserves_timeout_class_after_prefix() {
-    let tf = TestFailure::wrap("fixture 'browser' failed", FerriError::timeout("launch", 30_000));
+    let tf = TestFailure::wrap("fixture 'browser' failed", &FerriError::timeout("launch", 30_000));
     assert_eq!(
       tf.message,
       "fixture 'browser' failed: TimeoutError: Timeout 30000ms exceeded while launch"
@@ -2424,7 +2435,7 @@ mod tests {
 
   #[test]
   fn testfailure_wrap_unnamed_keeps_message_only() {
-    let tf = TestFailure::wrap("fixture 'page' failed", FerriError::backend("oops"));
+    let tf = TestFailure::wrap("fixture 'page' failed", &FerriError::backend("oops"));
     assert_eq!(tf.message, "fixture 'page' failed: backend error: oops");
   }
 

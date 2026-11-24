@@ -390,7 +390,10 @@ fn list_scenarios(
     }
     test.record.step_issues.clone_from(found);
   }
-  ferridriver_test::listing::print(&listed, &errors, json);
+  if let Err(e) = ferridriver_test::listing::print(&listed, &errors, json) {
+    eprintln!("Error: could not write the listing: {e}");
+    return exit::INFRASTRUCTURE;
+  }
   if fatal { exit::FAILED } else { exit::PASSED }
 }
 

@@ -48,25 +48,28 @@ where
 /// `use ferridriver_test::expect::LocatorSnapshotMatchers;` at the call
 /// site so the methods light up alongside the shared web-first
 /// matchers from [`ferridriver_expect`].
-#[allow(async_fn_in_trait)]
 pub trait LocatorSnapshotMatchers {
   /// Compare the element's text content against a stored `.snap` file.
-  async fn to_match_snapshot(&self, name: &str) -> Result<(), TestFailure>;
+  fn to_match_snapshot(&self, name: &str) -> impl Future<Output = Result<(), TestFailure>> + Send;
 
   /// Compare the element's screenshot to a baseline PNG (default
   /// options).
-  async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure>;
+  fn to_have_screenshot(&self, name: &str) -> impl Future<Output = Result<(), TestFailure>> + Send;
 
   /// Playwright `toHaveScreenshot(name, options?)` — full capture
   /// option bag.
-  async fn to_have_screenshot_with(&self, name: &str, options: ScreenshotMatcherOptions) -> Result<(), TestFailure>;
+  fn to_have_screenshot_with(
+    &self,
+    name: &str,
+    options: ScreenshotMatcherOptions,
+  ) -> impl Future<Output = Result<(), TestFailure>> + Send;
 
   /// Playwright `toMatchAriaSnapshot(yaml)` — compares the live ARIA
   /// tree against the Playwright-style YAML template.
-  async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure>;
+  fn to_match_aria_snapshot(&self, expected_yaml: &str) -> impl Future<Output = Result<(), TestFailure>> + Send;
 }
 
-impl<L: Borrow<Locator>> LocatorSnapshotMatchers for Expect<'_, L> {
+impl<L: Borrow<Locator> + Sync> LocatorSnapshotMatchers for Expect<'_, L> {
   async fn to_match_snapshot(&self, name: &str) -> Result<(), TestFailure> {
     let locator: &Locator = self.subject.borrow();
     let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
@@ -103,10 +106,10 @@ impl<L: Borrow<Locator>> LocatorSnapshotMatchers for Expect<'_, L> {
       project: None,
       config_snapshot: None,
       expect: std::sync::Arc::new(crate::config::ExpectConfig::default()),
-      config_dir: Default::default(),
-      test_dir: Default::default(),
-      snapshot_names: Default::default(),
-      aria_snapshot_names: Default::default(),
+      config_dir: std::path::PathBuf::default(),
+      test_dir: std::path::PathBuf::default(),
+      snapshot_names: Arc::default(),
+      aria_snapshot_names: Arc::default(),
       timeout: self.timeout,
       tags: Vec::new(),
       start_time: std::time::Instant::now(),
@@ -141,8 +144,7 @@ impl<L: Borrow<Locator>> LocatorSnapshotMatchers for Expect<'_, L> {
     let options = options.with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
     let timeout = options.timeout.unwrap_or(self.timeout);
     let snap_dir = std::env::var("SNAPSHOT_DIR")
-      .map(std::path::PathBuf::from)
-      .unwrap_or_else(|_| std::path::PathBuf::from("__snapshots__"));
+      .map_or_else(|_| std::path::PathBuf::from("__snapshots__"), std::path::PathBuf::from);
     let paths = crate::snapshot::ScreenshotFiles::beside(&snap_dir, name);
     crate::snapshot::settle_outside_host(
       crate::snapshot::to_have_screenshot(
@@ -201,6 +203,10 @@ impl<L: Borrow<Locator>> LocatorSnapshotMatchers for Expect<'_, L> {
 /// Capture a locator screenshot honoring the matcher's capture options
 /// (animations, caret, masks, clip, style). Public so the JS test
 /// runner's bridge reuses the exact capture pipeline.
+///
+/// # Errors
+///
+/// Forwards the capture failure, with the option that caused it named.
 pub async fn capture_with_options(
   locator: &Locator,
   options: &ScreenshotMatcherOptions,
@@ -326,6 +332,7 @@ async fn capture_target(
 
 fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>, TestFailure> {
   use image::GenericImageView;
+  use num_traits::ToPrimitive as _;
 
   let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).map_err(|e| TestFailure {
     message: format!("toHaveScreenshot clip: failed to decode capture: {e}"),
@@ -335,14 +342,11 @@ fn crop_png_to_clip(png: &[u8], clip: &super::ScreenshotClip) -> Result<Vec<u8>,
     error_context: None,
   })?;
   let (img_w, img_h) = img.dimensions();
-  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-  let x = (clip.x.max(0.0).min(f64::from(img_w))) as u32;
-  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-  let y = (clip.y.max(0.0).min(f64::from(img_h))) as u32;
-  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-  let w = (clip.width.max(0.0).min(f64::from(img_w.saturating_sub(x)))) as u32;
-  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-  let h = (clip.height.max(0.0).min(f64::from(img_h.saturating_sub(y)))) as u32;
+  let clamp = |value: f64, limit: u32| value.max(0.0).min(f64::from(limit)).to_u32().unwrap_or(0);
+  let x = clamp(clip.x, img_w);
+  let y = clamp(clip.y, img_h);
+  let w = clamp(clip.width, img_w.saturating_sub(x));
+  let h = clamp(clip.height, img_h.saturating_sub(y));
   if w == 0 || h == 0 {
     return Err(TestFailure {
       message: format!(

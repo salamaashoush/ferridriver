@@ -11,6 +11,7 @@ pub struct CucumberMessagesReporter {
 }
 
 impl CucumberMessagesReporter {
+  #[must_use]
   pub fn new(output_path: PathBuf) -> Self {
     Self {
       output_path,
@@ -84,7 +85,7 @@ impl Reporter for CucumberMessagesReporter {
 
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).ok();
+      std::fs::create_dir_all(parent)?;
     }
     let mut file = std::fs::File::create(&self.output_path)?;
     for msg in &self.messages {

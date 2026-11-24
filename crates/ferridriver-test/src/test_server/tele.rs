@@ -149,16 +149,18 @@ impl SuiteNode {
 
 /// The node named `title` among `nodes`, appended when it is new.
 fn node_for<'a>(nodes: &'a mut Vec<SuiteNode>, title: &str, file: &str) -> &'a mut SuiteNode {
-  if let Some(index) = nodes.iter().position(|node| node.title == title) {
-    return &mut nodes[index];
-  }
-  nodes.push(SuiteNode {
-    title: title.to_string(),
-    file: file.to_string(),
-    children: Vec::new(),
-    tests: Vec::new(),
-  });
-  nodes.last_mut().unwrap_or_else(|| unreachable!("just pushed"))
+  let index = if let Some(index) = nodes.iter().position(|node| node.title == title) {
+    index
+  } else {
+    nodes.push(SuiteNode {
+      title: title.to_string(),
+      file: file.to_string(),
+      children: Vec::new(),
+      tests: Vec::new(),
+    });
+    nodes.len() - 1
+  };
+  &mut nodes[index]
 }
 
 fn test_case(root_dir: &Path, project_name: &str, id: &TestId, annotations: &[TestAnnotation]) -> Value {
@@ -223,7 +225,7 @@ pub fn end(status: &str, start_wall_ms: f64, duration: Duration) -> Value {
       "result": {
         "status": status,
         "startTime": start_wall_ms,
-        "duration": duration.as_millis() as u64,
+        "duration": u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
       },
     },
   })
@@ -269,13 +271,13 @@ pub fn test_end(test_id: &str, outcome: &TestOutcome, timeout: Duration) -> Valu
       "test": {
         "testId": test_id,
         "expectedStatus": expected,
-        "timeout": timeout.as_millis() as u64,
+        "timeout": u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
         "annotations": [],
       },
       "result": {
         "id": result_id(test_id, outcome.attempt),
-        "duration": outcome.duration.as_millis() as u64,
-        "status": status_name(&outcome.status),
+        "duration": u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
+        "status": status_name(outcome.status),
         "errors": errors(outcome),
         "annotations": annotation_values(&outcome.annotations),
       },
@@ -286,7 +288,7 @@ pub fn test_end(test_id: &str, outcome: &TestOutcome, timeout: Duration) -> Valu
 /// Our statuses in Playwright's vocabulary. `flaky` is not a result
 /// status there — it is a test that failed once and passed on a retry,
 /// which the receiver works out from the results it has.
-fn status_name(status: &TestStatus) -> &'static str {
+fn status_name(status: TestStatus) -> &'static str {
   match status {
     TestStatus::Passed | TestStatus::Flaky => "passed",
     TestStatus::Failed => "failed",
@@ -369,7 +371,7 @@ pub fn step_end(
 ) -> Value {
   let mut step = json!({
     "id": step_id,
-    "duration": duration.as_millis() as u64,
+    "duration": u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
   });
   if let Some(error) = error {
     step["error"] = json!({ "message": error });
@@ -616,10 +618,10 @@ mod tests {
 
   #[test]
   fn statuses_translate_to_playwright_vocabulary() {
-    assert_eq!(status_name(&TestStatus::Passed), "passed");
-    assert_eq!(status_name(&TestStatus::Flaky), "passed");
-    assert_eq!(status_name(&TestStatus::TimedOut), "timedOut");
-    assert_eq!(status_name(&TestStatus::Interrupted), "interrupted");
+    assert_eq!(status_name(TestStatus::Passed), "passed");
+    assert_eq!(status_name(TestStatus::Flaky), "passed");
+    assert_eq!(status_name(TestStatus::TimedOut), "timedOut");
+    assert_eq!(status_name(TestStatus::Interrupted), "interrupted");
   }
 
   #[test]

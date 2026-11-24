@@ -1,7 +1,7 @@
 //! The seam a scripting host drives a core test through.
 //!
 //! The runner owns what a test IS — its fixtures, its `testInfo`, its
-//! steps, its snapshot rules. A host (the QuickJS binding today, a NAPI
+//! steps, its snapshot rules. A host (the `QuickJS` binding today, a NAPI
 //! one tomorrow) owns only the language it is written in. This module is
 //! the boundary between them: the data a host is handed to build one
 //! test invocation, and the trait through which a running test reaches
@@ -68,6 +68,10 @@ pub trait TestHostBridge: crate::step::StepDriver {
   /// `testInfo.snapshotPath(...name, { kind })`. `kind` is Playwright's
   /// `'snapshot' | 'screenshot' | 'aria'`; an unknown one is an error
   /// the host throws.
+  ///
+  /// # Errors
+  ///
+  /// Returns the message the host throws when `kind` is not one of those.
   fn snapshot_path(&self, name: &[String], kind: &str) -> Result<String, String>;
   fn errors(&self) -> Vec<String>;
   /// The identity the test's calls are filed under, so a timeout can name
@@ -88,6 +92,10 @@ pub trait TestHostBridge: crate::step::StepDriver {
   /// `expect(value).toMatchSnapshot(name?, options?)` — synchronous, as
   /// upstream: a `string` or a `Buffer` against its baseline, under the
   /// run's update mode. `Err(message)` = assertion failed.
+  ///
+  /// # Errors
+  ///
+  /// Returns the assertion's failure message.
   fn match_value_snapshot(
     &self,
     received: crate::snapshot::SnapshotValue,

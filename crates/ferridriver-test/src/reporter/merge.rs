@@ -40,6 +40,13 @@ struct Chunk {
   input: usize,
 }
 
+/// A place in the merged stream: an event as it came, or where a folded
+/// test's attempts go back.
+enum Slot {
+  Event(ReporterEvent),
+  Folded(TestKey),
+}
+
 /// Merge the event streams of several runs, in input order, into the one
 /// stream a single run over all of them would have produced.
 #[must_use]
@@ -64,10 +71,6 @@ pub fn merge_runs(inputs: Vec<Vec<ReporterEvent>>) -> Vec<ReporterEvent> {
   // Lay the inputs end to end. A folded test's events are cut into
   // attempts and set aside; the slot of its last finish is where they all
   // go back, in order.
-  enum Slot {
-    Event(ReporterEvent),
-    Folded(TestKey),
-  }
   let mut slots: Vec<Slot> = Vec::new();
   let mut chunks: FxHashMap<TestKey, Vec<Chunk>> = FxHashMap::default();
   let mut open: FxHashMap<(usize, TestKey), Chunk> = FxHashMap::default();

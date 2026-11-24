@@ -14,7 +14,7 @@
 //! registration exists the dependency falls through to the runtime's
 //! built-in of that name.
 //!
-//! Core-owned, host-neutral: the QuickJS binding resolves a spec's
+//! Core-owned, host-neutral: the `QuickJS` binding resolves a spec's
 //! fixtures through it, the BDD host picks a scenario's chain with
 //! [`dominant_fixture_set`], and the runner's own pool-request
 //! computation reads the same order, so no two of them can disagree

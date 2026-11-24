@@ -573,8 +573,8 @@ mod tests {
   /// The document a run of `outcomes` leaves, read back from `file`.
   async fn trace(file: &str, outcomes: Vec<TestOutcome>, errors: Vec<&str>, status: RunStatus) -> serde_json::Value {
     // One directory per test: they run side by side.
-    let test = std::thread::current().name().unwrap_or("perfetto").replace("::", "-");
-    let dir = scoped(&test);
+    let thread_name = std::thread::current().name().unwrap_or("perfetto").replace("::", "-");
+    let dir = scoped(&thread_name);
     let path = dir.0.join(file);
     let mut reporter = PerfettoReporter::new(path.clone()).with_root_dir("tests");
     reporter.collector.run.start_time = at(0);

@@ -203,6 +203,7 @@ pub struct Suite {
 
 impl Suite {
   /// Every case in this subtree, in the order a reporter walks them.
+  #[must_use]
   pub fn all_cases(&self) -> Vec<&Case> {
     let mut out = Vec::new();
     self.collect_cases(&mut out);
@@ -492,16 +493,18 @@ fn file_nodes(plan: &TestPlan) -> Vec<Node<'_>> {
 }
 
 fn node_for<'a, 'p>(nodes: &'a mut Vec<Node<'p>>, title: &str, file: &'p str) -> &'a mut Node<'p> {
-  if let Some(index) = nodes.iter().position(|node| node.title == title) {
-    return &mut nodes[index];
-  }
-  nodes.push(Node {
-    title: title.to_string(),
-    file,
-    children: Vec::new(),
-    cases: Vec::new(),
-  });
-  nodes.last_mut().unwrap_or_else(|| unreachable!("just pushed"))
+  let index = if let Some(index) = nodes.iter().position(|node| node.title == title) {
+    index
+  } else {
+    nodes.push(Node {
+      title: title.to_string(),
+      file,
+      children: Vec::new(),
+      cases: Vec::new(),
+    });
+    nodes.len() - 1
+  };
+  &mut nodes[index]
 }
 
 /// One `TestCase`, as the tree carries it before it has run.

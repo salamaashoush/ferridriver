@@ -11,6 +11,7 @@ pub struct RerunReporter {
 }
 
 impl RerunReporter {
+  #[must_use]
   pub fn new(output_path: PathBuf) -> Self {
     Self {
       output_path,
@@ -43,7 +44,7 @@ impl Reporter for RerunReporter {
     let content = self.failed.join("\n") + "\n";
 
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).ok();
+      std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&self.output_path, content)?;
 

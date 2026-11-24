@@ -16,7 +16,7 @@ use crate::model::{ShardInfo, TestPlan};
 /// # Errors
 /// When the assignment puts two tests of one serial group on different
 /// shards; running either half alone would break the group.
-pub fn filter_by_shard(
+pub(crate) fn filter_by_shard(
   plan: &mut TestPlan,
   shard: &ShardInfo,
   project: &str,
@@ -75,7 +75,7 @@ pub fn filter_by_shard(
 /// the answer has to be the same on every platform and every build.
 fn hashed_shard(key: &str, total: u32) -> u32 {
   let digest = ferridriver::tracing::sha1_hex(key.as_bytes());
-  let value = u64::from_str_radix(&digest[..16], 16).unwrap_or_default();
+  let value = u64::from_str_radix(crate::model::hex_prefix(&digest, 16), 16).unwrap_or_default();
   let index = value % u64::from(total.max(1));
   u32::try_from(index).unwrap_or_default() + 1
 }

@@ -37,15 +37,15 @@ pub(crate) fn selector_locator(
   page.locator(selector).strict(page.strict_selectors())
 }
 
-/// Resolve relative URLs against `FERRIDRIVER_BASE_URL` (set by the test
-/// runner when a `webServer` fixture is configured). Absolute `http(s)`
+/// Resolve relative URLs against the run's base URL (published by the
+/// test runner when a `webServer` fixture is configured). Absolute `http(s)`
 /// and `data:` URLs pass through untouched. Shared by navigation and API
 /// request steps so both address the same fixture server.
 pub(crate) fn resolve_url(url: &str) -> String {
   if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") {
     return url.to_string();
   }
-  if let Ok(base) = std::env::var("FERRIDRIVER_BASE_URL") {
+  if let Some(base) = ferridriver_test::config::run_base_url() {
     let base = base.trim_end_matches('/');
     let path = url.strip_prefix('/').unwrap_or(url);
     return format!("{base}/{path}");

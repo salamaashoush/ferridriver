@@ -28,6 +28,7 @@ impl GitInfo {
   /// Run `git` against the current working directory and return what
   /// the helper could collect. Never panics — every shell-out failure
   /// degrades to an empty field.
+  #[must_use]
   pub fn capture() -> Self {
     let mut info = Self::default();
     if let Some(out) = run_git(&["rev-parse", "HEAD"]) {
@@ -46,6 +47,7 @@ impl GitInfo {
   /// `--only-changed`. `reference` may be empty (`""`), in which
   /// case the working-tree diff is returned. Returns `None` when
   /// `git` is unavailable so callers can skip the filter.
+  #[must_use]
   pub fn changed_files(reference: &str) -> Option<Vec<String>> {
     let args: Vec<&str> = if reference.is_empty() {
       vec!["status", "--porcelain"]
@@ -58,11 +60,9 @@ impl GitInfo {
       // followed by a space.
       let mut files = Vec::new();
       for line in raw.lines() {
-        if line.len() <= 3 {
-          continue;
+        if let Some(path) = line.get(3..).filter(|path| !path.is_empty()) {
+          files.push(path.trim().to_string());
         }
-        let path = &line[3..];
-        files.push(path.trim().to_string());
       }
       Some(files)
     } else {

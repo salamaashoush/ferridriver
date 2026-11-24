@@ -37,162 +37,150 @@ use std::path::PathBuf;
 /// Parsed apart from [`CliOverrides`] because that type lives in
 /// `ferridriver-config`, below the debug surface — and a config field
 /// naming a runner type would invert the layering for one flag.
-#[must_use]
-pub fn parse_debug_mode() -> Option<crate::debug::DebugMode> {
+///
+/// # Errors
+///
+/// Returns the reason when `--debug` is followed by a value other than
+/// `start` or `fail`.
+pub fn parse_debug_mode() -> Result<Option<crate::debug::DebugMode>, String> {
   let args: Vec<String> = std::env::args().collect();
-  let at = args.iter().position(|a| a == "--debug")?;
+  let Some(at) = args.iter().position(|a| a == "--debug") else {
+    return Ok(None);
+  };
   match args.get(at + 1).filter(|v| !v.starts_with('-')) {
-    Some(value) => match value.parse() {
-      Ok(mode) => Some(mode),
-      Err(e) => {
-        eprintln!("--debug: {e}");
-        std::process::exit(2);
-      },
-    },
-    None => Some(crate::debug::DebugMode::Start),
+    Some(value) => value.parse().map(Some),
+    None => Ok(Some(crate::debug::DebugMode::Start)),
   }
 }
 
+#[must_use]
 pub fn parse_common_cli_args() -> CliOverrides {
   let args: Vec<String> = std::env::args().collect();
   let mut overrides = CliOverrides::default();
   apply_env_overrides(&mut overrides);
   let mut i = 1;
-  while i < args.len() {
-    match args[i].as_str() {
-      "--headless" => overrides.headless_override = Some(true),
-      "--headed" => overrides.headless_override = Some(false),
-      "--workers" | "-j" => {
-        i += 1;
-        overrides.workers = args
-          .get(i)
-          .and_then(|v| ferridriver_config::test::parse_workers(v).ok());
-      },
-      "--retries" => {
-        i += 1;
-        overrides.retries = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--timeout" => {
-        i += 1;
-        overrides.timeout = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--backend" => {
-        i += 1;
-        overrides.backend = args.get(i).cloned();
-      },
-      "--grep" | "-g" => {
-        i += 1;
-        overrides.grep = args.get(i).cloned();
-      },
-      "--tag" => {
-        i += 1;
-        overrides.tag = args.get(i).cloned();
-      },
-      "--list" => overrides.list_only = true,
-      // Consumed by `parse_debug_mode`; skipped here so its optional value
-      // is not mistaken for a positional.
-      "--debug" => {
-        if args.get(i + 1).is_some_and(|v| !v.starts_with('-')) {
-          i += 1;
-        }
-      },
-      "--update-snapshots" | "-u" => {
-        // A bare flag means `changed`, Playwright's preset.
-        let mode = match args.get(i + 1).map(|v| UpdateSnapshotsMode::parse(v)) {
-          Some(Ok(mode)) => {
-            i += 1;
-            mode
-          },
-          _ => UpdateSnapshotsMode::Changed,
-        };
-        overrides.update_snapshots = Some(mode);
-      },
-      "--forbid-only" => overrides.forbid_only = true,
-      "--last-failed" => overrides.last_failed = true,
-      "--max-failures" => {
-        i += 1;
-        overrides.max_failures = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--repeat-each" => {
-        i += 1;
-        overrides.repeat_each = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--global-timeout" => {
-        i += 1;
-        overrides.global_timeout = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "-x" => overrides.fail_fast = true,
-      "--pass-with-no-tests" => overrides.pass_with_no_tests = true,
-      "--ignore-snapshots" => overrides.ignore_snapshots = true,
-      "--tsconfig" => {
-        i += 1;
-        overrides.tsconfig = args.get(i).cloned();
-      },
-      "--fully-parallel" => overrides.fully_parallel = Some(true),
-      "--project" => {
-        i += 1;
-        if let Some(name) = args.get(i) {
-          overrides.project_filter.push(name.clone());
-        }
-      },
-      "--no-deps" => overrides.no_deps = true,
-      "--teardown" => {
-        i += 1;
-        overrides.teardown = args.get(i).cloned();
-      },
-      "--only-changed" => {
-        let next = args.get(i + 1).cloned();
-        match next {
-          Some(value) if !value.starts_with('-') => {
-            i += 1;
-            overrides.only_changed = Some(value);
-          },
-          _ => overrides.only_changed = Some(String::new()),
-        }
-      },
-      "--fail-on-flaky-tests" => overrides.fail_on_flaky_tests = true,
-      "--profile" => {
-        i += 1;
-        overrides.profile = args.get(i).cloned();
-      },
-      "--tags" | "-t" => {
-        i += 1;
-        overrides.bdd_tags = args.get(i).cloned();
-      },
-      "--dry-run" => overrides.bdd_dry_run = true,
-      "--strict" => overrides.bdd_strict = Some(true),
-      "--no-strict" => overrides.bdd_strict = Some(false),
-      "--fail-fast" => overrides.bdd_fail_fast = true,
-      "--step-timeout" => {
-        i += 1;
-        overrides.bdd_step_timeout = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--order" => {
-        i += 1;
-        overrides.bdd_order = args.get(i).cloned();
-      },
-      "--language" => {
-        i += 1;
-        overrides.bdd_language = args.get(i).cloned();
-      },
-      _ => {},
-    }
-    i += 1;
+  while let Some(arg) = args.get(i) {
+    let value = args.get(i + 1);
+    let consumed = if apply_cli_switch(&mut overrides, arg) {
+      false
+    } else if apply_cli_value(&mut overrides, arg, value) {
+      true
+    } else {
+      apply_cli_optional_value(&mut overrides, arg, value).unwrap_or(false)
+    };
+    i += 1 + usize::from(consumed);
   }
   overrides
 }
 
-/// `baseURL` as exported by the web-server startup path.
+/// A flag that takes no value. `false` when `arg` is not one.
+fn apply_cli_switch(overrides: &mut CliOverrides, arg: &str) -> bool {
+  match arg {
+    "--headless" => overrides.headless_override = Some(true),
+    "--headed" => overrides.headless_override = Some(false),
+    "--list" => overrides.list_only = true,
+    "--forbid-only" => overrides.forbid_only = true,
+    "--last-failed" => overrides.last_failed = true,
+    "-x" => overrides.fail_fast = true,
+    "--pass-with-no-tests" => overrides.pass_with_no_tests = true,
+    "--ignore-snapshots" => overrides.ignore_snapshots = true,
+    "--fully-parallel" => overrides.fully_parallel = Some(true),
+    "--no-deps" => overrides.no_deps = true,
+    "--fail-on-flaky-tests" => overrides.fail_on_flaky_tests = true,
+    "--dry-run" => overrides.bdd_dry_run = true,
+    "--strict" => overrides.bdd_strict = Some(true),
+    "--no-strict" => overrides.bdd_strict = Some(false),
+    "--fail-fast" => overrides.bdd_fail_fast = true,
+    _ => return false,
+  }
+  true
+}
+
+/// A flag whose value is the next argument, taken whatever it is. `false`
+/// when `arg` is not one.
+fn apply_cli_value(overrides: &mut CliOverrides, arg: &str, value: Option<&String>) -> bool {
+  match arg {
+    "--workers" | "-j" => overrides.workers = value.and_then(|v| ferridriver_config::test::parse_workers(v).ok()),
+    "--retries" => overrides.retries = value.and_then(|v| v.parse().ok()),
+    "--timeout" => overrides.timeout = value.and_then(|v| v.parse().ok()),
+    "--backend" => overrides.backend = value.cloned(),
+    "--grep" | "-g" => overrides.grep = value.cloned(),
+    "--tag" => overrides.tag = value.cloned(),
+    "--max-failures" => overrides.max_failures = value.and_then(|v| v.parse().ok()),
+    "--repeat-each" => overrides.repeat_each = value.and_then(|v| v.parse().ok()),
+    "--global-timeout" => overrides.global_timeout = value.and_then(|v| v.parse().ok()),
+    "--tsconfig" => overrides.tsconfig = value.cloned(),
+    "--project" => {
+      if let Some(name) = value {
+        overrides.project_filter.push(name.clone());
+      }
+    },
+    "--teardown" => overrides.teardown = value.cloned(),
+    "--profile" => overrides.profile = value.cloned(),
+    "--tags" | "-t" => overrides.bdd_tags = value.cloned(),
+    "--step-timeout" => overrides.bdd_step_timeout = value.and_then(|v| v.parse().ok()),
+    "--order" => overrides.bdd_order = value.cloned(),
+    "--language" => overrides.bdd_language = value.cloned(),
+    _ => return false,
+  }
+  true
+}
+
+/// A flag whose value is optional. `Some(true)` when it took the next
+/// argument as its value, `None` when `arg` is not one.
+fn apply_cli_optional_value(overrides: &mut CliOverrides, arg: &str, value: Option<&String>) -> Option<bool> {
+  match arg {
+    // Consumed by `parse_debug_mode`; skipped here so its optional value
+    // is not mistaken for a positional.
+    "--debug" => Some(value.is_some_and(|v| !v.starts_with('-'))),
+    "--update-snapshots" | "-u" => {
+      // A bare flag means `changed`, Playwright's preset.
+      let parsed = value.and_then(|v| UpdateSnapshotsMode::parse(v).ok());
+      overrides.update_snapshots = Some(parsed.unwrap_or(UpdateSnapshotsMode::Changed));
+      Some(parsed.is_some())
+    },
+    "--only-changed" => match value {
+      Some(value) if !value.starts_with('-') => {
+        overrides.only_changed = Some(value.clone());
+        Some(true)
+      },
+      _ => {
+        overrides.only_changed = Some(String::new());
+        Some(false)
+      },
+    },
+    _ => None,
+  }
+}
+
+static RUN_BASE_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// `baseURL` as published by the run, else `FERRIDRIVER_BASE_URL`.
 ///
 /// Playwright's webServer plugin sets `PLAYWRIGHT_TEST_BASE_URL` and its
 /// `baseURL` option fixture defaults to it
-/// (`plugins/webServerPlugin.ts`, `index.ts`). `FERRIDRIVER_BASE_URL` is
-/// the same channel: without this fallback a `webServer` that only
-/// declares a `staticDir`/`port` starts a server nothing resolves
-/// against, and `page.goto('/')` reaches the browser verbatim.
+/// (`plugins/webServerPlugin.ts`, `index.ts`). The run publishes the same
+/// value here: without this fallback a `webServer` that only declares a
+/// `staticDir`/`port` starts a server nothing resolves against, and
+/// `page.goto('/')` reaches the browser verbatim.
 #[must_use]
-pub fn base_url_from_env() -> Option<String> {
-  std::env::var("FERRIDRIVER_BASE_URL").ok().filter(|v| !v.is_empty())
+pub fn run_base_url() -> Option<String> {
+  let published = RUN_BASE_URL
+    .read()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  published
+    .or_else(|| std::env::var("FERRIDRIVER_BASE_URL").ok())
+    .filter(|v| !v.is_empty())
+}
+
+/// Publish the run's `baseURL` to [`run_base_url`].
+///
+/// A process-wide value rather than `std::env::set_var`: the run is
+/// already on a multi-threaded runtime, and setting the environment while
+/// another thread reads it is undefined behaviour.
+pub(crate) fn publish_run_base_url(url: &str) {
+  *RUN_BASE_URL.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(url.to_string());
 }
 
 /// Anchored, regex-escaped alternation matching exactly `ids` when run
@@ -294,13 +282,34 @@ pub fn resolve_config(overrides: &CliOverrides) -> ferridriver::error::Result<Te
 ///
 /// Returns an error if the named profile cannot be applied.
 pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> ferridriver::error::Result<TestConfig> {
+  apply_profile(&mut config, overrides)?;
+  apply_early_env(&mut config);
+  // CLI overrides (highest priority).
+  apply_reporter_overrides(&mut config, overrides);
+  apply_browser_overrides(&mut config, overrides);
+  apply_run_overrides(&mut config, overrides)?;
+  apply_late_env(&mut config);
+
+  config.workers = Some(config.worker_count());
+
+  // Normalize browser↔backend consistency after all overrides are applied.
+  config.browser.apply_use_engine();
+  config.browser.resolve_kinds()?;
+  config.browser.normalize();
+  config.apply_use_options();
+
+  Ok(config)
+}
+
+/// `--profile`: the named profile merged over the config.
+fn apply_profile(config: &mut TestConfig, overrides: &CliOverrides) -> ferridriver::error::Result<()> {
   use ferridriver::FerriError;
   // Apply profile overrides.
   if let Some(profile_name) = &overrides.profile {
     if let Some(profile_value) = config.profiles.get(profile_name) {
-      let mut base = serde_json::to_value(&config)?;
+      let mut base = serde_json::to_value(&*config)?;
       json_merge(&mut base, profile_value);
-      config = serde_json::from_value(base)?;
+      *config = serde_json::from_value(base)?;
     } else {
       return Err(FerriError::invalid_argument(
         "profile",
@@ -308,7 +317,11 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
       ));
     }
   }
+  Ok(())
+}
 
+/// `FERRIDRIVER_*` variables that CLI flags still override.
+fn apply_early_env(config: &mut TestConfig) {
   // Environment variable overrides.
   if let Ok(w) = std::env::var("FERRIDRIVER_WORKERS")
     && let Ok(v) = ferridriver_config::test::parse_workers(&w)
@@ -328,17 +341,10 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if let Ok(b) = std::env::var("FERRIDRIVER_BACKEND") {
     config.browser.backend = b;
   }
+}
 
-  // CLI overrides (highest priority).
-  if let Some(w) = overrides.workers {
-    config.workers = Some(w);
-  }
-  if let Some(t) = overrides.timeout {
-    config.timeout = t;
-  }
-  if let Some(r) = overrides.retries {
-    config.retries = r;
-  }
+/// `--reporter`, `--add-reporter` and the shard a sharded run names.
+fn apply_reporter_overrides(config: &mut TestConfig, overrides: &CliOverrides) {
   if !overrides.reporter.is_empty() {
     config.reporter = overrides.reporter.iter().map(|spec| reporter_from_flag(spec)).collect();
   }
@@ -366,6 +372,10 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
       }
     }
   }
+}
+
+/// Flags that choose and configure the browser.
+fn apply_browser_overrides(config: &mut TestConfig, overrides: &CliOverrides) {
   if let Some(headless) = overrides.headless_override {
     config.browser.headless = headless;
   }
@@ -425,6 +435,20 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   }
   if let Some(b) = overrides.bypass_csp {
     config.browser.use_options.bypass_csp = b;
+  }
+}
+
+/// Flags that shape the run itself.
+fn apply_run_overrides(config: &mut TestConfig, overrides: &CliOverrides) -> ferridriver::error::Result<()> {
+  use ferridriver::FerriError;
+  if let Some(w) = overrides.workers {
+    config.workers = Some(w);
+  }
+  if let Some(t) = overrides.timeout {
+    config.timeout = t;
+  }
+  if let Some(r) = overrides.retries {
+    config.retries = r;
   }
   if let Some(dir) = &overrides.output_dir {
     config.output_dir = PathBuf::from(dir);
@@ -488,6 +512,11 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
       .module_aliases
       .insert(from.trim().to_string(), to.trim().to_string());
   }
+  Ok(())
+}
+
+/// `FERRIDRIVER_*` variables that override CLI flags.
+fn apply_late_env(config: &mut TestConfig) {
   if let Ok(t) = std::env::var("FERRIDRIVER_GLOBAL_TIMEOUT")
     && let Ok(v) = t.parse()
   {
@@ -499,16 +528,6 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
   if let Ok(t) = std::env::var("FERRIDRIVER_TRACE") {
     config.trace = TraceMode::parse_label(&t);
   }
-
-  config.workers = Some(config.worker_count());
-
-  // Normalize browser↔backend consistency after all overrides are applied.
-  config.browser.apply_use_engine();
-  config.browser.resolve_kinds()?;
-  config.browser.normalize();
-  config.apply_use_options();
-
-  Ok(config)
 }
 
 fn json_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
