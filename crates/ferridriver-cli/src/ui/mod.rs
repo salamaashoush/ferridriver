@@ -10,9 +10,9 @@
 //! inside the test reporters. That is the whole propagation mechanism; nothing
 //! threads a flag.
 
-pub mod progress;
-pub mod prompt;
-pub mod table;
+pub(crate) mod progress;
+pub(crate) mod prompt;
+pub(crate) mod table;
 
 use std::io::IsTerminal as _;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -20,15 +20,15 @@ use std::time::Duration;
 
 use console::Style;
 
-pub use progress::Progress;
-pub use table::Table;
+pub(crate) use progress::Progress;
+pub(crate) use table::Table;
 
 // ── global state ────────────────────────────────────────────────────────
 
 /// What `--format` selected. Human output is a report for a person; JSON is a
 /// document for a program, and the two never appear on the same stream.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Format {
+pub(crate) enum Format {
   #[default]
   Human,
   Json,
@@ -36,7 +36,7 @@ pub enum Format {
 
 /// Colour policy from the command line, before the terminal has a say.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum ColorChoice {
+pub(crate) enum ColorChoice {
   #[default]
   Auto,
   Always,
@@ -51,7 +51,7 @@ static VERBOSITY: AtomicU8 = AtomicU8::new(1);
 /// Called once, before any command runs. Colour is decided here and installed
 /// into `console`'s global switch; the format and the quiet flag are read
 /// back through [`format`] and [`quiet`].
-pub fn init(color: ColorChoice, format: Format, quiet: bool) {
+pub(crate) fn init(color: ColorChoice, format: Format, quiet: bool) {
   FORMAT.store(u8::from(format == Format::Json), Ordering::Relaxed);
   VERBOSITY.store(u8::from(!quiet), Ordering::Relaxed);
 
@@ -76,7 +76,7 @@ pub fn init(color: ColorChoice, format: Format, quiet: bool) {
 }
 
 /// The output format this run selected.
-pub fn format() -> Format {
+pub(crate) fn format() -> Format {
   if FORMAT.load(Ordering::Relaxed) == 1 {
     Format::Json
   } else {
@@ -85,17 +85,17 @@ pub fn format() -> Format {
 }
 
 /// Whether the run asked for JSON. Sugar for the overwhelmingly common check.
-pub fn json() -> bool {
+pub(crate) fn json() -> bool {
   format() == Format::Json
 }
 
 /// Whether `--quiet` suppressed incidental output.
-pub fn quiet() -> bool {
+pub(crate) fn quiet() -> bool {
   VERBOSITY.load(Ordering::Relaxed) == 0
 }
 
 /// Whether both ends of the terminal are attached, so a prompt can be answered.
-pub fn interactive() -> bool {
+pub(crate) fn interactive() -> bool {
   std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
@@ -123,50 +123,50 @@ fn agent_session_from_env(claude: Option<&str>, cursor: Option<&str>, explicit: 
 
 /// Glyph marking an outcome. Kept out of the styles so a status can be shown
 /// in a table cell, a check line, or a finished progress bar identically.
-pub const OK: &str = "✓";
-pub const FAIL: &str = "✗";
-pub const WARN: &str = "!";
+pub(crate) const OK: &str = "✓";
+pub(crate) const FAIL: &str = "✗";
+pub(crate) const WARN: &str = "!";
 
 #[must_use]
-pub fn success(msg: &str) -> String {
+pub(crate) fn success(msg: &str) -> String {
   format!("{} {msg}", Style::new().green().bold().apply_to(OK))
 }
 
 #[must_use]
-pub fn failure(msg: &str) -> String {
+pub(crate) fn failure(msg: &str) -> String {
   format!("{} {msg}", Style::new().red().bold().apply_to(FAIL))
 }
 
 #[must_use]
-pub fn warning(msg: &str) -> String {
+pub(crate) fn warning(msg: &str) -> String {
   format!("{} {msg}", Style::new().yellow().bold().apply_to(WARN))
 }
 
 #[must_use]
-pub fn info(msg: &str) -> String {
+pub(crate) fn info(msg: &str) -> String {
   format!("{} {msg}", Style::new().dim().apply_to("·"))
 }
 
 /// The status glyph on its own, for a table's status column, where the space
 /// after it would be padding the column already adds.
 #[must_use]
-pub fn glyph_ok() -> String {
+pub(crate) fn glyph_ok() -> String {
   Style::new().green().bold().apply_to(OK).to_string()
 }
 
 #[must_use]
-pub fn glyph_fail() -> String {
+pub(crate) fn glyph_fail() -> String {
   Style::new().red().bold().apply_to(FAIL).to_string()
 }
 
 #[must_use]
-pub fn glyph_warn() -> String {
+pub(crate) fn glyph_warn() -> String {
   Style::new().yellow().bold().apply_to(WARN).to_string()
 }
 
 /// A section title: the line a reader scans for when skimming a report.
 #[must_use]
-pub fn header(msg: &str) -> String {
+pub(crate) fn header(msg: &str) -> String {
   format!(
     "{} {}",
     Style::new().cyan().apply_to("▸"),
@@ -176,63 +176,63 @@ pub fn header(msg: &str) -> String {
 
 /// `key: value`, with the key dimmed so the values line up as the content.
 #[must_use]
-pub fn kv(key: &str, value: &str) -> String {
+pub(crate) fn kv(key: &str, value: &str) -> String {
   format!("  {} {value}", Style::new().dim().apply_to(format!("{key}:")))
 }
 
 /// `key: value` with the key padded to `width`, for a run of them.
 #[must_use]
-pub fn kv_padded(key: &str, value: &str, width: usize) -> String {
+pub(crate) fn kv_padded(key: &str, value: &str, width: usize) -> String {
   let key = format!("{key}:");
   let pad = console::pad_str(&key, width + 1, console::Alignment::Left, None).into_owned();
   format!("  {} {value}", Style::new().dim().apply_to(pad))
 }
 
 #[must_use]
-pub fn list_item(msg: &str) -> String {
+pub(crate) fn list_item(msg: &str) -> String {
   format!("  {} {msg}", Style::new().cyan().apply_to("•"))
 }
 
 #[must_use]
-pub fn sub_item(msg: &str) -> String {
+pub(crate) fn sub_item(msg: &str) -> String {
   format!("    {} {msg}", Style::new().dim().apply_to("→"))
 }
 
 #[must_use]
-pub fn dim(msg: &str) -> String {
+pub(crate) fn dim(msg: &str) -> String {
   Style::new().dim().apply_to(msg).to_string()
 }
 
 #[must_use]
-pub fn bold(msg: &str) -> String {
+pub(crate) fn bold(msg: &str) -> String {
   Style::new().bold().apply_to(msg).to_string()
 }
 
 /// A command or snippet the reader is meant to run or paste.
 #[must_use]
-pub fn code(msg: &str) -> String {
+pub(crate) fn code(msg: &str) -> String {
   Style::new().green().apply_to(msg).to_string()
 }
 
 #[must_use]
-pub fn path(msg: &str) -> String {
+pub(crate) fn path(msg: &str) -> String {
   Style::new().cyan().apply_to(msg).to_string()
 }
 
 #[must_use]
-pub fn url(msg: &str) -> String {
+pub(crate) fn url(msg: &str) -> String {
   Style::new().blue().underlined().apply_to(msg).to_string()
 }
 
 #[must_use]
-pub fn number(n: impl std::fmt::Display) -> String {
+pub(crate) fn number(n: impl std::fmt::Display) -> String {
   Style::new().yellow().bold().apply_to(n).to_string()
 }
 
 /// An inverted label, for a short categorical value (a backend, a project, a
 /// status word) that has to be findable in a wall of text.
 #[must_use]
-pub fn badge(text: &str, style: &Style) -> String {
+pub(crate) fn badge(text: &str, style: &Style) -> String {
   style.apply_to(format!(" {text} ")).to_string()
 }
 
@@ -244,11 +244,11 @@ pub fn badge(text: &str, style: &Style) -> String {
 // then outlives it. These macros drop the output instead; the crate denies
 // the standard ones so every write comes through here.
 
-pub fn write_stdout(args: std::fmt::Arguments<'_>) {
+pub(crate) fn write_stdout(args: std::fmt::Arguments<'_>) {
   let _ = std::io::Write::write_fmt(&mut std::io::stdout().lock(), args);
 }
 
-pub fn write_stderr(args: std::fmt::Arguments<'_>) {
+pub(crate) fn write_stderr(args: std::fmt::Arguments<'_>) {
   let _ = std::io::Write::write_fmt(&mut std::io::stderr().lock(), args);
 }
 
@@ -273,7 +273,7 @@ macro_rules! stderrln {
 pub(crate) use {stderr, stderrln, stdout, stdoutln};
 
 /// Incidental progress, suppressed by `--quiet` and by `--format json`.
-pub fn say(line: &str) {
+pub(crate) fn say(line: &str) {
   if !quiet() && !json() {
     stdoutln!("{line}");
   }
@@ -281,7 +281,7 @@ pub fn say(line: &str) {
 
 /// Incidental progress that must not touch stdout, because stdout is either
 /// the protocol channel (`mcp --transport stdio`) or the run's document.
-pub fn note(line: &str) {
+pub(crate) fn note(line: &str) {
   if !quiet() && !json() {
     stderrln!("{} {line}", Style::new().dim().apply_to("-"));
   }
@@ -289,7 +289,7 @@ pub fn note(line: &str) {
 
 /// A section title followed by its body, with the blank line before it that
 /// separates one section from the last.
-pub fn section(title: &str) {
+pub(crate) fn section(title: &str) {
   if !quiet() && !json() {
     stdoutln!("\n{}", header(title));
   }
@@ -298,7 +298,7 @@ pub fn section(title: &str) {
 /// The width to lay out against: the terminal's, clamped to something a
 /// paragraph is still readable at, and a fixed width when piped.
 #[must_use]
-pub fn width() -> usize {
+pub(crate) fn width() -> usize {
   console::Term::stdout()
     .size_checked()
     .map_or(100, |(_, w)| (w as usize).clamp(40, 120))
@@ -306,7 +306,7 @@ pub fn width() -> usize {
 
 /// What to do next, as runnable commands. The single most useful thing a CLI
 /// prints, and the one thing this binary never printed.
-pub fn next_steps(steps: &[(&str, String)]) {
+pub(crate) fn next_steps(steps: &[(&str, String)]) {
   if quiet() || json() || steps.is_empty() {
     return;
   }
@@ -323,7 +323,7 @@ pub fn next_steps(steps: &[(&str, String)]) {
 /// that says what to do. Words longer than `width` are left over-long rather
 /// than broken, because a path or a URL is worse split than wrapped.
 #[must_use]
-pub fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
   let width = width.max(8);
   let mut lines = Vec::new();
   let mut current = String::new();
@@ -354,13 +354,10 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 ///
 /// # Errors
 /// When the value cannot be serialised.
-pub fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+pub(crate) fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
   use std::io::Write as _;
   let mut out = std::io::stdout().lock();
   writeln!(out, "{}", serde_json::to_string_pretty(value)?)?;
-  // Commands reach `std::process::exit` on a failing run, which runs no
-  // destructors; a piped stdout is block-buffered, so the document would be
-  // dropped on exactly the runs someone wanted the log of.
   out.flush()?;
   Ok(())
 }
@@ -369,25 +366,32 @@ pub fn print_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
 
 /// Human-readable byte count.
 #[must_use]
-pub fn bytes(n: u64) -> String {
+pub(crate) fn bytes(n: u64) -> String {
   const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-  #[allow(clippy::cast_precision_loss)]
-  let mut value = n as f64;
+  let n_wide = u128::from(n);
+  let mut scale: u128 = 1;
   let mut unit = 0;
-  while value >= 1024.0 && unit < UNITS.len() - 1 {
-    value /= 1024.0;
+  while n_wide >= scale * 1024 && unit < UNITS.len() - 1 {
+    scale *= 1024;
     unit += 1;
   }
   if unit == 0 {
-    format!("{n} B")
-  } else {
-    format!("{value:.1} {}", UNITS[unit])
+    return format!("{n} B");
   }
+  let tenths = rounded_div(n_wide * 10, scale);
+  format!("{}.{} {}", tenths / 10, tenths % 10, UNITS[unit])
+}
+
+/// `numerator / denominator`, rounded half away from zero as `f64::round`
+/// would, without leaving integers.
+#[must_use]
+pub(crate) fn rounded_div(numerator: u128, denominator: u128) -> u128 {
+  (2 * numerator + denominator) / (2 * denominator)
 }
 
 /// Human-readable duration, at the precision the magnitude deserves.
 #[must_use]
-pub fn duration(d: Duration) -> String {
+pub(crate) fn duration(d: Duration) -> String {
   let ms = d.as_millis();
   if ms < 1000 {
     return format!("{ms}ms");
@@ -410,7 +414,7 @@ pub fn duration(d: Duration) -> String {
 /// the home directory, and elided from the front when it is still too long
 /// for `max`.
 #[must_use]
-pub fn short_path(p: &std::path::Path, max: usize) -> String {
+pub(crate) fn short_path(p: &std::path::Path, max: usize) -> String {
   let text = relative_to_cwd(p)
     .or_else(|| relative_to_home(p))
     .unwrap_or_else(|| p.display().to_string());
@@ -421,9 +425,19 @@ pub fn short_path(p: &std::path::Path, max: usize) -> String {
   }
   // Keep the tail: the file name identifies the thing, the leading
   // directories only say where it lives.
-  let tail = console::truncate_str(&text, max.saturating_sub(1), "").into_owned();
-  let kept = text.len().saturating_sub(tail.len());
-  format!("…{}", &text[kept..])
+  let budget = max.saturating_sub(1);
+  let start = text
+    .char_indices()
+    .rev()
+    .map(|(i, _)| i)
+    .take_while(|&i| {
+      text
+        .get(i..)
+        .is_some_and(|tail| console::measure_text_width(tail) <= budget)
+    })
+    .last()
+    .unwrap_or(text.len());
+  format!("…{}", text.get(start..).unwrap_or_default())
 }
 
 /// The same shortening as [`short_path`] with no length limit: relative to
@@ -432,7 +446,7 @@ pub fn short_path(p: &std::path::Path, max: usize) -> String {
 /// For output that wraps rather than truncates, where cutting a path costs
 /// the reader the answer and costs nothing to keep.
 #[must_use]
-pub fn rel_path(p: &std::path::Path) -> String {
+pub(crate) fn rel_path(p: &std::path::Path) -> String {
   short_path(p, usize::MAX)
 }
 
@@ -453,7 +467,7 @@ fn relative_to_home(p: &std::path::Path) -> Option<String> {
 /// Whole-string first, because that is the common case; otherwise the last
 /// whitespace-separated token, which is where these messages put the path.
 #[must_use]
-pub fn short_in(text: &str, max: usize) -> String {
+pub(crate) fn short_in(text: &str, max: usize) -> String {
   let whole = short_path(std::path::Path::new(text), max);
   if whole != text {
     return whole;
@@ -485,6 +499,9 @@ mod tests {
     assert_eq!(bytes(512), "512 B");
     assert_eq!(bytes(2048), "2.0 KB");
     assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");
+    assert_eq!(bytes(1536), "1.5 KB");
+    assert_eq!(bytes(1024 * 1024 - 1), "1024.0 KB");
+    assert_eq!(bytes(u64::MAX), "16777216.0 TB");
   }
 
   #[test]
@@ -519,6 +536,14 @@ mod tests {
     let long = std::path::PathBuf::from("/a/very/long/prefix/that/goes/on/and/on/report.zip");
     let out = short_path(&long, 20);
     assert!(out.ends_with("report.zip"), "{out}");
+    assert!(console::measure_text_width(&out) <= 20, "{out}");
+  }
+
+  #[test]
+  fn short_path_cuts_a_multibyte_path_on_a_character() {
+    let long = std::path::PathBuf::from("/données/éléments/très/longs/rapport-été.zip");
+    let out = short_path(&long, 20);
+    assert!(out.ends_with("rapport-été.zip"), "{out}");
     assert!(console::measure_text_width(&out) <= 20, "{out}");
   }
 }

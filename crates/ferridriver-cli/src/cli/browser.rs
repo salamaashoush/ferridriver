@@ -6,7 +6,7 @@ use ferridriver::state::ConnectMode;
 
 /// Browser backend and connection options.
 #[derive(Args, Clone)]
-pub struct BrowserArgs {
+pub(crate) struct BrowserArgs {
   /// Browser to automate; its driver is selected automatically.
   #[arg(long, help_heading = "Browser")]
   pub browser: Option<ferridriver::options::BrowserKind>,
@@ -51,7 +51,7 @@ pub struct BrowserArgs {
 /// those flags: `ferridriver mcp` and `ferridriver config` both read it,
 /// so a report can never describe a resolution the server does not
 /// perform.
-pub struct EffectiveBrowser {
+pub(crate) struct EffectiveBrowser {
   pub browser: ferridriver::options::BrowserKind,
   pub backend: ferridriver::backend::BackendKind,
   pub headless: bool,
@@ -64,7 +64,7 @@ pub struct EffectiveBrowser {
 /// Apply CLI-over-config precedence for the browser flags.
 /// # Errors
 /// Rejects incompatible browser and protocol choices after applying CLI precedence.
-pub fn effective_browser(
+pub(crate) fn effective_browser(
   args: &BrowserArgs,
   mcp: &ferridriver_config::mcp::McpConfig,
 ) -> anyhow::Result<EffectiveBrowser> {
@@ -87,19 +87,19 @@ pub fn effective_browser(
 impl BrowserArgs {
   /// The backend the user asked for on the command line, if any.
   /// `None` means "defer to the config file".
-  pub fn backend_kind(&self) -> Option<BackendKind> {
+  pub(crate) fn backend_kind(&self) -> Option<BackendKind> {
     self.backend.as_ref().map(backend_to_kind)
   }
 
   /// The backend wire name the user asked for, for the string-typed
   /// `[test]` override path.
-  pub fn backend_name(&self) -> Option<&'static str> {
+  pub(crate) fn backend_name(&self) -> Option<&'static str> {
     self.backend_kind().map(BackendKind::name)
   }
 
   /// Explicit headed/headless choice, or `None` when neither flag was
   /// passed and the config decides.
-  pub fn headless_override(&self) -> Option<bool> {
+  pub(crate) fn headless_override(&self) -> Option<bool> {
     match (self.headless, self.headed) {
       (true, _) => Some(true),
       (_, true) => Some(false),
@@ -107,13 +107,13 @@ impl BrowserArgs {
     }
   }
 
-  pub fn connect_mode(&self) -> ConnectMode {
+  pub(crate) fn connect_mode(&self) -> ConnectMode {
     resolve_connect_mode(self)
   }
 }
 
 #[derive(Args, Clone)]
-pub struct TransportArgs {
+pub(crate) struct TransportArgs {
   /// Transport protocol: stdio (default) or http.
   #[arg(long, default_value = "stdio", help_heading = "Transport")]
   pub transport: Transport,
@@ -143,7 +143,7 @@ pub struct TransportArgs {
 }
 
 #[derive(Clone, ValueEnum)]
-pub enum Backend {
+pub(crate) enum Backend {
   CdpPipe,
   #[value(name = "cdp-ws", alias = "cdp-raw")]
   CdpWs,
@@ -155,12 +155,12 @@ pub enum Backend {
 }
 
 #[derive(Clone, ValueEnum)]
-pub enum Transport {
+pub(crate) enum Transport {
   Stdio,
   Http,
 }
 
-pub fn backend_to_kind(b: &Backend) -> BackendKind {
+pub(super) fn backend_to_kind(b: &Backend) -> BackendKind {
   match b {
     Backend::CdpPipe => BackendKind::CdpPipe,
     Backend::CdpWs => BackendKind::CdpWs,
@@ -170,7 +170,7 @@ pub fn backend_to_kind(b: &Backend) -> BackendKind {
   }
 }
 
-pub fn resolve_connect_mode(args: &BrowserArgs) -> ConnectMode {
+pub(super) fn resolve_connect_mode(args: &BrowserArgs) -> ConnectMode {
   if let Some(ref url) = args.connect {
     ConnectMode::ConnectUrl(url.clone())
   } else if let Some(ref channel) = args.auto_connect {

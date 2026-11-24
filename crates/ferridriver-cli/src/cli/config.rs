@@ -5,7 +5,7 @@ use clap::Args;
 use super::browser::BrowserArgs;
 
 #[derive(Args)]
-pub struct ConfigArgs {
+pub(crate) struct ConfigArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -20,7 +20,7 @@ pub struct ConfigArgs {
 }
 
 #[derive(Args)]
-pub struct DoctorArgs {
+pub(crate) struct DoctorArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 

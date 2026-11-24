@@ -20,7 +20,7 @@ use crate::ui;
 /// interactions, and emit a runnable script (TypeScript by default) to stdout
 /// or `--output`. The emitted script runs standalone via `ferridriver run`
 /// and replays on a live session via the MCP `run_script` tool.
-pub async fn run(args: cli::CodegenArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(args: cli::CodegenArgs) -> anyhow::Result<()> {
   let scaffold = Scaffold::parse(&args.target).map_err(anyhow::Error::msg)?;
   if let Some(session) = args.attach.clone() {
     return attach(&args, &session, scaffold).await;

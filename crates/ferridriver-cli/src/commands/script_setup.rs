@@ -13,7 +13,7 @@ use std::sync::Arc;
 use ferridriver_config::FerridriverConfig;
 
 /// The resolved scripting environment.
-pub struct ScriptSetup {
+pub(crate) struct ScriptSetup {
   /// Directory a relative ES module import resolves against.
   pub script_root: std::path::PathBuf,
   /// Root for `artifacts.*`, or `None` when it could not be prepared.
@@ -34,7 +34,7 @@ impl ScriptSetup {
   /// behind: they describe what the CLI renders around a run, not how the
   /// host runs it (the engine already carries its own copy of `secrets`).
   #[must_use]
-  pub fn into_session_script(self) -> ferridriver_script::SessionScriptConfig {
+  pub(crate) fn into_session_script(self) -> ferridriver_script::SessionScriptConfig {
     ferridriver_script::SessionScriptConfig {
       script_root: self.script_root,
       artifacts: self.artifacts,
@@ -54,7 +54,7 @@ impl ScriptSetup {
 /// Returns an error only when the script root itself cannot be prepared;
 /// a missing artifacts root degrades to `None` (scripts can still write
 /// through `fs`), and an unloadable extension is warned about and skipped.
-pub async fn resolve(
+pub(crate) async fn resolve(
   config: &FerridriverConfig,
   cwd: &Path,
   extra_extensions: &[String],
@@ -64,7 +64,7 @@ pub async fn resolve(
   let artifacts_root = config.artifacts_root();
   let artifacts = match std::fs::create_dir_all(&artifacts_root)
     .map_err(|e| e.to_string())
-    .and_then(|()| ferridriver_script::OutputDir::new(&artifacts_root).map_err(|e| e.message.clone()))
+    .and_then(|()| ferridriver_script::OutputDir::new(&artifacts_root).map_err(|e| e.message))
   {
     Ok(dir) => Some(Arc::new(dir)),
     Err(e) => {
@@ -137,7 +137,7 @@ async fn load_extensions(
 /// engine's `SidecarSpec`s. Shared by the `run`, `mcp`, `bdd` and session-host
 /// paths so the same config table drives every host.
 #[must_use]
-pub fn sidecar_specs(config: &FerridriverConfig) -> Vec<ferridriver_script::sidecar::SidecarSpec> {
+pub(crate) fn sidecar_specs(config: &FerridriverConfig) -> Vec<ferridriver_script::sidecar::SidecarSpec> {
   config
     .sidecars
     .iter()

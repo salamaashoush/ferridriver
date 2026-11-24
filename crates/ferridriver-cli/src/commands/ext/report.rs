@@ -115,11 +115,7 @@ fn registrations(payload: &serde_json::Value) {
 }
 
 /// Print one cycle's report.
-///
-/// Flushes explicitly: `ext check` exits through `std::process::exit`, which
-/// runs no destructors, so a report piped to a file (the CI / pre-commit
-/// shape) was block-buffered and lost on the failing runs.
-pub fn print(report: &Report) -> anyhow::Result<()> {
+pub(crate) fn print(report: &Report) -> anyhow::Result<()> {
   if ui::json() {
     return ui::print_json(&report.payload);
   }

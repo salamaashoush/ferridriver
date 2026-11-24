@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// the section defaults all have to resolve the same way they do for the MCP
 /// server, or `--instance staging` would mean something different depending on
 /// which host read it.
-pub struct Provisioned {
+pub(crate) struct Provisioned {
   pub page: Arc<ferridriver::Page>,
   pub context: Arc<ferridriver::context::ContextRef>,
   pub browser: Arc<ferridriver::Browser>,
@@ -25,7 +25,7 @@ pub struct Provisioned {
   pub created_session: bool,
 }
 
-pub async fn provision_instance(
+pub(crate) async fn provision_instance(
   mcp_config: ferridriver_config::mcp::McpConfig,
   instance: &str,
   headed: bool,

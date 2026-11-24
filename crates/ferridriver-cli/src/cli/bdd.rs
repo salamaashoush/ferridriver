@@ -7,9 +7,12 @@ use super::runner::RunnerArgs;
 
 // Independent bool flags from `clap` parse — grouping into enums adds
 // no value; each flag has its own --foo.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap derives one independent `--flag` per bool; folding them into enums would change the command line"
+)]
 #[derive(Args)]
-pub struct BddArgs {
+pub(crate) struct BddArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -79,7 +82,7 @@ impl BddArgs {
   /// `--strict` / `--no-strict`, or `None` when neither was passed and the
   /// config decides.
   #[must_use]
-  pub fn strict(&self) -> Option<bool> {
+  pub(crate) fn strict(&self) -> Option<bool> {
     match (self.strict, self.no_strict) {
       (true, _) => Some(true),
       (_, true) => Some(false),

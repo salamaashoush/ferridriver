@@ -48,7 +48,7 @@ const WEBKIT_HOST: &str = "fd_webkit_host";
 /// The rolling prerelease canary builds are published to.
 const CANARY_TAG: &str = "canary";
 
-pub async fn run(args: cli::UpgradeArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(args: cli::UpgradeArgs) -> anyhow::Result<()> {
   let current = build_info::VERSION;
   let exe = std::env::current_exe()?.canonicalize()?;
   let channel = args.channel();
@@ -150,7 +150,7 @@ pub async fn run(args: cli::UpgradeArgs) -> anyhow::Result<()> {
 
 /// Which line of releases a run follows.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Channel {
+pub(crate) enum Channel {
   Stable,
   Canary,
 }

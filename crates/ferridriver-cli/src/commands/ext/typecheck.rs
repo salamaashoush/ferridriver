@@ -20,7 +20,7 @@ use std::time::Duration;
 use super::types;
 
 /// What the TypeScript pass produced.
-pub struct TypecheckOutcome {
+pub(crate) struct TypecheckOutcome {
   /// The checker that ran, e.g. `tsc` — `None` when none was found.
   pub checker: Option<String>,
   /// Diagnostic lines, verbatim from the compiler.
@@ -170,7 +170,7 @@ fn find_checker(search_roots: &[PathBuf]) -> Option<Checker> {
 /// disagreement between the two is the check reporting `TS2307: cannot
 /// find module` for every import that rolldown resolves without
 /// complaint.
-pub fn run(
+pub(crate) fn run(
   entries: &[PathBuf],
   package_dirs: &[PathBuf],
   scratch: &Path,

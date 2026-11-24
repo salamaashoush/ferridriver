@@ -8,9 +8,12 @@ use clap::Args;
 // relationship to each other -- grouping them into an enum would model a state
 // machine that does not exist, and would change the CLI surface to satisfy a
 // lint about the struct behind it.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap derives one independent `--flag` per bool; folding them into enums would change the command line"
+)]
 #[derive(Args)]
-pub struct RunArgs {
+pub(crate) struct RunArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 

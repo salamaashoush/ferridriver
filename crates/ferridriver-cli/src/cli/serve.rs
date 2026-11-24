@@ -3,13 +3,13 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args)]
-pub struct BrowserCommandArgs {
+pub(crate) struct BrowserCommandArgs {
   #[command(subcommand)]
   pub command: BrowserCommand,
 }
 
 #[derive(Subcommand)]
-pub enum BrowserCommand {
+pub(crate) enum BrowserCommand {
   /// Launch a browser and serve its own protocol to other processes:
   /// Chromium's `DevTools` endpoint, or Firefox's `WebDriver` `BiDi` session.
   ///
@@ -28,7 +28,7 @@ pub enum BrowserCommand {
 }
 
 #[derive(Args)]
-pub struct BrowserServeArgs {
+pub(crate) struct BrowserServeArgs {
   /// The browser to serve: `chromium` over the `DevTools` Protocol, or
   /// `firefox` over `WebDriver` `BiDi`.
   #[arg(long, default_value = "chromium")]

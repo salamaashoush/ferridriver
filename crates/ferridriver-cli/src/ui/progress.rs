@@ -20,9 +20,9 @@ use console::{Style, Term};
 const REDRAW: Duration = Duration::from_millis(80);
 
 /// Characters in the bar itself.
-const BAR_WIDTH: usize = 24;
+const BAR_WIDTH: u8 = 24;
 
-pub struct Progress {
+pub(crate) struct Progress {
   term: Term,
   live: bool,
   label: String,
@@ -37,7 +37,7 @@ impl Progress {
   /// Start a step. Nothing is drawn until the first [`Progress::set`] or
   /// [`Progress::tick`], so a step that finishes instantly stays silent.
   #[must_use]
-  pub fn new(label: impl Into<String>) -> Self {
+  pub(crate) fn new(label: impl Into<String>) -> Self {
     let term = Term::stderr();
     let live = term.is_term() && std::io::stderr().is_terminal() && !super::quiet() && !super::json();
     Self {
@@ -52,38 +52,25 @@ impl Progress {
 
   /// Report byte progress. `total` is absent when the server sent no
   /// `Content-Length`, in which case the count is shown without a bar.
-  pub fn set(&mut self, done: u64, total: Option<u64>) {
+  pub(crate) fn set(&mut self, done: u64, total: Option<u64>) {
     if !self.live || !self.due() {
       return;
     }
-    let elapsed = self.started.elapsed();
-    #[allow(clippy::cast_precision_loss)]
-    let rate = if elapsed.as_secs_f64() > 0.0 {
-      done as f64 / elapsed.as_secs_f64()
-    } else {
-      0.0
-    };
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let rate = super::bytes(rate as u64);
+    let rate = (u128::from(done) * 1_000_000_000)
+      .checked_div(self.started.elapsed().as_nanos())
+      .map_or(0, |rate| u64::try_from(rate).unwrap_or(u64::MAX));
+    let rate = super::bytes(rate);
     let body = match total {
       Some(total) if total > 0 => {
-        // A bar 24 cells wide cannot express more precision than an f64
-        // already carries; the cast is the point, not an accident.
-        #[allow(clippy::cast_precision_loss)]
-        let done_frac = (done as f64 / total as f64).clamp(0.0, 1.0);
-        #[allow(
-          clippy::cast_possible_truncation,
-          clippy::cast_sign_loss,
-          clippy::cast_precision_loss
-        )]
-        let filled = (done_frac * BAR_WIDTH as f64).round() as usize;
+        let part = u128::from(done.min(total));
+        let whole = u128::from(total);
+        let filled = u8::try_from(super::rounded_div(part * u128::from(BAR_WIDTH), whole)).unwrap_or(BAR_WIDTH);
         let bar = format!(
           "{}{}",
-          "█".repeat(filled),
-          Style::new().dim().apply_to("░".repeat(BAR_WIDTH - filled))
+          "█".repeat(usize::from(filled)),
+          Style::new().dim().apply_to("░".repeat(usize::from(BAR_WIDTH - filled)))
         );
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let pct = (done_frac * 100.0).round() as u64;
+        let pct = super::rounded_div(part * 100, whole);
         format!(
           "{bar} {pct:>3}%  {} / {}  {rate}/s",
           super::bytes(done),
@@ -96,7 +83,7 @@ impl Progress {
   }
 
   /// Report an unmeasured step by name, for phases with no byte count.
-  pub fn tick(&mut self, detail: &str) {
+  pub(crate) fn tick(&mut self, detail: &str) {
     if !self.live || !self.due() {
       return;
     }
@@ -105,7 +92,7 @@ impl Progress {
   }
 
   /// End the step with a success line, replacing the bar.
-  pub fn finish_ok(mut self, summary: &str) {
+  pub(crate) fn finish_ok(mut self, summary: &str) {
     self.clear();
     let took = Style::new()
       .dim()
@@ -114,14 +101,14 @@ impl Progress {
   }
 
   /// End the step with a failure line, replacing the bar.
-  pub fn finish_fail(mut self, summary: &str) {
+  pub(crate) fn finish_fail(mut self, summary: &str) {
     self.clear();
     self.line(&super::failure(summary));
   }
 
   /// End the step without claiming an outcome — the step did nothing, or its
   /// result is reported elsewhere.
-  pub fn finish_quiet(mut self, summary: &str) {
+  pub(crate) fn finish_quiet(mut self, summary: &str) {
     self.clear();
     self.line(&super::info(summary));
   }

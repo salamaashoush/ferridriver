@@ -6,7 +6,7 @@ use std::io::Write as _;
 use crate::cli;
 use crate::ui;
 
-pub async fn run(args: cli::BrowserCommandArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(args: cli::BrowserCommandArgs) -> anyhow::Result<()> {
   match args.command {
     cli::BrowserCommand::Serve(serve) => Box::pin(serve_browser(serve)).await,
   }

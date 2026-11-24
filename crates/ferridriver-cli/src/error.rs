@@ -14,9 +14,9 @@ use crate::ui;
 ///
 /// Carries the non-zero exit status without printing a second banner — for a
 /// command whose failure IS its output, like a test run that already printed a
-/// reporter summary.
+/// reporter summary, which also decided the status.
 #[derive(Debug)]
-pub struct AlreadyReported;
+pub(crate) struct AlreadyReported(pub i32);
 
 impl std::fmt::Display for AlreadyReported {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -26,11 +26,39 @@ impl std::fmt::Display for AlreadyReported {
 
 impl std::error::Error for AlreadyReported {}
 
+/// The command is over, its outcome already reported, and the process has
+/// to end with this status now rather than return through the runtime,
+/// whose drop would wait on a blocking read only the client can end (the
+/// MCP stdio transport's stdin after a termination signal).
+#[derive(Debug)]
+pub(crate) struct ExitNow(pub i32);
+
+impl std::fmt::Display for ExitNow {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("")
+  }
+}
+
+impl std::error::Error for ExitNow {}
+
+/// The status a failed run's own report already stands for: a test run's
+/// exit code, success included.
+///
+/// # Errors
+/// [`AlreadyReported`] with `code` when it is not success.
+pub(crate) fn reported_status(code: i32) -> anyhow::Result<()> {
+  if code == ferridriver_test::exit::PASSED {
+    Ok(())
+  } else {
+    Err(AlreadyReported(code).into())
+  }
+}
+
 /// A failure of the command line or the configuration: nothing ran, and
 /// the status says so ([`ferridriver_test::exit::USAGE`]) so a caller can
 /// tell it from a suite that ran and failed.
 #[derive(Debug)]
-pub struct Usage(pub String);
+pub(crate) struct Usage(pub String);
 
 impl std::fmt::Display for Usage {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,7 +70,7 @@ impl std::error::Error for Usage {}
 
 /// A [`Usage`] failure as the `anyhow` error every command returns.
 #[must_use]
-pub fn usage(message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn usage(message: impl Into<String>) -> anyhow::Error {
   anyhow::Error::new(Usage(message.into()))
 }
 
@@ -58,9 +86,12 @@ fn status(err: &anyhow::Error) -> i32 {
 
 /// Print a failure and return the process exit status for it.
 #[must_use]
-pub fn report(err: &anyhow::Error) -> i32 {
-  if err.downcast_ref::<AlreadyReported>().is_some() {
-    return ferridriver_test::exit::FAILED;
+pub(crate) fn report(err: &anyhow::Error) -> i32 {
+  if let Some(AlreadyReported(code)) = err.downcast_ref::<AlreadyReported>() {
+    return *code;
+  }
+  if let Some(ExitNow(code)) = err.downcast_ref::<ExitNow>() {
+    return *code;
   }
   if ui::json() {
     let causes: Vec<String> = err.chain().skip(1).map(ToString::to_string).collect();
@@ -100,7 +131,7 @@ pub fn report(err: &anyhow::Error) -> i32 {
 /// identifies a failure is usually not the outermost context — a missing
 /// browser surfaces as "failed to launch", with the path only in the cause.
 #[must_use]
-pub fn hints(err: &anyhow::Error) -> Vec<(&'static str, String)> {
+pub(crate) fn hints(err: &anyhow::Error) -> Vec<(&'static str, String)> {
   let text = err
     .chain()
     .map(ToString::to_string)
@@ -216,7 +247,15 @@ mod tests {
 
   #[test]
   fn already_reported_is_silent_but_fatal() {
-    let err = anyhow::Error::new(AlreadyReported);
+    let err = anyhow::Error::new(AlreadyReported(ferridriver_test::exit::FAILED));
     assert_eq!(err.to_string(), "");
+    assert_eq!(report(&err), ferridriver_test::exit::FAILED);
+  }
+
+  #[test]
+  fn a_reported_run_keeps_its_own_status() {
+    assert!(reported_status(ferridriver_test::exit::PASSED).is_ok());
+    let err = reported_status(ferridriver_test::exit::INFRASTRUCTURE).unwrap_err();
+    assert_eq!(report(&err), ferridriver_test::exit::INFRASTRUCTURE);
   }
 }

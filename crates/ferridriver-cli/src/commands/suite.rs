@@ -18,7 +18,7 @@ use crate::commands::{bootstrap, script_setup};
 /// same way for the MCP server and `ferridriver run`, because a step body and
 /// a script are the same engine.
 #[must_use]
-pub fn caps(config: &FerridriverConfig) -> ScriptCaps {
+pub(crate) fn caps(config: &FerridriverConfig) -> ScriptCaps {
   ScriptCaps::from_scripting(&config.scripting)
     .with_extension_policy(config.extensions.policy())
     .with_extension_settings(config.extensions.settings())
@@ -29,7 +29,7 @@ pub fn caps(config: &FerridriverConfig) -> ScriptCaps {
 ///
 /// # Errors
 /// When `--shard` is not a valid `X/N`.
-pub fn apply_shared(
+pub(crate) fn apply_shared(
   overrides: &mut CliOverrides,
   runner: &cli::RunnerArgs,
   browser: &cli::BrowserArgs,
@@ -67,7 +67,7 @@ pub fn apply_shared(
 /// # Errors
 /// When the debug session cannot be built, the merged config is invalid, a
 /// module alias is malformed, or a configured JS reporter fails to compile.
-pub async fn resolve(
+pub(crate) async fn resolve(
   config: FerridriverConfig,
   caps: &ScriptCaps,
   debug: Option<ferridriver_test::debug::DebugMode>,
@@ -92,7 +92,7 @@ pub async fn resolve(
 /// and runs the test on line 12. An argument whose path part is not a file
 /// on disk stays a glob, so a pattern with a colon in it is left alone.
 #[must_use]
-pub fn split_locations(args: Vec<String>) -> (Vec<String>, Vec<ferridriver_test::config::TestLocation>) {
+pub(crate) fn split_locations(args: Vec<String>) -> (Vec<String>, Vec<ferridriver_test::config::TestLocation>) {
   let mut files = Vec::with_capacity(args.len());
   let mut locations = Vec::new();
   for arg in args {
@@ -107,21 +107,4 @@ pub fn split_locations(args: Vec<String>) -> (Vec<String>, Vec<ferridriver_test:
     }
   }
   (files, locations)
-}
-
-/// Hand a runner's exit status to the process.
-///
-/// Exiting rather than returning keeps the runner's own code — a suite that
-/// failed exits 1, a suite that could not start exits with whatever the
-/// runner chose — but `exit` runs no destructors, so a piped stdout has to be
-/// flushed here or the last of the report is lost on exactly the failing runs
-/// someone wanted the log of.
-pub fn finish(exit_code: i32) {
-  use std::io::Write as _;
-  if exit_code == 0 {
-    return;
-  }
-  let _ = std::io::stdout().flush();
-  let _ = std::io::stderr().flush();
-  std::process::exit(exit_code);
 }

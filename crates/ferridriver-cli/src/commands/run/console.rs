@@ -22,7 +22,7 @@ use ferridriver_script::{ConsoleEntry, ConsoleLevel, ConsoleSink, Outcome, Scrip
 
 /// Writes console entries to stderr as they are produced.
 #[derive(Debug)]
-pub struct StreamingConsole;
+pub(crate) struct StreamingConsole;
 
 impl ConsoleSink for StreamingConsole {
   fn emit(&self, entry: &ConsoleEntry) {
@@ -49,7 +49,7 @@ impl ConsoleSink for StreamingConsole {
 /// Shared with `run --session`, where the entries arrive as wire events from
 /// the host rather than from a sink on a local VM — the rendering must not
 /// depend on which side produced them.
-pub fn print_entry(entry: &ConsoleEntry) {
+pub(crate) fn print_entry(entry: &ConsoleEntry) {
   // Both streams are unbuffered, so the line lands before the next await
   // point; write failures (closed pipe) are not the script's problem.
   let _ = if goes_to_stderr(entry.level) {
@@ -81,7 +81,7 @@ const MAX_PARAM_WIDTH: usize = 100;
 /// same policy over its wire — see `ferridriver-script`'s forwarder — so a
 /// script echoes the same code whichever side ran it.
 #[derive(Debug)]
-pub struct RunObserver {
+pub(crate) struct RunObserver {
   pub trace: bool,
   pub code: Option<ferridriver::codegen::OutputLanguage>,
   /// Print each generated line as it happens. Off when the destination is a
@@ -116,7 +116,7 @@ impl ActionObserver for RunObserver {
       }
     }
     if self.trace {
-      print_action_end(&action.title, elapsed.as_secs_f64() * 1000.0, error);
+      print_action_end(&action.title, elapsed, error);
     }
   }
 
@@ -132,7 +132,7 @@ impl ActionObserver for RunObserver {
 /// Shared with `run --session`, where the actions arrive as wire events from
 /// the host rather than from an observer on a local browser — a traced run
 /// must look the same whichever side ran it.
-pub fn print_action_begin(title: &str, params: &serde_json::Value, location: Option<&str>) {
+pub(crate) fn print_action_begin(title: &str, params: &serde_json::Value, location: Option<&str>) {
   let dim = Style::new().for_stderr().dim();
   let params = summarize_params(params);
   let mut line = format!("› {title} {params}").trim_end().to_string();
@@ -142,20 +142,21 @@ pub fn print_action_begin(title: &str, params: &serde_json::Value, location: Opt
   let _ = writeln!(std::io::stderr(), "{}", dim.apply_to(line));
 }
 
-pub fn print_action_end(title: &str, ms: f64, error: Option<&str>) {
+pub(crate) fn print_action_end(title: &str, elapsed: std::time::Duration, error: Option<&str>) {
+  let ms = crate::ui::rounded_div(elapsed.as_micros(), 1000);
   let style = Style::new().for_stderr();
   let line = match error {
     // The message is often multi-line (Playwright-shaped call logs); the
     // first line is the failure itself.
     Some(err) => style
       .red()
-      .apply_to(format!("✗ {title} {ms:.0}ms — {}", err.lines().next().unwrap_or(err))),
-    None => style.dim().apply_to(format!("✓ {title} {ms:.0}ms")),
+      .apply_to(format!("✗ {title} {ms}ms — {}", err.lines().next().unwrap_or(err))),
+    None => style.dim().apply_to(format!("✓ {title} {ms}ms")),
   };
   let _ = writeln!(std::io::stderr(), "{line}");
 }
 
-pub fn print_action_log(message: &str) {
+pub(crate) fn print_action_log(message: &str) {
   let dim = Style::new().for_stderr().dim();
   let _ = writeln!(std::io::stderr(), "{}", dim.apply_to(format!("  · {message}")));
 }
@@ -188,7 +189,7 @@ fn summarize_params(params: &serde_json::Value) -> String {
 /// Render a finished run for a human: the returned value on stdout (strings
 /// raw, everything else pretty JSON, `null` printed as nothing at all), the
 /// failure on stderr.
-pub fn print_result(result: &ScriptResult) {
+pub(crate) fn print_result(result: &ScriptResult) {
   match &result.outcome {
     Outcome::Ok { success } => match &success.value {
       serde_json::Value::Null => {},

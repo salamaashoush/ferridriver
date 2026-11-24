@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand, ValueEnum};
 
 #[derive(Args)]
-pub struct TraceArgs {
+pub(crate) struct TraceArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -14,7 +14,7 @@ pub struct TraceArgs {
 }
 
 #[derive(Subcommand)]
-pub enum TraceCommand {
+pub(crate) enum TraceCommand {
   /// Open a trace in the embedded viewer: actions, DOM snapshots, network,
   /// console, source. Serves the viewer from this binary — no download, no
   /// node, works offline.
@@ -40,7 +40,7 @@ pub enum TraceCommand {
 }
 
 #[derive(Args)]
-pub struct TraceViewArgs {
+pub(crate) struct TraceViewArgs {
   /// Trace to open: a `trace.zip`, a directory of trace files, or an
   /// `http(s)` URL. Defaults to the newest trace under the test output
   /// directory.
@@ -61,7 +61,7 @@ pub struct TraceViewArgs {
 }
 
 #[derive(Args)]
-pub struct TraceShowArgs {
+pub(crate) struct TraceShowArgs {
   /// Trace to print: a `trace.zip` or a directory of trace files. Defaults
   /// to the newest trace under the test output directory.
   pub trace: Option<PathBuf>,
@@ -81,7 +81,7 @@ pub struct TraceShowArgs {
 
 /// A section of a printed trace.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum TraceSection {
+pub(crate) enum TraceSection {
   /// Per-call log lines (what a retrying call was waiting for).
   Logs,
   /// Console messages from the page.
@@ -91,7 +91,7 @@ pub enum TraceSection {
 }
 
 #[derive(Args)]
-pub struct TraceLsArgs {
+pub(crate) struct TraceLsArgs {
   /// Directory to scan. Defaults to the test output directory.
   pub dir: Option<PathBuf>,
 }

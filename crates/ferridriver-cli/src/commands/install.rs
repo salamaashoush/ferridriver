@@ -18,28 +18,53 @@ use crate::ui;
 /// engine and the video encoder, and they are here because they are
 /// provisioned the same way and to the same place, rather than vendored
 /// into the repository or left to the system.
-const KNOWN: [&str; 11] = [
-  "chromium",
-  "chromium-headless-shell",
-  "chromedriver",
-  "firefox",
-  "webkit",
-  "safari",
-  "axe",
-  "ffmpeg",
-  "android",
-  "android-driver",
-  "ios",
+const KNOWN: [(&str, Target); 11] = [
+  ("chromium", Target::Chromium),
+  ("chromium-headless-shell", Target::ChromiumHeadlessShell),
+  ("chromedriver", Target::Chromedriver),
+  ("firefox", Target::Firefox),
+  ("webkit", Target::Webkit),
+  ("safari", Target::Safari),
+  ("axe", Target::Axe),
+  ("ffmpeg", Target::Ffmpeg),
+  ("android", Target::Android),
+  ("android-driver", Target::AndroidDriver),
+  ("ios", Target::Ios),
 ];
 
-pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
+#[derive(Clone, Copy)]
+enum Target {
+  Chromium,
+  ChromiumHeadlessShell,
+  Chromedriver,
+  Firefox,
+  Webkit,
+  Safari,
+  Axe,
+  Ffmpeg,
+  Android,
+  AndroidDriver,
+  Ios,
+}
+
+pub(crate) async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
   let mut browsers = args.browsers;
   if browsers.is_empty() {
     browsers.push("chromium".to_string());
   }
-  if let Some(rejected) = browsers.iter().find(|b| !KNOWN.contains(&b.as_str())) {
-    anyhow::bail!("unknown target {rejected:?} (expected one of: {})", KNOWN.join(", "));
-  }
+  let targets = browsers
+    .iter()
+    .map(|browser| {
+      KNOWN
+        .iter()
+        .find(|(name, _)| name == browser)
+        .map(|&(_, target)| target)
+        .ok_or_else(|| {
+          let known: Vec<&str> = KNOWN.iter().map(|(name, _)| *name).collect();
+          anyhow::anyhow!("unknown target {browser:?} (expected one of: {})", known.join(", "))
+        })
+    })
+    .collect::<anyhow::Result<Vec<Target>>>()?;
 
   let installer = BrowserInstaller::new();
   let mut on_disk: Vec<Installed> = Vec::new();
@@ -51,20 +76,20 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
     phase.finish();
   }
 
-  for browser in &browsers {
+  for (browser, target) in browsers.iter().zip(targets) {
     let phase = Phase::new(browser);
-    let outcome = match browser.as_str() {
-      "chromium" => installer.install_chromium(phase.callback()).await,
-      "chromium-headless-shell" => installer.install_chromium_headless_shell(phase.callback()).await,
-      "chromedriver" => installer.install_chromedriver(phase.callback()).await,
-      "firefox" => installer.install_firefox(phase.callback()).await,
-      "webkit" => installer.install_webkit(phase.callback()).await,
-      "safari" => installer.install_safari(phase.callback()).await,
-      "ios" => installer.install_ios(phase.callback()).await,
-      "axe" => installer.install_axe_core(phase.callback()).await,
-      "ffmpeg" => installer.install_ffmpeg(phase.callback()).await,
-      "android-driver" => installer.install_android_driver(phase.callback()).await,
-      "android" => {
+    let outcome = match target {
+      Target::Chromium => installer.install_chromium(phase.callback()).await,
+      Target::ChromiumHeadlessShell => installer.install_chromium_headless_shell(phase.callback()).await,
+      Target::Chromedriver => installer.install_chromedriver(phase.callback()).await,
+      Target::Firefox => installer.install_firefox(phase.callback()).await,
+      Target::Webkit => installer.install_webkit(phase.callback()).await,
+      Target::Safari => installer.install_safari(phase.callback()).await,
+      Target::Ios => installer.install_ios(phase.callback()).await,
+      Target::Axe => installer.install_axe_core(phase.callback()).await,
+      Target::Ffmpeg => installer.install_ffmpeg(phase.callback()).await,
+      Target::AndroidDriver => installer.install_android_driver(phase.callback()).await,
+      Target::Android => {
         installer
           .install_android(
             &ferridriver::android::AndroidOptions {
@@ -77,8 +102,6 @@ pub async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
           )
           .await
       },
-      // Rejected above, before any download started.
-      other => unreachable!("unvalidated target {other:?}"),
     };
     // The bar owns the line the failure has to be readable on, so it closes
     // itself before the error propagates and `main` prints it.

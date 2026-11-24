@@ -6,28 +6,28 @@
 //! The values are baked in by `build.rs`.
 
 /// Version reported to users. Canary builds carry a `-canary.<sha>` suffix.
-pub const VERSION: &str = env!("FERRIDRIVER_VERSION");
+pub(crate) const VERSION: &str = env!("FERRIDRIVER_VERSION");
 
 /// The release line this build was cut from, without any canary suffix.
 /// Release tags are keyed on this, never on [`VERSION`].
-pub const RELEASE_VERSION: &str = env!("FERRIDRIVER_RELEASE_VERSION");
+pub(crate) const RELEASE_VERSION: &str = env!("FERRIDRIVER_RELEASE_VERSION");
 
 /// Release channel: `stable` or `canary`. Decides which releases
 /// `ferridriver upgrade` considers by default.
-pub const CHANNEL: &str = env!("FERRIDRIVER_CHANNEL");
+pub(crate) const CHANNEL: &str = env!("FERRIDRIVER_CHANNEL");
 
 /// Short commit this build was cut from. Empty where there was no git.
-pub const GIT_SHA: &str = env!("FERRIDRIVER_GIT_SHA");
+pub(crate) const GIT_SHA: &str = env!("FERRIDRIVER_GIT_SHA");
 
 /// `-dirty` when the working tree had uncommitted tracked changes.
-pub const DIRTY: &str = env!("FERRIDRIVER_BUILD_DIRTY");
+pub(crate) const DIRTY: &str = env!("FERRIDRIVER_BUILD_DIRTY");
 
 /// Target triple this build was compiled for.
-pub const TARGET: &str = env!("FERRIDRIVER_BUILD_TARGET");
+pub(crate) const TARGET: &str = env!("FERRIDRIVER_BUILD_TARGET");
 
 /// Whether this is a canary build.
 #[must_use]
-pub fn is_canary() -> bool {
+pub(crate) fn is_canary() -> bool {
   CHANNEL == "canary"
 }
 
@@ -36,7 +36,7 @@ pub fn is_canary() -> bool {
 ///
 /// Assembled by `build.rs`, because clap's `long_version` is an attribute
 /// that takes a `&'static str` and cannot call a function.
-pub const LONG_VERSION: &str = env!("FERRIDRIVER_LONG_VERSION");
+pub(crate) const LONG_VERSION: &str = env!("FERRIDRIVER_LONG_VERSION");
 
 #[cfg(test)]
 mod tests {

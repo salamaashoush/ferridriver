@@ -5,7 +5,7 @@
 //! in another process. What differs is where `page` comes from; the bundling,
 //! the artifact sweep, the action observer and the result document are shared.
 
-pub mod console;
+pub(crate) mod console;
 
 use std::sync::Arc;
 
@@ -101,7 +101,7 @@ async fn provision_for_run(mcp: ferridriver_config::mcp::McpConfig, args: &cli::
 /// full Playwright-style binding surface. The script launches its own
 /// browser via `chromium()` / `firefox()` / `webkit()`; `--backend`
 /// chooses what a plain `chromium()` resolves to. No page is pre-bound.
-pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::Result<()> {
   reject_conflicting_state_flags(&args)?;
   let (source, origin) = read_script_source(&args)?;
 
@@ -278,7 +278,7 @@ fn requested_code_language(args: &cli::RunArgs) -> Option<&str> {
   args
     .code
     .as_deref()
-    .or((args.code_out.is_some() || args.as_test).then_some("ts"))
+    .or_else(|| (args.code_out.is_some() || args.as_test).then_some("ts"))
 }
 
 fn scaffold(as_test: bool) -> ferridriver::codegen::Scaffold {
@@ -326,7 +326,6 @@ fn finish_code(
 
 /// Run a script against a live session: this process bundles and renders, the
 /// host owns the browser, the extensions and the sandboxes.
-#[allow(clippy::too_many_arguments)] // every one is a distinct piece of the run
 async fn run_against_session(
   id: &str,
   args: &cli::RunArgs,
@@ -505,7 +504,7 @@ fn report_code_result(
         "{}",
         ui::failure(&format!("{}: {} ({}ms)", error.kind, error.message, result.duration_ms))
       );
-      std::process::exit(1);
+      return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
     }
     return Ok(());
   }
@@ -520,7 +519,7 @@ fn report_code_result(
   ui::stdoutln!("{}", serde_json::to_string_pretty(&document)?);
   if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
     ui::stderrln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
-    std::process::exit(1);
+    return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
   }
   Ok(())
 }
@@ -534,12 +533,12 @@ fn report_result(result: &ferridriver_script::ScriptResult) -> anyhow::Result<()
         "{}",
         ui::failure(&format!("{}: {} ({}ms)", error.kind, error.message, result.duration_ms))
       );
-      std::process::exit(1);
+      return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
     }
   } else {
     console::print_result(result);
     if result.is_err() {
-      std::process::exit(1);
+      return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
     }
   }
   Ok(())

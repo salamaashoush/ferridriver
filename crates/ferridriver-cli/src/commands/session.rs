@@ -46,12 +46,12 @@ fn display_endpoint(endpoint: &str) -> String {
 /// `-c` runs with a different configuration than the command that opened it,
 /// silently.
 #[derive(Clone, Copy)]
-pub struct ConfigOrigin<'a> {
+pub(crate) struct ConfigOrigin<'a> {
   pub explicit: Option<&'a std::path::Path>,
   pub inherit: bool,
 }
 
-pub async fn run(config: FerridriverConfig, origin: ConfigOrigin<'_>, args: SessionArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(config: FerridriverConfig, origin: ConfigOrigin<'_>, args: SessionArgs) -> anyhow::Result<()> {
   match args.command {
     SessionCommand::Open(a) => open(a, origin).await,
     // Boxed: hosting carries the whole resolved scripting environment, which
@@ -267,7 +267,10 @@ fn host_command(args: &SessionOpenArgs, origin: &ConfigOrigin<'_>) -> anyhow::Re
 /// wait for the session to close. The host still gets the stdio it is
 /// given: `Command` duplicates what it hands a child.
 #[cfg(windows)]
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "clearing a handle's inherit flag is a Win32 call with no safe wrapper"
+)]
 fn keep_stdio_from_the_host() {
   use std::os::windows::io::AsRawHandle as _;
   use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
@@ -427,7 +430,7 @@ async fn attach(args: SessionTargetArgs) -> anyhow::Result<()> {
 /// every line in it — the host always streams, the client decides how to show
 /// it.
 /// Where a session run's side channels land in this process.
-pub struct RunSinks {
+pub(crate) struct RunSinks {
   /// Accumulates the generated source the host streamed.
   pub code: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
   /// Whether to also print each line as it arrives.
@@ -446,7 +449,7 @@ impl Default for RunSinks {
   }
 }
 
-pub async fn run_on_session(
+pub(crate) async fn run_on_session(
   id: &str,
   context: Option<&str>,
   request: ScriptRequest,
@@ -523,9 +526,8 @@ pub async fn run_on_session(
           crate::commands::run::console::print_action_log(message.as_deref().unwrap_or_default());
         },
         ferridriver_session::ActionPhase::End => {
-          #[allow(clippy::cast_precision_loss)] // display only, and milliseconds never reach 2^53
-          let ms = duration_ms.unwrap_or_default() as f64;
-          crate::commands::run::console::print_action_end(&title, ms, error.as_deref());
+          let elapsed = std::time::Duration::from_millis(duration_ms.unwrap_or_default());
+          crate::commands::run::console::print_action_end(&title, elapsed, error.as_deref());
         },
       },
       // A `run` streams none of these; they belong to the screencast and

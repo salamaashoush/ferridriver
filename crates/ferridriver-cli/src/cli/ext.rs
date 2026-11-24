@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 #[derive(Args)]
-pub struct ExtArgs {
+pub(crate) struct ExtArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -14,7 +14,7 @@ pub struct ExtArgs {
 }
 
 #[derive(Subcommand)]
-pub enum ExtCommand {
+pub(crate) enum ExtCommand {
   /// Verify extensions once: resolve, type-check, load, and report every
   /// tool, capability, unmet requirement and error. Exits non-zero when
   /// something is wrong, so it works as a pre-commit / CI gate.
@@ -38,7 +38,7 @@ pub enum ExtCommand {
 }
 
 #[derive(Args)]
-pub struct ExtCheckArgs {
+pub(crate) struct ExtCheckArgs {
   /// Extension files, directories, packages, or package specifiers.
   /// Defaults to the `extensions` list from the resolved config.
   pub paths: Vec<String>,
@@ -62,7 +62,7 @@ pub struct ExtCheckArgs {
 }
 
 #[derive(Args)]
-pub struct ExtTypesArgs {
+pub(crate) struct ExtTypesArgs {
   /// Directory to write `@ferridriver/extension/` and
   /// `@ferridriver/test/` into. Defaults to `./node_modules`, which is
   /// where TypeScript already looks.

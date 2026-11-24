@@ -7,7 +7,7 @@
 /// pool: a read of stdin cannot be cancelled, and a pool thread still
 /// blocked in one would hold the runtime open after the server stops for
 /// some other reason.
-pub fn stdin_closed() -> std::io::Result<impl std::future::Future<Output = ()>> {
+pub(crate) fn stdin_closed() -> std::io::Result<impl std::future::Future<Output = ()>> {
   let (closed, wait) = tokio::sync::oneshot::channel::<()>();
   std::thread::Builder::new().name("stdin-watch".into()).spawn(move || {
     let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
@@ -21,7 +21,7 @@ pub fn stdin_closed() -> std::io::Result<impl std::future::Future<Output = ()>> 
 /// A request to stop that is not a Ctrl-C: `SIGTERM` on Unix; on Windows,
 /// which has no such signal, the console closing, the user logging off or
 /// the system shutting down.
-pub struct Termination {
+pub(crate) struct Termination {
   #[cfg(unix)]
   term: tokio::signal::unix::Signal,
   #[cfg(windows)]
@@ -35,7 +35,7 @@ pub struct Termination {
 impl Termination {
   /// # Errors
   /// Fails when the handlers cannot be installed.
-  pub fn new() -> std::io::Result<Self> {
+  pub(crate) fn new() -> std::io::Result<Self> {
     Ok(Self {
       #[cfg(unix)]
       term: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
@@ -49,7 +49,7 @@ impl Termination {
   }
 
   /// Resolves on the next request.
-  pub async fn recv(&mut self) {
+  pub(crate) async fn recv(&mut self) {
     #[cfg(unix)]
     self.term.recv().await;
     #[cfg(windows)]

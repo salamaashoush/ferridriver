@@ -4,27 +4,27 @@
 //! so adding a command means adding a file and one arm rather than growing a
 //! single function past the point anyone can read it.
 
-pub mod bdd;
-pub mod bootstrap;
-pub mod browser;
-pub mod codegen;
-pub mod completions;
-pub mod config;
-pub mod ext;
-pub mod init;
-pub mod install;
-pub mod instance;
-pub mod lifetime;
-pub mod mcp;
-pub mod merge;
-pub mod run;
-pub mod rust_test;
-pub mod script_setup;
-pub mod session;
-pub mod suite;
-pub mod test;
-pub mod trace;
-pub mod upgrade;
+pub(crate) mod bdd;
+pub(crate) mod bootstrap;
+pub(crate) mod browser;
+pub(crate) mod codegen;
+pub(crate) mod completions;
+pub(crate) mod config;
+pub(crate) mod ext;
+pub(crate) mod init;
+pub(crate) mod install;
+pub(crate) mod instance;
+pub(crate) mod lifetime;
+pub(crate) mod mcp;
+pub(crate) mod merge;
+pub(crate) mod run;
+pub(crate) mod rust_test;
+pub(crate) mod script_setup;
+pub(crate) mod session;
+pub(crate) mod suite;
+pub(crate) mod test;
+pub(crate) mod trace;
+pub(crate) mod upgrade;
 
 use ferridriver_config::FerridriverConfig;
 
@@ -35,7 +35,7 @@ use crate::cli;
 /// Every arm is boxed rather than awaited inline: this frame is the union of
 /// all of them, so inline futures would put every command's stack behind
 /// whichever single one is running.
-pub async fn dispatch(
+pub(crate) async fn dispatch(
   args: cli::Cli,
   config: FerridriverConfig,
   startup: &ferridriver_config::Startup,

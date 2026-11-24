@@ -13,9 +13,9 @@
 //! load the MCP server runs, so a green report means the server will load
 //! the same set.
 
-pub mod report;
-pub mod typecheck;
-pub mod types;
+pub(crate) mod report;
+pub(crate) mod typecheck;
+pub(crate) mod types;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ use ferridriver_config::FerridriverConfig;
 use crate::cli;
 use crate::ui;
 
-pub async fn run(config: FerridriverConfig, args: cli::ExtArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(config: FerridriverConfig, args: cli::ExtArgs) -> anyhow::Result<()> {
   match args.command {
     cli::ExtCommand::Check(check) => Box::pin(check_once(config, check)).await,
     cli::ExtCommand::Dev(mut dev) => {
@@ -57,7 +57,7 @@ fn write_types(args: cli::ExtTypesArgs) -> anyhow::Result<()> {
 }
 
 /// One report cycle's outcome.
-pub struct Report {
+pub(crate) struct Report {
   pub payload: serde_json::Value,
   /// Roots to watch: an entry file's directory, or a package's own dir.
   pub roots: Vec<PathBuf>,
@@ -80,7 +80,7 @@ async fn check_once(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyho
   if report.ok {
     return Ok(());
   }
-  std::process::exit(1);
+  Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into())
 }
 
 async fn check_loop(config: FerridriverConfig, args: cli::ExtCheckArgs) -> anyhow::Result<()> {

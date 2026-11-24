@@ -11,7 +11,7 @@ use clap_complete::Shell;
 use crate::cli;
 use crate::ui;
 
-pub fn run(args: &cli::CompletionsArgs) -> anyhow::Result<()> {
+pub(crate) fn run(args: &cli::CompletionsArgs) -> anyhow::Result<()> {
   let shell = match args.shell {
     Some(shell) => shell,
     None => detect().ok_or_else(|| {

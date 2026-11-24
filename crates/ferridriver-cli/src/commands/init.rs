@@ -29,7 +29,7 @@ impl Wrote {
   }
 }
 
-pub fn run(args: &cli::InitArgs) -> anyhow::Result<()> {
+pub(crate) fn run(args: &cli::InitArgs) -> anyhow::Result<()> {
   let root = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
   std::fs::create_dir_all(&root).map_err(|e| anyhow::anyhow!("create {}: {e}", root.display()))?;
 

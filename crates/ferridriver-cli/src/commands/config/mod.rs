@@ -9,7 +9,7 @@
 //! they add up to, and which file set each key. [`doctor`] is the other half
 //! — it takes the same resolution and asks whether it will actually work.
 
-pub mod doctor;
+pub(crate) mod doctor;
 
 use ferridriver_config::FerridriverConfig;
 use ferridriver_config::layer::{self, LoadOptions};
@@ -37,7 +37,7 @@ fn load_options(startup: &ferridriver_config::Startup) -> LoadOptions {
 /// through `defineDefaults`, already read by startup's second pass.
 /// Without them this command would answer "where did this value come
 /// from" while omitting a whole layer.
-pub fn run_config(
+pub(crate) fn run_config(
   startup: &ferridriver_config::Startup,
   defaults: Vec<(String, serde_json::Value)>,
   args: &cli::ConfigArgs,

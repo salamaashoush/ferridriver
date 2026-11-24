@@ -11,9 +11,12 @@
 use clap::Args;
 
 /// Selection, parallelism and reporting for a suite run.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap derives one independent `--flag` per bool; folding them into enums would change the command line"
+)]
 #[derive(Args)]
-pub struct RunnerArgs {
+pub(crate) struct RunnerArgs {
   /// Run only these `[test.projects]` entries (repeatable). Without this
   /// flag the suite runs on every configured project, or on the single
   /// `[test.browser]` when no projects are configured.
@@ -128,7 +131,7 @@ impl RunnerArgs {
   ///
   /// # Errors
   /// When the test list cannot be read.
-  pub fn test_ids(&self) -> anyhow::Result<Vec<String>> {
+  pub(crate) fn test_ids(&self) -> anyhow::Result<Vec<String>> {
     let mut ids = self.test_id.clone();
     if let Some(path) = &self.test_list {
       let text = std::fs::read_to_string(path)
@@ -149,7 +152,7 @@ impl RunnerArgs {
   /// # Errors
   /// When the file cannot be read or parsed, or names a shard outside
   /// `1..=N`.
-  pub fn shard_assignment(
+  pub(crate) fn shard_assignment(
     &self,
     shard: Option<&ferridriver_test::config::ShardArg>,
   ) -> anyhow::Result<Option<rustc_hash::FxHashMap<String, u32>>> {
@@ -181,7 +184,7 @@ impl RunnerArgs {
   ///
   /// # Errors
   /// When the spec is not `X/N` with `1 <= X <= N`.
-  pub fn shard(&self) -> anyhow::Result<Option<ferridriver_test::config::ShardArg>> {
+  pub(crate) fn shard(&self) -> anyhow::Result<Option<ferridriver_test::config::ShardArg>> {
     self
       .shard
       .as_deref()

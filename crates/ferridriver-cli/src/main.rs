@@ -30,9 +30,11 @@ async fn main() -> std::process::ExitCode {
   match Box::pin(run()).await {
     Ok(()) => std::process::ExitCode::SUCCESS,
     Err(err) => {
-      #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-      let code = error::report(&err) as u8;
-      std::process::ExitCode::from(code)
+      let code = error::report(&err);
+      if err.is::<error::ExitNow>() {
+        std::process::exit(code);
+      }
+      u8::try_from(code).map_or(std::process::ExitCode::FAILURE, std::process::ExitCode::from)
     },
   }
 }

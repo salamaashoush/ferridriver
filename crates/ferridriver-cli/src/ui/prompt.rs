@@ -12,7 +12,7 @@ use console::{Style, Term};
 ///
 /// # Errors
 /// When the terminal cannot be read.
-pub fn confirm(question: &str, default: bool) -> anyhow::Result<bool> {
+pub(crate) fn confirm(question: &str, default: bool) -> anyhow::Result<bool> {
   if !super::interactive() {
     return Ok(default);
   }

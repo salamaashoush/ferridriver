@@ -66,7 +66,7 @@ impl Status {
 
 /// `ferridriver doctor`: verify the setup end to end and exit non-zero
 /// when something will not work.
-pub async fn run(
+pub(crate) async fn run(
   startup: &ferridriver_config::Startup,
   defaults: Vec<(String, serde_json::Value)>,
   args: cli::DoctorArgs,
@@ -85,7 +85,7 @@ pub async fn run(
         status: Status::Fail,
         detail: e.to_string(),
       }])?;
-      std::process::exit(1);
+      return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
     },
   };
 
@@ -146,7 +146,7 @@ pub async fn run(
   let failed = checks.iter().any(|c| c.status == Status::Fail);
   report(&checks)?;
   if failed {
-    std::process::exit(1);
+    return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
   }
   Ok(())
 }
@@ -479,11 +479,6 @@ fn check_instances(config: &FerridriverConfig) -> Vec<Check> {
 }
 
 /// Print the checks.
-///
-/// Flushes explicitly: `doctor` exits through `std::process::exit`, which
-/// runs no destructors, and piping the command to a file (the CI shape)
-/// makes stdout block-buffered — so the whole report was discarded on
-/// exactly the failing runs someone would want the log of.
 fn report(checks: &[Check]) -> anyhow::Result<()> {
   if ui::json() {
     let payload: Vec<serde_json::Value> = checks
@@ -532,9 +527,8 @@ fn report(checks: &[Check]) -> anyhow::Result<()> {
       ("install a browser", "ferridriver install chromium".to_string()),
     ]);
   }
-  // `doctor` exits through `std::process::exit`, which runs no destructors,
-  // and a piped stdout is block-buffered — so the whole report was discarded
-  // on exactly the failing runs someone would want the log of.
+  // A piped stdout is block-buffered: flushing here makes a failed write
+  // fail the command rather than vanish when the process exits.
   std::io::Write::flush(&mut std::io::stdout())?;
   Ok(())
 }

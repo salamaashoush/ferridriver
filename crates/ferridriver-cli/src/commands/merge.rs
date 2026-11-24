@@ -23,7 +23,7 @@ use crate::ui;
 /// # Errors
 ///
 /// Fails when an input path holds no readable blob.
-pub async fn run(config: FerridriverConfig, args: MergeReportsArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(config: FerridriverConfig, args: MergeReportsArgs) -> anyhow::Result<()> {
   let caps = crate::commands::suite::caps(&config);
   let mut test_config = *config.test;
   if let Some(dir) = args.output_dir.clone() {
@@ -105,7 +105,7 @@ pub async fn run(config: FerridriverConfig, args: MergeReportsArgs) -> anyhow::R
   if failed {
     // The reporters just wrote the report that says what failed; the process
     // needs the status, not a second banner over the top of it.
-    return Err(crate::error::AlreadyReported.into());
+    return Err(crate::error::AlreadyReported(ferridriver_test::exit::FAILED).into());
   }
   Ok(())
 }

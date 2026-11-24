@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use super::browser::BrowserArgs;
 
 #[derive(Args)]
-pub struct SessionArgs {
+pub(crate) struct SessionArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -14,7 +14,7 @@ pub struct SessionArgs {
 }
 
 #[derive(Subcommand)]
-pub enum SessionCommand {
+pub(crate) enum SessionCommand {
   /// Provision a browser or device, bind it under `id`, and serve it in the background.
   /// Spawns a detached host process and returns once the session is live.
   #[command(after_help = "Examples:\n  \
@@ -50,7 +50,7 @@ pub enum SessionCommand {
 }
 
 #[derive(Args)]
-pub struct SessionOpenArgs {
+pub(crate) struct SessionOpenArgs {
   /// Session id to publish the browser under.
   pub id: String,
 
@@ -92,7 +92,7 @@ pub struct SessionOpenArgs {
 }
 
 #[derive(Args)]
-pub struct SessionHostArgs {
+pub(crate) struct SessionHostArgs {
   /// Session id to publish the browser under.
   pub id: String,
 
@@ -131,10 +131,10 @@ pub struct SessionHostArgs {
 }
 
 #[derive(Args)]
-pub struct SessionTargetArgs {
+pub(crate) struct SessionTargetArgs {
   /// Session id.
   pub id: String,
 }
 
 #[derive(Args)]
-pub struct SessionListArgs;
+pub(crate) struct SessionListArgs;

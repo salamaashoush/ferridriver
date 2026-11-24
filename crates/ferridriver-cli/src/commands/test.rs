@@ -5,7 +5,7 @@ use ferridriver_config::FerridriverConfig;
 use crate::cli;
 use crate::commands::{script_setup, suite};
 
-pub async fn run(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::Result<()> {
   let caps = suite::caps(&config);
   ferridriver_testjs::set_test_script_caps(caps.clone());
   ferridriver_testjs::set_test_sidecars(script_setup::sidecar_specs(&config));
@@ -45,6 +45,5 @@ pub async fn run(config: FerridriverConfig, args: cli::TestRunArgs) -> anyhow::R
 
   let test_config = Box::pin(suite::resolve(config, &caps, args.runner.debug, &mut overrides)).await?;
   let exit_code = Box::pin(ferridriver_testjs::run_ts_tests_with(test_config, overrides)).await;
-  suite::finish(exit_code);
-  Ok(())
+  crate::error::reported_status(exit_code)
 }

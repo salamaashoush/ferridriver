@@ -25,17 +25,19 @@ mod test;
 mod tools;
 mod trace;
 
-pub use bdd::BddArgs;
-pub use browser::{BrowserArgs, EffectiveBrowser, Transport, effective_browser};
-pub use config::{ConfigArgs, DoctorArgs};
-pub use ext::{ExtArgs, ExtCheckArgs, ExtCommand, ExtTypesArgs};
-pub use run::RunArgs;
-pub use runner::RunnerArgs;
-pub use serve::{BrowserCommand, BrowserCommandArgs, BrowserServeArgs};
-pub use session::{SessionArgs, SessionCommand, SessionHostArgs, SessionListArgs, SessionOpenArgs, SessionTargetArgs};
-pub use test::{RustTestArgs, TestRunArgs, TestRunner};
-pub use tools::{CodegenArgs, CompletionsArgs, InitArgs, InstallArgs, McpArgs, MergeReportsArgs, UpgradeArgs};
-pub use trace::{TraceArgs, TraceCommand, TraceLsArgs, TraceSection, TraceShowArgs, TraceViewArgs};
+pub(crate) use bdd::BddArgs;
+pub(crate) use browser::{BrowserArgs, EffectiveBrowser, Transport, effective_browser};
+pub(crate) use config::{ConfigArgs, DoctorArgs};
+pub(crate) use ext::{ExtArgs, ExtCheckArgs, ExtCommand, ExtTypesArgs};
+pub(crate) use run::RunArgs;
+pub(crate) use runner::RunnerArgs;
+pub(crate) use serve::{BrowserCommand, BrowserCommandArgs, BrowserServeArgs};
+pub(crate) use session::{
+  SessionArgs, SessionCommand, SessionHostArgs, SessionListArgs, SessionOpenArgs, SessionTargetArgs,
+};
+pub(crate) use test::{RustTestArgs, TestRunArgs, TestRunner};
+pub(crate) use tools::{CodegenArgs, CompletionsArgs, InitArgs, InstallArgs, McpArgs, MergeReportsArgs, UpgradeArgs};
+pub(crate) use trace::{TraceArgs, TraceCommand, TraceLsArgs, TraceSection, TraceShowArgs, TraceViewArgs};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -67,7 +69,7 @@ use crate::ui;
     ferridriver doctor                     check the setup end to end\n\n\
     Run `ferridriver <command> --help` for that command's options and examples."
 )]
-pub struct Cli {
+pub(crate) struct Cli {
   /// Verbose output (-v = debug, -vv = trace including CDP protocol)
   #[arg(short, long, action = clap::ArgAction::Count, global = true, help_heading = "Global")]
   pub verbose: u8,
@@ -117,7 +119,7 @@ pub struct Cli {
 /// `--format`, mapped onto [`ui::Format`] so the presentation layer owns the
 /// meaning and clap only owns the spelling.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum FormatArg {
+pub(crate) enum FormatArg {
   Human,
   Json,
 }
@@ -135,7 +137,7 @@ pub enum FormatArg {
 /// `session --config x open dev` and `session open dev --config x` both
 /// parse, as they did when the root owned them.
 #[derive(clap::Args, Clone, Default, Debug)]
-pub struct ConfigSource {
+pub(crate) struct ConfigSource {
   /// Config file path, applied on top of the discovered config layers
   /// (machine, user, repository, cwd). Format inferred from the
   /// extension.
@@ -160,14 +162,14 @@ pub struct ConfigSource {
 impl ConfigSource {
   /// Whether the discovered layers apply underneath `path`.
   #[must_use]
-  pub fn inherit(&self) -> bool {
+  pub(crate) fn inherit(&self) -> bool {
     !self.no_inherit
   }
 }
 
 /// `--color`, mapped onto [`ui::ColorChoice`].
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ColorArg {
+pub(crate) enum ColorArg {
   Auto,
   Always,
   Never,
@@ -181,7 +183,7 @@ impl Cli {
   /// actually consume it. A command that reads no configuration answers with
   /// the default, and the stack it never looks at is the discovered one.
   #[must_use]
-  pub fn config_source(&self) -> ConfigSource {
+  pub(crate) fn config_source(&self) -> ConfigSource {
     match &self.command {
       Command::Mcp(a) => a.config.clone(),
       Command::Bdd(a) => a.config.clone(),
@@ -205,7 +207,7 @@ impl Cli {
 
   /// The presentation policy these flags describe.
   #[must_use]
-  pub fn presentation(&self) -> (ui::ColorChoice, ui::Format, bool) {
+  pub(crate) fn presentation(&self) -> (ui::ColorChoice, ui::Format, bool) {
     let color = match self.color {
       ColorArg::Auto => ui::ColorChoice::Auto,
       ColorArg::Always => ui::ColorChoice::Always,
@@ -220,7 +222,7 @@ impl Cli {
 }
 
 #[derive(Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
   /// Scaffold a project here: a config, a first spec, and the type
   /// declarations an editor needs.
   #[command(after_help = "Examples:\n  \

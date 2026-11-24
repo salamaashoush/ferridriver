@@ -9,7 +9,7 @@ use clap::Args;
 use super::browser::{BrowserArgs, TransportArgs};
 
 #[derive(Args)]
-pub struct InitArgs {
+pub(crate) struct InitArgs {
   /// Directory to scaffold. Defaults to the current one.
   pub dir: Option<PathBuf>,
 
@@ -29,7 +29,7 @@ pub struct InitArgs {
 }
 
 #[derive(Args)]
-pub struct McpArgs {
+pub(crate) struct McpArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -41,7 +41,7 @@ pub struct McpArgs {
 }
 
 #[derive(Args)]
-pub struct InstallArgs {
+pub(crate) struct InstallArgs {
   /// Browsers to install: `chromium`, `chromium-headless-shell`,
   /// `chromedriver`, `firefox`, `webkit`, `safari`, `android`,
   /// `android-driver`, `ios`, `axe`, or `ffmpeg`. Defaults to `chromium`.
@@ -73,7 +73,7 @@ pub struct InstallArgs {
 }
 
 #[derive(Args)]
-pub struct CodegenArgs {
+pub(crate) struct CodegenArgs {
   /// URL to open in the codegen browser.
   pub url: Option<String>,
 
@@ -123,7 +123,7 @@ pub struct CodegenArgs {
 }
 
 #[derive(Args)]
-pub struct MergeReportsArgs {
+pub(crate) struct MergeReportsArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -147,9 +147,12 @@ pub struct MergeReportsArgs {
 // Independent flags with no relationship to each other: grouping them into
 // an enum would model a state machine that does not exist and would change
 // the CLI surface to satisfy a lint about the struct behind it.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "clap derives one independent `--flag` per bool; folding them into enums would change the command line"
+)]
 #[derive(Args)]
-pub struct UpgradeArgs {
+pub(crate) struct UpgradeArgs {
   /// Follow the canary channel: the rolling prerelease built from every
   /// push to main. A canary build already follows it; this is how a stable
   /// build opts in.
@@ -182,7 +185,7 @@ impl UpgradeArgs {
   /// binary was built for. A canary that silently upgraded itself onto
   /// stable would be a one-way door nobody asked for.
   #[must_use]
-  pub fn channel(&self) -> crate::commands::upgrade::Channel {
+  pub(crate) fn channel(&self) -> crate::commands::upgrade::Channel {
     use crate::commands::upgrade::Channel;
     match (self.canary, self.stable) {
       (true, _) => Channel::Canary,
@@ -194,7 +197,7 @@ impl UpgradeArgs {
 }
 
 #[derive(Args)]
-pub struct CompletionsArgs {
+pub(crate) struct CompletionsArgs {
   /// Shell to generate for. Detected from `$SHELL` when omitted.
   #[arg(value_enum)]
   pub shell: Option<clap_complete::Shell>,

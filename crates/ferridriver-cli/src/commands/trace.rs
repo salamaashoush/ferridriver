@@ -23,7 +23,7 @@ use ferridriver_viewer::{App, FileRoots, dump};
 use crate::cli;
 use crate::ui;
 
-pub async fn run(config: &FerridriverConfig, args: cli::TraceArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(config: &FerridriverConfig, args: cli::TraceArgs) -> anyhow::Result<()> {
   match args.command {
     cli::TraceCommand::View(view) => view_trace(config, view).await,
     cli::TraceCommand::Show(show) => show_trace(config, &show),
@@ -50,7 +50,9 @@ async fn view_trace(config: &FerridriverConfig, args: cli::TraceViewArgs) -> any
     let root = if path.is_dir() {
       path.clone()
     } else {
-      path.parent().unwrap_or(Path::new(".")).to_path_buf()
+      path
+        .parent()
+        .map_or_else(|| Path::new(".").to_path_buf(), Path::to_path_buf)
     };
     // A directory is addressed through the marker entry, which the file
     // route answers with a listing of every trace inside it.

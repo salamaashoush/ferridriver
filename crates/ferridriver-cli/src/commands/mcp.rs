@@ -9,7 +9,7 @@ use crate::cli;
 use crate::commands::script_setup;
 use crate::ui;
 
-pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Result<()> {
   // The mcp section drives chrome args, instances, and server metadata.
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
@@ -40,7 +40,7 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
       .with_sidecars(sidecars.clone())
       .with_test_config(test_config.clone())
   };
-  match args.transport.transport {
+  let served = match args.transport.transport {
     // stdio IS the protocol channel: nothing but frames may touch stdout,
     // so the startup line goes to stderr or nowhere at all.
     cli::Transport::Stdio => {
@@ -51,7 +51,7 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
         format!("{backend:?}").to_lowercase(),
         if headless { "headless" } else { "headed" }
       ));
-      Box::pin(ferridriver_mcp::mcp::serve_stdio_with(server)).await
+      Box::pin(ferridriver_mcp::mcp::serve_stdio_with(server)).await?
     },
     cli::Transport::Http => {
       let options = ferridriver_mcp::mcp::HttpOptions {
@@ -101,7 +101,17 @@ pub async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> anyhow::R
           n => format!(", {n} clients with a token each"),
         }
       ));
-      Box::pin(ferridriver_mcp::mcp::serve_http_clients(clients, options)).await
+      Box::pin(ferridriver_mcp::mcp::serve_http_clients(clients, options)).await?
+    },
+  };
+  match served {
+    ferridriver_mcp::mcp::Served::Finished(result) => result,
+    ferridriver_mcp::mcp::Served::Signalled(result) => {
+      let code = match &result {
+        Ok(()) => ferridriver_test::exit::PASSED,
+        Err(err) => crate::error::report(err),
+      };
+      Err(crate::error::ExitNow(code).into())
     },
   }
 }

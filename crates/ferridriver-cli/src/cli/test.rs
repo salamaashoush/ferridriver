@@ -5,9 +5,8 @@ use clap::{Args, ValueEnum};
 use super::browser::BrowserArgs;
 use super::runner::RunnerArgs;
 
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Args)]
-pub struct TestRunArgs {
+pub(crate) struct TestRunArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -86,7 +85,7 @@ pub struct TestRunArgs {
 }
 
 #[derive(Args)]
-pub struct RustTestArgs {
+pub(crate) struct RustTestArgs {
   #[command(flatten)]
   pub config: super::ConfigSource,
 
@@ -160,14 +159,14 @@ pub struct RustTestArgs {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-pub enum TestRunner {
+pub(crate) enum TestRunner {
   Nextest,
   Cargo,
 }
 
 impl TestRunner {
   #[must_use]
-  pub fn name(self) -> &'static str {
+  pub(crate) fn name(self) -> &'static str {
     match self {
       Self::Nextest => "nextest",
       Self::Cargo => "cargo",
@@ -177,7 +176,7 @@ impl TestRunner {
 
 /// Whether ferritest harness binaries open their browsers in windows.
 #[derive(Args)]
-pub struct HarnessWindows {
+pub(crate) struct HarnessWindows {
   /// Run ferritest harness binaries headless, which is the default
   /// (exported as `FERRITEST_HEADLESS`; non-harness test binaries ignore it).
   #[arg(long, overrides_with = "headed", help_heading = "Harness")]
@@ -190,7 +189,7 @@ pub struct HarnessWindows {
 
 impl HarnessWindows {
   /// `--headless` / `--headed`, or `None` when the config decides.
-  pub fn headless_override(&self) -> Option<bool> {
+  pub(crate) fn headless_override(&self) -> Option<bool> {
     match (self.headless, self.headed) {
       (true, _) => Some(true),
       (_, true) => Some(false),

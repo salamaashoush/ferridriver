@@ -5,7 +5,7 @@
 //! the `FERRITEST_*` environment a harness binary reads cannot differ between
 //! a plain run and a watched one.
 
-pub mod ui;
+pub(crate) mod ui;
 
 use ferridriver_config::FerridriverConfig;
 
@@ -16,7 +16,7 @@ use crate::ui as term;
 /// and the `--ui` cycle spawner: runner selection, `FERRITEST_*` env
 /// exports, and package filters. Callers append positionals /
 /// passthrough / UI-cycle env on top.
-pub fn base_test_command(args: &cli::RustTestArgs, runner: cli::TestRunner) -> std::process::Command {
+pub(crate) fn base_test_command(args: &cli::RustTestArgs, runner: cli::TestRunner) -> std::process::Command {
   let (program, base_args): (&str, Vec<String>) = match runner {
     cli::TestRunner::Nextest => {
       let mut a = vec!["nextest".into(), "run".into()];
@@ -77,8 +77,8 @@ fn full_test_command(args: &cli::RustTestArgs, chosen_runner: cli::TestRunner) -
   cmd
 }
 
-pub fn run(args: &cli::RustTestArgs) -> anyhow::Result<()> {
-  let chosen_runner = args.runner.unwrap_or(detect_test_runner());
+pub(crate) fn run(args: &cli::RustTestArgs) -> anyhow::Result<()> {
+  let chosen_runner = args.runner.unwrap_or_else(detect_test_runner);
   let mut cmd = full_test_command(args, chosen_runner);
 
   tracing::info!(
@@ -93,7 +93,8 @@ pub fn run(args: &cli::RustTestArgs) -> anyhow::Result<()> {
   if status.success() {
     Ok(())
   } else {
-    std::process::exit(status.code().unwrap_or(1));
+    // cargo already reported the failures; its status is the run's.
+    Err(crate::error::AlreadyReported(status.code().unwrap_or(ferridriver_test::exit::FAILED)).into())
   }
 }
 
@@ -103,7 +104,7 @@ pub fn run(args: &cli::RustTestArgs) -> anyhow::Result<()> {
 /// A change arriving while a cycle runs queues exactly one re-run for
 /// when it finishes; Ctrl-C / SIGTERM kill the cycle's whole process
 /// group (cargo, harness binaries, browsers) and exit.
-pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
+pub(crate) async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
   let overrides = ferridriver_test::config::CliOverrides {
     headless_override: args.windows.headless_override(),
     backend: args.backend.clone(),
@@ -117,7 +118,7 @@ pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> an
   let cwd = std::env::current_dir()?;
   let watcher = ferridriver_test::watch::FileWatcher::new(&cwd, &["**/*.rs".to_string()], &test_config.test_ignore)
     .map_err(|e| anyhow::anyhow!("start file watcher: {e}"))?;
-  let chosen_runner = args.runner.unwrap_or(detect_test_runner());
+  let chosen_runner = args.runner.unwrap_or_else(detect_test_runner);
   let mut sigterm = crate::commands::lifetime::Termination::new()?;
 
   loop {

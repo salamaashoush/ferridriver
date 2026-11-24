@@ -18,7 +18,7 @@ use ferridriver_types::PACKAGES;
 /// `/// <reference types="node" />` where nothing else provides it.
 ///
 /// Returns the written declaration paths, keyed by package name.
-pub fn materialize(root: &Path) -> std::io::Result<Vec<(&'static str, PathBuf)>> {
+pub(crate) fn materialize(root: &Path) -> std::io::Result<Vec<(&'static str, PathBuf)>> {
   let version = ferridriver_types::VERSION;
   let mut written = Vec::new();
   for pkg in PACKAGES {

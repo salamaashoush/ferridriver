@@ -16,7 +16,7 @@ const GUTTER: usize = 2;
 /// the line overflow: below this the content is all ellipsis.
 const MIN_COL: usize = 8;
 
-pub struct Table {
+pub(crate) struct Table {
   headers: Vec<String>,
   /// Column that absorbs the slack, and gives it back first when the table is
   /// too wide. Defaults to the widest column.
@@ -29,7 +29,7 @@ pub struct Table {
 
 impl Table {
   #[must_use]
-  pub fn new(headers: &[&str]) -> Self {
+  pub(crate) fn new(headers: &[&str]) -> Self {
     Self {
       headers: headers.iter().map(|h| (*h).to_string()).collect(),
       flex: None,
@@ -40,19 +40,19 @@ impl Table {
 
   /// Nominate the column that gives up width first.
   #[must_use]
-  pub fn flex(mut self, column: usize) -> Self {
+  pub(crate) fn flex(mut self, column: usize) -> Self {
     self.flex = Some(column);
     self
   }
 
   /// Indent every line, header included.
   #[must_use]
-  pub fn indent(mut self, spaces: usize) -> Self {
+  pub(crate) fn indent(mut self, spaces: usize) -> Self {
     self.indent = spaces;
     self
   }
 
-  pub fn row<I, S>(&mut self, cells: I)
+  pub(crate) fn row<I, S>(&mut self, cells: I)
   where
     I: IntoIterator<Item = S>,
     S: Into<String>,
@@ -62,7 +62,7 @@ impl Table {
 
   /// Render to a string, laid out for `available` columns of terminal.
   #[must_use]
-  pub fn render(&self, available: usize) -> String {
+  pub(crate) fn render(&self, available: usize) -> String {
     let margin = " ".repeat(self.indent);
     let widths = self.resolve_widths(available.saturating_sub(self.indent));
     let mut out = String::new();
@@ -92,7 +92,7 @@ impl Table {
 
   /// Print the table, or nothing at all when it has no rows — an empty table
   /// is a header line that says a thing exists when it does not.
-  pub fn print(&self, available: usize) {
+  pub(crate) fn print(&self, available: usize) {
     if self.rows.is_empty() {
       return;
     }
@@ -154,7 +154,7 @@ mod tests {
     // Every line pads to the same column start, which hand-rolled `{:<20}`
     // stops doing the moment a value exceeds the guess.
     let col = lines[1].find('1').expect("pid on the first row");
-    assert_eq!(&lines[2][col..col + 6], "123456");
+    assert_eq!(lines[2].get(col..col + 6), Some("123456"));
   }
 
   #[test]

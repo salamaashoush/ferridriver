@@ -389,7 +389,7 @@ fn handle_wire_message(
   }
 }
 
-pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
+pub(crate) async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::Result<()> {
   if matches!(args.runner, Some(cli::TestRunner::Nextest)) {
     anyhow::bail!(
       "--ui drives ferritest harness binaries through `cargo test`; nextest cannot enumerate \
@@ -528,10 +528,9 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
         let Some((generation, ok)) = done else { break };
         // Stale completions (a cycle Stop already killed and dropped)
         // are ignored; only the live cycle's exit ends the run.
-        if cycle.as_ref().is_none_or(|c| c.generation != generation) {
+        let Some(finished) = cycle.take_if(|c| c.generation == generation) else {
           continue;
-        }
-        let finished = cycle.take().unwrap_or_else(|| unreachable!("cycle checked above"));
+        };
         match finished.kind {
           CycleKind::List => {
             // A failed list cycle (compile error) produced no hellos —
