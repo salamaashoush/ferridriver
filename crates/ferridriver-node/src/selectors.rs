@@ -6,11 +6,6 @@
 //! `Function | string | { path, content }` lowering. This decides only
 //! which of those shapes JS passed.
 
-// `#[napi]` exports these to JS but clippy's reachability check only
-// follows Rust call graphs, so it flags the entry points as dead. Same
-// module-level exemption every other NAPI entry-point module carries.
-#![allow(dead_code)]
-
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -64,9 +59,15 @@ pub struct SelectorEngineOptions {
 /// `selectors.setTestIdAttribute(attributeName)` — the process default
 /// every context starts from. A comma-separated list matches any of the
 /// named attributes.
+///
+/// # Errors
+///
+/// When `attributeName` is not a string.
 #[napi(namespace = "selectors", js_name = "setTestIdAttribute")]
-pub fn set_test_id_attribute(attribute_name: String) {
-  ferridriver::selectors::set_default_test_id_attribute(&attribute_name);
+pub fn set_test_id_attribute(attribute_name: napi::JsString<'_>) -> Result<()> {
+  let attribute_name = attribute_name.into_utf8()?;
+  ferridriver::selectors::set_default_test_id_attribute(attribute_name.as_str()?);
+  Ok(())
 }
 
 /// Which of Playwright's three shapes JS passed. A function is

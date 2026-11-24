@@ -5,7 +5,7 @@
 //! answers into `#[napi(object)]` shapes so the generated `.d.ts` names
 //! them, and lifts the option bags back.
 //!
-//! Chromium-only, because the format is V8's. On WebKit and Firefox the
+//! Chromium-only, because the format is V8's. On `WebKit` and Firefox the
 //! capture throws the typed `Unsupported` the core raises.
 
 use napi::Result;
@@ -13,6 +13,12 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 use crate::error::IntoNapi;
+
+/// A size, count or id as the integer napi hands JS, saturating where V8's
+/// unsigned value would not fit.
+fn js_int<T: TryInto<i64>>(value: T) -> i64 {
+  value.try_into().unwrap_or(i64::MAX)
+}
 
 /// One object as every list here reports it.
 #[napi(object)]
@@ -39,12 +45,12 @@ pub struct HeapNode {
 impl From<ferridriver::heap::NodeSummary> for HeapNode {
   fn from(node: ferridriver::heap::NodeSummary) -> Self {
     Self {
-      id: node.id as i64,
+      id: js_int(node.id),
       name: node.name,
       distance: node.distance,
-      node_index: node.node_index as i64,
-      retained_size: node.retained_size as i64,
-      self_size: node.self_size as i64,
+      node_index: js_int(node.node_index),
+      retained_size: js_int(node.retained_size),
+      self_size: js_int(node.self_size),
       kind: node.kind,
       can_be_queried: node.can_be_queried,
       detached_dom_tree_node: node.detached_dom_tree_node,
@@ -71,7 +77,7 @@ impl From<ferridriver::heap::EdgeSummary> for HeapEdge {
       name: edge.name,
       node: edge.node.into(),
       kind: edge.kind,
-      edge_index: edge.edge_index as i64,
+      edge_index: js_int(edge.edge_index),
     }
   }
 }
@@ -99,16 +105,16 @@ pub struct HeapObject {
 impl From<ferridriver::heap::ObjectInfo> for HeapObject {
   fn from(info: ferridriver::heap::ObjectInfo) -> Self {
     Self {
-      id: info.id as i64,
+      id: js_int(info.id),
       name: info.name,
       kind: info.kind,
-      node_index: info.node_index as i64,
-      detachedness: info.detachedness as i64,
-      self_size: info.self_size as i64,
-      retained_size: info.retained_size as i64,
+      node_index: js_int(info.node_index),
+      detachedness: js_int(info.detachedness),
+      self_size: js_int(info.self_size),
+      retained_size: js_int(info.retained_size),
       distance: info.distance,
-      edge_count: info.edge_count as i64,
-      retainer_count: info.retainer_count as i64,
+      edge_count: js_int(info.edge_count),
+      retainer_count: js_int(info.retainer_count),
     }
   }
 }
@@ -127,11 +133,11 @@ pub struct HeapDominator {
 impl From<ferridriver::heap::DominatorStep> for HeapDominator {
   fn from(step: ferridriver::heap::DominatorStep) -> Self {
     Self {
-      node_id: step.node_id as i64,
-      node_index: step.node_index as i64,
+      node_id: js_int(step.node_id),
+      node_index: js_int(step.node_index),
       node_name: step.node_name,
-      retained_size: step.retained_size as i64,
-      self_size: step.self_size as i64,
+      retained_size: js_int(step.retained_size),
+      self_size: js_int(step.self_size),
     }
   }
 }
@@ -153,11 +159,11 @@ pub struct HeapRetainingEdge {
 impl From<ferridriver::heap::RetainingEdge> for HeapRetainingEdge {
   fn from(edge: ferridriver::heap::RetainingEdge) -> Self {
     Self {
-      edge_index: edge.edge_index as i64,
+      edge_index: js_int(edge.edge_index),
       edge_name: edge.edge_name,
       edge_type: edge.edge_type,
-      node_id: edge.node_id as i64,
-      node_index: edge.node_index as i64,
+      node_id: js_int(edge.node_id),
+      node_index: js_int(edge.node_index),
       node_name: edge.node_name,
       distance: edge.distance,
       children: edge.children.into_iter().map(Into::into).collect(),
@@ -234,15 +240,12 @@ pub struct HeapClassOptions {
   pub object_id: Option<i64>,
 }
 
-/// Through the core's own parser, so this and the QuickJS binding
+/// Through the core's own parser, so this and the `QuickJS` binding
 /// cannot disagree about what an unknown name means.
 fn node_filter(options: Option<HeapClassOptions>) -> Result<ferridriver::heap::NodeFilter> {
   let options = options.unwrap_or_default();
-  ferridriver::heap::NodeFilter::parse(
-    options.filter_name.as_deref(),
-    options.object_id.map(|id| id.unsigned_abs()),
-  )
-  .map_err(|e| napi::Error::from_reason(e.to_string()))
+  ferridriver::heap::NodeFilter::parse(options.filter_name.as_deref(), options.object_id.map(i64::unsigned_abs))
+    .map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
 /// One JavaScript realm, and how much of the heap it owns.
@@ -276,16 +279,16 @@ impl From<ferridriver::heap::NativeContextSizes> for HeapNativeContexts {
         .native_contexts
         .into_iter()
         .map(|context| HeapNativeContext {
-          node_id: context.node_id as i64,
-          node_index: context.node_index as i64,
+          node_id: js_int(context.node_id),
+          node_index: js_int(context.node_index),
           node_name: context.node_name,
-          attributed_size: context.attributed_size as i64,
-          retained_size: context.retained_size as i64,
-          self_size: context.self_size as i64,
+          attributed_size: js_int(context.attributed_size),
+          retained_size: js_int(context.retained_size),
+          self_size: js_int(context.self_size),
         })
         .collect(),
-      shared_size: sizes.shared_size as i64,
-      no_attribution_size: sizes.no_attribution_size as i64,
+      shared_size: js_int(sizes.shared_size),
+      no_attribution_size: js_int(sizes.no_attribution_size),
     }
   }
 }
@@ -305,12 +308,12 @@ pub struct HeapContextSummary {
 impl From<ferridriver::heap::RetainedByContextSummary> for HeapContextSummary {
   fn from(summary: ferridriver::heap::RetainedByContextSummary) -> Self {
     Self {
-      context_count: summary.context_count as i64,
-      retained_by_context_size: summary.retained_by_context_size as i64,
-      retained_by_context_count: summary.retained_by_context_count as i64,
-      not_retained_by_context_size: summary.not_retained_by_context_size as i64,
-      not_retained_by_context_count: summary.not_retained_by_context_count as i64,
-      total_size: summary.total_size as i64,
+      context_count: js_int(summary.context_count),
+      retained_by_context_size: js_int(summary.retained_by_context_size),
+      retained_by_context_count: js_int(summary.retained_by_context_count),
+      not_retained_by_context_size: js_int(summary.not_retained_by_context_size),
+      not_retained_by_context_count: js_int(summary.not_retained_by_context_count),
+      total_size: js_int(summary.total_size),
     }
   }
 }
@@ -338,10 +341,10 @@ impl From<ferridriver::heap::HeapClass> for HeapClass {
     Self {
       class_key: class.class_key,
       name: class.name,
-      count: class.count as i64,
+      count: js_int(class.count),
       distance: class.distance,
-      self_size: class.self_size as i64,
-      max_retained_size: class.max_retained_size as i64,
+      self_size: js_int(class.self_size),
+      max_retained_size: js_int(class.max_retained_size),
     }
   }
 }
@@ -371,16 +374,16 @@ impl From<ferridriver::heap::HeapClassDiff> for HeapClassDiff {
     Self {
       class_key: diff.class_key,
       name: diff.name,
-      added_count: diff.added_count as i64,
-      removed_count: diff.removed_count as i64,
-      added_size: diff.added_size as i64,
-      removed_size: diff.removed_size as i64,
+      added_count: js_int(diff.added_count),
+      removed_count: js_int(diff.removed_count),
+      added_size: js_int(diff.added_size),
+      removed_size: js_int(diff.removed_size),
       count_delta: diff.count_delta,
       size_delta: diff.size_delta,
-      added_ids: diff.added_ids.into_iter().map(|id| id as i64).collect(),
-      added_self_sizes: diff.added_self_sizes.into_iter().map(|s| s as i64).collect(),
-      deleted_ids: diff.deleted_ids.into_iter().map(|id| id as i64).collect(),
-      deleted_self_sizes: diff.deleted_self_sizes.into_iter().map(|s| s as i64).collect(),
+      added_ids: diff.added_ids.into_iter().map(js_int).collect(),
+      added_self_sizes: diff.added_self_sizes.into_iter().map(js_int).collect(),
+      deleted_ids: diff.deleted_ids.into_iter().map(js_int).collect(),
+      deleted_self_sizes: diff.deleted_self_sizes.into_iter().map(js_int).collect(),
     }
   }
 }
@@ -414,16 +417,16 @@ impl From<ferridriver::heap::DuplicateStringGroup> for HeapDuplicateString {
   fn from(group: ferridriver::heap::DuplicateStringGroup) -> Self {
     Self {
       value: group.value,
-      count: group.count as i64,
-      total_self_size: group.total_self_size as i64,
-      total_retained_size: group.total_retained_size as i64,
+      count: js_int(group.count),
+      total_self_size: js_int(group.total_self_size),
+      total_retained_size: js_int(group.total_retained_size),
       nodes: group
         .nodes
         .into_iter()
         .map(|node| HeapDuplicateStringNode {
-          id: node.id as i64,
-          self_size: node.self_size as i64,
-          retained_size: node.retained_size as i64,
+          id: js_int(node.id),
+          self_size: js_int(node.self_size),
+          retained_size: js_int(node.retained_size),
           distance: node.distance,
         })
         .collect(),
@@ -465,17 +468,17 @@ pub struct HeapV8Statistics {
 impl From<ferridriver::heap::Statistics> for HeapStatistics {
   fn from(stats: ferridriver::heap::Statistics) -> Self {
     Self {
-      total: stats.total as i64,
+      total: js_int(stats.total),
       native: HeapNativeStatistics {
-        total: stats.native.total as i64,
-        typed_arrays: stats.native.typed_arrays as i64,
+        total: js_int(stats.native.total),
+        typed_arrays: js_int(stats.native.typed_arrays),
       },
       v8heap: HeapV8Statistics {
-        total: stats.v8heap.total as i64,
-        code: stats.v8heap.code as i64,
-        js_arrays: stats.v8heap.js_arrays as i64,
-        strings: stats.v8heap.strings as i64,
-        system: stats.v8heap.system as i64,
+        total: js_int(stats.v8heap.total),
+        code: js_int(stats.v8heap.code),
+        js_arrays: js_int(stats.v8heap.js_arrays),
+        strings: js_int(stats.v8heap.strings),
+        system: js_int(stats.v8heap.system),
       },
     }
   }
@@ -520,10 +523,10 @@ impl TryFrom<HeapQueryOptions> for ferridriver::heap::ObjectQuery {
       class_name: options.class_name,
       property_name: options.property_name,
       node_type: options.node_type,
-      min_retained_size: options.min_retained_size.map(|v| v as u64),
-      max_retained_size: options.max_retained_size.map(|v| v as u64),
-      min_self_size: options.min_self_size.map(|v| v as u64),
-      max_self_size: options.max_self_size.map(|v| v as u64),
+      min_retained_size: options.min_retained_size.map(i64::cast_unsigned),
+      max_retained_size: options.max_retained_size.map(i64::cast_unsigned),
+      min_self_size: options.min_self_size.map(i64::cast_unsigned),
+      max_self_size: options.max_self_size.map(i64::cast_unsigned),
       is_detached: options.is_detached,
       sort_by,
     })
@@ -545,6 +548,10 @@ impl HeapSnapshot {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl HeapSnapshot {
   /// The snapshot as a `.heapsnapshot` file holds it. Write it out to
   /// open it in the `DevTools` Memory panel.
@@ -562,13 +569,13 @@ impl HeapSnapshot {
   /// Every byte the snapshot accounts for.
   #[napi]
   pub fn total_size(&self) -> i64 {
-    self.inner.total_size() as i64
+    js_int(self.inner.total_size())
   }
 
   /// How many nodes the graph holds.
   #[napi]
   pub fn node_count(&self) -> i64 {
-    self.inner.node_count() as i64
+    js_int(self.inner.node_count())
   }
 
   /// Every class, heaviest first, or only what one filter keeps.
@@ -623,7 +630,7 @@ impl HeapSnapshot {
   /// What one object is.
   #[napi]
   pub fn object(&self, node_id: i64) -> Result<HeapObject> {
-    Ok(self.inner.object(node_id as u64).into_napi()?.into())
+    Ok(self.inner.object(node_id.cast_unsigned()).into_napi()?.into())
   }
 
   /// What this object points at.
@@ -632,7 +639,7 @@ impl HeapSnapshot {
     Ok(
       self
         .inner
-        .edges(node_id as u64)
+        .edges(node_id.cast_unsigned())
         .into_napi()?
         .into_iter()
         .map(Into::into)
@@ -647,7 +654,7 @@ impl HeapSnapshot {
     Ok(
       self
         .inner
-        .retainers(node_id as u64)
+        .retainers(node_id.cast_unsigned())
         .into_napi()?
         .into_iter()
         .map(Into::into)
@@ -662,7 +669,7 @@ impl HeapSnapshot {
     Ok(
       self
         .inner
-        .retaining_paths(node_id as u64, Some(options.unwrap_or_default().into()))
+        .retaining_paths(node_id.cast_unsigned(), Some(options.unwrap_or_default().into()))
         .into_napi()?
         .into(),
     )
@@ -675,7 +682,7 @@ impl HeapSnapshot {
     Ok(
       self
         .inner
-        .dominators(node_id as u64)
+        .dominators(node_id.cast_unsigned())
         .into_napi()?
         .into_iter()
         .map(Into::into)

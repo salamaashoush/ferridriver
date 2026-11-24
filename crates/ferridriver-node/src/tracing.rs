@@ -49,7 +49,7 @@ impl Tracing {
     ts_args_type = "path: string, options?: { content?: 'embed' | 'attach' | 'omit', mode?: 'full' | 'minimal', urlFilter?: string | RegExp, resourcesDir?: string }"
   )]
   pub async fn start_har(&self, path: String, options: Option<StartHarOptionsJs>) -> Result<()> {
-    let opts = build_start_har_options(options)?;
+    let opts = build_start_har_options(options.as_ref())?;
     self.inner.tracing().start_har(path, opts).await.into_napi()
   }
 
@@ -188,8 +188,8 @@ impl From<TracingStopOptionsJs> for ferridriver::trace::TracingStopOptions {
   }
 }
 
-fn build_start_har_options(options: Option<StartHarOptionsJs>) -> Result<StartHarOptions> {
-  let url_filter = options.as_ref().and_then(|o| o.url_filter.as_ref());
+fn build_start_har_options(options: Option<&StartHarOptionsJs>) -> Result<StartHarOptions> {
+  let url_filter = options.and_then(|o| o.url_filter.as_ref());
   let url_filter = match url_filter {
     Some(Either::A(glob)) => Some(UrlMatcher::glob(glob.clone()).into_napi()?),
     Some(Either::B(re)) => {
@@ -197,14 +197,14 @@ fn build_start_har_options(options: Option<StartHarOptionsJs>) -> Result<StartHa
     },
     None => None,
   };
-  let content = match options.as_ref().and_then(|o| o.content.as_deref()) {
+  let content = match options.and_then(|o| o.content.as_deref()) {
     Some("embed") => Some(HarContentPolicy::Embed),
     Some("attach") => Some(HarContentPolicy::Attach),
     Some("omit") => Some(HarContentPolicy::Omit),
     Some(other) => return Err(napi::Error::from_reason(format!("invalid HAR content policy: {other}"))),
     None => None,
   };
-  let mode = match options.as_ref().and_then(|o| o.mode.as_deref()) {
+  let mode = match options.and_then(|o| o.mode.as_deref()) {
     Some("full") => Some(HarMode::Full),
     Some("minimal") => Some(HarMode::Minimal),
     Some(other) => return Err(napi::Error::from_reason(format!("invalid HAR mode: {other}"))),
@@ -215,7 +215,6 @@ fn build_start_har_options(options: Option<StartHarOptionsJs>) -> Result<StartHa
     mode,
     url_filter,
     resources_dir: options
-      .as_ref()
       .and_then(|o| o.resources_dir.as_ref())
       .map(std::path::PathBuf::from),
   })

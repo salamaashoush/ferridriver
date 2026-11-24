@@ -37,7 +37,7 @@ pub struct ContinueOptions {
   /// Override HTTP method.
   pub method: Option<String>,
   /// Override request headers.
-  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub headers: Option<crate::types::HashMap<String, String>>,
   /// Override POST body.
   pub post_data: Option<Either<String, Buffer>>,
 }
@@ -68,7 +68,7 @@ pub struct RouteFetchOptions {
   /// Override HTTP method.
   pub method: Option<String>,
   /// Override request headers.
-  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub headers: Option<crate::types::HashMap<String, String>>,
   /// Override POST body.
   pub post_data: Option<Either<String, Buffer>>,
   /// Redirects to follow; 0 follows none. 20 when unset.
@@ -80,6 +80,10 @@ pub struct RouteFetchOptions {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl Route {
   /// The URL of the intercepted request.
   #[napi(getter)]
@@ -137,35 +141,32 @@ impl Route {
   /// The request headers as a JSON object.
   #[napi(getter)]
   pub fn headers(&self) -> Result<serde_json::Value> {
-    Ok(
-      self
-        .lock()?
-        .as_ref()
-        .map(|r| {
-          let map: serde_json::Map<String, serde_json::Value> = r
-            .request()
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-          serde_json::Value::Object(map)
-        })
-        .unwrap_or(serde_json::Value::Object(Default::default())),
-    )
+    Ok(self.lock()?.as_ref().map_or_else(
+      || serde_json::Value::Object(serde_json::Map::new()),
+      |r| {
+        let map: serde_json::Map<String, serde_json::Value> = r
+          .request()
+          .headers
+          .iter()
+          .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+          .collect();
+        serde_json::Value::Object(map)
+      },
+    ))
   }
 
   #[napi(
     ts_args_type = "options?: { response?: APIResponse; status?: number; headers?: Record<string, string>; contentType?: string; body?: string | Buffer; json?: any; path?: string }",
     ts_return_type = "Promise<void>"
   )]
-  pub fn fulfill<'env>(&mut self, env: &'env Env, options: Option<Object<'env>>) -> Result<PromiseRaw<'env, ()>> {
+  pub fn fulfill<'env>(&self, env: &'env Env, options: Option<Object<'env>>) -> Result<PromiseRaw<'env, ()>> {
     let mut opts = ferridriver::route::FulfillOptions::default();
     if let Some(bag) = options {
       opts.status = bag.get("status")?;
       opts.content_type = bag.get("contentType")?;
       opts.path = bag.get::<String>("path")?.map(Into::into);
       opts.headers = bag
-        .get::<std::collections::HashMap<String, String>>("headers")?
+        .get::<rustc_hash::FxHashMap<String, String>>("headers")?
         .map(|headers| headers.into_iter().collect());
       opts.body = bag.get::<Either<String, Buffer>>("body")?.map(|body| match body {
         Either::A(text) => text.into_bytes(),
@@ -179,7 +180,7 @@ impl Route {
         .get::<ClassInstance<'_, crate::http_client::HttpResponse>>("response")?
         .map(|response| response.inner.clone());
     }
-    let shared = self.inner.clone();
+    let shared = Arc::clone(&self.inner);
     env.spawn_future(async move {
       let response = opts
         .resolve()
@@ -227,7 +228,7 @@ impl Route {
 
   /// Continue the request, optionally with modifications.
   #[napi(js_name = "continue")]
-  pub fn continue_route(&mut self, options: Option<ContinueOptions>) -> Result<()> {
+  pub fn continue_route(&self, options: Option<ContinueOptions>) -> Result<()> {
     let inner = self
       .lock()?
       .take()
@@ -245,7 +246,7 @@ impl Route {
   /// overrides this is the unmodified request, which is the end state
   /// Playwright's `fallback` reaches once no further handler claims it).
   #[napi]
-  pub fn fallback(&mut self, options: Option<ContinueOptions>) -> Result<()> {
+  pub fn fallback(&self, options: Option<ContinueOptions>) -> Result<()> {
     let inner = self
       .lock()?
       .take()
@@ -257,7 +258,7 @@ impl Route {
 
   /// Playwright: `route.abort(errorCode?)`.
   #[napi]
-  pub fn abort(&mut self, error_code: Option<String>) -> Result<()> {
+  pub fn abort(&self, error_code: Option<String>) -> Result<()> {
     let inner = self
       .lock()?
       .take()

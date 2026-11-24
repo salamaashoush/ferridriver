@@ -21,6 +21,8 @@ use crate::error::IntoNapi;
 
 mod namespace;
 
+pub use namespace::{android_connect, android_devices, android_launch_server, android_set_default_timeout};
+
 /// Playwright: `androidDevice.screenshot(options?)`.
 #[napi(object, object_to_js = false)]
 #[derive(Debug, Clone, Default)]
@@ -65,9 +67,13 @@ impl TypeName for AndroidLaunchBrowserOptions {
 
 impl ValidateNapiValue for AndroidLaunchBrowserOptions {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl FromNapiValue for AndroidLaunchBrowserOptions {
   unsafe fn from_napi_value(env: napi::sys::napi_env, value: napi::sys::napi_value) -> Result<Self> {
+    // SAFETY: the `env` and `value` napi-rs handed this conversion, live for
+    // the current call; the context options read their fields from the same bag.
     let context = unsafe { crate::context::NapiBrowserContextOptions::from_napi_value(env, value) }?;
+    // SAFETY: as above; a non-object surfaces as an error from the reads below.
     let bag = unsafe { Object::from_napi_value(env, value) }?;
     Ok(Self {
       context,
@@ -138,8 +144,11 @@ impl AndroidSelector {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl FromNapiValue for AndroidSelector {
   unsafe fn from_napi_value(env: napi::sys::napi_env, value: napi::sys::napi_value) -> Result<Self> {
+    // SAFETY: the `env` and `value` napi-rs handed this conversion, live for
+    // the current call; a non-object surfaces as an error from the reads.
     let bag = unsafe { Object::from_napi_value(env, value) }?;
     Self::read(&bag).map(Self)
   }
@@ -186,6 +195,10 @@ pub struct AndroidSpeedOptions {
 /// Playwright: `AndroidElementInfo`.
 #[napi(object, object_from_js = false)]
 #[derive(Debug, Clone)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "mirrors Playwright's AndroidElementInfo, whose UI flags are independent booleans"
+)]
 pub struct AndroidElementInfo {
   pub clazz: String,
   pub desc: String,
@@ -345,10 +358,13 @@ impl TypeName for AndroidDeviceEventArg {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for AndroidDeviceEventArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, value: Self) -> Result<napi::sys::napi_value> {
     match value {
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       Self::WebView(view) => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, view) },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       Self::Device(device) => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, device) },
     }
   }
@@ -372,10 +388,13 @@ impl TypeName for AndroidSocketEventArg {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for AndroidSocketEventArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, value: Self) -> Result<napi::sys::napi_value> {
     match value {
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       Self::Data(bytes) => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, Buffer::from(bytes)) },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       Self::Close => unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, ()) },
     }
   }
@@ -387,7 +406,7 @@ impl napi::bindgen_prelude::ToNapiValue for AndroidSocketEventArg {
 pub struct AndroidWebViewSelector {
   /// The package the web view runs in.
   pub pkg: Option<String>,
-  /// The name of its DevTools socket.
+  /// The name of its `DevTools` socket.
   pub socket_name: Option<String>,
 }
 
@@ -451,6 +470,10 @@ impl AndroidDevice {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl AndroidDevice {
   /// Playwright: `androidDevice.serial(): string`.
   #[napi]
@@ -538,15 +561,13 @@ impl AndroidDevice {
 
   /// Playwright: `androidDevice.off(event, listener)`.
   #[napi(ts_args_type = "event: 'webview' | 'close', listener: (arg: AndroidWebView | AndroidDevice) => void")]
-  // napi-rs injects Env only as `&Env` (no by-value FromNapiValue).
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     event: String,
     listener: napi::bindgen_prelude::Function<'static, AndroidDeviceEventArg, ()>,
   ) -> Result<()> {
-    self.events.remove(*env, &event, &listener)
+    self.events.remove(env, &event, &listener)
   }
 
   /// Playwright: `androidDevice.waitForEvent(event, optionsOrPredicate?)`.
@@ -555,10 +576,9 @@ impl AndroidDevice {
     ts_args_type = "event: 'webview' | 'close', optionsOrPredicate?: ((arg: AndroidWebView | AndroidDevice) => boolean | Promise<boolean>) | { predicate?: (arg: AndroidWebView | AndroidDevice) => boolean | Promise<boolean>; timeout?: number }",
     ts_return_type = "Promise<AndroidWebView | AndroidDevice>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_event(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     event: String,
     options_or_predicate: Option<
       Either<napi::bindgen_prelude::Function<'_, AndroidDeviceEventArg, crate::page::PredReturn>, Object<'_>>,
@@ -636,7 +656,7 @@ impl AndroidDevice {
           ))
         })?
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `androidDevice.webViews(): AndroidWebView[]`.
@@ -1035,6 +1055,10 @@ impl AndroidWebView {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl AndroidWebView {
   /// Playwright: `androidWebView.pid(): number`.
   #[napi]
@@ -1068,14 +1092,13 @@ impl AndroidWebView {
 
   /// Playwright: `androidWebView.off('close', listener)`.
   #[napi(ts_args_type = "event: 'close', listener: () => void")]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     event: String,
     listener: napi::bindgen_prelude::Function<'static, (), ()>,
   ) -> Result<()> {
-    self.events.remove(*env, &event, &listener)
+    self.events.remove(env, &event, &listener)
   }
 }
 
@@ -1111,6 +1134,10 @@ impl AndroidSocket {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl AndroidSocket {
   /// Playwright: `androidSocket.write(data: Buffer): Promise<void>`.
   #[napi]
@@ -1146,13 +1173,12 @@ impl AndroidSocket {
 
   /// Playwright: `androidSocket.off(event, listener)`.
   #[napi(ts_args_type = "event: 'data' | 'close', listener: (data?: Buffer) => void")]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     event: String,
     listener: napi::bindgen_prelude::Function<'static, AndroidSocketEventArg, ()>,
   ) -> Result<()> {
-    self.events.remove(*env, &event, &listener)
+    self.events.remove(env, &event, &listener)
   }
 }

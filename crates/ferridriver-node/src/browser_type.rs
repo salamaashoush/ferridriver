@@ -5,12 +5,6 @@
 //! and the three top-level `chromium` / `firefox` / `webkit`
 //! singletons exposed by `import { chromium } from 'playwright'`.
 
-// `#[napi]` exports these to JS but clippy's reachability check only
-// follows Rust call graphs, so it flags the entry points as dead.
-// Disable the lint at the module level — every public item here is
-// part of the NAPI surface, not internal.
-#![allow(dead_code)]
-
 use crate::browser::Browser;
 use crate::error::IntoNapi;
 use crate::types::{BrowserTypeOptions, ConnectOptions, ConnectOverCdpOptions, LaunchOptions};
@@ -212,12 +206,15 @@ pub struct LaunchServerOptions {
   pub server: ServerListenOptions,
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for LaunchServerOptions {
   unsafe fn from_napi_value(env: napi::sys::napi_env, value: napi::sys::napi_value) -> napi::Result<Self> {
-    Ok(Self {
-      launch: unsafe { LaunchOptions::from_napi_value(env, value)? },
-      server: unsafe { ServerListenOptions::from_napi_value(env, value)? },
-    })
+    // SAFETY: the `env` and `value` napi-rs handed this conversion, live for
+    // the current call; both option sets read their fields from the one bag.
+    let launch = unsafe { LaunchOptions::from_napi_value(env, value)? };
+    // SAFETY: as above.
+    let server = unsafe { ServerListenOptions::from_napi_value(env, value)? };
+    Ok(Self { launch, server })
   }
 }
 
@@ -239,7 +236,8 @@ impl BrowserServer {
   /// Playwright `browserServer.close()`: stop serving and close the browser.
   #[napi]
   pub async fn close(&self) -> Result<()> {
-    match self.inner.lock().await.take() {
+    let server = self.inner.lock().await.take();
+    match server {
       Some(server) => server.close().await.into_napi(),
       None => Ok(()),
     }
@@ -258,11 +256,17 @@ pub struct PersistentContextOptions {
   pub context: Option<crate::context::NapiBrowserContextOptions>,
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for PersistentContextOptions {
   unsafe fn from_napi_value(env: napi::sys::napi_env, value: napi::sys::napi_value) -> napi::Result<Self> {
+    // SAFETY: the `env` and `value` napi-rs handed this conversion, live for
+    // the current call; both option sets read their fields from the one bag.
+    let launch = unsafe { LaunchOptions::from_napi_value(env, value)? };
+    // SAFETY: as above.
+    let context = unsafe { crate::context::NapiBrowserContextOptions::from_napi_value(env, value)? };
     Ok(Self {
-      launch: unsafe { LaunchOptions::from_napi_value(env, value)? },
-      context: Some(unsafe { crate::context::NapiBrowserContextOptions::from_napi_value(env, value)? }),
+      launch,
+      context: Some(context),
     })
   }
 }
@@ -328,9 +332,10 @@ fn lower_connect_over_cdp_options(opts: ConnectOverCdpOptions) -> core_opts::Con
 ///
 /// `chromium()` returns a Chromium `BrowserType` configured with the
 /// CDP-pipe transport. Pass `{ transport: 'ws' }` to drive CDP over
-/// WebSocket (CdpWs backend) — a ferridriver extension over
+/// WebSocket (`CdpWs` backend) — a ferridriver extension over
 /// Playwright's pipe-only `chromium`.
 #[napi(ts_args_type = "options?: { transport?: 'pipe' | 'ws' }")]
+#[must_use]
 pub fn chromium(options: Option<BrowserTypeOptions>) -> BrowserType {
   let transport = options.and_then(|o| o.transport).and_then(|t| match t.as_str() {
     "ws" => Some(core_opts::ChromiumTransport::Ws),
@@ -344,20 +349,23 @@ pub fn chromium(options: Option<BrowserTypeOptions>) -> BrowserType {
 
 /// Top-level Playwright `firefox` accessor.
 #[napi]
+#[must_use]
 pub fn firefox() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::firefox())
 }
 
 /// Top-level Playwright `webkit` accessor. Drives Playwright's
-/// cross-platform WebKit build via `pw_run.sh`, so `launch()` works on
+/// cross-platform `WebKit` build via `pw_run.sh`, so `launch()` works on
 /// Unix (Linux + macOS); on unsupported platforms (Windows) it returns
 /// a typed error.
 #[napi]
+#[must_use]
 pub fn webkit() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::webkit())
 }
 
 #[napi]
+#[must_use]
 pub fn safari() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::safari())
 }

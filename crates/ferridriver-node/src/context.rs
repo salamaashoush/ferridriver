@@ -5,7 +5,6 @@ use crate::page::{JsUrl, MatcherSpec, PredReturn, PredRoute, resolve_pred};
 use crate::types::CookieData;
 use napi::Result;
 use napi_derive::napi;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Isolated browser context with its own cookies, storage, and permissions.
@@ -55,7 +54,7 @@ impl BrowserContext {
   fn register_listener(
     &self,
     event: &str,
-    listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+    listener: &napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
     once: bool,
     front: bool,
   ) -> Result<()> {
@@ -81,6 +80,10 @@ impl BrowserContext {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl BrowserContext {
   /// Context name.
   #[napi(getter)]
@@ -124,11 +127,9 @@ impl BrowserContext {
     ts_args_type = "page: Page",
     ts_return_type = "Promise<CDPSession>"
   )]
-  // napi-rs injects Env only as `&Env` (no by-value FromNapiValue).
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn new_cdp_session(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     page: napi::bindgen_prelude::Reference<crate::page::Page>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::cdp_session::CDPSession>> {
     let core_page = page.inner_arc();
@@ -137,7 +138,7 @@ impl BrowserContext {
       let session = inner.new_cdp_session(&core_page).await.into_napi()?;
       Ok(crate::cdp_session::CDPSession::wrap(session))
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Create a new page in this context.
@@ -286,12 +287,8 @@ impl BrowserContext {
   }
 
   #[napi(js_name = "setExtraHTTPHeaders")]
-  pub async fn set_extra_http_headers(&self, headers: HashMap<String, String>) -> Result<()> {
-    let mut fx = rustc_hash::FxHashMap::default();
-    for (k, v) in headers {
-      fx.insert(k, v);
-    }
-    self.inner.set_extra_http_headers(&fx).await.into_napi()
+  pub async fn set_extra_http_headers(&self, headers: crate::types::HashMap<String, String>) -> Result<()> {
+    self.inner.set_extra_http_headers(&headers).await.into_napi()
   }
 
   #[napi]
@@ -361,10 +358,9 @@ impl BrowserContext {
     ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void, options?: { times?: number }",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn route(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either3<
       String,
       crate::types::JsRegExpLike,
@@ -460,7 +456,7 @@ impl BrowserContext {
         .map_err(crate::error::to_napi)?;
       Ok(())
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `browserContext.routeWebSocket(url, handler)`. Intercepts
@@ -470,10 +466,9 @@ impl BrowserContext {
     ts_args_type = "url: string | RegExp, handler: (ws: WebSocketRoute) => void",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn route_web_socket(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either<String, crate::types::JsRegExpLike>,
     handler: napi::bindgen_prelude::Function<'_, crate::web_socket_route::WebSocketRouteArg, ()>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
@@ -485,7 +480,7 @@ impl BrowserContext {
           .map_err(crate::error::to_napi)?
       },
     };
-    let rust_handler = crate::web_socket_route::build_ws_handler(handler)?;
+    let rust_handler = crate::web_socket_route::build_ws_handler(&handler)?;
     let inner = self.inner.clone();
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       inner
@@ -493,7 +488,7 @@ impl BrowserContext {
         .await
         .map_err(crate::error::to_napi)
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `browserContext.unroute(url, handler?)`.
@@ -502,10 +497,9 @@ impl BrowserContext {
     ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler?: (route: Route) => void",
     ts_return_type = "Promise<void>"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn unroute(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     url: napi::bindgen_prelude::Either3<
       String,
       crate::types::JsRegExpLike,
@@ -522,8 +516,8 @@ impl BrowserContext {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
       for reg in regs.iter() {
-        let a = in_ref.borrow_back(env)?;
-        let b = reg.handler_ref.borrow_back(env)?;
+        let a = in_ref.borrow_back(&env)?;
+        let b = reg.handler_ref.borrow_back(&env)?;
         if env.strict_equals(a, b)? {
           handler_id = Some(reg.handler_id);
           break;
@@ -531,7 +525,7 @@ impl BrowserContext {
       }
       drop(regs);
       if handler_id.is_none() {
-        return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(env);
+        return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(&env);
       }
     }
     let specs: Vec<MatcherSpec> = match url {
@@ -550,8 +544,8 @@ impl BrowserContext {
         let mut i = 0;
         while i < guard.len() {
           let same = {
-            let a = in_ref.borrow_back(env)?;
-            let b = guard[i].pred_ref.borrow_back(env)?;
+            let a = in_ref.borrow_back(&env)?;
+            let b = guard[i].pred_ref.borrow_back(&env)?;
             env.strict_equals(a, b)?
           };
           if same {
@@ -571,7 +565,7 @@ impl BrowserContext {
       }
       Ok(())
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright:
@@ -632,10 +626,8 @@ impl BrowserContext {
     let opts = ferridriver::options::RecordVideoOptions {
       dir: std::path::PathBuf::from(options.dir),
       size: options.size.map(|s| ferridriver::options::VideoSize {
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        width: s.width.max(0.0) as u32,
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        height: s.height.max(0.0) as u32,
+        width: crate::types::f64_to_u32(s.width),
+        height: crate::types::f64_to_u32(s.height),
       }),
     };
     self.inner.set_record_video(opts).await.into_napi()
@@ -657,7 +649,7 @@ impl BrowserContext {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, false, false)?;
+    self.register_listener(&event, &listener, false, false)?;
     Ok(this.object)
   }
 
@@ -686,7 +678,7 @@ impl BrowserContext {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, true, false)?;
+    self.register_listener(&event, &listener, true, false)?;
     Ok(this.object)
   }
 
@@ -702,7 +694,7 @@ impl BrowserContext {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, false, true)?;
+    self.register_listener(&event, &listener, false, true)?;
     Ok(this.object)
   }
 
@@ -717,7 +709,7 @@ impl BrowserContext {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, true, true)?;
+    self.register_listener(&event, &listener, true, true)?;
     Ok(this.object)
   }
 
@@ -728,10 +720,9 @@ impl BrowserContext {
     ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener?: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off<'env>(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, ContextEventArg, ()>>,
@@ -749,8 +740,8 @@ impl BrowserContext {
     let mut i = 0;
     while i < regs.len() {
       let hit = regs[i].event == event && {
-        let a = in_ref.borrow_back(env)?;
-        let b = regs[i].fn_ref.borrow_back(env)?;
+        let a = in_ref.borrow_back(&env)?;
+        let b = regs[i].fn_ref.borrow_back(&env)?;
         env.strict_equals(a, b)?
       };
       if hit {
@@ -768,10 +759,9 @@ impl BrowserContext {
     ts_args_type = "event: 'page' | 'weberror' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'pageclose' | 'pageload' | 'dialog' | 'dialogclosed' | 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'close', listener?: (arg: WebError | Download | Frame | Page | Dialog | ConsoleMessage | Request | Response | BrowserContext) => void",
     ts_return_type = "this"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn remove_listener<'env>(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, ContextEventArg, ()>>,
@@ -785,30 +775,25 @@ impl BrowserContext {
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: Option<String>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+  ) -> napi::bindgen_prelude::Object<'env> {
     let mut regs = self
       .listener_regs
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match event {
-      Some(ev) => {
-        self.inner.remove_listeners_named(&ev);
-        regs.retain(|r| r.event != ev);
-      },
-      None => {
-        self.inner.remove_all_listeners();
-        regs.clear();
-      },
+    if let Some(ev) = event {
+      self.inner.remove_listeners_named(&ev);
+      regs.retain(|r| r.event != ev);
+    } else {
+      self.inner.remove_all_listeners();
+      regs.clear();
     }
-    Ok(this.object)
+    this.object
   }
 
   /// Node's `listenerCount(type)`.
   #[napi]
   pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+    crate::types::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()` — every event with a listener attached.
@@ -823,19 +808,15 @@ impl BrowserContext {
     &self,
     this: napi::bindgen_prelude::This<'env>,
     max: f64,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self
-      .inner
-      .set_max_listeners(crate::types::f64_to_u64(max.max(0.0)) as usize);
-    Ok(this.object)
+  ) -> napi::bindgen_prelude::Object<'env> {
+    self.inner.set_max_listeners(crate::types::f64_to_usize(max));
+    this.object
   }
 
   /// Node's `getMaxListeners()`.
   #[napi]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::types::usize_to_f64(self.inner.max_listeners())
   }
 
   /// Wait for a context-level event. Playwright:
@@ -874,21 +855,19 @@ impl BrowserContext {
     ts_args_type = "name: string, callback: (source: { context: BrowserContext, page: Page, frame: Frame }, ...args: any[]) => any",
     ts_return_type = "Promise<Disposable>"
   )]
-  // napi `AsyncBlockBuilder::build` takes `&Env`; matches the sibling `route` binding.
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn expose_binding(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     name: String,
     callback: napi::bindgen_prelude::Unknown<'_>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::disposable::Disposable>> {
-    let binding = crate::exposed::binding(*env, callback, true)?;
+    let binding = crate::exposed::binding(env, callback, true)?;
     let inner = self.inner.clone();
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let d = inner.expose_binding(&name, binding).await.into_napi()?;
       Ok(crate::disposable::Disposable::wrap(d))
     })
-    .build(env)
+    .build(&env)
   }
 
   /// Playwright: `browserContext.exposeFunction(name, callback)` —
@@ -899,21 +878,19 @@ impl BrowserContext {
     ts_args_type = "name: string, callback: Function",
     ts_return_type = "Promise<Disposable>"
   )]
-  // napi `AsyncBlockBuilder::build` takes `&Env`; matches the sibling `route` binding.
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn expose_function(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     name: String,
     callback: napi::bindgen_prelude::Unknown<'_>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::disposable::Disposable>> {
-    let binding = crate::exposed::binding(*env, callback, false)?;
+    let binding = crate::exposed::binding(env, callback, false)?;
     let inner = self.inner.clone();
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let d = inner.expose_binding(&name, binding).await.into_napi()?;
       Ok(crate::disposable::Disposable::wrap(d))
     })
-    .build(env)
+    .build(&env)
   }
 
   // ── Lifecycle ──
@@ -946,8 +923,9 @@ impl BrowserContext {
 /// the objects that already stand for them; a source with no page behind
 /// it (the page went away as its call was dispatched) has none of the
 /// three.
-pub struct BindingSourceJs(pub ferridriver::events::BindingSource);
+pub(crate) struct BindingSourceJs(pub ferridriver::events::BindingSource);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for BindingSourceJs {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
     let js_env = napi::Env::from_raw(env);
@@ -961,6 +939,7 @@ impl napi::bindgen_prelude::ToNapiValue for BindingSourceJs {
     if let Some(frame) = val.0.live_frame() {
       object.set("frame", crate::identity::FrameObject(frame))?;
     }
+    // SAFETY: `env` is the live environment napi-rs handed this conversion.
     unsafe { napi::bindgen_prelude::Object::to_napi_value(env, object) }
   }
 }
@@ -999,7 +978,7 @@ pub struct RecordHarOptionsJs {
   pub mode: Option<String>,
   /// Deprecated alias for `content: 'omit'`.
   pub omit_content: Option<bool>,
-  /// Only record requests whose URL matches. Glob string or RegExp.
+  /// Only record requests whose URL matches. Glob string or `RegExp`.
   #[napi(ts_type = "string | RegExp")]
   pub url_filter: Option<napi::Either<String, crate::types::JsRegExpLike>>,
 }
@@ -1039,7 +1018,7 @@ pub struct NapiBrowserContextOptions {
   pub contrast: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
   pub device_scale_factor: Option<f64>,
   #[napi(js_name = "extraHTTPHeaders")]
-  pub extra_http_headers: Option<HashMap<String, String>>,
+  pub extra_http_headers: Option<crate::types::HashMap<String, String>>,
   #[napi(ts_type = "null | 'active' | 'none'")]
   pub forced_colors: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
   pub geolocation: Option<NapiGeolocation>,
@@ -1105,7 +1084,7 @@ pub struct NapiHttpCredentials {
 
 /// Playwright `HttpCredentials | HttpCredentials[]`. The list comes first:
 /// an array is an object too, and would be read as one entry.
-pub type NapiHttpCredentialsInput = napi::Either<Vec<NapiHttpCredentials>, NapiHttpCredentials>;
+pub(crate) type NapiHttpCredentialsInput = napi::Either<Vec<NapiHttpCredentials>, NapiHttpCredentials>;
 
 /// The list core takes, or `None` for an empty one.
 pub(crate) fn http_credentials_list(
@@ -1213,13 +1192,13 @@ impl TryFrom<ferridriver::options::StorageState> for NapiStorageState {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()
-            .map_err(storage_json_error)?,
+            .map_err(|e| storage_json_error(&e))?,
           opfs: o
             .opfs
             .as_ref()
             .map(serde_json::to_value)
             .transpose()
-            .map_err(storage_json_error)?,
+            .map_err(|e| storage_json_error(&e))?,
           origin: o.origin,
           local_storage: o
             .local_storage
@@ -1240,8 +1219,38 @@ impl TryFrom<ferridriver::options::StorageState> for NapiStorageState {
   }
 }
 
-fn storage_json_error(error: serde_json::Error) -> napi::Error {
+fn storage_json_error(error: &serde_json::Error) -> napi::Error {
   napi::Error::from_reason(format!("storageState: {error}"))
+}
+
+impl RecordHarOptionsJs {
+  /// Lower into the core [`ferridriver::options::RecordHarOptions`]. Unknown
+  /// `content` / `mode` values and an invalid `urlFilter` fall back to
+  /// `None`, like the context options around it.
+  fn into_core(self) -> ferridriver::options::RecordHarOptions {
+    use ferridriver::options as fo;
+    fo::RecordHarOptions {
+      path: std::path::PathBuf::from(self.path),
+      content: match self.content.as_deref() {
+        Some("omit") => Some(fo::RecordHarContent::Omit),
+        Some("embed") => Some(fo::RecordHarContent::Embed),
+        Some("attach") => Some(fo::RecordHarContent::Attach),
+        _ => None,
+      },
+      mode: match self.mode.as_deref() {
+        Some("minimal") => Some(fo::RecordHarMode::Minimal),
+        Some("full") => Some(fo::RecordHarMode::Full),
+        _ => None,
+      },
+      omit_content: self.omit_content,
+      url_filter: self.url_filter.and_then(|f| match f {
+        napi::Either::A(glob) => ferridriver::url_matcher::UrlMatcher::glob(&glob).ok(),
+        napi::Either::B(re) => {
+          ferridriver::url_matcher::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or("")).ok()
+        },
+      }),
+    }
+  }
 }
 
 impl NapiBrowserContextOptions {
@@ -1254,7 +1263,6 @@ impl NapiBrowserContextOptions {
   ///
   /// `networkConditions` that is neither a known preset nor valid numbers:
   /// a monitor that silently runs unthrottled measures the wrong thing.
-  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
   pub fn into_core(self) -> Result<ferridriver::options::BrowserContextOptions> {
     use ferridriver::options as fo;
     let network_conditions = self
@@ -1270,19 +1278,12 @@ impl NapiBrowserContextOptions {
       fo::ViewportOption::Null
     } else if let Some(vp) = self.viewport {
       fo::ViewportOption::Size {
-        width: vp.width.max(0.0) as i64,
-        height: vp.height.max(0.0) as i64,
+        width: crate::types::f64_to_i64(vp.width),
+        height: crate::types::f64_to_i64(vp.height),
       }
     } else {
       fo::ViewportOption::Default
     };
-    let extra_http_headers = self.extra_http_headers.map(|h| {
-      let mut fx = rustc_hash::FxHashMap::default();
-      for (k, v) in h {
-        fx.insert(k, v);
-      }
-      fx
-    });
     let http_credentials = self.http_credentials.and_then(http_credentials_list);
     let proxy = self.proxy.map(|p| fo::ProxyConfig {
       server: p.server,
@@ -1293,13 +1294,13 @@ impl NapiBrowserContextOptions {
     let record_video = self.record_video.map(|rv| fo::RecordVideoOptions {
       dir: std::path::PathBuf::from(rv.dir),
       size: rv.size.map(|s| fo::VideoSize {
-        width: s.width.max(0.0) as u32,
-        height: s.height.max(0.0) as u32,
+        width: crate::types::f64_to_u32(s.width),
+        height: crate::types::f64_to_u32(s.height),
       }),
     });
     let screen = self.screen.map(|s| fo::ScreenSize {
-      width: s.width.max(0.0) as i64,
-      height: s.height.max(0.0) as i64,
+      width: crate::types::f64_to_i64(s.width),
+      height: crate::types::f64_to_i64(s.height),
     });
     let service_workers = self.service_workers.and_then(|s| match s.as_str() {
       "allow" => Some(fo::ServiceWorkerPolicy::Allow),
@@ -1322,7 +1323,7 @@ impl NapiBrowserContextOptions {
       color_scheme,
       contrast,
       device_scale_factor: self.device_scale_factor,
-      extra_http_headers,
+      extra_http_headers: self.extra_http_headers,
       forced_colors,
       geolocation: self.geolocation.map(|g| fo::Geolocation {
         latitude: g.latitude,
@@ -1341,27 +1342,7 @@ impl NapiBrowserContextOptions {
       permissions: self.permissions,
       origin_permissions: Vec::new(),
       proxy,
-      record_har: self.record_har.map(|h| fo::RecordHarOptions {
-        path: std::path::PathBuf::from(h.path),
-        content: match h.content.as_deref() {
-          Some("omit") => Some(fo::RecordHarContent::Omit),
-          Some("embed") => Some(fo::RecordHarContent::Embed),
-          Some("attach") => Some(fo::RecordHarContent::Attach),
-          _ => None,
-        },
-        mode: match h.mode.as_deref() {
-          Some("minimal") => Some(fo::RecordHarMode::Minimal),
-          Some("full") => Some(fo::RecordHarMode::Full),
-          _ => None,
-        },
-        omit_content: h.omit_content,
-        url_filter: h.url_filter.and_then(|f| match f {
-          napi::Either::A(glob) => ferridriver::url_matcher::UrlMatcher::glob(&glob).ok(),
-          napi::Either::B(re) => {
-            ferridriver::url_matcher::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or("")).ok()
-          },
-        }),
-      }),
+      record_har: self.record_har.map(RecordHarOptionsJs::into_core),
       record_video,
       reduced_motion,
       screen,
@@ -1401,37 +1382,47 @@ pub enum ContextEventArg {
   Context(ferridriver::context::ContextRef),
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for ContextEventArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
     match val {
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::WebError(err) => unsafe {
         crate::web_error::WebErrorArg::to_napi_value(env, crate::web_error::WebErrorArg(err))
       },
       ContextEventArg::Download(d) => {
         let wrapper = crate::download::Download::from_core(d);
+        // SAFETY: `env` is the live environment napi-rs handed this conversion.
         unsafe { crate::download::Download::to_napi_value(env, wrapper) }
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Frame { page, frame_id } => unsafe {
         crate::identity::FrameObject::to_napi_value(env, crate::identity::FrameObject(page.frame_for_id(&frame_id)))
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Page(page) => unsafe {
         crate::identity::PageObject::to_napi_value(env, crate::identity::PageObject(page))
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Dialog(dialog) => unsafe {
         crate::identity::DialogObject::to_napi_value(env, crate::identity::DialogObject(dialog))
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Console(message) => unsafe {
         crate::console_message::ConsoleMessage::to_napi_value(
           env,
           crate::console_message::ConsoleMessage::from_core(message),
         )
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Request { page, request } => unsafe {
         crate::network::Request::to_napi_value(env, crate::network::Request::from_core_with_page(request, page))
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Response { page, response } => unsafe {
         crate::network::Response::to_napi_value(env, crate::network::Response::from_core_with_page(response, page))
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       ContextEventArg::Context(context) => unsafe { BrowserContext::to_napi_value(env, BrowserContext::wrap(context)) },
     }
   }
@@ -1460,7 +1451,7 @@ impl ContextEventArg {
 }
 
 fn build_context_event_callback(
-  listener: napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
+  listener: &napi::bindgen_prelude::Function<'_, ContextEventArg, ()>,
 ) -> Result<ferridriver::events::ContextEventCallback> {
   let tsfn = listener
     .build_threadsafe_function()

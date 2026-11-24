@@ -20,9 +20,11 @@
 ///
 /// `env` must be the live `napi_env` napi-rs passes at module
 /// registration.
+#[expect(unsafe_code, reason = "napi-rs registers a module export through an unsafe callback")]
 unsafe fn devices_value(env: napi::sys::napi_env) -> napi::Result<napi::sys::napi_value> {
   let table: serde_json::Value = serde_json::from_str(ferridriver::devices::SOURCE)
     .map_err(|e| napi::Error::from_reason(format!("device registry is not valid JSON: {e}")))?;
+  // SAFETY: `env` is live per this function's contract.
   unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env, table) }
 }
 

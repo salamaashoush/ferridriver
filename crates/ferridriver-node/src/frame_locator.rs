@@ -27,6 +27,10 @@ impl FrameLocator {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl FrameLocator {
   /// Playwright: `frameLocator.locator(selectorOrLocator, options?): Locator`.
   #[napi(ts_args_type = "selectorOrLocator: string | Locator, options?: FilterOptions")]

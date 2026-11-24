@@ -38,7 +38,7 @@ impl Codegen {
   #[napi]
   pub async fn run(config: CodegenConfig) -> Result<()> {
     let viewport = match (config.viewport_width, config.viewport_height) {
-      (Some(w), Some(h)) => Some((w as u32, h as u32)),
+      (Some(w), Some(h)) => Some((w.cast_unsigned(), h.cast_unsigned())),
       _ => None,
     };
 

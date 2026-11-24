@@ -19,13 +19,17 @@
 use ferridriver::FerriError;
 
 #[must_use]
-pub fn to_napi(err: FerriError) -> napi::Error {
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "the `map_err` adapter every binding passes, and `map_err` hands the error over by value"
+)]
+pub(crate) fn to_napi(err: FerriError) -> napi::Error {
   napi::Error::from_reason(err.display_named())
 }
 
 /// Extension trait to convert `Result<T, FerriError>` into `napi::Result<T>`
 /// with one call at NAPI boundaries.
-pub trait IntoNapi<T> {
+pub(crate) trait IntoNapi<T> {
   fn into_napi(self) -> napi::Result<T>;
 }
 

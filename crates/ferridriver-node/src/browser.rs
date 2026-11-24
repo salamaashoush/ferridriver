@@ -42,7 +42,7 @@ impl Browser {
   fn register_listener(
     &self,
     event: &str,
-    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
+    listener: &napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
     once: bool,
     front: bool,
   ) -> Result<()> {
@@ -84,19 +84,22 @@ impl BrowserEventArg {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for BrowserEventArg {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
     match val {
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       BrowserEventArg::Context(context) => unsafe {
         crate::context::BrowserContext::to_napi_value(env, crate::context::BrowserContext::wrap(context))
       },
+      // SAFETY: `env` is the live environment napi-rs handed this conversion.
       BrowserEventArg::Browser(browser) => unsafe { Browser::to_napi_value(env, Browser::wrap(browser)) },
     }
   }
 }
 
 fn build_browser_event_callback(
-  listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
+  listener: &napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
 ) -> Result<ferridriver::events::BrowserEventCallback> {
   let tsfn = listener
     .build_threadsafe_function()
@@ -113,6 +116,12 @@ fn build_browser_event_callback(
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  clippy::unused_async,
+  clippy::unused_async_trait_impl,
+  reason = "napi-derive takes JS strings, functions and option bags only by value, and turns only an async fn into the Promise the Playwright signature returns"
+)]
 impl Browser {
   /// Playwright: `browser.newPage(options?)`. A page in a context of its
   /// own, made from `options` as `newContext` makes one and closed with
@@ -236,7 +245,7 @@ impl Browser {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, false, false)?;
+    self.register_listener(&event, &listener, false, false)?;
     Ok(this.object)
   }
 
@@ -265,7 +274,7 @@ impl Browser {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, true, false)?;
+    self.register_listener(&event, &listener, true, false)?;
     Ok(this.object)
   }
 
@@ -280,7 +289,7 @@ impl Browser {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, false, true)?;
+    self.register_listener(&event, &listener, false, true)?;
     Ok(this.object)
   }
 
@@ -295,7 +304,7 @@ impl Browser {
     event: String,
     listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
   ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, listener, true, true)?;
+    self.register_listener(&event, &listener, true, true)?;
     Ok(this.object)
   }
 
@@ -306,10 +315,9 @@ impl Browser {
     ts_args_type = "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn off<'env>(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>>,
@@ -327,8 +335,8 @@ impl Browser {
     let mut i = 0;
     while i < regs.len() {
       let hit = regs[i].event == event && {
-        let a = in_ref.borrow_back(env)?;
-        let b = regs[i].fn_ref.borrow_back(env)?;
+        let a = in_ref.borrow_back(&env)?;
+        let b = regs[i].fn_ref.borrow_back(&env)?;
         env.strict_equals(a, b)?
       };
       if hit {
@@ -346,10 +354,9 @@ impl Browser {
     ts_args_type = "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
     ts_return_type = "this"
   )]
-  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn remove_listener<'env>(
     &self,
-    env: &napi::Env,
+    env: napi::Env,
     this: napi::bindgen_prelude::This<'env>,
     event: String,
     listener: Option<napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>>,
@@ -363,30 +370,25 @@ impl Browser {
     &self,
     this: napi::bindgen_prelude::This<'env>,
     event: Option<String>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
+  ) -> napi::bindgen_prelude::Object<'env> {
     let mut regs = self
       .listener_regs
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match event {
-      Some(ev) => {
-        self.inner.remove_listeners_named(&ev);
-        regs.retain(|r| r.event != ev);
-      },
-      None => {
-        self.inner.remove_all_listeners();
-        regs.clear();
-      },
+    if let Some(ev) = event {
+      self.inner.remove_listeners_named(&ev);
+      regs.retain(|r| r.event != ev);
+    } else {
+      self.inner.remove_all_listeners();
+      regs.clear();
     }
-    Ok(this.object)
+    this.object
   }
 
   /// Node's `listenerCount(type)`.
   #[napi]
   pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+    crate::types::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()`.
@@ -401,19 +403,15 @@ impl Browser {
     &self,
     this: napi::bindgen_prelude::This<'env>,
     max: f64,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self
-      .inner
-      .set_max_listeners(crate::types::f64_to_u64(max.max(0.0)) as usize);
-    Ok(this.object)
+  ) -> napi::bindgen_prelude::Object<'env> {
+    self.inner.set_max_listeners(crate::types::f64_to_usize(max));
+    this.object
   }
 
   /// Node's `getMaxListeners()`.
   #[napi]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::types::usize_to_f64(self.inner.max_listeners())
   }
 
   /// Wait for a browser-level event. Playwright:
@@ -497,7 +495,6 @@ impl Browser {
   }",
     ts_return_type = "Promise<{ endpoint: string }>"
   )]
-  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn bind(&self, title: String, options: Option<NapiBindOptions>) -> Result<BindResult> {
     let _ = (title, options);
     Err(napi::Error::from_reason(
@@ -512,7 +509,6 @@ impl Browser {
   /// A no-op — [`Self::bind`] never binds from this addon — kept so code
   /// written against the Playwright shape still runs.
   #[napi]
-  #[allow(clippy::unused_async_trait_impl)] // NAPI requires async to surface a JS Promise (Playwright parity)
   pub async fn unbind(&self) -> Result<()> {
     ferridriver_session::unbind_browser(&self.inner).map_err(|e| napi::Error::from_reason(e.to_string()))
   }

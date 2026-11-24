@@ -24,6 +24,10 @@ impl Locator {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl Locator {
   /// The selector string for this locator.
   #[napi(getter)]
@@ -49,7 +53,7 @@ impl Locator {
   // ── Handle materialisation (Playwright `locator.elementHandle`) ───────
 
   /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
-  /// Resolves the locator and returns a pinned ElementHandle.
+  /// Resolves the locator and returns a pinned `ElementHandle`.
   #[napi]
   pub async fn element_handle(&self) -> Result<crate::element_handle::ElementHandle> {
     let inner = self.inner.element_handle().await.map_err(crate::error::to_napi)?;
@@ -201,7 +205,7 @@ impl Locator {
   /// Playwright: `locator.page(): Page`.
   #[napi(ts_return_type = "Page")]
   pub fn page(&self) -> crate::identity::PageObject {
-    crate::identity::PageObject(self.inner.page().clone())
+    crate::identity::PageObject(std::sync::Arc::clone(self.inner.page()))
   }
 
   /// Playwright: `locator.describe(description: string): Locator`.

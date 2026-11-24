@@ -79,9 +79,6 @@ impl ConsoleMessage {
   /// since epoch.
   #[napi]
   pub fn timestamp(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    {
-      self.inner.timestamp() as f64
-    }
+    crate::types::u64_to_f64(self.inner.timestamp())
   }
 }

@@ -97,10 +97,9 @@ pub struct JsErrorValue {
   pub stack: String,
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for JsErrorValue {
   unsafe fn to_napi_value(raw_env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
-    // SAFETY: `raw_env` is a valid `napi_env` handle provided by the
-    // napi-rs runtime; it lives for the duration of the JS call.
     let env = Env::from_raw(raw_env);
     let global = env.get_global()?;
     // Look up the global `Error` constructor. `Function<String, ()>`
@@ -113,6 +112,8 @@ impl ToNapiValue for JsErrorValue {
     // `new_instance` returns `Unknown<'a>`; convert back to a raw
     // napi_value to rebuild as an `Object` we can mutate.
     let err_raw = constructed.raw();
+    // SAFETY: `raw_env` is the live environment napi-rs handed this
+    // conversion, and `err_raw` the `Error` instance just constructed in it.
     let mut err_object: NapiObject<'_> = unsafe { NapiObject::from_napi_value(raw_env, err_raw)? };
     // Override `name` (defaults to `'Error'`) and carry the original
     // `stack` when one was observed. Leaving `stack` unset when empty
@@ -123,6 +124,7 @@ impl ToNapiValue for JsErrorValue {
     if !val.stack.is_empty() {
       err_object.set_named_property("stack", val.stack)?;
     }
+    // SAFETY: `raw_env` is the live environment napi-rs handed this conversion.
     unsafe { ToNapiValue::to_napi_value(raw_env, err_object) }
   }
 }
@@ -146,11 +148,13 @@ impl JsErrorValue {
 /// class instance (Playwright:
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:8365`
 /// `on(event: 'weberror', listener: (webError: WebError) => any)`).
-pub struct WebErrorArg(pub CoreWebError);
+pub(crate) struct WebErrorArg(pub CoreWebError);
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl ToNapiValue for WebErrorArg {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> napi::Result<sys::napi_value> {
     let wrapper = WebError::from_core(val.0);
+    // SAFETY: `env` is the live environment napi-rs handed this conversion.
     unsafe { WebError::to_napi_value(env, wrapper) }
   }
 }

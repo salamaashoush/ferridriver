@@ -46,17 +46,12 @@ impl TypeName for NapiEvaluateArg {
 
 impl ValidateNapiValue for NapiEvaluateArg {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl FromNapiValue for NapiEvaluateArg {
   unsafe fn from_napi_value(env: sys::napi_env, value: sys::napi_value) -> napi::Result<Self> {
-    let mut walk = Walk {
-      env,
-      alloc: SerializationContext::default(),
-      handles: Vec::new(),
-      functions: Vec::new(),
-      unexpected: None,
-      path: Vec::new(),
-      visited: Vec::new(),
-    };
+    // SAFETY: napi-rs hands this conversion the live `env` of the current
+    // call and a `value` in its scope; the walk ends before this returns.
+    let mut walk = unsafe { Walk::new(env) };
     let value = walk.serialize(value, 0)?;
     Ok(Self {
       arg: SerializedArgument {
@@ -69,6 +64,8 @@ impl FromNapiValue for NapiEvaluateArg {
   }
 }
 
+/// One argument's walk. Every `napi_value` it is handed or reaches is a
+/// handle in the scope of the call that built it, against `env`.
 struct Walk {
   env: sys::napi_env,
   alloc: SerializationContext,
@@ -79,24 +76,50 @@ struct Walk {
   visited: Vec<(sys::napi_value, u32)>,
 }
 
+#[expect(unsafe_code, reason = "the walk reads JS values through napi's C API")]
 impl Walk {
+  /// # Safety
+  ///
+  /// `env` is the live environment of the current JS call, and the walk
+  /// is dropped before that call returns.
+  unsafe fn new(env: sys::napi_env) -> Self {
+    Self {
+      env,
+      alloc: SerializationContext::default(),
+      handles: Vec::new(),
+      functions: Vec::new(),
+      unexpected: None,
+      path: Vec::new(),
+      visited: Vec::new(),
+    }
+  }
+
   fn serialize(&mut self, value: sys::napi_value, depth: u32) -> napi::Result<SerializedValue> {
     if depth > MAX_DEPTH {
       return Err(napi::Error::from_reason("argument too deeply nested"));
     }
     let mut kind = 0;
-    check_status!(unsafe { sys::napi_typeof(self.env, value, &raw mut kind) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `kind` is a writable out-parameter.
+    let status = unsafe { sys::napi_typeof(self.env, value, &raw mut kind) };
+    check_status!(status)?;
     match kind {
       sys::ValueType::napi_undefined | sys::ValueType::napi_symbol => {
         Ok(SerializedValue::Special(SpecialValue::Undefined))
       },
       sys::ValueType::napi_null => Ok(SerializedValue::Special(SpecialValue::Null)),
+      // SAFETY: a live handle (see [`Walk`]) that `napi_typeof` just
+      // reported as a boolean.
       sys::ValueType::napi_boolean => Ok(SerializedValue::Bool(unsafe {
         bool::from_napi_value(self.env, value)?
       })),
+      // SAFETY: a live handle (see [`Walk`]) that `napi_typeof` just
+      // reported as a number.
       sys::ValueType::napi_number => Ok(SerializedValue::from_f64(unsafe {
         f64::from_napi_value(self.env, value)?
       })),
+      // SAFETY: a live handle (see [`Walk`]) that `napi_typeof` just
+      // reported as a string.
       sys::ValueType::napi_string => Ok(SerializedValue::Str(unsafe {
         String::from_napi_value(self.env, value)?
       })),
@@ -111,6 +134,8 @@ impl Walk {
       let display = self.coerce_string(value)?;
       self.unexpected = Some(ferridriver::protocol::unexpected_value_error(&self.path, &display).to_string());
     }
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `Unknown` asks nothing more.
     let callback = unsafe { Unknown::from_raw_unchecked(self.env, value) };
     let binding = crate::exposed::binding(Env::from_raw(self.env), callback, false)?;
     let name = ArgFunction::fresh_name();
@@ -130,7 +155,10 @@ impl Walk {
     }
     for (seen, id) in &self.visited {
       let mut same = false;
-      check_status!(unsafe { sys::napi_strict_equals(self.env, *seen, value, &raw mut same) })?;
+      // SAFETY: both handles were reached by this walk, so are live in
+      // `self.env`'s scope (see [`Walk`]); `same` is a writable out-parameter.
+      let status = unsafe { sys::napi_strict_equals(self.env, *seen, value, &raw mut same) };
+      check_status!(status)?;
       if same {
         return Ok(SerializedValue::Reference(*id));
       }
@@ -138,14 +166,23 @@ impl Walk {
     let id = self.alloc.alloc_id();
     self.visited.push((value, id));
     let mut is_array = false;
-    check_status!(unsafe { sys::napi_is_array(self.env, value, &raw mut is_array) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `is_array` is a writable out-parameter.
+    let status = unsafe { sys::napi_is_array(self.env, value, &raw mut is_array) };
+    check_status!(status)?;
     if is_array {
       let mut len = 0;
-      check_status!(unsafe { sys::napi_get_array_length(self.env, value, &raw mut len) })?;
+      // SAFETY: `value` is a live array handle (see [`Walk`]); `len` is a
+      // writable out-parameter.
+      let status = unsafe { sys::napi_get_array_length(self.env, value, &raw mut len) };
+      check_status!(status)?;
       let mut items = Vec::with_capacity(len as usize);
       for index in 0..len {
         let mut item = ptr::null_mut();
-        check_status!(unsafe { sys::napi_get_element(self.env, value, index, &raw mut item) })?;
+        // SAFETY: `value` is a live array handle (see [`Walk`]); `item` is a
+        // writable out-parameter.
+        let status = unsafe { sys::napi_get_element(self.env, value, index, &raw mut item) };
+        check_status!(status)?;
         self.path.push(ArgPathStep::Index(index as usize));
         // A hole reads as `undefined` and crosses as one, as Playwright's
         // `serializeValue` has it.
@@ -156,7 +193,9 @@ impl Walk {
       return Ok(SerializedValue::Array { id, items });
     }
     let mut keys = ptr::null_mut();
-    check_status!(unsafe {
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `keys` is a writable out-parameter.
+    let status = unsafe {
       sys::napi_get_all_property_names(
         self.env,
         value,
@@ -165,15 +204,27 @@ impl Walk {
         sys::KeyConversion::numbers_to_strings,
         &raw mut keys,
       )
-    })?;
+    };
+    check_status!(status)?;
     let mut len = 0;
-    check_status!(unsafe { sys::napi_get_array_length(self.env, keys, &raw mut len) })?;
+    // SAFETY: `keys` is the array napi just returned in `self.env`'s scope;
+    // `len` is a writable out-parameter.
+    let status = unsafe { sys::napi_get_array_length(self.env, keys, &raw mut len) };
+    check_status!(status)?;
     let mut entries = Vec::with_capacity(len as usize);
     for index in 0..len {
       let mut key = ptr::null_mut();
-      check_status!(unsafe { sys::napi_get_element(self.env, keys, index, &raw mut key) })?;
+      // SAFETY: `keys` is a live array handle in `self.env`'s scope; `key` is
+      // a writable out-parameter.
+      let status = unsafe { sys::napi_get_element(self.env, keys, index, &raw mut key) };
+      check_status!(status)?;
       let mut item = ptr::null_mut();
-      check_status!(unsafe { sys::napi_get_property(self.env, value, key, &raw mut item) })?;
+      // SAFETY: `value` and `key` are live handles (see [`Walk`]); `item` is
+      // a writable out-parameter.
+      let status = unsafe { sys::napi_get_property(self.env, value, key, &raw mut item) };
+      check_status!(status)?;
+      // SAFETY: `key` is a live handle, a string because the key collection
+      // above asked for `numbers_to_strings` and `skip_symbols`.
       let key = unsafe { String::from_napi_value(self.env, key)? };
       self.path.push(ArgPathStep::Key(key.clone()));
       let serialized = self.serialize(item, depth + 1)?;
@@ -184,16 +235,19 @@ impl Walk {
   }
 
   fn handle(&mut self, value: sys::napi_value) -> napi::Result<Option<SerializedValue>> {
-    let backing =
-      if let Ok(handle) = unsafe { ClassInstance::<crate::js_handle::JSHandle>::from_napi_value(self.env, value) } {
-        handle.inner_ref().backing().clone()
-      } else if let Ok(handle) =
-        unsafe { ClassInstance::<crate::element_handle::ElementHandle>::from_napi_value(self.env, value) }
-      {
-        handle.inner_ref().as_js_handle().backing().clone()
-      } else {
-        return Ok(None);
-      };
+    // SAFETY: `value` is a live handle (see [`Walk`]); `ClassInstance`
+    // checks the class it wraps before reading through it.
+    let js_handle = unsafe { ClassInstance::<crate::js_handle::JSHandle>::from_napi_value(self.env, value) };
+    let backing = if let Ok(handle) = js_handle {
+      handle.inner_ref().backing().clone()
+    } else if let Ok(handle) =
+      // SAFETY: as above, for the `ElementHandle` class.
+      unsafe { ClassInstance::<crate::element_handle::ElementHandle>::from_napi_value(self.env, value) }
+    {
+      handle.inner_ref().as_js_handle().backing().clone()
+    } else {
+      return Ok(None);
+    };
     Ok(Some(match backing {
       ferridriver::js_handle::JSHandleBacking::Remote(remote) => {
         let index = u32::try_from(self.handles.len()).map_err(|_| napi::Error::from_reason("too many JS handles"))?;
@@ -208,7 +262,10 @@ impl Walk {
   /// array or `ArrayBuffer` crosses as itself rather than as its keys.
   fn rich(&mut self, value: sys::napi_value) -> napi::Result<Option<SerializedValue>> {
     let mut yes = false;
-    check_status!(unsafe { sys::napi_is_error(self.env, value, &raw mut yes) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `yes` is a writable out-parameter.
+    let status = unsafe { sys::napi_is_error(self.env, value, &raw mut yes) };
+    check_status!(status)?;
     if yes {
       return Ok(Some(SerializedValue::Error(ErrorValue {
         m: self.property_string(value, "message")?,
@@ -216,7 +273,10 @@ impl Walk {
         s: self.property_string(value, "stack")?,
       })));
     }
-    check_status!(unsafe { sys::napi_is_date(self.env, value, &raw mut yes) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `yes` is a writable out-parameter.
+    let status = unsafe { sys::napi_is_date(self.env, value, &raw mut yes) };
+    check_status!(status)?;
     if yes {
       return Ok(Some(SerializedValue::Date(self.to_json(value)?)));
     }
@@ -229,10 +289,15 @@ impl Walk {
         f: self.property_string(value, "flags")?,
       })));
     }
-    check_status!(unsafe { sys::napi_is_typedarray(self.env, value, &raw mut yes) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `yes` is a writable out-parameter.
+    let status = unsafe { sys::napi_is_typedarray(self.env, value, &raw mut yes) };
+    check_status!(status)?;
     if yes {
       let (mut kind, mut length, mut data, mut buffer, mut offset) = (0, 0, ptr::null_mut(), ptr::null_mut(), 0);
-      check_status!(unsafe {
+      // SAFETY: `value` is a live typed-array handle (see [`Walk`]); the five
+      // out-parameters are writable locals of the types napi declares.
+      let status = unsafe {
         sys::napi_get_typedarray_info(
           self.env,
           value,
@@ -242,7 +307,8 @@ impl Walk {
           &raw mut buffer,
           &raw mut offset,
         )
-      })?;
+      };
+      check_status!(status)?;
       let Some(k) = typed_array_kind(kind) else {
         return Ok(None);
       };
@@ -256,10 +322,16 @@ impl Walk {
       };
       return Ok(Some(SerializedValue::TypedArray(TypedArrayValue { b, k })));
     }
-    check_status!(unsafe { sys::napi_is_arraybuffer(self.env, value, &raw mut yes) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `yes` is a writable out-parameter.
+    let status = unsafe { sys::napi_is_arraybuffer(self.env, value, &raw mut yes) };
+    check_status!(status)?;
     if yes {
       let (mut data, mut length) = (ptr::null_mut(), 0);
-      check_status!(unsafe { sys::napi_get_arraybuffer_info(self.env, value, &raw mut data, &raw mut length) })?;
+      // SAFETY: `value` is a live `ArrayBuffer` handle (see [`Walk`]); `data`
+      // and `length` are writable out-parameters.
+      let status = unsafe { sys::napi_get_arraybuffer_info(self.env, value, &raw mut data, &raw mut length) };
+      check_status!(status)?;
       let b = if length == 0 {
         Vec::new()
       } else {
@@ -275,13 +347,20 @@ impl Walk {
 
   fn is_undefined(&self, value: sys::napi_value) -> napi::Result<bool> {
     let mut kind = 0;
-    check_status!(unsafe { sys::napi_typeof(self.env, value, &raw mut kind) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `kind` is a writable out-parameter.
+    let status = unsafe { sys::napi_typeof(self.env, value, &raw mut kind) };
+    check_status!(status)?;
     Ok(kind == sys::ValueType::napi_undefined)
   }
 
   fn coerce_string(&self, value: sys::napi_value) -> napi::Result<String> {
     let mut text = ptr::null_mut();
-    check_status!(unsafe { sys::napi_coerce_to_string(self.env, value, &raw mut text) })?;
+    // SAFETY: `self.env` is live and `value` is a handle in its scope (see
+    // [`Walk`]); `text` is a writable out-parameter.
+    let status = unsafe { sys::napi_coerce_to_string(self.env, value, &raw mut text) };
+    check_status!(status)?;
+    // SAFETY: `text` is the string napi just created in `self.env`'s scope.
     unsafe { String::from_napi_value(self.env, text) }
   }
 
@@ -289,7 +368,10 @@ impl Walk {
     let env = Env::from_raw(self.env);
     let key = env.create_string(name)?;
     let mut out = ptr::null_mut();
-    check_status!(unsafe { sys::napi_get_property(self.env, object, key.raw(), &raw mut out) })?;
+    // SAFETY: `object` is a live handle (see [`Walk`]) and `key` a string
+    // just created in the same scope; `out` is a writable out-parameter.
+    let status = unsafe { sys::napi_get_property(self.env, object, key.raw(), &raw mut out) };
+    check_status!(status)?;
     Ok(out)
   }
 
@@ -303,25 +385,42 @@ impl Walk {
 
   fn instance_of(&self, value: sys::napi_value, class: &str) -> napi::Result<bool> {
     let mut global = ptr::null_mut();
-    check_status!(unsafe { sys::napi_get_global(self.env, &raw mut global) })?;
+    // SAFETY: `self.env` is live (see [`Walk`]); `global` is a writable
+    // out-parameter.
+    let status = unsafe { sys::napi_get_global(self.env, &raw mut global) };
+    check_status!(status)?;
     let constructor = self.property(global, class)?;
     let mut kind = 0;
-    check_status!(unsafe { sys::napi_typeof(self.env, constructor, &raw mut kind) })?;
+    // SAFETY: `constructor` is the handle `property` just read in
+    // `self.env`'s scope; `kind` is a writable out-parameter.
+    let status = unsafe { sys::napi_typeof(self.env, constructor, &raw mut kind) };
+    check_status!(status)?;
     if kind != sys::ValueType::napi_function {
       return Ok(false);
     }
     let mut yes = false;
-    check_status!(unsafe { sys::napi_instanceof(self.env, value, constructor, &raw mut yes) })?;
+    // SAFETY: `value` is a live handle (see [`Walk`]) and `constructor` a
+    // function `napi_typeof` just confirmed; `yes` is a writable out-parameter.
+    let status = unsafe { sys::napi_instanceof(self.env, value, constructor, &raw mut yes) };
+    check_status!(status)?;
     Ok(yes)
   }
 
   fn to_json(&self, value: sys::napi_value) -> napi::Result<String> {
     let method = self.property(value, "toJSON")?;
     let mut out = ptr::null_mut();
-    check_status!(unsafe { sys::napi_call_function(self.env, value, method, 0, ptr::null(), &raw mut out) })?;
+    // SAFETY: `value` is a live handle (see [`Walk`]) and `method` the handle
+    // just read from it; zero arguments pair with a null `argv`, and `out` is
+    // a writable out-parameter. napi reports a non-callable `method` as a status.
+    let status = unsafe { sys::napi_call_function(self.env, value, method, 0, ptr::null(), &raw mut out) };
+    check_status!(status)?;
     let mut kind = 0;
-    check_status!(unsafe { sys::napi_typeof(self.env, out, &raw mut kind) })?;
+    // SAFETY: `out` is the call's result in `self.env`'s scope; `kind` is a
+    // writable out-parameter.
+    let status = unsafe { sys::napi_typeof(self.env, out, &raw mut kind) };
+    check_status!(status)?;
     if kind == sys::ValueType::napi_string {
+      // SAFETY: `out` is live and `napi_typeof` just reported a string.
       unsafe { String::from_napi_value(self.env, out) }
     } else {
       Ok(String::new())
@@ -331,25 +430,34 @@ impl Walk {
 
 /// `JSON.stringify(value)` parsed back: the argument Playwright inlines
 /// into a plain init script, functions and `undefined` dropped.
-pub fn json_stringify(env: sys::napi_env, value: sys::napi_value) -> napi::Result<serde_json::Value> {
-  let walk = Walk {
-    env,
-    alloc: SerializationContext::default(),
-    handles: Vec::new(),
-    functions: Vec::new(),
-    unexpected: None,
-    path: Vec::new(),
-    visited: Vec::new(),
-  };
+///
+/// # Safety
+///
+/// `env` is the live environment of the current JS call and `value` a
+/// handle in its scope.
+#[expect(unsafe_code, reason = "reads a JS value through napi's C API")]
+pub(crate) unsafe fn json_stringify(env: sys::napi_env, value: sys::napi_value) -> napi::Result<serde_json::Value> {
+  // SAFETY: the caller's contract is `Walk::new`'s, and the walk ends here.
+  let walk = unsafe { Walk::new(env) };
   let mut global = ptr::null_mut();
-  check_status!(unsafe { sys::napi_get_global(env, &raw mut global) })?;
+  // SAFETY: `env` is live per this function's contract; `global` is a
+  // writable out-parameter.
+  let status = unsafe { sys::napi_get_global(env, &raw mut global) };
+  check_status!(status)?;
   let json = walk.property(global, "JSON")?;
   let stringify = walk.property(json, "stringify")?;
   let mut out = ptr::null_mut();
-  check_status!(unsafe { sys::napi_call_function(env, json, stringify, 1, &raw const value, &raw mut out) })?;
+  // SAFETY: `json` and `stringify` were just read from the global object
+  // in `env`'s scope and `value` is live per this function's contract; one
+  // argument pairs with the one-element `argv` at `&value`, and `out` is a
+  // writable out-parameter.
+  let status = unsafe { sys::napi_call_function(env, json, stringify, 1, &raw const value, &raw mut out) };
+  check_status!(status)?;
   if walk.is_undefined(out)? {
     return Ok(serde_json::Value::Null);
   }
+  // SAFETY: `out` is the call's result in `env`'s scope; `JSON.stringify`
+  // returns a string whenever it does not return `undefined`, handled above.
   let text = unsafe { String::from_napi_value(env, out)? };
   serde_json::from_str(&text).map_err(|e| napi::Error::from_reason(e.to_string()))
 }

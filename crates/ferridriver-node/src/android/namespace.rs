@@ -2,11 +2,6 @@
 //! napi namespace, so the generated loader names the export and a
 //! Node ES module can import it by name.
 
-// `#[napi]` exports these to JS but clippy's reachability check only
-// follows Rust call graphs, so it flags the entry points as dead. Same
-// module-level exemption every other NAPI entry-point module carries.
-#![allow(dead_code)]
-
 use napi::Result;
 use napi::bindgen_prelude::{AsyncBlock, AsyncBlockBuilder, Env};
 use napi_derive::napi;

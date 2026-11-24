@@ -31,8 +31,12 @@ impl TypeName for Signal {
 
 impl ValidateNapiValue for Signal {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl FromNapiValue for Signal {
   unsafe fn from_napi_value(env: sys::napi_env, value: sys::napi_value) -> Result<Self> {
+    // SAFETY: the `env` and `value` napi-rs handed this conversion. napi-rs
+    // checks the external's type tag, and the signal is cloned out while the
+    // current call still holds the JS value that owns it.
     let handle = unsafe { External::<AbortSignal>::from_napi_ref(env, value) }
       .map_err(|_| Error::from_reason("signal: expected an AbortSignal"))?;
     Ok(Self((**handle).clone()))
@@ -40,7 +44,7 @@ impl FromNapiValue for Signal {
 }
 
 /// An option bag that carries `signal`.
-pub trait Signalled {
+pub(crate) trait Signalled {
   fn take_signal(&mut self) -> Option<AbortSignal>;
 }
 
@@ -69,12 +73,12 @@ pub(crate) use signalled;
 
 /// Take the signal out of an option bag whose other fields are lowered
 /// by hand.
-pub fn take<B: Signalled>(options: &mut Option<B>) -> Option<AbortSignal> {
+pub(crate) fn take<B: Signalled>(options: &mut Option<B>) -> Option<AbortSignal> {
   options.take_signal()
 }
 
 /// Lowers a JS option bag onto a core action, its `signal` included.
-pub trait Bag<O>: Sized {
+pub(crate) trait Bag<O>: Sized {
   fn bag<N>(self, options: Option<N>) -> Result<Self>
   where
     N: Signalled + TryInto<O>,
@@ -100,7 +104,7 @@ impl<O, T> Bag<O> for ferridriver::action::Action<'_, O, T> {
 }
 
 /// Run a core call that is not an action under the bag's signal.
-pub fn run<'a, T: 'a>(
+pub(crate) fn run<'a, T: 'a>(
   signal: Option<AbortSignal>,
   call: impl Future<Output = ferridriver::error::Result<T>> + Send + 'a,
 ) -> impl Future<Output = Result<T>> + Send + 'a {
@@ -113,7 +117,7 @@ pub fn run<'a, T: 'a>(
 }
 
 /// Run a wait the binding drives itself under the bag's signal.
-pub async fn race<T>(signal: Option<AbortSignal>, wait: impl Future<Output = Result<T>>) -> Result<T> {
+pub(crate) async fn race<T>(signal: Option<AbortSignal>, wait: impl Future<Output = Result<T>>) -> Result<T> {
   let Some(signal) = signal else {
     return wait.await;
   };
@@ -184,7 +188,7 @@ mod load {
 })";
 
   #[napi(module_exports)]
-  pub fn wrap_classes(env: Env, exports: Object<'_>) -> Result<()> {
+  pub(super) fn wrap_classes(env: Env, exports: Object<'_>) -> Result<()> {
     let arm = env.create_function_from_closure::<FnArgs<(bool, String)>, External<AbortSignal>, _>("arm", |ctx| {
       let reason: String = ctx.get(1)?;
       Ok(External::new(if ctx.get::<bool>(0)? {

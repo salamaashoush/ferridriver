@@ -19,6 +19,11 @@ pub fn dump_rtt_stats() {
 
 /// Install the latest stable Chromium browser.
 /// Returns the path to the installed chrome executable.
+///
+/// # Errors
+///
+/// When the Chrome for Testing API is unreachable, the download fails after
+/// every retry, extraction fails, or the platform is unsupported.
 #[napi]
 pub async fn install_chromium() -> Result<String> {
   let installer = BrowserInstaller::new();
@@ -28,6 +33,11 @@ pub async fn install_chromium() -> Result<String> {
 /// Install the system packages `browsers` need (Linux only), like
 /// `npx playwright install-deps`: every browser when none are named.
 /// Requires root/sudo on Linux. No-op on macOS/Windows.
+///
+/// # Errors
+///
+/// When a name has no package list, there is no package list for this
+/// distribution, or the package manager fails.
 #[napi(ts_args_type = "browsers?: Array<'chromium' | 'chromium-headless-shell' | 'firefox' | 'webkit'>")]
 pub async fn install_system_deps(browsers: Option<Vec<String>>) -> Result<()> {
   let groups = match browsers {
@@ -52,6 +62,11 @@ pub async fn install_system_deps(browsers: Option<Vec<String>>) -> Result<()> {
 
 /// Install Chromium with system dependencies (convenience: install + install-deps).
 /// Returns the path to the installed chrome executable.
+///
+/// # Errors
+///
+/// When installing the system packages fails (see `installSystemDeps`) or
+/// installing Chromium does (see `installChromium`).
 #[napi]
 pub async fn install_chromium_with_deps() -> Result<String> {
   let installer = BrowserInstaller::new();
@@ -65,6 +80,11 @@ pub async fn install_chromium_with_deps() -> Result<String> {
 /// Install the latest stable Chrome Headless Shell.
 /// Returns the path to the installed chrome-headless-shell executable.
 /// This is a lighter, purpose-built binary optimized for headless automation.
+///
+/// # Errors
+///
+/// When the Chrome for Testing API is unreachable, the download fails after
+/// every retry, extraction fails, or the platform is unsupported.
 #[napi]
 pub async fn install_chromium_headless_shell() -> Result<String> {
   let installer = BrowserInstaller::new();
@@ -77,6 +97,7 @@ pub async fn install_chromium_headless_shell() -> Result<String> {
 /// Find an installed Chromium in the ferridriver cache.
 /// Returns the path to the executable or null if not found.
 #[napi]
+#[must_use]
 pub fn find_installed_chromium() -> Option<String> {
   BrowserInstaller::new().find_installed_chromium()
 }
@@ -84,12 +105,18 @@ pub fn find_installed_chromium() -> Option<String> {
 /// Find an installed Chrome Headless Shell in the ferridriver cache.
 /// Returns the path to the executable or null if not found.
 #[napi]
+#[must_use]
 pub fn find_installed_headless_shell() -> Option<String> {
   BrowserInstaller::new().find_installed_headless_shell()
 }
 
 /// Install the latest stable Firefox.
 /// Returns the path to the installed firefox executable.
+///
+/// # Errors
+///
+/// When the Mozilla API is unreachable, the download fails after every
+/// retry, extraction fails, or the platform is unsupported.
 #[napi]
 pub async fn install_firefox() -> Result<String> {
   let installer = BrowserInstaller::new();
@@ -99,12 +126,14 @@ pub async fn install_firefox() -> Result<String> {
 /// Find an installed Firefox in the ferridriver cache.
 /// Returns the path to the executable or null if not found.
 #[napi]
+#[must_use]
 pub fn find_installed_firefox() -> Option<String> {
   BrowserInstaller::new().find_installed_firefox()
 }
 
 /// Get the browser cache directory path.
 #[napi]
+#[must_use]
 pub fn get_browser_cache_dir() -> String {
   BrowserInstaller::new().cache_dir().to_string_lossy().to_string()
 }

@@ -2,48 +2,6 @@
 //!
 //! Exposes the Playwright-compatible Browser/Page/Locator API to Node.js.
 
-#![allow(
-  unsafe_code,
-  clippy::needless_pass_by_value,
-  clippy::missing_errors_doc,
-  clippy::missing_panics_doc,
-  clippy::must_use_candidate,
-  clippy::doc_markdown,
-  clippy::module_name_repetitions,
-  clippy::cast_possible_truncation,
-  clippy::cast_possible_wrap,
-  clippy::cast_sign_loss,
-  clippy::cast_precision_loss,
-  clippy::cast_lossless,
-  clippy::redundant_closure_for_method_calls,
-  clippy::implicit_clone,
-  clippy::too_many_lines,
-  clippy::uninlined_format_args,
-  clippy::single_char_pattern,
-  clippy::unwrap_used,
-  clippy::expect_used,
-  clippy::map_unwrap_or,
-  clippy::struct_excessive_bools,
-  clippy::unnecessary_wraps,
-  clippy::default_trait_access,
-  clippy::bool_to_int_with_if,
-  clippy::format_push_string,
-  clippy::unused_async,
-  clippy::unused_self,
-  clippy::match_same_arms,
-  clippy::items_after_statements,
-  clippy::vec_init_then_push,
-  clippy::iter_over_hash_type,
-  clippy::semicolon_if_nothing_returned,
-  clippy::option_map_or_none,
-  clippy::single_match_else,
-  clippy::manual_let_else
-)]
-
-//! NAPI-RS native addon for ferridriver browser automation.
-//!
-//! Exposes the Playwright-compatible Browser/Page/Locator API to Node.js.
-
 // Use mimalloc as the global allocator for better NAPI workload performance.
 // Reduces fragmentation and improves throughput for the frequent small allocations
 // that occur at the Rust/JS boundary (strings, options structs, callbacks).
@@ -76,7 +34,6 @@ mod frame_locator;
 mod heap;
 mod http_client;
 mod identity;
-#[allow(dead_code)]
 mod install;
 mod js_handle;
 mod locator;
@@ -93,3 +50,16 @@ mod web_mcp;
 mod web_socket_route;
 mod web_storage;
 mod worker;
+
+// napi-derive registers free-function exports from a constructor it
+// compiles out under `cfg(test)`; exporting them from the crate root keeps
+// the unit-test build from reading them as dead.
+pub use android::{android_connect, android_devices, android_launch_server, android_set_default_timeout};
+pub use browser_type::{chromium, firefox, safari, webkit};
+pub use http_client::new_context;
+pub use install::{
+  dump_rtt_stats, find_installed_chromium, find_installed_firefox, find_installed_headless_shell,
+  get_browser_cache_dir, install_chromium, install_chromium_headless_shell, install_chromium_with_deps,
+  install_firefox, install_system_deps,
+};
+pub use selectors::{register_selector_engine, set_test_id_attribute};

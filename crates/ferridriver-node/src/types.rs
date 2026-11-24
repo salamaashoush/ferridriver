@@ -2,20 +2,50 @@
 
 use napi_derive::napi;
 
+/// The workspace's `FxHashMap` under the one name napi-derive renders as
+/// `Record<K, V>` in `index.d.ts`; under any other name the typings would
+/// carry the Rust type's name instead.
+pub(crate) type HashMap<K, V> = rustc_hash::FxHashMap<K, V>;
+
 /// Convert a JS `number` (f64) to u64 for millisecond timeouts and similar values.
 /// Negative values are clamped to 0; fractional parts are truncated.
 /// This is the correct semantic for the NAPI boundary where JS has only f64 numbers.
+#[expect(
+  clippy::cast_possible_truncation,
+  clippy::cast_sign_loss,
+  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
+)]
 pub(crate) fn f64_to_u64(v: f64) -> u64 {
-  if v < 0.0 {
-    0
-  } else {
-    // After the negative check above, v is guaranteed non-negative.
-    // Truncation of the fractional part is intentional for ms timeouts.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    {
-      v as u64
-    }
-  }
+  if v < 0.0 { 0 } else { v as u64 }
+}
+
+/// [`f64_to_u64`], saturating at `u32::MAX`.
+pub(crate) fn f64_to_u32(v: f64) -> u32 {
+  u32::try_from(f64_to_u64(v)).unwrap_or(u32::MAX)
+}
+
+/// [`f64_to_u64`], saturating at `i64::MAX`.
+pub(crate) fn f64_to_i64(v: f64) -> i64 {
+  i64::try_from(f64_to_u64(v)).unwrap_or(i64::MAX)
+}
+
+/// [`f64_to_u64`], saturating at `usize::MAX`.
+pub(crate) fn f64_to_usize(v: f64) -> usize {
+  usize::try_from(f64_to_u64(v)).unwrap_or(usize::MAX)
+}
+
+/// A count, id or millisecond value as the JS `number` it crosses as.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+pub(crate) fn u64_to_f64(v: u64) -> f64 {
+  v as f64
+}
+
+/// [`u64_to_f64`] for a `usize` count.
+pub(crate) fn usize_to_f64(v: usize) -> f64 {
+  u64_to_f64(u64::try_from(v).unwrap_or(u64::MAX))
 }
 
 /// Options for `page.checkAccessibility`.
@@ -263,7 +293,7 @@ impl RouteOptions {
   /// Resolve `times` to a `u32` count (truncates fractional, clamps negative).
   #[must_use]
   pub fn times_u32(&self) -> Option<u32> {
-    self.times.map(|t| f64_to_u64(t) as u32)
+    self.times.map(f64_to_u32)
   }
 }
 
@@ -320,10 +350,14 @@ impl napi::bindgen_prelude::TypeName for JsDateLike {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ValidateNapiValue::validate unsafe")]
 impl napi::bindgen_prelude::ValidateNapiValue for JsDateLike {
   unsafe fn validate(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<napi::sys::napi_value> {
     let mut is_date = false;
-    napi::check_status!(unsafe { napi::sys::napi_is_date(env, napi_val, &raw mut is_date) })?;
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion are live
+    // for the current call; `is_date` is a writable out-parameter.
+    let status = unsafe { napi::sys::napi_is_date(env, napi_val, &raw mut is_date) };
+    napi::check_status!(status)?;
     if !is_date {
       return Err(napi::Error::new(
         napi::Status::InvalidArg,
@@ -334,18 +368,27 @@ impl napi::bindgen_prelude::ValidateNapiValue for JsDateLike {
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for JsDateLike {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
     let mut time_ms = 0f64;
-    napi::check_status!(unsafe { napi::sys::napi_get_date_value(env, napi_val, &raw mut time_ms) })?;
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion are live
+    // for the current call; `time_ms` is a writable out-parameter. A value
+    // that is not a `Date` comes back as `napi_date_expected`.
+    let status = unsafe { napi::sys::napi_get_date_value(env, napi_val, &raw mut time_ms) };
+    napi::check_status!(status)?;
     Ok(Self { time_ms })
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares ToNapiValue::to_napi_value unsafe")]
 impl napi::bindgen_prelude::ToNapiValue for JsDateLike {
   unsafe fn to_napi_value(env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
     let mut ptr = std::ptr::null_mut();
-    napi::check_status!(unsafe { napi::sys::napi_create_date(env, val.time_ms, &raw mut ptr) })?;
+    // SAFETY: `env` is the live environment napi-rs handed this conversion;
+    // `ptr` is a writable out-parameter.
+    let status = unsafe { napi::sys::napi_create_date(env, val.time_ms, &raw mut ptr) };
+    napi::check_status!(status)?;
     Ok(ptr)
   }
 }
@@ -603,7 +646,7 @@ pub struct CookieData {
   pub secure: bool,
   pub http_only: bool,
   pub expires: Option<f64>,
-  /// SameSite attribute: "Strict", "Lax", or "None".
+  /// `SameSite` attribute: "Strict", "Lax", or "None".
   pub same_site: Option<String>,
   /// Playwright `SetNetworkCookieParam.url` — when set, the browser
   /// derives domain/path from it. Absent on cookies read back.
@@ -848,6 +891,12 @@ impl napi::bindgen_prelude::ValidateNapiValue for NapiInputFiles {}
 /// the core `InputFiles` union. Shared by `setInputFiles` and the `files`
 /// field of `Locator.drop`'s payload so both accept the identical native
 /// shape.
+///
+/// # Safety
+///
+/// `env` is the live environment of the current JS call and `napi_val` a
+/// handle in its scope.
+#[expect(unsafe_code, reason = "reads a JS value napi-rs handed over as a raw handle")]
 unsafe fn parse_input_files(
   env: napi::sys::napi_env,
   napi_val: napi::sys::napi_value,
@@ -855,6 +904,7 @@ unsafe fn parse_input_files(
 ) -> napi::Result<ferridriver::options::InputFiles> {
   use napi::JsValue;
   use napi::bindgen_prelude::JsObjectValue;
+  // SAFETY: `env` and `napi_val` are live per this function's contract.
   let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
   match unknown.get_type()? {
     napi::ValueType::String => {
@@ -863,12 +913,7 @@ unsafe fn parse_input_files(
     },
     napi::ValueType::Object => {
       let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
-      let is_array = unsafe {
-        let mut is_arr = false;
-        napi::check_status!(napi::sys::napi_is_array(env, napi_val, &raw mut is_arr))?;
-        is_arr
-      };
-      if is_array {
+      if unknown.is_array()? {
         let len: u32 = obj.get("length")?.unwrap_or(0);
         // Peek first entry to decide whether this is string[] or FilePayload[].
         if len == 0 {
@@ -891,6 +936,8 @@ unsafe fn parse_input_files(
           Ok(ferridriver::options::InputFiles::Payloads(payloads))
         }
       } else {
+        // SAFETY: `get_type` reported an object, which is what the
+        // `FilePayload` object conversion reads its fields from.
         let p: FilePayload = unsafe { unknown.cast()? };
         Ok(ferridriver::options::InputFiles::Payloads(vec![p.into()]))
       }
@@ -901,8 +948,11 @@ unsafe fn parse_input_files(
   }
 }
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for NapiInputFiles {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion, live for
+    // the current call.
     Ok(Self(unsafe { parse_input_files(env, napi_val, "setInputFiles")? }))
   }
 }
@@ -960,6 +1010,7 @@ impl napi::bindgen_prelude::TypeName for NapiDropPayload {
 
 impl napi::bindgen_prelude::ValidateNapiValue for NapiDropPayload {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for NapiDropPayload {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
     use napi::JsValue;
@@ -968,12 +1019,14 @@ impl napi::bindgen_prelude::FromNapiValue for NapiDropPayload {
 
     let files = match obj.get_named_property_unchecked::<napi::Unknown<'_>>("files") {
       Ok(v) if !matches!(v.get_type()?, napi::ValueType::Undefined | napi::ValueType::Null) => {
+        // SAFETY: `env` is the live environment napi-rs handed this
+        // conversion, and `v` was just read from its object in that scope.
         Some(unsafe { parse_input_files(env, v.raw(), "drop payload files")? })
       },
       _ => None,
     };
 
-    let data = match obj.get::<std::collections::HashMap<String, String>>("data") {
+    let data = match obj.get::<rustc_hash::FxHashMap<String, String>>("data") {
       Ok(Some(map)) => map.into_iter().collect(),
       _ => Vec::new(),
     };
@@ -1001,10 +1054,13 @@ impl napi::bindgen_prelude::TypeName for NapiSelectOptionInput {
 
 impl napi::bindgen_prelude::ValidateNapiValue for NapiSelectOptionInput {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
     use napi::JsValue;
     use napi::bindgen_prelude::JsObjectValue;
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion, live for
+    // the current call.
     let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
     let mut out: Vec<ferridriver::options::SelectOptionValue> = Vec::new();
     match unknown.get_type()? {
@@ -1015,12 +1071,7 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
       napi::ValueType::Object => {
         let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
         // Array path: iterate numeric keys.
-        let is_array = unsafe {
-          let mut is_arr = false;
-          napi::check_status!(napi::sys::napi_is_array(env, napi_val, &raw mut is_arr))?;
-          is_arr
-        };
-        if is_array {
+        if unknown.is_array()? {
           let len: u32 = obj.get("length")?.unwrap_or(0);
           for i in 0..len {
             let el: napi::Unknown<'_> = obj.get_element(i)?;
@@ -1030,6 +1081,8 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
                 out.push(ferridriver::options::SelectOptionValue::by_value_or_label(s));
               },
               napi::ValueType::Object => {
+                // SAFETY: `get_type` reported an object, which is what the
+                // `SelectOptionValue` object conversion reads its fields from.
                 let v: SelectOptionValue = unsafe { el.cast()? };
                 out.push(v.into());
               },
@@ -1041,6 +1094,8 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
             }
           }
         } else {
+          // SAFETY: `get_type` reported an object, which is what the
+          // `SelectOptionValue` object conversion reads its fields from.
           let v: SelectOptionValue = unsafe { unknown.cast()? };
           out.push(v.into());
         }
@@ -1091,15 +1146,18 @@ impl napi::bindgen_prelude::TypeName for NapiPageFunction {
 
 impl napi::bindgen_prelude::ValidateNapiValue for NapiPageFunction {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for NapiPageFunction {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion, live for
+    // the current call.
     let u = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
     let (source, is_function) = crate::serialize_out::extract_fn_source(u)?;
     Ok(Self { source, is_function })
   }
 }
 
-pub use crate::evaluate_arg::NapiEvaluateArg;
+pub(crate) use crate::evaluate_arg::NapiEvaluateArg;
 
 /// Playwright's `ExposeFunctionsOptions`, `{ exposeFunctions?: boolean }`,
 /// on `evaluate`, `evaluateHandle` and `addInitScript`.
@@ -1630,7 +1688,7 @@ pub struct ObservedFilterOptions {
 pub struct PageCloseOptions {
   /// When `true`, fires the page's `beforeunload` handlers before
   /// unloading. CDP switches from `Target.closeTarget` (force) to
-  /// `Page.close`; BiDi passes `promptUnload: true`; WebKit dispatches
+  /// `Page.close`; `BiDi` passes `promptUnload: true`; `WebKit` dispatches
   /// a synthetic `BeforeUnloadEvent` on the window.
   pub run_before_unload: Option<bool>,
   /// Human-readable reason surfaced on subsequent `TargetClosed` errors
@@ -1722,7 +1780,7 @@ pub struct FrameSelectorBag {
 /// `string | { name?, url? }`. napi-rs resolves the union at the JS
 /// boundary; the `ts_args_type` on the call site forces the generated
 /// `.d.ts` to the precise shape.
-pub type FrameSelectorArg = napi::Either<String, FrameSelectorBag>;
+pub(crate) type FrameSelectorArg = napi::Either<String, FrameSelectorBag>;
 
 impl From<FrameSelectorBag> for ferridriver::options::FrameSelector {
   fn from(b: FrameSelectorBag) -> Self {
@@ -1753,7 +1811,7 @@ pub struct LaunchOptions {
   pub channel: Option<String>,
   /// Environment variables visible to the browser.
   #[napi(ts_type = "{ [key: string]: string | undefined }")]
-  pub env: Option<std::collections::HashMap<String, Option<String>>>,
+  pub env: Option<rustc_hash::FxHashMap<String, Option<String>>>,
   /// Slow down operations by this many ms (debugging).
   pub slow_mo: Option<u32>,
   /// Maximum time to wait for the browser to start (ms). `0` disables.
@@ -1772,15 +1830,15 @@ pub struct LaunchOptions {
   pub ignore_default_args: Option<napi::Either<bool, Vec<String>>>,
   /// Proxy every context of this browser uses unless it names its own.
   ///
-  /// Lowered per engine: Chromium takes `--proxy-server`, WebKit takes
-  /// `--proxy`, and Firefox takes the WebDriver `proxy` capability -- it has no
+  /// Lowered per engine: Chromium takes `--proxy-server`, `WebKit` takes
+  /// `--proxy`, and Firefox takes the `WebDriver` `proxy` capability -- it has no
   /// proxy switch at all.
   pub proxy: Option<crate::context::NapiProxyConfig>,
   /// Keep Chromium's sandbox; it is turned off unless this is `true`.
   pub chromium_sandbox: Option<bool>,
   /// Firefox preferences (`about:config`) the launched browser starts with.
   #[napi(ts_type = "{ [key: string]: string | number | boolean }")]
-  pub firefox_user_prefs: Option<std::collections::HashMap<String, serde_json::Value>>,
+  pub firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
 }
 
 /// Options for `chromium()` / `firefox()` / `webkit()` factory.
@@ -1797,7 +1855,7 @@ pub struct BrowserTypeOptions {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOptions {
-  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub headers: Option<crate::types::HashMap<String, String>>,
   pub slow_mo: Option<u32>,
   pub timeout: Option<u32>,
   pub expose_network: Option<String>,
@@ -1808,7 +1866,7 @@ pub struct ConnectOptions {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOverCdpOptions {
-  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub headers: Option<crate::types::HashMap<String, String>>,
   pub slow_mo: Option<u32>,
   pub timeout: Option<u32>,
 }
@@ -2067,7 +2125,7 @@ pub struct JsRegExpLike {
 /// NAPI accepts `string | RegExp` directly — exactly the Playwright
 /// surface `URLMatch = string | RegExp | ((url) => boolean) | URLPattern`
 /// minus the predicate/URLPattern branches, which ride on separate NAPI
-/// methods (predicate needs a `ThreadsafeFunction`; URLPattern is Node
+/// methods (predicate needs a `ThreadsafeFunction`; `URLPattern` is Node
 /// 24+). No client-side serialization: a literal `/foo/i` flows through
 /// unchanged.
 pub(crate) fn string_or_regex_to_rust(
@@ -2167,9 +2225,12 @@ impl napi::bindgen_prelude::TypeName for NapiInitScript {
 
 impl napi::bindgen_prelude::ValidateNapiValue for NapiInitScript {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for NapiInitScript {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
     use napi::JsValue;
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion, live for
+    // the current call.
     let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
     match unknown.get_type()? {
       napi::ValueType::Function => {
@@ -2317,15 +2378,21 @@ impl From<ClearCookieOptions> for ferridriver::backend::ClearCookieOptions {
 
 impl napi::bindgen_prelude::ValidateNapiValue for NapiInitScriptArg {}
 
+#[expect(unsafe_code, reason = "napi-rs declares FromNapiValue::from_napi_value unsafe")]
 impl napi::bindgen_prelude::FromNapiValue for NapiInitScriptArg {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    // SAFETY: the `env` and `napi_val` napi-rs handed this conversion, live for
+    // the current call; an evaluate argument accepts any JS value.
     let exposed = unsafe { crate::evaluate_arg::NapiEvaluateArg::from_napi_value(env, napi_val)? };
     let mut t: napi::sys::napi_valuetype = 0;
-    napi::check_status!(unsafe { napi::sys::napi_typeof(env, napi_val, &raw mut t) })?;
+    // SAFETY: as above; `t` is a writable out-parameter.
+    let status = unsafe { napi::sys::napi_typeof(env, napi_val, &raw mut t) };
+    napi::check_status!(status)?;
     let json = if t == napi::sys::ValueType::napi_undefined {
       None
     } else {
-      Some(crate::evaluate_arg::json_stringify(env, napi_val)?)
+      // SAFETY: the `env` and `napi_val` napi-rs handed this conversion.
+      Some(unsafe { crate::evaluate_arg::json_stringify(env, napi_val)? })
     };
     Ok(Self { json, exposed })
   }

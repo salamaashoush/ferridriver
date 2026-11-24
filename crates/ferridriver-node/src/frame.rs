@@ -20,6 +20,10 @@ impl Frame {
 }
 
 #[napi]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "napi-derive takes JS strings, functions and option bags only by value"
+)]
 impl Frame {
   #[napi(getter)]
   pub fn webmcp(&self) -> crate::web_mcp::WebMcp {
@@ -219,7 +223,7 @@ impl Frame {
     options: Option<crate::types::GotoOptions>,
   ) -> Result<Option<crate::network::Response>> {
     let resp = self.inner.goto(&url).bag(options)?.await.into_napi()?;
-    let page = self.inner.page_arc().clone();
+    let page = std::sync::Arc::clone(self.inner.page_arc());
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
   }
 
@@ -272,7 +276,7 @@ impl Frame {
     // Listening from the call: the navigation is usually started before
     // the promise is awaited.
     let navigation = self.inner.wait_for_navigation().bag(options);
-    let page = self.inner.page_arc().clone();
+    let page = std::sync::Arc::clone(self.inner.page_arc());
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let resp = navigation?.await.into_napi()?;
       Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
@@ -491,7 +495,7 @@ impl Frame {
   /// Playwright: `frame.page(): Page` — the page this frame belongs to.
   #[napi(ts_return_type = "Page")]
   pub fn page(&self) -> crate::identity::PageObject {
-    crate::identity::PageObject(self.inner.page_arc().clone())
+    crate::identity::PageObject(std::sync::Arc::clone(self.inner.page_arc()))
   }
 
   // ── Action methods (Playwright parity — task 3.9) ────────────────────
