@@ -14,7 +14,7 @@
 //! 2. disk-warm — unchanged sources skip rolldown AND compile; load bytecode from the cross-process cache.
 //! 3. after-edit — a transitive input changed: the cache must MISS and rebundle (freshness check).
 //! 4. cache-off — `FERRIDRIVER_NO_BYTECODE_CACHE`: always cold (the pre-cache baseline).
-//! 5. per-session — `JsBddSession::load`: VM create + eval bytecode + registry + BeforeAll.
+//! 5. per-session — `JsBddSession::load`: VM create + eval bytecode + registry + `BeforeAll`.
 
 use std::time::Instant;
 
@@ -64,7 +64,7 @@ async fn js_plugin_load_bench() {
 
   let cold_ms = time_bundle(&globs, &dir).await;
   let warm_ms = time_bundle(&globs, &dir).await; // disk hit
-  let warm2_ms = time_bundle(&globs, &dir).await; // disk hit again
+  let warm_again_ms = time_bundle(&globs, &dir).await; // disk hit again
 
   // Mutate a transitive input -> cache must miss and rebundle.
   std::fs::write(dir.join("steps.ts"), step_source(now_ns())).expect("rewrite");
@@ -73,8 +73,8 @@ async fn js_plugin_load_bench() {
 
   // Baseline with the cache disabled: every call pays full cold.
   unsafe { std::env::set_var("FERRIDRIVER_NO_BYTECODE_CACHE", "1") };
-  let off_a_ms = time_bundle(&globs, &dir).await;
-  let off_b_ms = time_bundle(&globs, &dir).await;
+  let uncached_first_ms = time_bundle(&globs, &dir).await;
+  let uncached_second_ms = time_bundle(&globs, &dir).await;
   unsafe { std::env::remove_var("FERRIDRIVER_NO_BYTECODE_CACHE") };
 
   // Per-session load (unchanged by the disk cache).
@@ -97,11 +97,11 @@ async fn js_plugin_load_bench() {
     "disk-warm  (validate+load bytecode)  : {warm_ms:8.3} ms   [{:.0}x faster]",
     cold_ms / warm_ms
   );
-  println!("disk-warm  (again)                   : {warm2_ms:8.3} ms");
+  println!("disk-warm  (again)                   : {warm_again_ms:8.3} ms");
   println!("after edit (must miss -> rebundle)   : {after_edit_ms:8.2} ms   [freshness ok]");
   println!("disk-warm  (post-edit content)       : {warm_after_edit_ms:8.3} ms");
-  println!("cache OFF  (a)                        : {off_a_ms:8.2} ms");
-  println!("cache OFF  (b)                        : {off_b_ms:8.2} ms");
+  println!("cache OFF  (a)                        : {uncached_first_ms:8.2} ms");
+  println!("cache OFF  (b)                        : {uncached_second_ms:8.2} ms");
   println!("per-session load (VM+eval+reg)       : {per_session_ms:8.3} ms");
   println!("===================================================\n");
 

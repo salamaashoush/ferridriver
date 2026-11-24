@@ -41,3 +41,6 @@ tempfile = "3"
 [[bench]]
 name = "scenario_clone"
 harness = false
+
+[lints]
+workspace = true

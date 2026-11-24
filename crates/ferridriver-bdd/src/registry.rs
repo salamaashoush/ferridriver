@@ -1,5 +1,6 @@
 //! Step registry: collects step definitions from inventory + runtime registration.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::expression;
@@ -294,7 +295,7 @@ impl StepRegistry {
             }
             first_match = Some((def, params));
           },
-          Err(_) => continue,
+          Err(_) => {},
         }
       }
     }
@@ -355,9 +356,9 @@ impl StepRegistry {
         continue;
       }
 
-      output.push_str(&format!("## {kind}\n\n"));
+      let _ = write!(output, "## {kind}\n\n");
       for step in steps {
-        output.push_str(&format!("- `{}`\n", step.expression));
+        let _ = writeln!(output, "- `{}`", step.expression);
       }
       output.push('\n');
     }

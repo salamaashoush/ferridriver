@@ -154,7 +154,7 @@ impl FeatureSet {
             if path.extension().and_then(|e| e.to_str()) == Some("feature") {
               let should_ignore = ignore
                 .iter()
-                .any(|ig| glob::Pattern::new(ig).map(|p| p.matches_path(&path)).unwrap_or(false));
+                .any(|ig| glob::Pattern::new(ig).is_ok_and(|p| p.matches_path(&path)));
               if !should_ignore {
                 files.push(path);
               }

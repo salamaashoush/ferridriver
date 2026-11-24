@@ -176,16 +176,16 @@ fn assign_slots(expression: &str, regex: &Regex, declared: Vec<(ParamType, usize
 
   for (ty, id) in declared {
     let prefix = format!("__{id}_");
-    let mut named = Vec::new();
+    let mut own_groups = Vec::new();
     while let Some(Some(name)) = names.get(group) {
       if !name.starts_with(&prefix) {
         break;
       }
-      named.push(name.clone());
+      own_groups.push(name.clone());
       group += 1;
     }
 
-    let slot = if named.is_empty() {
+    let slot = if own_groups.is_empty() {
       match names.get(group) {
         Some(None) => {
           let at = group;
@@ -205,7 +205,7 @@ fn assign_slots(expression: &str, regex: &Regex, declared: Vec<(ParamType, usize
         },
       }
     } else {
-      ParamSlot::Named(named)
+      ParamSlot::Named(own_groups)
     };
 
     infos.push(ParamInfo { ty, id, slot });
@@ -238,12 +238,11 @@ pub fn extract_params_with_custom(
 
   for info in infos {
     let cap = match &info.slot {
-      ParamSlot::Positional(index) => captures.get(*index).map(|m| m.as_str()).unwrap_or(""),
+      ParamSlot::Positional(index) => captures.get(*index).map_or("", |m| m.as_str()),
       ParamSlot::Named(names) => names
         .iter()
         .find_map(|name| captures.name(name))
-        .map(|m| m.as_str())
-        .unwrap_or(""),
+        .map_or("", |m| m.as_str()),
     };
 
     let param = match &info.ty {

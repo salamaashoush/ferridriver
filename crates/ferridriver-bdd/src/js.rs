@@ -1218,7 +1218,7 @@ pub fn translate_features_js(
             BrowserWorld::without_browser(Arc::clone(&test_info), request, browser_config)
           };
 
-          let result = session.run_scenario(&scenario, &mut world).await;
+          let result = Box::pin(session.run_scenario(&scenario, &mut world)).await;
           forward_attachments(&test_info, session.drain_attachments().await).await;
 
           if result.passed {

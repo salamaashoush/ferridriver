@@ -5,15 +5,21 @@
 //! retries, reporters).
 //!
 //! Run with:
-//!   cargo test -p bdd-example                      # run all scenarios (headed)
-//!   cargo test -p bdd-example -- --headless        # hide the browser
-//!   cargo test -p bdd-example -- --workers 2       # 2 parallel workers
-//!   cargo test -p bdd-example -- --list            # list scenarios
-//!   cargo test -p bdd-example -- --grep "TodoMVC"  # filter by name
+//!
+//! ```text
+//! cargo test -p bdd-example                      # run all scenarios (headed)
+//! cargo test -p bdd-example -- --headless        # hide the browser
+//! cargo test -p bdd-example -- --workers 2       # 2 parallel workers
+//! cargo test -p bdd-example -- --list            # list scenarios
+//! cargo test -p bdd-example -- --grep "TodoMVC"  # filter by name
+//! ```
 //!
 //! Environment variables:
-//!   FERRIDRIVER_FEATURES="features/**/*.feature"   # feature file globs
-//!   FERRIDRIVER_TAGS="@smoke and not @skip"         # tag filter
+//!
+//! ```text
+//! FERRIDRIVER_FEATURES="features/**/*.feature"   # feature file globs
+//! FERRIDRIVER_TAGS="@smoke and not @skip"         # tag filter
+//! ```
 
 use ferridriver_bdd::prelude::*;
 

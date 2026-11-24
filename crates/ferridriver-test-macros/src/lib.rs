@@ -32,19 +32,23 @@ use syn::{Expr, FnArg, ItemFn, ItemMod, Lit, Meta, Pat, Token, Type, parse_macro
 /// `retries`, `timeout`, `tag`, `skip`/`slow`/`fixme`/`fail`, `only`,
 /// `info`, plus context overrides (`viewport`, `locale`, ... or raw
 /// `use_options` JSON).
+/// When a `skip` / `slow` / `fixme` / `fail` annotation applies: a bare
+/// `skip` always, `skip = "firefox"` (or `"firefox | reason"`) only under
+/// that condition.
+enum Condition {
+  Always,
+  When(String),
+}
+
 #[derive(Default)]
 struct FerritestArgs {
   retries: Option<u32>,
   timeout_ms: Option<u64>,
   tags: Vec<String>,
-  /// None = not set, Some(None) = unconditional, Some(Some("firefox")) = conditional
-  skip: Option<Option<String>>,
-  /// None = not set, Some(None) = unconditional, Some(Some("ci")) = conditional
-  slow: Option<Option<String>>,
-  /// None = not set, Some(None) = unconditional, Some(Some("linux")) = conditional
-  fixme: Option<Option<String>>,
-  /// None = not set, Some(None) = unconditional, Some(Some("webkit")) = conditional
-  fail: Option<Option<String>>,
+  skip: Option<Condition>,
+  slow: Option<Condition>,
+  fixme: Option<Condition>,
+  fail: Option<Condition>,
   only: bool,
   /// Structured metadata annotations: `info = "type:description"`.
   infos: Vec<(String, String)>,
@@ -54,6 +58,10 @@ struct FerritestArgs {
   /// Context overrides from structured attribute keys (`viewport`,
   /// `locale`, ...), stored under their camelCase wire names.
   use_structured: serde_json::Map<String, serde_json::Value>,
+}
+
+fn option_tokens<T: quote::ToTokens>(value: Option<T>) -> proc_macro2::TokenStream {
+  value.map_or_else(|| quote! { None }, |v| quote! { Some(#v) })
 }
 
 fn lit_str(nv: &syn::MetaNameValue) -> syn::Result<String> {
@@ -78,15 +86,15 @@ fn lit_f64(nv: &syn::MetaNameValue) -> syn::Result<f64> {
   if let Expr::Lit(lit) = &nv.value {
     match &lit.lit {
       Lit::Float(f) => return f.base10_parse(),
-      Lit::Int(i) => return i.base10_parse::<i64>().map(|v| v as f64),
+      Lit::Int(i) => return i.base10_parse::<f64>(),
       _ => {},
     }
   }
   Err(syn::Error::new(nv.value.span(), "expected a numeric literal"))
 }
 
-/// Structured context-override keys: snake_case attribute name to the
-/// camelCase wire key used by the runner's `use_options` JSON.
+/// Structured context-override keys: `snake_case` attribute name to the
+/// `camelCase` wire key used by the runner's `use_options` JSON.
 const USE_STR_KEYS: &[(&str, &str)] = &[
   ("locale", "locale"),
   ("color_scheme", "colorScheme"),
@@ -128,10 +136,10 @@ impl FerritestArgs {
           },
           "timeout" => self.timeout_ms = Some(parse_duration_str(&lit_str(nv)?)?),
           "tag" => self.tags.push(lit_str(nv)?),
-          "skip" => self.skip = Some(Some(lit_str(nv)?)),
-          "slow" => self.slow = Some(Some(lit_str(nv)?)),
-          "fixme" => self.fixme = Some(Some(lit_str(nv)?)),
-          "fail" => self.fail = Some(Some(lit_str(nv)?)),
+          "skip" => self.skip = Some(Condition::When(lit_str(nv)?)),
+          "slow" => self.slow = Some(Condition::When(lit_str(nv)?)),
+          "fixme" => self.fixme = Some(Condition::When(lit_str(nv)?)),
+          "fail" => self.fail = Some(Condition::When(lit_str(nv)?)),
           "info" => {
             let val = lit_str(nv)?;
             if let Some((type_name, desc)) = val.split_once(':') {
@@ -192,10 +200,10 @@ impl FerritestArgs {
       Meta::Path(p) => {
         let ident = p.get_ident().map(ToString::to_string).unwrap_or_default();
         match ident.as_str() {
-          "skip" => self.skip = Some(None),
-          "slow" => self.slow = Some(None),
-          "fixme" => self.fixme = Some(None),
-          "fail" => self.fail = Some(None),
+          "skip" => self.skip = Some(Condition::Always),
+          "slow" => self.slow = Some(Condition::Always),
+          "fixme" => self.fixme = Some(Condition::Always),
+          "fail" => self.fail = Some(Condition::Always),
           "only" => self.only = true,
           other => {
             if let Some((_, wire)) = USE_BOOL_KEYS.iter().find(|(attr, _)| *attr == other) {
@@ -230,14 +238,14 @@ impl FerritestArgs {
 
   fn annotations(&self) -> Vec<proc_macro2::TokenStream> {
     // Helper: parse "condition" or "condition | reason" into (condition, reason) tokens.
-    fn annotation_tokens(variant: &str, arg: &Option<Option<String>>, annotations: &mut Vec<proc_macro2::TokenStream>) {
+    fn annotation_tokens(variant: &str, arg: Option<&Condition>, annotations: &mut Vec<proc_macro2::TokenStream>) {
       let variant_ident = quote::format_ident!("{}", variant);
       match arg {
-        Some(None) => {
+        Some(Condition::Always) => {
           annotations
             .push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident { reason: None, condition: None } });
         },
-        Some(Some(val)) => {
+        Some(Condition::When(val)) => {
           // Support "condition | reason" format.
           if let Some((cond, reason)) = val.split_once('|') {
             let cond = cond.trim();
@@ -258,10 +266,10 @@ impl FerritestArgs {
     }
 
     let mut annotations = Vec::new();
-    annotation_tokens("Skip", &self.skip, &mut annotations);
-    annotation_tokens("Slow", &self.slow, &mut annotations);
-    annotation_tokens("Fixme", &self.fixme, &mut annotations);
-    annotation_tokens("Fail", &self.fail, &mut annotations);
+    annotation_tokens("Skip", self.skip.as_ref(), &mut annotations);
+    annotation_tokens("Slow", self.slow.as_ref(), &mut annotations);
+    annotation_tokens("Fixme", self.fixme.as_ref(), &mut annotations);
+    annotation_tokens("Fail", self.fail.as_ref(), &mut annotations);
     if self.only {
       annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
     }
@@ -465,18 +473,9 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   let fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
   let annotations = args.annotations();
-  let retries_expr = match args.retries {
-    Some(r) => quote! { Some(#r) },
-    None => quote! { None },
-  };
-  let timeout_ms_expr = match args.timeout_ms {
-    Some(ms) => quote! { Some(#ms) },
-    None => quote! { None },
-  };
-  let use_options_expr = match args.use_options_json() {
-    Some(json) => quote! { Some(#json) },
-    None => quote! { None },
-  };
+  let retries_expr = option_tokens(args.retries);
+  let timeout_ms_expr = option_tokens(args.timeout_ms);
+  let use_options_expr = option_tokens(args.use_options_json());
 
   let (line_expr, column_expr) = source_position(fn_name);
 
@@ -618,18 +617,9 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     .collect();
 
   let annotations = args.common.annotations();
-  let retries_expr = match args.common.retries {
-    Some(r) => quote! { Some(#r) },
-    None => quote! { None },
-  };
-  let timeout_ms_expr = match args.common.timeout_ms {
-    Some(ms) => quote! { Some(#ms) },
-    None => quote! { None },
-  };
-  let use_options_expr = match args.common.use_options_json() {
-    Some(json) => quote! { Some(#json) },
-    None => quote! { None },
-  };
+  let retries_expr = option_tokens(args.common.retries);
+  let timeout_ms_expr = option_tokens(args.common.timeout_ms);
+  let use_options_expr = option_tokens(args.common.use_options_json());
 
   let (line_expr, column_expr) = source_position(fn_name);
 

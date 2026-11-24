@@ -94,7 +94,7 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
   // Infer content type from extension.
   let content_type = match path.extension().and_then(|e| e.to_str()) {
     Some("json") => "application/json",
-    Some("html") | Some("htm") => "text/html",
+    Some("html" | "htm") => "text/html",
     Some("xml") => "application/xml",
     Some("txt") => "text/plain",
     Some("css") => "text/css",
@@ -131,7 +131,7 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
 
   let content_type = match path.extension().and_then(|e| e.to_str()) {
     Some("json") => "application/json",
-    Some("html") | Some("htm") => "text/html",
+    Some("html" | "htm") => "text/html",
     Some("xml") => "application/xml",
     Some("txt") => "text/plain",
     Some("css") => "text/css",
@@ -252,12 +252,12 @@ fn last_response(world: &BrowserWorld) -> Result<LastFetchResponse, StepError> {
 #[when("I fetch {string}")]
 async fn fetch_url(world: &mut BrowserWorld, url: String) {
   let js = format!(
-    r#"(async () => {{
+    r"(async () => {{
       const r = await fetch({url});
       const hdrs = {{}};
       r.headers.forEach((v, k) => {{ hdrs[k] = v; }});
       return JSON.stringify({{ status: r.status, body: await r.text(), headers: hdrs }});
-    }})()"#,
+    }})()",
     url = serde_json::to_string(&url).unwrap_or_else(|_| format!("\"{url}\""))
   );
   let result = world
@@ -328,11 +328,7 @@ async fn response_body_should_equal(world: &mut BrowserWorld, expected: String) 
 #[then("the response header {string} should contain {string}")]
 async fn response_header_should_contain(world: &mut BrowserWorld, header: String, expected: String) {
   let resp = last_response(world)?;
-  let header_val = resp
-    .headers
-    .get(&header.to_lowercase())
-    .map(String::as_str)
-    .unwrap_or("");
+  let header_val = resp.headers.get(&header.to_lowercase()).map_or("", String::as_str);
   if !header_val.contains(&expected) {
     return Err(StepError {
       message: format!("response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"),

@@ -22,11 +22,13 @@ use ferridriver_bdd_macros::{then, when};
 /// Stored API response for assertion chaining.
 struct LastHttpResponse(HttpResponse);
 
-fn get_or_create_ctx(world: &mut BrowserWorld) -> &HttpClient {
+fn get_or_create_ctx(world: &mut BrowserWorld) -> Result<&HttpClient, StepError> {
   if world.get_state::<HttpClient>().is_none() {
     world.set_state(HttpClient::new(HttpClientOptions::default()));
   }
-  world.get_state::<HttpClient>().unwrap()
+  world
+    .get_state::<HttpClient>()
+    .ok_or_else(|| StepError::from("API request client was not stored in the world"))
 }
 
 fn last_api_response(world: &BrowserWorld) -> Result<&HttpResponse, StepError> {
@@ -41,7 +43,7 @@ fn last_api_response(world: &BrowserWorld) -> Result<&HttpResponse, StepError> {
 #[when("I send a GET request to {string}")]
 async fn send_get(world: &mut BrowserWorld, url: String) {
   let url_resolved = super::resolve_url(&url);
-  let ctx = get_or_create_ctx(world);
+  let ctx = get_or_create_ctx(world)?;
   let resp = ctx
     .get(&url_resolved)
     .await
@@ -52,7 +54,7 @@ async fn send_get(world: &mut BrowserWorld, url: String) {
 #[when("I send a POST request to {string}")]
 async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
   let url_resolved = super::resolve_url(&url);
-  let ctx = get_or_create_ctx(world);
+  let ctx = get_or_create_ctx(world)?;
   let resp = ctx
     .post(&url_resolved)
     .await
@@ -64,7 +66,7 @@ async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
 async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: Option<&str>) {
   let url_resolved = super::resolve_url(&url);
   let body = docstring.unwrap_or("").to_string();
-  let ctx = get_or_create_ctx(world);
+  let ctx = get_or_create_ctx(world)?;
   let opts = RequestOptions {
     json_data: serde_json::from_str(&body).ok(),
     data: if serde_json::from_str::<serde_json::Value>(&body).is_err() {
@@ -86,7 +88,7 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
 async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Option<&str>) {
   let url_resolved = super::resolve_url(&url);
   let body = docstring.unwrap_or("").to_string();
-  let ctx = get_or_create_ctx(world);
+  let ctx = get_or_create_ctx(world)?;
   let opts = RequestOptions {
     json_data: serde_json::from_str(&body).ok(),
     data: if serde_json::from_str::<serde_json::Value>(&body).is_err() {
@@ -107,7 +109,7 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
 #[when("I send a DELETE request to {string}")]
 async fn send_delete(world: &mut BrowserWorld, url: String) {
   let url_resolved = super::resolve_url(&url);
-  let ctx = get_or_create_ctx(world);
+  let ctx = get_or_create_ctx(world)?;
   let resp = ctx
     .delete(&url_resolved)
     .await
@@ -119,7 +121,7 @@ async fn send_delete(world: &mut BrowserWorld, url: String) {
 async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: Option<&str>) {
   let url_resolved = super::resolve_url(&url);
   let body = docstring.unwrap_or("").to_string();
-  let ctx = get_or_create_ctx(world);
+  let ctx = get_or_create_ctx(world)?;
   let opts = RequestOptions {
     json_data: serde_json::from_str(&body).ok(),
     data: if serde_json::from_str::<serde_json::Value>(&body).is_err() {
@@ -142,7 +144,7 @@ async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: 
 #[then("the API response status should be {int}")]
 async fn api_response_status(world: &mut BrowserWorld, expected: i64) {
   let resp = last_api_response(world)?;
-  let actual = resp.status() as i64;
+  let actual = i64::from(resp.status());
   if actual != expected {
     return Err(StepError {
       message: format!("expected API response status {expected}, got {actual}"),

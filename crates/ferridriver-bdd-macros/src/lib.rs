@@ -250,11 +250,6 @@ fn generate_step(kind: &str, attr: TokenStream, item: TokenStream) -> TokenStrea
 fn type_to_extraction(ty: &syn::Type, idx: usize) -> proc_macro2::TokenStream {
   let type_str = quote!(#ty).to_string();
   match type_str.trim() {
-    "String" => quote! {
-      __params.get(#idx)
-        .and_then(|p| p.as_string())
-        .unwrap_or_default()
-    },
     "i64" => quote! {
       __params.get(#idx)
         .and_then(|p| p.as_int())
@@ -275,6 +270,41 @@ fn type_to_extraction(ty: &syn::Type, idx: usize) -> proc_macro2::TokenStream {
 
 // ── Hook macro codegen ──
 
+fn hook_point_tokens(prefix: &str, point: &str) -> proc_macro2::TokenStream {
+  let before = prefix == "Before";
+  match point {
+    "all" => {
+      if before {
+        quote! { ferridriver_bdd::hook::HookPoint::BeforeAll }
+      } else {
+        quote! { ferridriver_bdd::hook::HookPoint::AfterAll }
+      }
+    },
+    "feature" => {
+      if before {
+        quote! { ferridriver_bdd::hook::HookPoint::BeforeFeature }
+      } else {
+        quote! { ferridriver_bdd::hook::HookPoint::AfterFeature }
+      }
+    },
+    "scenario" => {
+      if before {
+        quote! { ferridriver_bdd::hook::HookPoint::BeforeScenario }
+      } else {
+        quote! { ferridriver_bdd::hook::HookPoint::AfterScenario }
+      }
+    },
+    "step" => {
+      if before {
+        quote! { ferridriver_bdd::hook::HookPoint::BeforeStep }
+      } else {
+        quote! { ferridriver_bdd::hook::HookPoint::AfterStep }
+      }
+    },
+    _ => unreachable!(),
+  }
+}
+
 fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStream {
   let args = parse_macro_input!(attr as HookArgs);
   let input = parse_macro_input!(item as ItemFn);
@@ -288,42 +318,11 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
   let point = &args.point;
   let order = args.order;
 
-  let hook_point = match point.as_str() {
-    "all" => {
-      if prefix == "Before" {
-        quote! { ferridriver_bdd::hook::HookPoint::BeforeAll }
-      } else {
-        quote! { ferridriver_bdd::hook::HookPoint::AfterAll }
-      }
-    },
-    "feature" => {
-      if prefix == "Before" {
-        quote! { ferridriver_bdd::hook::HookPoint::BeforeFeature }
-      } else {
-        quote! { ferridriver_bdd::hook::HookPoint::AfterFeature }
-      }
-    },
-    "scenario" => {
-      if prefix == "Before" {
-        quote! { ferridriver_bdd::hook::HookPoint::BeforeScenario }
-      } else {
-        quote! { ferridriver_bdd::hook::HookPoint::AfterScenario }
-      }
-    },
-    "step" => {
-      if prefix == "Before" {
-        quote! { ferridriver_bdd::hook::HookPoint::BeforeStep }
-      } else {
-        quote! { ferridriver_bdd::hook::HookPoint::AfterStep }
-      }
-    },
-    _ => unreachable!(),
-  };
-
-  let tag_filter_expr = match &args.tags {
-    Some(tags) => quote! { Some(#tags.to_string()) },
-    None => quote! { None },
-  };
+  let hook_point = hook_point_tokens(prefix, point);
+  let tag_filter_expr = args
+    .tags
+    .as_ref()
+    .map_or_else(|| quote! { None }, |tags| quote! { Some(#tags.to_string()) });
 
   // Determine handler variant based on hook point.
   let is_global = point == "all";

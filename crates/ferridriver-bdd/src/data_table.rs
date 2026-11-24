@@ -66,6 +66,7 @@ impl DataTable {
   }
 
   /// Transpose rows and columns.
+  #[must_use]
   pub fn transpose(&self) -> DataTable {
     if self.rows.is_empty() {
       return DataTable::new(Vec::new());

@@ -164,10 +164,13 @@ macro_rules! bdd_main {
 pub fn run_bdd_harness() {
   ferridriver_test::logging::init_from_env();
 
-  let rt = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .expect("failed to build tokio runtime");
+  let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    Ok(rt) => rt,
+    Err(e) => {
+      eprintln!("failed to build tokio runtime: {e}");
+      std::process::exit(1);
+    },
+  };
 
   let exit_code = rt.block_on(async {
     let overrides = ferridriver_test::parse_common_cli_args();
@@ -175,7 +178,7 @@ pub fn run_bdd_harness() {
       eprintln!("config error: {e}");
       std::process::exit(1);
     });
-    run_bdd_with(config, overrides).await
+    Box::pin(run_bdd_with(config, overrides)).await
   });
 
   std::process::exit(exit_code);
@@ -197,10 +200,10 @@ pub async fn run_bdd_with(
 
   // BDD-specific feature glob defaults from env vars (used by the macro entry
   // point; the CLI subcommand sets `config.features` explicitly).
-  let feature_patterns = std::env::var("FERRIDRIVER_FEATURES")
-    .ok()
-    .map(|s| s.split(',').map(String::from).collect::<Vec<_>>())
-    .unwrap_or_else(|| vec!["features/**/*.feature".to_string()]);
+  let feature_patterns = std::env::var("FERRIDRIVER_FEATURES").ok().map_or_else(
+    || vec!["features/**/*.feature".to_string()],
+    |s| s.split(',').map(String::from).collect::<Vec<_>>(),
+  );
 
   if config.features.is_empty() {
     config.features = feature_patterns;
@@ -297,7 +300,7 @@ pub async fn run_bdd_with(
       let js_globs = js_globs.clone();
       let extensions = extensions.clone();
       Box::pin(async move {
-        match build_bdd_plans(&config, &js_globs, &extensions, changed.as_deref()).await {
+        match Box::pin(build_bdd_plans(&config, &js_globs, &extensions, changed.as_deref())).await {
           // Watch and UI rebuild the shared plan only: a per-project
           // rebuild would have to reach the runner between cycles, and
           // the factory hands back one plan. A project-scoped BDD suite
@@ -314,7 +317,7 @@ pub async fn run_bdd_with(
     let code = if ui_mode {
       Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
     } else {
-      runner.run_watch(factory, cwd).await
+      Box::pin(runner.run_watch(factory, cwd)).await
     };
     // Worker VMs outlive the individual cycles, so their `AfterAll`
     // hooks and worker-scoped fixtures are torn down once, here.
@@ -322,7 +325,7 @@ pub async fn run_bdd_with(
     return code;
   }
 
-  let plans = match build_bdd_plans(&config, &js_globs, &extensions, None).await {
+  let plans = match Box::pin(build_bdd_plans(&config, &js_globs, &extensions, None)).await {
     Ok(built) => built,
     Err(e) => {
       eprintln!("{e}");

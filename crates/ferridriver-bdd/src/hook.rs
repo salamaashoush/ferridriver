@@ -149,7 +149,7 @@ impl HookRegistry {
       match &hook.handler {
         HookHandler::Step(handler) => handler(world, step_text).await?,
         HookHandler::Scenario(handler) => handler(world).await?,
-        _ => {},
+        HookHandler::Global(_) => {},
       }
     }
     Ok(())

@@ -78,8 +78,7 @@ pub fn translate_features(
       // Use current time as seed when no explicit seed given.
       std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(42)
+        .map_or(42, |d| d.as_nanos() as u64)
     };
 
     tracing::info!("shuffling scenarios with seed {seed}");
@@ -113,7 +112,7 @@ fn build_feature_hooks(registry: Arc<StepRegistry>, feature_tags: Vec<String>, c
       let feature_tags = before_tags.clone();
       let browser_config = before_browser_config.clone();
       Box::pin(async move {
-        let mut world = build_world_from_pool(pool, browser_config).await?;
+        let mut world = Box::pin(build_world_from_pool(pool, browser_config)).await?;
         registry
           .hooks()
           .run_suite(HookPoint::BeforeAll, &mut world, &feature_tags)
@@ -126,7 +125,7 @@ fn build_feature_hooks(registry: Arc<StepRegistry>, feature_tags: Vec<String>, c
       let feature_tags = after_tags.clone();
       let browser_config = after_browser_config.clone();
       Box::pin(async move {
-        let mut world = build_world_from_pool(pool, browser_config).await?;
+        let mut world = Box::pin(build_world_from_pool(pool, browser_config)).await?;
         registry
           .hooks()
           .run_suite(HookPoint::AfterAll, &mut world, &feature_tags)

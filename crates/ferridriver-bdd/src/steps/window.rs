@@ -79,7 +79,7 @@ async fn should_see_tab_count(world: &mut BrowserWorld, expected: i64) {
   let expected_count = expected as usize;
   expect_poll(move || {
     let c = ctx.clone();
-    async move { c.discover_pages().await.map(|p| p.len()).unwrap_or(0) }
+    async move { c.discover_pages().await.map_or(0, |p| p.len()) }
   })
   .with_timeout(Duration::from_secs(5))
   .to_equal(expected_count)

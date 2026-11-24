@@ -83,7 +83,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
   let handler = step_match.def.handler.clone();
   let params = step_match.params;
 
-  expect::to_pass(timeout, || {
+  Box::pin(expect::to_pass(timeout, || {
     let handler = handler.clone();
     let params = params.clone();
     let base_fixtures = base_fixtures.clone();
@@ -95,7 +95,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
         .await
         .map_err(|e| AssertionFailure::new(e.message, None))
     }
-  })
+  }))
   .await
   .map_err(to_step_err)?;
 }

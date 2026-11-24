@@ -5,6 +5,7 @@
 //! to receive per-step events in real-time (TestInfo reporting in the test
 //! runner, progress notifications in MCP, etc.).
 
+use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -318,7 +319,7 @@ impl ScenarioExecutor {
         if !suggestions.is_empty() {
           msg.push_str("\n  did you mean:");
           for s in &suggestions {
-            msg.push_str(&format!("\n    - {s}"));
+            let _ = write!(msg, "\n    - {s}");
           }
         }
         if self.strict {
@@ -334,7 +335,7 @@ impl ScenarioExecutor {
       }) => {
         let mut msg = format!("ambiguous step: \"{t}\" matched {} definitions:", matches.len());
         for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
-          msg.push_str(&format!("\n  {}. {} ({})", i + 1, expr, loc));
+          let _ = write!(msg, "\n  {}. {} ({})", i + 1, expr, loc);
         }
         Err(crate::step::StepError::from(msg))
       },
