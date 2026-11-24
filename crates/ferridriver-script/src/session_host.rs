@@ -208,14 +208,8 @@ impl ScriptHost for SessionScriptHost {
 
     // Captured before the run so the page handle is in scope afterwards; the
     // read itself happens once the script is done.
-    let started_on = run_context.page.clone();
+    let left_on = run_context.page.clone();
     let context_ref = run_context.browser_context.clone();
-    // Under the slot lock, so a popup counted after this mark was opened by
-    // this run and no other.
-    let popups_before = match &context_ref {
-      Some(context) => context.popups_listed().await,
-      None => 0,
-    };
     // The output directory outlives this run, so its record has to be
     // diffed to tell this run's outputs from every earlier run's.
     let artifacts_before = self
@@ -257,16 +251,13 @@ impl ScriptHost for SessionScriptHost {
       }
     }
 
-    // A tab the run opened is waited for and becomes the page the next run
-    // acts on; one that opens later is listed and leaves the focus alone.
-    let mut left_on = started_on;
+    // A tab the run opened is waited for, so the context lists it once the
+    // run answers. It stays a tab a client selects: the run is left on the
+    // page it ran on.
     if let (Some(context), Some(page)) = (&context_ref, &left_on) {
       let within = std::time::Duration::from_millis(page.default_navigation_timeout());
       if let Err(error) = context.opened_pages_settled(within).await {
         tracing::debug!(%error, "tabs the run opened are not all listed yet");
-      }
-      if let Some(popup) = context.activate_popup_since(popups_before).await {
-        left_on = Some(ferridriver::Page::with_context(popup, context.as_ref().clone()));
       }
     }
 

@@ -149,6 +149,8 @@ struct BrowserInstance {
   /// the generation changes — a relaunch/reconnect under the same
   /// instance name is a *different* browser session.
   generation: u64,
+  /// What every context of this instance does when its active page closes.
+  refocus: crate::context::Refocus,
 }
 
 enum PendingOwner {
@@ -207,7 +209,7 @@ impl BrowserInstance {
     self
       .contexts
       .entry(name.to_string())
-      .or_insert_with(|| BrowserContext::new(name.to_string()))
+      .or_insert_with(|| BrowserContext::new(name.to_string(), self.refocus))
   }
 
   fn context_mut_checked(&mut self, name: &str) -> Result<&mut BrowserContext> {
@@ -305,8 +307,8 @@ pub enum ClosedContexts {
 pub(crate) enum Listing {
   /// A page opened through ferridriver, which becomes the active page.
   Active,
-  /// A page the browser opened, which the caller whose call opened it
-  /// activates ([`BrowserState::activate_popup_since`]).
+  /// A page the browser opened, which becomes the active page only when
+  /// its context has none.
   Popup,
 }
 
@@ -1229,6 +1231,7 @@ impl BrowserState {
       browser: allocation.take_browser().await?,
       contexts: HashMap::default(),
       generation,
+      refocus: crate::context::Refocus::default(),
     }
     .into();
     let install = Box::pin(self.finish_install_instance(
@@ -1264,6 +1267,7 @@ impl BrowserState {
         browser,
         contexts: HashMap::default(),
         generation,
+        refocus: crate::context::Refocus::default(),
       }
       .into(),
     ));
@@ -2410,29 +2414,19 @@ impl BrowserState {
     Ok(())
   }
 
-  /// How many popups `context` has listed: the mark a caller takes before
-  /// a call, to activate only a popup that call opened
-  /// ([`Self::activate_popup_since`]).
-  #[must_use]
-  pub fn popups_listed(&self, context: &str) -> u64 {
-    let key = self.session_key(context);
-    self
-      .instance(&key.instance)
-      .and_then(|inst| inst.context(&key.context))
-      .map_or(0, BrowserContext::popups_listed)
-  }
-
-  /// Make the latest popup `context` listed after `mark` its active page.
-  /// Returns whether there was one to activate.
-  pub fn activate_popup_since(&mut self, context: &str, mark: u64) -> bool {
-    let key = self.session_key(context);
-    let Ok(inst) = self.instance_mut(&key.instance) else {
-      return false;
-    };
-    let Ok(ctx) = inst.context_mut_checked(&key.context) else {
-      return false;
-    };
-    ctx.activate_popup_since(mark)
+  /// Set which page each context of `instance` makes active when its
+  /// active page closes, for the contexts it has and the ones it makes.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance does not exist.
+  pub fn set_refocus(&mut self, instance: &str, refocus: crate::context::Refocus) -> Result<()> {
+    let inst = self.instance_mut(instance)?;
+    inst.refocus = refocus;
+    for ctx in inst.contexts.values_mut() {
+      ctx.refocus = refocus;
+    }
+    Ok(())
   }
 
   /// Same as `open_page` but accepts a pre-parsed `SessionKey` (avoids re-parsing).
@@ -2671,6 +2665,44 @@ impl BrowserState {
     Ok(())
   }
 
+  /// Make `page` the active page of `context`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist or `page` is not one of
+  /// its open pages.
+  pub fn select_open_page(&mut self, context: &str, page: &AnyPage) -> Result<()> {
+    let key = self.session_key(context);
+    let inst = self.instance_mut(&key.instance)?;
+    let ctx = inst.context_mut_checked(&key.context)?;
+    ctx.prune_closed_pages();
+    let index = ctx
+      .pages
+      .iter()
+      .position(|listed| listed.same_backend_page(page))
+      .ok_or_else(|| FerriError::invalid_argument("page", format!("not an open page of context '{context}'")))?;
+    ctx.active_page_idx = index;
+    Ok(())
+  }
+
+  /// The open pages of `context` in the order they were listed, which is
+  /// the order [`Self::select_page`] indexes, and which of them is active.
+  /// `None` for the index once nothing is open.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist.
+  pub fn open_pages(&mut self, context: &str) -> Result<(Vec<AnyPage>, Option<usize>)> {
+    let key = self.session_key(context);
+    let context_pages = self.context_pages.clone();
+    let inst = self.instance_mut(&key.instance)?;
+    let ctx = inst.context_mut_checked(&key.context)?;
+    ctx.prune_closed_pages();
+    context_pages.set(&key.to_composite(), &ctx.pages);
+    let active = (!ctx.pages.is_empty()).then(|| ctx.active_page_idx.min(ctx.pages.len() - 1));
+    Ok((ctx.pages.clone(), active))
+  }
+
   /// Close one page of a context: ask the browser to close the target,
   /// release the page's local resources, and drop it from the context.
   ///
@@ -2689,10 +2721,7 @@ impl BrowserState {
     if page_idx >= ctx.pages.len() {
       return Err(FerriError::Backend(format!("Page index {page_idx} out of range")));
     }
-    let page = ctx.pages.remove(page_idx);
-    if ctx.active_page_idx >= ctx.pages.len() {
-      ctx.active_page_idx = ctx.pages.len().saturating_sub(1);
-    }
+    let page = ctx.remove_page(page_idx);
     context_pages.set(&key.to_composite(), &ctx.pages);
     // A page whose target is already gone (crashed, closed from the
     // page itself) still needs its local teardown, so the close failure

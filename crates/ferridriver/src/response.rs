@@ -34,13 +34,15 @@ pub mod section {
   pub const RESULT: &str = "Result";
   pub const CODE: &str = "Ran ferridriver code";
   pub const PAGE: &str = "Page";
+  pub const TABS: &str = "Open tabs";
 }
 
 /// A response under construction.
 ///
 /// Sections render in insertion order, and every caller adds them in the same
 /// order — failure first (an agent that reads nothing else must still see it),
-/// then the result, then the reproduction, then the page it is now looking at.
+/// then the result, then the reproduction, then the open tabs and the page it is
+/// now looking at.
 #[derive(Debug, Default)]
 pub struct Response {
   sections: Vec<Section>,
@@ -93,6 +95,15 @@ impl Response {
 
   pub fn page(&mut self, state: &PageState) {
     self.push(section::PAGE, state.lines(), None);
+  }
+
+  /// The context's open tabs, the current one marked. Nothing when there is
+  /// exactly one: it is the page the `### Page` section describes, which is
+  /// when Playwright MCP's response leaves the list out too.
+  pub fn tabs(&mut self, tabs: &[TabState]) {
+    if tabs.len() != 1 {
+      self.push(section::TABS, TabState::lines(tabs), None);
+    }
   }
 
   /// Markdown: `### Title` per section, source bodies fenced. Redacted.
@@ -199,6 +210,52 @@ impl PageState {
       lines.push(format!("- Uncaught page errors: {}", self.page_errors));
     }
     lines
+  }
+}
+
+/// One open tab of a context: what Playwright MCP's response lists under
+/// `### Open tabs`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TabState {
+  pub url: String,
+  pub title: String,
+  /// The context's active page, the one a call without a page acts on.
+  pub current: bool,
+}
+
+impl TabState {
+  /// The open pages of `context`, in the order `page(select)` indexes them.
+  /// Empty when the context does not exist.
+  pub async fn capture(state: &tokio::sync::RwLock<crate::state::BrowserState>, context: &str) -> Vec<Self> {
+    let Ok((pages, active)) = state.write().await.open_pages(context) else {
+      return Vec::new();
+    };
+    let mut tabs = Vec::with_capacity(pages.len());
+    for (index, page) in pages.iter().enumerate() {
+      tabs.push(Self {
+        url: page.url().await.ok().flatten().unwrap_or_default(),
+        title: page.title().await.ok().flatten().unwrap_or_default(),
+        current: active == Some(index),
+      });
+    }
+    tabs
+  }
+
+  /// The `### Open tabs` body, in Playwright MCP's `renderTabsMarkdown`
+  /// shape: `- 0: (current) [Title](url)`.
+  #[must_use]
+  pub fn lines(tabs: &[Self]) -> Vec<String> {
+    if tabs.is_empty() {
+      return vec!["No open tabs. Navigate to a URL to create one.".to_string()];
+    }
+    tabs
+      .iter()
+      .enumerate()
+      .map(|(index, tab)| {
+        let current = if tab.current { " (current)" } else { "" };
+        format!("- {index}:{current} [{}]({})", tab.title, tab.url)
+      })
+      .collect()
   }
 }
 
@@ -381,6 +438,40 @@ mod tests {
       "### Result\ndone\n\
        \n### Ran ferridriver code\n```ts\nawait page.goto('https://example.com');\n```\n\
        \n### Page\n- Page URL: https://example.com/\n- Page Title: Example\n- Console: 1 errors, 2 warnings\n"
+    );
+  }
+
+  #[test]
+  fn open_tabs_are_listed_unless_there_is_exactly_one() {
+    let tab = |url: &str, title: &str, current| TabState {
+      url: url.into(),
+      title: title.into(),
+      current,
+    };
+    let mut one = Response::new();
+    one.tabs(&[tab("https://example.com/", "Example", true)]);
+    assert!(one.render().is_empty(), "a single tab is the page section");
+
+    let mut two = Response::new();
+    two.tabs(&[
+      tab("https://example.com/", "Example", true),
+      tab("https://example.com/help", "Help", false),
+    ]);
+    assert_eq!(
+      two.render(),
+      "### Open tabs
+- 0: (current) [Example](https://example.com/)
+- 1: [Help](https://example.com/help)
+"
+    );
+
+    let mut none = Response::new();
+    none.tabs(&[]);
+    assert_eq!(
+      none.render(),
+      "### Open tabs
+No open tabs. Navigate to a URL to create one.
+"
     );
   }
 

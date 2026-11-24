@@ -72,6 +72,22 @@ Scripts that throw surface as `status: "error"` **in the payload** —
 not as MCP-level errors. Callers can inspect the failure without
 catching protocol exceptions.
 
+Beside either shape, `page` describes the page the session is on (`url`,
+`title`, console and page error counts), the one the next call acts on.
+When the session has more or fewer than one tab, `tabs` lists them in
+the order `page(select)` indexes them:
+
+```jsonc
+"tabs": [
+  { "index": 0, "url": "https://example.com/", "title": "Shop", "current": true },
+  { "index": 1, "url": "https://example.com/help", "title": "Help", "current": false }
+]
+```
+
+A tab the script opened (a popup, a `target=_blank` link) is listed there
+and stays unselected: the next call acts on `page` until
+`page(action: "select", page_index)` switches.
+
 ## Globals
 
 | Global    | What it is |

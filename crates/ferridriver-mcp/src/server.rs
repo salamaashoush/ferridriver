@@ -388,9 +388,11 @@ locators (`page.getByRole`, `page.getByText`, `page.locator(selector)`) over ref
 — they survive re-snapshots.\n\
 \n\
 == TAB MANAGEMENT ==\n\
-`page(action='list')` lists tabs, `page(action='select', page_index=N)` switches. Do \
-not use `evaluate` or `run_script` to enumerate tabs — CDP page-target mapping is \
-only exposed via the `page` tool.\n\
+`page(action='list')` lists tabs, `page(action='select', page_index=N)` switches. A tab \
+a page opens (a popup, a target=_blank link) is listed under `### Open tabs` in the \
+next response and never takes focus by itself: the page you were on stays current until \
+you select another. Do not use `evaluate` or `run_script` to enumerate tabs — CDP \
+page-target mapping is only exposed via the `page` tool.\n\
 \n\
 == SCRIPTING SAFETY ==\n\
 `run_script` runs in a sandboxed QuickJS runtime: no raw filesystem access (only \
@@ -1738,9 +1740,29 @@ impl McpServer {
   /// (soft failures produce inline error text instead).
   pub async fn action_ok(&self, page: &Arc<Page>, context: &str, msg: &str) -> Result<CallToolResult, ErrorData> {
     self.settle(page).await;
+    let tabs = self.tabs_section(context).await;
     let snap = self.snap(page, context).await;
     let tools = self.webmcp_section(page).await;
-    Ok(self.ok_text(format!("{msg}\n\n{snap}{tools}")))
+    Ok(self.ok_text(format!("{msg}\n\n{tabs}{snap}{tools}")))
+  }
+
+  /// The open tabs of `context`, in the order `page(select)` indexes them.
+  pub(crate) async fn open_tabs(&self, context: &str) -> Vec<ferridriver::response::TabState> {
+    ferridriver::response::TabState::capture(&self.state.state_arc(), context).await
+  }
+
+  /// `### Open tabs` and a blank line, ahead of a snapshot, as Playwright
+  /// MCP lists the tabs beside every snapshot; empty when there is exactly
+  /// one tab.
+  pub(crate) async fn tabs_section(&self, context: &str) -> String {
+    let mut response = ferridriver::response::Response::new().with_secrets(self.secrets.clone());
+    response.tabs(&self.open_tabs(context).await);
+    let rendered = response.render();
+    if rendered.is_empty() {
+      rendered
+    } else {
+      format!("{rendered}\n")
+    }
   }
 
   /// Wait until the tabs `context`'s browser has opened so far are listed,

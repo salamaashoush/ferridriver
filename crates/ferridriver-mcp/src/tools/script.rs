@@ -104,6 +104,31 @@ pub struct RunScriptOutput {
   /// Absent only if the page could not be read.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub page: Option<PageStateOut>,
+  /// The session's open tabs, the current one marked; `page(select)` with a
+  /// tab's `index` switches to it. Absent when there is exactly one, the
+  /// page above.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub tabs: Option<Vec<TabOut>>,
+}
+
+/// One open tab of the session.
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+pub struct TabOut {
+  pub index: usize,
+  pub url: String,
+  pub title: String,
+  pub current: bool,
+}
+
+impl From<(usize, ferridriver::response::TabState)> for TabOut {
+  fn from((index, tab): (usize, ferridriver::response::TabState)) -> Self {
+    Self {
+      index,
+      url: tab.url,
+      title: tab.title,
+      current: tab.current,
+    }
+  }
 }
 
 /// [`ferridriver::response::PageState`] with a schema, so the tool's declared
@@ -143,6 +168,7 @@ impl McpServer {
     result: &ferridriver_script::ScriptResult,
     code: &[String],
     code_language: Option<&str>,
+    tabs: &[ferridriver::response::TabState],
     page: Option<&ferridriver::response::PageState>,
   ) -> String {
     let mut response = ferridriver::response::Response::new().with_secrets(self.secrets.clone());
@@ -166,6 +192,7 @@ impl McpServer {
     if let Some(language) = code_language {
       response.code(code.to_vec(), ferridriver::codegen::OutputLanguage::parse_cli(language));
     }
+    response.tabs(tabs);
     if let Some(page) = page {
       response.page(page);
     }
@@ -197,7 +224,9 @@ impl McpServer {
     buffer (bounded; oldest kept) and deliver at the start of the next call. For reliable \
     cross-call observation poll `page.consoleMessages()` / `page.pageErrors()` (retained \
     history) or use `page.waitForEvent(event, { predicate })` inside one script. \
-    Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[], code[]? }. \
+    Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[], code[]?, page?, tabs? }. \
+    `page` is the page the session is on; a tab the script opened is listed in `tabs` and stays \
+    unselected, so the next call still acts on `page` until `page(action='select')` switches. \
     On `error`, the payload includes message, stack, line, column, and a source snippet around the failure. \
     Set `code_language` to also get back the source reproducing every action the script performed \
     (TypeScript, Rust, or Gherkin) — that is how an exploratory run becomes a committed test. \
@@ -215,9 +244,6 @@ impl McpServer {
     // Serialize per-session: a concurrent run_script / extension / navigation
     // call on the same session must not interleave browser state.
     let guard = self.session_guard(&session).await;
-    // Under the guard, so a popup counted after this mark was opened by
-    // this call and no other.
-    let popups_before = self.state.read().await.popups_listed(&session);
     McpServer::emit_progress(&peer, token.as_ref(), 0.0, Some(1.0), "executing script").await;
 
     let Some(script_root) = self.script_root.clone() else {
@@ -361,10 +387,10 @@ impl McpServer {
     // Where the script left the session. Captured after the run and before
     // the guard is released, so it describes the page the caller's NEXT call
     // will act on. Reading it opens no action span, so it never appears in
-    // the code the run just echoed. A tab the script opened is waited for
-    // and made the active page first, so the report names it.
+    // the code the run just echoed. A tab the script opened is waited for,
+    // so the tab list names it; it stays a tab the caller selects.
     self.opened_tabs_settled(&session).await;
-    self.state.write().await.activate_popup_since(&session, popups_before);
+    let tabs = self.open_tabs(&session).await;
     let page_state = match Box::pin(self.page(&session)).await {
       Ok(page) => Some(ferridriver::response::PageState::capture(&page).await),
       Err(e) => {
@@ -381,6 +407,7 @@ impl McpServer {
       result,
       code: code.clone(),
       page: page_state.clone().map(PageStateOut::from),
+      tabs: (tabs.len() != 1).then(|| tabs.iter().cloned().enumerate().map(TabOut::from).collect()),
     };
     let result = &output.result;
 
@@ -397,7 +424,7 @@ impl McpServer {
     // Ahead of it, the same run as titled sections — the shape an agent reads
     // without parsing. Cheap to skip past, and it is what carries the page
     // the session is now on into a skimmed reading.
-    let sections = self.run_script_sections(result, &code, p.code_language.as_deref(), page_state.as_ref());
+    let sections = self.run_script_sections(result, &code, p.code_language.as_deref(), &tabs, page_state.as_ref());
     if !sections.is_empty() {
       contents.insert(0, ContentBlock::text(sections));
     }

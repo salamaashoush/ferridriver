@@ -97,6 +97,14 @@ The MCP `page` tool manages the active page within a session:
 { "tool": "page", "arguments": { "action": "close", "page_index": 0 } }
 ```
 
+A tab a page opens (a popup, a `target=_blank` link) never becomes the
+active page by opening, as in Playwright MCP: the response to the call that
+opened it lists it under `### Open tabs` (and `tabs` in `run_script`'s
+JSON), the current one marked, and the session stays on the opener until
+`page(select)` switches. It becomes active by itself only when no other tab
+is open. When the active tab closes, the tab that took its place in the
+list becomes active, or the last one.
+
 After `page(select)` or `page(new)`, **refs from the previous
 `snapshot` become invalid** — re-snapshot before clicking.
 

@@ -32,9 +32,10 @@ impl McpServer {
         count
       };
       let page = Box::pin(self.page(s)).await?;
+      let tabs = self.tabs_section(s).await;
       let snap = self.snap(&page, s).await;
       Ok(self.ok_text(format!(
-        "Connected to browser at {url}. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
+        "Connected to browser at {url}. Found {page_count} existing page(s) in session '{s}'.\n\n{tabs}{snap}"
       )))
     } else if p.auto_discover.unwrap_or(false) {
       let channel = p.channel.unwrap_or_default().as_str();
@@ -48,9 +49,10 @@ impl McpServer {
         count
       };
       let page = Box::pin(self.page(s)).await?;
+      let tabs = self.tabs_section(s).await;
       let snap = self.snap(&page, s).await;
       Ok(self.ok_text(format!(
-        "Auto-connected to the {channel} browser. Found {page_count} existing page(s) in session '{s}'.\n\n{snap}"
+        "Auto-connected to the {channel} browser. Found {page_count} existing page(s) in session '{s}'.\n\n{tabs}{snap}"
       )))
     } else {
       Err(Self::err(
@@ -99,7 +101,7 @@ impl McpServer {
   #[tool(
     name = "page",
     title = "Manage Tabs",
-    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_context (close one session's context: its tabs, cookies and storage, leaving the browser up), close_instance (close one browser process and its contexts, leaving other instances alone -- also how you pick up changed per-instance chrome flags), close_browser (close every browser this server launched). Use 'list' to find tabs, then 'select' to switch.",
+    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_context (close one session's context: its tabs, cookies and storage, leaving the browser up), close_instance (close one browser process and its contexts, leaving other instances alone -- also how you pick up changed per-instance chrome flags), close_browser (close every browser this server launched). Use 'list' to find tabs, then 'select' to switch. A tab a page opens is listed and never becomes current until selected.",
     annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
   )]
   async fn page_manage(&self, Parameters(p): Parameters<PageParams>) -> Result<CallToolResult, ErrorData> {
@@ -138,9 +140,10 @@ impl McpServer {
               page.goto(url).await.map_err(Self::err)?;
             }
             self.invalidate_context(&s);
+            let tabs = self.tabs_section(&s).await;
             let snap = self.snap(&page, &s).await;
             let tools = self.webmcp_section(&page).await;
-            Ok(self.ok_text(format!("Opened new page in session '{s}'.\n\n{snap}{tools}")))
+            Ok(self.ok_text(format!("Opened new page in session '{s}'.\n\n{tabs}{snap}{tools}")))
           })
           .await
       },
