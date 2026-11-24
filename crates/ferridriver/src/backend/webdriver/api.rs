@@ -39,7 +39,7 @@ impl WebDriverPage {
   }
 
   pub(crate) fn frame_id(&self) -> String {
-    json!([self.target.window, self.target.frames]).to_string()
+    frame_id_of(&self.target)
   }
 
   pub(crate) fn in_frame(&self, frame_id: Option<&str>) -> Result<Self> {
@@ -376,6 +376,10 @@ impl WebDriverPage {
     }
     self.close().await
   }
+}
+
+pub(super) fn frame_id_of(target: &super::session::Target) -> String {
+  json!([target.window, target.frames]).to_string()
 }
 
 #[cfg(test)]

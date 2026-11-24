@@ -336,12 +336,8 @@ pub struct WebKitPage {
   keyboard: Arc<crate::backend::keyboard::KeyboardState>,
   /// Main-frame id captured from the initial `Page.getResourceTree`
   /// response. PW `WebKit`'s `frame_id` is distinct from `target_id`
-  /// (the page proxy's id); returning `target_id` from
-  /// `peek_main_frame_id` caused `main_frame()` to attach a phantom
-  /// record under the wrong key while `Page.frameNavigated` events
-  /// filled the real id with the navigated URL -- callers reading
-  /// `page.url()` then saw the empty phantom record. Mirrors CDP's
-  /// `main_frame_id` `OnceLock`.
+  /// (the page proxy's id), so event routing keys off this rather than
+  /// the target. Mirrors CDP's `main_frame_id` `OnceLock`.
   pub(crate) main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>>,
   /// Live WebSocket table, keyed by PW `WebKit` `requestId`. The network
   /// listener inserts on `Network.webSocketCreated`, emits frames on
@@ -646,7 +642,9 @@ impl WebKitPage {
       // The frame cache moves with the frame events in wire order, from
       // the connection's reader; set up before `Page.enable` sends the
       // first of them.
-      let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default()));
+      // The target id stands in for the main frame only until the resource
+      // tree below (or the first frame event) reports the frame's own id.
+      let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
       let frames = super::events::FrameTracker::new(Arc::clone(&frame_cache));
       frames.track_target(&target);
       frames.track_proxy(&proxy);
@@ -702,8 +700,16 @@ impl WebKitPage {
       let _ = target
         .send("Page.setBootstrapScript", json!({ "source": CONTEXT_MENU_SUPPRESSOR }))
         .await;
-      let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
-      let main_frame_id_cache = Arc::new(std::sync::Mutex::new(main_frame_id(resource_tree.as_ref())));
+      let resource_tree = target.send("Page.getResourceTree", json!({})).await?;
+      let main_frame_id_cache = Arc::new(std::sync::Mutex::new(main_frame_id(Some(&resource_tree))));
+      if let Some(root) = resource_tree.get("frameTree") {
+        let mut frames = Vec::new();
+        collect_frames(root, None, &mut frames);
+        frame_cache
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .seed(frames);
+      }
 
       let page = WebKitPage {
         proxy,
@@ -873,8 +879,8 @@ impl WebKitPage {
 
   /// Reset the main-frame id cache. Used after a cross-process target
   /// swap because the new target has a fresh main frame id distinct
-  /// from the old one. Next call to `peek_main_frame_id` returns `None`
-  /// until the listener re-seeds via `Page.frameNavigated`.
+  /// from the old one. The slot reads `None` until the listener
+  /// re-seeds it via `Page.frameNavigated`.
   fn main_frame_id_cache_clear(&self) {
     *self
       .main_frame_id_cache
@@ -1141,15 +1147,6 @@ impl WebKitPage {
       collect_frames(root, None, &mut frames);
     }
     Ok(frames)
-  }
-
-  #[must_use]
-  pub fn peek_main_frame_id(&self) -> Option<String> {
-    self
-      .main_frame_id_cache
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone()
   }
 
   /// The content-frame id hosted inside an `<iframe>`/`<frame>` element

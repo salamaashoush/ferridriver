@@ -1181,7 +1181,7 @@ impl FrameTracker {
       .remove(target_id)
       .unwrap_or_default();
     let mut cache = lock_cache(&self.cache);
-    *cache = crate::frame_cache::FrameCache::default();
+    cache.new_process();
     for env in &held {
       apply_frame_event(&mut cache, env);
     }
@@ -1786,7 +1786,7 @@ mod frame_event_tests {
 
   #[tokio::test(flavor = "current_thread")]
   async fn navigation_notification_preserves_children_restored_after_the_wire_event() {
-    let cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default()));
+    let cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new("initial")));
     let observed = Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default()));
     let emitter = crate::events::EventEmitter::new();
     assert!(emitter.set_state_observer(Arc::new(crate::page::page_state_observer(

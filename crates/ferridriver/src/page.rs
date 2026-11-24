@@ -121,13 +121,11 @@ impl Page {
 
   /// Construct a Page (no `BrowserContext`). Synchronous — only
   /// spawns the frame-cache listener; the eager `Page.getFrameTree`
-  /// RTT was dropped (see `PERF_AUDIT` §M.4). The listener seeds
-  /// the cache on the first frame event, and
-  /// `Self::ensure_frame_cache_seeded` does an on-demand fetch
-  /// only when a sync accessor fires before any navigation.
+  /// RTT was dropped (see `PERF_AUDIT` §M.4). The backend builds the
+  /// cache around the main frame's id, and frame events keep it fresh.
   #[must_use]
   pub fn new(inner: AnyPage) -> Arc<Self> {
-    let frame_cache = inner.frame_cache().clone();
+    let frame_cache = Arc::clone(inner.frame_cache());
     let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(UNSET_TIMEOUT),
@@ -159,7 +157,7 @@ impl Page {
   /// contract as [`Self::new`].
   #[must_use]
   pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Arc<Self> {
-    let frame_cache = inner.frame_cache().clone();
+    let frame_cache = Arc::clone(inner.frame_cache());
     let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(UNSET_TIMEOUT),
@@ -250,49 +248,6 @@ impl Page {
         }
       }
     });
-  }
-
-  /// Lazy frame-cache seed. Returns immediately when the cache
-  /// already has a main frame (populated either by a prior
-  /// `Page.frameNavigated` event or by an earlier call). Otherwise:
-  ///
-  /// 1. Tries the backend's cached `peek_main_frame_id()` first
-  ///    (populated for free from the `Page.navigate` response when
-  ///    the user has already called `goto`) — seeds a synthetic
-  ///    `FrameInfo` with that id and an empty url, no RTT.
-  /// 2. Falls back to `Page.getFrameTree` if the backend has no
-  ///    cached frame id (no prior navigation).
-  ///
-  /// Called from [`Self::goto`] after `inner.goto` returns to
-  /// guarantee `main_frame()` works for the synchronous accessor
-  /// the user is about to invoke. The RTT path fires at most once
-  /// per page lifetime and is skipped entirely for the common case
-  /// (navigate-then-query test flows — the bench's 100% case).
-  pub(crate) async fn ensure_frame_cache_seeded(self: &Arc<Self>) -> Result<()> {
-    let already_seeded = self.with_frame_cache(|c| c.main_frame_id().is_some());
-    if already_seeded {
-      return Ok(());
-    }
-    if let Some(fid) = self.inner.peek_main_frame_id() {
-      if let Ok(mut g) = self.frame_cache.lock()
-        && g.main_frame_id().is_none()
-      {
-        g.attach(crate::backend::FrameInfo {
-          frame_id: fid,
-          parent_frame_id: None,
-          name: String::new(),
-          url: String::new(),
-        });
-      }
-      return Ok(());
-    }
-    let infos = self.inner.get_frame_tree().await?;
-    if let Ok(mut g) = self.frame_cache.lock()
-      && g.main_frame_id().is_none()
-    {
-      g.seed(infos);
-    }
-    Ok(())
   }
 
   /// Refresh the frame cache from the backend without touching the
@@ -587,28 +542,14 @@ impl Page {
   }
 
   /// `(frame_id, is_main)` for every live frame, main frame first.
-  /// Falls back to the backend's main-frame id when the cache is cold
-  /// (fresh page before its first navigation event).
   pub(crate) fn trace_frame_list(&self) -> Vec<(std::sync::Arc<str>, bool)> {
     let (main_id, ids) = self.with_frame_cache(|c| {
-      let main = c.main_frame_id();
       let ids: Vec<std::sync::Arc<str>> = c.live_ids().collect();
-      (main, ids)
+      (c.main_frame_id(), ids)
     });
     let mut out: Vec<(std::sync::Arc<str>, bool)> = Vec::with_capacity(ids.len().max(1));
-    if let Some(ref main) = main_id {
-      out.push((std::sync::Arc::clone(main), true));
-    }
-    for id in ids {
-      if main_id.as_deref() != Some(&*id) {
-        out.push((id, false));
-      }
-    }
-    if out.is_empty()
-      && let Some(fid) = self.inner.peek_main_frame_id()
-    {
-      out.push((std::sync::Arc::from(fid), true));
-    }
+    out.push((std::sync::Arc::clone(&main_id), true));
+    out.extend(ids.into_iter().filter(|id| *id != main_id).map(|id| (id, false)));
     out
   }
 
@@ -767,18 +708,6 @@ impl Page {
     if matches!(result, Ok(Some(_))) {
       self.raise_observed_nav_marks(pre_nav);
     }
-    // PERF_AUDIT.md §M.4 — bootstrap no longer fetches `Page.getFrameTree`,
-    // so the wrapper's frame cache is empty on a fresh page until the
-    // first navigation event lands. The CDP backend captures the
-    // top-level `frameId` from `Page.navigate`'s response and we read
-    // it here via `peek_main_frame_id()` to seed the cache without
-    // an extra RTT — the synchronous `main_frame()` call the user is
-    // about to make then sees a populated cache. `ensure_frame_cache_seeded`
-    // is a no-op when a `Page.frameNavigated` event has already
-    // populated the cache via the listener (the common path on
-    // network-light tests where the listener task gets scheduled
-    // before goto returns).
-    let _ = self.ensure_frame_cache_seeded().await;
     // BiDi subframe seeding: WebDriver BiDi's `browsingContext.contextCreated`
     // fires asynchronously for child iframes after `browsingContext.navigate`
     // completes, and the iframe's `name` attribute lives in the DOM —
@@ -799,10 +728,8 @@ impl Page {
     //   runs.
     // - WebKit (Playwright WebKit, cross-platform): no FrameAttached
     //   events at all — the cache is populated solely by `get_frame_tree`'s
-    //   DOM probe, which must run after EVERY navigation since
-    //   `ensure_frame_cache_seeded`'s early-return on `main_frame_id`
-    //   present would otherwise skip refreshing the iframe set on a
-    //   reused page.
+    //   DOM probe, which must run after EVERY navigation to refresh the
+    //   iframe set on a reused page.
     self.finish_navigation(result).await
   }
 
@@ -974,8 +901,8 @@ impl Page {
   #[must_use]
   pub fn url(&self) -> String {
     let url = self.with_frame_cache(|c| {
-      c.main_frame_id()
-        .and_then(|id| c.record(&id).map(|r| r.info.url.clone()))
+      c.record(&c.main_frame_id())
+        .map(|r| r.info.url.clone())
         .unwrap_or_default()
     });
     // See [`Frame::url`]: no navigation has committed yet.
@@ -1272,7 +1199,7 @@ impl Page {
     for function in functions {
       self
         .inner
-        .expose_callback(&function.name, function.binding.clone())
+        .expose_callback(&function.name, Arc::clone(&function.binding))
         .await?;
     }
     Ok(())
@@ -3205,47 +3132,11 @@ impl Page {
   // [`Page::init_frame_cache`] and kept fresh by the listener task.
 
   /// Main frame of this page. Mirrors Playwright's `page.mainFrame():
-  /// Frame` (non-null).
-  ///
-  /// The cache is seeded one of three ways:
-  /// 1. The frame listener spawned in `seed_frame_cache` picks up a
-  ///    `FrameNavigated` event and writes `main_id`.
-  /// 2. `goto` calls `ensure_frame_cache_seeded` after the
-  ///    `Page.navigate` response lands, which seeds via the backend's
-  ///    `peek_main_frame_id()` (no RTT).
-  /// 3. Below: when this accessor is reached without (1) or (2) — for
-  ///    example, an MCP tool that constructs a fresh `Page` wrapper
-  ///    over an already-navigated inner page — we synchronously seed
-  ///    from `peek_main_frame_id()` so the user-visible API never
-  ///    panics on a live, navigated page.
-  ///
-  /// # Panics
-  ///
-  /// Panics only when the cache is empty AND the backend has never
-  /// observed a top-level frame (i.e. no navigation has ever occurred
-  /// on this inner page). This is genuine API misuse — Playwright
-  /// itself can't return a `Frame` either before the first navigation.
+  /// Frame` (non-null): the frame cache is built around the main frame
+  /// when the backend creates the page, so there always is one.
   #[must_use]
   pub fn main_frame(self: &Arc<Self>) -> Frame {
-    if let Some(id) = self.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id) {
-      return Frame::new(Arc::clone(self), id);
-    }
-    if let Some(fid) = self.inner.peek_main_frame_id() {
-      if let Ok(mut g) = self.frame_cache.lock()
-        && g.main_frame_id().is_none()
-      {
-        g.attach(crate::backend::FrameInfo {
-          frame_id: fid.clone(),
-          parent_frame_id: None,
-          name: String::new(),
-          url: String::new(),
-        });
-      }
-      return Frame::new(Arc::clone(self), Arc::from(fid));
-    }
-    panic!(
-      "Page::main_frame called before any navigation has occurred (no main frame id available from frame cache or backend)"
-    )
+    Frame::new(Arc::clone(self), self.with_frame_cache(FrameCache::main_frame_id))
   }
 
   /// All non-detached frames attached to the page, main-frame first.
@@ -3632,7 +3523,7 @@ impl Page {
   ///
   /// Returns an error if the navigation event does not occur within the timeout.
   pub fn expect_navigation(&self, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<()>> + use<> {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout());
+    let timeout = timeout_ms.unwrap_or_else(|| self.default_timeout());
     let loaded = self
       .inner
       .events()
@@ -3657,7 +3548,7 @@ impl Page {
     self
       .inner
       .events()
-      .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
+      .wait_for_event(event_name, timeout_ms.unwrap_or_else(|| self.default_timeout()))
   }
 
   /// Arm a waiter for `event_name`, run `action`, then resolve with the
@@ -3864,7 +3755,7 @@ impl Page {
   ) -> impl std::future::Future<Output = Result<crate::network::Request>> + Send + use<> {
     let event = self.inner.events().wait_for(
       move |e| matches!(e, PageEvent::Request(r) if matcher.matches(r.url())),
-      timeout_ms.unwrap_or(self.default_timeout()),
+      timeout_ms.unwrap_or_else(|| self.default_timeout()),
     );
     async move {
       match event.await? {
@@ -3889,7 +3780,7 @@ impl Page {
   ) -> impl std::future::Future<Output = Result<crate::network::Response>> + Send + use<> {
     let event = self.inner.events().wait_for(
       move |e| matches!(e, PageEvent::Response(r) if matcher.matches(r.url())),
-      timeout_ms.unwrap_or(self.default_timeout()),
+      timeout_ms.unwrap_or_else(|| self.default_timeout()),
     );
     async move {
       match event.await? {
@@ -4130,7 +4021,7 @@ impl Page {
     self.lock_highlights().clear();
     let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
     let main = self.with_frame_cache(FrameCache::main_frame_id);
-    for id in ids.iter().filter(|id| main.as_deref() != Some(&***id)) {
+    for id in ids.iter().filter(|id| **id != main) {
       let _ = self
         .inner
         .evaluate_in_frame("window.__fd && window.__fd._injected.hideHighlight()", id)
@@ -4196,7 +4087,7 @@ impl Page {
         .filter(|e| e.frame_id == id)
         .map(|e| (e.selector.clone(), e.style.clone()))
         .collect();
-      let frame_id = (main.as_deref() != Some(&*id)).then_some(&*id);
+      let frame_id = (main != id).then_some(&*id);
       if let Err(e) = crate::selectors::set_highlights(&self.inner, &mine, frame_id).await
         && !mine.is_empty()
       {
@@ -4310,7 +4201,7 @@ impl Page {
     let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
     let inner = &self.inner;
     let runs = ids.iter().map(|id| {
-      let is_main = main.as_deref() == Some(&**id);
+      let is_main = main == *id;
       async move {
         let _ = if is_main {
           inner.evaluate(expression).await
@@ -4437,11 +4328,10 @@ impl Page {
     use std::sync::Mutex;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::dialog::Dialog>();
     let tx = Arc::new(Mutex::new(Some(tx)));
-    let tx_clone = tx.clone();
     // Claimed from the call, so one the caller triggers before awaiting
     // is not missed.
     let id = self.inner.dialog_manager().add_handler(Arc::new(move |dialog| {
-      let mut guard = match tx_clone.lock() {
+      let mut guard = match tx.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
       };
@@ -4511,11 +4401,10 @@ impl Page {
     use std::sync::Mutex;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::file_chooser::FileChooser>();
     let tx = Arc::new(Mutex::new(Some(tx)));
-    let tx_clone = tx.clone();
     // Claimed from the call, so one the caller triggers before awaiting
     // is not missed.
     let id = self.inner.file_chooser_manager().add_handler(Arc::new(move |chooser| {
-      let mut guard = match tx_clone.lock() {
+      let mut guard = match tx.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
       };
@@ -4591,11 +4480,10 @@ impl Page {
     use std::sync::Mutex;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::download::Download>();
     let tx = Arc::new(Mutex::new(Some(tx)));
-    let tx_clone = tx.clone();
     // Claimed from the call, so one the caller triggers before awaiting
     // is not missed.
     let id = self.inner.download_manager().add_handler(Arc::new(move |download| {
-      let mut guard = match tx_clone.lock() {
+      let mut guard = match tx.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
       };
@@ -4681,7 +4569,7 @@ impl Page {
     for function in &arg.functions {
       self
         .inner
-        .expose_callback(&function.name, function.binding.clone())
+        .expose_callback(&function.name, Arc::clone(&function.binding))
         .await?;
     }
     let identifier = self.inner.add_init_script(&source).await?;
