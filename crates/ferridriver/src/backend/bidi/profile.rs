@@ -75,8 +75,9 @@ impl ProfileGuard {
 
   /// Firefox opens its lock file unshared on Windows, so ours is closed.
   #[cfg(windows)]
-  pub(super) fn allow_firefox_start(&mut self) {
+  pub(super) fn allow_firefox_start(mut self) -> Self {
     self.file.take();
+    self
   }
 }
 
