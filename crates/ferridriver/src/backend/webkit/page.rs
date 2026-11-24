@@ -437,7 +437,7 @@ pub(crate) struct LifecycleSignals {
 }
 
 impl LifecycleSignals {
-  pub fn reset(&self) {
+  pub(crate) fn reset(&self) {
     self.commit.store(false, Ordering::SeqCst);
     self.same_document.store(false, Ordering::SeqCst);
     self.domcontentloaded.store(false, Ordering::SeqCst);
@@ -469,7 +469,7 @@ impl LifecycleSignals {
   /// A new main-frame document committed: what fired for the previous
   /// one no longer counts (Playwright's `frameCommittedNewDocumentNavigation`
   /// clears the frame's lifecycle events).
-  pub fn commit_document(&self, loader_id: Option<String>) {
+  pub(crate) fn commit_document(&self, loader_id: Option<String>) {
     self.domcontentloaded.store(false, Ordering::SeqCst);
     self.load.store(false, Ordering::SeqCst);
     *self
@@ -481,7 +481,7 @@ impl LifecycleSignals {
 
   /// Whether the document of the navigation under `loader_id` has
   /// committed; any commit counts for a waiter that does not know its loader.
-  pub fn committed(&self, loader_id: Option<&str>) -> bool {
+  pub(crate) fn committed(&self, loader_id: Option<&str>) -> bool {
     let committed = self
       .committed_loader
       .lock()
@@ -494,7 +494,7 @@ impl LifecycleSignals {
 
   /// Record a `Playwright.provisionalLoadFailed` for the pending
   /// main-frame navigation (mirrors `wkPage._onProvisionalLoadFailed`).
-  pub fn mark_provisional_failed(&self, loader_id: Option<String>, error_text: String) {
+  pub(crate) fn mark_provisional_failed(&self, loader_id: Option<String>, error_text: String) {
     self
       .provisional_failure
       .lock()
@@ -506,7 +506,7 @@ impl LifecycleSignals {
   /// The provisional-load failure of the navigation under `loader_id`, or
   /// of any navigation when the waiter does not know its loader. A failure
   /// that names no loader counts for every waiter.
-  pub fn provisional_failure(&self, loader_id: Option<&str>) -> Option<String> {
+  pub(crate) fn provisional_failure(&self, loader_id: Option<&str>) -> Option<String> {
     self
       .provisional_failure
       .lock()
@@ -516,12 +516,12 @@ impl LifecycleSignals {
       .map(|failure| failure.error_text.clone())
   }
 
-  pub fn mark_same_document(&self) {
+  pub(crate) fn mark_same_document(&self) {
     self.same_document.store(true, Ordering::SeqCst);
     self.notify.notify_waiters();
   }
 
-  pub fn mark(&self, kind: NavLifecycle) {
+  pub(crate) fn mark(&self, kind: NavLifecycle) {
     match kind {
       NavLifecycle::Commit => self.commit.store(true, Ordering::SeqCst),
       NavLifecycle::DomContentLoaded => self.domcontentloaded.store(true, Ordering::SeqCst),
@@ -532,7 +532,7 @@ impl LifecycleSignals {
 
   /// `request_id` now carries the main frame's pending document
   /// (Playwright's `frameManager.requestStarted`).
-  pub fn bind_pending_request(&self, request_id: String) {
+  pub(crate) fn bind_pending_request(&self, request_id: String) {
     *self
       .pending_request
       .lock()
@@ -542,7 +542,7 @@ impl LifecycleSignals {
   /// The main frame is checking a navigation's policy, so the pending
   /// document has no request until the next one starts (Playwright's
   /// `frameManager.frameRequestedNavigation` with no document).
-  pub fn unbind_pending_request(&self) {
+  pub(crate) fn unbind_pending_request(&self) {
     *self
       .pending_request
       .lock()
@@ -551,7 +551,7 @@ impl LifecycleSignals {
 
   /// A request failed. Only the one carrying the pending document fails
   /// the navigation (Playwright's `frameManager.requestFailed`).
-  pub fn request_failed(&self, request_id: &str, error_text: &str) {
+  pub(crate) fn request_failed(&self, request_id: &str, error_text: &str) {
     let pending = {
       let mut slot = self
         .pending_request
@@ -581,7 +581,7 @@ impl LifecycleSignals {
     self.notify.notify_waiters();
   }
 
-  pub fn seen(&self, kind: NavLifecycle) -> bool {
+  pub(crate) fn seen(&self, kind: NavLifecycle) -> bool {
     match kind {
       NavLifecycle::Commit => self.commit.load(Ordering::SeqCst),
       NavLifecycle::DomContentLoaded => self.domcontentloaded.load(Ordering::SeqCst),
@@ -589,7 +589,7 @@ impl LifecycleSignals {
     }
   }
 
-  pub fn failure(&self) -> Option<(String, String)> {
+  pub(crate) fn failure(&self) -> Option<(String, String)> {
     if !self.failed.load(Ordering::SeqCst) {
       return None;
     }
@@ -615,6 +615,12 @@ impl WebKitPage {
   /// and let `Self::resume_popup` release it — the popup pump needs
   /// the pause window to register listeners before the popup's first
   /// navigation fires. `new_page` passes `false` (resume immediately).
+  ///
+  /// # Errors
+  ///
+  /// Returns `BrowserError::Protocol` when the page proxy closes before announcing its page target,
+  /// or an error when the `Page.enable`, `Runtime.enable`, `Network.enable`, `Console.enable`,
+  /// `Worker.enable`, `Dialog.enable` or `Emulation.setActiveAndFocused` command fails.
   pub fn attach(
     browser: &WebKitBrowser,
     proxy: Session,
@@ -991,12 +997,12 @@ impl WebKitPage {
   /// Cached `objectId` of the main-world global, evaluating `"this"`
   /// once. The anchor `Runtime.callFunctionOn` runs against.
   async fn global_anchor(&self) -> Result<String> {
-    if let Some(id) = self
+    let cached = self
       .global_object_id
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone()
-    {
+      .clone();
+    if let Some(id) = cached {
       return Ok(id);
     }
     let resp = self.runtime_evaluate("this", false).await?;
@@ -1013,12 +1019,6 @@ impl WebKitPage {
     Ok(id)
   }
 
-  /// `Runtime.callFunctionOn` anchored on the main-world global. A
-  /// browser-initiated navigation can commit before its event resets the
-  /// cached anchor, and `WebKit` then answers "Missing injected script for
-  /// given objectId" without running the function. The realm caches are
-  /// dropped and the call is made once more on a fresh anchor, with the
-  /// engine re-injected first when the function needs `window.__fd`.
   /// `Runtime.callFunctionOn` on the live target. A call still running
   /// when its document is replaced is one `WebKit` never answers, so it
   /// is told apart from one that is merely slow: a target answers in
@@ -1064,6 +1064,12 @@ impl WebKitPage {
     }
   }
 
+  /// `Runtime.callFunctionOn` anchored on the main-world global. A
+  /// browser-initiated navigation can commit before its event resets the
+  /// cached anchor, and `WebKit` then answers "Missing injected script for
+  /// given objectId" without running the function. The realm caches are
+  /// dropped and the call is made once more on a fresh anchor, with the
+  /// engine re-injected first when the function needs `window.__fd`.
   async fn call_on_global(&self, mut params: Value, needs_engine: bool) -> Result<Value> {
     let mut retried = false;
     loop {
@@ -1090,7 +1096,8 @@ impl WebKitPage {
   /// evaluate from silently running in the main frame.
   async fn resolve_frame_context(&self, frame_id: &str) -> Result<i64> {
     for _ in 0..200u32 {
-      if let Some(id) = self.frame_contexts.read().await.get(frame_id).copied() {
+      let context = self.frame_contexts.read().await.get(frame_id).copied();
+      if let Some(id) = context {
         return Ok(id);
       }
       tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1130,6 +1137,9 @@ impl WebKitPage {
 
   // ── Frames ────────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Page.getResourceTree` command fails.
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     let resp = self
       .target_session()
@@ -1158,6 +1168,10 @@ impl WebKitPage {
   /// when the element hosts no frame. Deterministic — works for
   /// unnamed / `srcdoc` / `data:` iframes the name/url cache heuristic
   /// cannot attribute.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `DOM.describeNode` command fails.
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     let resp = self
       .target_session()
@@ -1179,6 +1193,12 @@ impl WebKitPage {
   /// `wkPage.ts::getFrameElement`: `DOM.resolveNode {frameId}` into the
   /// parent's main-world context, then `Runtime.callFunctionOn` with
   /// the element as `this`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the parent frame has no execution context after about two seconds, when
+  /// `DOM.resolveNode` fails or resolves no live owner element (`FerriError::Protocol`, also for a
+  /// detached frame), or when the `Runtime.callFunctionOn` call fails.
   pub async fn mark_snapshot_iframe(
     &self,
     child_frame_id: &str,
@@ -1223,6 +1243,9 @@ impl WebKitPage {
     call.map(|_| ())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the page is closed or the `Target.activate` command fails.
   pub async fn bring_to_front(&self) -> Result<()> {
     self.ensure_open()?;
     self
@@ -1233,6 +1256,11 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the frame has no execution context after about two seconds, when
+  /// injecting the selector engine into it fails, or when the `Runtime.callFunctionOn` evaluation
+  /// fails, and `FerriError::Evaluation` when `expression` throws.
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
     let ctx_id = self.resolve_frame_context(frame_id).await?;
     // Selector-engine calls reach a child frame's realm through
@@ -1248,6 +1276,11 @@ impl WebKitPage {
 
   // ── Navigation ────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the page is closed, when `Playwright.navigate` fails or reports an error
+  /// text, or when the main document fails to load. A `FerriError::Timeout` comes back when the
+  /// navigate reply or the `lifecycle` event misses `timeout_ms`.
   pub async fn goto(
     &self,
     url: &str,
@@ -1350,6 +1383,10 @@ impl WebKitPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the main document fails to load, or a `FerriError::Timeout` when no
+  /// `load` event arrives within 30 seconds.
   pub async fn wait_for_navigation(&self) -> Result<()> {
     self.lifecycle.reset();
     self.wait_for_lifecycle(NavLifecycle::Load, 30_000, None).await
@@ -1357,6 +1394,10 @@ impl WebKitPage {
 
   /// Force a GC pass in the page's JS engine. Mirrors Playwright's
   /// `wkPage.requestGC` (`Heap.gc`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the page is closed or the `Heap.gc` command fails.
   pub async fn request_gc(&self) -> Result<()> {
     self.ensure_open()?;
     self
@@ -1367,6 +1408,11 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the page is closed, when the `Page.reload` command fails or the reloaded
+  /// document fails to load, or a `FerriError::Timeout` when `lifecycle` is not reached within
+  /// `timeout_ms`.
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.ensure_open()?;
     self.reset_realm();
@@ -1381,10 +1427,20 @@ impl WebKitPage {
     Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the page is closed, when `Page.goBack` fails for a reason other than a
+  /// missing history entry (which yields `Ok(None)`), or when the new document fails to load. A
+  /// `FerriError::Timeout` comes back when `lifecycle` is not reached within `timeout_ms`.
   pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.history_traverse("Page.goBack", lifecycle, timeout_ms).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the page is closed, when `Page.goForward` fails for a reason other than
+  /// a missing history entry (which yields `Ok(None)`), or when the new document fails to load. A
+  /// `FerriError::Timeout` comes back when `lifecycle` is not reached within `timeout_ms`.
   pub async fn go_forward(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.history_traverse("Page.goForward", lifecycle, timeout_ms).await
   }
@@ -1447,16 +1503,30 @@ impl WebKitPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when resolving the main-world global with `Runtime.evaluate` or evaluating
+  /// `location.href` with `Runtime.callFunctionOn` fails, or `FerriError::Evaluation` when it
+  /// throws.
   pub async fn url(&self) -> Result<Option<String>> {
     Ok(self.eval_value("location.href").await?.as_str().map(String::from))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when resolving the main-world global with `Runtime.evaluate` or evaluating
+  /// `document.title` with `Runtime.callFunctionOn` fails, or `FerriError::Evaluation` when it
+  /// throws.
   pub async fn title(&self) -> Result<Option<String>> {
     Ok(self.eval_value("document.title").await?.as_str().map(String::from))
   }
 
   // ── JavaScript ────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns the error from [`Self::ensure_engine_injected`] when the selector engine cannot be
+  /// injected.
   pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
     Ok("window.__fd".to_string())
@@ -1467,6 +1537,11 @@ impl WebKitPage {
     self.engine_injected.reset();
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine through `Runtime.callFunctionOn` fails, or
+  /// `FerriError::Evaluation` when the injection script throws. A failure caused by the document
+  /// being replaced mid-call is retried up to `ENGINE_ATTEMPTS` times first.
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     // Until an injection lands in the document that is still current: one
     // that finishes after a navigation went into the document it replaced.
@@ -1538,13 +1613,13 @@ impl WebKitPage {
   /// context (an iframe's realm), evaluating `"this"` with `contextId`
   /// set. Cached per context in [`Self::frame_engine_contexts`].
   async fn frame_context_anchor(&self, context_id: i64) -> Result<String> {
-    if let Some(id) = self
+    let cached = self
       .frame_engine_contexts
       .read()
       .await
       .get(&context_id)
-      .and_then(|c| c.global_object_id.clone())
-    {
+      .and_then(|c| c.global_object_id.clone());
+    if let Some(id) = cached {
       return Ok(id);
     }
     let resp = self
@@ -1592,7 +1667,7 @@ impl WebKitPage {
     // (a navigated frame gets a fresh contextId) so the map stays
     // bounded across long-lived pages.
     {
-      let live: std::collections::HashSet<i64> = self.frame_contexts.read().await.values().copied().collect();
+      let live: rustc_hash::FxHashSet<i64> = self.frame_contexts.read().await.values().copied().collect();
       self
         .frame_engine_contexts
         .write()
@@ -1630,12 +1705,22 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when resolving the main-world global with `Runtime.evaluate` or the
+  /// `Runtime.callFunctionOn` evaluation fails, or `FerriError::Evaluation` when `expression`
+  /// throws.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<Value>> {
     Ok(Some(self.eval_value(expression).await?))
   }
 
   // ── Elements ──────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine fails, `FerriError::InvalidSelector` when
+  /// `selector` does not parse, and `FerriError::ElementNotFound` when evaluating it yields no
+  /// element or fails for any other reason.
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     self.ensure_engine_injected().await?;
     let sel_js = crate::selectors::build_selone_js(selector, "window.__fd", false)?;
@@ -1645,6 +1730,11 @@ impl WebKitPage {
       .map_err(|_| FerriError::element_not_found(selector))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine into the frame's context or the
+  /// `Runtime.evaluate` command fails, `FerriError::Evaluation` when `js` throws, and
+  /// `FerriError::Protocol` when the result is not an object.
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     // Resolve element selectors inside the owning frame's realm so the
     // returned `objectId` is bound to the right execution context and
@@ -1690,6 +1780,9 @@ impl WebKitPage {
     )))
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature.
   pub async fn resolve_backend_node(&self, _backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     tokio::task::yield_now().await;
     Ok(AnyElement::WebKit(WebKitElement::new(
@@ -1700,6 +1793,11 @@ impl WebKitPage {
 
   // ── Content ───────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when resolving the main-world global with `Runtime.evaluate` or evaluating
+  /// `document.documentElement.outerHTML` with `Runtime.callFunctionOn` fails, or
+  /// `FerriError::Evaluation` when it throws.
   pub async fn content(&self) -> Result<String> {
     Ok(
       self
@@ -1711,6 +1809,10 @@ impl WebKitPage {
     )
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Runtime.evaluate` command that writes `html` into the document
+  /// fails, or `FerriError::Evaluation` when it throws.
   pub async fn set_content(&self, html: &str) -> Result<()> {
     let escaped = serde_json::to_string(html).unwrap_or_else(|_| "\"\"".into());
     self
@@ -1725,6 +1827,10 @@ impl WebKitPage {
   // ── Screenshots ───────────────────────────────────────────────────────
 
   /// `wkPage.ts::setBackgroundColor`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Page.setDefaultBackgroundColorOverride` command fails.
   pub async fn set_background_color(&self, color: Option<BackgroundColor>) -> Result<()> {
     let params = match color {
       Some(c) => json!({ "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a } }),
@@ -1739,6 +1845,13 @@ impl WebKitPage {
   }
 
   /// `wkPage.ts::takeScreenshot`.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Backend` when `capture` has neither a document nor a viewport rect, when
+  /// the rect exceeds 32767 device pixels on a non-macOS port, or when the image data is not valid
+  /// base64. Also returns an error when the `Page.snapshotRect` command, reading
+  /// `devicePixelRatio`, or re-encoding the PNG as WebP fails.
   pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     let (rect, coordinate_system) = match (capture.document_rect, capture.viewport_rect) {
       (Some(rect), _) => (rect, "Page"),
@@ -1814,10 +1927,18 @@ impl WebKitPage {
 
   // ── Accessibility ─────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine fails, or when evaluating the
+  /// accessibility-tree scripts with `Runtime.callFunctionOn` fails or throws.
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     self.accessibility_tree_with_depth(-1).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine fails, or when evaluating the
+  /// accessibility-tree scripts with `Runtime.callFunctionOn` fails or throws.
   pub async fn accessibility_tree_with_depth(&self, max_depth: i32) -> Result<Vec<AxNodeData>> {
     let fd = self.injected_script().await?;
     self.eval_value(crate::selectors::AX_SUPPORT_JS).await?;
@@ -1833,12 +1954,20 @@ impl WebKitPage {
 
   // ── Input ─────────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when an `Input.dispatchMouseEvent` command for the move, press or release
+  /// fails; the events after it are not sent.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self
       .click_at_with(x, y, &crate::backend::BackendClickArgs::default_left())
       .await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when an `Input.dispatchMouseEvent` command for the move, press or release
+  /// fails; the events after it are not sent.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let mut args = crate::backend::BackendClickArgs::default_left();
     args.button = crate::options::MouseButton::parse(button).unwrap_or_default();
@@ -1846,14 +1975,25 @@ impl WebKitPage {
     self.click_at_with(x, y, &args).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when an `Input.dispatchMouseEvent` command for the move, press or release
+  /// fails; the events after it are not sent.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendClickArgs) -> Result<()> {
     super::input::click(self, x, y, args).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Input.dispatchMouseEvent` command fails.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendHoverArgs) -> Result<()> {
     super::input::hover(self, x, y, args).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when reading the visual viewport under mobile emulation fails, or when the
+  /// `Input.dispatchTapEvent` command fails.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     let (x, y) = self.root_view_point(x, y).await?;
     super::input::tap(self, x, y).await
@@ -1884,26 +2024,46 @@ impl WebKitPage {
     &self.keyboard
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Input.dispatchMouseEvent` command fails.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     super::input::move_mouse(self, x, y).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when an `Input.dispatchMouseEvent` move command fails; the remaining steps
+  /// are not sent.
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     super::input::move_mouse_smooth(self, from_x, from_y, to_x, to_y, steps).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Page.updateScrollingState` command, the wait for a compositor frame
+  /// through `Runtime.callFunctionOn`, or the `Input.dispatchWheelEvent` command fails.
   pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     super::input::mouse_wheel(self, x, y, delta_x, delta_y).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Input.dispatchMouseEvent` command fails.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     super::input::mouse_down(self, x, y, button, click_count).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Input.dispatchMouseEvent` command fails.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     super::input::mouse_up(self, x, y, button, click_count).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Page.insertText` command fails.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
     super::input::type_text(self, text).await
   }
@@ -1929,6 +2089,9 @@ impl WebKitPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.getAllCookies` command fails.
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     // Context-wide store via the root browser session (mirrors Playwright's
     // `Playwright.getAllCookies`); `Page.getCookies` only returns cookies the
@@ -1954,6 +2117,9 @@ impl WebKitPage {
     Ok(arr.iter().map(super::events::parse_cookie).collect())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.setCookies` command fails.
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
     let mut params = self.cookie_ctx_params();
     params["cookies"] = json!([super::events::webkit_set_cookie_param(&cookie)]);
@@ -1965,6 +2131,11 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when reading the cookies with `Playwright.getAllCookies`, clearing them with
+  /// `Playwright.deleteAllCookies`, or setting the rest back with `Playwright.setCookies` fails. A
+  /// failure after the clear leaves the context with none of its cookies.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     // WebKit's browser session exposes only `deleteAllCookies`; to drop a
     // single cookie, re-seed the context with every other cookie. Matches the
@@ -1978,6 +2149,9 @@ impl WebKitPage {
     self.replace_all_cookies(remaining).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.deleteAllCookies` command fails.
   pub async fn clear_cookies(&self) -> Result<()> {
     self
       .browser
@@ -2027,6 +2201,13 @@ impl WebKitPage {
       .is_ok_and(|contexts| !contexts.is_empty())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `timezone_id` would change after the page has a
+  /// document, and `FerriError::InvalidArgument` for an unknown permission. Also returns an error
+  /// when applying the viewport (see [`Self::emulate_viewport`]) or the
+  /// `Network.setExtraHTTPHeaders`, `Emulation.grantPermissions` or `Playwright.setLanguages`
+  /// command fails.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     // `Page.setTimeZone` is honoured only before a session's first
     // document. WebKit accepts the command afterwards and does nothing
@@ -2065,6 +2246,10 @@ impl WebKitPage {
   /// Backs [`crate::Page::set_http_credentials`]. Mirrors Playwright's
   /// `wkPage.updateHttpCredentials` — `Emulation.setAuthCredentials` on
   /// the page-proxy session; clearing sends an empty credentials list.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Emulation.setAuthCredentials` command fails.
   pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     if let Ok(mut auth) = self.auth_credentials.lock() {
       auth.site = creds.unwrap_or_default();
@@ -2076,6 +2261,10 @@ impl WebKitPage {
   /// the proxy's challenges (`proxyCredentials`, which `WebKit` uses for
   /// those and nothing else). The context was already created with the
   /// proxy (`Playwright.createContext({ proxyServer })`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Emulation.setAuthCredentials` command fails.
   pub async fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> Result<()> {
     if let Ok(mut auth) = self.auth_credentials.lock() {
       auth.proxy = proxy.as_ref().and_then(crate::options::ProxyConfig::credentials);
@@ -2233,6 +2422,11 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Emulation.setDeviceMetricsOverride` or `Page.setBootstrapScript`
+  /// command fails. Failures of the screen-size, orientation, touch and setting overrides are
+  /// ignored.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     // Per `wkPage.ts::_updateViewport`: device metrics override goes
     // on the page-proxy session, screen-size override on the inner
@@ -2389,6 +2583,10 @@ impl WebKitPage {
     ]
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when a `Page.setEmulatedMedia`, `Page.overrideUserPreference` or
+  /// `Page.setForcedColors` command fails; the commands after it are not sent.
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     // Persist the merged state (the core `Page` merges before
     // delegating) so the per-target re-apply on the next navigation's
@@ -2403,6 +2601,9 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Network.setExtraHTTPHeaders` command fails.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
     let map: serde_json::Map<String, Value> = headers
       .iter()
@@ -2425,6 +2626,10 @@ impl WebKitPage {
 
   /// Playwright: `wkPage.ts::_clearPermissions`. The override is the
   /// page proxy's, like the grant it undoes.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Emulation.resetPermissions` command fails.
   pub async fn reset_permissions(&self) -> Result<()> {
     self
       .proxy
@@ -2440,6 +2645,11 @@ impl WebKitPage {
   /// every insight computed downstream reads Chrome trace events. These
   /// used to return `Ok`, so a `WebKit` session reported a trace it had
   /// never recorded and the caller got an empty analysis with no error.
+  ///
+  /// # Errors
+  ///
+  /// Always returns `FerriError::Unsupported`: the `WebKit` Inspector protocol has no `Tracing`
+  /// domain.
   pub async fn start_tracing(&self, _categories: Option<&[String]>) -> Result<()> {
     tokio::task::yield_now().await;
     Err(FerriError::unsupported(
@@ -2447,6 +2657,10 @@ impl WebKitPage {
     ))
   }
 
+  /// # Errors
+  ///
+  /// Always returns `FerriError::Unsupported`: the `WebKit` Inspector protocol has no `Tracing`
+  /// domain.
   pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     tokio::task::yield_now().await;
     Err(FerriError::unsupported(
@@ -2454,6 +2668,10 @@ impl WebKitPage {
     ))
   }
 
+  /// # Errors
+  ///
+  /// Always returns `FerriError::Unsupported`: the `WebKit` Inspector protocol has no
+  /// `Performance.getMetrics`.
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     tokio::task::yield_now().await;
     Err(FerriError::unsupported(
@@ -2480,6 +2698,10 @@ impl WebKitPage {
 
   // ── PDF / screencast ──────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Always returns `FerriError::Unsupported`: the `WebKit` protocol has no `Page.printToPDF`
+  /// command.
   pub async fn pdf(&self, _opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     tokio::task::yield_now().await;
     Err(FerriError::unsupported(
@@ -2488,6 +2710,10 @@ impl WebKitPage {
     ))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Screencast.startScreencast` command fails, or
+  /// `FerriError::Protocol` when its reply carries no `generation` to acknowledge frames with.
   pub async fn start_screencast(
     &self,
     quality: u8,
@@ -2570,6 +2796,10 @@ impl WebKitPage {
     Ok((rx, shutdown_tx))
   }
 
+  /// # Errors
+  ///
+  /// Never fails; a failed `Screencast.stopScreencast` is ignored and the `Result` matches the
+  /// other backends' signature.
   pub async fn stop_screencast(&self) -> Result<()> {
     let _ = self.proxy.send("Screencast.stopScreencast", json!({})).await;
     Ok(())
@@ -2583,6 +2813,11 @@ impl WebKitPage {
   /// `Playwright.grantFileReadAccess` so the sandboxed `WebKit` process
   /// is allowed to read the payload bytes when the page later touches
   /// `input.files[i]`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.grantFileReadAccess` or `DOM.setInputFiles` command
+  /// fails.
   pub async fn set_input_files_element(&self, element: &super::WebKitElement, paths: &[String]) -> Result<()> {
     let grant = self.browser.send(
       protocol::PLAYWRIGHT_GRANT_FILE_READ_ACCESS,
@@ -2594,6 +2829,11 @@ impl WebKitPage {
     set_result
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when enabling interception on first use fails: the
+  /// `Network.setInterceptionEnabled`, `Network.setResourceCachingDisabled` or
+  /// `Network.addInterception` command.
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     self.ensure_interception_enabled().await?;
     self.routes.write().await.push(route);
@@ -2627,6 +2867,9 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature.
   pub async fn unroute(
     &self,
     matcher: &crate::url_matcher::UrlMatcher,
@@ -2639,6 +2882,9 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature.
   pub async fn unroute_all(
     &self,
     _behavior: crate::options::UnrouteBehavior,
@@ -2652,6 +2898,10 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; a failed `Page.setInterceptFileChooserDialog` is ignored and the `Result` matches
+  /// the other backends' signature.
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     let _ = self
       .target_session()
@@ -2660,6 +2910,9 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature.
   pub async fn enable_download_behavior(&self) -> Result<()> {
     tokio::task::yield_now().await;
     Ok(())
@@ -2667,6 +2920,12 @@ impl WebKitPage {
 
   // ── Exposed functions / init scripts ──────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when installing the binding channel on first use fails (the
+  /// `Runtime.addBinding` or `Page.setBootstrapScript` command, or evaluating the controller script
+  /// with `Runtime.evaluate`), when `Page.setBootstrapScript` fails for the registration script, or
+  /// when evaluating that script with `Runtime.evaluate` fails or throws.
   pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -2728,6 +2987,10 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the page-side removal is best effort and the `Result` matches the other backends'
+  /// signature.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     self.exposed_fns.write().await.remove(name);
     let js = format!(
@@ -2774,6 +3037,12 @@ impl WebKitPage {
 
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when installing the binding channel on first use fails (the
+  /// `Runtime.addBinding` or `Page.setBootstrapScript` command, or evaluating the controller script
+  /// with `Runtime.evaluate`).
   pub async fn expose_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -2854,6 +3123,10 @@ impl WebKitPage {
       .join(";\n")
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Page.setBootstrapScript` command fails. The script stays registered
+  /// and goes out with the next successful update.
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
     let id = self.init_script_seq.fetch_add(1, Ordering::Relaxed).to_string();
     {
@@ -2864,6 +3137,9 @@ impl WebKitPage {
     Ok(id)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Page.setBootstrapScript` command fails.
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
     {
       let mut scripts = self.init_scripts.lock().await;
@@ -2895,6 +3171,14 @@ impl WebKitPage {
   /// `Runtime.callFunctionOn` (which has `awaitPromise`) anchored on the
   /// main-world global, or on the first handle's `objectId` when handles
   /// are supplied (free context anchor, same realm).
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` for a handle from another backend,
+  /// `FerriError::Evaluation` when the function throws, and an error when injecting the selector
+  /// engine, resolving the frame's execution context, the `Runtime.callFunctionOn` call, or parsing
+  /// its reply fails. A call lost to a replaced document is retried up to `ENGINE_ATTEMPTS` times
+  /// first.
   pub async fn call_utility_evaluate(
     &self,
     fn_source: &str,
@@ -3011,6 +3295,10 @@ impl WebKitPage {
     parse_eval_response(&resp, return_by_value)
   }
 
+  /// # Errors
+  ///
+  /// Never fails; a failed `Runtime.releaseObject` is ignored and the `Result` matches the other
+  /// backends' signature.
   pub async fn release_object(&self, object_id: &str) -> Result<()> {
     let _ = self
       .target_session()
@@ -3026,6 +3314,10 @@ impl WebKitPage {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Never fails; `Target.close` is best effort with a two-second limit, and the `Result` matches
+  /// the other backends' signature.
   pub async fn close_page(&self, _opts: crate::options::PageCloseOptions) -> Result<()> {
     if self.closed.swap(true, Ordering::Relaxed) {
       return Ok(());

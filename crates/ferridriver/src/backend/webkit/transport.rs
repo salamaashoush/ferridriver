@@ -69,6 +69,11 @@ impl WriterHandle {
 
   /// Serialize `value` and queue it (with its NUL terminator) for the
   /// writer task. Errors on JSON encoding failure or a closed transport.
+  ///
+  /// # Errors
+  ///
+  /// Returns `TransportError::Json` when `value` cannot be serialized, or `TransportError::Closed`
+  /// when the transport is stopping or its writer task has gone.
   pub fn send(&self, value: &Value) -> Result<(), TransportError> {
     self.send_checked(value, || Ok(()))
   }
