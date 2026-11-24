@@ -92,7 +92,7 @@ pub(super) fn observation(event: &ReporterEvent) -> Value {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Action {
+pub(crate) enum Action {
   Emit {
     sender: usize,
     event: Event,
@@ -184,7 +184,7 @@ impl Bus {
   }
 }
 
-pub async fn bus(subscribers: usize, actions: Vec<Action>) -> Result<Value> {
+pub(crate) async fn bus(subscribers: usize, actions: Vec<Action>) -> Result<Value> {
   let mut builder = EventBusBuilder::new();
   let subscribers: Vec<_> = (0..subscribers).map(|_| Some(builder.subscribe())).collect();
   let mut bus = Bus {
@@ -213,7 +213,7 @@ impl Reporter for Collector {
   }
 }
 
-pub async fn driver(events: Vec<Event>) -> Result<Value> {
+pub(crate) async fn driver(events: Vec<Event>) -> Result<Value> {
   let collected = Arc::new(Mutex::new(Vec::new()));
   let reporters = ReporterSet::new(vec![Box::new(Collector(Arc::clone(&collected)))]);
   let mut builder = EventBusBuilder::new();

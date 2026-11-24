@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Scenario {
+pub(crate) enum Scenario {
   Tls,
   Websocket,
   Proxy,
@@ -77,7 +77,7 @@ async fn proxy(server: &FixtureServer, client: &reqwest::Client) -> Result<Value
   Ok(json!({ "advertised": url, "actual": server.proxy_url(), "body": body, "log": log, "cleared": cleared }))
 }
 
-pub async fn run(root: &Path, scenario: Scenario) -> Result<Value> {
+pub(crate) async fn run(root: &Path, scenario: Scenario) -> Result<Value> {
   let server = FixtureServer::start(FixtureServerOptions {
     static_dir: matches!(scenario, Scenario::Static).then(|| root.to_path_buf()),
     ..Default::default()

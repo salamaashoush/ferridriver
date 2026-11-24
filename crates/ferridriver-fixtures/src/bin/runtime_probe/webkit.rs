@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(tag = "scenario", rename_all = "kebab-case")]
-pub enum Request {
+pub(crate) enum Request {
   Navigation,
   Locale { url: String },
   Mobile,
@@ -68,8 +68,8 @@ async fn observe(browser: &WebKitBrowser, request: Request) -> Result<Value> {
   Ok(result)
 }
 
-pub async fn run(request: Request) -> Result<Value> {
-  let mut browser = WebKitBrowser::launch(&LaunchConfig {
+pub(crate) async fn run(request: Request) -> Result<Value> {
+  let browser = WebKitBrowser::launch(&LaunchConfig {
     headless: true,
     ..Default::default()
   })

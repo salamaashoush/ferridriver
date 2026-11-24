@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Deserialize)]
-pub struct Request {
+pub(crate) struct Request {
   url: String,
   guard: Option<Guard>,
 }
@@ -38,7 +38,7 @@ impl Guard {
   }
 }
 
-pub async fn run(request: Request) -> Result<Value> {
+pub(crate) async fn run(request: Request) -> Result<Value> {
   let options = request.guard.map(Guard::into_options).transpose()?;
   let client = HttpClient::new(HttpClientOptions::default());
   let response = client.get(&request.url).maybe_options(options).await?;

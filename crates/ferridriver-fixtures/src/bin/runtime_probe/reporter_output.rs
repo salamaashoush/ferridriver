@@ -25,7 +25,7 @@ enum Mode {
 }
 
 #[derive(Deserialize)]
-pub struct Request {
+pub(crate) struct Request {
   config: Box<TestConfig>,
   events: Vec<blob::WireEvent>,
   #[serde(default)]
@@ -49,7 +49,7 @@ async fn js_reporter(config: &TestConfig) -> Result<Box<dyn Reporter>> {
   Ok(Box::new(Arc::new(module).reporter()))
 }
 
-pub async fn run(request: Request) -> Result<Value> {
+pub(crate) async fn run(request: Request) -> Result<Value> {
   let (out, captured) = Out::buffer();
   let collected = Arc::new(Mutex::new(Vec::new()));
   let mut direct: Option<Box<dyn Reporter>> = match request.mode {

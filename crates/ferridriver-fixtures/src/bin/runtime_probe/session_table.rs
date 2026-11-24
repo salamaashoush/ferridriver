@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Request {
+pub(crate) struct Request {
   max_vms: usize,
   ttl_ms: Option<u64>,
   #[serde(default)]
@@ -33,7 +33,7 @@ enum Action {
   },
 }
 
-pub async fn run(context: &RunContext, request: Request) -> Result<Value> {
+pub(crate) async fn run(context: &RunContext, request: Request) -> Result<Value> {
   let browser = if request.browser {
     Some(
       ferridriver::chromium()

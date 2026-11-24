@@ -7,14 +7,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Deserialize)]
-pub struct Call {
+pub(crate) struct Call {
   method: String,
   params: Option<Value>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
-pub enum Action {
+pub(crate) enum Action {
   Send { call: Call },
   Concurrent { calls: Vec<Call> },
   Batch { calls: Vec<Call> },
@@ -32,7 +32,7 @@ fn outcome(result: Result<Value, SidecarError>) -> Value {
   }
 }
 
-pub async fn run(binary: String, actions: Vec<Action>) -> Result<Value> {
+pub(crate) async fn run(binary: String, actions: Vec<Action>) -> Result<Value> {
   let sidecar = Sidecar::connect(&SidecarSpec {
     name: "echo".into(),
     command: vec![binary],

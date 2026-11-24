@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Request {
+pub(crate) struct Request {
   entries: Vec<String>,
   host: String,
   sources: Vec<String>,
@@ -24,7 +24,7 @@ pub struct Request {
 }
 
 #[derive(Deserialize)]
-pub struct CompileRequest {
+pub(crate) struct CompileRequest {
   groups: Vec<Vec<PathBuf>>,
   #[serde(default, rename = "httpClient")]
   http_client: bool,
@@ -34,7 +34,7 @@ pub struct CompileRequest {
   policy: ferridriver_config::ExtensionPolicyConfig,
 }
 
-pub async fn compile(root: &Path, context: &mut RunContext, request: CompileRequest) -> Result<Value> {
+pub(crate) async fn compile(root: &Path, context: &mut RunContext, request: CompileRequest) -> Result<Value> {
   let groups = request
     .groups
     .into_iter()
@@ -70,7 +70,7 @@ pub async fn compile(root: &Path, context: &mut RunContext, request: CompileRequ
   Ok(result)
 }
 
-pub async fn run(root: &Path, context: &RunContext, request: Request) -> Result<Value> {
+pub(crate) async fn run(root: &Path, context: &RunContext, request: Request) -> Result<Value> {
   let specs = request
     .entries
     .into_iter()

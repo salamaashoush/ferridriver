@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Scenario {
+pub(crate) enum Scenario {
   Chromium,
   Firefox,
   Webkit,
@@ -90,7 +90,7 @@ async fn observe(state: &mut BrowserState, scenario: Scenario, profile: &Path) -
   Ok(json!({ "size": size, "before": profile_state(profile), "windowBeforeResize": maximized }))
 }
 
-pub async fn run(root: &Path, scenario: Scenario) -> Result<Value> {
+pub(crate) async fn run(root: &Path, scenario: Scenario) -> Result<Value> {
   let profile = root.join("persistent-profile");
   let (backend, kind) = match scenario {
     Scenario::Firefox | Scenario::Temporary => (BackendKind::Bidi, BrowserKind::Firefox),

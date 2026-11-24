@@ -616,7 +616,7 @@ async fn handle_fx(
   body: axum::body::Bytes,
 ) -> Response<Body> {
   match path.as_str() {
-    _ if path.starts_with("http-client/") => fx_http_client(&path[12..], &headers, &body),
+    _ if let Some(rest) = path.strip_prefix("http-client/") => fx_http_client(rest, &headers, &body),
     "redirect" => fx_redirect("/fx/landed"),
     _ if path.starts_with("redirect/") => {
       let n: u32 = path

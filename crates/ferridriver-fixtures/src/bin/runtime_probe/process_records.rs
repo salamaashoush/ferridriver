@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use ferridriver::backend::process::{ChildGroup, track_spawned};
 use serde_json::{Value, json};
 
-pub async fn run() -> Result<Value> {
+pub(crate) async fn run() -> Result<Value> {
   let child = tokio::process::Command::new("cat")
     .stdin(std::process::Stdio::piped())
     .stdout(std::process::Stdio::null())

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", rename_all_fields = "camelCase")]
-pub enum Action {
+pub(crate) enum Action {
   Shell {
     command: String,
   },
@@ -32,7 +32,7 @@ pub enum Action {
 
 /// Drive the first device an ADB server lists. The first result is the
 /// listing itself; each action adds one.
-pub async fn run(host: Option<String>, port: Option<u16>, actions: Vec<Action>) -> Result<Value> {
+pub(crate) async fn run(host: Option<String>, port: Option<u16>, actions: Vec<Action>) -> Result<Value> {
   let android = Android::new();
   let devices = android
     .devices(AndroidDevicesOptions {
@@ -86,7 +86,7 @@ pub async fn run(host: Option<String>, port: Option<u16>, actions: Vec<Action>) 
           })
           .await?;
         let pages = context.pages();
-        let page = pages.first().context("the launched browser has no page")?.clone();
+        let page = std::sync::Arc::clone(pages.first().context("the launched browser has no page")?);
         page.goto(&url).await?;
         let value = page.inner().evaluate(&expression).await?;
         let listed = context.pages().len();

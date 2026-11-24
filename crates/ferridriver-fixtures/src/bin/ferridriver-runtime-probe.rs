@@ -39,7 +39,7 @@ mod web_server;
 #[path = "runtime_probe/webkit.rs"]
 mod webkit;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -696,7 +696,7 @@ async fn run_engine(context: &RunContext, source: &str, args: &[Value], timeout_
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn main() -> Result<std::process::ExitCode> {
   if std::env::args().nth(1).as_deref() == Some("--web-server-fixture") {
     return web_server::child().await;
   }
@@ -730,6 +730,9 @@ async fn main() -> Result<()> {
       Err(error) => json!({ "error": error.to_string() }),
     });
   }
-  println!("{}", serde_json::to_string(&results)?);
-  Ok(())
+  let mut out = std::io::stdout().lock();
+  serde_json::to_writer(&mut out, &results)?;
+  writeln!(out)?;
+  out.flush()?;
+  Ok(std::process::ExitCode::SUCCESS)
 }

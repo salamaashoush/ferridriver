@@ -17,7 +17,6 @@
 //! selector whose text is `^Missing$` is not found, and `info` describes
 //! one button.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -27,7 +26,7 @@ use tokio::net::{TcpListener, TcpStream};
 const SERIAL: &str = "emulator-5554";
 const PNG: &[u8] = &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 
-type Files = Arc<Mutex<HashMap<String, (u32, Vec<u8>)>>>;
+type Files = Arc<Mutex<rustc_hash::FxHashMap<String, (u32, Vec<u8>)>>>;
 
 /// Where the driver's calls are recorded, among the pushed files.
 const DRIVER_CALLS: &str = "driver-calls";

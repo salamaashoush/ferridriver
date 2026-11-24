@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum Request {
+pub(crate) enum Request {
   Archive {
     path: std::path::PathBuf,
     entries: std::collections::BTreeMap<String, String>,
@@ -30,7 +30,7 @@ pub enum Request {
 }
 
 #[derive(Deserialize)]
-pub struct Case {
+pub(crate) struct Case {
   file: String,
   describe: Option<String>,
   name: String,
@@ -120,7 +120,7 @@ fn preamble(config: &TestConfig, project: Option<&ProjectConfig>, name: &str, gr
   )
 }
 
-pub fn run(request: Request) -> Result<Value> {
+pub(crate) fn run(request: Request) -> Result<Value> {
   match request {
     Request::Archive { path, entries } => archive(&path, entries),
     Request::StepLocations { locations } => Ok(json!(

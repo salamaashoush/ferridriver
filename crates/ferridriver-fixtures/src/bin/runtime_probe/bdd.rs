@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
-pub enum Action {
+pub(crate) enum Action {
   Plan {
     steps: Vec<usize>,
   },
@@ -62,7 +62,7 @@ impl From<Argument> for JsArg {
 }
 
 #[derive(Deserialize)]
-pub struct HookArgument {
+pub(crate) struct HookArgument {
   name: String,
   tags: Vec<String>,
   status: String,
@@ -87,7 +87,12 @@ fn plan(registry: &CollectedRegistry, steps: &[usize], hooks: &[usize]) -> Resul
   Ok((set, requested))
 }
 
-pub async fn run(root: &Path, context: &RunContext, entries: Vec<PathBuf>, actions: Vec<Action>) -> Result<Value> {
+pub(crate) async fn run(
+  root: &Path,
+  context: &RunContext,
+  entries: Vec<PathBuf>,
+  actions: Vec<Action>,
+) -> Result<Value> {
   let bundle = Arc::new(bundle_and_compile(&entries, root).await?);
   let mut context = context.clone();
   context.host = ExtensionHost::Bdd;
@@ -100,14 +105,14 @@ pub async fn run(root: &Path, context: &RunContext, entries: Vec<PathBuf>, actio
     Arc::new(TestInfo::new_anonymous()),
     Arc::new(TestModifiers::default()),
     Arc::new(session.deadline()),
-    Arc::new(BundleSourceMap::new(bundle.clone(), Arc::from(cwd.as_path()))),
+    Arc::new(BundleSourceMap::new(Arc::clone(&bundle), Arc::from(cwd.as_path()))),
     Arc::from(cwd.as_path()),
     Duration::from_secs(30),
     Vec::new(),
   ));
   let mut results = Vec::new();
   for action in actions {
-    let result = execute(&session, &registry, &bundle.module_name, bridge.clone(), action).await;
+    let result = execute(&session, &registry, &bundle.module_name, Arc::clone(&bridge), action).await;
     results.push(match result {
       Ok(value) => json!({ "value": value }),
       Err(error) => json!({ "error": error.to_string() }),

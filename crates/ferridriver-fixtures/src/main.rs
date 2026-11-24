@@ -3,6 +3,7 @@
 //! Runs the fixture server until killed. Spawned by `ferridriver.toml`'s
 //! `webServer` command entry for the repo's own test suites.
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -61,11 +62,22 @@ async fn main() -> ExitCode {
       return ExitCode::FAILURE;
     },
   };
-  println!(
-    "ferridriver-fixtures serving {} (proxy {})",
-    server.url(),
-    server.proxy_url()
-  );
+  // Supervisors read this line to learn the ports, so a lost write is a
+  // failed start.
+  let announced = {
+    let mut out = std::io::stdout().lock();
+    writeln!(
+      out,
+      "ferridriver-fixtures serving {} (proxy {})",
+      server.url(),
+      server.proxy_url()
+    )
+    .and_then(|()| out.flush())
+  };
+  if let Err(e) = announced {
+    eprintln!("ferridriver-fixtures: writing the ready line: {e}");
+    return ExitCode::FAILURE;
+  }
   server.run_forever().await;
   ExitCode::SUCCESS
 }

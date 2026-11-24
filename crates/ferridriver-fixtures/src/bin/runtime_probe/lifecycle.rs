@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", rename_all_fields = "camelCase")]
-pub enum Action {
+pub(crate) enum Action {
   Registries,
   NewContext { user_agent: Option<String> },
   NewPage,
@@ -33,7 +33,7 @@ pub enum Action {
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Backend {
+pub(crate) enum Backend {
   #[default]
   CdpPipe,
   CdpRaw,
@@ -43,7 +43,7 @@ pub enum Backend {
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Callback {
+pub(crate) enum Callback {
   Double,
   Greet,
   Add,
@@ -224,7 +224,7 @@ async fn registries(browser: &Browser) -> Result<Value> {
   Ok(Value::Object(sizes))
 }
 
-pub async fn run(backend: Backend, actions: Vec<Action>) -> Result<Value> {
+pub(crate) async fn run(backend: Backend, actions: Vec<Action>) -> Result<Value> {
   let (kind, backend) = match backend {
     Backend::CdpPipe => (BrowserKind::Chromium, BackendKind::CdpPipe),
     Backend::CdpRaw => (BrowserKind::Chromium, BackendKind::CdpWs),

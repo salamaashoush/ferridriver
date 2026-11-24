@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Request {
+pub(crate) struct Request {
   cwd: PathBuf,
   explicit: Option<PathBuf>,
   user: Option<PathBuf>,
@@ -22,7 +22,7 @@ pub struct Request {
   module: Option<Value>,
 }
 
-pub fn run(root: &Path, request: Request) -> Result<Value> {
+pub(crate) fn run(root: &Path, request: Request) -> Result<Value> {
   let module_loader = request
     .module
     .map(|value| Arc::new(move |_: &Path| Ok(value.clone())) as ferridriver_config::layer::ModuleLoader);
@@ -58,7 +58,7 @@ pub fn run(root: &Path, request: Request) -> Result<Value> {
   }))
 }
 
-pub fn contracts(modes: Vec<(String, u32)>) -> Value {
+pub(crate) fn contracts(modes: Vec<(String, u32)>) -> Value {
   use ferridriver_config::test::{TraceMode, VideoMode};
   let modes: Vec<Value> = modes
     .into_iter()
@@ -79,7 +79,7 @@ pub fn contracts(modes: Vec<(String, u32)>) -> Value {
     "aliases": ferridriver_config::layer::DOCUMENT_ALIASES, "modes": modes })
 }
 
-pub fn cached(root: &Path, path: &Path, updated: &str) -> Result<Value> {
+pub(crate) fn cached(root: &Path, path: &Path, updated: &str) -> Result<Value> {
   let file = root.join(path);
   let cache = ferridriver_config::layer::LayerCache::default();
   let first = cache.parse(&file, None)?;

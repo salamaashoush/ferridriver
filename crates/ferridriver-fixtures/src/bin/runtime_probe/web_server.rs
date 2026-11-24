@@ -8,14 +8,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Deserialize)]
-pub struct Request {
+pub(crate) struct Request {
   signal: Option<String>,
   #[serde(default)]
   noisy: bool,
   failure: Option<String>,
 }
 
-pub async fn shutdown(root: &Path, request: Request) -> Result<Value> {
+pub(crate) async fn shutdown(root: &Path, request: Request) -> Result<Value> {
   if request.failure.as_deref() == Some("reuse") {
     return reuse().await;
   }
@@ -121,7 +121,7 @@ async fn reuse() -> Result<Value> {
   outcome
 }
 
-pub async fn probes() -> Result<Value> {
+pub(crate) async fn probes() -> Result<Value> {
   let server = FixtureServer::start(FixtureServerOptions::default()).await?;
   let http = format!("{}/fx/landed", server.url());
   let https = format!("{}/secure", server.tls_url());
@@ -135,11 +135,11 @@ pub async fn probes() -> Result<Value> {
   Ok(result)
 }
 
-pub async fn child() -> Result<()> {
+pub(crate) async fn child() -> Result<std::process::ExitCode> {
   use std::io::Write;
 
   if let Ok(code) = std::env::var("PROBE_EXIT") {
-    std::process::exit(code.parse()?);
+    return Ok(std::process::ExitCode::from(code.parse::<u8>()?));
   }
   #[cfg(unix)]
   let (mut term, mut interrupt) = {
@@ -206,5 +206,5 @@ pub async fn child() -> Result<()> {
   release.send_replace(true);
   stop.send(()).ok();
   server.await??;
-  Ok(())
+  Ok(std::process::ExitCode::SUCCESS)
 }

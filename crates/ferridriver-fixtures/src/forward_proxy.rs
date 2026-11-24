@@ -168,7 +168,7 @@ struct Target {
 /// Split an absolute-form `http://host[:port]/path?query` target.
 fn parse_absolute(target: &str) -> Result<Target, ()> {
   let rest = target.strip_prefix("http://").ok_or(())?;
-  let (authority, path) = rest.find('/').map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
+  let (authority, path) = rest.find('/').map_or((rest, "/"), |i| rest.split_at(i));
   let (host, port) = match authority.rsplit_once(':') {
     Some((host, port)) if !host.ends_with(']') || authority.starts_with('[') => {
       (host.to_string(), port.parse::<u16>().map_err(|_| ())?)

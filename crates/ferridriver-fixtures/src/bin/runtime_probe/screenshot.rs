@@ -7,7 +7,7 @@ use ferridriver_test::ct::server::ComponentServer;
 use ferridriver_test::expect::{LocatorSnapshotMatchers, expect};
 use serde_json::{Value, json};
 
-pub async fn run(root: &Path, name: &str, expression: Option<&str>) -> Result<Value> {
+pub(crate) async fn run(root: &Path, name: &str, expression: Option<&str>) -> Result<Value> {
   let server = ComponentServer::start(root).await?;
   let result = async {
     let browser = ferridriver::chromium()

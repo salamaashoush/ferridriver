@@ -16,7 +16,7 @@ async fn pages(browser: &CdpBrowser<WsTransport>) -> Result<Vec<Value>> {
   Ok(observations)
 }
 
-pub async fn run(root: &Path, urls: Vec<String>) -> Result<Value> {
+pub(crate) async fn run(root: &Path, urls: Vec<String>) -> Result<Value> {
   let profile = root.join("cdp-connection-profile");
   tokio::fs::create_dir(&profile).await?;
   let (transport, child) = WsTransport::spawn(

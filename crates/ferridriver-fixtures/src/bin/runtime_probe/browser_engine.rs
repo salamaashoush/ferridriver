@@ -5,13 +5,13 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Deserialize)]
-pub struct Script {
+pub(crate) struct Script {
   source: String,
   #[serde(default)]
   args: Vec<Value>,
 }
 
-pub async fn run(context: &RunContext, scripts: Vec<Script>) -> Result<Value> {
+pub(crate) async fn run(context: &RunContext, scripts: Vec<Script>) -> Result<Value> {
   let browser = ferridriver::chromium()
     .launch(LaunchOptions {
       headless: Some(true),

@@ -18,7 +18,12 @@ fn annotations(items: &[CollectedAnnotation]) -> Vec<Value> {
     .collect()
 }
 
-pub async fn collect(root: &Path, context: &RunContext, entries: Vec<PathBuf>, host: ExtensionHost) -> Result<Value> {
+pub(crate) async fn collect(
+  root: &Path,
+  context: &RunContext,
+  entries: Vec<PathBuf>,
+  host: ExtensionHost,
+) -> Result<Value> {
   let bundle = bundle_and_compile_named(&entries, root, "ferridriver-tests.js").await?;
   let mut context = context.clone();
   context.host = host;
