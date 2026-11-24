@@ -69,6 +69,10 @@ impl KeyboardJs {
 #[rquickjs::methods]
 impl KeyboardJs {
   /// Dispatch a `keydown` event for `key` on the currently focused element.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error for an unknown key or a page that is closed.
   #[qjs(rename = "down")]
   pub async fn down(
     &self,
@@ -82,6 +86,10 @@ impl KeyboardJs {
   }
 
   /// Dispatch a `keyup` event for `key` on the currently focused element.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error for an unknown key or a page that is closed.
   #[qjs(rename = "up")]
   pub async fn up(
     &self,
@@ -95,6 +103,11 @@ impl KeyboardJs {
   }
 
   /// `keyboard.press(key, options?: { delay? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error for an unknown key or a
+  /// page that is closed.
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
@@ -119,6 +132,10 @@ impl KeyboardJs {
   }
 
   /// `keyboard.type(text, options?: { delay?, namedKeys? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when typing fails.
   #[qjs(rename = "type")]
   pub async fn type_<'js>(
     &self,
@@ -142,6 +159,10 @@ impl KeyboardJs {
   }
 
   /// `keyboard.insertText(text)` — `input` event only, no key events.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the text cannot be inserted.
   #[qjs(rename = "insertText")]
   pub async fn insert_text(
     &self,

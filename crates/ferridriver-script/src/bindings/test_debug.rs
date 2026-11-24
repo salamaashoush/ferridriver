@@ -113,7 +113,7 @@ pub fn install<'js>(ctx: &Ctx<'js>, control: Arc<dyn TestDebugControl>) -> QjsRe
     obj.set("paused", Function::new(ctx.clone(), move || c.paused())?)?;
   }
   {
-    let c = Arc::clone(&control);
+    let c = control;
     obj.set(
       "info",
       // The context comes in as a parameter rather than being captured: a

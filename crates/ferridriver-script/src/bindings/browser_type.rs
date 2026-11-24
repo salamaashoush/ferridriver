@@ -12,11 +12,11 @@
 
 use std::sync::Arc;
 
+use ferridriver::BrowserType;
 use ferridriver::options::{
   self as core_opts, BrowserTypeOptions, ChromiumTransport, ConnectOptions, ConnectOverCdpOptions, IgnoreDefaultArgs,
   LaunchOptions, LaunchPersistentContextOptions,
 };
-use ferridriver::{Browser, BrowserType};
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
 
@@ -53,17 +53,25 @@ impl BrowserTypeJs {
 impl BrowserTypeJs {
   /// Playwright `BrowserType.name()`.
   #[qjs(rename = "name")]
+  #[must_use]
   pub fn name(&self) -> String {
     self.inner.name().to_string()
   }
 
   /// Playwright `BrowserType.executablePath()`.
   #[qjs(rename = "executablePath")]
+  #[must_use]
   pub fn executable_path(&self) -> crate::bindings::convert::Null<String> {
     crate::bindings::convert::Null(self.inner.executable_path().map(|p| p.to_string_lossy().into_owned()))
   }
 
   /// Playwright `browserType.launch(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a
+  /// `PermissionDeniedError` when a path it names is outside the realm's grants, or
+  /// the core error when the browser cannot be launched.
   #[qjs(rename = "launch")]
   pub async fn launch<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let core = match options.0 {
@@ -84,6 +92,12 @@ impl BrowserTypeJs {
   /// `DevTools` Protocol, or Firefox its `WebDriver` `BiDi` session, on
   /// `host:port` (loopback and a free port unless given), admitting clients
   /// on `wsPath` and, when set, `token`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a
+  /// `PermissionDeniedError` when a path it names is outside the realm's grants, or
+  /// the core error when the browser cannot be launched or served.
   #[qjs(rename = "launchServer")]
   pub async fn launch_server<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let (launch, serve) = match options.0 {
@@ -114,6 +128,11 @@ impl BrowserTypeJs {
   }
 
   /// Playwright `browserType.connect(wsEndpoint, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, or with the core
+  /// error when the endpoint cannot be reached.
   #[qjs(rename = "connect")]
   pub async fn connect<'js>(
     &self,
@@ -136,6 +155,11 @@ impl BrowserTypeJs {
   }
 
   /// Playwright `browserType.connectOverCDP(endpointURL, options?)`. Chromium-only.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, or with the core
+  /// error when the endpoint cannot be reached.
   #[qjs(rename = "connectOverCDP")]
   pub async fn connect_over_cdp<'js>(
     &self,
@@ -158,6 +182,12 @@ impl BrowserTypeJs {
   }
 
   /// Playwright `browserType.launchPersistentContext(userDataDir, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a
+  /// `PermissionDeniedError` when `userDataDir` or another path is outside the
+  /// realm's grants, or the core error when the browser cannot be launched.
   #[qjs(rename = "launchPersistentContext")]
   pub async fn launch_persistent_context<'js>(
     &self,
@@ -225,11 +255,16 @@ pub struct BrowserServerJs {
 impl BrowserServerJs {
   /// Playwright `browserServer.wsEndpoint()`.
   #[qjs(rename = "wsEndpoint")]
+  #[must_use]
   pub fn ws_endpoint(&self) -> String {
     self.ws_endpoint.clone()
   }
 
   /// Playwright `browserServer.close()`: stop serving and close the browser.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser does not close cleanly.
   #[qjs(rename = "close")]
   pub async fn close(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     let server = self.inner.lock().await.take();
@@ -416,9 +451,13 @@ fn webkit_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
 /// Install the top-level `chromium`, `firefox`, and `webkit` globals.
 /// Mirrors Playwright's `import { chromium, firefox, webkit }` exactly:
 /// `chromium()` is ALWAYS Chromium, `firefox()` ALWAYS Firefox,
-/// `webkit()` ALWAYS WebKit. The wire backend is a per-product detail
+/// `webkit()` ALWAYS `WebKit`. The wire backend is a per-product detail
 /// (Chromium pipe vs `chromium({transport:'ws'})`; Firefox speaks
-/// BiDi) — never a product swap.
+/// `BiDi`) — never a product swap.
+///
+/// # Errors
+///
+/// When a global cannot be defined on the context.
 pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<BrowserTypeJs>::define(&ctx.globals())?;
   Class::<BrowserServerJs>::define(&ctx.globals())?;
@@ -439,10 +478,6 @@ pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     .globals()
     .set("safari", rquickjs::Function::new(ctx.clone(), safari_factory)?)?;
   crate::bindings::runtime::mirror_global(ctx, "safari")?;
-
-  // Suppress the unused-import warning for `Browser`, which is only
-  // here to keep doc-link references valid in a future binding.
-  let _ = std::marker::PhantomData::<Browser>;
 
   Ok(())
 }

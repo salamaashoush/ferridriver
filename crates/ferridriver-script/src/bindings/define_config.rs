@@ -36,6 +36,11 @@ const SHALLOW_MERGED_KEYS: &[&str] = &["expect", "use"];
 
 /// Install `defineConfig` and `defineTestConfig` on the `ferridriver`
 /// global, where the `@ferridriver/test` native module reads them from.
+///
+/// # Errors
+///
+/// When the functions cannot be created or `globalThis.ferridriver`
+/// written.
 pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
   let document = Function::new(ctx.clone(), define_config)?;
@@ -52,7 +57,14 @@ pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 ///
 /// A single argument is returned as it was passed, not copied, as a
 /// module exporting one literal expects.
-fn define_config<'js>(ctx: Ctx<'js>, documents: Rest<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+fn define_config<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  documents: Rest<Value<'js>>,
+) -> rquickjs::Result<Value<'js>> {
   let mut iter = documents.0.into_iter();
   let Some(first) = iter.next() else {
     return Err(throw_named(
@@ -94,7 +106,14 @@ fn document<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<serde_js
 /// A single argument is returned as it was passed, not copied: upstream
 /// assigns `result = configs[0]` and never clones it, and a config that
 /// arrived by reference has to keep going out by reference.
-fn define_test_config<'js>(ctx: Ctx<'js>, configs: Rest<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+fn define_test_config<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  configs: Rest<Value<'js>>,
+) -> rquickjs::Result<Value<'js>> {
   let mut iter = configs.0.into_iter();
   let Some(first) = iter.next() else {
     // Upstream throws here too, from `result[kDefineConfigWasUsed] = true`

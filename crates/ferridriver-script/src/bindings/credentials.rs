@@ -1,4 +1,4 @@
-//! `CredentialsJs`: QuickJS binding for `context.credentials`, the
+//! `CredentialsJs`: `QuickJS` binding for `context.credentials`, the
 //! context's virtual WebAuthn authenticator (Playwright `Credentials`).
 
 use ferridriver::credentials::{CredentialCreateOptions, CredentialFilter, Credentials};
@@ -31,6 +31,11 @@ fn bag<'js, T: Default + serde::de::DeserializeOwned>(ctx: &Ctx<'js>, value: Opt
 #[rquickjs::methods]
 impl CredentialsJs {
   /// Playwright: `credentials.create(rpId, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed options bag, or the core error when the authenticator
+  /// cannot create the credential.
   #[qjs(rename = "create")]
   pub async fn create<'js>(
     &self,
@@ -49,6 +54,10 @@ impl CredentialsJs {
   }
 
   /// Playwright: `credentials.get(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed filter.
   #[qjs(rename = "get")]
   pub async fn get<'js>(
     &self,
@@ -71,6 +80,10 @@ impl CredentialsJs {
   }
 
   /// Playwright: `credentials.install()`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the virtual authenticator cannot be installed.
   #[qjs(rename = "install")]
   pub async fn install(&self, call_site: crate::bindings::CallSite, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     call_site

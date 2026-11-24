@@ -1,4 +1,4 @@
-//! QuickJS bindings for ferridriver core types.
+//! `QuickJS` bindings for ferridriver core types.
 //!
 //! Wrappers live here (one module per core type) and use `rquickjs`'s own
 //! `#[class]` / `#[methods]` proc macros to generate the JS FFI. Each wrapper
@@ -117,6 +117,11 @@ use std::sync::Arc;
 /// Prototype registration is idempotent and session-stable: callers
 /// invoke this ONCE at `Session::create`, not per `execute`. The
 /// per-call `install_*` helpers below only build the live instance.
+///
+/// # Errors
+///
+/// When the engine fails to define a class (an engine exception such as
+/// out-of-memory) or to install the abort wrappers.
 pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let g = ctx.globals();
   Class::<PageJs>::define(&g)?;
@@ -167,6 +172,10 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 ///
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
+///
+/// # Errors
+///
+/// When creating the `Page` instance or setting the global fails.
 pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, vm: ferrijs::VmHandle) -> rquickjs::Result<()> {
   install_page_on(ctx, &ctx.globals(), page, vm)?;
   crate::bindings::runtime::mirror_global(ctx, "page")
@@ -179,6 +188,10 @@ pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, vm: ferrijs::Vm
 /// per-scenario World object (so cucumber `this.page` resolves to that
 /// scenario's fixtures). One binding, two install targets — no
 /// duplicate `PageJs` wiring.
+///
+/// # Errors
+///
+/// When creating the `Page` instance or setting it on `target` fails.
 pub fn install_page_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
@@ -196,12 +209,20 @@ pub fn install_page_on<'js>(
 }
 
 /// Install the `context` global (cookies, storage, permissions, route, etc.).
+///
+/// # Errors
+///
+/// When creating the `BrowserContext` instance or setting the global fails.
 pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::ContextRef>) -> rquickjs::Result<()> {
   install_browser_context_on(ctx, &ctx.globals(), bcx)?;
   crate::bindings::runtime::mirror_global(ctx, "context")
 }
 
 /// `context` binding onto an arbitrary target (see [`install_page_on`]).
+///
+/// # Errors
+///
+/// When creating the `BrowserContext` instance or setting it on `target` fails.
 pub fn install_browser_context_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
@@ -216,12 +237,20 @@ pub fn install_browser_context_on<'js>(
 /// so scripts can construct fresh contexts with the full Playwright
 /// [`ferridriver::options::BrowserContextOptions`] bag. Rule-9 tests
 /// for §4.1 consume this entry point.
+///
+/// # Errors
+///
+/// When creating the `Browser` instance or setting the global fails.
 pub fn install_browser(ctx: &Ctx<'_>, browser: Arc<ferridriver::Browser>) -> rquickjs::Result<()> {
   install_browser_on(ctx, &ctx.globals(), browser)?;
   crate::bindings::runtime::mirror_global(ctx, "browser")
 }
 
 /// `browser` binding onto an arbitrary target (see [`install_page_on`]).
+///
+/// # Errors
+///
+/// When creating the `Browser` instance or setting it on `target` fails.
 pub fn install_browser_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
@@ -232,13 +261,21 @@ pub fn install_browser_on<'js>(
   Ok(())
 }
 
-/// Install the `request` global (runner-side HTTP via HttpClient).
+/// Install the `request` global (runner-side HTTP via `HttpClient`).
+///
+/// # Errors
+///
+/// When creating the `APIRequestContext` instance or setting the global fails.
 pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::http_client::HttpClient>) -> rquickjs::Result<()> {
   install_request_on(ctx, &ctx.globals(), req)?;
   crate::bindings::runtime::mirror_global(ctx, "request")
 }
 
 /// `request` binding onto an arbitrary target (see [`install_page_on`]).
+///
+/// # Errors
+///
+/// When creating the `APIRequestContext` instance or setting it on `target` fails.
 pub fn install_request_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
@@ -251,6 +288,10 @@ pub fn install_request_on<'js>(
 
 /// Install the `artifacts` global — a dedicated sandboxed directory for
 /// script outputs (screenshots, PDFs, traces, downloaded bodies).
+///
+/// # Errors
+///
+/// When creating the `Artifacts` instance or setting the global fails.
 pub fn install_artifacts(ctx: &Ctx<'_>, sandbox: Arc<crate::output_dir::OutputDir>) -> rquickjs::Result<()> {
   let js_art = Class::instance(ctx.clone(), ArtifactsJs::new(sandbox))?;
   ctx.globals().set("artifacts", js_art)?;

@@ -1,7 +1,7 @@
 //! `sidecars` JS binding: connect to a declared sidecar process and drive
 //! it with `send(method, params?)` (Promise) plus pushed events
 //! (`on`/`once`/`off`). The transport lives in [`crate::sidecar`]; this is
-//! the QuickJS surface.
+//! the `QuickJS` surface.
 //!
 //! Connecting is by declared name only — `sidecars.connect(name)` resolves a
 //! `[[sidecars]]` spec the operator configured; scripts cannot spawn an
@@ -10,7 +10,7 @@
 //!
 //! Pushed events (id-less `{method, params}` frames the child writes) are
 //! dispatched to JS listeners by ONE pump task per connected handle. The
-//! pump is spawned onto the QuickJS runtime's OWN executor via
+//! pump is spawned onto the `QuickJS` runtime's OWN executor via
 //! [`rquickjs::Ctx::spawn`] (the same mechanism `setInterval` uses), so it
 //! is only polled by whichever future holds the runtime lock — a long-lived
 //! `tokio::spawn` + per-event `async_with` loop is the shape that crashed
@@ -68,6 +68,11 @@ impl SidecarsJs {
   /// yields a fresh handle with its own listeners). A dead cached transport
   /// (child died, or some handle `close()`d it) is evicted and respawned —
   /// never handed back as a corpse whose every `send` fails `Closed`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` is not a declared sidecar or its
+  /// process cannot be spawned.
   #[qjs(rename = "connect")]
   pub async fn connect<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
     let Some(spec) = self.specs.get(&name).cloned() else {
@@ -79,10 +84,10 @@ impl SidecarsJs {
     let inner = {
       let mut live = self.live.lock().await;
       match live.get(&name) {
-        Some(existing) if !existing.is_closed() => existing.clone(),
+        Some(existing) if !existing.is_closed() => Arc::clone(existing),
         _ => {
           let s = Sidecar::connect(&spec).await.map_err(|e| throw(&ctx, &e.to_string()))?;
-          live.insert(name, s.clone());
+          live.insert(name, Arc::clone(&s));
           s
         },
       }
@@ -92,7 +97,7 @@ impl SidecarsJs {
       default_timeout_ms: DEFAULT_SEND_TIMEOUT_MS,
       handle_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
       pump: Arc::new(StdMutex::new(None)),
-      live: self.live.clone(),
+      live: Arc::clone(&self.live),
     };
     let instance = Class::instance(ctx.clone(), wrapper)?;
     IntoJs::into_js(instance, &ctx)
@@ -113,15 +118,8 @@ struct SidecarListeners {
   by_handle: FxHashMap<u64, EventListeners>,
 }
 
+#[derive(JsLifetime)]
 struct SidecarListenersUd(RefCell<SidecarListeners>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles in a single-
-// threaded VM's userdata), so re-stating the unused `'js` lifetime is sound —
-// identical rationale to `PageCallbacksUd` / `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SidecarListenersUd {
-  type Changed<'to> = SidecarListenersUd;
-}
 
 fn with_sidecar_listeners<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut SidecarListeners) -> R) -> R {
   if ctx.userdata::<SidecarListenersUd>().is_none() {
@@ -161,12 +159,12 @@ pub struct SidecarJs {
 
 impl Drop for SidecarJs {
   fn drop(&mut self) {
-    if let Some(stop) = self
+    let stop = self
       .pump
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .take()
-    {
+      .take();
+    if let Some(stop) = stop {
       stop.notify_waiters();
     }
   }
@@ -174,7 +172,7 @@ impl Drop for SidecarJs {
 
 impl SidecarJs {
   /// Start the one event-pump for this handle if it is not already running.
-  /// The pump runs on the QuickJS runtime's own executor (`ctx.spawn`), so it
+  /// The pump runs on the `QuickJS` runtime's own executor (`ctx.spawn`), so it
   /// only ever touches the interpreter from the interpreter thread. It owns a
   /// `broadcast::Receiver` and dispatches each id-less frame to every callback
   /// registered (in context userdata) for this handle + event.
@@ -184,7 +182,7 @@ impl SidecarJs {
       return;
     }
     let stop = Arc::new(Notify::new());
-    let stop_for_task = stop.clone();
+    let stop_for_task = Arc::clone(&stop);
     let mut rx = self.inner.subscribe();
     let handle_id = self.handle_id;
     let pump_ctx = ctx.clone();
@@ -234,6 +232,11 @@ impl SidecarJs {
 impl SidecarJs {
   /// `send(method, params?)` → `Promise<result>`. Rejects on a child
   /// `{error}` reply, timeout, or a closed transport.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for unserializable `params`, or an `Error`
+  /// on a child `{error}` reply, a timeout, or a closed transport.
   #[qjs(rename = "send")]
   pub async fn send<'js>(
     &self,
@@ -260,6 +263,12 @@ impl SidecarJs {
   /// reply / timeout (Promise.all semantics) — the direct, lower-overhead
   /// replacement for `Promise.all(items.map(x => sc.send(x.method, x.params)))`,
   /// collapsing N JS promises + the Promise.all aggregation into one.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `calls` is not an array of
+  /// `{ method, params? }` or on the first `{error}` reply, timeout or closed
+  /// transport; with a `TypeError` for unserializable `params`.
   #[qjs(rename = "sendMany")]
   pub async fn send_many<'js>(&self, ctx: Ctx<'js>, calls: Value<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = calls
@@ -299,6 +308,10 @@ impl SidecarJs {
   /// `on(event, cb)` → unsubscribe function. Registers `cb` for `event`'s
   /// pushed frames and starts the pump on first use. Calling the returned
   /// function removes exactly this listener.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the unsubscribe function cannot be created.
   #[qjs(rename = "on")]
   pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, cb: Function<'js>) -> rquickjs::Result<Function<'js>> {
     let lid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -314,7 +327,7 @@ impl SidecarJs {
     });
     self.ensure_pump(&ctx);
 
-    Function::new(ctx.clone(), move |ctx: Ctx<'_>| {
+    Function::new(ctx, move |ctx: Ctx<'_>| {
       with_sidecar_listeners(&ctx, |r| {
         if let Some(v) = r.by_handle.get_mut(&handle_id).and_then(|m| m.get_mut(&event)) {
           v.retain(|(id, _)| *id != lid);
@@ -327,6 +340,7 @@ impl SidecarJs {
   /// event's params, then auto-unsubscribes (its dedicated receiver is
   /// dropped). Independent of `on`'s listener registry.
   #[qjs(rename = "once")]
+  #[must_use]
   pub fn once<'js>(
     &self,
     ctx: Ctx<'js>,
@@ -352,7 +366,24 @@ impl SidecarJs {
   /// `off(event, cb?)`. With `cb`, drops that one listener (by `===`
   /// identity); without it, drops every listener for `event`.
   #[qjs(rename = "off")]
-  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, cb: Opt<Function<'js>>) {
+  pub fn off<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    cb: Opt<Function<'js>>,
+  ) {
     let handle_id = self.handle_id;
     with_sidecar_listeners(&ctx, |r| {
       let Some(by_event) = r.by_handle.get_mut(&handle_id) else {
@@ -382,14 +413,18 @@ impl SidecarJs {
   /// `connect(name)` shares one child process, so closing any of them
   /// closes it for all. The cache entry is evicted, so a later
   /// `connect(name)` spawns a fresh child.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when closing the transport fails.
   #[qjs(rename = "close")]
   pub async fn close(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    if let Some(stop) = self
+    let stop = self
       .pump
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .take()
-    {
+      .take();
+    if let Some(stop) = stop {
       stop.notify_waiters();
     }
     with_sidecar_listeners(&ctx, |r| {
@@ -407,6 +442,7 @@ impl SidecarJs {
   }
 
   #[qjs(rename = "name")]
+  #[must_use]
   pub fn name(&self) -> String {
     self.inner.name().to_string()
   }
@@ -414,6 +450,11 @@ impl SidecarJs {
 
 /// Install the `sidecars` global. Always installed (even with no declared
 /// specs) so `sidecars.connect` exists and rejects unknown names clearly.
+///
+/// # Errors
+///
+/// When defining the classes, creating the instance or setting the global
+/// fails.
 pub fn install_sidecars(ctx: &Ctx<'_>, specs: &[SidecarSpec]) -> rquickjs::Result<()> {
   let g = ctx.globals();
   Class::<SidecarsJs>::define(&g)?;

@@ -1,4 +1,4 @@
-//! `WebSocketRouteJs` / `WebSocketRouteServerJs` — QuickJS bindings for
+//! `WebSocketRouteJs` / `WebSocketRouteServerJs` — `QuickJS` bindings for
 //! `page.routeWebSocket` / `context.routeWebSocket` (Playwright 1.60).
 //!
 //! `onMessage` / `onClose` callbacks fire repeatedly over a socket's
@@ -36,17 +36,11 @@ type WsPumpMsg = (u64, WsPumpEvent);
 /// Per-context sender feeding the single WS-callback pump. Sibling of
 /// `PageEventPumpUd`; same rule-1 rationale (a long-lived loop resolving
 /// plain JS callbacks must stay on the interpreter thread).
+#[derive(JsLifetime)]
 struct WsEventPumpUd(tokio::sync::mpsc::Sender<WsPumpMsg>);
 
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `PageEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for WsEventPumpUd {
-  type Changed<'to> = WsEventPumpUd;
-}
-
 /// Get (or lazily start) this context's WS-callback pump. The pump future
-/// lives on the QuickJS runtime executor, polled only by the session's VM
+/// lives on the `QuickJS` runtime executor, polled only by the session's VM
 /// event loop. Callback invocations retain arrival order; their async
 /// continuations may interleave with later callbacks and script runs.
 fn ensure_ws_pump(ctx: &Ctx<'_>) -> tokio::sync::mpsc::Sender<WsPumpMsg> {
@@ -127,23 +121,20 @@ pub(crate) fn build_ws_route_handler(
   })
 }
 
-// 0.13 forbids running JS while a buffer borrow is alive; these copy out
-// immediately.
-#[allow(unsafe_code)]
 fn ws_message_from_js(value: &Value<'_>) -> WsMessage {
   if let Some(s) = value.as_string() {
     return WsMessage::Text(s.to_string().unwrap_or_default());
   }
   if let Some(obj) = value.as_object() {
     if let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone())
-      && let Some(bytes) = unsafe { buf.as_bytes() }
+      && let Some(bytes) = crate::bindings::convert::array_buffer_bytes(&buf, 0, usize::MAX)
     {
-      return WsMessage::Binary(bytes.to_vec());
+      return WsMessage::Binary(bytes);
     }
     if let Ok(ta) = rquickjs::TypedArray::<u8>::from_object(obj.clone())
-      && let Some(bytes) = unsafe { ta.as_bytes() }
+      && let Some(bytes) = crate::bindings::convert::typed_array_bytes(&ta)
     {
-      return WsMessage::Binary(bytes.to_vec());
+      return WsMessage::Binary(bytes);
     }
   }
   WsMessage::Text(String::new())
@@ -160,7 +151,11 @@ fn parse_close(options: &Opt<Value<'_>>) -> (Option<u32>, Option<String>) {
   let Some(obj) = options.0.as_ref().and_then(rquickjs::Value::as_object) else {
     return (None, None);
   };
-  let code = obj.get::<_, Option<f64>>("code").ok().flatten().map(|c| c as u32);
+  let code = obj
+    .get::<_, Option<f64>>("code")
+    .ok()
+    .flatten()
+    .map(crate::bindings::convert::f64_to_u32);
   let reason = obj.get::<_, Option<String>>("reason").ok().flatten();
   (code, reason)
 }
@@ -222,43 +217,66 @@ impl WebSocketRouteJs {
 #[rquickjs::methods]
 impl WebSocketRouteJs {
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
   }
 
   #[qjs(rename = "protocols")]
+  #[must_use]
   pub fn protocols(&self) -> Vec<String> {
     self.inner.protocols().to_vec()
   }
 
   #[qjs(rename = "send")]
-  pub async fn send<'js>(&self, _ctx: Ctx<'js>, message: Value<'js>) -> rquickjs::Result<()> {
+  pub async fn send<'js>(&self, _ctx: Ctx<'js>, message: Value<'js>) {
     self.inner.send(ws_message_from_js(&message)).await;
-    Ok(())
   }
 
   #[qjs(rename = "close")]
-  pub async fn close<'js>(&self, _ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+  pub async fn close<'js>(&self, _ctx: Ctx<'js>, options: Opt<Value<'js>>) {
     let (code, reason) = parse_close(&options);
     self.inner.close(code, reason).await;
-    Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "onMessage")]
-  pub fn on_message<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
+  pub fn on_message<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    handler: Function<'js>,
+  ) -> rquickjs::Result<()> {
     let cb = make_msg_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_message(cb);
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "onClose")]
-  pub fn on_close<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
+  pub fn on_close<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    handler: Function<'js>,
+  ) -> rquickjs::Result<()> {
     let cb = make_close_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_close(cb);
     Ok(())
   }
 
   #[qjs(rename = "connectToServer")]
+  #[must_use]
   pub fn connect_to_server(&self) -> WebSocketRouteServerJs {
     WebSocketRouteServerJs {
       inner: self.inner.connect_to_server(),
@@ -279,32 +297,53 @@ pub struct WebSocketRouteServerJs {
 #[rquickjs::methods]
 impl WebSocketRouteServerJs {
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
   }
 
   #[qjs(rename = "send")]
-  pub async fn send<'js>(&self, _ctx: Ctx<'js>, message: Value<'js>) -> rquickjs::Result<()> {
+  pub async fn send<'js>(&self, _ctx: Ctx<'js>, message: Value<'js>) {
     self.inner.send(ws_message_from_js(&message)).await;
-    Ok(())
   }
 
   #[qjs(rename = "close")]
-  pub async fn close<'js>(&self, _ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+  pub async fn close<'js>(&self, _ctx: Ctx<'js>, options: Opt<Value<'js>>) {
     let (code, reason) = parse_close(&options);
     self.inner.close(code, reason).await;
-    Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "onMessage")]
-  pub fn on_message<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
+  pub fn on_message<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    handler: Function<'js>,
+  ) -> rquickjs::Result<()> {
     let cb = make_msg_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_message(cb);
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "onClose")]
-  pub fn on_close<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
+  pub fn on_close<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    handler: Function<'js>,
+  ) -> rquickjs::Result<()> {
     let cb = make_close_cb(&ctx, handler, self.owner.clone())?;
     self.inner.on_close(cb);
     Ok(())

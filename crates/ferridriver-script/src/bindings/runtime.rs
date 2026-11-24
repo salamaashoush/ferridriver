@@ -8,6 +8,10 @@
 use rquickjs::{Ctx, Object, Value};
 
 /// Get or create `globalThis.ferridriver`.
+///
+/// # Errors
+///
+/// When the engine fails to create the object or set the global.
 pub fn ensure_ferridriver<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   let g = ctx.globals();
   if let Ok(fd) = g.get::<_, Object<'js>>("ferridriver") {
@@ -19,11 +23,19 @@ pub fn ensure_ferridriver<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> 
 }
 
 /// Install/update `ferridriver.host`.
+///
+/// # Errors
+///
+/// When `globalThis.ferridriver` cannot be created or written.
 pub fn install_host(ctx: &Ctx<'_>, host: &str) -> rquickjs::Result<()> {
   ensure_ferridriver(ctx)?.set("host", host)
 }
 
 /// Copy a global binding onto `ferridriver.<name>` if the global exists.
+///
+/// # Errors
+///
+/// When `globalThis.ferridriver` cannot be created or written.
 pub fn mirror_global(ctx: &Ctx<'_>, name: &str) -> rquickjs::Result<()> {
   let g = ctx.globals();
   if let Ok(v) = g.get::<_, Value<'_>>(name) {
@@ -33,6 +45,11 @@ pub fn mirror_global(ctx: &Ctx<'_>, name: &str) -> rquickjs::Result<()> {
 }
 
 /// Set `ferridriver.<name> = value`.
+///
+/// # Errors
+///
+/// When `value` cannot be converted, or `globalThis.ferridriver` cannot be
+/// created or written.
 pub fn set<'js, V>(ctx: &Ctx<'js>, name: &str, value: V) -> rquickjs::Result<()>
 where
   V: rquickjs::IntoJs<'js>,
@@ -52,7 +69,19 @@ struct TotpOptions {
 
 /// `ferridriver.totp(secret, options?)`: the current code for a base32
 /// secret or an `otpauth://totp/` link.
-fn totp<'js>(ctx: Ctx<'js>, secret: String, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<String> {
+fn totp<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs extracts a native function's JS arguments by value"
+  )]
+  secret: String,
+  options: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<String> {
   let options: TotpOptions = match options.0 {
     Some(value) if !value.is_undefined() && !value.is_null() => crate::bindings::convert::serde_from_js(&ctx, value)?,
     _ => TotpOptions::default(),
@@ -75,6 +104,11 @@ fn totp<'js>(ctx: Ctx<'js>, secret: String, options: rquickjs::function::Opt<Val
   .map_err(throw)
 }
 
+/// Install `ferridriver.totp`.
+///
+/// # Errors
+///
+/// When the function cannot be created or `globalThis.ferridriver` written.
 pub fn install_totp(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   set(ctx, "totp", rquickjs::Function::new(ctx.clone(), totp)?)
 }

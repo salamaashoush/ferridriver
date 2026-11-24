@@ -1,4 +1,4 @@
-//! `JSHandleJs`: QuickJS wrapper around `ferridriver::JSHandle`.
+//! `JSHandleJs`: `QuickJS` wrapper around `ferridriver::JSHandle`.
 //!
 //! Mirrors the NAPI surface in `crates/ferridriver-node/src/js_handle.rs`
 //! and Playwright's `JSHandle` TS interface. Phase-C surface covers lifecycle
@@ -40,6 +40,7 @@ impl JSHandleJs {
   /// Playwright `jsHandle.isDisposed(): boolean` — METHOD (not
   /// property): callers write `h.isDisposed()` with parens.
   #[qjs(rename = "isDisposed")]
+  #[must_use]
   pub fn is_disposed(&self) -> bool {
     self.inner.is_disposed()
   }
@@ -47,6 +48,11 @@ impl JSHandleJs {
   /// Release the underlying remote object. Playwright:
   /// `jsHandle.dispose(): Promise<void>`. Idempotent — calling twice
   /// short-circuits the second time.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// releasing the remote object fails.
   #[qjs(rename = "dispose")]
   pub async fn dispose(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.dispose().await.into_js_with(&ctx)
@@ -60,6 +66,10 @@ impl JSHandleJs {
   /// Playwright: `jsHandle.asElement(): ElementHandle | null`.
   /// Explicit `null` (NOT `undefined`) — rquickjs maps `Option::None` to
   /// JS `undefined`, so we hand back a JS Value carrying a real `null`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot create the `ElementHandle` object.
   #[qjs(rename = "asElement")]
   pub fn as_element<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     use rquickjs::class::Class;
@@ -79,6 +89,11 @@ impl JSHandleJs {
   /// `NaN` / `±Infinity` / `undefined` / `-0`) arrive as native JS —
   /// matches Playwright's `parseSerializedValue` at
   /// `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading the value fails.
   #[qjs(rename = "jsonValue")]
   pub async fn json_value<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let v = self.inner.json_value().await.into_js_with(&ctx)?;
@@ -86,6 +101,11 @@ impl JSHandleJs {
   }
 
   /// Playwright: `jsHandle.getProperty(propertyName): Promise<JSHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading the property fails.
   #[qjs(rename = "getProperty")]
   pub async fn get_property(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<JSHandleJs> {
     let h = self.inner.get_property(&name).await.into_js_with(&ctx)?;
@@ -93,9 +113,14 @@ impl JSHandleJs {
   }
 
   /// Playwright: `jsHandle.getProperties(): Promise<Map<string, JSHandle>>`.
-  /// The QuickJS surface returns a plain object `{ [key]: JSHandle }`
+  /// The `QuickJS` surface returns a plain object `{ [key]: JSHandle }`
   /// mirroring the NAPI `Record<string, JSHandle>` shape — ergonomic
   /// on the JS side without losing per-key handle identity.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading the properties fails.
   #[qjs(rename = "getProperties")]
   pub async fn get_properties<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let pairs = self.inner.get_properties().await.into_js_with(&ctx)?;
@@ -110,6 +135,12 @@ impl JSHandleJs {
   /// Playwright: `jsHandle.evaluate(pageFunction, arg?): Promise<R>`.
   /// `pageFunction` accepts a string or a JS function — matches
   /// Playwright's `String(pageFunction)` + `typeof fn === 'function'`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
+  /// when the page function throws or the page is gone.
   #[qjs(rename = "evaluate")]
   pub async fn evaluate<'js>(
     &self,
@@ -136,6 +167,12 @@ impl JSHandleJs {
   }
 
   /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
+  /// when the page function throws or the page is gone.
   #[qjs(rename = "evaluateHandle")]
   pub async fn evaluate_handle<'js>(
     &self,

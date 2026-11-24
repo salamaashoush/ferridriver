@@ -1,4 +1,4 @@
-//! `TracingJs`: QuickJS binding for `context.tracing`.
+//! `TracingJs`: `QuickJS` binding for `context.tracing`.
 //!
 //! Mirrors Playwright's `Tracing` (`client/tracing.ts`). HAR recording
 //! (`startHar` / `stopHar`) is fully wired; the trace `.zip` recorder
@@ -33,6 +33,12 @@ impl TracingJs {
   /// Playwright: `tracing.startHar(path, { content?, mode?, urlFilter?, resourcesDir? })`.
   /// A `.zip` path packs `har.har` plus attached bodies; default content
   /// policy is `attach` for `.zip`, `embed` otherwise.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `PermissionDeniedError` when the realm's write grant refuses `path` or
+  /// `resourcesDir`, a `TypeError` for an option of the wrong type, or the core error when HAR
+  /// recording cannot start.
   #[qjs(rename = "startHar")]
   pub async fn start_har<'js>(&self, ctx: Ctx<'js>, path: String, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     crate::bindings::convert::writable(&ctx, std::path::Path::new(&path))?;
@@ -44,6 +50,10 @@ impl TracingJs {
   }
 
   /// Playwright: `tracing.stopHar()`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when no HAR recording is running or the HAR cannot be written.
   #[qjs(rename = "stopHar")]
   pub async fn stop_har(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self.ctx.tracing().stop_har().await.into_js_with(&ctx)
@@ -52,6 +62,11 @@ impl TracingJs {
   /// Playwright: `tracing.start(options?: { name?, title?, screenshots?,
   /// snapshots?, sources? })`. Records a Playwright-format trace; write
   /// it with `stop({ path })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for an option of the wrong type, or the core error when tracing cannot
+  /// start.
   #[qjs(rename = "start")]
   pub async fn start<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_start_options(&options)?;
@@ -59,6 +74,11 @@ impl TracingJs {
   }
 
   /// Playwright: `tracing.startChunk(options?: { name?, title? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for an option of the wrong type, or the core error when tracing is not
+  /// running.
   #[qjs(rename = "startChunk")]
   pub async fn start_chunk<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_chunk_options(&options)?;
@@ -67,19 +87,53 @@ impl TracingJs {
 
   /// Playwright: `tracing.group(name, options?: { location? })`. Nests
   /// everything up to `groupEnd()` under one entry in the viewer.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for an option of the wrong type, or the core error when tracing is not
+  /// running.
   #[qjs(rename = "group")]
-  pub fn group<'js>(&self, ctx: Ctx<'js>, name: String, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
+  pub fn group<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    name: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    options: Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let location = parse_group_location(&options)?;
     self.ctx.tracing().group(name, location).into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.groupEnd()`.
+  ///
+  /// # Errors
+  ///
+  /// Throws the core error when tracing was not started.
   #[qjs(rename = "groupEnd")]
-  pub fn group_end(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn group_end(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     self.ctx.tracing().group_end().into_js_with(&ctx)
   }
 
   /// Playwright: `tracing.stopChunk(options?: { path? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `PermissionDeniedError` when the realm's write grant refuses `path`, a `TypeError`
+  /// for an option of the wrong type, or the core error when the trace cannot be written.
   #[qjs(rename = "stopChunk")]
   pub async fn stop_chunk<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_stop_options(&ctx, &options)?;
@@ -87,6 +141,11 @@ impl TracingJs {
   }
 
   /// Playwright: `tracing.stop(options?: { path? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `PermissionDeniedError` when the realm's write grant refuses `path`, a `TypeError`
+  /// for an option of the wrong type, or the core error when the trace cannot be written.
   #[qjs(rename = "stop")]
   pub async fn stop<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let opts = parse_tracing_stop_options(&ctx, &options)?;
@@ -191,7 +250,9 @@ fn parse_start_har_options<'js>(ctx: &Ctx<'js>, options: Opt<Value<'js>>) -> rqu
     _ => None,
   };
   let url_filter = match obj.get::<_, Option<Value<'js>>>("urlFilter")? {
-    Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::page::options::url_value_to_matcher(ctx, v)?),
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      Some(crate::bindings::page::options::url_value_to_matcher(ctx, &v)?)
+    },
     _ => None,
   };
   let resources_dir = obj

@@ -44,12 +44,12 @@ pub(crate) fn page_event_to_js<'js>(
     },
     PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => Class::instance(
       ctx.clone(),
-      crate::bindings::network::RequestJs::new_with_page(r, page.clone()),
+      crate::bindings::network::RequestJs::new_with_page(r, Arc::clone(page)),
     )?
     .into_js(ctx),
     PageEvent::Response(r) => Class::instance(
       ctx.clone(),
-      crate::bindings::network::ResponseJs::new_with_page(r, page.clone()),
+      crate::bindings::network::ResponseJs::new_with_page(r, Arc::clone(page)),
     )?
     .into_js(ctx),
     PageEvent::WebSocket(ws) => {
@@ -70,7 +70,7 @@ pub(crate) fn page_event_to_js<'js>(
       crate::bindings::identity::frame_object(ctx, page.frame_for_id(&frame_id))?.into_js(ctx)
     },
     PageEvent::Load | PageEvent::DomContentLoaded | PageEvent::Close | PageEvent::Crash => {
-      crate::bindings::identity::page_object(ctx, page.clone())?.into_js(ctx)
+      crate::bindings::identity::page_object(ctx, Arc::clone(page))?.into_js(ctx)
     },
     PageEvent::Popup(popup) => crate::bindings::identity::page_object(ctx, popup)?.into_js(ctx),
     PageEvent::Worker(worker) => crate::bindings::identity::worker_object(ctx, worker)?.into_js(ctx),
@@ -117,7 +117,7 @@ pub(crate) async fn call_predicate_truthy<'js>(
 /// rejects the wait as it was thrown.
 pub(crate) async fn wait_for_url_condition<'js, W, F>(
   ctx: &rquickjs::Ctx<'js>,
-  url: rquickjs::Value<'js>,
+  url: &rquickjs::Value<'js>,
   wait: W,
 ) -> rquickjs::Result<()>
 where
@@ -200,10 +200,13 @@ pub(crate) async fn wait_request_predicate<'js>(
     }
     match tokio::time::timeout(remaining, rx.recv()).await {
       Ok(Some(PageEvent::Request(req))) => {
-        let probe = crate::bindings::network::RequestJs::new_with_page(req.clone(), page.clone());
+        let probe = crate::bindings::network::RequestJs::new_with_page(req.clone(), Arc::clone(&page));
         let inst = Class::instance(ctx.clone(), probe)?;
         if call_predicate_truthy(&pred, inst, &ctx).await? {
-          return Ok(crate::bindings::network::RequestJs::new_with_page(req, page.clone()));
+          return Ok(crate::bindings::network::RequestJs::new_with_page(
+            req,
+            Arc::clone(&page),
+          ));
         }
       },
       Ok(Some(_)) => {},
@@ -247,10 +250,13 @@ pub(crate) async fn wait_response_predicate<'js>(
     }
     match tokio::time::timeout(remaining, rx.recv()).await {
       Ok(Some(PageEvent::Response(resp))) => {
-        let probe = crate::bindings::network::ResponseJs::new_with_page(resp.clone(), page.clone());
+        let probe = crate::bindings::network::ResponseJs::new_with_page(resp.clone(), Arc::clone(&page));
         let inst = Class::instance(ctx.clone(), probe)?;
         if call_predicate_truthy(&pred, inst, &ctx).await? {
-          return Ok(crate::bindings::network::ResponseJs::new_with_page(resp, page.clone()));
+          return Ok(crate::bindings::network::ResponseJs::new_with_page(
+            resp,
+            Arc::clone(&page),
+          ));
         }
       },
       Ok(Some(_)) => {},

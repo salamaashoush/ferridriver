@@ -20,7 +20,7 @@
 //! `Promise.all([a.click(), b.click()])` has two call sites in flight at
 //! once, and a slot would report the second for both.
 //!
-//! Positions arrive as coordinates in the bundle QuickJS actually ran, so
+//! Positions arrive as coordinates in the bundle `QuickJS` actually ran, so
 //! they are mapped back through that bundle's source map before anyone
 //! sees them: `--debug`'s `pauseAt` matches what the user typed, and the
 //! trace viewer's Source tab needs a file that exists on disk.
@@ -128,13 +128,8 @@ pub fn capture(ctx: &Ctx<'_>) -> CallOrigin {
 // read by the runtime's own error remap and by the call sites here.
 
 /// The script identity a gate uses to recognise its own calls.
+#[derive(JsLifetime)]
 struct ScriptIdUd(Arc<str>);
-
-// SAFETY: holds only `'static` data.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ScriptIdUd {
-  type Changed<'to> = ScriptIdUd;
-}
 
 pub use ferrijs::source_map::{caller_source_file, register_bundle, remap_stack};
 

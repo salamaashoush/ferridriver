@@ -131,15 +131,8 @@ pub(crate) struct ParamTypeReg {
 /// declared manifest with it, so the `ToolReg` a session dispatches
 /// from already carries the effective grants. Declared hosts are retained
 /// separately so extraction can report permissions removed by the ceiling.
+#[derive(JsLifetime)]
 pub(crate) struct ExtensionPolicyUd(pub(crate) ferridriver_config::ExtensionPolicyConfig);
-
-// SAFETY: holds only owned config data (no JS values), so re-stating
-// the unused `'js` lifetime is sound — same rationale as
-// `RegistryUserData`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ExtensionPolicyUd {
-  type Changed<'to> = ExtensionPolicyUd;
-}
 
 /// The effective `allow.net` for a declared list under the operator
 /// ceiling. `None` ⇒ unrestricted; `Some` ⇒ default-deny allow-list.
@@ -168,6 +161,7 @@ fn effective_net(declared: Vec<String>, ceiling: Option<&[String]>) -> Option<st
 /// host; a wildcard `*.suffix` only when a ceiling wildcard's domain
 /// space contains its whole space (an exact ceiling entry can never
 /// subsume a wildcard).
+#[must_use]
 pub fn net_entry_subsumed(entry: &str, ceiling: &[String]) -> bool {
   if let Some(suffix) = entry.strip_prefix("*.") {
     ceiling.iter().any(|c| {
@@ -217,15 +211,8 @@ fn check_commands_ceiling(
 
 /// Context userdata holding the registry. Single-threaded VM ⇒
 /// `RefCell`, never `Arc`/`Mutex`.
+#[derive(JsLifetime)]
 struct RegistryUserData(RefCell<ExtensionRegistry>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles and owned
-// values), so re-stating the unused `'js` lifetime is sound — same
-// rationale as `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for RegistryUserData {
-  type Changed<'to> = RegistryUserData;
-}
 
 pub(crate) fn with_registry<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ExtensionRegistry) -> R) -> Result<R, ScriptError> {
   let ud = ctx
@@ -274,7 +261,7 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   let timeout_ms = m
     .get::<_, f64>("timeoutMs")
     .ok()
-    .map(|ms| ms.max(0.0) as u64)
+    .map(crate::bindings::convert::f64_to_u64)
     .filter(|&v| v > 0);
 
   let (allowed_commands, allowed_net) = match m.get::<_, Value<'_>>("allow") {
@@ -408,6 +395,10 @@ pub struct CollectedTool {
 /// Snapshot every registered tool manifest, in registration order.
 /// Synchronous (`&Ctx`) so the bundle/extraction path can call it inside
 /// its own `async_with!` without a second context hop.
+///
+/// # Errors
+///
+/// When the extension registry is not installed in `ctx`.
 pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> {
   with_registry(ctx, |reg| {
     reg
@@ -433,6 +424,10 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
 
 /// Number of tools registered so far — lets the loader slice each
 /// bundled file's contributions out of the shared registry.
+///
+/// # Errors
+///
+/// When the extension registry is not installed in `ctx`.
 pub fn tools_len(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   with_registry(ctx, |reg| reg.tools.len())
 }
@@ -451,6 +446,10 @@ pub struct RegistryMarks {
 }
 
 /// Snapshot the position of every registry.
+///
+/// # Errors
+///
+/// When the extension or test registry is not installed in `ctx`.
 pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
   let (tools, steps, hooks, param_types, defaults) = with_registry(ctx, |reg| {
     (
@@ -479,6 +478,10 @@ pub fn registry_marks(ctx: &Ctx<'_>) -> Result<RegistryMarks, ScriptError> {
 /// Tools used to be the only registry sliced, so an extension that
 /// contributes steps, hooks, parameter types or fixtures reported an
 /// empty manifest — the same answer as a `defineTool` that never ran.
+///
+/// # Errors
+///
+/// When the extension or test registry is not installed in `ctx`.
 pub fn registrations_since(
   ctx: &Ctx<'_>,
   marks: RegistryMarks,
@@ -537,6 +540,10 @@ pub fn registrations_since(
 /// indices. A file that registered some of them and then threw leaves
 /// the VM holding entries nobody can address, so the count before and
 /// after an install is what says whether skipping it is safe.
+///
+/// # Errors
+///
+/// When the extension or test registry is not installed in `ctx`.
 pub fn registration_counts(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   let own = with_registry(ctx, |reg| {
     reg.tools.len() + reg.steps.len() + reg.hooks.len() + reg.param_types.len()
@@ -546,6 +553,10 @@ pub fn registration_counts(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
 
 /// The ordered tool names — drives building the native `tools.<name>`
 /// surface.
+///
+/// # Errors
+///
+/// When the extension registry is not installed in `ctx`.
 pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
   with_registry(ctx, |reg| reg.tools.iter().map(|t| t.name.clone()).collect())
 }
@@ -580,7 +591,7 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
         (
           t.name.clone(),
           t.handler.clone(),
-          t.allowed_commands.clone(),
+          std::sync::Arc::clone(&t.allowed_commands),
           t.allowed_net.clone(),
           t.timeout_ms,
         )
@@ -610,7 +621,14 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
 /// `ferridriver-config`, which checks the payload against the one
 /// schema every layer is checked against and refuses a key an extension
 /// may not set.
-fn define_defaults<'js>(ctx: Ctx<'js>, defaults: Value<'js>) -> rquickjs::Result<()> {
+fn define_defaults<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  defaults: Value<'js>,
+) -> rquickjs::Result<()> {
   let permitted = ctx.userdata::<ExtensionPolicyUd>().is_none_or(|p| p.0.config_defaults);
   if !permitted {
     return Err(throw_script_error(

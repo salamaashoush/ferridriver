@@ -83,7 +83,7 @@ impl ExtensionCommandsJs {
   }
 
   /// A real `Error`: the ctx-free conversion error is rendered through
-  /// QuickJS's 256-byte format buffer, which cut process diagnostics and
+  /// `QuickJS`'s 256-byte format buffer, which cut process diagnostics and
   /// output tails short.
   fn cmd_err(ctx: &Ctx<'_>, verb: &str, msg: impl std::fmt::Display) -> rquickjs::Error {
     throw_named(ctx, "Error", format!("{verb}: {msg}"))
@@ -116,6 +116,14 @@ impl ExtensionCommandsJs {
 
 #[rquickjs::methods]
 impl ExtensionCommandsJs {
+  /// One-shot: run to completion and return the full result (exit code,
+  /// stdout, stderr).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` is not in the commands allow-list, a variable
+  /// does not resolve, persistent commands are unavailable, or the process
+  /// cannot run; with a `TypeError` for a malformed `vars`.
   #[qjs(rename = "exec")]
   pub async fn exec<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let spec = self.spec(&ctx, "commands.exec", &name)?;
@@ -132,6 +140,12 @@ impl ExtensionCommandsJs {
   }
 
   /// One-shot: run to completion and return shaped stdout.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when `name` is not in the commands allow-list, a variable
+  /// does not resolve, persistent commands are unavailable, or the run fails;
+  /// with a `TypeError` for a malformed `vars`.
   #[qjs(rename = "run")]
   pub async fn run<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let spec = self.spec(&ctx, "commands.run", &name)?;
@@ -148,8 +162,27 @@ impl ExtensionCommandsJs {
 
   /// Persistent: start (idempotent if already running). Returns
   /// `{ name, pid }`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when `name` is not in the commands allow-list, a variable does
+  /// not resolve, persistent commands are unavailable, or the process cannot
+  /// start; a `TypeError` for a malformed `vars`.
   #[qjs(rename = "start")]
-  pub fn start<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+  pub fn start<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    name: String,
+    vars: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
     let spec = self.spec(&ctx, "commands.start", &name)?;
     let vars_map = Self::vars_of(&ctx, vars)?;
     let resolved = spec
@@ -162,8 +195,28 @@ impl ExtensionCommandsJs {
     json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
   }
 
+  /// Persistent, interactive: start with piped stdin. Returns `{ name, pid }`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when `name` is not in the commands allow-list, a variable does
+  /// not resolve, persistent commands are unavailable, or the process cannot
+  /// start; a `TypeError` for a malformed `vars`.
   #[qjs(rename = "open")]
-  pub fn open<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+  pub fn open<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    name: String,
+    vars: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Value<'js>> {
     let resolved = self
       .spec(&ctx, "commands.open", &name)?
       .resolve(&Self::vars_of(&ctx, vars)?)
@@ -175,6 +228,12 @@ impl ExtensionCommandsJs {
     json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
   }
 
+  /// Persistent: write `data` to the process's stdin (`undefined` closes it).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when persistent commands are unavailable or
+  /// the process cannot be written to.
   #[qjs(rename = "write")]
   pub async fn write(&self, ctx: Ctx<'_>, name: String, data: Option<String>) -> rquickjs::Result<()> {
     self
@@ -184,6 +243,12 @@ impl ExtensionCommandsJs {
       .map_err(|m| Self::cmd_err(&ctx, "commands.write", m))
   }
 
+  /// Persistent: the next stdout line.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when persistent commands are unavailable, the
+  /// read fails, or no line arrives within `timeoutMs` (30s by default).
   #[qjs(rename = "read")]
   pub async fn read<'js>(&self, ctx: Ctx<'js>, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<Value<'js>> {
     let ms = timeout_ms.0.unwrap_or(30_000);
@@ -197,6 +262,13 @@ impl ExtensionCommandsJs {
     json_to_js(&ctx, &serde_json::json!(line))
   }
 
+  /// Persistent: wait until the process's output contains `text`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when persistent commands are unavailable, the
+  /// read fails, or `text` does not appear within `timeoutMs` (30s by
+  /// default).
   #[qjs(rename = "waitForOutput")]
   pub async fn wait_for_output(
     &self,
@@ -223,6 +295,13 @@ impl ExtensionCommandsJs {
     .map_err(|m| Self::cmd_err(&ctx, "commands.waitForOutput", m))
   }
 
+  /// Persistent: wait for the process to exit; its exit code.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when persistent commands are unavailable, the
+  /// wait fails, or the process does not exit within `timeoutMs` (30s by
+  /// default).
   #[qjs(rename = "wait")]
   pub async fn wait(&self, ctx: Ctx<'_>, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<i32> {
     let ms = timeout_ms.0.unwrap_or(30_000);
@@ -242,8 +321,25 @@ impl ExtensionCommandsJs {
   }
 
   /// Persistent: running?/exit code + the buffered stdout/stderr tail.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when persistent commands are unavailable or the
+  /// process is unknown.
   #[qjs(rename = "status")]
-  pub fn status<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+  pub fn status<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    name: String,
+  ) -> rquickjs::Result<Value<'js>> {
     let value = self
       .registry(&ctx, "commands.status")?
       .status(&name)
@@ -252,6 +348,11 @@ impl ExtensionCommandsJs {
   }
 
   /// Persistent: kill the process group.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when persistent commands are unavailable or the
+  /// process cannot be stopped.
   #[qjs(rename = "stop")]
   pub async fn stop(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<()> {
     self
@@ -480,6 +581,12 @@ fn extension_logger<'js>(ctx: &Ctx<'js>, tool: &str) -> rquickjs::Result<Value<'
 /// Per-file isolation mirrors startup (`load_all`): one extension whose
 /// top-level throws is logged and skipped — it must not take down the
 /// whole session VM (and with it every `run_script` for the session).
+///
+/// # Errors
+///
+/// Throws when the operator policy refuses an extension, a module provider
+/// fails to evaluate, a failing extension had already registered items, the
+/// registry is missing, or rebuilding the `tools` global fails.
 pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rquickjs::Result<()> {
   for file in files {
     let before = crate::bindings::registry::registration_counts(ctx).map_err(|e| throw_script_error(ctx, &e))?;
@@ -557,6 +664,11 @@ pub async fn install_extensions(ctx: &Ctx<'_>, files: &[ExtensionBinding]) -> rq
 /// VM — has a registry entry but no callable until this runs again.
 /// Cheap (one closure per tool) and idempotent, so every bundle
 /// evaluation ends with it.
+///
+/// # Errors
+///
+/// When the registry is missing, or creating a callable or setting a
+/// global fails.
 pub fn rebuild_tool_bindings(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let names = tool_names(ctx).map_err(|e| throw_script_error(ctx, &e))?;
   let tools_obj = Object::new(ctx.clone())?;
@@ -591,7 +703,7 @@ async fn install_one_extension(ctx: &Ctx<'_>, file: &ExtensionBinding) -> rquick
   // endianness, pointer width) plus transitive input hashes guarantee
   // an ABI-identical toolchain wrote it. That satisfies the
   // same-interpreter precondition `Module::load` documents.
-  #[allow(unsafe_code)]
+  #[expect(unsafe_code, reason = "rquickjs declares loading module bytecode unsafe")]
   let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
   // Evaluating the module runs its top-level `tool(...)` /
   // `Given(...)` calls, registering directly into the extension
@@ -723,56 +835,7 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
     }
   }
 
-  // Copy what the handler context needs out of userdata and DROP the
-  // guard before anything awaits. `Ctx::userdata` hands back a borrow
-  // guard; holding one across the handler's execution blocks any nested
-  // `store_userdata` for the whole call (the net-policy bracket does
-  // exactly that), which deadlocks instead of failing.
-  let (session_key, settings_json) = {
-    let env = ctx.userdata::<crate::engine::ExtensionEnvUd>();
-    match env.as_ref() {
-      Some(e) => {
-        let namespace = d.name.split('.').next().unwrap_or(d.name.as_str());
-        let settings = e
-          .settings
-          .get(d.name.as_str())
-          .or_else(|| e.settings.get(namespace))
-          .cloned();
-        (e.session.clone(), settings)
-      },
-      None => (None, None),
-    }
-  };
-
-  // `session`: which browser session (and therefore which environment)
-  // this handler is driving. Without it a tool had to take the
-  // environment as an argument, and an argument that disagreed with the
-  // session key silently drove the wrong environment.
-  //
-  // The host hands over an already-resolved `<instance>:<context>` key, so
-  // splitting it needs no knowledge of which instance names that host's
-  // config defines.
-  let session_value = match session_key {
-    Some(key) => {
-      let parsed = ferridriver::state::SessionKey::parse(&key);
-      let obj = Object::new(ctx.clone())?;
-      obj.set("key", key.as_str())?;
-      obj.set("instance", &*parsed.instance)?;
-      obj.set("context", &*parsed.context)?;
-      obj.into_value()
-    },
-    None => undef.clone(),
-  };
-  arg.set("session", session_value)?;
-
-  // `settings`: the operator's `[extensions.settings.<name>]` block for
-  // this tool. A tool-specific entry wins over its namespace's entry, so
-  // `acme.login` can be tuned without splitting the `acme` block.
-  let settings_value = match &settings_json {
-    Some(value) => json_to_js(&ctx, value)?,
-    None => Object::new(ctx.clone())?.into_value(),
-  };
-  arg.set("settings", settings_value)?;
+  set_session_and_settings(&ctx, &arg, &d.name, &undef)?;
 
   // `log`: diagnostics attributed to the tool, so an extension does not
   // have to choose between `console.log` (captured per call, invisible
@@ -790,34 +853,9 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   // confined below the session runs in a session of its own.
   let net_policy: Option<Arc<[String]>> = d.allowed_net.clone();
 
-  let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
-  let request_out: Value<'js> = match net_policy.as_deref() {
-    Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
-      Ok(cls) => {
-        let inner = cls.borrow().inner_arc();
-        let guarded =
-          HttpClientJs::with_net(inner, net).map_err(|m| type_error(&ctx, format!("extensions.allow.net: {m}")))?;
-        Class::instance(ctx.clone(), guarded)?.into_js(&ctx)?
-      },
-      Err(_) => req_val,
-    },
-    None => req_val,
-  };
-  arg.set("request", request_out)?;
+  set_net_capabilities(&ctx, &arg, &g, net_policy.as_deref(), &undef)?;
 
-  let fetch_out: Value<'js> = match (net_policy.as_deref(), ctx.userdata::<crate::engine::SessionFetchUd>()) {
-    (Some(net), Some(session_fetch)) => {
-      let declared = ferrijs::Permissions::none()
-        .allow_net(net)
-        .map_err(|m| type_error(&ctx, format!("extensions.allow.net: {m}")))?;
-      let backend: Arc<dyn ferrijs::fetch::FetchBackend> = Arc::new(session_fetch.0.attenuated(Arc::new(declared)));
-      ferrijs::fetch::function(&ctx, backend)?.into_value()
-    },
-    _ => g.get("fetch").unwrap_or_else(|_| undef.clone()),
-  };
-  arg.set("fetch", fetch_out)?;
-
-  let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
+  let procs = ctx.userdata::<SessionProcsUd>().map(|u| Arc::clone(&u.0));
   let commands = Class::instance(ctx.clone(), ExtensionCommandsJs::new(d.allowed_commands, procs))?;
   arg.set("commands", commands)?;
 
@@ -868,12 +906,110 @@ async fn run_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Option<Value<'js>>)
   inner.await
 }
 
+/// The handler context's `session` and `settings`.
+fn set_session_and_settings<'js>(
+  ctx: &Ctx<'js>,
+  arg: &Object<'js>,
+  name: &str,
+  undef: &Value<'js>,
+) -> rquickjs::Result<()> {
+  // Copy what the handler context needs out of userdata and DROP the
+  // guard before anything awaits. `Ctx::userdata` hands back a borrow
+  // guard; holding one across the handler's execution blocks any nested
+  // `store_userdata` for the whole call (the net-policy bracket does
+  // exactly that), which deadlocks instead of failing.
+  let (session_key, settings_json) = {
+    let env = ctx.userdata::<crate::engine::ExtensionEnvUd>();
+    match env.as_ref() {
+      Some(e) => {
+        let namespace = name.split('.').next().unwrap_or(name);
+        let settings = e.settings.get(name).or_else(|| e.settings.get(namespace)).cloned();
+        (e.session.clone(), settings)
+      },
+      None => (None, None),
+    }
+  };
+
+  // `session`: which browser session (and therefore which environment)
+  // this handler is driving. Without it a tool had to take the
+  // environment as an argument, and an argument that disagreed with the
+  // session key silently drove the wrong environment.
+  //
+  // The host hands over an already-resolved `<instance>:<context>` key, so
+  // splitting it needs no knowledge of which instance names that host's
+  // config defines.
+  let session_value = match session_key {
+    Some(key) => {
+      let parsed = ferridriver::state::SessionKey::parse(&key);
+      let obj = Object::new(ctx.clone())?;
+      obj.set("key", key.as_str())?;
+      obj.set("instance", &*parsed.instance)?;
+      obj.set("context", &*parsed.context)?;
+      obj.into_value()
+    },
+    None => undef.clone(),
+  };
+  arg.set("session", session_value)?;
+
+  // `settings`: the operator's `[extensions.settings.<name>]` block for
+  // this tool. A tool-specific entry wins over its namespace's entry, so
+  // `acme.login` can be tuned without splitting the `acme` block.
+  let settings_value = match &settings_json {
+    Some(value) => json_to_js(ctx, value)?,
+    None => Object::new(ctx.clone())?.into_value(),
+  };
+  arg.set("settings", settings_value)?;
+  Ok(())
+}
+
+/// The handler context's `request` and `fetch`, attenuated to `net_policy`.
+fn set_net_capabilities<'js>(
+  ctx: &Ctx<'js>,
+  arg: &Object<'js>,
+  g: &Object<'js>,
+  net_policy: Option<&[String]>,
+  undef: &Value<'js>,
+) -> rquickjs::Result<()> {
+  let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
+  let request_out: Value<'js> = match net_policy {
+    Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
+      Ok(cls) => {
+        let inner = cls.borrow().inner_arc();
+        let guarded =
+          HttpClientJs::with_net(inner, net).map_err(|m| type_error(ctx, format!("extensions.allow.net: {m}")))?;
+        Class::instance(ctx.clone(), guarded)?.into_js(ctx)?
+      },
+      Err(_) => req_val,
+    },
+    None => req_val,
+  };
+  arg.set("request", request_out)?;
+
+  let fetch_out: Value<'js> = match (net_policy, ctx.userdata::<crate::engine::SessionFetchUd>()) {
+    (Some(net), Some(session_fetch)) => {
+      let declared = ferrijs::Permissions::none()
+        .allow_net(net)
+        .map_err(|m| type_error(ctx, format!("extensions.allow.net: {m}")))?;
+      let backend: Arc<dyn ferrijs::fetch::FetchBackend> = Arc::new(session_fetch.0.attenuated(Arc::new(declared)));
+      ferrijs::fetch::function(ctx, backend)?.into_value()
+    },
+    _ => g.get("fetch").unwrap_or_else(|_| undef.clone()),
+  };
+  arg.set("fetch", fetch_out)?;
+  Ok(())
+}
+
 /// Host-side native invocation of a registered tool by manifest name —
 /// what the MCP server's `invoke_extension_tool` / promoted-tool routes call.
 /// Skips the script pipeline entirely (no synthesized one-liner, no
 /// compile): the exact `run_tool` body behind `tools.<name>` runs, so
 /// capability wrappers, `timeoutMs`, and the net-policy bracket apply
 /// identically for every caller.
+///
+/// # Errors
+///
+/// When no tool `name` is installed, the registry is missing, `args`
+/// cannot be converted, or the handler throws or times out.
 pub async fn invoke_tool_by_name(
   ctx: &Ctx<'_>,
   name: &str,

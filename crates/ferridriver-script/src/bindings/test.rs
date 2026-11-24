@@ -1,4 +1,4 @@
-//! Playwright-shaped test registration surface for the shared QuickJS
+//! Playwright-shaped test registration surface for the shared `QuickJS`
 //! engine (`import { test, describe, expect } from '@ferridriver/test'`).
 //!
 //! `test`/`describe` and every modifier (`skip`/`fixme`/`fail`/`slow`/
@@ -329,15 +329,8 @@ impl TestRegistry {
 
 /// Context userdata holding the test registry. Single-threaded VM ⇒
 /// `RefCell`, never `Arc`/`Mutex`.
+#[derive(JsLifetime)]
 struct TestRegistryUserData(RefCell<TestRegistry>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles and owned
-// values), so re-stating the unused `'js` lifetime is sound — same
-// rationale as `RegistryUserData`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for TestRegistryUserData {
-  type Changed<'to> = TestRegistryUserData;
-}
 
 pub(crate) fn with_test_registry<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut TestRegistry) -> R) -> Result<R, ScriptError> {
   let ud = ctx
@@ -476,10 +469,10 @@ fn parse_details<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Result<ParsedDetails, r
   }
   out.annotations.extend(lock_annotations(ctx, o)?);
   if let Ok(t) = o.get::<_, f64>("timeout") {
-    out.timeout_ms = Some(t.max(0.0) as u64);
+    out.timeout_ms = Some(crate::bindings::convert::f64_to_u64(t));
   }
   if let Ok(r) = o.get::<_, f64>("retries") {
-    out.retries = Some(r.max(0.0) as u32);
+    out.retries = Some(crate::bindings::convert::f64_to_u32(r));
   }
   Ok(out)
 }
@@ -863,7 +856,11 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       .get::<_, Value<'js>>("option")
       .is_ok_and(|v| !v.is_undefined() && !v.is_null());
     option = o.get::<_, bool>("option").unwrap_or(false);
-    timeout_ms = o.get::<_, Option<f64>>("timeout").ok().flatten().map(|ms| ms as u64);
+    timeout_ms = o
+      .get::<_, Option<f64>>("timeout")
+      .ok()
+      .flatten()
+      .map(crate::bindings::convert::f64_to_u64);
     title = o.get::<_, Option<String>>("title").ok().flatten();
     boxed = match o.get::<_, Value<'js>>("box") {
       Ok(v) if v.is_string() => match v.as_string().and_then(|s| s.to_string().ok()).as_deref() {
@@ -976,7 +973,7 @@ pub(crate) fn fixture_set_of<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<
   let obj = value.as_object()?;
   let marked: Value<'js> = obj.get(test_type_key(ctx).ok()?).ok()?;
   let index = marked.as_number()?;
-  (index >= 0.0).then_some(index as usize)
+  (index >= 0.0).then(|| crate::bindings::convert::f64_to_usize(index))
 }
 
 /// `mergeTests(...tests)` — one `test` whose fixtures are the union of
@@ -988,7 +985,18 @@ pub(crate) fn fixture_set_of<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<
 /// identity. Dedup by NAME would be wrong in the same way it is
 /// upstream: a base fixture appearing in both chains would become an
 /// override of itself and resolve its own `super`.
-fn merge_tests<'js>(ctx: Ctx<'js>, tests: Rest<Value<'js>>) -> rquickjs::Result<Function<'js>> {
+fn merge_tests<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs extracts a native function's JS arguments by value"
+  )]
+  tests: Rest<Value<'js>>,
+) -> rquickjs::Result<Function<'js>> {
   let mut merged: Vec<usize> = Vec::new();
   for test in &tests.0 {
     let Some(set) = fixture_set_of(&ctx, test) else {
@@ -1033,7 +1041,18 @@ const BASE_FIXTURE_SET: usize = 0;
 /// it as its `super`. A chain a package already derived with
 /// `test.extend` keeps the base it copied — which is why the base seals
 /// once the last extension has been installed.
-fn define_fixtures<'js>(ctx: Ctx<'js>, fixtures: Object<'js>) -> rquickjs::Result<Value<'js>> {
+fn define_fixtures<'js>(
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands a native function its `Ctx` by value"
+  )]
+  ctx: Ctx<'js>,
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs extracts a native function's JS arguments by value"
+  )]
+  fixtures: Object<'js>,
+) -> rquickjs::Result<Value<'js>> {
   let permitted = ctx
     .userdata::<crate::bindings::registry::ExtensionPolicyUd>()
     .is_none_or(|p| p.0.fixtures);
@@ -1104,6 +1123,7 @@ pub fn seal_base_fixtures(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
 /// extraction pass runs a non-Test host in.
 ///
 /// The absent-surface case answers `false`.
+#[must_use]
 pub fn base_is_sealed(ctx: &Ctx<'_>) -> bool {
   with_test_registry(ctx, |r| r.base_sealed).unwrap_or(false)
 }
@@ -1146,7 +1166,42 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
   )?;
   obj.set("only", only)?;
 
-  let each = Function::new(
+  obj.set("each", make_each_fn(ctx, set)?)?;
+
+  for kind in ["beforeAll", "afterAll", "beforeEach", "afterEach"] {
+    obj.set(kind, make_hook_fn(ctx, kind, set)?)?;
+  }
+
+  obj.set("use", make_use_fn(ctx)?)?;
+
+  let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
+    current_bridge(&ctx, "test.setTimeout()")?.set_timeout_override(crate::bindings::convert::f64_to_u64(ms));
+    Ok(())
+  })?;
+  obj.set("setTimeout", set_timeout)?;
+
+  obj.set("info", make_info_fn(ctx)?)?;
+
+  obj.set("step", make_step_fn(ctx)?)?;
+
+  obj.set("extend", make_extend_fn(ctx, set)?)?;
+
+  let describe = make_describe_object(ctx)?;
+  obj.set("describe", describe)?;
+
+  // Non-enumerable, non-writable: a spread of `test` must not copy it,
+  // and a suite must not be able to forge a chain by assigning it.
+  obj.prop(
+    test_type_key(ctx)?,
+    rquickjs::object::Property::from(crate::bindings::convert::usize_to_f64(set)),
+  )?;
+
+  Ok(test_fn)
+}
+
+/// `test.each(rows)`: a registrar that adds one test per row.
+fn make_each_fn<'js>(ctx: &Ctx<'js>, set: usize) -> rquickjs::Result<Function<'js>> {
+  Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, rows: Value<'js>| -> rquickjs::Result<Function<'js>> {
       let rows: Vec<serde_json::Value> = serde_from_js(&ctx, rows).map_err(|e| {
@@ -1167,41 +1222,43 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
         },
       )
     },
-  )?;
-  obj.set("each", each)?;
+  )
+}
 
-  for kind in ["beforeAll", "afterAll", "beforeEach", "afterEach"] {
-    let f = Function::new(
-      ctx.clone(),
-      move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
-        // `(fn)` or `(title, fn)` — the optional title is display-only.
-        let func = args.0.iter().find_map(as_function).ok_or_else(|| {
-          throw_script_error(
-            &ctx,
-            &ScriptError::internal(format!("test.{kind} has no function body")),
-          )
-        })?;
-        let (line, col) = capture_location(&ctx);
-        let requested = destructured_keys(&ctx, &func);
-        let saved = Persistent::save(&ctx, func);
-        with_test_registry(&ctx, |r| {
-          r.hooks.push(TestHookReg {
-            kind: kind.to_string(),
-            suite: r.describe_stack.last().copied(),
-            fixture_set,
-            func: saved,
-            requested,
-            line,
-            col,
-          });
-        })
-        .map_err(|e| throw_script_error(&ctx, &e))
-      },
-    )?;
-    obj.set(kind, f)?;
-  }
+/// `test.beforeAll` and its siblings, by `kind`.
+fn make_hook_fn<'js>(ctx: &Ctx<'js>, kind: &'static str, fixture_set: usize) -> rquickjs::Result<Function<'js>> {
+  Function::new(
+    ctx.clone(),
+    move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
+      // `(fn)` or `(title, fn)` — the optional title is display-only.
+      let func = args.0.iter().find_map(as_function).ok_or_else(|| {
+        throw_script_error(
+          &ctx,
+          &ScriptError::internal(format!("test.{kind} has no function body")),
+        )
+      })?;
+      let (line, col) = capture_location(&ctx);
+      let requested = destructured_keys(&ctx, &func);
+      let saved = Persistent::save(&ctx, func);
+      with_test_registry(&ctx, |r| {
+        r.hooks.push(TestHookReg {
+          kind: kind.to_string(),
+          suite: r.describe_stack.last().copied(),
+          fixture_set,
+          func: saved,
+          requested,
+          line,
+          col,
+        });
+      })
+      .map_err(|e| throw_script_error(&ctx, &e))
+    },
+  )
+}
 
-  let use_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, bag: Value<'js>| -> rquickjs::Result<()> {
+/// `test.use(options)`.
+fn make_use_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  Function::new(ctx.clone(), |ctx: Ctx<'js>, bag: Value<'js>| -> rquickjs::Result<()> {
     let options: serde_json::Value = serde_from_js(&ctx, bag).map_err(|e| {
       throw_script_error(
         &ctx,
@@ -1220,16 +1277,12 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
       None => r.file_use.push(FileUseReg { options, line, col }),
     })
     .map_err(|e| throw_script_error(&ctx, &e))
-  })?;
-  obj.set("use", use_fn)?;
+  })
+}
 
-  let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
-    current_bridge(&ctx, "test.setTimeout()")?.set_timeout_override(ms.max(0.0) as u64);
-    Ok(())
-  })?;
-  obj.set("setTimeout", set_timeout)?;
-
-  let info = Function::new(ctx.clone(), |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+/// `test.info()`.
+fn make_info_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  Function::new(ctx.clone(), |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
     let saved = with_test_registry(&ctx, |r| r.current.as_ref().map(|c| c.test_info.clone()))
       .map_err(|e| throw_script_error(&ctx, &e))?;
     let saved = saved.ok_or_else(|| {
@@ -1241,12 +1294,12 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
     saved
       .restore(&ctx)
       .map_err(|e| throw_script_error(&ctx, &ScriptError::internal(e.to_string())))
-  })?;
-  obj.set("info", info)?;
+  })
+}
 
-  obj.set("step", make_step_fn(ctx)?)?;
-
-  let extend = Function::new(
+/// `test.extend(fixtures)`: a new test object over a widened fixture set.
+fn make_extend_fn<'js>(ctx: &Ctx<'js>, set: usize) -> rquickjs::Result<Function<'js>> {
+  Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, fixtures: Object<'js>| -> rquickjs::Result<Function<'js>> {
       if fixture_set_of(&ctx, fixtures.as_value()).is_some() {
@@ -1275,17 +1328,7 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
       .map_err(|e: ScriptError| throw_script_error(&ctx, &e))?;
       make_test_object(&ctx, new_set)
     },
-  )?;
-  obj.set("extend", extend)?;
-
-  let describe = make_describe_object(ctx)?;
-  obj.set("describe", describe)?;
-
-  // Non-enumerable, non-writable: a spread of `test` must not copy it,
-  // and a suite must not be able to forge a chain by assigning it.
-  obj.prop(test_type_key(ctx)?, rquickjs::object::Property::from(set as f64))?;
-
-  Ok(test_fn)
+  )
 }
 
 /// Shallow `Object.assign` merge of a `use` bag into a target slot.
@@ -1407,7 +1450,16 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
     obj.set(kind, f)?;
   }
 
-  let each = Function::new(
+  obj.set("each", make_describe_each_fn(ctx)?)?;
+
+  obj.set("configure", make_describe_configure_fn(ctx)?)?;
+
+  Ok(describe_fn)
+}
+
+/// `describe.each(rows)`: a registrar that adds one suite per row.
+fn make_describe_each_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  Function::new(
     ctx.clone(),
     |ctx: Ctx<'js>, rows: Value<'js>| -> rquickjs::Result<Function<'js>> {
       let rows: Vec<serde_json::Value> = serde_from_js(&ctx, rows).map_err(|e| {
@@ -1448,10 +1500,12 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
         },
       )
     },
-  )?;
-  obj.set("each", each)?;
+  )
+}
 
-  let configure = Function::new(
+/// `describe.configure({ mode, retries, timeout })`.
+fn make_describe_configure_fn<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> {
+  Function::new(
     ctx.clone(),
     |ctx: Ctx<'js>, opts: Object<'js>| -> rquickjs::Result<()> {
       let mode = match opts.get::<_, String>("mode") {
@@ -1468,8 +1522,14 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
         }),
         Err(_) => None,
       };
-      let retries = opts.get::<_, f64>("retries").ok().map(|r| r.max(0.0) as u32);
-      let timeout_ms = opts.get::<_, f64>("timeout").ok().map(|t| t.max(0.0) as u64);
+      let retries = opts
+        .get::<_, f64>("retries")
+        .ok()
+        .map(crate::bindings::convert::f64_to_u32);
+      let timeout_ms = opts
+        .get::<_, f64>("timeout")
+        .ok()
+        .map(crate::bindings::convert::f64_to_u64);
       let locks = lock_annotations(&ctx, &opts)?;
       let (line, col) = capture_location(&ctx);
       with_test_registry(&ctx, |r| {
@@ -1502,10 +1562,7 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
       })
       .map_err(|e| throw_script_error(&ctx, &e))
     },
-  )?;
-  obj.set("configure", configure)?;
-
-  Ok(describe_fn)
+  )
 }
 
 /// Install the Playwright-shaped test surface: the `TestRegistry`
@@ -1515,6 +1572,11 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
 /// at `Session::create`, for EVERY host: a fixture chain an extension
 /// or a step file builds must exist wherever it is imported, and only
 /// the Test host consumes what registering leaves behind.
+///
+/// # Errors
+///
+/// When building the `test`/`describe` objects, installing `defineConfig`,
+/// or setting a property on `ferridriver` or the globals fails.
 pub fn install_test(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   if ctx.userdata::<TestRegistryUserData>().is_some() {
     return Ok(());
@@ -1756,7 +1818,7 @@ fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rqui
     timeout: options
       .get::<_, Option<f64>>("timeout")?
       .filter(|ms| *ms > 0.0)
-      .map(|ms| std::time::Duration::from_millis(ms as u64)),
+      .map(|ms| std::time::Duration::from_millis(crate::bindings::convert::f64_to_u64(ms))),
     subtitle: options.get::<_, Option<String>>("subtitle")?,
     // Reports carry the params as JSON, which is what they are written as.
     params: match options.get::<_, Option<Object<'js>>>("params")? {
@@ -1777,8 +1839,8 @@ fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rqui
     })?;
     parsed.location = Some(StepLocation {
       file,
-      line: location.get::<_, Option<f64>>("line")?.unwrap_or(0.0) as u32,
-      column: location.get::<_, Option<f64>>("column")?.unwrap_or(0.0) as u32,
+      line: crate::bindings::convert::f64_to_u32(location.get::<_, Option<f64>>("line")?.unwrap_or(0.0)),
+      column: crate::bindings::convert::f64_to_u32(location.get::<_, Option<f64>>("column")?.unwrap_or(0.0)),
     });
   }
   let _ = ctx;
@@ -1804,7 +1866,7 @@ fn build_step_info<'js>(
     if let Some(condition) = args.0.first()
       && !condition
         .as_bool()
-        .unwrap_or(!condition.is_null() && !condition.is_undefined())
+        .unwrap_or_else(|| !condition.is_null() && !condition.is_undefined())
     {
       return Ok(());
     }
@@ -1876,6 +1938,72 @@ fn build_test_info<'js>(
   annotations: &AnnotationsMirror,
 ) -> Result<Object<'js>, ScriptError> {
   let obj = Object::new(ctx.clone()).map_err(se)?;
+  set_test_info_fields(ctx, &obj, info)?;
+
+  // Live getters backed by the bridge: annotations grows via
+  // `annotate()` and pushes, attachmentCount via `attach()`.
+  install_bridge_getter(ctx, &obj, "annotations", {
+    let bridge = Arc::clone(bridge);
+    let mirror = annotations.clone();
+    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { Ok(mirror.sync(ctx, bridge.as_ref())?.into_value()) }
+  })
+  .map_err(se)?;
+  install_bridge_getter(ctx, &obj, "attachmentCount", {
+    let bridge = Arc::clone(bridge);
+    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+      rquickjs::IntoJs::into_js(u32::try_from(bridge.attachment_count()).unwrap_or(u32::MAX), ctx)
+    }
+  })
+  .map_err(se)?;
+  install_bridge_getter(ctx, &obj, "errors", {
+    let bridge = Arc::clone(bridge);
+    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { rquickjs::IntoJs::into_js(bridge.errors(), ctx) }
+  })
+  .map_err(se)?;
+
+  // testInfo.attach(name, contentType, body[, opts]) — positional — or
+  // Playwright's testInfo.attach(name, { body?, contentType?, path? }).
+  obj.set("attach", make_attach_fn(ctx, bridge)?).map_err(se)?;
+
+  let annotate_bridge = Arc::clone(bridge);
+  let annotate = Function::new(
+    ctx.clone(),
+    move |kind: String, description: rquickjs::function::Opt<String>| {
+      annotate_bridge.annotate(kind, description.0);
+    },
+  )
+  .map_err(se)?;
+  obj.set("annotate", annotate).map_err(se)?;
+
+  for kind in ["skip", "fixme", "fail", "slow"] {
+    let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
+      runtime_modifier(&ctx, kind, &args.0)
+    })
+    .map_err(se)?;
+    obj.set(kind, f).map_err(se)?;
+  }
+  let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
+    current_bridge(&ctx, "testInfo.setTimeout()")?.set_timeout_override(crate::bindings::convert::f64_to_u64(ms));
+    Ok(())
+  })
+  .map_err(se)?;
+  obj.set("setTimeout", set_timeout).map_err(se)?;
+
+  let output_bridge = Arc::clone(bridge);
+  let output_path = Function::new(ctx.clone(), move |parts: Rest<String>| {
+    output_bridge.output_path(&parts.0)
+  })
+  .map_err(se)?;
+  obj.set("outputPath", output_path).map_err(se)?;
+  obj
+    .set("snapshotPath", make_snapshot_path_fn(ctx, bridge)?)
+    .map_err(se)?;
+
+  Ok(obj)
+}
+
+/// The plain data fields of `testInfo`.
+fn set_test_info_fields<'js>(ctx: &Ctx<'js>, obj: &Object<'js>, info: &TestInfoData) -> Result<(), ScriptError> {
   obj.set("title", info.title.clone()).map_err(se)?;
   obj.set("titlePath", info.title_path.clone()).map_err(se)?;
   obj.set("file", info.file.clone()).map_err(se)?;
@@ -1904,32 +2032,13 @@ fn build_test_info<'js>(
     .set("name", info.project_name.clone().unwrap_or_default())
     .map_err(se)?;
   obj.set("project", project).map_err(se)?;
+  Ok(())
+}
 
-  // Live getters backed by the bridge: annotations grows via
-  // `annotate()` and pushes, attachmentCount via `attach()`.
-  install_bridge_getter(ctx, &obj, "annotations", {
-    let bridge = Arc::clone(bridge);
-    let mirror = annotations.clone();
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { Ok(mirror.sync(ctx, bridge.as_ref())?.into_value()) }
-  })
-  .map_err(se)?;
-  install_bridge_getter(ctx, &obj, "attachmentCount", {
-    let bridge = Arc::clone(bridge);
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-      rquickjs::IntoJs::into_js(bridge.attachment_count() as u32, ctx)
-    }
-  })
-  .map_err(se)?;
-  install_bridge_getter(ctx, &obj, "errors", {
-    let bridge = Arc::clone(bridge);
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { rquickjs::IntoJs::into_js(bridge.errors(), ctx) }
-  })
-  .map_err(se)?;
-
-  // testInfo.attach(name, contentType, body[, opts]) — positional — or
-  // Playwright's testInfo.attach(name, { body?, contentType?, path? }).
+/// `testInfo.attach`.
+fn make_attach_fn<'js>(ctx: &Ctx<'js>, bridge: &Arc<dyn TestHostBridge>) -> Result<Function<'js>, ScriptError> {
   let attach_bridge = Arc::clone(bridge);
-  let attach = Function::new(
+  Function::new(
     ctx.clone(),
     Async(
       move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> Pin<Box<dyn Future<Output = rquickjs::Result<()>> + 'js>> {
@@ -1951,44 +2060,16 @@ fn build_test_info<'js>(
       },
     ),
   )
-  .map_err(se)?;
-  obj.set("attach", attach).map_err(se)?;
+  .map_err(se)
+}
 
-  let annotate_bridge = Arc::clone(bridge);
-  let annotate = Function::new(
-    ctx.clone(),
-    move |kind: String, description: rquickjs::function::Opt<String>| {
-      annotate_bridge.annotate(kind, description.0);
-    },
-  )
-  .map_err(se)?;
-  obj.set("annotate", annotate).map_err(se)?;
-
-  for kind in ["skip", "fixme", "fail", "slow"] {
-    let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
-      runtime_modifier(&ctx, kind, &args.0)
-    })
-    .map_err(se)?;
-    obj.set(kind, f).map_err(se)?;
-  }
-  let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
-    current_bridge(&ctx, "testInfo.setTimeout()")?.set_timeout_override(ms.max(0.0) as u64);
-    Ok(())
-  })
-  .map_err(se)?;
-  obj.set("setTimeout", set_timeout).map_err(se)?;
-
-  let output_bridge = Arc::clone(bridge);
-  let output_path = Function::new(ctx.clone(), move |parts: Rest<String>| {
-    output_bridge.output_path(&parts.0)
-  })
-  .map_err(se)?;
-  obj.set("outputPath", output_path).map_err(se)?;
+/// `testInfo.snapshotPath(...)`.
+fn make_snapshot_path_fn<'js>(ctx: &Ctx<'js>, bridge: &Arc<dyn TestHostBridge>) -> Result<Function<'js>, ScriptError> {
   let snap_bridge = Arc::clone(bridge);
   // Playwright: `snapshotPath(...name: string[])` and
   // `snapshotPath(name, { kind })` (`worker/testInfo.ts:644-662`) — a
   // trailing object is the options bag, everything before it is a path.
-  let snapshot_path = Function::new(
+  Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<String> {
       let mut parts: Vec<String> = Vec::with_capacity(args.0.len());
@@ -2013,10 +2094,7 @@ fn build_test_info<'js>(
         .map_err(|message| throw_script_error(&ctx, &ScriptError::internal(message)))
     },
   )
-  .map_err(se)?;
-  obj.set("snapshotPath", snapshot_path).map_err(se)?;
-
-  Ok(obj)
+  .map_err(se)
 }
 
 fn install_bridge_getter<'js>(
@@ -2510,11 +2588,11 @@ async fn run_fixture_factory<'js>(
         let w = w.restore(&ctx)?;
         w.set(use_name.as_str(), value)?;
       }
-      if let Some(tx) = setup_slot
+      let tx = setup_slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-      {
+        .take();
+      if let Some(tx) = tx {
         let _ = tx.send(());
       }
       Ok(gate)
@@ -2643,6 +2721,12 @@ impl From<ScriptError> for Thrown {
 
 /// Resume every suspended worker-scoped fixture factory — the glue
 /// calls this once per worker session after the run completes.
+///
+/// # Errors
+///
+/// When the VM has shut down, the test registry is missing, or a fixture's
+/// teardown throws (the first failure is returned once every fixture has
+/// been resumed).
 pub async fn teardown_worker_fixtures(vm: &ferrijs::VmHandle) -> Result<(), ScriptError> {
   crate::vm_with!(vm => |ctx| {
     let mut first_err: Option<ScriptError> = None;
@@ -2733,6 +2817,11 @@ fn requested_names(reg: &TestRegistry, spec: &RunTestSpec) -> Vec<String> {
 /// build the fixtures object, resolve custom fixtures, run each-hooks
 /// and the body, tear down, and clear the current-test slot. The
 /// returned error carries the raw (bundled) stack — the glue remaps it.
+///
+/// # Errors
+///
+/// When the VM has shut down, `spec.test_idx` is out of range, setting up
+/// the test fails, the body or a hook throws, or a fixture's teardown fails.
 pub async fn run_test(
   vm: &ferrijs::VmHandle,
   spec: RunTestSpec,
@@ -2773,6 +2862,11 @@ const SCRIPT_FIXTURES: [&str; 4] = ["page", "context", "browser", "request"];
 /// `test`, and the script's module evaluates from its own bytecode, so
 /// every run starts from a fresh top level and its frames map through its
 /// own source map onto the file the user wrote.
+///
+/// # Errors
+///
+/// When the VM has shut down, setting up the test fails, the script
+/// throws, or a fixture's teardown fails.
 pub async fn run_script_test(
   vm: &ferrijs::VmHandle,
   script: Arc<crate::bundle::CompiledBundle>,
@@ -2834,7 +2928,7 @@ async fn drive_script(
   // bytecode disk cache whose ABI tag guarantees an ABI-identical
   // toolchain wrote it: the precondition `Module::load` documents. QuickJS
   // creates a new module at every load, so a retry evaluates it afresh.
-  #[allow(unsafe_code)]
+  #[expect(unsafe_code, reason = "rquickjs declares loading module bytecode unsafe")]
   let declared = unsafe { rquickjs::Module::load(ctx.clone(), &script.bytecode) }
     .catch(ctx)
     .map_err(|e| Thrown::caught(e, &script.module_name))?;
@@ -3020,6 +3114,12 @@ async fn invoke_hook_fn<'js>(
 
 /// Execute one `beforeAll`/`afterAll` hook with its own fixtures
 /// object and current-test slot (so `test.info()`/steps work inside).
+///
+/// # Errors
+///
+/// When the VM has shut down, setting up the hook's fixtures fails, a
+/// requested fixture name is unknown, the hook throws, or a fixture's
+/// teardown fails.
 pub async fn run_standalone_hook(
   vm: &ferrijs::VmHandle,
   hook_idx: usize,
@@ -3223,6 +3323,10 @@ fn mode_str(mode: Option<CollectedSuiteMode>) -> Option<String> {
 }
 
 /// Snapshot the registry after the bundled test module evaluated.
+///
+/// # Errors
+///
+/// When the VM has shut down or the test registry is not installed in it.
 pub async fn collect_tests(vm: &ferrijs::VmHandle) -> Result<CollectedTests, ScriptError> {
   crate::vm_with!(vm => |ctx| {
     with_test_registry(&ctx, |r| CollectedTests {

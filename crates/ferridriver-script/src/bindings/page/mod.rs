@@ -47,12 +47,12 @@ pub struct PageJs {
   /// VM-loop handle used by `page.route` to dispatch JS callbacks
   /// from a separate tokio task back into the script's JS context.
   /// `None` only when the wrapper was constructed directly (e.g. by
-  /// tests); the engine always installs PageJs via
+  /// tests); the engine always installs `PageJs` via
   /// `install_page` which sets this field.
   #[qjs(skip_trace)]
   vm: Option<ferrijs::VmHandle>,
   /// Maps a handler locator's selector to the persisted-callback ids so
-  /// `removeLocatorHandler` can drop them. (QuickJS `addLocatorHandler`
+  /// `removeLocatorHandler` can drop them. (`QuickJS` `addLocatorHandler`
   /// itself is Unsupported -- see its binding -- so this normally stays empty.)
   #[qjs(skip_trace)]
   locator_handler_ids: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Vec<u64>>>>,
@@ -66,7 +66,7 @@ impl PageJs {
   #[must_use]
   pub fn new(inner: Arc<Page>) -> Self {
     Self {
-      inner: inner.clone(),
+      inner,
       vm: None,
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
@@ -77,7 +77,7 @@ impl PageJs {
   #[must_use]
   pub fn new_with_vm(inner: Arc<Page>, vm: ferrijs::VmHandle) -> Self {
     Self {
-      inner: inner.clone(),
+      inner,
       vm: Some(vm),
       locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       coverage_session: Arc::new(tokio::sync::Mutex::new(None)),
@@ -94,7 +94,7 @@ impl PageJs {
   /// (used by `expect()` to lift a `PageJs` into an assertion target).
   #[must_use]
   pub fn page_arc(&self) -> Arc<Page> {
-    self.inner.clone()
+    Arc::clone(&self.inner)
   }
 
   #[must_use]
@@ -105,15 +105,15 @@ impl PageJs {
   fn off_impl<'js>(
     &self,
     ctx: &rquickjs::Ctx<'js>,
-    target: rquickjs::Value<'js>,
-    listener: Opt<rquickjs::Value<'js>>,
+    target: &rquickjs::Value<'js>,
+    listener: Option<&rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let ctx = ctx.clone();
     let Some(event) = target.as_string() else {
       return Err(type_error(&ctx, "page.off: off(event, listener) expects an event name"));
     };
     let event = event.to_string()?;
-    let listener_fn = listener.0.as_ref().and_then(|v| v.as_function().cloned());
+    let listener_fn = listener.and_then(|v| v.as_function().cloned());
     let Some(listener_fn) = listener_fn else {
       // Lenient `off(event)` — drop every listener for that event
       // (matches `removeAllListeners(event)` semantics).
@@ -169,15 +169,15 @@ impl PageJs {
     // through a slot the closure reads at fire time (registration is
     // synchronous, so the slot is populated long before any event lands).
     let id_slot = Arc::new(AtomicU64::new(0));
-    let id_slot_cb = id_slot.clone();
-    let page_for_cb = self.inner.clone();
+    let id_slot_cb = Arc::clone(&id_slot);
+    let page_for_cb = Arc::clone(&self.inner);
     let callback: ferridriver::events::EventCallback =
       std::sync::Arc::new(move |ev: ferridriver::events::PageEvent| {
         let id = id_slot_cb.load(Ordering::Relaxed);
         let msg = crate::bindings::page::callbacks::PageEventMsg::Event {
           id,
           remove_after: once,
-          page: page_for_cb.clone(),
+          page: Arc::clone(&page_for_cb),
           event: ev,
         };
         if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
@@ -199,8 +199,7 @@ impl PageJs {
     with_page_callbacks(ctx, |r| {
       r.insert_event_listener(id.0, event.to_string(), page_key, saved);
     })?;
-    #[allow(clippy::cast_precision_loss)]
-    Ok(id.0 as f64)
+    Ok(crate::bindings::convert::u64_to_f64(id.0))
   }
 }
 
@@ -222,6 +221,11 @@ impl PageJs {
 
   /// Navigate to `url`. Accepts `{ waitUntil?, timeout?, referer? }` to
   /// mirror Playwright's `page.goto(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the navigation fails.
   #[qjs(rename = "goto")]
   pub async fn goto<'js>(
     &self,
@@ -234,13 +238,18 @@ impl PageJs {
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
         let resp = self.inner.goto(&url).maybe_options(opts).await.into_js_with(&ctx)?;
-        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, Arc::clone(&self.inner))))
       })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   /// Reload the current page. Accepts the same option bag as `goto`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the reload fails.
   #[qjs(rename = "reload")]
   pub async fn reload<'js>(
     &self,
@@ -252,13 +261,18 @@ impl PageJs {
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
         let resp = self.inner.reload().maybe_options(opts).await.into_js_with(&ctx)?;
-        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, Arc::clone(&self.inner))))
       })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   /// Navigate back in history. Accepts the same option bag as `goto`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the navigation fails.
   #[qjs(rename = "goBack")]
   pub async fn go_back<'js>(
     &self,
@@ -270,13 +284,18 @@ impl PageJs {
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
         let resp = self.inner.go_back().maybe_options(opts).await.into_js_with(&ctx)?;
-        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, Arc::clone(&self.inner))))
       })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   /// Navigate forward in history. Accepts the same option bag as `goto`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the navigation fails.
   #[qjs(rename = "goForward")]
   pub async fn go_forward<'js>(
     &self,
@@ -288,7 +307,7 @@ impl PageJs {
       .scope(async move {
         let opts = parse_goto_options(&ctx, options)?;
         let resp = self.inner.go_forward().maybe_options(opts).await.into_js_with(&ctx)?;
-        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
+        Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, Arc::clone(&self.inner))))
       })
       .await
       .map(crate::bindings::convert::Null)
@@ -297,11 +316,17 @@ impl PageJs {
   /// Current URL of the page.
   /// Playwright: `page.url(): string` — synchronous.
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url()
   }
 
   /// Document title.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the title cannot be
+  /// read.
   #[qjs(rename = "title")]
   pub async fn title(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
     call_site
@@ -313,6 +338,10 @@ impl PageJs {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`.
   /// Returns a live `Video` handle when the owning context was
   /// created with `recordVideo`, or `null` otherwise.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the `Video` instance cannot be created in this context.
   #[qjs(rename = "video")]
   pub fn video<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     use rquickjs::class::Class;
@@ -327,6 +356,11 @@ impl PageJs {
   }
 
   /// Full HTML content of the page.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options.includeShadow` throws, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the content cannot be read.
   #[qjs(rename = "content")]
   pub async fn content<'js>(
     &self,
@@ -345,6 +379,11 @@ impl PageJs {
   }
 
   /// Playwright: `page.setContent(html, options?: { timeout?, waitUntil? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when setting the content fails.
   #[qjs(rename = "setContent")]
   pub async fn set_content<'js>(
     &self,
@@ -374,6 +413,11 @@ impl PageJs {
   /// Accepts `Function | string | { path?, content? }` + optional `arg`
   /// exactly like the NAPI binding; all lowering runs in Rust core via
   /// [`ferridriver::options::evaluation_script`].
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `script`, `arg` or `options` cannot be converted, and with the core failure
+  /// (`TimeoutError`, `TargetClosedError` or `FerriError`) when the script cannot be registered.
   #[qjs(rename = "addInitScript")]
   pub async fn add_init_script<'js>(
     &self,
@@ -404,6 +448,11 @@ impl PageJs {
   }
 
   /// Remove a previously-registered init script by identifier.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the script cannot be
+  /// removed.
   #[qjs(rename = "removeInitScript")]
   pub async fn remove_init_script(
     &self,
@@ -418,6 +467,11 @@ impl PageJs {
 
   /// Full page rendered as clean Markdown (headings, lists, links, tables
   /// preserved; chrome and boilerplate stripped).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the page cannot be
+  /// read.
   #[qjs(rename = "markdown")]
   pub async fn markdown(
     &self,
@@ -433,6 +487,11 @@ impl PageJs {
   /// strict?, timeout? })`. Resolves to the matched element handle for
   /// `state: 'attached'` / `'visible'` (default), or `null` for
   /// `'hidden'` / `'detached'`; throws on timeout.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the element does not reach the state in time.
   #[qjs(rename = "waitForSelector")]
   pub async fn wait_for_selector<'js>(
     &self,
@@ -463,6 +522,11 @@ impl PageJs {
   /// pinned to the first element matching `selector`, or `null` when no
   /// element matches. Callers `dispose()` the handle when done to
   /// release the backend remote.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options.strict` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the query fails, such as a strict-mode violation.
   #[qjs(rename = "querySelector")]
   pub async fn query_selector<'js>(
     &self,
@@ -482,6 +546,11 @@ impl PageJs {
   }
 
   /// Playwright: `page.$(selector, options?: { strict?: boolean })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options.strict` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the query fails, such as a strict-mode violation.
   #[qjs(rename = "$")]
   pub async fn dollar<'js>(
     &self,
@@ -500,6 +569,10 @@ impl PageJs {
   }
 
   /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the query fails.
   #[qjs(rename = "querySelectorAll")]
   pub async fn query_selector_all(
     &self,
@@ -521,6 +594,10 @@ impl PageJs {
   }
 
   /// Playwright `$$` shortcut for [`Self::query_selector_all`].
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the query fails.
   #[qjs(rename = "$$")]
   pub async fn dollar_dollar(
     &self,
@@ -538,6 +615,11 @@ impl PageJs {
   }
 
   /// Playwright: `page.$eval(selector, pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when `pageFunction` or `arg` cannot be converted, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when no element matches or the function throws in the page.
   #[qjs(rename = "$eval")]
   pub async fn eval_on_selector<'js>(
     &self,
@@ -562,6 +644,11 @@ impl PageJs {
   }
 
   /// Playwright: `page.$$eval(selector, pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when `pageFunction` or `arg` cannot be converted, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the function throws in the page.
   #[qjs(rename = "$$eval")]
   pub async fn eval_on_selector_all<'js>(
     &self,
@@ -588,8 +675,19 @@ impl PageJs {
   /// Playwright: `page.pause(): Promise<void>`. ferridriver has no
   /// Inspector/recorder UI, so this rejects with a typed `Unsupported`
   /// error rather than silently pretending to pause.
+  ///
+  /// # Errors
+  ///
+  /// Always throws a `FerriError`: ferridriver has no Inspector to pause in.
   #[qjs(rename = "pause")]
-  pub fn pause(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+  pub fn pause(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'_>,
+  ) -> rquickjs::Result<()> {
     self.inner.pause().into_js_with(&ctx)
   }
 
@@ -598,6 +696,11 @@ impl PageJs {
   /// types (`Date` / `RegExp` / `BigInt` / `URL` / `Error` / typed
   /// arrays / `NaN` / `±Infinity` / `undefined` / `-0`) arrive as
   /// native JS, matching Playwright's `parseResult`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when `pageFunction`, `arg` or `options` cannot be converted, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the evaluation fails in the page.
   #[qjs(rename = "evaluate")]
   pub async fn evaluate<'js>(
     &self,
@@ -626,6 +729,11 @@ impl PageJs {
   }
 
   /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when `pageFunction`, `arg` or `options` cannot be converted, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the evaluation fails in the page.
   #[qjs(rename = "evaluateHandle")]
   pub async fn evaluate_handle<'js>(
     &self,
@@ -655,10 +763,22 @@ impl PageJs {
 
   /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`.
   /// Thin delegator to Rust core's `Page::locator`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `options` is malformed.
   #[qjs(rename = "locator")]
   pub fn locator<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     selector: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<LocatorJs> {
@@ -685,9 +805,17 @@ impl PageJs {
   /// Locate elements by ARIA role. Accepts `{ name: string | RegExp,
   /// exact, checked, disabled, expanded, level, pressed, selected,
   /// includeHidden }` via the options bag.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `options.name` or `options.description` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByRole")]
   pub fn get_by_role(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     role: String,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
@@ -698,37 +826,61 @@ impl PageJs {
   }
 
   /// Locate elements containing the given text. Accepts `string | RegExp`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByText")]
   pub fn get_by_text(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(text)?;
+    let t = string_or_regex_from_js(&text)?;
     let opts = parse_text_options(options);
     Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
   }
 
   /// Locate form controls by associated label text.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByLabel")]
   pub fn get_by_label(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(text)?;
+    let t = string_or_regex_from_js(&text)?;
     let opts = parse_text_options(options);
     Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
   }
 
   /// Locate inputs by placeholder text.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByPlaceholder")]
   pub fn get_by_placeholder(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(text)?;
+    let t = string_or_regex_from_js(&text)?;
     let opts = parse_text_options(options);
     Ok(LocatorJs::new(
       self.inner.get_by_placeholder(t).options(opts).into_locator(),
@@ -736,13 +888,21 @@ impl PageJs {
   }
 
   /// Locate images/media by alt text.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByAltText")]
   pub fn get_by_alt_text(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(text)?;
+    let t = string_or_regex_from_js(&text)?;
     let opts = parse_text_options(options);
     Ok(LocatorJs::new(
       self.inner.get_by_alt_text(t).options(opts).into_locator(),
@@ -750,21 +910,40 @@ impl PageJs {
   }
 
   /// Locate elements by `title` attribute text.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByTitle")]
   pub fn get_by_title(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     text: rquickjs::Value<'_>,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(text)?;
+    let t = string_or_regex_from_js(&text)?;
     let opts = parse_text_options(options);
     Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
   }
 
   /// Locate elements by `data-testid`. Accepts `string | RegExp`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `testId` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByTestId")]
-  pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(test_id)?;
+  pub fn get_by_test_id(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    test_id: rquickjs::Value<'_>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(&test_id)?;
     Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
   }
 
@@ -772,6 +951,11 @@ impl PageJs {
 
   /// Click the first element matching `selector`. Accepts Playwright's
   /// full `PageClickOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the click fails.
   #[qjs(rename = "click")]
   pub async fn click<'js>(
     &self,
@@ -790,6 +974,11 @@ impl PageJs {
 
   /// Double-click the first element matching `selector`. Accepts
   /// Playwright's full `PageDblClickOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the double-click fails.
   #[qjs(rename = "dblclick")]
   pub async fn dblclick<'js>(
     &self,
@@ -813,6 +1002,11 @@ impl PageJs {
 
   /// Fill `value` into the input matching `selector`. Accepts
   /// Playwright's full `PageFillOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the fill fails.
   #[qjs(rename = "fill")]
   pub async fn fill<'js>(
     &self,
@@ -840,6 +1034,11 @@ impl PageJs {
   ///
   /// Exposed as `type` in JS (matches Playwright) — Rust renames to avoid
   /// the `type` keyword.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when typing fails.
   #[qjs(rename = "type")]
   pub async fn type_<'js>(
     &self,
@@ -864,6 +1063,11 @@ impl PageJs {
 
   /// Press `key` on the element matching `selector`. Accepts Playwright's
   /// full `PagePressOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the key press fails.
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
@@ -887,6 +1091,11 @@ impl PageJs {
   }
 
   /// `page.focus(selector, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the element cannot be
+  /// focused.
   #[qjs(rename = "focus")]
   pub async fn focus(
     &self,
@@ -902,6 +1111,11 @@ impl PageJs {
 
   /// Hover the first element matching `selector`. Accepts Playwright's
   /// full `PageHoverOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the hover fails.
   #[qjs(rename = "hover")]
   pub async fn hover<'js>(
     &self,
@@ -920,6 +1134,11 @@ impl PageJs {
 
   /// Dispatch a DOM event on the first element matching `selector`.
   /// Mirrors Playwright's `page.dispatchEvent(selector, type, eventInit?, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `eventInit` or `options` is malformed, and with the core failure
+  /// (`TimeoutError`, `TargetClosedError` or `FerriError`) when the event cannot be dispatched.
   #[qjs(rename = "dispatchEvent")]
   pub async fn dispatch_event<'js>(
     &self,
@@ -946,6 +1165,11 @@ impl PageJs {
 
   /// Tap (touch) the first element matching `selector`. Accepts
   /// Playwright's full `PageTapOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the tap fails.
   #[qjs(rename = "tap")]
   pub async fn tap<'js>(
     &self,
@@ -964,6 +1188,11 @@ impl PageJs {
 
   /// Check a checkbox matching `selector`. Accepts Playwright's full
   /// `PageCheckOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the element cannot be checked.
   #[qjs(rename = "check")]
   pub async fn check<'js>(
     &self,
@@ -982,6 +1211,11 @@ impl PageJs {
 
   /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
   /// `PageUncheckOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the element cannot be unchecked.
   #[qjs(rename = "uncheck")]
   pub async fn uncheck<'js>(
     &self,
@@ -1005,6 +1239,11 @@ impl PageJs {
 
   /// Set the checked state of a checkbox/radio matching `selector`.
   /// Accepts Playwright's full `PageSetCheckedOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the checked state cannot be set.
   #[qjs(rename = "setChecked")]
   pub async fn set_checked<'js>(
     &self,
@@ -1030,6 +1269,11 @@ impl PageJs {
   /// Select options on the `<select>` matching `selector`. Returns the
   /// values of the selected options. Accepts Playwright's full
   /// `string | string[] | { value?, label?, index? } | Array<...>` union.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `values` or `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the selection fails.
   #[qjs(rename = "selectOption")]
   pub async fn select_option<'js>(
     &self,
@@ -1056,6 +1300,11 @@ impl PageJs {
   // ── Info ──────────────────────────────────────────────────────────────────
 
   /// Text content of the first element matching `selector` (or `null`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the read fails.
   #[qjs(rename = "textContent")]
   pub async fn text_content<'js>(
     &self,
@@ -1079,6 +1328,11 @@ impl PageJs {
   }
 
   /// `innerText` of the first element matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the read fails.
   #[qjs(rename = "innerText")]
   pub async fn inner_text<'js>(
     &self,
@@ -1101,6 +1355,11 @@ impl PageJs {
   }
 
   /// `innerHTML` of the first element matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the read fails.
   #[qjs(rename = "innerHTML")]
   pub async fn inner_html<'js>(
     &self,
@@ -1123,6 +1382,11 @@ impl PageJs {
   }
 
   /// Current input value of the first element matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the read fails.
   #[qjs(rename = "inputValue")]
   pub async fn input_value<'js>(
     &self,
@@ -1146,6 +1410,11 @@ impl PageJs {
 
   /// Get attribute `name` on the first element matching `selector`
   /// (or `null` if the attribute is absent).
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the read fails.
   #[qjs(rename = "getAttribute")]
   pub async fn get_attribute<'js>(
     &self,
@@ -1170,6 +1439,11 @@ impl PageJs {
   }
 
   /// Whether the first element matching `selector` is visible.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the check fails.
   #[qjs(rename = "isVisible")]
   pub async fn is_visible<'js>(
     &self,
@@ -1192,6 +1466,11 @@ impl PageJs {
   }
 
   /// Whether the first element matching `selector` is hidden.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the check fails.
   #[qjs(rename = "isHidden")]
   pub async fn is_hidden<'js>(
     &self,
@@ -1214,6 +1493,11 @@ impl PageJs {
   }
 
   /// Whether the first element matching `selector` is enabled.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the check fails.
   #[qjs(rename = "isEnabled")]
   pub async fn is_enabled<'js>(
     &self,
@@ -1236,6 +1520,11 @@ impl PageJs {
   }
 
   /// Whether the first element matching `selector` is disabled.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the check fails.
   #[qjs(rename = "isDisabled")]
   pub async fn is_disabled<'js>(
     &self,
@@ -1258,6 +1547,11 @@ impl PageJs {
   }
 
   /// Whether the first checkbox matching `selector` is checked.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the check fails.
   #[qjs(rename = "isChecked")]
   pub async fn is_checked<'js>(
     &self,
@@ -1284,29 +1578,39 @@ impl PageJs {
   /// `page.mouse.*` namespace: `click`, `dblclick`, `down`, `up`, `wheel`.
   /// Exposed as a JS property, matching Playwright.
   #[qjs(get, rename = "mouse")]
+  #[must_use]
   pub fn mouse(&self) -> MouseJs {
-    MouseJs::new(self.inner.clone())
+    MouseJs::new(Arc::clone(&self.inner))
   }
 
   /// `page.keyboard.*` namespace: `down`, `up`, `press` (no selector; acts on
   /// the currently focused element). Exposed as a JS property.
   #[qjs(get, rename = "keyboard")]
+  #[must_use]
   pub fn keyboard(&self) -> KeyboardJs {
-    KeyboardJs::new(self.inner.clone())
+    KeyboardJs::new(Arc::clone(&self.inner))
   }
 
   /// `page.localStorage` — the `localStorage` area for the page's
   /// current origin. Exposed as a JS property, matching Playwright.
   #[qjs(get, rename = "localStorage")]
+  #[must_use]
   pub fn local_storage(&self) -> crate::bindings::web_storage::WebStorageJs {
-    crate::bindings::web_storage::WebStorageJs::new(self.inner.clone(), ferridriver::options::WebStorageKind::Local)
+    crate::bindings::web_storage::WebStorageJs::new(
+      Arc::clone(&self.inner),
+      ferridriver::options::WebStorageKind::Local,
+    )
   }
 
   /// `page.sessionStorage` — the `sessionStorage` area for the page's
   /// current origin. Exposed as a JS property, matching Playwright.
   #[qjs(get, rename = "sessionStorage")]
+  #[must_use]
   pub fn session_storage(&self) -> crate::bindings::web_storage::WebStorageJs {
-    crate::bindings::web_storage::WebStorageJs::new(self.inner.clone(), ferridriver::options::WebStorageKind::Session)
+    crate::bindings::web_storage::WebStorageJs::new(
+      Arc::clone(&self.inner),
+      ferridriver::options::WebStorageKind::Session,
+    )
   }
 
   // ── Event emitter (Playwright parity) ────────────────────────────────────
@@ -1323,10 +1627,22 @@ impl PageJs {
   /// JS function with the event snapshot (`pageerror` receives a native
   /// `Error`, matching Playwright). Mirrors `ferridriver-node`'s
   /// `page.on`, which uses the same core `EventEmitter`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing.
   #[qjs(rename = "on")]
   pub fn on<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -1335,6 +1651,10 @@ impl PageJs {
   }
 
   /// Node's `addListener`, an alias of [`Self::on`].
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing.
   #[qjs(rename = "addListener")]
   pub fn add_listener<'js>(
     this: This<Class<'js, Self>>,
@@ -1347,10 +1667,22 @@ impl PageJs {
 
   /// Node's `prependListener`: this listener runs before every listener
   /// already attached to the same event.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing.
   #[qjs(rename = "prependListener")]
   pub fn prepend_listener<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -1362,10 +1694,22 @@ impl PageJs {
   }
 
   /// Node's `prependOnceListener`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing.
   #[qjs(rename = "prependOnceListener")]
   pub fn prepend_once_listener<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -1378,8 +1722,25 @@ impl PageJs {
 
   /// Node's `listeners(type)` — the callbacks attached to `event`, in
   /// the order they will fire.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing, or when a saved listener cannot be
+  /// restored.
   #[qjs(rename = "listeners")]
-  pub fn listeners<'js>(&self, ctx: rquickjs::Ctx<'js>, event: String) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+  pub fn listeners<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let saved = with_page_callbacks(&ctx, |r| r.event_listeners_named(&event))?;
     let mut out = Vec::with_capacity(saved.len());
     // Dispatch order lives in core; the registry is a map.
@@ -1394,6 +1755,11 @@ impl PageJs {
   /// Node's `rawListeners(type)`. ferridriver wraps a `once` listener
   /// in core rather than in JS, so there is no wrapper to unwrap and
   /// this is [`Self::listeners`].
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing, or when a saved listener cannot be
+  /// restored.
   #[qjs(rename = "rawListeners")]
   pub fn raw_listeners<'js>(
     &self,
@@ -1405,41 +1771,62 @@ impl PageJs {
 
   /// Node's `listenerCount(type)`.
   #[qjs(rename = "listenerCount")]
-  pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+  #[must_use]
+  pub fn listener_count(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+  ) -> f64 {
+    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()` — every event with a listener attached.
   #[qjs(rename = "eventNames")]
+  #[must_use]
   pub fn event_names(&self) -> Vec<String> {
     self.inner.event_names()
   }
 
   /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
   #[qjs(rename = "setMaxListeners")]
+  #[must_use]
   pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let max = max.max(0.0) as usize;
-    this.0.borrow().inner.set_max_listeners(max);
+    this
+      .0
+      .borrow()
+      .inner
+      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
     this.0
   }
 
   /// Node's `getMaxListeners()`.
   #[qjs(rename = "getMaxListeners")]
+  #[must_use]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
 
   /// `page.once(event, listener)`. Like [`Self::on`] but the listener
   /// fires at most once (core auto-removes it after the first emit).
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing.
   #[qjs(rename = "once")]
   pub fn once<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -1450,18 +1837,40 @@ impl PageJs {
   /// `page.off(event, listener)` — Playwright's form, matching the
   /// registration by function identity (`===`). `off(event)` with no
   /// listener drops every listener for that event.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `event` is not a string, and an `Error` when the context's page-callback registry is
+  /// missing.
   #[qjs(rename = "off")]
   pub fn off<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     target: rquickjs::Value<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     listener: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().off_impl(&ctx, target, listener)?;
+    this.0.borrow().off_impl(&ctx, &target, listener.0.as_ref())?;
     Ok(this.0)
   }
 
   /// Node's `removeListener`, an alias of [`Self::off`].
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `event` is not a string, and an `Error` when the context's page-callback registry is
+  /// missing.
   #[qjs(rename = "removeListener")]
   pub fn remove_listener<'js>(
     this: This<Class<'js, Self>>,
@@ -1483,16 +1892,25 @@ impl PageJs {
   /// its own body is NOT tracked, because the pump does not await what
   /// a listener returns. `'ignoreErrors'` and `'default'` resolve the
   /// same way: a throwing listener is already contained by the pump.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing, or when the promise for `options` cannot
+  /// be created.
   #[qjs(rename = "removeAllListeners")]
   pub fn remove_all_listeners<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
     event: Opt<String>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     {
       let page = this.0.borrow();
-      if let Some(ev) = event.0.clone() {
+      if let Some(ev) = event.0 {
         let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_named(&ev))?;
         for id in ids {
           page.inner.off(ferridriver::events::ListenerId(id));
@@ -1530,21 +1948,27 @@ impl PageJs {
   // ── Misc page surface (Playwright parity) ────────────────────────────────
 
   /// `page.waitForTimeout(timeout)`. Sleeps `timeout` ms via the core
-  /// async timer (the QuickJS engine has no `setTimeout`). Playwright
+  /// async timer (the `QuickJS` engine has no `setTimeout`). Playwright
   /// discourages this in production code; prefer web-first waits.
   #[qjs(rename = "waitForTimeout")]
   pub async fn wait_for_timeout(&self, call_site: crate::bindings::CallSite, timeout: f64) {
     call_site
       .scope(async move {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let ms = if timeout < 0.0 { 0 } else { timeout as u64 };
-        self.inner.wait_for_timeout(ms).await;
+        self
+          .inner
+          .wait_for_timeout(crate::bindings::convert::f64_to_u64(timeout))
+          .await;
       })
       .await;
   }
 
   /// `page.requestGC()`. Forces a garbage-collection pass in the
   /// page's JS engine (Playwright parity).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the page cannot collect
+  /// garbage.
   #[qjs(rename = "requestGC")]
   pub async fn request_gc(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     call_site
@@ -1555,9 +1979,17 @@ impl PageJs {
   /// Playwright: `page.workers(): Worker[]`.
   /// Playwright: `page.requests(): Promise<Request[]>`; the array is
   /// already at hand, so it is returned as `consoleMessages` returns its own.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a `Request` instance cannot be created in this context.
   #[qjs(rename = "requests")]
   pub fn requests<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Vec<rquickjs::class::Class<'js, crate::bindings::network::RequestJs>>> {
     self
@@ -1567,15 +1999,22 @@ impl PageJs {
       .map(|request| {
         rquickjs::class::Class::instance(
           ctx.clone(),
-          crate::bindings::network::RequestJs::new_with_page(request, self.inner.clone()),
+          crate::bindings::network::RequestJs::new_with_page(request, Arc::clone(&self.inner)),
         )
       })
       .collect()
   }
 
+  /// # Errors
+  ///
+  /// Throws when a `Worker` instance cannot be created in this context.
   #[qjs(rename = "workers")]
   pub fn workers<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Vec<rquickjs::class::Class<'js, crate::bindings::worker::WorkerJs>>> {
     self
@@ -1589,10 +2028,22 @@ impl PageJs {
   /// `page.consoleMessages(options?)`. Returns the retained console
   /// history as `ConsoleMessage` instances. Accepts `{ filter?: 'all' |
   /// 'since-navigation' }`, defaulting to `since-navigation`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when reading `options.filter` throws, or when a `ConsoleMessage` instance cannot be created.
   #[qjs(rename = "consoleMessages")]
   pub fn console_messages<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let filter = ferridriver::observed::ObservedFilter::parse(opt_str_field(&options, "filter")?.as_deref());
@@ -1615,10 +2066,22 @@ impl PageJs {
   /// `page.pageErrors(options?)`. Returns the retained uncaught page
   /// exceptions as native JS `Error`s. Accepts `{ filter?: 'all' |
   /// 'since-navigation' }`, defaulting to `since-navigation`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when reading `options.filter` throws, or when a native `Error` cannot be built.
   #[qjs(rename = "pageErrors")]
   pub fn page_errors<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let filter = ferridriver::observed::ObservedFilter::parse(opt_str_field(&options, "filter")?.as_deref());
@@ -1640,10 +2103,15 @@ impl PageJs {
   /// waitUntil? }): Promise<Response | null>`. Deprecated in Playwright
   /// in favour of `waitForURL`, kept for parity.
   #[qjs(rename = "waitForNavigation")]
+  #[must_use]
   pub fn wait_for_navigation<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
     impl std::future::Future<
@@ -1654,7 +2122,7 @@ impl PageJs {
     // the promise is first awaited.
     let navigation = self.inner.wait_for_navigation();
     let opts = crate::bindings::convert::arm_now(&ctx, || parse_wait_for_navigation_options(&ctx, &options));
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
     rquickjs::promise::Promised::from(call_site.scope(async move {
       let opts = opts.map_err(|deferred| deferred.raise(&ctx))?;
       let response = navigation.options(opts).await.into_js_with(&ctx)?;
@@ -1666,6 +2134,12 @@ impl PageJs {
 
   /// Playwright: `page.addScriptTag(options?: { content?, path?, type?,
   /// url? }): Promise<ElementHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the tag cannot be added. A `path` the sandbox does not let this script
+  /// read is refused before the page is touched.
   #[qjs(rename = "addScriptTag")]
   pub async fn add_script_tag<'js>(
     &self,
@@ -1693,6 +2167,12 @@ impl PageJs {
 
   /// Playwright: `page.addStyleTag(options?: { content?, path?, url? }):
   /// Promise<ElementHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the tag cannot be added. A `path` the sandbox does not let this script
+  /// read is refused before the page is touched.
   #[qjs(rename = "addStyleTag")]
   pub async fn add_style_tag<'js>(
     &self,
@@ -1720,6 +2200,11 @@ impl PageJs {
 
   /// `page.setExtraHTTPHeaders(headers)`. Sends `headers` (a plain
   /// `Record<string, string>`) with every subsequent request.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `headers` is not an object of strings, and with the core failure
+  /// (`TimeoutError`, `TargetClosedError` or `FerriError`) when the headers cannot be set.
   #[qjs(rename = "setExtraHTTPHeaders")]
   pub async fn set_extra_http_headers<'js>(
     &self,
@@ -1736,6 +2221,11 @@ impl PageJs {
   }
 
   /// `page.bringToFront()`. Activates the page (brings its tab to front).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the page cannot be
+  /// activated.
   #[qjs(rename = "bringToFront")]
   pub async fn bring_to_front(
     &self,
@@ -1748,6 +2238,11 @@ impl PageJs {
   }
 
   /// `page.isEditable(selector)`. Whether the element is editable.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the check fails.
   #[qjs(rename = "isEditable")]
   pub async fn is_editable<'js>(
     &self,
@@ -1772,6 +2267,10 @@ impl PageJs {
   /// Playwright: `page.viewportSize(): null | { width, height }` — a
   /// synchronous accessor over the tracked emulated viewport; `null`
   /// when no viewport emulation is applied.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the result object cannot be created.
   #[qjs(rename = "viewportSize")]
   pub fn viewport_size<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     match self.inner.viewport_size() {
@@ -1789,16 +2288,21 @@ impl PageJs {
   #[qjs(rename = "context")]
   /// Playwright: `page.coverage`. Chromium only.
   #[qjs(get, rename = "coverage")]
+  #[must_use]
   pub fn coverage(&self) -> crate::bindings::coverage::CoverageJs {
     crate::bindings::coverage::CoverageJs::new(self.inner.coverage())
   }
 
   /// `page.clock` — the owning context's fake-time controller
   /// (Playwright: `page.clock` IS `context.clock`).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the `Clock` instance cannot be created in this context.
   #[qjs(get, rename = "clock")]
   pub fn clock<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let Some(cref) = self.inner.context() else {
-      return Ok(rquickjs::Value::new_null(ctx.clone()));
+      return Ok(rquickjs::Value::new_null(ctx));
     };
     let wrapper = crate::bindings::clock::ClockJs::new(std::sync::Arc::new(cref.clone()));
     let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
@@ -1808,19 +2312,26 @@ impl PageJs {
   /// `page.request` — the owning context's context-bound HTTP client
   /// (Playwright: `page.request` IS `context.request`). Cookies flow
   /// both ways between these requests and the browser context.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the `APIRequestContext` instance cannot be created in this context.
   #[qjs(get, rename = "request")]
   pub fn request<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let Some(client) = self.inner.http_client() else {
-      return Ok(rquickjs::Value::new_null(ctx.clone()));
+      return Ok(rquickjs::Value::new_null(ctx));
     };
     let wrapper = crate::bindings::http_client::HttpClientJs::new(std::sync::Arc::new(client));
     let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
+  /// # Errors
+  ///
+  /// Throws when the `BrowserContext` instance cannot be created in this context.
   pub fn context<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let Some(cref) = self.inner.context() else {
-      return Ok(rquickjs::Value::new_null(ctx.clone()));
+      return Ok(rquickjs::Value::new_null(ctx));
     };
     let wrapper = crate::bindings::context::BrowserContextJs::new(std::sync::Arc::new(cref.clone()));
     let instance = rquickjs::class::Class::instance(ctx.clone(), wrapper)?;
@@ -1833,6 +2344,7 @@ impl PageJs {
   /// is synchronous (a weak upgrade); `Promised` keeps Playwright's
   /// promise-returning signature.
   #[qjs(rename = "opener")]
+  #[must_use]
   pub fn opener<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
@@ -1849,6 +2361,10 @@ impl PageJs {
 
   /// ferridriver-specific (NOT Playwright): click at viewport
   /// coordinates without a selector. Playwright equivalent: `mouse.click(x, y)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the click fails.
   #[qjs(rename = "clickAt")]
   pub async fn click_at(
     &self,
@@ -1865,6 +2381,11 @@ impl PageJs {
   /// ferridriver-specific (NOT Playwright): interpolated mouse move
   /// from `(fromX, fromY)` to `(toX, toY)` in `steps` points. Playwright
   /// equivalent: `mouse.move(x, y, { steps })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the mouse cannot be
+  /// moved.
   #[qjs(rename = "moveMouseSmooth")]
   pub async fn move_mouse_smooth(
     &self,
@@ -1890,6 +2411,11 @@ impl PageJs {
   /// Drag from the source selector to the target selector. Accepts
   /// Playwright's `FrameDragAndDropOptions & TimeoutOptions` bag:
   /// `{ force?, noWaitAfter?, sourcePosition?, targetPosition?, steps?, strict?, timeout?, trial? }`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the drag fails.
   #[qjs(rename = "dragAndDrop")]
   pub async fn drag_and_drop<'js>(
     &self,
@@ -1917,6 +2443,11 @@ impl PageJs {
   /// Attach files to a `<input type="file">` selector. Accepts
   /// Playwright's full `string | string[] | FilePayload | FilePayload[]`
   /// union plus the `PageSetInputFilesOptions` bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `files` or `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the files cannot be set.
   #[qjs(rename = "setInputFiles")]
   pub async fn set_input_files<'js>(
     &self,
@@ -1946,6 +2477,11 @@ impl PageJs {
   /// `page.setViewportSize({ width, height })`.
   /// Playwright: `page.setViewportSize({ width, height })` — a single
   /// object, not two positional numbers.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `size` is not `{ width, height }`, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the viewport cannot be resized.
   #[qjs(rename = "setViewportSize")]
   pub async fn set_viewport_size<'js>(
     &self,
@@ -1970,6 +2506,11 @@ impl PageJs {
   /// `{ media?, colorScheme?, reducedMotion?, forcedColors?, contrast? }`
   /// option bag — each call is a partial update layered on top of the
   /// page's persistent emulated-media state.
+  ///
+  /// # Errors
+  ///
+  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when the emulation cannot be applied.
   #[qjs(rename = "emulateMedia")]
   pub async fn emulate_media<'js>(
     &self,
@@ -1987,7 +2528,7 @@ impl PageJs {
 
   // ── Screenshots / PDF (return raw bytes; pair with `artifacts.writeBytes`) ─
 
-  /// Capture the page as a PNG (raw bytes — Uint8Array in JS). Pair with
+  /// Capture the page as a PNG (raw bytes — `Uint8Array` in JS). Pair with
   /// `await artifacts.writeBytes('page.png', bytes)` to save to disk.
   /// Optional `options` accept `{ fullPage?: boolean, format?: 'png'|'jpeg'|'webp', quality?: number }`.
   /// ferridriver extension: `page.checkAccessibility(options?)`.
@@ -1995,6 +2536,11 @@ impl PageJs {
   /// Not a Playwright method — Playwright's `page.accessibility` is the
   /// accessibility TREE, which is a different question. This runs
   /// axe-core and reports what it found.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the audit fails.
   #[qjs(rename = "checkAccessibility")]
   pub async fn check_accessibility<'js>(
     &self,
@@ -2027,6 +2573,11 @@ impl PageJs {
   ///
   /// The tools the page offers about itself, from its own answer to a
   /// `devtoolstooldiscovery` event. Empty where it offers none.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the tool list cannot be
+  /// read.
   #[qjs(rename = "developerTools")]
   pub async fn developer_tools<'js>(
     &self,
@@ -2042,6 +2593,11 @@ impl PageJs {
   }
 
   /// ferridriver extension: `page.executeDeveloperTool(name, params?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `args` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the tool fails.
   #[qjs(rename = "executeDeveloperTool")]
   pub async fn execute_developer_tool<'js>(
     &self,
@@ -2067,6 +2623,7 @@ impl PageJs {
   }
 
   #[qjs(get)]
+  #[must_use]
   pub fn webmcp(&self) -> crate::bindings::web_mcp::WebMcpJs {
     crate::bindings::web_mcp::WebMcpJs::new(self.inner.webmcp())
   }
@@ -2076,6 +2633,11 @@ impl PageJs {
   /// Captures a V8 heap snapshot, garbage collected first, and hands
   /// back a handle with the queries on it. Chromium-only: the format is
   /// V8's, so `webkit` and `bidi` throw `Unsupported`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`), a `FerriError` off
+  /// Chromium, when the snapshot cannot be taken.
   #[qjs(rename = "takeHeapSnapshot")]
   pub async fn take_heap_snapshot<'js>(
     &self,
@@ -2098,6 +2660,11 @@ impl PageJs {
   /// `{ only: ['meta-description'] }` to run a subset. `http-status-code`
   /// and `is-crawlable` need the main document's own response and are
   /// absent for a document that arrived without one.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the check fails.
   #[qjs(rename = "checkPageQuality")]
   pub async fn check_page_quality<'js>(
     &self,
@@ -2124,6 +2691,10 @@ impl PageJs {
       .await
   }
 
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the capture fails.
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(
     &self,
@@ -2140,6 +2711,11 @@ impl PageJs {
   }
 
   /// Capture a single element as PNG bytes.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the element cannot be
+  /// captured.
   #[qjs(rename = "screenshotElement")]
   pub async fn screenshot_element(
     &self,
@@ -2155,6 +2731,11 @@ impl PageJs {
   /// Render the current page as a PDF (raw bytes). Accepts a Playwright-shape
   /// options object: `{ format?, landscape?, printBackground?, scale?, ... }`.
   /// Pair with `await artifacts.writeBytes('page.pdf', bytes)` to save.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`), a `FerriError` off Chromium, when the PDF cannot be produced.
   #[qjs(rename = "pdf")]
   pub async fn pdf<'js>(
     &self,
@@ -2170,8 +2751,13 @@ impl PageJs {
       .await
   }
 
-  /// Start the Chromium DevTools performance trace. Chromium only; the
+  /// Start the Chromium `DevTools` performance trace. Chromium only; the
   /// returned events are consumed by `stopTracing`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `categories` is not an array of strings, and with the core failure
+  /// (`TimeoutError`, `TargetClosedError` or `FerriError`) when the trace cannot start.
   #[qjs(rename = "startTracing")]
   pub async fn start_tracing<'js>(
     &self,
@@ -2190,7 +2776,12 @@ impl PageJs {
       .await
   }
 
-  /// End the Chromium DevTools performance trace and return its events.
+  /// End the Chromium `DevTools` performance trace and return its events.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the trace cannot be
+  /// stopped.
   #[qjs(rename = "stopTracing")]
   pub async fn stop_tracing<'js>(
     &self,
@@ -2205,7 +2796,12 @@ impl PageJs {
       .await
   }
 
-  /// Read the Chromium DevTools performance counters for this page.
+  /// Read the Chromium `DevTools` performance counters for this page.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the counters cannot be
+  /// read.
   #[qjs(rename = "metrics")]
   pub async fn metrics<'js>(
     &self,
@@ -2221,6 +2817,12 @@ impl PageJs {
   }
 
   /// Start Chromium's precise JavaScript coverage counters.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, an `Error` when coverage is already started, and the
+  /// core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the page has no browser context or the
+  /// coverage session fails.
   #[qjs(rename = "startJSCoverage")]
   pub async fn start_js_coverage<'js>(
     &self,
@@ -2273,6 +2875,11 @@ impl PageJs {
   }
 
   /// Collect and reset Chromium's precise JavaScript coverage counters.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when coverage has not been started, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the coverage cannot be read.
   #[qjs(rename = "takeJSCoverage")]
   pub async fn take_js_coverage<'js>(
     &self,
@@ -2299,6 +2906,11 @@ impl PageJs {
   }
 
   /// Stop Chromium's precise JavaScript coverage counters.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when coverage has not been started, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the coverage cannot be read or stopped.
   #[qjs(rename = "stopJSCoverage")]
   pub async fn stop_js_coverage<'js>(
     &self,
@@ -2329,6 +2941,11 @@ impl PageJs {
   }
 
   /// Start Chromium's sampled JavaScript CPU profiler.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when profiling is already started, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the page has no browser context or the profiler session fails.
   #[qjs(rename = "startCPUProfile")]
   pub async fn start_cpu_profile<'js>(
     &self,
@@ -2366,6 +2983,11 @@ impl PageJs {
   }
 
   /// Stop Chromium's sampled JavaScript CPU profiler and return its profile.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when profiling has not been started, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the profile cannot be read or stopped.
   #[qjs(rename = "stopCPUProfile")]
   pub async fn stop_cpu_profile<'js>(
     &self,
@@ -2399,6 +3021,11 @@ impl PageJs {
 
   /// Close the page. Accepts `{ runBeforeUnload?, reason? }` to mirror
   /// Playwright's `page.close(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the page cannot be closed.
   #[qjs(rename = "close")]
   pub async fn close<'js>(
     &self,
@@ -2449,6 +3076,7 @@ impl PageJs {
 
   /// Whether the page has been closed.
   #[qjs(rename = "isClosed")]
+  #[must_use]
   pub fn is_closed(&self) -> bool {
     self.inner.is_closed()
   }
@@ -2470,12 +3098,26 @@ impl PageJs {
   /// callback by ID, and invokes it with a fresh `RouteJs` wrapper.
   /// `rquickjs`'s scheduler serialises the dispatch against the
   /// script's own `await` points so JS-side state stays consistent.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `url` is neither a glob, a `RegExp` nor a predicate, and an `Error` when the page has
+  /// no VM handle. The promise rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`)
+  /// when the route cannot be registered.
   #[qjs(rename = "route")]
   pub fn route<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<
     rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js>,
@@ -2505,7 +3147,7 @@ impl PageJs {
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
-      (url_value_to_matcher(&ctx, url)?, None, None)
+      (url_value_to_matcher(&ctx, &url)?, None, None)
     };
 
     // LIMITATION (persistent-session VMs): this closure captures a clone
@@ -2571,7 +3213,7 @@ impl PageJs {
       );
     })?;
 
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       let disposable = inner.route(matcher, rust_handler, times).await.into_js_with(&ctx)?;
       let instance =
@@ -2585,10 +3227,20 @@ impl PageJs {
   /// handler receives a live `WebSocketRoute`. Cross-task dispatch mirrors
   /// `page.route` — the handler is restored + invoked inside `async_with!`,
   /// awaited so the driver observes `connectToServer()` before opening.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `url` is neither a glob nor a `RegExp`, and an `Error` when the page has no VM handle.
+  /// The promise rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the route
+  /// cannot be registered.
   #[qjs(rename = "routeWebSocket")]
   pub fn route_web_socket<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
@@ -2599,7 +3251,7 @@ impl PageJs {
         "page.routeWebSocket requires the script engine's VM handle (install_page)",
       )
     })?;
-    let matcher = url_value_to_matcher(&ctx, url)?;
+    let matcher = url_value_to_matcher(&ctx, &url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Page(self.inner.backend_page_id());
     // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
@@ -2607,13 +3259,19 @@ impl PageJs {
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
 
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.route_web_socket(matcher, rust_handler).await.into_js_with(&ctx)
     }))
   }
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replay-only.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the archive cannot be served. A HAR path the sandbox does not let this
+  /// script read (or write, with `update`) is refused first.
   #[qjs(rename = "routeFromHAR")]
   pub async fn route_from_har<'js>(
     &self,
@@ -2640,6 +3298,11 @@ impl PageJs {
   /// predicate is matched by `===` identity against the function passed
   /// to `route`, then its always-true core matcher is dropped by `Arc`
   /// identity so sibling predicate routes survive.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `url` is neither a glob, a `RegExp` nor a predicate, and with the core failure
+  /// (`TimeoutError`, `TargetClosedError` or `FerriError`) when the route cannot be removed.
   #[qjs(rename = "unroute")]
   pub async fn unroute<'js>(
     &self,
@@ -2692,7 +3355,7 @@ impl PageJs {
           }
           return Ok(());
         }
-        let matcher = url_value_to_matcher(&ctx, url)?;
+        let matcher = url_value_to_matcher(&ctx, &url)?;
         self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
@@ -2701,6 +3364,11 @@ impl PageJs {
   /// `page.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
   /// Removes every route registered via `page.route`, clearing the script-side
   /// predicate/handler tables too.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options.behavior` is not `'wait'`, `'ignoreErrors'` or `'default'`, and with
+  /// the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the routes cannot be removed.
   #[qjs(rename = "unrouteAll")]
   pub async fn unroute_all<'js>(
     &self,
@@ -2735,22 +3403,36 @@ impl PageJs {
   /// core checkpoint awaits a oneshot the dispatch task fulfils once the
   /// handler (and any returned promise) settles, so the original action
   /// only resumes afterwards.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page has no VM handle, and the core failure (`TimeoutError`, `TargetClosedError` or
+  /// `FerriError`) when core refuses the handler.
   #[qjs(rename = "addLocatorHandler")]
   pub fn add_locator_handler<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     locator: rquickjs::Class<'js, LocatorJs>,
     handler: rquickjs::Function<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let mut times: Option<u32> = None;
     let mut no_wait_after = false;
     if let Some(bag) = options.0.as_ref().and_then(rquickjs::Value::as_object) {
       if let Ok(Some(t)) = bag.get::<_, Option<f64>>("times") {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-          times = Some(t as u32);
-        }
+        times = Some(crate::bindings::convert::f64_to_u32(t));
       }
       if let Ok(Some(n)) = bag.get::<_, Option<bool>>("noWaitAfter") {
         no_wait_after = n;
@@ -2821,10 +3503,22 @@ impl PageJs {
   /// `page.removeLocatorHandler(locator)`. Drops every handler registered for
   /// `locator` (by selector) and releases the persisted JS callbacks. Mirrors
   /// Playwright `client/page.ts:423`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing.
   #[qjs(rename = "removeLocatorHandler")]
   pub fn remove_locator_handler<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     locator: rquickjs::Class<'js, LocatorJs>,
   ) -> rquickjs::Result<()> {
     let core_locator = locator.borrow().inner_ref().clone();
@@ -2845,6 +3539,11 @@ impl PageJs {
 
   /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the
   /// cursor and resolves with a Locator for the element the user clicks.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when picking fails or is
+  /// cancelled.
   #[qjs(rename = "pickLocator")]
   pub async fn pick_locator(
     &self,
@@ -2860,6 +3559,11 @@ impl PageJs {
   }
 
   /// `page.cancelPickLocator(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the pick cannot be
+  /// cancelled.
   #[qjs(rename = "cancelPickLocator")]
   pub async fn cancel_pick_locator(
     &self,
@@ -2872,6 +3576,11 @@ impl PageJs {
   }
 
   /// `page.hideHighlight(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the highlight cannot be
+  /// hidden.
   #[qjs(rename = "hideHighlight")]
   pub async fn hide_highlight(
     &self,
@@ -2893,16 +3602,21 @@ impl PageJs {
   /// `page.waitForRequest(string | RegExp | ((r: Request) => boolean |
   /// Promise<boolean>), options?: { timeout? })`.
   #[qjs(rename = "waitForRequest")]
+  #[must_use]
   pub fn wait_for_request<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
     impl std::future::Future<Output = rquickjs::Result<crate::bindings::network::RequestJs>> + 'js,
   > {
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
     // Listening starts here, before the promise is returned: the caller's
     // next statement may already send the request.
     let wait = crate::bindings::convert::arm_now(&ctx, || {
@@ -2910,7 +3624,7 @@ impl PageJs {
       let wait = match url.as_function() {
         Some(pred) => NetworkWait::Predicate(page.events().subscribe(), pred.clone()),
         None => NetworkWait::Matched(Box::pin(
-          page.wait_for_request(url_value_to_matcher(&ctx, url)?, timeout),
+          page.wait_for_request(url_value_to_matcher(&ctx, &url)?, timeout),
         )),
       };
       Ok((timeout, wait))
@@ -2933,22 +3647,27 @@ impl PageJs {
   /// `page.waitForResponse(string | RegExp | ((r: Response) => boolean |
   /// Promise<boolean>), options?: { timeout? })`.
   #[qjs(rename = "waitForResponse")]
+  #[must_use]
   pub fn wait_for_response<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
     impl std::future::Future<Output = rquickjs::Result<crate::bindings::network::ResponseJs>> + 'js,
   > {
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
     let wait = crate::bindings::convert::arm_now(&ctx, || {
       let timeout = parse_wait_timeout(&ctx, options)?;
       let wait = match url.as_function() {
         Some(pred) => NetworkWait::Predicate(page.events().subscribe(), pred.clone()),
         None => NetworkWait::Matched(Box::pin(
-          page.wait_for_response(url_value_to_matcher(&ctx, url)?, timeout),
+          page.wait_for_response(url_value_to_matcher(&ctx, &url)?, timeout),
         )),
       };
       Ok((timeout, wait))
@@ -2977,6 +3696,11 @@ impl PageJs {
   /// Playwright: `page.waitForLoadState(state?: 'load' |
   /// 'domcontentloaded' | 'networkidle', options?: { timeout? })`.
   /// Defaults to `'load'`. Thin delegator to `Page::wait_for_load_state`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the state is not reached in time.
   #[qjs(rename = "waitForLoadState")]
   pub async fn wait_for_load_state<'js>(
     &self,
@@ -3002,6 +3726,11 @@ impl PageJs {
   /// Playwright: `page.waitForURL(url: string | RegExp | ((url: URL) =>
   /// boolean), options?: { timeout?, waitUntil? })`. A predicate gets a
   /// `URL` and may return a promise of its answer.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the URL does not match in time.
   #[qjs(rename = "waitForURL")]
   pub async fn wait_for_url<'js>(
     &self,
@@ -3014,7 +3743,7 @@ impl PageJs {
       .scope(async move {
         let opts: Option<ferridriver::options::WaitForUrlOptions> =
           crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        wait_for_url_condition(&ctx, url, |condition| {
+        wait_for_url_condition(&ctx, &url, |condition| {
           self.inner.wait_for_url(condition).maybe_options(opts).into_future()
         })
         .await
@@ -3025,8 +3754,13 @@ impl PageJs {
   /// Playwright: `page.waitForFunction(pageFunction: Function|string,
   /// arg?, options?: { polling?: number|'raf', timeout? }): Promise<JSHandle>`.
   /// Function values get `String(fn)` (Playwright parity); strings are
-  /// polled as expressions. The truthy result comes back as a JSHandle,
-  /// like Playwright's SmartHandle.
+  /// polled as expressions. The truthy result comes back as a `JSHandle`,
+  /// like Playwright's `SmartHandle`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` or `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the function stays falsy past the timeout.
   #[qjs(rename = "waitForFunction")]
   pub async fn wait_for_function<'js>(
     &self,
@@ -3061,6 +3795,7 @@ impl PageJs {
   /// `page.on` listener would and the wait resolves on the first event
   /// for which it returns truthy.
   #[qjs(rename = "waitForEvent")]
+  #[must_use]
   pub fn wait_for_event<'js>(
     &self,
     call_site: crate::bindings::CallSite,
@@ -3069,7 +3804,7 @@ impl PageJs {
     options_or_predicate: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js> {
     use rquickjs::class::Class;
-    let page = self.inner.clone();
+    let page = Arc::clone(&self.inner);
     let event_lc = event.to_ascii_lowercase();
     let options = crate::bindings::convert::arm_now(&ctx, || {
       let mut timeout_ms: Option<f64> = None;
@@ -3176,9 +3911,17 @@ impl PageJs {
   /// Main frame of this page. Playwright: `page.mainFrame(): Frame`.
   /// Always returns a Frame — the cache is seeded inside `Page::new` /
   /// `Page::with_context` before the Page is handed out.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the `Frame` instance cannot be created in this context.
   #[qjs(rename = "mainFrame")]
   pub fn main_frame<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::frame::FrameJs>> {
     crate::bindings::identity::frame_object(&ctx, self.inner.main_frame())
@@ -3186,9 +3929,17 @@ impl PageJs {
 
   /// All non-detached frames on the page. Playwright:
   /// `page.frames(): Frame[]`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when a `Frame` instance cannot be created in this context.
   #[qjs(rename = "frames")]
   pub fn frames<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Vec<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     self
@@ -3203,13 +3954,29 @@ impl PageJs {
   /// Without a selector, the locator matches in whichever frame it is
   /// found.
   #[qjs(rename = "frameLocator")]
-  pub fn frame_locator(&self, selector: Opt<String>) -> crate::bindings::frame_locator::FrameLocatorJs {
+  #[must_use]
+  pub fn frame_locator(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    selector: Opt<String>,
+  ) -> crate::bindings::frame_locator::FrameLocatorJs {
     crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(selector.0.as_deref()))
   }
 
   /// Playwright: `page.getByRef(ref: string): Locator`.
   #[qjs(rename = "getByRef")]
-  pub fn get_by_ref(&self, aria_ref: String) -> crate::bindings::locator::LocatorJs {
+  #[must_use]
+  pub fn get_by_ref(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    aria_ref: String,
+  ) -> crate::bindings::locator::LocatorJs {
     crate::bindings::locator::LocatorJs::new(self.inner.get_by_ref(&aria_ref))
   }
 
@@ -3220,10 +3987,22 @@ impl PageJs {
   /// is not required here — both absent and explicit-null mean "no
   /// filter on this field", which matches Playwright's optional-field
   /// semantics.
+  ///
+  /// # Errors
+  ///
+  /// Throws when reading `selector.name` or `selector.url` throws, or when the `Frame` instance cannot be created.
   #[qjs(rename = "frame")]
   pub fn frame<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     selector: rquickjs::Value<'js>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     let core_sel = if let Some(s) = selector.as_string() {
@@ -3262,9 +4041,10 @@ impl PageJs {
 
   /// Playwright: `page.touchscreen: Touchscreen`.
   #[qjs(rename = "touchscreen", get)]
+  #[must_use]
   pub fn touchscreen(&self) -> TouchscreenJs {
     TouchscreenJs {
-      page: self.inner.clone(),
+      page: Arc::clone(&self.inner),
     }
   }
 
@@ -3272,6 +4052,11 @@ impl PageJs {
   /// `{ full: string, incremental?: string, refMap: Record<string, number> }`.
   /// Playwright's public accessibility API is `ariaSnapshot` (string);
   /// this richer shape feeds the MCP server's incremental tracking.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the snapshot cannot be taken.
   #[qjs(rename = "snapshotForAI")]
   pub async fn snapshot_for_ai<'js>(
     &self,
@@ -3311,7 +4096,7 @@ impl PageJs {
         }
         let ref_map = rquickjs::Object::new(ctx.clone())?;
         for (k, v) in snap.ref_map {
-          ref_map.set(k, v as f64)?;
+          ref_map.set(k, crate::bindings::convert::i64_to_f64(v))?;
         }
         obj.set("refMap", ref_map)?;
         rquickjs::IntoJs::into_js(obj, &ctx)
@@ -3320,6 +4105,11 @@ impl PageJs {
   }
 
   /// Playwright `page.ariaSnapshot(options?): Promise<string>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the snapshot cannot be taken.
   #[qjs(rename = "ariaSnapshot")]
   pub async fn aria_snapshot<'js>(
     &self,
@@ -3336,6 +4126,11 @@ impl PageJs {
   }
 
   /// Playwright: `page.ariaSnapshotJSON(options?): Promise<AriaSnapshotJSON>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the snapshot cannot be taken.
   #[qjs(rename = "ariaSnapshotJSON")]
   pub async fn aria_snapshot_json<'js>(
     &self,
@@ -3364,7 +4159,12 @@ impl PageJs {
   /// The callback receives the args as a single array. The page-side
   /// call resolves to `null` since the script-side callback runs
   /// asynchronously (Rust core's `ExposedFn` is sync + JSON-in/out;
-  /// QuickJS dispatch is async-only).
+  /// `QuickJS` dispatch is async-only).
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page has no VM handle. The promise rejects with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the function cannot be installed.
   #[qjs(rename = "exposeFunction")]
   pub fn expose_function<'js>(
     &self,
@@ -3437,7 +4237,7 @@ impl PageJs {
         })
       }
     });
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.expose_function(&name, cb).await.into_js_with(&ctx)
     }))
@@ -3448,6 +4248,11 @@ impl PageJs {
   /// Like [`Self::expose_function`], but the callback receives a
   /// `BindingSource` object (the live `{ context, page, frame }`) as its
   /// first argument, then the spread page-side call arguments.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page has no VM handle. The promise rejects with the core failure (`TimeoutError`,
+  /// `TargetClosedError` or `FerriError`) when the binding cannot be installed.
   #[qjs(rename = "exposeBinding")]
   pub fn expose_binding<'js>(
     &self,
@@ -3496,7 +4301,7 @@ impl PageJs {
         })
       }
     });
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.expose_binding(&name, cb).await.into_js_with(&ctx)
     }))
@@ -3515,6 +4320,11 @@ impl PageJs {
   /// runs while the VM is driven; frames arriving while the VM idles
   /// are coalesced to the newest one (a screencast consumer wants the
   /// latest frame, and the core channel is unbounded).
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's page-callback registry is missing. The promise rejects with the core
+  /// failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the screencast cannot start.
   #[qjs(rename = "startScreencast")]
   pub fn start_screencast<'js>(
     &self,
@@ -3528,7 +4338,7 @@ impl PageJs {
     // callback keeps this tool's `allow.net` (see `SavedCallback::save`).
     let saved = SavedCallback::save(&ctx, callback);
     with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       // Frames flow until `stopScreencast` clears the callback or the
       // channel closes.
@@ -3568,6 +4378,11 @@ impl PageJs {
   /// started by `startScreencast`. Clears the persisted frame callback
   /// (ending the frame pump) so it doesn't outlive the screencast in
   /// the session VM's registry.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the screencast cannot
+  /// be stopped.
   #[qjs(rename = "stopScreencast")]
   pub async fn stop_screencast(
     &self,
@@ -3595,6 +4410,10 @@ pub struct TouchscreenJs {
 #[rquickjs::methods]
 impl TouchscreenJs {
   /// Playwright: `touchscreen.tap(x, y)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the tap fails.
   #[qjs(rename = "tap")]
   pub async fn tap(&self, ctx: rquickjs::Ctx<'_>, x: f64, y: f64) -> rquickjs::Result<()> {
     self.page.touchscreen().tap(x, y).await.into_js_with(&ctx)

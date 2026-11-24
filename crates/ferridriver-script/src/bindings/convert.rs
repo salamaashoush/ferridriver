@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 /// Lower a [`FerriError`] into a thrown JS exception whose `name`
 /// mirrors the core error name (`"TimeoutError"`, `"TargetClosedError"`,
 /// ...), so `e.name === 'TimeoutError'` holds, matching Playwright.
+#[must_use]
 pub fn ferri_throw(ctx: &Ctx<'_>, e: &FerriError) -> rquickjs::Error {
   throw_named(ctx, e.name(), e.to_string())
 }
@@ -27,7 +28,7 @@ pub use ferrijs::std::node::throw_named;
 /// argument a binding cannot use.
 ///
 /// `rquickjs::Error::new_from_js_message` is banned in `clippy.toml`:
-/// rquickjs throws it through QuickJS's 256-byte format buffer, so a longer
+/// rquickjs throws it through `QuickJS`'s 256-byte format buffer, so a longer
 /// message was cut, and every one read "Error converting from js ...".
 pub fn type_error(ctx: &Ctx<'_>, message: impl Into<String>) -> rquickjs::Error {
   let message = message.into();
@@ -52,6 +53,7 @@ pub enum Deferred<'js> {
 
 impl<'js> Deferred<'js> {
   /// The failure, taken off the context when it is a thrown exception.
+  #[must_use]
   pub fn hold(ctx: &Ctx<'js>, error: rquickjs::Error) -> Self {
     if error.is_exception() {
       Self::Thrown(ctx.catch())
@@ -61,6 +63,7 @@ impl<'js> Deferred<'js> {
   }
 
   /// Throw it again, from the promise.
+  #[must_use]
   pub fn raise(self, ctx: &Ctx<'js>) -> rquickjs::Error {
     match self {
       Self::Thrown(value) => ctx.throw(value),
@@ -71,6 +74,10 @@ impl<'js> Deferred<'js> {
 
 /// Run a binding's synchronous part now, holding a failure for its
 /// promise (see [`Deferred`]).
+///
+/// # Errors
+///
+/// A [`Deferred`] holding whatever `arm` fails with.
 pub fn arm_now<'js, T>(ctx: &Ctx<'js>, arm: impl FnOnce() -> rquickjs::Result<T>) -> Result<T, Deferred<'js>> {
   arm().map_err(|error| Deferred::hold(ctx, error))
 }
@@ -81,6 +88,7 @@ pub fn arm_now<'js, T>(ctx: &Ctx<'js>, arm: impl FnOnce() -> rquickjs::Result<T>
 /// A boxed `test.step` re-attributes its failure to the line that called
 /// the step (`ferridriver_test::step::boxed_error_stack`), and that
 /// stack is what the user catches and what every report prints.
+#[must_use]
 pub fn throw_named_with_stack(ctx: &Ctx<'_>, name: &str, message: String, stack: Option<String>) -> rquickjs::Error {
   let Some(stack) = stack else {
     return throw_named(ctx, name, message);
@@ -101,6 +109,11 @@ pub fn throw_named_with_stack(ctx: &Ctx<'_>, name: &str, message: String, stack:
 /// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>` with a
 /// properly-named thrown `Error` (see [`ferri_throw`]).
 pub trait FerriResultCtxExt<T> {
+  /// The value, or the error thrown into `ctx`.
+  ///
+  /// # Errors
+  ///
+  /// The core error, rethrown under its JS name (see [`ferri_throw`]).
   fn into_js_with(self, ctx: &Ctx<'_>) -> rquickjs::Result<T>;
 }
 
@@ -111,30 +124,98 @@ impl<T> FerriResultCtxExt<T> for Result<T, FerriError> {
 }
 
 /// Convert a JS millisecond value (`f64`) into a `u64`, clamping
-/// negatives to `0`. Single home for the otherwise-repeated f64->u64
-/// timeout cast so call sites stay lint-clean.
+/// negatives to `0` and NaN to `u64::MAX`. The fractional part is
+/// truncated: sub-millisecond precision is irrelevant for timeouts.
 #[must_use]
 pub fn ms_f64_to_u64(ms: f64) -> u64 {
-  if ms <= 0.0 {
-    return 0;
-  }
-  // `ms` is now strictly positive and finite-or-inf; `f64::min` against
-  // `u64::MAX` keeps the cast in range, and the fractional part is
-  // truncated (sub-millisecond precision is irrelevant for timeouts).
-  #[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-  )]
-  {
-    ms.min(u64::MAX as f64) as u64
-  }
+  if ms.is_nan() { u64::MAX } else { f64_to_u64(ms) }
+}
+
+/// A JS number as a `u64`: the fraction truncated, a negative or NaN value
+/// as `0`, a value past `u64::MAX` saturating.
+#[expect(
+  clippy::cast_possible_truncation,
+  clippy::cast_sign_loss,
+  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
+)]
+#[must_use]
+pub fn f64_to_u64(v: f64) -> u64 {
+  v as u64
+}
+
+/// [`f64_to_u64`], saturating at `u32::MAX`.
+#[must_use]
+pub fn f64_to_u32(v: f64) -> u32 {
+  u32::try_from(f64_to_u64(v)).unwrap_or(u32::MAX)
+}
+
+/// [`f64_to_u64`], saturating at `usize::MAX`.
+#[must_use]
+pub fn f64_to_usize(v: f64) -> usize {
+  usize::try_from(f64_to_u64(v)).unwrap_or(usize::MAX)
+}
+
+/// A JS number as an `i64`: the fraction truncated, NaN as `0`, a value
+/// past either bound saturating.
+#[expect(
+  clippy::cast_possible_truncation,
+  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
+)]
+#[must_use]
+pub fn f64_to_i64(v: f64) -> i64 {
+  v as i64
+}
+
+/// A count, id or millisecond value as the JS `number` it crosses as.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+#[must_use]
+pub fn u64_to_f64(v: u64) -> f64 {
+  v as f64
+}
+
+/// [`u64_to_f64`] for a signed value.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+#[must_use]
+pub fn i64_to_f64(v: i64) -> f64 {
+  v as f64
+}
+
+/// [`u64_to_f64`] for a `usize` count.
+#[must_use]
+pub fn usize_to_f64(v: usize) -> f64 {
+  u64_to_f64(u64::try_from(v).unwrap_or(u64::MAX))
+}
+
+/// A duration in whole milliseconds as the JS `number` it crosses as.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+#[must_use]
+pub fn duration_ms_to_f64(d: std::time::Duration) -> f64 {
+  d.as_millis() as f64
+}
+
+/// A duration in whole milliseconds, saturating at `u64::MAX`.
+#[must_use]
+pub fn duration_ms_to_u64(d: std::time::Duration) -> u64 {
+  u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Parse a `waitForEvent`-style trailing argument: a bare timeout
 /// number (documented ferridriver extension) or Playwright's
 /// `{ timeout }` options bag. Returns `None` when omitted so callers
 /// apply their own default.
+///
+/// # Errors
+///
+/// A `TypeError` when the options bag is malformed.
 pub fn parse_timeout_number_or_bag<'js>(
   ctx: &Ctx<'js>,
   options: rquickjs::function::Opt<rquickjs::Value<'js>>,
@@ -159,6 +240,11 @@ pub fn parse_timeout_number_or_bag<'js>(
 /// byte sequence and `toString('base64')` encodes, as a Node spec expects;
 /// a plain view would answer `includes(buffer)` with a quiet `false`. A
 /// realm without `Buffer` gets the view.
+///
+/// # Errors
+///
+/// Whatever `Buffer.from` throws, or, in a realm without `Buffer`, a failure to make the `Uint8Array`
+/// view.
 pub fn node_buffer<'js>(ctx: &Ctx<'js>, buffer: rquickjs::ArrayBuffer<'js>) -> rquickjs::Result<Value<'js>> {
   let from = ctx
     .globals()
@@ -177,6 +263,10 @@ pub fn node_buffer<'js>(ctx: &Ctx<'js>, buffer: rquickjs::ArrayBuffer<'js>) -> r
 /// `ferrijs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
 /// and no `serde_json::Value` middle allocation. Used for binding
 /// returns (cookies, storage state, parsed JSON bodies).
+///
+/// # Errors
+///
+/// A `TypeError` (`cannot convert the value: ...`) when `value` does not serialize.
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
   ferrijs_serde::to_value(ctx.clone(), value).map_err(|e| type_error(ctx, format!("cannot convert the value: {e}")))
 }
@@ -185,6 +275,10 @@ pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Re
 /// via `ferrijs-serde` — no `serde_json::json!` / `serde_json::Value`
 /// middle allocation. Used by `request`/`response`/`apiResponse`
 /// `headersArray()`.
+///
+/// # Errors
+///
+/// As [`serde_to_js`].
 pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S)]) -> rquickjs::Result<Value<'js>> {
   #[derive(Serialize)]
   struct NameValue<'a> {
@@ -207,6 +301,10 @@ pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S
 /// cycle handling all hold (covered by the ferrijs-serde test suite),
 /// so the option-bag call sites keep their prior semantics without our
 /// own hand-rolled walker.
+///
+/// # Errors
+///
+/// A `TypeError` (`invalid argument: ...`) when `value` does not have the shape of `T`.
 pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
   ferrijs_serde::from_value(value).map_err(|e| type_error(ctx, format!("invalid argument: {e}")))
 }
@@ -217,6 +315,10 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>
 /// (serde camelCase + defaults, enum lowering with Playwright error
 /// text), so there is no binding-side mirror struct to drift: a field
 /// added in core is automatically accepted from JS.
+///
+/// # Errors
+///
+/// As [`serde_from_js`], for a bag that is present.
 pub fn parse_opt_bag<'js, T: DeserializeOwned>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -300,7 +402,7 @@ pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs
 
 // ── evaluate(fn, arg) wire bridge (Phase D) ───────────────────────────
 
-/// Lower a QuickJS JS argument into a
+/// Lower a `QuickJS` JS argument into a
 /// [`ferridriver::protocol::SerializedArgument`] ready for
 /// `page.evaluate(fn, arg)` / `page.evaluateHandle(fn, arg)` etc.
 ///
@@ -314,6 +416,11 @@ pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs
 /// backend [`ferridriver::protocol::HandleId`] pushed into the shared
 /// handle table. Detection is recursive, so handles nested inside
 /// object / array user args keep their page-side identity.
+///
+/// # Errors
+///
+/// A `TypeError` for an argument nested too deeply or cyclic, an `Error` naming where a function
+/// sat in it, or whatever reading one of its properties throws.
 pub fn quickjs_arg_to_serialized<'js>(
   ctx: &Ctx<'js>,
   value: Option<Value<'js>>,
@@ -333,6 +440,10 @@ pub enum ArgFunctions {
 
 impl ArgFunctions {
   /// The mode an `{ exposeFunctions?: boolean }` option bag selects.
+  ///
+  /// # Errors
+  ///
+  /// When reading `exposeFunctions` throws or its value is not a boolean.
   pub fn from_options(options: Option<&Value<'_>>, page_key: Option<usize>) -> rquickjs::Result<Self> {
     let expose = match options.and_then(Value::as_object) {
       Some(bag) => bag.get::<_, Option<bool>>("exposeFunctions")?.unwrap_or(false),
@@ -348,6 +459,10 @@ impl ArgFunctions {
 
 /// The `{ timeout?: number }` of an evaluate option bag (Playwright
 /// `locator.evaluate(pageFunction, arg?, options?)`).
+///
+/// # Errors
+///
+/// When reading `timeout` throws or its value is not a number.
 pub fn evaluate_options(
   options: Option<&Value<'_>>,
 ) -> rquickjs::Result<Option<ferridriver::options::EvaluateOptions>> {
@@ -361,6 +476,11 @@ pub fn evaluate_options(
 
 /// [`quickjs_arg_to_serialized`] with the functions in the argument
 /// handled as `functions` says.
+///
+/// # Errors
+///
+/// As [`quickjs_arg_to_serialized`], except that under [`ArgFunctions::Expose`] a function becomes a
+/// binding rather than an error.
 pub fn quickjs_arg_with_functions<'js>(
   ctx: &Ctx<'js>,
   value: Option<Value<'js>>,
@@ -562,7 +682,7 @@ impl<'js> ArgWalk<'_, 'js> {
     }
     if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
       return Ok(Some(SerializedValue::ArrayBuffer(ArrayBufferValue {
-        b: buffer_bytes(&buffer, 0, buffer.len()),
+        b: array_buffer_bytes(&buffer, 0, usize::MAX).unwrap_or_default(),
       })));
     }
     for (class, k) in TYPED_ARRAYS {
@@ -640,10 +760,15 @@ fn handle_backing_to_serialized(
 }
 
 /// Convert a [`ferridriver::protocol::SerializedValue`] into a native
-/// QuickJS JS value — `Date` / `RegExp` / `BigInt` / `URL` / `Error` /
+/// `QuickJS` JS value — `Date` / `RegExp` / `BigInt` / `URL` / `Error` /
 /// typed arrays / `NaN` / `±Infinity` / `undefined` / `-0` all round-trip
 /// as their native JS form. Mirrors Playwright's `parseSerializedValue`
 /// at `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
+///
+/// # Errors
+///
+/// A `TypeError` when a global constructor the value needs is missing or a buffer is longer than
+/// `u32::MAX` bytes, or whatever the engine throws while building the value.
 pub fn serialized_value_to_quickjs<'js>(
   ctx: &Ctx<'js>,
   value: &ferridriver::protocol::SerializedValue,
@@ -749,9 +874,7 @@ fn rehydrate<'js>(
 
 fn f64_as_exact_i32(n: f64) -> Option<i32> {
   if n.is_finite() && n.fract() == 0.0 && n >= f64::from(i32::MIN) && n <= f64::from(i32::MAX) {
-    // SAFETY: bounds-checked above. Direct cast preserves value for integers in i32 range.
-    let trunc = n.trunc();
-    i32::try_from(trunc as i64).ok()
+    i32::try_from(f64_to_i64(n)).ok()
   } else {
     None
   }
@@ -793,16 +916,49 @@ fn rehydrate_typed_array<'js>(
 }
 
 /// `length` bytes of `buffer` from `offset`, or none of them once it is
-/// detached. rquickjs forbids running JS while a buffer borrow is alive;
-/// this copies out at once.
-#[allow(unsafe_code)]
+/// detached or the range runs past its end.
 fn buffer_bytes(buffer: &rquickjs::ArrayBuffer<'_>, offset: usize, length: usize) -> Vec<u8> {
-  // SAFETY: the borrow ends inside this expression, before any JS can
-  // run to detach or resize the buffer.
-  unsafe { buffer.as_bytes() }
-    .and_then(|bytes| bytes.get(offset..offset.saturating_add(length)))
-    .map(<[u8]>::to_vec)
-    .unwrap_or_default()
+  copy_array_buffer(buffer, |bytes| bytes.get(offset..offset.saturating_add(length))).unwrap_or_default()
+}
+
+/// Up to `length` bytes of `buffer` from `offset`, the range clamped to the
+/// buffer; `None` once the buffer is detached.
+pub(crate) fn array_buffer_bytes(buffer: &rquickjs::ArrayBuffer<'_>, offset: usize, length: usize) -> Option<Vec<u8>> {
+  copy_array_buffer(buffer, |bytes| {
+    let start = offset.min(bytes.len());
+    let end = offset.saturating_add(length).min(bytes.len());
+    bytes.get(start..end)
+  })
+}
+
+/// A `Uint8Array`'s bytes; `None` once its buffer is detached.
+#[expect(
+  unsafe_code,
+  reason = "rquickjs exposes a typed array's bytes only through the unsafe `as_bytes`"
+)]
+pub(crate) fn typed_array_bytes(array: &rquickjs::TypedArray<'_, u8>) -> Option<Vec<u8>> {
+  // SAFETY: `as_bytes` requires that no JS runs while the slice lives. It
+  // is copied into a `Vec` within this expression, before control returns
+  // to anything that could run JS.
+  unsafe { array.as_bytes() }.map(<[u8]>::to_vec)
+}
+
+/// Copy the part of `buffer` that `select` picks out. `select` is a plain
+/// function of the bytes, which is what keeps the borrow below sound.
+#[expect(
+  unsafe_code,
+  reason = "rquickjs exposes an ArrayBuffer's bytes only through the unsafe `as_bytes`"
+)]
+fn copy_array_buffer(
+  buffer: &rquickjs::ArrayBuffer<'_>,
+  select: impl FnOnce(&[u8]) -> Option<&[u8]>,
+) -> Option<Vec<u8>> {
+  // SAFETY: `as_bytes` requires that no JS runs while the slice lives. The
+  // only code that sees it is `select`, which every caller in this module
+  // passes as a pure range computation, and the selection is copied into a
+  // `Vec` before this function returns.
+  let bytes = unsafe { buffer.as_bytes() }?;
+  select(bytes).map(<[u8]>::to_vec)
 }
 
 /// Each typed-array constructor and the tag it crosses the wire under.
@@ -828,6 +984,10 @@ const TYPED_ARRAYS: [(&str, ferridriver::protocol::TypedArrayKind); 11] = {
 /// `String(pageFunction)` + `typeof pageFunction === 'function'` check.
 /// For functions, invokes the engine's `Function.prototype.toString()`
 /// via global `String(...)`.
+///
+/// # Errors
+///
+/// Whatever `String(value)` throws.
 pub fn extract_page_function<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<(String, Option<bool>)> {
   let is_fn = value.is_function();
   let s: String = if let Some(str_val) = value.clone().into_string() {
@@ -843,6 +1003,10 @@ pub fn extract_page_function<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs
 }
 
 /// Parse Playwright's `DispatchEventOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_dispatch_event_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -881,6 +1045,11 @@ pub(crate) fn check_context_paths(
 
 /// Parse the polymorphic `files` arg for `setInputFiles`:
 /// `string | string[] | FilePayload | FilePayload[]`.
+///
+/// # Errors
+///
+/// A `TypeError` for a value of none of those shapes or a malformed `FilePayload`, or a
+/// `PermissionDeniedError` for a path outside the realm's read grant.
 pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<ferridriver::options::InputFiles> {
   if value.is_string() {
     let s: String = value.get()?;
@@ -947,6 +1116,10 @@ fn parse_file_payload<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Resul
 }
 
 /// Parse Playwright's `SetInputFilesOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_set_input_files_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -955,6 +1128,10 @@ pub fn parse_set_input_files_options<'js>(
 }
 
 /// Parse Playwright's `DropOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_drop_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -965,6 +1142,11 @@ pub fn parse_drop_options<'js>(
 /// Parse Playwright's native `DropPayload`
 /// (`{ files?: string | string[] | FilePayload | FilePayload[], data?: { [mimeType: string]: string } }`)
 /// into the core struct. Both fields are optional.
+///
+/// # Errors
+///
+/// A `TypeError` for a payload that is not an object or a malformed `files` or `data`, or a
+/// `PermissionDeniedError` for a file path outside the realm's read grant.
 pub fn parse_drop_payload<'js>(
   ctx: &Ctx<'js>,
   value: Value<'js>,
@@ -991,6 +1173,10 @@ pub fn parse_drop_payload<'js>(
 
 /// Parse a polymorphic `selectOption` `values` JS argument:
 /// `string | string[] | { value?, label?, index? } | Array<...>`.
+///
+/// # Errors
+///
+/// A `TypeError` for a value of none of those shapes or a malformed descriptor.
 pub fn parse_select_option_values<'js>(
   ctx: &Ctx<'js>,
   value: Value<'js>,
@@ -1031,6 +1217,10 @@ pub fn parse_select_option_values<'js>(
 }
 
 /// Parse Playwright's `SelectOptionOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_select_option_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1039,6 +1229,10 @@ pub fn parse_select_option_options<'js>(
 }
 
 /// Parse Playwright's `FillOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_fill_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1047,6 +1241,10 @@ pub fn parse_fill_options<'js>(
 }
 
 /// Parse Playwright's `PressOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_press_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1055,6 +1253,10 @@ pub fn parse_press_options<'js>(
 }
 
 /// Parse Playwright's `TypeOptions` JS bag — same shape as `PressOptions`.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_type_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1064,6 +1266,10 @@ pub fn parse_type_options<'js>(
 
 /// Parse Playwright's `CheckOptions` / `UncheckOptions` /
 /// `SetCheckedOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_check_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1072,6 +1278,10 @@ pub fn parse_check_options<'js>(
 }
 
 /// Parse Playwright's `HoverOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_hover_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1080,6 +1290,10 @@ pub fn parse_hover_options<'js>(
 }
 
 /// Parse Playwright's `TapOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_tap_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1088,6 +1302,10 @@ pub fn parse_tap_options<'js>(
 }
 
 /// Parse Playwright's `DblClickOptions` JS bag into the core struct.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_dblclick_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1101,6 +1319,10 @@ pub fn parse_dblclick_options<'js>(
 /// strings raise a typed `rquickjs::Error` with the exact Playwright
 /// message so JS-side assertions see `/Unknown (button|modifier)/` for
 /// drift detection.
+///
+/// # Errors
+///
+/// As [`parse_opt_bag`].
 pub fn parse_click_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
@@ -1122,6 +1344,11 @@ pub fn parse_click_options<'js>(
 /// `{ path, content }` entry. The (source|path|content) + arg rejection is
 /// left to [`ferridriver::options::evaluation_script`] so both binding
 /// layers share the exact error text Playwright ships.
+///
+/// # Errors
+///
+/// A `TypeError` for an `arg` that does not convert to JSON, and as
+/// [`init_script_source_from_js`].
 pub fn init_script_from_js<'js>(
   ctx: &Ctx<'js>,
   script: Value<'js>,
@@ -1138,6 +1365,11 @@ pub fn init_script_from_js<'js>(
 
 /// The `script` of `addInitScript(script, ...)`: a function, source text,
 /// or `{ path?, content? }`.
+///
+/// # Errors
+///
+/// A `TypeError` for a `script` of none of those shapes or an object with neither `content` nor
+/// `path`, or a `PermissionDeniedError` for a `path` outside the realm's read grant.
 pub fn init_script_source_from_js<'js>(
   ctx: &Ctx<'js>,
   script: Value<'js>,

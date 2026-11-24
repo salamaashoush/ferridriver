@@ -1,4 +1,4 @@
-//! `CdpSessionJs`: QuickJS binding for raw Chrome DevTools Protocol
+//! `CdpSessionJs`: `QuickJS` binding for raw Chrome `DevTools` Protocol
 //! access.
 //!
 //! Mirrors Playwright's `CDPSession` (`client/cdpSession.ts`):
@@ -22,14 +22,8 @@ const CDP_PUMP_CAPACITY: usize = 1024;
 
 type CdpPumpMsg = (u64, serde_json::Value);
 
+#[derive(JsLifetime)]
 struct CdpEventPumpUd(tokio::sync::mpsc::Sender<CdpPumpMsg>);
-
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `WsEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for CdpEventPumpUd {
-  type Changed<'to> = CdpEventPumpUd;
-}
 
 /// Get (or lazily start) this context's CDP-listener pump. Same
 /// single-owner-VM discipline as the WS pump: the pump future runs on
@@ -91,6 +85,11 @@ impl CdpSessionJs {
 #[rquickjs::methods]
 impl CdpSessionJs {
   /// Playwright: `cdpSession.send(method, params?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for `params` that do not convert to JSON, or the core error when the
+  /// session is detached or the protocol answers with an error.
   #[qjs(rename = "send")]
   pub async fn send<'js>(
     &self,
@@ -107,6 +106,10 @@ impl CdpSessionJs {
   }
 
   /// Playwright: `cdpSession.detach()`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the session cannot be detached.
   #[qjs(rename = "detach")]
   pub async fn detach(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.detach().await.into_js_with(&ctx)
@@ -114,21 +117,77 @@ impl CdpSessionJs {
 
   /// Register a protocol-event listener. `'event'` is the every-event
   /// wildcard (receives `{ method, params }`).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing from this context.
   #[qjs(rename = "on")]
-  pub fn on<'js>(&self, ctx: Ctx<'js>, event: String, handler: rquickjs::Function<'js>) -> rquickjs::Result<()> {
-    self.register(&ctx, event, handler, false)
+  pub fn on<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    self.register(&ctx, &event, handler, false)
   }
 
   /// One-shot variant of `on`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing from this context.
   #[qjs(rename = "once")]
-  pub fn once<'js>(&self, ctx: Ctx<'js>, event: String, handler: rquickjs::Function<'js>) -> rquickjs::Result<()> {
-    self.register(&ctx, event, handler, true)
+  pub fn once<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    self.register(&ctx, &event, handler, true)
   }
 
   /// Remove a previously registered listener (matched by JS function
   /// identity).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page callback registry is missing or a saved listener cannot be restored into
+  /// this context.
   #[qjs(rename = "off")]
-  pub fn off<'js>(&self, ctx: Ctx<'js>, event: String, handler: rquickjs::Function<'js>) -> rquickjs::Result<()> {
+  pub fn off<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
     let saved = with_page_callbacks(&ctx, |r| r.cdp_listeners_for_event(&event))?;
     let mut victims: Vec<u64> = Vec::new();
     for (id, sp) in saved {
@@ -153,24 +212,24 @@ impl CdpSessionJs {
   fn register<'js>(
     &self,
     ctx: &Ctx<'js>,
-    event: String,
+    event: &str,
     handler: rquickjs::Function<'js>,
     once: bool,
   ) -> rquickjs::Result<()> {
     let id = with_page_callbacks(ctx, PageCallbacks::next_route_id)?;
     let saved = crate::bindings::page::SavedCallback::save(ctx, handler);
-    with_page_callbacks(ctx, |r| r.insert_cdp_listener(id, event.clone(), saved))?;
+    with_page_callbacks(ctx, |r| r.insert_cdp_listener(id, event.to_string(), saved))?;
     let pump = ensure_cdp_pump(ctx);
     let callback: ferridriver::cdp_session::CdpEventCallback = std::sync::Arc::new(move |payload| {
       // Backend thread — never touch the VM here; buffer through the
       // pump (dropped beyond capacity, same as the page-event pump).
       let _ = pump.try_send((id, payload));
     });
-    let core_id = match (event.as_str(), once) {
+    let core_id = match (event, once) {
       ("event", false) => self.inner.on_any(callback),
       ("event", true) => self.inner.once_any(callback),
-      (_, false) => self.inner.on(&event, callback),
-      (_, true) => self.inner.once(&event, callback),
+      (_, false) => self.inner.on(event, callback),
+      (_, true) => self.inner.once(event, callback),
     };
     self.core_ids.borrow_mut().push((id, core_id));
     Ok(())

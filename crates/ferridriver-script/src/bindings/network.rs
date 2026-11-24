@@ -1,4 +1,4 @@
-//! QuickJS bindings for `ferridriver::network::{Request, Response, WebSocket}`.
+//! `QuickJS` bindings for `ferridriver::network::{Request, Response, WebSocket}`.
 //!
 //! Each wrapper is a thin pass-through to the core type per Rule 1.
 //! Method names mirror Playwright's `client/network.ts` exactly so
@@ -22,7 +22,7 @@ use crate::bindings::convert::{throw_named, type_error};
 pub struct RequestJs {
   #[qjs(skip_trace)]
   inner: CoreRequest,
-  /// Owning page reference, used by `frame()` to resolve frame_id via
+  /// Owning page reference, used by `frame()` to resolve `frame_id` via
   /// the page's frame cache. `None` when the wrapper was constructed
   /// without page context.
   #[qjs(skip_trace)]
@@ -60,26 +60,31 @@ impl RequestJs {
 #[rquickjs::methods]
 impl RequestJs {
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
   }
 
   #[qjs(rename = "method")]
+  #[must_use]
   pub fn method(&self) -> String {
     self.inner.method().to_string()
   }
 
   #[qjs(rename = "resourceType")]
+  #[must_use]
   pub fn resource_type(&self) -> String {
     self.inner.resource_type().to_string()
   }
 
   #[qjs(rename = "isNavigationRequest")]
+  #[must_use]
   pub fn is_navigation_request(&self) -> bool {
     self.inner.is_navigation_request()
   }
 
   #[qjs(rename = "postData")]
+  #[must_use]
   pub fn post_data(&self) -> Null<String> {
     Null(self.inner.post_data())
   }
@@ -87,17 +92,31 @@ impl RequestJs {
   /// Mirrors Playwright `request.postDataBuffer(): Buffer | null` —
   /// raw body bytes as a `Uint8Array`, `null` when the request has no
   /// post body.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the `Uint8Array`.
   #[qjs(rename = "postDataBuffer")]
   pub fn post_data_buffer<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     use rquickjs::IntoJs;
     match self.inner.post_data_buffer() {
-      Some(b) => rquickjs::TypedArray::new(ctx.clone(), b.clone())?.into_js(&ctx),
+      Some(b) => rquickjs::TypedArray::new(ctx.clone(), b)?.into_js(&ctx),
       None => Ok(Value::new_null(ctx)),
     }
   }
 
+  /// # Errors
+  ///
+  /// Throws the core error when the post body is not valid JSON.
   #[qjs(rename = "postDataJSON")]
-  pub fn post_data_json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn post_data_json<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let v = self.inner.post_data_json().into_js_with(&ctx)?;
     let v = v.unwrap_or(serde_json::Value::Null);
     // A raw `serde_json::Value` must go through `json_to_js`: a
@@ -107,11 +126,24 @@ impl RequestJs {
     crate::bindings::convert::json_to_js(&ctx, &v)
   }
 
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when the headers cannot be converted to a JS object.
   #[qjs(rename = "headers")]
-  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn headers<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     serde_to_js(&ctx, &self.inner.headers())
   }
 
+  /// # Errors
+  ///
+  /// Rejects when the engine cannot allocate the array.
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
@@ -119,34 +151,56 @@ impl RequestJs {
     crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot report the headers.
   #[qjs(rename = "allHeaders")]
   pub async fn all_headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let h = self.inner.all_headers().await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &h)
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot report the headers.
   #[qjs(rename = "headerValue")]
   pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Null<String>> {
     Ok(Null(self.inner.header_value(&name).await.into_js_with(&ctx)?))
   }
 
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the failure object.
   #[qjs(rename = "failure")]
   pub fn failure<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.failure() {
       Some(error_text) => {
-        let o = rquickjs::Object::new(ctx.clone())?;
+        let o = rquickjs::Object::new(ctx)?;
         o.set("errorText", error_text)?;
         Ok(o.into_value())
       },
-      None => Ok(Value::new_null(ctx.clone())),
+      None => Ok(Value::new_null(ctx)),
     }
   }
 
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when the timing cannot be converted to a JS object.
   #[qjs(rename = "timing")]
-  pub fn timing<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn timing<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     serde_to_js(&ctx, &self.inner.timing())
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot report the sizes.
   #[qjs(rename = "sizes")]
   pub async fn sizes<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let sizes = self.inner.sizes().await.into_js_with(&ctx)?;
@@ -154,26 +208,31 @@ impl RequestJs {
   }
 
   #[qjs(rename = "redirectedFrom")]
+  #[must_use]
   pub fn redirected_from(&self) -> Null<RequestJs> {
     Null(self.inner.redirected_from().map(|r| match self.page.as_ref() {
-      Some(page) => RequestJs::new_with_page(r, page.clone()),
+      Some(page) => RequestJs::new_with_page(r, Arc::clone(page)),
       None => RequestJs::new(r),
     }))
   }
 
   #[qjs(rename = "redirectedTo")]
+  #[must_use]
   pub fn redirected_to(&self) -> Null<RequestJs> {
     Null(self.inner.redirected_to().map(|r| match self.page.as_ref() {
-      Some(page) => RequestJs::new_with_page(r, page.clone()),
+      Some(page) => RequestJs::new_with_page(r, Arc::clone(page)),
       None => RequestJs::new(r),
     }))
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when waiting for the response fails.
   #[qjs(rename = "response")]
   pub async fn response(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<Null<ResponseJs>> {
     let resp = self.inner.response().await.into_js_with(&ctx)?;
     Ok(Null(resp.map(|r| match self.page.as_ref() {
-      Some(page) => ResponseJs::new_with_page(r, page.clone()),
+      Some(page) => ResponseJs::new_with_page(r, Arc::clone(page)),
       None => ResponseJs::new(r),
     })))
   }
@@ -183,17 +242,25 @@ impl RequestJs {
   #[qjs(rename = "existingResponse")]
   pub async fn existing_response(&self) -> Null<ResponseJs> {
     Null(self.inner.existing_response().await.map(|r| match self.page.as_ref() {
-      Some(page) => ResponseJs::new_with_page(r, page.clone()),
+      Some(page) => ResponseJs::new_with_page(r, Arc::clone(page)),
       None => ResponseJs::new(r),
     }))
   }
 
   /// Mirrors Playwright `request.frame(): Frame`. Resolves the
-  /// initiating frame_id via the owning page's frame cache. Returns
+  /// initiating `frame_id` via the owning page's frame cache. Returns
   /// `null` when no frame context is attached.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the `Frame` object.
   #[qjs(rename = "frame")]
   pub fn frame<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     self
@@ -214,6 +281,11 @@ impl RequestJs {
   /// Service-worker requests are not attributed to their worker yet, so
   /// this is always `null`, as in the NAPI binding.
   #[qjs(rename = "serviceWorker")]
+  #[must_use]
+  #[expect(
+    clippy::unused_self,
+    reason = "a JS instance method: `&self` is what makes rquickjs check `this` is a Request"
+  )]
   pub fn service_worker<'js>(&self, ctx: Ctx<'js>) -> Value<'js> {
     Value::new_null(ctx)
   }
@@ -248,41 +320,62 @@ impl ResponseJs {
 #[rquickjs::methods]
 impl ResponseJs {
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url().to_string()
   }
 
   #[qjs(rename = "status")]
+  #[must_use]
   pub fn status(&self) -> i32 {
     i32::try_from(self.inner.status()).unwrap_or(i32::MAX)
   }
 
   #[qjs(rename = "statusText")]
+  #[must_use]
   pub fn status_text(&self) -> String {
     self.inner.status_text().to_string()
   }
 
   #[qjs(rename = "ok")]
+  #[must_use]
   pub fn ok(&self) -> bool {
     self.inner.ok()
   }
 
   #[qjs(rename = "fromServiceWorker")]
+  #[must_use]
   pub fn is_from_service_worker(&self) -> bool {
     self.inner.is_from_service_worker()
   }
 
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when the headers cannot be converted to a JS object.
   #[qjs(rename = "headers")]
-  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn headers<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     serde_to_js(&ctx, &self.inner.headers())
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot report the headers.
   #[qjs(rename = "allHeaders")]
   pub async fn all_headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let h = self.inner.all_headers().await.into_js_with(&ctx)?;
     serde_to_js(&ctx, &h)
   }
 
+  /// # Errors
+  ///
+  /// Rejects when the engine cannot allocate the array.
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
@@ -290,20 +383,28 @@ impl ResponseJs {
     crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot report the headers.
   #[qjs(rename = "headerValue")]
   pub async fn header_value(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Null<String>> {
     Ok(Null(self.inner.header_value(&name).await.into_js_with(&ctx)?))
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot report the headers.
   #[qjs(rename = "headerValues")]
   pub async fn header_values(&self, ctx: rquickjs::Ctx<'_>, name: String) -> rquickjs::Result<Vec<String>> {
     self.inner.header_values(&name).await.into_js_with(&ctx)
   }
 
-  /// Response body as base64-encoded string. QuickJS does not have
-  /// `Buffer`; scripts decode if they need raw bytes.
   /// Mirrors Playwright `response.body(): Promise<Buffer>` — raw bytes
   /// as a `Uint8Array`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the body cannot be read.
   #[qjs(rename = "body")]
   pub async fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let bytes = self.inner.body().await.into_js_with(&ctx)?;
@@ -311,11 +412,18 @@ impl ResponseJs {
     crate::bindings::convert::node_buffer(&ctx, buffer)
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the body cannot be read or is not UTF-8.
   #[qjs(rename = "text")]
   pub async fn text(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
     self.inner.text().await.into_js_with(&ctx)
   }
 
+  /// # Errors
+  ///
+  /// Rejects with the core error when the body cannot be read, or a `SyntaxError`
+  /// when it is not JSON.
   #[qjs(rename = "json")]
   pub async fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     // Body -> JS via QuickJS's C JSON parser; no serde_json::Value
@@ -326,6 +434,10 @@ impl ResponseJs {
 
   /// Mirrors Playwright `response.finished()`. Resolves to `null` on
   /// success, throws on failure.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when the response failed to finish.
   #[qjs(rename = "finished")]
   pub async fn finished<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.finished().await {
@@ -334,6 +446,9 @@ impl ResponseJs {
     }
   }
 
+  /// # Errors
+  ///
+  /// Rejects when the engine cannot allocate the address object.
   #[qjs(rename = "serverAddr")]
   pub async fn server_addr<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.server_addr().await {
@@ -347,6 +462,10 @@ impl ResponseJs {
     }
   }
 
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when the details cannot be converted to a JS
+  /// object.
   #[qjs(rename = "securityDetails")]
   pub async fn security_details<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.security_details().await {
@@ -363,15 +482,20 @@ impl ResponseJs {
   }
 
   #[qjs(rename = "request")]
+  #[must_use]
   pub fn request(&self) -> RequestJs {
     match self.page.as_ref() {
-      Some(page) => RequestJs::new_with_page(self.inner.request(), page.clone()),
+      Some(page) => RequestJs::new_with_page(self.inner.request(), Arc::clone(page)),
       None => RequestJs::new(self.inner.request()),
     }
   }
 
   /// Mirrors Playwright `response.frame(): Frame`. Convenience for
   /// `response.request().frame()`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the `Frame` object.
   #[qjs(rename = "frame")]
   pub fn frame<'js>(
     &self,
@@ -389,14 +513,8 @@ const SOCKET_PUMP_CAPACITY: usize = 1024;
 
 type SocketPumpMsg = (u64, WebSocketEvent, CoreWebSocket);
 
+#[derive(JsLifetime)]
 struct SocketEventPumpUd(tokio::sync::mpsc::Sender<SocketPumpMsg>);
-
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `WsEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for SocketEventPumpUd {
-  type Changed<'to> = SocketEventPumpUd;
-}
 
 /// Get (or lazily start) this context's socket-listener pump. Listeners
 /// run on the interpreter thread, never on the backend thread that
@@ -508,9 +626,17 @@ impl WebSocketJs {
   }
 
   /// Playwright: `webSocket.on(event, listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "on")]
   pub fn on<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
     event: String,
     handler: rquickjs::Function<'js>,
@@ -520,6 +646,10 @@ impl WebSocketJs {
   }
 
   /// Node's `addListener`, an alias of `on`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "addListener")]
   pub fn add_listener<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
@@ -531,9 +661,17 @@ impl WebSocketJs {
   }
 
   /// One-shot `on`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "once")]
   pub fn once<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
     event: String,
     handler: rquickjs::Function<'js>,
@@ -544,11 +682,27 @@ impl WebSocketJs {
 
   /// Remove `handler` from `event`, or every listener of `event`
   /// registered through this socket.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "off")]
   pub fn off<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     handler: rquickjs::function::Opt<rquickjs::Function<'js>>,
   ) -> rquickjs::Result<rquickjs::class::Class<'js, Self>> {
     {
@@ -577,6 +731,10 @@ impl WebSocketJs {
   }
 
   /// Node's `removeListener`, an alias of `off`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the page-callback registry is unavailable.
   #[qjs(rename = "removeListener")]
   pub fn remove_listener<'js>(
     this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
@@ -695,27 +853,59 @@ pub struct RouteRequestJs {
 #[rquickjs::methods]
 impl RouteRequestJs {
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.url.clone()
   }
   #[qjs(rename = "method")]
+  #[must_use]
   pub fn method(&self) -> String {
     self.method.clone()
   }
   /// Playwright: `request.headers(): Record<string, string>`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when the headers cannot be converted to a JS object.
   #[qjs(rename = "headers")]
-  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn headers<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     serde_to_js(&ctx, &self.headers)
   }
   /// Playwright: `request.headersArray(): { name, value }[]`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the array.
   #[qjs(rename = "headersArray")]
-  pub fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn headers_array<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let pairs: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
   /// Playwright: `request.headerValue(name): Promise<string | null>`.
   #[qjs(rename = "headerValue")]
-  pub fn header_value(&self, name: String) -> Null<String> {
+  #[must_use]
+  pub fn header_value(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    name: String,
+  ) -> Null<String> {
     let lower = name.to_ascii_lowercase();
     Null(
       self
@@ -726,10 +916,12 @@ impl RouteRequestJs {
     )
   }
   #[qjs(rename = "postData")]
+  #[must_use]
   pub fn post_data(&self) -> Null<String> {
     Null(self.post_data.clone())
   }
   #[qjs(rename = "resourceType")]
+  #[must_use]
   pub fn resource_type(&self) -> String {
     self.resource_type.clone()
   }
@@ -761,11 +953,11 @@ type JsHeadersMap = std::collections::BTreeMap<String, String>;
 /// else goes through the one byte extractor the rest of the runtime
 /// uses, so a `Buffer` or typed array reaches the wire intact instead of
 /// being JSON-stringified.
-fn fulfill_body_bytes<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Vec<u8>> {
+fn fulfill_body_bytes<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<Vec<u8>> {
   if let Some(text) = value.as_string() {
     return Ok(text.to_string()?.into_bytes());
   }
-  ferrijs::std::node::bytes::buffer_source_bytes(ctx, &value).map_err(|e| {
+  ferrijs::std::node::bytes::buffer_source_bytes(ctx, value).map_err(|e| {
     type_error(
       ctx,
       format!("route.fulfill: `body` must be a string or a byte source: {e}"),
@@ -869,8 +1061,19 @@ impl RouteJs {
   }
 
   /// Headers as a plain JS object (`Record<string, string>`).
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when the headers cannot be converted to a JS object.
   #[qjs(rename = "headers")]
-  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn headers<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let map: rustc_hash::FxHashMap<String, String> = self
       .inner
       .lock()
@@ -889,6 +1092,13 @@ impl RouteJs {
   /// implies the MIME type its extension names; `response` takes the
   /// status, headers and body of an `APIResponse`, each only where the
   /// option bag did not say otherwise.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `json` cannot be serialised or `body` is not
+  /// a string or byte source, a `PermissionDeniedError` when `path` is outside the
+  /// realm's `read` grant, the core error when the response cannot be built, or an
+  /// `Error` when the route was already handled.
   #[qjs(rename = "fulfill")]
   pub async fn fulfill<'js>(
     &self,
@@ -909,7 +1119,7 @@ impl RouteJs {
       }
       let body: Value<'js> = bag.get("body")?;
       if !body.is_undefined() {
-        opts.body = Some(fulfill_body_bytes(&ctx, body)?);
+        opts.body = Some(fulfill_body_bytes(&ctx, &body)?);
       }
       if let Some(path) = bag.get::<_, Option<String>>("path")? {
         if !path.is_empty() {
@@ -938,6 +1148,12 @@ impl RouteJs {
   /// maxRetries?, method?, postData?, timeout?, url? }): Promise<APIResponse>`.
   /// The request goes out under the realm's network policy, like the
   /// realm's own `request`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `postData` is not a string or byte source,
+  /// an `Error` when the route was already handled, or the core error when the
+  /// request fails or the network policy refuses it.
   #[qjs(rename = "fetch")]
   pub async fn fetch<'js>(
     &self,
@@ -959,7 +1175,7 @@ impl RouteJs {
         .map(|headers| headers_to_pairs(Some(headers)));
       let post_data: Value<'js> = bag.get("postData")?;
       if !post_data.is_undefined() && !post_data.is_null() {
-        fetch.post_data = Some(fulfill_body_bytes(&ctx, post_data)?);
+        fetch.post_data = Some(fulfill_body_bytes(&ctx, &post_data)?);
       }
       fetch.max_redirects = bag.get("maxRedirects")?;
       fetch.max_retries = bag.get("maxRetries")?;
@@ -983,8 +1199,21 @@ impl RouteJs {
 
   /// Mirrors Playwright `route.continue(options?)`. `postData` takes a
   /// string or any byte source, like `fulfill`'s `body`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `postData` is not a string or byte source, or an
+  /// `Error` when the route was already handled.
   #[qjs(rename = "continue")]
-  pub fn continue_<'js>(&self, ctx: Ctx<'js>, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<()> {
+  pub fn continue_<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    options: rquickjs::function::Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let bag = options.0.filter(|v| !v.is_undefined() && !v.is_null());
     let post_data = bag
       .as_ref()
@@ -992,7 +1221,7 @@ impl RouteJs {
       .and_then(|o| o.get::<_, Option<Value<'js>>>("postData").ok().flatten())
       .filter(|v| !v.is_undefined() && !v.is_null());
     let post_data = match post_data {
-      Some(v) => Some(fulfill_body_bytes(&ctx, v)?),
+      Some(v) => Some(fulfill_body_bytes(&ctx, &v)?),
       None => None,
     };
     let opts: JsContinueOptions = match bag {
@@ -1021,8 +1250,21 @@ impl RouteJs {
   /// by continuing the request with the overrides applied (with no
   /// overrides this is the unmodified request, matching the end state
   /// Playwright's `fallback` reaches once no further handler claims it).
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag, or an `Error` when the
+  /// route was already handled.
   #[qjs(rename = "fallback")]
-  pub fn fallback<'js>(&self, ctx: Ctx<'js>, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<()> {
+  pub fn fallback<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    options: rquickjs::function::Opt<Value<'js>>,
+  ) -> rquickjs::Result<()> {
     let opts: JsContinueOptions = match options.0 {
       Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
       _ => JsContinueOptions::default(),
@@ -1043,8 +1285,24 @@ impl RouteJs {
   }
 
   /// Mirrors Playwright `route.abort(errorCode?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the route was already handled.
   #[qjs(rename = "abort")]
-  pub fn abort(&self, ctx: Ctx<'_>, error_code: rquickjs::function::Opt<String>) -> rquickjs::Result<()> {
+  pub fn abort(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'_>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    error_code: rquickjs::function::Opt<String>,
+  ) -> rquickjs::Result<()> {
     let route = self
       .inner
       .lock()

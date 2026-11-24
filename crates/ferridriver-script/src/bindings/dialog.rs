@@ -1,4 +1,4 @@
-//! `DialogJs` — QuickJS binding for [`ferridriver::dialog::Dialog`].
+//! `DialogJs` — `QuickJS` binding for [`ferridriver::dialog::Dialog`].
 //!
 //! Mirrors Playwright's client-side `Dialog` class from
 //! `/tmp/playwright/packages/playwright-core/src/client/dialog.ts`:
@@ -31,12 +31,14 @@ impl DialogJs {
   /// Playwright: `dialog.type(): string` — `"alert"` / `"beforeunload"`
   /// / `"confirm"` / `"prompt"`.
   #[qjs(rename = "type")]
+  #[must_use]
   pub fn dialog_type(&self) -> String {
     self.inner.dialog_type().as_str().to_string()
   }
 
   /// Playwright: `dialog.message(): string`.
   #[qjs(rename = "message")]
+  #[must_use]
   pub fn message(&self) -> String {
     self.inner.message().to_string()
   }
@@ -44,6 +46,7 @@ impl DialogJs {
   /// Playwright: `dialog.defaultValue(): string`. Empty for non-prompt
   /// dialogs.
   #[qjs(rename = "defaultValue")]
+  #[must_use]
   pub fn default_value(&self) -> String {
     self.inner.default_value().to_string()
   }
@@ -51,9 +54,17 @@ impl DialogJs {
   /// Playwright: `dialog.page(): Page | null`. `null` when the dialog
   /// opened before its page was available (early page initialization)
   /// or the owning page has been closed.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the page's object cannot be created or restored in this context.
   #[qjs(rename = "page")]
   pub fn page<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::page::PageJs>>> {
     let page = self.inner.page();
@@ -69,12 +80,20 @@ impl DialogJs {
   /// ignore it. Double-accept / accept-after-dismiss rejects with the
   /// Playwright-exact message `"Cannot accept dialog which is already
   /// handled!"`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the dialog was already handled or cannot be accepted.
   #[qjs(rename = "accept")]
   pub async fn accept(&self, ctx: rquickjs::Ctx<'_>, prompt_text: Opt<String>) -> rquickjs::Result<()> {
     self.inner.accept(prompt_text.0).await.into_js_with(&ctx)
   }
 
   /// Playwright: `dialog.dismiss(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the dialog was already handled or cannot be dismissed.
   #[qjs(rename = "dismiss")]
   pub async fn dismiss(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.dismiss().await.into_js_with(&ctx)

@@ -41,19 +41,22 @@ impl BrowserContextJs {
   /// `context.tracing` — Playwright's `Tracing` controller. Exposed as a
   /// JS property.
   #[qjs(get, rename = "tracing")]
+  #[must_use]
   pub fn tracing(&self) -> crate::bindings::tracing::TracingJs {
-    crate::bindings::tracing::TracingJs::new(self.inner.clone())
+    crate::bindings::tracing::TracingJs::new(Arc::clone(&self.inner))
   }
 
   /// `context.clock` — Playwright's fake-time controller. Exposed as a
   /// JS property.
   #[qjs(get, rename = "clock")]
+  #[must_use]
   pub fn clock(&self) -> crate::bindings::clock::ClockJs {
-    crate::bindings::clock::ClockJs::new(self.inner.clone())
+    crate::bindings::clock::ClockJs::new(Arc::clone(&self.inner))
   }
 
   /// `context.credentials` — the virtual WebAuthn authenticator.
   #[qjs(get, rename = "credentials")]
+  #[must_use]
   pub fn credentials(&self) -> crate::bindings::credentials::CredentialsJs {
     crate::bindings::credentials::CredentialsJs::new(self.inner.credentials())
   }
@@ -62,6 +65,7 @@ impl BrowserContextJs {
   /// context's cookies both ways (Playwright: `browserContext.request`;
   /// `page.request` returns the same context-bound client).
   #[qjs(get, rename = "request")]
+  #[must_use]
   pub fn request(&self) -> crate::bindings::http_client::HttpClientJs {
     crate::bindings::http_client::HttpClientJs::new(Arc::new(self.inner.http_client()))
   }
@@ -70,6 +74,11 @@ impl BrowserContextJs {
   /// CDP session to the page's target. Chromium-only. Playwright also
   /// accepts an OOPIF `Frame`; ferridriver currently supports the
   /// `Page` form.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error (`TargetClosedError`, or a `FerriError` off
+  /// Chromium) when the page's target cannot be attached.
   #[qjs(rename = "newCDPSession")]
   pub async fn new_cdp_session<'js>(
     &self,
@@ -92,6 +101,11 @@ impl BrowserContextJs {
   ///
   /// Playwright: `cookies(urls?: string | string[])` — with URLs, only
   /// the cookies a request to one of them would carry.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `urls` is neither a string nor a string
+  /// array, or with the core error when the browser cannot read its cookies.
   #[qjs(rename = "cookies")]
   pub async fn cookies<'js>(
     &self,
@@ -113,6 +127,11 @@ impl BrowserContextJs {
   /// `cookies` is an array matching Playwright's `SetNetworkCookieParam[]`:
   /// only `name` + `value` are required, plus either `url` OR `domain`+`path`.
   /// `secure`, `httpOnly`, `sameSite`, `expires` all default when absent.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `cookies` is not an array of cookie
+  /// objects, or with the core error when the browser refuses one.
   #[qjs(rename = "addCookies")]
   pub async fn add_cookies<'js>(
     &self,
@@ -134,6 +153,11 @@ impl BrowserContextJs {
   /// cookies matching ALL specified filters are cleared. Each filter
   /// is `string | RegExp` — exact match for strings, `.test()` for
   /// regexes (Playwright's `server/browserContext.ts::clearCookies`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is not an object or a filter is
+  /// neither a string nor a `RegExp`, or with the core error from the browser.
   #[qjs(rename = "clearCookies")]
   pub async fn clear_cookies<'js>(
     &self,
@@ -155,6 +179,10 @@ impl BrowserContextJs {
   }
 
   /// Delete a cookie by name (optionally scoped to a domain).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot delete the cookie.
   #[qjs(rename = "deleteCookie")]
   pub async fn delete_cookie(
     &self,
@@ -182,6 +210,12 @@ impl BrowserContextJs {
   ///   credentials? }): Promise<StorageState>`
   /// (`packages/playwright-core/src/client/browserContext.ts`). `path`
   /// writes the JSON to disk.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a
+  /// `PermissionDeniedError` when `path` is outside the realm's `write` grant, or
+  /// the core error when collecting or writing the state fails.
   #[qjs(rename = "storageState")]
   pub async fn storage_state<'js>(
     &self,
@@ -231,6 +265,12 @@ impl BrowserContextJs {
   /// Promise<void>` (1.59). Clears existing cookies + localStorage then
   /// applies `storageState`. A string is a path to a state file; an object is
   /// the inline `{ cookies, origins }` shape.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `storageState` cannot be read as JSON, an
+  /// `Error` when the state file cannot be read or parsed, or the core error when
+  /// applying the state fails.
   #[qjs(rename = "setStorageState")]
   pub async fn set_storage_state<'js>(&self, ctx: Ctx<'js>, storage_state: Value<'js>) -> rquickjs::Result<()> {
     let input: serde_json::Value = serde_from_js(&ctx, storage_state)?;
@@ -260,6 +300,10 @@ impl BrowserContextJs {
 
   /// Playwright: `browserContext.grantPermissions(permissions, options?:
   /// { origin? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser refuses the grant.
   #[qjs(rename = "grantPermissions")]
   pub async fn grant_permissions<'js>(
     &self,
@@ -284,6 +328,10 @@ impl BrowserContextJs {
   }
 
   /// Revoke all previously granted permissions.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot clear the grants.
   #[qjs(rename = "clearPermissions")]
   pub async fn clear_permissions(
     &self,
@@ -300,6 +348,11 @@ impl BrowserContextJs {
   /// Playwright: `browserContext.setGeolocation(geolocation | null)` —
   /// `{ latitude, longitude, accuracy? }` sets the override, `null`
   /// clears it.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `geolocation` lacks a numeric `latitude` or
+  /// `longitude`, or with the core error from the browser.
   #[qjs(rename = "setGeolocation")]
   pub async fn set_geolocation<'js>(
     &self,
@@ -332,6 +385,11 @@ impl BrowserContextJs {
   }
 
   /// Toggle offline mode for this context.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot change the network
+  /// state.
   #[qjs(rename = "setOffline")]
   pub async fn set_offline(
     &self,
@@ -345,6 +403,11 @@ impl BrowserContextJs {
   }
 
   /// `browserContext.setNetworkConditions(preset | conditions | null)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `conditions` is neither a known preset nor a
+  /// conditions object, or with the core error from the browser.
   #[qjs(rename = "setNetworkConditions")]
   pub async fn set_network_conditions<'js>(
     &self,
@@ -366,6 +429,10 @@ impl BrowserContextJs {
   }
 
   /// `browserContext.setCPUThrottling(rate | null)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot throttle the CPU.
   #[qjs(rename = "setCPUThrottling")]
   pub async fn set_cpu_throttling(
     &self,
@@ -382,6 +449,11 @@ impl BrowserContextJs {
   /// HttpCredentials | HttpCredentials[] | null)`
   /// (`packages/playwright-core/src/client/browserContext.ts`). `null`,
   /// `undefined` and an empty list clear the stored credentials.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for malformed credentials, or with the core error
+  /// from the browser.
   #[qjs(rename = "setHTTPCredentials")]
   pub async fn set_http_credentials<'js>(
     &self,
@@ -405,6 +477,11 @@ impl BrowserContextJs {
   /// Set HTTP headers sent with every request in this context.
   ///
   /// `headers` is a plain object (e.g. `{ 'X-Foo': 'bar' }`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `headers` is not an object of string values,
+  /// or with the core error from the browser.
   #[qjs(rename = "setExtraHTTPHeaders")]
   pub async fn set_extra_http_headers<'js>(
     &self,
@@ -429,13 +506,27 @@ impl BrowserContextJs {
   /// core matcher and are evaluated in the JS runtime via the session's
   /// `AsyncContext`; the JS callback / predicate live in the shared
   /// `PageCallbacks` userdata registry keyed by route id.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the session has no VM handle, or a `TypeError` when
+  /// `url` is not a string, `RegExp` or predicate. The returned promise rejects
+  /// with the core error when the route cannot be installed.
   #[qjs(rename = "route")]
   pub fn route<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
     let times = crate::bindings::page::parse_route_times(&options)?;
@@ -457,7 +548,7 @@ impl BrowserContextJs {
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       (m.clone(), Some(saved_pred), Some(m))
     } else {
-      (url_value_to_matcher(&ctx, url)?, None, None)
+      (url_value_to_matcher(&ctx, &url)?, None, None)
     };
 
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
@@ -506,7 +597,7 @@ impl BrowserContextJs {
       );
     })?;
 
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
       inner.route(matcher, rust_handler, times).await.into_js_with(&ctx)?;
       Ok(())
@@ -518,10 +609,20 @@ impl BrowserContextJs {
   /// page in this context; the handler receives a live `WebSocketRoute`.
   /// One-shot create dispatch is shared with `page.routeWebSocket` via
   /// `build_ws_route_handler`; `onMessage`/`onClose` use the WS pump.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the session has no VM handle, or a `TypeError` when
+  /// `url` is neither a string nor a `RegExp`. The returned promise rejects with
+  /// the core error when the route cannot be installed.
   #[qjs(rename = "routeWebSocket")]
   pub fn route_web_socket<'js>(
     &self,
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
@@ -532,20 +633,26 @@ impl BrowserContextJs {
         "context.routeWebSocket requires the script engine's VM handle",
       ));
     };
-    let matcher = url_value_to_matcher(&ctx, url)?;
+    let matcher = url_value_to_matcher(&ctx, &url)?;
     let handler_id = with_page_callbacks(&ctx, PageCallbacks::next_route_id)?;
     let owner = RouteOwner::Context(self.inner.name().to_string());
     // Sync prologue: snapshot the registrar's grant (see `SavedCallback::save`).
     let saved = crate::bindings::page::SavedCallback::save(&ctx, handler);
     with_page_callbacks(&ctx, |r| r.insert_ws_callback(handler_id, owner.clone(), saved))?;
     let rust_handler = crate::bindings::web_socket_route::build_ws_route_handler(vm, handler_id, owner);
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(async move {
       inner.route_web_socket(matcher, rust_handler).await.into_js_with(&ctx)
     }))
   }
 
   /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replay-only.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for an invalid `url` or `notFound` option, a
+  /// `PermissionDeniedError` when the archive is outside the realm's grants, or the
+  /// core error when the archive cannot be loaded.
   #[qjs(rename = "routeFromHAR")]
   pub async fn route_from_har<'js>(
     &self,
@@ -566,6 +673,11 @@ impl BrowserContextJs {
   /// Playwright: `browserContext.unroute(url, handler?)` —
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:411`.
   /// A predicate is matched by `===` against the function passed to `route`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `url` is not a string, `RegExp` or
+  /// predicate, or with the core error when the route cannot be removed.
   #[qjs(rename = "unroute")]
   pub async fn unroute<'js>(
     &self,
@@ -610,7 +722,7 @@ impl BrowserContextJs {
           }
           return Ok(());
         }
-        let matcher = url_value_to_matcher(&ctx, url)?;
+        let matcher = url_value_to_matcher(&ctx, &url)?;
         self.inner.unroute(&matcher, handler_id).await.into_js_with(&ctx)
       })
       .await
@@ -621,6 +733,11 @@ impl BrowserContextJs {
   /// Removes every route registered via `context.route` (page-scoped
   /// routes stay active), clearing the script-side predicate/handler
   /// tables for this context too.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for an unknown `behavior`, or with the core error
+  /// when a route cannot be removed.
   #[qjs(rename = "unrouteAll")]
   pub async fn unroute_all<'js>(
     &self,
@@ -652,6 +769,13 @@ impl BrowserContextJs {
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:356`.
   /// Accepts `Function | string | { path?, content? }` + optional `arg`
   /// exactly like the NAPI binding.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `script` is not a function, string or
+  /// `{ path?, content? }` or `arg` cannot be serialised, a `PermissionDeniedError`
+  /// when `path` is outside the realm's `read` grant, or the core error when the
+  /// script cannot be installed.
   #[qjs(rename = "addInitScript")]
   pub async fn add_init_script<'js>(
     &self,
@@ -706,6 +830,7 @@ impl BrowserContextJs {
 
   /// Name of the session this context belongs to.
   #[qjs(rename = "name")]
+  #[must_use]
   pub fn name(&self) -> String {
     self.inner.name().to_string()
   }
@@ -714,6 +839,10 @@ impl BrowserContextJs {
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:290`.
   /// Returns the parent browser, or `null` if the context was not created
   /// from a `Browser`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the `Browser` object.
   #[qjs(rename = "browser")]
   pub fn browser<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     use rquickjs::class::Class;
@@ -730,11 +859,16 @@ impl BrowserContextJs {
   /// Playwright: `browserContext.isClosed(): boolean` —
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:298`.
   #[qjs(rename = "isClosed")]
+  #[must_use]
   pub fn is_closed(&self) -> bool {
     self.inner.is_closed()
   }
 
   /// Close the context (tears down the underlying browser state).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the context cannot be closed.
   #[qjs(rename = "close")]
   pub async fn close(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     call_site
@@ -761,6 +895,10 @@ impl BrowserContextJs {
   /// [`crate::bindings::page::PageJs`] inherits the context's
   /// `recordVideo` configuration (if any) and every other per-context
   /// setting wired through [`ContextRef`].
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot open the page.
   #[qjs(rename = "newPage")]
   pub async fn new_page<'js>(
     &self,
@@ -779,8 +917,19 @@ impl BrowserContextJs {
   /// Playwright: `browserContext.pages(): Page[]` —
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts`.
   /// The pages open in this context, in the order they were opened.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the array or a `Page` object.
   #[qjs(rename = "pages")]
-  pub fn pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Array<'js>> {
+  pub fn pages<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Array<'js>> {
     page_array(&ctx, self.inner.pages())
   }
 
@@ -788,6 +937,10 @@ impl BrowserContextJs {
   /// classic `WebDriver` session is not told of a window opened behind
   /// its back, or of one that closed; every other backend is, and this
   /// only waits for it. Not in Playwright, which drives no such browser.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser cannot list its windows.
   #[qjs(rename = "discoverPages")]
   pub async fn discover_pages<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Array<'js>> {
     let pages = self.inner.discover_pages().await.into_js_with(&ctx)?;
@@ -801,6 +954,12 @@ impl BrowserContextJs {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`.
   /// Transitional API: §4.1's `BrowserContextOptions` bag will fold
   /// this into the full options struct.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` lacks a string `dir`, a
+  /// `PermissionDeniedError` when `dir` is outside the realm's `write` grant, or the
+  /// core error from the browser.
   #[qjs(rename = "setRecordVideo")]
   pub async fn set_record_video<'js>(&self, ctx: Ctx<'js>, options: Value<'js>) -> rquickjs::Result<()> {
     #[derive(serde::Deserialize)]
@@ -819,10 +978,8 @@ impl BrowserContextJs {
     let opts = ferridriver::options::RecordVideoOptions {
       dir: std::path::PathBuf::from(parsed.dir),
       size: parsed.size.map(|s| ferridriver::options::VideoSize {
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        width: s.width.max(0.0) as u32,
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        height: s.height.max(0.0) as u32,
+        width: crate::bindings::convert::f64_to_u32(s.width),
+        height: crate::bindings::convert::f64_to_u32(s.height),
       }),
     };
     self.inner.set_record_video(opts).await.into_js_with(&ctx)
@@ -840,6 +997,11 @@ impl BrowserContextJs {
   /// call args are spread (Playwright parity). The callback's return
   /// value (awaiting any returned promise) is delivered to the
   /// page-side caller. Returns a `{ dispose() }` Disposable.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the session has no VM handle. The returned promise
+  /// rejects with the core error when the binding cannot be installed.
   #[qjs(rename = "exposeBinding")]
   pub fn expose_binding<'js>(
     &self,
@@ -853,9 +1015,9 @@ impl BrowserContextJs {
     // Both the callback save (inside `make_binding`) and the disposable
     // build happen synchronously here, on the registrar's stack, so the
     // callback captures the tool's grant (see `SavedCallback::save`).
-    let binding = self.make_binding(&ctx, &name, callback, true)?;
+    let binding = Self::make_binding(&ctx, &name, callback, true)?;
     let disposable = self.make_disposable(&ctx, name.clone())?;
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
       inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
       Ok(disposable)
@@ -867,6 +1029,11 @@ impl BrowserContextJs {
   ///
   /// `exposeFunction` is `exposeBinding` minus the `source` argument:
   /// the callback receives only the spread page-side call args.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the session has no VM handle. The returned promise
+  /// rejects with the core error when the function cannot be installed.
   #[qjs(rename = "exposeFunction")]
   pub fn expose_function<'js>(
     &self,
@@ -877,9 +1044,9 @@ impl BrowserContextJs {
   ) -> rquickjs::Result<
     rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js>,
   > {
-    let binding = self.make_binding(&ctx, &name, callback, false)?;
+    let binding = Self::make_binding(&ctx, &name, callback, false)?;
     let disposable = self.make_disposable(&ctx, name.clone())?;
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(rquickjs::promise::Promised::from(call_site.scope(async move {
       inner.expose_binding(&name, binding).await.into_js_with(&ctx)?;
       Ok(disposable)
@@ -893,10 +1060,22 @@ impl BrowserContextJs {
   /// `'framenavigated'`, `'pageclose'`, `'pageload'`. Returns the
   /// context so registrations chain, as Playwright's do; the listener
   /// receives the same live class instance `waitForEvent` resolves to.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "on")]
   pub fn on<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -908,6 +1087,10 @@ impl BrowserContextJs {
   }
 
   /// Node's `addListener`, an alias of [`Self::on`].
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "addListener")]
   pub fn add_listener<'js>(
     this: This<Class<'js, Self>>,
@@ -919,10 +1102,22 @@ impl BrowserContextJs {
   }
 
   /// `context.once(event, listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "once")]
   pub fn once<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -931,10 +1126,22 @@ impl BrowserContextJs {
   }
 
   /// Node's `prependListener`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "prependListener")]
   pub fn prepend_listener<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -943,10 +1150,22 @@ impl BrowserContextJs {
   }
 
   /// Node's `prependOnceListener`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "prependOnceListener")]
   pub fn prepend_once_listener<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -956,18 +1175,38 @@ impl BrowserContextJs {
 
   /// `context.off(event, listener)` — removal by function identity.
   /// `off(event)` alone drops every listener for that event.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "off")]
   pub fn off<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     listener: Opt<Value<'js>>,
   ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().off_impl(&ctx, &event, listener)?;
+    this.0.borrow().off_impl(&ctx, &event, listener.0.as_ref())?;
     Ok(this.0)
   }
 
   /// Node's `removeListener`, an alias of [`Self::off`].
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "removeListener")]
   pub fn remove_listener<'js>(
     this: This<Class<'js, Self>>,
@@ -980,10 +1219,22 @@ impl BrowserContextJs {
 
   /// `context.removeAllListeners(type?, options?)` — see the page form
   /// for what `behavior` can and cannot observe.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "removeAllListeners")]
   pub fn remove_all_listeners<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: Opt<String>,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<Value<'js>> {
@@ -1027,8 +1278,24 @@ impl BrowserContextJs {
   }
 
   /// Node's `listeners(type)`, in the order they will fire.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "listeners")]
-  pub fn listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
+  pub fn listeners<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+  ) -> rquickjs::Result<Vec<Value<'js>>> {
     let name = self.inner.name().to_string();
     let saved = with_context_callbacks(&ctx, |r| {
       r.listeners
@@ -1047,6 +1314,10 @@ impl BrowserContextJs {
   }
 
   /// Node's `rawListeners(type)`; see the page form.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the context's listener registry is unavailable.
   #[qjs(rename = "rawListeners")]
   pub fn raw_listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
     self.listeners(ctx, event)
@@ -1054,33 +1325,42 @@ impl BrowserContextJs {
 
   /// Node's `listenerCount(type)`.
   #[qjs(rename = "listenerCount")]
-  pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+  #[must_use]
+  pub fn listener_count(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+  ) -> f64 {
+    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()`.
   #[qjs(rename = "eventNames")]
+  #[must_use]
   pub fn event_names(&self) -> Vec<String> {
     self.inner.event_names()
   }
 
   /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
   #[qjs(rename = "setMaxListeners")]
+  #[must_use]
   pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let max = max.max(0.0) as usize;
-    this.0.borrow().inner.set_max_listeners(max);
+    this
+      .0
+      .borrow()
+      .inner
+      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
     this.0
   }
 
   /// Node's `getMaxListeners()`.
   #[qjs(rename = "getMaxListeners")]
+  #[must_use]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
 
   // ── Context-level events ───────────────────────────────────────────────
@@ -1088,6 +1368,7 @@ impl BrowserContextJs {
   /// Playwright: `browserContext.waitForEvent(event, optionsOrPredicate?)`,
   /// resolving with the live class instance the event carries.
   #[qjs(rename = "waitForEvent")]
+  #[must_use]
   pub fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
@@ -1209,7 +1490,7 @@ pub(crate) fn clear_cookie_options<'js>(
     if value.is_undefined() || value.is_null() {
       return Ok(None);
     }
-    crate::bindings::page::options::string_or_regex_from_js(value).map(Some)
+    crate::bindings::page::options::string_or_regex_from_js(&value).map(Some)
   };
   Ok(Some(ferridriver::backend::ClearCookieOptions {
     name: field("name")?,
@@ -1226,7 +1507,6 @@ impl BrowserContextJs {
   /// to the spread args (`exposeBinding`); otherwise only the args are
   /// spread (`exposeFunction`).
   fn make_binding<'js>(
-    &self,
     ctx: &Ctx<'js>,
     name: &str,
     callback: rquickjs::Function<'js>,
@@ -1280,11 +1560,11 @@ impl BrowserContextJs {
   /// `exposeBinding` / `exposeFunction`. `dispose()` removes the
   /// binding from the registry and from every page in the context
   /// (`window[name]` is deleted on each page), and releases the
-  /// persisted QuickJS callback so it doesn't sit in the session VM's
+  /// persisted `QuickJS` callback so it doesn't sit in the session VM's
   /// name-keyed registry forever.
   fn make_disposable<'js>(&self, ctx: &Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
     let obj = rquickjs::Object::new(ctx.clone())?;
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     let dispose = rquickjs::Function::new(
       ctx.clone(),
       rquickjs::prelude::Async(move |ctx: Ctx<'_>| {
@@ -1293,7 +1573,7 @@ impl BrowserContextJs {
         // callback synchronously, then have core remove `window[name]`
         // from every page (the future must not borrow `ctx`).
         crate::bindings::page::remove_exposed_callback(&ctx, &name);
-        let inner = inner.clone();
+        let inner = Arc::clone(&inner);
         let name = name.clone();
         async move {
           let _ = inner.remove_exposed_binding(&name).await;
@@ -1322,14 +1602,8 @@ struct ContextCallbacks {
   listeners: FxHashMap<u64, ContextListenerEntry>,
 }
 
+#[derive(JsLifetime)]
 struct ContextCallbacksUd(std::cell::RefCell<ContextCallbacks>);
-
-// SAFETY: holds only `'static` data (`Persistent` handles and owned
-// values), same rationale as the page-callbacks userdata.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ContextCallbacksUd {
-  type Changed<'to> = ContextCallbacksUd;
-}
 
 fn with_context_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ContextCallbacks) -> R) -> rquickjs::Result<R> {
   if ctx.userdata::<ContextCallbacksUd>().is_none() {
@@ -1355,12 +1629,8 @@ enum ContextEventMsg {
   Drain(tokio::sync::oneshot::Sender<()>),
 }
 
+#[derive(JsLifetime)]
 struct ContextEventPumpUd(tokio::sync::mpsc::Sender<ContextEventMsg>);
-
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ContextEventPumpUd {
-  type Changed<'to> = ContextEventPumpUd;
-}
 
 /// Capacity of the context-event pump channel — the page pump's
 /// rationale and bound, applied to the lower-rate context stream.
@@ -1466,7 +1736,7 @@ impl BrowserContextJs {
     let saved = crate::bindings::page::SavedCallback::save(ctx, listener);
     let tx = ensure_context_event_pump(ctx);
     let id_slot = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let id_slot_cb = id_slot.clone();
+    let id_slot_cb = Arc::clone(&id_slot);
     let callback: ferridriver::events::ContextEventCallback = Arc::new(move |ev: ferridriver::events::ContextEvent| {
       let id = id_slot_cb.load(std::sync::atomic::Ordering::Relaxed);
       let msg = ContextEventMsg::Event {
@@ -1502,9 +1772,9 @@ impl BrowserContextJs {
     Ok(())
   }
 
-  fn off_impl<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: Opt<Value<'js>>) -> rquickjs::Result<()> {
+  fn off_impl<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: Option<&Value<'js>>) -> rquickjs::Result<()> {
     let name = self.inner.name().to_string();
-    let Some(listener_fn) = listener.0.as_ref().and_then(|v| v.as_function().cloned()) else {
+    let Some(listener_fn) = listener.and_then(|v| v.as_function().cloned()) else {
       let ids = with_context_callbacks(ctx, |r| {
         let ids: Vec<u64> = r
           .listeners
