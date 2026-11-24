@@ -183,7 +183,7 @@ impl BidiBrowser {
   ) -> Result<Self> {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
-    let (session, child, profile) = Box::pin(BidiSession::launch(
+    let (session, mut group, profile) = Box::pin(BidiSession::launch(
       browser_path,
       flags,
       headless,
@@ -197,8 +197,6 @@ impl BidiBrowser {
     let downloads_dir = new_downloads_dir()?;
     let create_ledger = Arc::new(crate::backend::CreateLedger::default());
     let (popup_taps, popups) = Self::spawn_popup_listener(&session, &downloads_dir, &create_ledger);
-    let owns_profile = profile.owned.is_some();
-    let mut group = crate::backend::process::ChildGroup::recorded(child, Some(&profile.path), owns_profile);
     group.own_dir(downloads_dir.path());
     Ok(Self {
       session,

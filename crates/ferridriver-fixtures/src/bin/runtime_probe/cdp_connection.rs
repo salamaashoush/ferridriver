@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ferridriver::backend::cdp::{CdpBrowser, ws::WsTransport};
-use ferridriver::backend::process::ChildGroup;
 use serde_json::{Value, json};
 
 async fn pages(browser: &CdpBrowser<WsTransport>) -> Result<Vec<Value>> {
@@ -19,7 +18,7 @@ async fn pages(browser: &CdpBrowser<WsTransport>) -> Result<Vec<Value>> {
 pub(crate) async fn run(root: &Path, urls: Vec<String>) -> Result<Value> {
   let profile = root.join("cdp-connection-profile");
   tokio::fs::create_dir(&profile).await?;
-  let (transport, child) = WsTransport::spawn(
+  let (transport, mut child) = WsTransport::spawn(
     &ferridriver::state::detect_chromium(),
     &profile,
     &ferridriver::state::chrome_flags(true, &[]),
@@ -27,7 +26,6 @@ pub(crate) async fn run(root: &Path, urls: Vec<String>) -> Result<Value> {
     &rustc_hash::FxHashMap::default(),
   )
   .await?;
-  let mut child = ChildGroup::recorded(child, Some(&profile), false);
   drop(transport);
   let result = async {
     let port_file = tokio::fs::read_to_string(profile.join("DevToolsActivePort")).await?;

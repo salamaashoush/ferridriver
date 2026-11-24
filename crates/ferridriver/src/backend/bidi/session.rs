@@ -243,10 +243,11 @@ impl BidiSession {
   /// created if missing and never removed, so cookies and logins survive
   /// a restart. Without it a throwaway profile is created and owned.
   ///
-  /// Returns `(session, child, profile)`. The caller must keep
+  /// Returns `(session, group, profile)`. The caller must keep
   /// `profile` alive for the lifetime of the browser — the owned variant's
-  /// `Drop` removes the directory from disk. Firefox is launched with
-  /// `kill_on_drop(true)` so the process dies before the dir vanishes.
+  /// `Drop` removes the directory from disk. Firefox is owned by its
+  /// process group from the moment it is spawned, so its whole tree dies
+  /// before the dir vanishes, a failed startup included.
   pub(crate) async fn launch_firefox(
     firefox_path: &str,
     flags: &[String],
@@ -255,7 +256,7 @@ impl BidiSession {
     user_data_dir: Option<&std::path::Path>,
     proxy: Option<&crate::options::ProxyConfig>,
     firefox_user_prefs: Option<&rustc_hash::FxHashMap<String, serde_json::Value>>,
-  ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
+  ) -> Result<(Self, crate::backend::process::ChildGroup, LaunchedProfile)> {
     super::profile::validate_preferences(firefox_user_prefs)?;
     // Prefix the throwaway profile dir so test-harness cleanup can
     // `pkill -f` any leaked Firefox processes by their `--profile` arg —
@@ -378,22 +379,20 @@ impl BidiSession {
     debug!("Launching Firefox for BiDi: {firefox_path}");
     let mut child =
       crate::backend::process::spawn_exclusive(|| command.spawn()).map_err(|e| format!("Firefox launch: {e}"))?;
-    // Track before the BiDi handshake below. Firefox does not exit when
+    let stderr = child.stderr.take();
+    // Owned before the BiDi handshake below. Firefox does not exit when
     // its parent dies, and the handshake takes long enough that a kill
     // landing inside it used to strand a whole browser.
-    crate::backend::process::track_spawned(
-      child.id().unwrap_or(0),
-      Some(&profile_dir.path),
-      profile_dir.owned.is_some(),
-    );
+    let mut group =
+      crate::backend::process::ChildGroup::recorded(child, Some(&profile_dir.path), profile_dir.owned.is_some());
 
     // Firefox prints "WebDriver BiDi listening on ws://127.0.0.1:PORT" to stderr
-    let ws_url = discover_bidi_ws_url(&mut child).await?;
+    let ws_url = discover_bidi_ws_url(stderr, &mut group).await?;
     debug!("Firefox BiDi endpoint: {ws_url}");
 
     let session = Box::pin(Self::connect_with_proxy(&ws_url, proxy)).await?;
 
-    Ok((session, child, profile_dir))
+    Ok((session, group, profile_dir))
   }
 
   /// Launch a browser and create a `BiDi` session.
@@ -407,7 +406,7 @@ impl BidiSession {
     user_data_dir: Option<&std::path::Path>,
     proxy: Option<&crate::options::ProxyConfig>,
     firefox_user_prefs: Option<&rustc_hash::FxHashMap<String, serde_json::Value>>,
-  ) -> Result<(Self, tokio::process::Child, LaunchedProfile)> {
+  ) -> Result<(Self, crate::backend::process::ChildGroup, LaunchedProfile)> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
       Box::pin(Self::launch_firefox(
@@ -432,13 +431,13 @@ impl BidiSession {
 
 /// Read Firefox stderr to find the `BiDi` WebSocket URL.
 /// Firefox prints: "`WebDriver` `BiDi` listening on ws://127.0.0.1:PORT"
-async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<String> {
+async fn discover_bidi_ws_url(
+  stderr: Option<tokio::process::ChildStderr>,
+  group: &mut crate::backend::process::ChildGroup,
+) -> Result<String> {
   use tokio::io::AsyncBufReadExt;
 
-  let stderr = child
-    .stderr
-    .take()
-    .ok_or_else(|| FerriError::backend("Firefox: no stderr handle"))?;
+  let stderr = stderr.ok_or_else(|| FerriError::backend("Firefox: no stderr handle"))?;
   let mut reader = tokio::io::BufReader::new(stderr);
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
 
@@ -472,8 +471,8 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
     match read_result {
       Ok(Ok(0)) => {
         // EOF
-        if let Ok(Some(status)) = child.try_wait() {
-          return Err(exited(status, &output));
+        if !group.is_running() {
+          return Err(exited(group.wait().await?, &output));
         }
         // stderr closed but the process is still alive — read_line
         // returns 0 immediately from here on, so pace the exit checks
@@ -509,8 +508,8 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
       Ok(Err(e)) => return Err(FerriError::Backend(format!("Firefox stderr read error: {e}"))),
       Err(_) => {
         // Timeout on this read, check if process died
-        if let Ok(Some(status)) = child.try_wait() {
-          return Err(exited(status, &output));
+        if !group.is_running() {
+          return Err(exited(group.wait().await?, &output));
         }
       },
     }

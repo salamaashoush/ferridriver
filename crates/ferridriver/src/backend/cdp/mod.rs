@@ -1585,14 +1585,14 @@ impl CdpBrowser<ws::WsTransport> {
     env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<Self> {
     // Held as a `TempDir` so the dir is removed from disk when the browser
-    // handle drops. The Child spawned by `WsTransport::spawn` has
-    // `kill_on_drop(true)` set, so Chrome dies before the directory vanishes.
+    // handle drops. `WsTransport::spawn` hands Chrome over as a process
+    // group that is killed first, so Chrome dies before the directory vanishes.
     let user_data_dir = tempfile::Builder::new()
       .prefix("ferridriver-raw-")
       .tempdir()
       .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(
+    let (transport, group) = Box::pin(ws::WsTransport::spawn(
       chromium_path,
       user_data_dir.path(),
       flags,
@@ -1600,7 +1600,6 @@ impl CdpBrowser<ws::WsTransport> {
       env,
     ))
     .await?;
-    let group = super::process::ChildGroup::recorded(child, Some(user_data_dir.path()), true);
     Self::init(Arc::new(transport), Some(group), Some(user_data_dir)).await
   }
 
@@ -1619,8 +1618,7 @@ impl CdpBrowser<ws::WsTransport> {
     env: &rustc_hash::FxHashMap<String, String>,
   ) -> Result<Self> {
     crate::backend::ensure_user_data_dir(Some(&user_data_dir.to_string_lossy()))?;
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags, false, env)).await?;
-    let group = super::process::ChildGroup::recorded(child, Some(user_data_dir), false);
+    let (transport, group) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags, false, env)).await?;
     Self::init(Arc::new(transport), Some(group), None).await
   }
 
