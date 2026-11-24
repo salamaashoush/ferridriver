@@ -320,7 +320,7 @@ impl BidiSession {
     #[cfg(unix)]
     profile_guard.allow_firefox_start()?;
     #[cfg(windows)]
-    profile_guard.allow_firefox_start();
+    let _profile_guard = profile_guard.allow_firefox_start();
 
     let mut command = tokio::process::Command::new(firefox_path);
     command.envs(env);
