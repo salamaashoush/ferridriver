@@ -71,9 +71,38 @@ async fn reclaim_leaked_browsers() {
   }
 }
 
+/// How a serve call ended, and what it ended with.
+#[derive(Debug)]
+#[must_use = "a signalled server asks its caller to end the process"]
+pub enum Served {
+  /// The transport ended or the caller's stop future resolved.
+  Finished(anyhow::Result<()>),
+  /// A termination signal arrived and the browsers were closed. Installing
+  /// a handler took over the signal's default "terminate now", and
+  /// unwinding back through `main` does not get there: dropping the
+  /// runtime waits on the blocking stdin read of the stdio transport,
+  /// which only returns when the client closes the pipe. The caller
+  /// should end the process instead of returning through the runtime.
+  Signalled(anyhow::Result<()>),
+}
+
+impl Served {
+  /// What the server ended with, whichever way it ended.
+  ///
+  /// # Errors
+  ///
+  /// The transport's failure, or the browser shutdown's when the
+  /// transport ended cleanly.
+  pub fn into_result(self) -> anyhow::Result<()> {
+    match self {
+      Self::Finished(result) | Self::Signalled(result) => result,
+    }
+  }
+}
+
 /// Run `servers` until the transport ends or the process is signalled,
 /// then close every browser each of them launched.
-async fn serve_until_shutdown<S, T>(servers: &[McpServer], serve: S, stop: T) -> anyhow::Result<()>
+async fn serve_until_shutdown<S, T>(servers: &[McpServer], serve: S, stop: T) -> Served
 where
   S: std::future::Future<Output = anyhow::Result<()>>,
   T: std::future::Future<Output = ()>,
@@ -103,14 +132,10 @@ where
     (Err(error), Err(cleanup)) => Err(error.context(format!("{cleanup:#}"))),
   };
   if signalled {
-    // Installing a handler took over the signal's default "terminate
-    // now", and unwinding back through main does not get us there:
-    // dropping the runtime waits on the blocking stdin read of the
-    // stdio transport, which only returns when the client closes the
-    // pipe. Exit after reporting cleanup rather than waiting for stdin.
-    std::process::exit(i32::from(outcome.is_err()));
+    Served::Signalled(outcome)
+  } else {
+    Served::Finished(outcome)
   }
-  outcome
 }
 
 /// Shut every server down, all of them even when one fails, reporting the
@@ -133,9 +158,10 @@ async fn futures_shutdown(servers: &[McpServer]) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// Returns an error if the MCP transport fails to initialize or the server
-/// encounters a fatal communication error.
-pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind, headless: bool) -> anyhow::Result<()> {
+/// Returns an error if the MCP transport fails to initialize. A fatal
+/// communication error once serving ends the serve and comes back inside
+/// the [`Served`].
+pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind, headless: bool) -> anyhow::Result<Served> {
   Box::pin(serve_stdio_with(McpServer::new_headless(mode, backend, headless))).await
 }
 
@@ -143,14 +169,15 @@ pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind, headless: bool
 ///
 /// # Errors
 ///
-/// Returns an error if the TCP listener cannot bind to the requested port,
-/// or if the HTTP server encounters a fatal error.
+/// Returns an error if the TCP listener cannot bind to the requested port.
+/// A fatal error of the HTTP server once serving comes back inside the
+/// [`Served`].
 pub async fn serve_http(
   mode: ConnectMode,
   backend: BackendKind,
   options: HttpOptions,
   headless: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Served> {
   // One server shared by every HTTP session, like `serve_http_with`.
   // Minting a fresh `McpServer` per session gave each one its own
   // browser state that nothing ever shut down, so a client that
@@ -166,13 +193,14 @@ pub async fn serve_http(
 ///
 /// # Errors
 ///
-/// Returns an error if the MCP transport fails to initialize or the server
-/// encounters a fatal communication error.
-pub async fn serve_stdio_with(server: McpServer) -> anyhow::Result<()> {
+/// Returns an error if the MCP transport fails to initialize. A fatal
+/// communication error once serving ends the serve and comes back inside
+/// the [`Served`].
+pub async fn serve_stdio_with(server: McpServer) -> anyhow::Result<Served> {
   reclaim_leaked_browsers().await;
   let handle = server.clone();
   let svc = Box::pin(server.serve(rmcp::transport::io::stdio())).await?;
-  serve_until_shutdown(
+  let outcome = serve_until_shutdown(
     std::slice::from_ref(&handle),
     async move {
       svc.waiting().await?;
@@ -180,7 +208,8 @@ pub async fn serve_stdio_with(server: McpServer) -> anyhow::Result<()> {
     },
     std::future::pending(),
   )
-  .await
+  .await;
+  Ok(outcome)
 }
 
 /// Where the HTTP transport listens, and what stops it.
@@ -221,9 +250,9 @@ pub struct HttpClient {
 ///
 /// Returns an error if the TCP listener cannot bind to the requested port,
 /// if `options.host` is not a loopback address (an unauthenticated server
-/// must not be reachable from the network), or if the HTTP server
-/// encounters a fatal error.
-pub async fn serve_http_with(server: McpServer, options: HttpOptions) -> anyhow::Result<()> {
+/// must not be reachable from the network). A fatal error of the HTTP
+/// server once serving comes back inside the [`Served`].
+pub async fn serve_http_with(server: McpServer, options: HttpOptions) -> anyhow::Result<Served> {
   Box::pin(serve_http_clients(vec![HttpClient { token: None, server }], options)).await
 }
 
@@ -235,8 +264,9 @@ pub async fn serve_http_with(server: McpServer, options: HttpOptions) -> anyhow:
 ///
 /// Returns an error when `clients` is empty, two clients share a token, a
 /// client without a token is mixed with others or served on a non-loopback
-/// address, the listener cannot bind, or the HTTP server fails.
-pub async fn serve_http_clients(clients: Vec<HttpClient>, options: HttpOptions) -> anyhow::Result<()> {
+/// address, or the listener cannot bind. A failure of the HTTP server once
+/// serving comes back inside the [`Served`].
+pub async fn serve_http_clients(clients: Vec<HttpClient>, options: HttpOptions) -> anyhow::Result<Served> {
   use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
   };
@@ -301,7 +331,7 @@ pub async fn serve_http_clients(clients: Vec<HttpClient>, options: HttpOptions) 
     }
   };
 
-  serve_until_shutdown(
+  let outcome = serve_until_shutdown(
     &owners,
     async move {
       let app = axum::Router::new()
@@ -314,7 +344,8 @@ pub async fn serve_http_clients(clients: Vec<HttpClient>, options: HttpOptions) 
     },
     options.shutdown.cancelled_owned(),
   )
-  .await
+  .await;
+  Ok(outcome)
 }
 
 /// Which client answers a request, by the SHA-256 of the token it presents.

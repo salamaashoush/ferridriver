@@ -487,7 +487,7 @@ pub struct McpServer {
   /// [`McpServer::with_test_config`] from the operator's `ferridriver.toml`.
   /// Used as the base config for the `run_bdd` tool so an MCP-driven BDD
   /// run inherits the same `[test]` settings as the `ferridriver bdd` CLI.
-  pub(crate) test_config: ferridriver_test::config::TestConfig,
+  pub(crate) test_config: Box<ferridriver_test::config::TestConfig>,
   /// Top-level `extensions` specs (files/dirs/packages) recorded at
   /// startup by [`McpServer::load_extensions`]. The `run_bdd` tool bundles
   /// these alongside step globs so one extension serves MCP tools AND BDD
@@ -555,8 +555,8 @@ pub fn browser_state_for(
       kind,
       headless,
       args: Vec::new(),
-      executable_path: base.executable_path.clone(),
-      user_data_dir: base.user_data_dir.clone(),
+      executable_path: base.executable_path,
+      user_data_dir: base.user_data_dir,
       default_viewport: config.default_viewport(),
       ..Default::default()
     },
@@ -636,7 +636,7 @@ impl McpServer {
     let artifacts_root = config.artifacts_root();
     let artifacts_dir = match std::fs::create_dir_all(&artifacts_root)
       .map_err(|e| format!("{e}"))
-      .and_then(|()| ferridriver_script::OutputDir::new(&artifacts_root).map_err(|e| e.message.clone()))
+      .and_then(|()| ferridriver_script::OutputDir::new(&artifacts_root).map_err(|e| e.message))
     {
       Ok(sb) => Some(Arc::new(sb)),
       Err(msg) => {
@@ -669,7 +669,7 @@ impl McpServer {
       script_caps: ferridriver_script::ScriptCaps::default(),
       extension_registry: Arc::new(arc_swap::ArcSwap::from_pointee(LoadedExtensions::default())),
       reload_lock: Arc::new(tokio::sync::Mutex::new(())),
-      test_config: ferridriver_test::config::TestConfig::default(),
+      test_config: Box::default(),
       extension_specs: Vec::new(),
       bdd_engine: Arc::new(Mutex::new(crate::bdd_engine::BddEngine::new())),
       builtin_steps: Arc::new(std::sync::OnceLock::new()),
@@ -1115,7 +1115,7 @@ impl McpServer {
       .files()
       .iter()
       .map(|f| ferridriver_script::ExtensionBinding {
-        bytecode: f.bytecode.clone(),
+        bytecode: Arc::clone(&f.bytecode),
         name: f.path.display().to_string(),
         source_map: f.source_map.clone(),
         provides: ferridriver_script::provided_modules::provider_module_name(&f.path),
@@ -1287,7 +1287,7 @@ impl McpServer {
   /// resolved `FerridriverConfig::test` so MCP-driven BDD runs honour the
   /// same feature/step globs, browser, workers, and retries as the CLI.
   #[must_use]
-  pub fn with_test_config(mut self, test_config: ferridriver_test::config::TestConfig) -> Self {
+  pub fn with_test_config(mut self, test_config: Box<ferridriver_test::config::TestConfig>) -> Self {
     self.test_config = test_config;
     self
   }

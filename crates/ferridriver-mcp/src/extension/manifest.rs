@@ -8,8 +8,6 @@
 //! closure that only makes sense inside a live `QuickJS` context, so
 //! manifest extraction serialises everything except it.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 /// Manifest extracted from one top-level `defineTool(...)` registration.
@@ -120,7 +118,7 @@ pub struct ToolAllow {
   /// `persistent`). Default-deny: a name not declared here cannot be
   /// run. `exec` is accepted as a synonym.
   #[serde(default, alias = "exec")]
-  pub commands: HashMap<String, ferridriver_script::CommandSpec>,
+  pub commands: rustc_hash::FxHashMap<String, ferridriver_script::CommandSpec>,
 
   /// Host patterns the handler's `request` client may target. Each entry
   /// is an exact host (`api.acme.com`) or a leading-wildcard suffix

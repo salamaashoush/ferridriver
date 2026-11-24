@@ -14,21 +14,21 @@ use super::loader::LoadedExtension;
 use super::manifest::ToolManifest;
 
 /// Read-only collection of loaded extension files. Cheap to clone -- the
-/// inner `Vec` is wrapped in `Arc` so all consumers share the same data.
+/// inner slices are wrapped in `Arc` so all consumers share the same data.
 #[derive(Default, Clone)]
 pub struct ExtensionRegistry {
-  files: Arc<Vec<LoadedExtension>>,
+  files: Arc<[LoadedExtension]>,
   /// Per-file/spec load failures recorded at startup (discovery,
   /// bundle/compile, manifest extraction). Kept so the
   /// `ferridriver_extensions` tool can report what failed to load —
   /// previously the only trace was a startup log line.
-  errors: Arc<Vec<(String, String)>>,
+  errors: Arc<[(String, String)]>,
   /// `(source, message)` startup warnings — operator-policy conflicts
   /// (a declared `allow.net` entry outside the ceiling, a shell-form
   /// command under `argvOnly`). The tools still load (net entries are
   /// clamped; command conflicts fail per-tool at session install), but
   /// the conflict is surfaced here instead of only in logs.
-  warnings: Arc<Vec<(String, String)>>,
+  warnings: Arc<[(String, String)]>,
   /// Pre-compiled `inputSchema` validator per tool name, or the error
   /// message an invalid schema produces. Built once here so tool
   /// invocations look a validator up instead of recompiling the schema
@@ -89,9 +89,9 @@ impl ExtensionRegistry {
     let validators = compile(|t| t.input_schema.as_ref(), "inputSchema");
     let output_validators = compile(|t| t.output_schema.as_ref(), "outputSchema");
     Self {
-      files: Arc::new(files),
-      errors: Arc::new(errors),
-      warnings: Arc::new(warnings),
+      files: Arc::from(files),
+      errors: Arc::from(errors),
+      warnings: Arc::from(warnings),
       validators: Arc::new(validators),
       output_validators: Arc::new(output_validators),
     }
