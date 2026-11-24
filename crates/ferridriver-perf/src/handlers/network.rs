@@ -284,16 +284,14 @@ pub fn from_events(events: &[TraceEvent<'_>]) -> Vec<NetworkRequest> {
   requests
 }
 
-#[allow(clippy::too_many_lines)]
-fn resolve(id: &str, partial: &Partial<'_>) -> Option<NetworkRequest> {
-  // The LAST send is the request that actually completed; the earlier
-  // ones are the redirect hops.
-  let send = *partial.send_requests.last()?;
-  let send_data: SendData = send.data_as()?;
-  let response_data: Option<ResponseData> = partial.receive_response.and_then(TraceEvent::data_as);
-  let finish_data: Option<FinishData> = partial.resource_finish.and_then(TraceEvent::data_as);
-  let timing = response_data.as_ref().and_then(|r| r.timing.clone());
+struct Bounds {
+  start: Micro,
+  end_redirect: Micro,
+  end: Micro,
+  finish: Micro,
+}
 
+fn bounds(partial: &Partial<'_>, send: &TraceEvent<'_>, finish_data: Option<&FinishData>) -> Bounds {
   // The FIRST willSendRequest is when the renderer queued the request,
   // which is earlier than the send: Chrome emits one even where nothing
   // redirected. Taking the send instead loses the queueing, and every
@@ -302,89 +300,40 @@ fn resolve(id: &str, partial: &Partial<'_>) -> Option<NetworkRequest> {
   let start_time = partial
     .will_send_requests
     .first()
-    .or(partial.send_requests.first())
+    .or_else(|| partial.send_requests.first())
     .map_or(send.ts, |e| e.ts);
   // The LAST willSendRequest is where the non-redirect part of the
   // request actually begins; everything before it was redirect hops.
   let end_redirect_time = partial.will_send_requests.last().map_or(send.ts, |e| e.ts);
   let end_time = partial.resource_finish.as_ref().map_or(end_redirect_time, |e| e.ts);
   let finish_time = finish_data
-    .as_ref()
     .filter(|f| f.finish_time > 0.0)
     .map_or(end_time, |f| us(f.finish_time * SECONDS_TO_MICROS));
-
-  let network_duration = if timing.is_some() {
-    finish_time - end_redirect_time
-  } else {
-    0
-  };
-  let processing_duration = end_time - finish_time;
-  let redirection_duration = end_redirect_time - start_time;
-
-  let mut t = Timing {
-    network_duration,
-    processing_duration,
-    redirection_duration,
-    total_time: network_duration + processing_duration,
-    finish_time,
-    is_https: send_data.url.starts_with("https:"),
-    is_memory_cached: partial.mark_as_cached,
-    is_disk_cached: response_data.as_ref().is_some_and(|r| r.from_cache) && !partial.mark_as_cached,
-    ..Default::default()
-  };
-
-  if let Some(ref timing) = timing {
-    let request_time_us = timing.request_time * SECONDS_TO_MICROS;
-    // Clamped at zero: a recorded start later than `requestTime` would
-    // otherwise report negative queueing.
-    t.queueing = us((request_time_us - micros_to_f64(end_redirect_time)).max(0.0));
-    t.stalled = first_positive(&[
-      timing.dns_start * MILLIS_TO_MICROS,
-      timing.connect_start * MILLIS_TO_MICROS,
-      timing.send_start * MILLIS_TO_MICROS,
-      partial
-        .receive_response
-        .as_ref()
-        .map_or(f64::NAN, |e| micros_to_f64(e.ts - end_redirect_time)),
-    ]);
-    t.dns_lookup = us((timing.dns_end - timing.dns_start) * MILLIS_TO_MICROS);
-    t.initial_connection = us((timing.connect_end - timing.connect_start) * MILLIS_TO_MICROS);
-    t.ssl = us((timing.ssl_end - timing.ssl_start) * MILLIS_TO_MICROS);
-    t.proxy_negotiation = us((timing.proxy_end - timing.proxy_start) * MILLIS_TO_MICROS);
-    t.request_sent = us((timing.send_end - timing.send_start) * MILLIS_TO_MICROS);
-    t.waiting = us((timing.receive_headers_end - timing.send_end) * MILLIS_TO_MICROS);
-    t.server_response_time =
-      us((timing.receive_headers_start.unwrap_or(timing.receive_headers_end) - timing.send_end) * MILLIS_TO_MICROS);
-    t.send_start_time = us(request_time_us + timing.send_start * MILLIS_TO_MICROS);
-    t.download_start = us(request_time_us + timing.receive_headers_end * MILLIS_TO_MICROS);
-    t.download = finish_time - t.download_start;
-    // `receiveHeadersStart` is absent on older traces; headers-end is
-    // close enough and is what DevTools falls back to.
-    t.first_byte_ts = Some(us(
-      request_time_us + timing.receive_headers_start.unwrap_or(timing.receive_headers_end) * MILLIS_TO_MICROS,
-    ));
-  } else {
-    t.stalled = partial.receive_response.as_ref().map_or(0, |e| e.ts - start_time);
-    t.send_start_time = start_time;
-    t.download_start = start_time;
-    t.download = partial.receive_response.as_ref().map_or(0, |e| end_time - e.ts);
+  Bounds {
+    start: start_time,
+    end_redirect: end_redirect_time,
+    end: end_time,
+    finish: finish_time,
   }
+}
 
-  let redirects: Vec<Redirect> = partial
-    .will_send_requests
-    .windows(2)
-    .enumerate()
-    .map(|(hop, pair)| Redirect {
-      url: partial
-        .send_requests
-        .get(hop)
-        .and_then(|event| event.data()?.get("url")?.as_str())
-        .unwrap_or_default()
-        .to_string(),
-      ts: pair[0].ts,
-      dur: pair[1].ts - pair[0].ts,
-    })
-    .collect();
+fn resolve(id: &str, partial: &Partial<'_>) -> Option<NetworkRequest> {
+  // The LAST send is the request that actually completed; the earlier
+  // ones are the redirect hops.
+  let send = *partial.send_requests.last()?;
+  let send_data: SendData = send.data_as()?;
+  let response_data: Option<ResponseData> = partial.receive_response.and_then(TraceEvent::data_as);
+  let finish_data: Option<FinishData> = partial.resource_finish.and_then(TraceEvent::data_as);
+  let timing = response_data.as_ref().and_then(|r| r.timing.clone());
+  let span = bounds(partial, send, finish_data.as_ref());
+  let t = phase_timing(
+    partial,
+    &span,
+    timing.as_ref(),
+    response_data.as_ref().is_some_and(|r| r.from_cache),
+    send_data.url.starts_with("https:"),
+  );
+  let redirects = redirects(partial);
 
   Some(NetworkRequest {
     request_id: id.to_string(),
@@ -405,7 +354,7 @@ fn resolve(id: &str, partial: &Partial<'_>) -> Option<NetworkRequest> {
       .unwrap_or_else(|| send_data.priority.clone()),
     initial_priority: send_data.priority,
     status_code: response_data.as_ref().map_or(0, |r| r.status_code),
-    resource_timing: timing.clone(),
+    resource_timing: timing,
     connection_id: response_data.as_ref().map_or(0, |r| r.connection_id),
     connection_reused: response_data.as_ref().is_some_and(|r| r.connection_reused),
     frame: send_data.frame,
@@ -441,10 +390,101 @@ fn resolve(id: &str, partial: &Partial<'_>) -> Option<NetworkRequest> {
       has_response: partial.receive_response.is_some(),
     },
     redirects,
-    start_time,
-    end_time,
+    start_time: span.start,
+    end_time: span.end,
     timing: t,
   })
+}
+
+fn phase_timing(
+  partial: &Partial<'_>,
+  bounds: &Bounds,
+  timing: Option<&ResourceTiming>,
+  from_cache: bool,
+  is_https: bool,
+) -> Timing {
+  let Bounds {
+    start: start_time,
+    end_redirect: end_redirect_time,
+    end: end_time,
+    finish: finish_time,
+  } = *bounds;
+
+  let network_duration = if timing.is_some() {
+    finish_time - end_redirect_time
+  } else {
+    0
+  };
+  let processing_duration = end_time - finish_time;
+  let redirection_duration = end_redirect_time - start_time;
+
+  let mut t = Timing {
+    network_duration,
+    processing_duration,
+    redirection_duration,
+    total_time: network_duration + processing_duration,
+    finish_time,
+    is_https,
+    is_memory_cached: partial.mark_as_cached,
+    is_disk_cached: from_cache && !partial.mark_as_cached,
+    ..Default::default()
+  };
+
+  if let Some(timing) = timing {
+    let request_time_us = timing.request_time * SECONDS_TO_MICROS;
+    // Clamped at zero: a recorded start later than `requestTime` would
+    // otherwise report negative queueing.
+    t.queueing = us((request_time_us - micros_to_f64(end_redirect_time)).max(0.0));
+    t.stalled = first_positive(&[
+      timing.dns_start * MILLIS_TO_MICROS,
+      timing.connect_start * MILLIS_TO_MICROS,
+      timing.send_start * MILLIS_TO_MICROS,
+      partial
+        .receive_response
+        .as_ref()
+        .map_or(f64::NAN, |e| micros_to_f64(e.ts - end_redirect_time)),
+    ]);
+    t.dns_lookup = us((timing.dns_end - timing.dns_start) * MILLIS_TO_MICROS);
+    t.initial_connection = us((timing.connect_end - timing.connect_start) * MILLIS_TO_MICROS);
+    t.ssl = us((timing.ssl_end - timing.ssl_start) * MILLIS_TO_MICROS);
+    t.proxy_negotiation = us((timing.proxy_end - timing.proxy_start) * MILLIS_TO_MICROS);
+    t.request_sent = us((timing.send_end - timing.send_start) * MILLIS_TO_MICROS);
+    t.waiting = us((timing.receive_headers_end - timing.send_end) * MILLIS_TO_MICROS);
+    t.server_response_time =
+      us((timing.receive_headers_start.unwrap_or(timing.receive_headers_end) - timing.send_end) * MILLIS_TO_MICROS);
+    t.send_start_time = us(request_time_us + timing.send_start * MILLIS_TO_MICROS);
+    t.download_start = us(request_time_us + timing.receive_headers_end * MILLIS_TO_MICROS);
+    t.download = finish_time - t.download_start;
+    // `receiveHeadersStart` is absent on older traces; headers-end is
+    // close enough and is what DevTools falls back to.
+    t.first_byte_ts = Some(us(
+      request_time_us + timing.receive_headers_start.unwrap_or(timing.receive_headers_end) * MILLIS_TO_MICROS,
+    ));
+  } else {
+    t.stalled = partial.receive_response.as_ref().map_or(0, |e| e.ts - start_time);
+    t.send_start_time = start_time;
+    t.download_start = start_time;
+    t.download = partial.receive_response.as_ref().map_or(0, |e| end_time - e.ts);
+  }
+  t
+}
+
+fn redirects(partial: &Partial<'_>) -> Vec<Redirect> {
+  partial
+    .will_send_requests
+    .windows(2)
+    .enumerate()
+    .map(|(hop, pair)| Redirect {
+      url: partial
+        .send_requests
+        .get(hop)
+        .and_then(|event| event.data()?.get("url")?.as_str())
+        .unwrap_or_default()
+        .to_string(),
+      ts: pair[0].ts,
+      dur: pair[1].ts - pair[0].ts,
+    })
+    .collect()
 }
 
 /// First strictly-positive value, matching `DevTools`'
