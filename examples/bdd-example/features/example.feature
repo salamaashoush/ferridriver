@@ -1,5 +1,10 @@
 Feature: Example Domain
-  Test the example.com page using both built-in and custom steps.
+  Test the example.com page using both built-in and custom steps. The page
+  is served from a pinned copy: the live site has changed since these
+  scenarios were written and asks not to be used for testing.
+
+  Background:
+    Given I mock requests to "https://example.com/**" with fixture "fixtures/example-domain.html"
 
   Scenario: Page loads correctly
     Given I am on the example page
