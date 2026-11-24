@@ -471,7 +471,8 @@ impl Video {
   async fn await_terminal_state(&self) -> crate::error::Result<FinalPath> {
     let mut rx = self.state.path_rx.clone();
     loop {
-      if let Some(val) = rx.borrow_and_update().clone() {
+      let current = rx.borrow_and_update().clone();
+      if let Some(val) = current {
         return Ok(val);
       }
       if rx.changed().await.is_err() {

@@ -1244,7 +1244,8 @@ impl HeadedRecorder {
     };
 
     if live {
-      if let Some(code) = source.lock().unwrap_or_else(PoisonError::into_inner).finish() {
+      let code = source.lock().unwrap_or_else(PoisonError::into_inner).finish();
+      if let Some(code) = code {
         let _ = stdout.write_all(code.as_bytes());
       }
       let _ = stdout.write_all(emitter.footer().as_bytes());
@@ -1536,7 +1537,7 @@ mod tests {
     );
     // The same value again reuses the name; another value takes the next.
     shared.on_message(FIRST_PAGE, &fill("#again", "hunter2", Some(field.clone())));
-    shared.on_message(FIRST_PAGE, &fill("#new", "s3cret", Some(field.clone())));
+    shared.on_message(FIRST_PAGE, &fill("#new", "s3cret", Some(field)));
     // A value typed into a plain field stays as typed.
     shared.on_message(FIRST_PAGE, &fill("#user", "sashoush", None));
     let actions: Vec<serde_json::Value> = shared
