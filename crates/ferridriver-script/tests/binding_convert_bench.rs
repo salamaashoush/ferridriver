@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used)]
 //! Ignored microbench for the `QuickJS` -> ferridriver evaluate-argument bridge.
 //!
 //! Run with:

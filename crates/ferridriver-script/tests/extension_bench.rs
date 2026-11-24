@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Re-runnable plugin-path microbench. `#[ignore]` so it stays out of
 //! the green gate; run explicitly for before/after numbers:
 //!
@@ -65,7 +64,7 @@ fn bindings(compiled: &[Compiled]) -> Vec<ExtensionBinding> {
   compiled
     .iter()
     .map(|c| ExtensionBinding {
-      bytecode: c.bytecode.clone(),
+      bytecode: Arc::clone(&c.bytecode),
       name: c.name.clone(),
       source_map: None,
       provides: None,

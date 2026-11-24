@@ -1,10 +1,3 @@
-#![allow(
-  clippy::expect_used,
-  clippy::unwrap_used,
-  clippy::cast_precision_loss,
-  clippy::cast_possible_truncation,
-  clippy::cast_sign_loss
-)]
 //! Sidecar timing harness, measured through the `QuickJS` API that scripts
 //! actually use (`sidecars.connect(name).send(...)`), not the raw Rust
 //! transport — so the numbers include the full per-call cost: JS→serde
@@ -34,9 +27,9 @@ use ferridriver_script::sidecar::{Sidecar, SidecarSpec};
 use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_sidecar_echo");
-const WARMUP: usize = 300;
-const SEQUENTIAL: usize = 5_000;
-const CONCURRENT: usize = 5_000;
+const WARMUP: u32 = 300;
+const SEQUENTIAL: u32 = 5_000;
+const CONCURRENT: u32 = 5_000;
 
 fn bench_spec() -> SidecarSpec {
   let command = std::env::var("FERRIDRIVER_SIDECAR_BENCH_CMD").map_or_else(
@@ -67,21 +60,21 @@ fn ctx(tmp: &tempfile::TempDir) -> RunContext {
   }
 }
 
-/// Run one script against the persistent session, asserting it succeeded,
-/// and return the wall-clock duration of the `execute` call.
-async fn timed(session: &Session, rc: &RunContext, src: &str) -> std::time::Duration {
+/// Run one script against the persistent session and return the wall-clock
+/// duration of the `execute` call, or the script's error.
+async fn timed(session: &Session, rc: &RunContext, src: &str) -> Result<std::time::Duration, String> {
   let t = Instant::now();
   let run = session.execute(src, &[], RunOptions::default(), rc).await;
   let elapsed = t.elapsed();
   match run.result.outcome {
-    Outcome::Ok { .. } => elapsed,
-    Outcome::Error { error } => panic!("script failed: {error:?}"),
+    Outcome::Ok { .. } => Ok(elapsed),
+    Outcome::Error { error } => Err(format!("script failed: {error:?}")),
   }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "timing harness; run with --ignored --nocapture"]
-async fn bench_round_trip_via_quickjs() {
+async fn bench_round_trip_via_quickjs() -> Result<(), Box<dyn std::error::Error>> {
   let spec = bench_spec();
   eprintln!("\n=== sidecar bench (QuickJS API): {:?} ===", spec.command);
 
@@ -100,7 +93,7 @@ async fn bench_round_trip_via_quickjs() {
     &rc,
     "globalThis.sc = await sidecars.connect('bench'); const r = await sc.send('ping'); if (r.ok !== true) throw new Error('handshake'); return 'ok';",
   )
-  .await;
+  .await?;
   eprintln!("connect + handshake : {} us", connect.as_micros());
 
   // Warm up the child (caches/pool) — not timed.
@@ -109,7 +102,7 @@ async fn bench_round_trip_via_quickjs() {
     &rc,
     &format!("const sc = globalThis.sc; for (let i = 0; i < {WARMUP}; i++) await sc.send('ping'); return 'warm';"),
   )
-  .await;
+  .await?;
 
   // Sequential: await each send before the next. Aggregate throughput +
   // mean per-call latency through the whole JS stack.
@@ -120,11 +113,11 @@ async fn bench_round_trip_via_quickjs() {
       "const sc = globalThis.sc; for (let i = 0; i < {SEQUENTIAL}; i++) await sc.send('ping'); return {SEQUENTIAL};"
     ),
   )
-  .await;
+  .await?;
   eprintln!(
     "sequential ({SEQUENTIAL}) : {:.1} req/s | mean {:.1} us/req",
-    SEQUENTIAL as f64 / seq.as_secs_f64(),
-    seq.as_micros() as f64 / SEQUENTIAL as f64,
+    f64::from(SEQUENTIAL) / seq.as_secs_f64(),
+    seq.as_secs_f64() * 1e6 / f64::from(SEQUENTIAL),
   );
 
   // Concurrent: fire all sends, then await Promise.all — the real
@@ -137,11 +130,11 @@ async fn bench_round_trip_via_quickjs() {
       "const sc = globalThis.sc; const ps = []; for (let i = 0; i < {CONCURRENT}; i++) ps.push(sc.send('ping')); await Promise.all(ps); return {CONCURRENT};"
     ),
   )
-  .await;
+  .await?;
   eprintln!(
     "concurrent ({CONCURRENT}, Promise.all) : {:.1} req/s | {:.1} us/req wall",
-    CONCURRENT as f64 / conc.as_secs_f64(),
-    conc.as_micros() as f64 / CONCURRENT as f64,
+    f64::from(CONCURRENT) / conc.as_secs_f64(),
+    conc.as_secs_f64() * 1e6 / f64::from(CONCURRENT),
   );
 
   // Batched: ONE `sendMany` call carrying all N requests -> one promise, one
@@ -155,11 +148,11 @@ async fn bench_round_trip_via_quickjs() {
       "const sc = globalThis.sc; const calls = []; for (let i = 0; i < {CONCURRENT}; i++) calls.push({{ method: 'ping' }}); await sc.sendMany(calls); return {CONCURRENT};"
     ),
   )
-  .await;
+  .await?;
   eprintln!(
     "batched ({CONCURRENT}, sendMany) : {:.1} req/s | {:.1} us/req wall",
-    CONCURRENT as f64 / batch.as_secs_f64(),
-    batch.as_micros() as f64 / CONCURRENT as f64,
+    f64::from(CONCURRENT) / batch.as_secs_f64(),
+    batch.as_secs_f64() * 1e6 / f64::from(CONCURRENT),
   );
 
   // Payloaded echo: round-trips a ~40-field object both ways. The per-call
@@ -178,15 +171,16 @@ async fn bench_round_trip_via_quickjs() {
        return {SEQUENTIAL};"
     ),
   )
-  .await;
+  .await?;
   eprintln!(
     "sequential payload ({SEQUENTIAL}, ~40-field obj) : {:.1} req/s | mean {:.1} us/req",
-    SEQUENTIAL as f64 / payload_seq.as_secs_f64(),
-    payload_seq.as_micros() as f64 / SEQUENTIAL as f64,
+    f64::from(SEQUENTIAL) / payload_seq.as_secs_f64(),
+    payload_seq.as_secs_f64() * 1e6 / f64::from(SEQUENTIAL),
   );
 
-  timed(&session, &rc, "await globalThis.sc.close(); return 'closed';").await;
+  timed(&session, &rc, "await globalThis.sc.close(); return 'closed';").await?;
   eprintln!();
+  Ok(())
 }
 
 /// Raw transport, NO `QuickJS` — the same `ping` loop driven straight through
@@ -212,8 +206,8 @@ async fn bench_round_trip_transport_only() {
   let seq = seq_start.elapsed();
   eprintln!(
     "sequential ({SEQUENTIAL}) : {:.1} req/s | mean {:.1} us/req",
-    SEQUENTIAL as f64 / seq.as_secs_f64(),
-    seq.as_micros() as f64 / SEQUENTIAL as f64,
+    f64::from(SEQUENTIAL) / seq.as_secs_f64(),
+    seq.as_secs_f64() * 1e6 / f64::from(SEQUENTIAL),
   );
 
   // Same ~40-field payload as the QuickJS bench, but through the raw
@@ -234,18 +228,16 @@ async fn bench_round_trip_transport_only() {
   let pay = pay_start.elapsed();
   eprintln!(
     "sequential payload ({SEQUENTIAL}, ~40-field obj) : {:.1} req/s | mean {:.1} us/req",
-    SEQUENTIAL as f64 / pay.as_secs_f64(),
-    pay.as_micros() as f64 / SEQUENTIAL as f64,
+    f64::from(SEQUENTIAL) / pay.as_secs_f64(),
+    pay.as_secs_f64() * 1e6 / f64::from(SEQUENTIAL),
   );
-
-  let s = Arc::new(s);
 
   // (a) 64 tasks across the worker pool — true multi-thread parallelism.
   let conc_start = Instant::now();
   let per = CONCURRENT / 64;
   let mut handles = Vec::new();
   for _ in 0..64 {
-    let s = s.clone();
+    let s = Arc::clone(&s);
     handles.push(tokio::spawn(async move {
       for _ in 0..per {
         s.send("ping", None, 10_000).await.expect("conc ping");
@@ -259,8 +251,8 @@ async fn bench_round_trip_transport_only() {
   let n = per * 64;
   eprintln!(
     "concurrent ({n}, 64 tasks/threads) : {:.1} req/s | {:.1} us/req wall",
-    n as f64 / conc.as_secs_f64(),
-    conc.as_micros() as f64 / n as f64,
+    f64::from(n) / conc.as_secs_f64(),
+    conc.as_secs_f64() * 1e6 / f64::from(n),
   );
 
   // (b) ONE issuing task — all futures multiplexed on a single thread via
@@ -281,8 +273,8 @@ async fn bench_round_trip_transport_only() {
   let one = one_start.elapsed();
   eprintln!(
     "concurrent ({CONCURRENT}, 1 task/thread, join_all) : {:.1} req/s | {:.1} us/req wall",
-    CONCURRENT as f64 / one.as_secs_f64(),
-    one.as_micros() as f64 / CONCURRENT as f64,
+    f64::from(CONCURRENT) / one.as_secs_f64(),
+    one.as_secs_f64() * 1e6 / f64::from(CONCURRENT),
   );
 
   s.close().await.expect("close");

@@ -1,11 +1,3 @@
-#![allow(
-  clippy::expect_used,
-  clippy::unwrap_used,
-  clippy::cast_precision_loss,
-  clippy::cast_possible_truncation,
-  clippy::cast_sign_loss,
-  unsafe_code
-)]
 // It times the Unix socket pair layer by layer; the Windows transport is
 // named pipes, which `backend::windows_spawn`'s own test covers.
 #![cfg(unix)]
@@ -41,9 +33,9 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_sidecar_echo");
-const WARMUP: usize = 2_000;
-const ITERS: usize = 50_000;
-const CPU_ITERS: usize = 2_000_000;
+const WARMUP: u32 = 2_000;
+const ITERS: u32 = 50_000;
+const CPU_ITERS: u32 = 2_000_000;
 
 fn bench_command() -> Vec<String> {
   std::env::var("FERRIDRIVER_SIDECAR_BENCH_CMD").map_or_else(
@@ -61,77 +53,82 @@ fn bench_spec() -> SidecarSpec {
   }
 }
 
-/// Set fd 3/4 in the child to the given sockets and clear `CLOEXEC` + `O_NONBLOCK`
-/// (hand the child blocking descriptors). Mirrors `sidecar.rs::spawn_child`.
-fn pre_exec_fds(read_fd: i32, write_fd: i32) {
+/// Set fd 3/4 in the child to the given sockets and clear `CLOEXEC` +
+/// `O_NONBLOCK` (hand the child blocking descriptors). Mirrors
+/// `sidecar.rs::hand_fds_to_child`.
+#[expect(
+  unsafe_code,
+  reason = "pre_exec has no safe form, and the sidecar contract names the raw descriptor numbers 3 and 4, which no owned-fd API can name"
+)]
+fn hand_fds_to_child(cmd: &mut std::process::Command, read_fd: i32, write_fd: i32) {
+  let place_fds = move || -> std::io::Result<()> {
+    for (source, target) in [(read_fd, 3), (write_fd, 4)] {
+      // SAFETY: `dup2` takes plain descriptor numbers and is
+      // async-signal-safe; whatever held `target` in the child is replaced.
+      if unsafe { libc::dup2(source, target) } == -1 {
+        return Err(std::io::Error::last_os_error());
+      }
+    }
+    for target in [3, 4] {
+      // SAFETY: the `dup2` above just placed an open descriptor on `target`,
+      // and nothing in this closure closes it.
+      let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(target) };
+      let descriptor_flags = rustix::io::fcntl_getfd(fd)?;
+      rustix::io::fcntl_setfd(fd, descriptor_flags.difference(rustix::io::FdFlags::CLOEXEC))?;
+      let status_flags = rustix::fs::fcntl_getfl(fd)?;
+      rustix::fs::fcntl_setfl(fd, status_flags.difference(rustix::fs::OFlags::NONBLOCK))?;
+    }
+    Ok(())
+  };
+  // SAFETY: `place_fds` runs between fork and exec, where only
+  // async-signal-safe work is sound. It makes only the `dup2` and `fcntl`
+  // syscalls and allocates nothing, errors included.
   unsafe {
-    if libc::dup2(read_fd, 3) == -1 || libc::dup2(write_fd, 4) == -1 {
-      return;
-    }
-    for fd in [3i32, 4] {
-      let df = libc::fcntl(fd, libc::F_GETFD);
-      if df != -1 {
-        libc::fcntl(fd, libc::F_SETFD, df & !libc::FD_CLOEXEC);
-      }
-      let sf = libc::fcntl(fd, libc::F_GETFL);
-      if sf != -1 {
-        libc::fcntl(fd, libc::F_SETFL, sf & !libc::O_NONBLOCK);
-      }
-    }
+    cmd.pre_exec(place_fds);
   }
 }
 
 /// Spawn the echo fixture wired to BLOCKING std sockets (parent ends returned).
-fn spawn_blocking() -> (
+fn spawn_blocking() -> std::io::Result<(
   std::process::Child,
   std::os::unix::net::UnixStream,
   std::os::unix::net::UnixStream,
-) {
+)> {
   use std::os::unix::net::UnixStream;
-  let (parent_in, child_in) = UnixStream::pair().expect("pair");
-  let (parent_out, child_out) = UnixStream::pair().expect("pair");
+  let (parent_in, child_in) = UnixStream::pair()?;
+  let (parent_out, child_out) = UnixStream::pair()?;
   let read_fd = child_in.as_raw_fd();
   let write_fd = child_out.as_raw_fd();
   let mut cmd = std::process::Command::new(FIXTURE);
-  unsafe {
-    cmd.pre_exec(move || {
-      pre_exec_fds(read_fd, write_fd);
-      Ok(())
-    });
-  }
-  let child = cmd.spawn().expect("spawn");
+  hand_fds_to_child(&mut cmd, read_fd, write_fd);
+  let child = cmd.spawn()?;
   drop(child_in);
   drop(child_out);
-  (child, parent_in, parent_out)
+  Ok((child, parent_in, parent_out))
 }
 
 /// Spawn the echo fixture wired to TOKIO sockets (parent ends returned). The
 /// child still gets blocking fd 3/4 (`pre_exec` clears `O_NONBLOCK`).
-fn spawn_tokio() -> (tokio::process::Child, tokio::net::UnixStream, tokio::net::UnixStream) {
+fn spawn_tokio() -> std::io::Result<(tokio::process::Child, tokio::net::UnixStream, tokio::net::UnixStream)> {
   use tokio::net::UnixStream;
-  let (parent_in, child_in) = UnixStream::pair().expect("pair");
-  let (parent_out, child_out) = UnixStream::pair().expect("pair");
+  let (parent_in, child_in) = UnixStream::pair()?;
+  let (parent_out, child_out) = UnixStream::pair()?;
   let read_fd = child_in.as_raw_fd();
   let write_fd = child_out.as_raw_fd();
   let mut cmd = tokio::process::Command::new(FIXTURE);
   cmd.kill_on_drop(true);
-  unsafe {
-    cmd.pre_exec(move || {
-      pre_exec_fds(read_fd, write_fd);
-      Ok(())
-    });
-  }
-  let child = cmd.spawn().expect("spawn");
+  hand_fds_to_child(cmd.as_std_mut(), read_fd, write_fd);
+  let child = cmd.spawn()?;
   drop(child_in);
   drop(child_out);
-  (child, parent_in, parent_out)
+  Ok((child, parent_in, parent_out))
 }
 
-fn report(label: &str, n: usize, dur: std::time::Duration) {
+fn report(label: &str, n: u32, dur: std::time::Duration) {
   eprintln!(
     "{label:<46} : {:>9.1} req/s | mean {:>6.3} us/req",
-    n as f64 / dur.as_secs_f64(),
-    dur.as_micros() as f64 / n as f64,
+    f64::from(n) / dur.as_secs_f64(),
+    dur.as_secs_f64() * 1e6 / f64::from(n),
   );
 }
 
@@ -142,7 +139,7 @@ async fn attrib_layers() {
 
   // ── L0: blocking std, same thread, no framing machinery ───────────────
   {
-    let (mut child, mut win, mut rout) = spawn_blocking();
+    let (mut child, mut win, mut rout) = spawn_blocking().expect("spawn");
     let mut rbuf = Vec::with_capacity(256);
     let mut chunk = [0u8; 256];
     for _ in 0..WARMUP {
@@ -179,7 +176,7 @@ async fn attrib_layers() {
 
   // ── L1: tokio async, same task, read inline (no oneshot/read_loop) ─────
   {
-    let (mut child, mut win, mut rout) = spawn_tokio();
+    let (mut child, mut win, mut rout) = spawn_tokio().expect("spawn");
     let mut rbuf = Vec::with_capacity(256);
     let mut chunk = [0u8; 256];
     for _ in 0..WARMUP {
@@ -228,19 +225,19 @@ async fn attrib_layers() {
     s.close().await.expect("close");
   }
 
-  cpu_microbenches();
+  cpu_microbenches().expect("serde round trip");
   eprintln!();
 }
 
 /// CPU-only (no IPC): the serde cost of building a request frame and parsing
 /// a response, isolating it from the L2-L1 scheduling overhead.
-fn cpu_microbenches() {
+fn cpu_microbenches() -> serde_json::Result<()> {
   {
     let t = Instant::now();
     let mut sink = 0usize;
     for i in 0..CPU_ITERS {
-      let frame = json!({ "id": i as u64, "method": "ping", "params": json!({}) });
-      let bytes = serde_json::to_vec(&frame).expect("ser");
+      let frame = json!({ "id": i, "method": "ping", "params": json!({}) });
+      let bytes = serde_json::to_vec(&frame)?;
       sink = sink.wrapping_add(bytes.len());
     }
     report("CPU frame build (json! + to_vec)", CPU_ITERS, t.elapsed());
@@ -251,12 +248,13 @@ fn cpu_microbenches() {
     let t = Instant::now();
     let mut sink = 0usize;
     for _ in 0..CPU_ITERS {
-      let v: serde_json::Value = serde_json::from_slice(resp).expect("de");
+      let v: serde_json::Value = serde_json::from_slice(resp)?;
       sink = sink.wrapping_add(v.as_object().map_or(0, serde_json::Map::len));
     }
     report("CPU response parse (from_slice Value)", CPU_ITERS, t.elapsed());
     std::hint::black_box(sink);
   }
+  Ok(())
 }
 
 /// Long-running concurrent `QuickJS` loop for sampling under `samply`. Drives
@@ -300,7 +298,7 @@ async fn profile_concurrent_quickjs() {
     .await;
   let src = "const sc = globalThis.sc; const ps = []; for (let i = 0; i < 200; i++) ps.push(sc.send('ping')); await Promise.all(ps); return 200;";
   let t = Instant::now();
-  let mut total = 0usize;
+  let mut total = 0u32;
   for _ in 0..batches {
     let run = session.execute(src, &[], RunOptions::default(), &rc).await;
     assert!(matches!(run.result.outcome, ferridriver_script::Outcome::Ok { .. }));
@@ -326,8 +324,8 @@ async fn profile_concurrent_quickjs() {
 #[ignore = "batching bench; run with --ignored --nocapture"]
 async fn bench_batching() {
   use ferridriver_script::{InMemoryVars, Outcome, RunContext, RunOptions, ScriptEngineConfig, Session};
-  const N: usize = 5_000;
-  const ROUNDS: usize = 6;
+  const N: u32 = 5_000;
+  const ROUNDS: u32 = 6;
   eprintln!(
     "\n=== sidecar batching: {:?} (N={N}/batch, {ROUNDS} rounds) ===",
     bench_command()
@@ -345,8 +343,8 @@ async fn bench_batching() {
       let calls: Vec<(String, Option<serde_json::Value>)> = (0..N).map(|_| ("ping".to_string(), None)).collect();
       let t = Instant::now();
       let res = s.send_many(calls, 10_000).await;
-      let us = t.elapsed().as_micros() as f64 / N as f64;
-      assert_eq!(res.len(), N);
+      let us = t.elapsed().as_secs_f64() * 1e6 / f64::from(N);
+      assert_eq!(res.len(), N as usize);
       best = best.min(us);
     }
     eprintln!(
@@ -406,12 +404,12 @@ async fn bench_batching() {
     let t = Instant::now();
     let r = session.execute(&promise_all, &[], RunOptions::default(), &rc).await;
     assert!(matches!(r.result.outcome, Outcome::Ok { .. }));
-    best_pa = best_pa.min(t.elapsed().as_micros() as f64 / N as f64);
+    best_pa = best_pa.min(t.elapsed().as_secs_f64() * 1e6 / f64::from(N));
 
     let t = Instant::now();
     let r = session.execute(&send_many, &[], RunOptions::default(), &rc).await;
     assert!(matches!(r.result.outcome, Outcome::Ok { .. }));
-    best_sm = best_sm.min(t.elapsed().as_micros() as f64 / N as f64);
+    best_sm = best_sm.min(t.elapsed().as_secs_f64() * 1e6 / f64::from(N));
   }
   eprintln!(
     "QuickJS Promise.all           : {:>9.1} req/s | best {:.3} us/req",

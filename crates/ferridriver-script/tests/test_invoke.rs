@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Invocation surface of `@ferridriver/test`: registered bodies run
 //! through `run_test` with a mock [`TestHostBridge`] — fixtures object,
 //! custom-fixture use()-handshake lifecycle, each-hooks, runtime
@@ -20,15 +19,18 @@ struct Harness {
   session: Session,
   collected: CollectedTests,
   _bundle: CompiledBundle,
+  // Declared last so it drops after the session: the fixture files back
+  // the bundle's disk cache for the session's whole life.
+  _dir: tempfile::TempDir,
 }
 
-async fn harness(source: &str) -> Harness {
-  let dir = tempfile::tempdir().expect("tempdir");
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+async fn harness(source: &str) -> Result<Harness, Box<dyn std::error::Error>> {
+  let dir = tempfile::tempdir()?;
   let entry = dir.path().join("invoke.test.ts");
-  std::fs::write(&entry, source).expect("write entry");
-  let bundle = bundle_and_compile_named(&[entry], dir.path(), "ferridriver-tests.js")
-    .await
-    .expect("bundle");
+  std::fs::write(&entry, source)?;
+  let bundle = bundle_and_compile_named(&[entry], dir.path(), "ferridriver-tests.js").await?;
   let context = RunContext {
     vars: Arc::new(InMemoryVars::new()),
     script_root: dir.path().into(),
@@ -42,19 +44,15 @@ async fn harness(source: &str) -> Harness {
     caps: ScriptCaps::default(),
     session: None,
   };
-  let session = Session::create(ScriptEngineConfig::default(), &context)
-    .await
-    .expect("session");
-  eval_bundle(&session.vm_handle(), &bundle).await.expect("eval bundle");
-  let collected = collect_tests(&session.vm_handle()).await.expect("collect");
-  // The tempdir must outlive bundling only; leak it so the fixture
-  // files backing the disk cache stay valid for the session's life.
-  std::mem::forget(dir);
-  Harness {
+  let session = Session::create(ScriptEngineConfig::default(), &context).await?;
+  eval_bundle(&session.vm_handle(), &bundle).await?;
+  let collected = collect_tests(&session.vm_handle()).await?;
+  Ok(Harness {
     session,
     collected,
     _bundle: bundle,
-  }
+    _dir: dir,
+  })
 }
 
 fn world(title: &str) -> TestWorldData {
@@ -106,8 +104,8 @@ fn spec(idx: usize) -> RunTestSpec {
 /// outer scope first — the ancestor walk `ferridriver-testjs`'
 /// `modifiers_for` does for a real run, minus the per-file filter (one
 /// file per harness).
-fn spec_with_modifiers(h: &Harness, title: &str) -> RunTestSpec {
-  let idx = title_index(&h.collected, title);
+fn spec_with_modifiers(h: &Harness, title: &str) -> Result<RunTestSpec, String> {
+  let idx = title_index(&h.collected, title)?;
   let mut scopes: Vec<Option<usize>> = vec![None];
   let mut chain: Vec<usize> = Vec::new();
   let mut cur = h.collected.tests[idx].suite;
@@ -128,18 +126,18 @@ fn spec_with_modifiers(h: &Harness, title: &str) -> RunTestSpec {
         .map(|(i, _)| i)
     })
     .collect();
-  RunTestSpec { modifiers, ..spec(idx) }
+  Ok(RunTestSpec { modifiers, ..spec(idx) })
 }
 
-fn title_index(c: &CollectedTests, title: &str) -> usize {
+fn title_index(c: &CollectedTests, title: &str) -> Result<usize, String> {
   c.tests
     .iter()
     .position(|t| t.title == title)
-    .unwrap_or_else(|| panic!("no test titled `{title}`"))
+    .ok_or_else(|| format!("no test titled `{title}`"))
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fixtures_scalars_and_test_info() {
+async fn fixtures_scalars_and_test_info() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -159,13 +157,18 @@ test('second arg is testInfo', async ({ browserName }, info) => {
 });
 ",
   )
-  .await;
+  .await?;
   let bridge = Arc::new(MockBridge::default());
-  let idx = title_index(&h.collected, "scalars");
-  run_test(&h.session.vm_handle(), spec(idx), world("scalars"), bridge.clone())
-    .await
-    .expect("scalars test passes");
-  let idx = title_index(&h.collected, "second arg is testInfo");
+  let idx = title_index(&h.collected, "scalars")?;
+  run_test(
+    &h.session.vm_handle(),
+    spec(idx),
+    world("scalars"),
+    Arc::<MockBridge>::clone(&bridge),
+  )
+  .await
+  .expect("scalars test passes");
+  let idx = title_index(&h.collected, "second arg is testInfo")?;
   run_test(
     &h.session.vm_handle(),
     spec(idx),
@@ -174,10 +177,11 @@ test('second arg is testInfo', async ({ browserName }, info) => {
   )
   .await
   .expect("info arg test passes");
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_modifiers_reach_the_bridge() {
+async fn runtime_modifiers_reach_the_bridge() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -201,14 +205,14 @@ test('conditional skip false path', async ({ browserName }) => {
 });
 ",
   )
-  .await;
+  .await?;
 
   let bridge = Arc::new(MockBridge::default());
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "skips")),
+    spec(title_index(&h.collected, "skips")?),
     world("skips"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect_err("skip aborts the body");
@@ -223,9 +227,9 @@ test('conditional skip false path', async ({ browserName }) => {
   let bridge = Arc::new(MockBridge::default());
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "fails expectedly")),
+    spec(title_index(&h.collected, "fails expectedly")?),
     world("fails expectedly"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect_err("body error propagates; worker inverts via expected_failure");
@@ -235,9 +239,9 @@ test('conditional skip false path', async ({ browserName }) => {
   let bridge = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "slow and setTimeout")),
+    spec(title_index(&h.collected, "slow and setTimeout")?),
     world("slow and setTimeout"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("modifier-only body passes");
@@ -247,17 +251,18 @@ test('conditional skip false path', async ({ browserName }) => {
   let bridge = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "conditional skip false path")),
+    spec(title_index(&h.collected, "conditional skip false path")?),
     world("conditional skip false path"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("false condition does not skip");
   assert!(!bridge.state(|s| s.skipped));
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn steps_nest_and_return_values() {
+async fn steps_nest_and_return_values() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -276,14 +281,14 @@ test('failing step', async () => {
 });
 ",
   )
-  .await;
+  .await?;
 
   let bridge = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "steps")),
+    spec(title_index(&h.collected, "steps")?),
     world("steps"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("steps pass");
@@ -305,9 +310,9 @@ test('failing step', async () => {
   let bridge = Arc::new(MockBridge::default());
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "failing step")),
+    spec(title_index(&h.collected, "failing step")?),
     world("failing step"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect_err("step error fails the test");
@@ -315,10 +320,11 @@ test('failing step', async () => {
   let events = bridge.state(|s| s.step_events.clone());
   assert_eq!(events.len(), 2);
   assert!(events[1].starts_with("end s1 err=") && events[1].contains("step exploded"));
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_info_attach_annotate_and_getters() {
+async fn test_info_attach_annotate_and_getters() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -339,14 +345,14 @@ test('attaches', async ({ testInfo }) => {
 });
 ",
   )
-  .await;
+  .await?;
 
   let bridge = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "attaches")),
+    spec(title_index(&h.collected, "attaches")?),
     world("attaches"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("attach test passes");
@@ -358,10 +364,11 @@ test('attaches', async ({ testInfo }) => {
   assert_eq!(atts[1].0, "bag");
   assert_eq!(atts[1].1, "text/x-custom");
   assert_eq!(atts[1].2, b"world");
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn custom_fixtures_setup_use_teardown_lifecycle() {
+async fn custom_fixtures_setup_use_teardown_lifecycle() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -389,14 +396,14 @@ test('log probe', async () => {
 });
 ",
   )
-  .await;
+  .await?;
 
   let bridge = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "uses fixtures")),
+    spec(title_index(&h.collected, "uses fixtures")?),
     world("uses fixtures"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("fixture test passes");
@@ -405,16 +412,16 @@ test('log probe', async () => {
   w.use_options = serde_json::json!({ "port": 9999 });
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "port override")),
+    spec(title_index(&h.collected, "port override")?),
     w,
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("override test passes");
 
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "log probe")),
+    spec(title_index(&h.collected, "log probe")?),
     world("log probe"),
     bridge,
   )
@@ -430,10 +437,11 @@ test('log probe', async () => {
   let next_test = msg.find("override port").expect("next test in log");
   assert!(teardown_pos < next_test, "teardown must precede the next test: {msg}");
   assert_eq!(msg.matches("setup greeting").count(), 1, "greeting set up once: {msg}");
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn worker_scoped_fixtures_cache_across_tests() {
+async fn worker_scoped_fixtures_cache_across_tests() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -463,15 +471,15 @@ test('probe', async () => {
 });
 ",
   )
-  .await;
+  .await?;
 
   let bridge = Arc::new(MockBridge::default());
   for title in ["first", "second"] {
     run_test(
       &h.session.vm_handle(),
-      spec(title_index(&h.collected, title)),
+      spec(title_index(&h.collected, title)?),
       world(title),
-      bridge.clone(),
+      Arc::<MockBridge>::clone(&bridge),
     )
     .await
     .unwrap_or_else(|e| panic!("{title} failed: {}", e.message));
@@ -481,7 +489,7 @@ test('probe', async () => {
     .expect("worker teardown");
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "probe")),
+    spec(title_index(&h.collected, "probe")?),
     world("probe"),
     bridge,
   )
@@ -492,10 +500,11 @@ test('probe', async () => {
   assert!(msg.contains("first got srv-1"), "log: {msg}");
   assert!(msg.contains("second got srv-1"), "log: {msg}");
   assert_eq!(msg.matches("worker teardown").count(), 1, "one teardown: {msg}");
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn each_hooks_run_around_the_body_and_share_fixtures() {
+async fn each_hooks_run_around_the_body_and_share_fixtures() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -523,30 +532,40 @@ test('probe', async () => {
 });
 ",
   )
-  .await;
+  .await?;
 
   let hooks_before = vec![0usize];
   let hooks_after = vec![1usize];
   let bridge = Arc::new(MockBridge::default());
 
-  let mut s0 = spec(title_index(&h.collected, "body"));
+  let mut s0 = spec(title_index(&h.collected, "body")?);
   s0.hooks_before = hooks_before.clone();
   s0.hooks_after = hooks_after.clone();
-  run_test(&h.session.vm_handle(), s0, world("body"), bridge.clone())
-    .await
-    .expect("hooked test passes");
+  run_test(
+    &h.session.vm_handle(),
+    s0,
+    world("body"),
+    Arc::<MockBridge>::clone(&bridge),
+  )
+  .await
+  .expect("hooked test passes");
 
-  let mut s1 = spec(title_index(&h.collected, "failing body"));
+  let mut s1 = spec(title_index(&h.collected, "failing body")?);
   s1.hooks_before = hooks_before;
   s1.hooks_after = hooks_after;
-  let err = run_test(&h.session.vm_handle(), s1, world("failing body"), bridge.clone())
-    .await
-    .expect_err("body failure propagates");
+  let err = run_test(
+    &h.session.vm_handle(),
+    s1,
+    world("failing body"),
+    Arc::<MockBridge>::clone(&bridge),
+  )
+  .await
+  .expect_err("body failure propagates");
   assert!(err.message.contains("body failed"));
 
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "probe")),
+    spec(title_index(&h.collected, "probe")?),
     world("probe"),
     bridge,
   )
@@ -557,10 +576,11 @@ test('probe', async () => {
     msg.contains(r#"["before chromium","body","after","before chromium","failing body","after"#),
     "afterEach must run on failure too: {msg}"
   );
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn each_arg_reaches_the_body() {
+async fn each_arg_reaches_the_body() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -573,22 +593,23 @@ test.each([
 });
 ",
   )
-  .await;
+  .await?;
   let bridge = Arc::new(MockBridge::default());
   for title in ["row Alice", "row Bob"] {
     run_test(
       &h.session.vm_handle(),
-      spec(title_index(&h.collected, title)),
+      spec(title_index(&h.collected, title)?),
       world(title),
-      bridge.clone(),
+      Arc::<MockBridge>::clone(&bridge),
     )
     .await
     .unwrap_or_else(|e| panic!("{title} failed: {}", e.message));
   }
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn factory_that_never_calls_use_is_an_error() {
+async fn factory_that_never_calls_use_is_an_error() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -601,11 +622,11 @@ const extended = test.extend({
 extended('needs broken', async ({ broken }) => {});
 ",
   )
-  .await;
+  .await?;
   let bridge = Arc::new(MockBridge::default());
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "needs broken")),
+    spec(title_index(&h.collected, "needs broken")?),
     world("needs broken"),
     bridge,
   )
@@ -616,10 +637,11 @@ extended('needs broken', async ({ broken }) => {});
     "got: {}",
     err.message
   );
+  Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn snapshot_matchers_cross_the_bridge() {
+async fn snapshot_matchers_cross_the_bridge() -> TestResult {
   let h = harness(
     r"import { test, expect } from '@ferridriver/test';
 
@@ -629,25 +651,26 @@ test('value snapshot', async () => {
 });
 ",
   )
-  .await;
+  .await?;
   let bridge = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "value snapshot")),
+    spec(title_index(&h.collected, "value snapshot")?),
     world("value snapshot"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect("snapshot test passes");
   let calls = bridge.state(|s| s.snapshot_calls.clone());
   assert_eq!(calls, ["text value name=greeting", "text value name=<auto>"]);
+  Ok(())
 }
 
 /// A first parameter naming nothing is Playwright's load error, not an
 /// `undefined` the body then fails on somewhere unrelated
 /// (`common/fixtures.ts:250-256` via `common/poolBuilder.ts:66-71`).
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_first_parameter_name_is_reported_by_name() {
+async fn an_unknown_first_parameter_name_is_reported_by_name() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -656,22 +679,23 @@ test('asks for nothing anyone registered', async ({ deployment }) => {
 });
 ",
   )
-  .await;
+  .await?;
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "asks for nothing anyone registered")),
+    spec(title_index(&h.collected, "asks for nothing anyone registered")?),
     world("asks for nothing anyone registered"),
     Arc::new(MockBridge::default()),
   )
   .await
   .expect_err("an unknown parameter must fail the test");
   assert_eq!(err.message, "Test has unknown parameter \"deployment\".");
+  Ok(())
 }
 
 /// A hook is checked too, and the message names the hook the way
 /// Playwright does.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_hook_parameter_names_the_hook() {
+async fn an_unknown_hook_parameter_names_the_hook() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -680,8 +704,8 @@ test.beforeEach(async ({ notAFixture }) => { void notAFixture; });
 test('body is fine', async ({ browserName }) => { void browserName; });
 ",
   )
-  .await;
-  let mut s = spec(title_index(&h.collected, "body is fine"));
+  .await?;
+  let mut s = spec(title_index(&h.collected, "body is fine")?);
   s.hooks_before = h
     .collected
     .hooks
@@ -700,13 +724,14 @@ test('body is fine', async ({ browserName }) => { void browserName; });
   .await
   .expect_err("an unknown hook parameter must fail the test");
   assert_eq!(err.message, "beforeEach hook has unknown parameter \"notAFixture\".");
+  Ok(())
 }
 
 /// A built-in the world in hand does not carry is still a known name.
 /// A `beforeAll` world has no `page`; answering "unknown parameter" for
 /// it would be a worse lie than the `undefined` this check replaces.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_builtin_absent_from_this_world_is_not_an_unknown_parameter() {
+async fn a_builtin_absent_from_this_world_is_not_an_unknown_parameter() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -715,21 +740,22 @@ test('names a built-in this world lacks', async ({ page }) => {
 });
 ",
   )
-  .await;
+  .await?;
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "names a built-in this world lacks")),
+    spec(title_index(&h.collected, "names a built-in this world lacks")?),
     world("names a built-in this world lacks"),
     Arc::new(MockBridge::default()),
   )
   .await
   .expect("a built-in name must pass the check whatever this world carries");
+  Ok(())
 }
 
 /// And a registered custom fixture passes, so the check cannot be
 /// passing everything or failing everything.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_registered_fixture_passes_the_check() {
+async fn a_registered_fixture_passes_the_check() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -740,15 +766,16 @@ t('asks for what it registered', async ({ deployment }) => {
 });
 ",
   )
-  .await;
+  .await?;
   run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "asks for what it registered")),
+    spec(title_index(&h.collected, "asks for what it registered")?),
     world("asks for what it registered"),
     Arc::new(MockBridge::default()),
   )
   .await
   .expect("a registered fixture resolves");
+  Ok(())
 }
 
 /// `test.skip(callback)` at describe scope: the callback is kept, then
@@ -756,7 +783,7 @@ t('asks for what it registered', async ({ deployment }) => {
 /// skips the test. Playwright's `suite._modifiers`
 /// (`common/testType.ts:232`, evaluated at `worker/workerMain.ts:545`).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_describe_scope_callback_modifier_skips_with_its_fixtures() {
+async fn a_describe_scope_callback_modifier_skips_with_its_fixtures() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -766,13 +793,13 @@ test.describe('group', () => {
 });
 ",
   )
-  .await;
+  .await?;
   let bridge = Arc::new(MockBridge::default());
   let err = run_test(
     &h.session.vm_handle(),
-    spec_with_modifiers(&h, "is skipped"),
+    spec_with_modifiers(&h, "is skipped")?,
     world("is skipped"),
-    bridge.clone(),
+    Arc::<MockBridge>::clone(&bridge),
   )
   .await
   .expect_err("the modifier must abort the test");
@@ -782,11 +809,12 @@ test.describe('group', () => {
     err.message
   );
   assert!(bridge.state(|s| s.skipped), "the bridge must be told it is a skip");
+  Ok(())
 }
 
 /// The same modifier whose callback answers false leaves the test alone.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_falsy_callback_modifier_runs_the_test() {
+async fn a_falsy_callback_modifier_runs_the_test() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -798,20 +826,21 @@ test.describe('group', () => {
 });
 ",
   )
-  .await;
+  .await?;
   run_test(
     &h.session.vm_handle(),
-    spec_with_modifiers(&h, "runs"),
+    spec_with_modifiers(&h, "runs")?,
     world("runs"),
     Arc::new(MockBridge::default()),
   )
   .await
   .expect("a false condition must not skip");
+  Ok(())
 }
 
 /// A modifier reaches the bridge for the non-aborting kinds too.
 #[tokio::test(flavor = "multi_thread")]
-async fn callback_modifiers_cover_fail_and_slow() {
+async fn callback_modifiers_cover_fail_and_slow() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -826,13 +855,13 @@ test.describe('slow', () => {
 });
 ",
   )
-  .await;
+  .await?;
   let failing = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec_with_modifiers(&h, "expected to fail"),
+    spec_with_modifiers(&h, "expected to fail")?,
     world("expected to fail"),
-    failing.clone(),
+    Arc::<MockBridge>::clone(&failing),
   )
   .await
   .expect("fail does not abort the body");
@@ -841,20 +870,21 @@ test.describe('slow', () => {
   let slow = Arc::new(MockBridge::default());
   run_test(
     &h.session.vm_handle(),
-    spec_with_modifiers(&h, "is slow"),
+    spec_with_modifiers(&h, "is slow")?,
     world("is slow"),
-    slow.clone(),
+    Arc::<MockBridge>::clone(&slow),
   )
   .await
   .expect("slow does not abort the body");
   assert!(slow.state(|s| s.slow), "slow must reach the bridge");
+  Ok(())
 }
 
 /// A callback inside a running test is refused with Playwright's own
 /// message: the fixtures it would read are already resolved by then, so
 /// accepting it would silently do nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_callback_modifier_inside_a_test_body_is_refused() {
+async fn a_callback_modifier_inside_a_test_body_is_refused() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -863,10 +893,10 @@ test('uses a callback at the wrong scope', async () => {
 });
 ",
   )
-  .await;
+  .await?;
   let err = run_test(
     &h.session.vm_handle(),
-    spec(title_index(&h.collected, "uses a callback at the wrong scope")),
+    spec(title_index(&h.collected, "uses a callback at the wrong scope")?),
     world("uses a callback at the wrong scope"),
     Arc::new(MockBridge::default()),
   )
@@ -879,13 +909,14 @@ test('uses a callback at the wrong scope', async () => {
     "expected Playwright's message, got: {}",
     err.message
   );
+  Ok(())
 }
 
 /// The static form at describe scope annotates the suite instead of
 /// throwing "can only be called while a test is running", and a falsy
 /// condition registers nothing at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_static_form_at_describe_scope_annotates_the_suite() {
+async fn the_static_form_at_describe_scope_annotates_the_suite() -> TestResult {
   let h = harness(
     r"import { test } from '@ferridriver/test';
 
@@ -900,23 +931,26 @@ test.describe('untouched', () => {
 });
 ",
   )
-  .await;
-  let suite_of = |title: &str| {
-    let t = &h.collected.tests[title_index(&h.collected, title)];
-    t.suite
-      .map(|i| h.collected.suites[i].annotations.clone())
-      .unwrap_or_default()
+  .await?;
+  let suite_of = |title: &str| -> Result<_, String> {
+    let t = &h.collected.tests[title_index(&h.collected, title)?];
+    Ok(
+      t.suite
+        .map(|i| h.collected.suites[i].annotations.clone())
+        .unwrap_or_default(),
+    )
   };
-  let annotated = suite_of("a");
+  let annotated = suite_of("a")?;
   assert!(
     annotated
       .iter()
       .any(|a| a.kind == "skip" && a.value.as_deref() == Some("not yet")),
     "expected a skip annotation carrying its reason, got: {annotated:?}"
   );
+  let unannotated = suite_of("b")?;
   assert!(
-    suite_of("b").is_empty(),
-    "a falsy condition must leave no annotation: {:?}",
-    suite_of("b")
+    unannotated.is_empty(),
+    "a falsy condition must leave no annotation: {unannotated:?}"
   );
+  Ok(())
 }

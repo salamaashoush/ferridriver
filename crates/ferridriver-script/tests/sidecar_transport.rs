@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! The sidecar wire contract end to end: a child reading requests on fd 3
 //! and answering on fd 4. On Windows those are C runtime descriptors the
 //! child's runtime inherits, which `sidecar_echo` adopts through

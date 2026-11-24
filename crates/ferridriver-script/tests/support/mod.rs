@@ -4,15 +4,13 @@
 //! BDD-world tests both run against: one recorder, so a change to the
 //! bridge contract cannot be satisfied differently in two places.
 
-#![allow(dead_code)]
-
 use std::sync::Mutex;
 
 use ferridriver_test::host::{BridgeFuture, SnapshotTarget, TestHostBridge};
 use ferridriver_test::step::{StepFrame, StepFuture, StepOutcome, StepSpec, StepStarted};
 
 #[derive(Default)]
-pub struct MockBridgeState {
+pub(crate) struct MockBridgeState {
   pub attachments: Vec<(String, String, Vec<u8>)>,
   pub annotations: Vec<(String, Option<String>)>,
   pub steps: Vec<String>,
@@ -34,10 +32,10 @@ pub struct MockBridgeState {
 }
 
 #[derive(Default)]
-pub struct MockBridge(Mutex<MockBridgeState>);
+pub(crate) struct MockBridge(Mutex<MockBridgeState>);
 
 impl MockBridge {
-  pub fn state<R>(&self, f: impl FnOnce(&mut MockBridgeState) -> R) -> R {
+  pub(crate) fn state<R>(&self, f: impl FnOnce(&mut MockBridgeState) -> R) -> R {
     f(&mut self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
   }
 }
@@ -226,7 +224,7 @@ impl TestHostBridge for MockBridge {
   }
 }
 
-pub fn snapshot_target_kind(target: &SnapshotTarget) -> &'static str {
+pub(crate) fn snapshot_target_kind(target: &SnapshotTarget) -> &'static str {
   match target {
     SnapshotTarget::Locator(_) => "locator",
     SnapshotTarget::Page(_) => "page",

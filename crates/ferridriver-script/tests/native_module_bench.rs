@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Re-runnable native-module-loader microbench, ignored by default so
 //! it stays out of the green gate; run explicitly:
 //!
@@ -41,8 +40,7 @@ fn ctx(dir: &std::path::Path) -> RunContext {
 fn report(label: &str, mut samples: Vec<f64>) {
   samples.sort_by(f64::total_cmp);
   let n = samples.len();
-  #[allow(clippy::cast_precision_loss)]
-  let mean = samples.iter().sum::<f64>() / n as f64;
+  let mean = samples.iter().sum::<f64>() / f64::from(u32::try_from(n).unwrap_or(u32::MAX));
   let p50 = samples[n / 2];
   let p95 = samples[(n * 95 / 100).min(n - 1)];
   eprintln!("{label:<44} n={n:<4} mean={mean:>9.3}ms  p50={p50:>9.3}ms  p95={p95:>9.3}ms");
@@ -50,12 +48,16 @@ fn report(label: &str, mut samples: Vec<f64>) {
 
 #[tokio::test]
 #[ignore = "microbench, run explicitly with --ignored --nocapture"]
+#[expect(
+  unsafe_code,
+  reason = "the bytecode cache is switched off only through the environment, read once into a process-wide OnceLock"
+)]
 async fn native_module_loader_microbench() {
-  // SAFETY: set before any cache access in this single-test binary.
-  #[allow(unsafe_code)]
+  // SAFETY: this binary holds this one test on a current-thread runtime, and
+  // nothing has read the environment concurrently by the time it runs.
   unsafe {
     std::env::set_var("FERRIDRIVER_NO_BYTECODE_CACHE", "1");
-  };
+  }
 
   let dir = tempfile::tempdir().expect("tempdir");
   std::fs::write(dir.path().join("data.txt"), "x").expect("data");
