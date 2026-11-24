@@ -669,7 +669,7 @@ impl PopupsInFlight {
 
 /// One popup counted in its browser's [`PopupsInFlight`]; dropping the
 /// last handle to it takes it off the count.
-pub struct PopupClaim(Arc<InFlight>);
+pub(crate) struct PopupClaim(Arc<InFlight>);
 
 impl Drop for PopupClaim {
   fn drop(&mut self) {
