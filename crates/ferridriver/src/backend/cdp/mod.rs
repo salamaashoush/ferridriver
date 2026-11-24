@@ -924,7 +924,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     injected_script
       .injected
       .store(true, std::sync::atomic::Ordering::Relaxed);
-    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
+    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(target_id)));
     let page = CdpPage {
       transport: Arc::clone(transport),
       session_id: Some(Arc::from(session_id)),
