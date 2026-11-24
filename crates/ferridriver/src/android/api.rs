@@ -958,10 +958,10 @@ fn web_view_sockets(listing: &str) -> Vec<(String, Option<u32>)> {
       continue;
     };
     let name = name.trim();
-    let Some(at) = name.find(MARKER) else {
+    let Some((_, after)) = name.split_once(MARKER) else {
       continue;
     };
-    let digits: String = name[at + MARKER.len()..]
+    let digits: String = after
       .trim_start_matches('_')
       .chars()
       .take_while(char::is_ascii_digit)

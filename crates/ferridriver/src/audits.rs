@@ -776,20 +776,11 @@ fn anchor_is_uncrawlable(anchor: &Anchor, document_url: &str) -> bool {
 /// Lighthouse's `/javascript:void(\(|)0(\)|)/`, unanchored, over the
 /// whitespace-stripped href.
 fn is_javascript_void(raw_href: &str) -> bool {
-  let bytes = raw_href.as_bytes();
-  for start in 0..bytes.len() {
-    let rest = &raw_href[start..];
-    let Some(rest) = rest.strip_prefix("javascript:void") else {
-      continue;
-    };
-    let rest = rest.strip_prefix('(').unwrap_or(rest);
-    let Some(rest) = rest.strip_prefix('0') else {
-      continue;
-    };
-    let _ = rest.strip_prefix(')');
-    return true;
-  }
-  false
+  raw_href.match_indices("javascript:void").any(|(at, needle)| {
+    raw_href
+      .get(at + needle.len()..)
+      .is_some_and(|rest| rest.strip_prefix('(').unwrap_or(rest).starts_with('0'))
+  })
 }
 
 /// `new URL(href, base)`: absolute, or relative to the document.
@@ -1209,32 +1200,24 @@ fn is_size_candidate(image: &Image) -> bool {
 
 /// Lighthouse's `/ \d+(\.\d+)?x/` over the `srcset`.
 fn has_density_descriptor(srcset: &str) -> bool {
-  let bytes = srcset.as_bytes();
-  for (index, byte) in bytes.iter().enumerate() {
-    if *byte != b' ' {
-      continue;
+  let is_digit = |c: char| c.is_ascii_digit();
+  srcset.split(' ').skip(1).any(|rest| {
+    let after_digits = rest.trim_start_matches(is_digit);
+    if after_digits.len() == rest.len() {
+      return false;
     }
-    let rest = &srcset[index + 1..];
-    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    if digits == 0 {
-      continue;
-    }
-    let after_digits = &rest[digits..];
     let after_fraction = match after_digits.strip_prefix('.') {
       Some(fraction) => {
-        let count = fraction.len() - fraction.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if count == 0 {
-          continue;
+        let after = fraction.trim_start_matches(is_digit);
+        if after.len() == fraction.len() {
+          return false;
         }
-        &fraction[count..]
+        after
       },
       None => after_digits,
     };
-    if after_fraction.starts_with('x') {
-      return true;
-    }
-  }
-  false
+    after_fraction.starts_with('x')
+  })
 }
 
 fn is_visible(rect: &Rect, viewport: &Viewport) -> bool {
@@ -1250,8 +1233,9 @@ fn is_smaller_than_viewport(rect: &Rect, viewport: &Viewport) -> bool {
 }
 
 fn elide_data_uri(url: &str) -> String {
-  if url.starts_with("data:") && url.len() > 100 {
-    format!("{}\u{2026}", &url[..99])
+  if url.starts_with("data:") && url.chars().nth(100).is_some() {
+    let head: String = url.chars().take(99).collect();
+    format!("{head}\u{2026}")
   } else {
     url.to_string()
   }
@@ -1490,10 +1474,7 @@ const MONTHS: [&str; 12] = [
 
 /// `2010-06-25`, optionally `T15:00:00` and a zone.
 fn parse_iso_8601(value: &str) -> Option<i64> {
-  let (date, rest) = match value.find(['t', ' ']) {
-    Some(at) => (&value[..at], &value[at + 1..]),
-    None => (value, ""),
-  };
+  let (date, rest) = value.split_once(['t', ' ']).unwrap_or((value, ""));
   let mut parts = date.split('-');
   let year: i64 = parts.next()?.parse().ok()?;
   let month: i64 = parts.next()?.parse().ok()?;
@@ -1528,10 +1509,11 @@ fn parse_rfc_1123(value: &str) -> Option<i64> {
 /// Split a time from the zone that may follow it with no separator
 /// (`15:00:00z`, `15:00:00+01:00`).
 fn split_zone(value: &str) -> (&str, &str) {
-  match value.find(['z', '+']).or_else(|| value.rfind('-')) {
-    Some(at) => (&value[..at], &value[at..]),
-    None => (value, ""),
-  }
+  value
+    .find(['z', '+'])
+    .or_else(|| value.rfind('-'))
+    .and_then(|at| value.split_at_checked(at))
+    .unwrap_or((value, ""))
 }
 
 /// `hh:mm` or `hh:mm:ss`, with any fractional seconds discarded.
@@ -1584,8 +1566,9 @@ fn parse_numeric_zone(zone: &str) -> Option<i64> {
   if digits.len() != 4 {
     return None;
   }
-  let hours: i64 = digits[..2].parse().ok()?;
-  let minutes: i64 = digits[2..].parse().ok()?;
+  let (hours, minutes) = digits.split_at_checked(2)?;
+  let hours: i64 = hours.parse().ok()?;
+  let minutes: i64 = minutes.parse().ok()?;
   Some(sign * (hours * 3600 + minutes * 60))
 }
 
@@ -1629,6 +1612,22 @@ pub fn robots_txt_url(document_url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn javascript_void_after_a_multibyte_char() {
+    assert!(is_javascript_void("\u{e9}javascript:void(0)"));
+    assert!(is_javascript_void("javascript:void0"));
+    assert!(!is_javascript_void("\u{e9}javascript:voida"));
+  }
+
+  #[test]
+  fn elide_data_uri_cuts_on_a_char_boundary() {
+    let url = format!("data:text/plain,{}", "\u{e9}".repeat(120));
+    let elided = elide_data_uri(&url);
+    assert_eq!(elided.chars().count(), 100);
+    assert!(elided.ends_with('\u{2026}'));
+    assert_eq!(elide_data_uri("data:,short"), "data:,short");
+  }
 
   fn meta(name: &str, content: &str) -> Meta {
     Meta {

@@ -58,15 +58,14 @@ impl Totp {
   /// A secret that is not base32, or a link that is not a TOTP link.
   pub fn parse(text: &str) -> Result<Self> {
     let text = text.trim();
-    if !text.starts_with("otpauth://") {
+    let Some(rest) = text.strip_prefix("otpauth://") else {
       return Ok(Self {
         secret: base32(text)?,
         digits: 6,
         period: 30,
         algorithm: Algorithm::Sha1,
       });
-    }
-    let rest = &text["otpauth://".len()..];
+    };
     let (kind, rest) = rest.split_once('/').unwrap_or((rest, ""));
     if !kind.eq_ignore_ascii_case("totp") {
       return Err(FerriError::invalid_argument(
@@ -176,8 +175,6 @@ fn base32(text: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-  #![allow(clippy::unwrap_used)]
-
   use super::*;
 
   fn totp(secret: &[u8], digits: u32, algorithm: Algorithm) -> Totp {

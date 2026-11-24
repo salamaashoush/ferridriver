@@ -333,15 +333,11 @@ fn parse_iso_date_ms(text: &str) -> Option<f64> {
   if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
     return None;
   }
-  let mut rest = &s[10..];
+  let mut rest = s.get(10..)?;
   let (mut hour, mut minute, mut second, mut millis): (u32, u32, u32, f64) = (0, 0, 0, 0.0);
   let mut offset_minutes: i64 = 0;
   if !rest.is_empty() {
-    let sep = rest.chars().next()?;
-    if sep != 'T' && sep != 't' && sep != ' ' {
-      return None;
-    }
-    rest = &rest[1..];
+    rest = rest.strip_prefix(['T', 't', ' '])?;
     // Split the trailing timezone designator first.
     let (time_part, tz_part) = match rest.find(['Z', 'z', '+']) {
       Some(idx) => rest.split_at(idx),
@@ -359,13 +355,7 @@ fn parse_iso_date_ms(text: &str) -> Option<f64> {
       _ => return None,
     }
   }
-  Some(civil_to_utc_ms(
-    year,
-    month,
-    day,
-    (hour, minute, second, millis),
-    offset_minutes,
-  ))
+  civil_to_utc_ms(year, month, day, (hour, minute, second, millis), offset_minutes)
 }
 
 /// `HH:MM[:SS[.fraction]]` → (hour, minute, second, millis).
@@ -390,7 +380,7 @@ fn parse_hms(time_part: &str) -> Option<(u32, u32, u32, f64)> {
   }
   let mut millis = 0.0;
   if !frac.is_empty() {
-    let digits = &frac[1..];
+    let digits = frac.strip_prefix('.')?;
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
       return None;
     }
@@ -403,13 +393,13 @@ fn parse_hms(time_part: &str) -> Option<(u32, u32, u32, f64)> {
 /// `±HH:MM` / `±HHMM` / `±HH` → signed minutes east of UTC.
 fn parse_tz_offset(tz_part: &str) -> Option<i64> {
   let sign = tz_part.chars().next()?;
-  if sign != '+' && sign != '-' {
-    return None;
-  }
-  let tz = &tz_part[1..];
-  let (oh, om) = match tz.find(':') {
-    Some(idx) => (tz[..idx].parse::<i64>().ok()?, tz[idx + 1..].parse::<i64>().ok()?),
-    None if tz.len() == 4 => (tz[..2].parse::<i64>().ok()?, tz[2..].parse::<i64>().ok()?),
+  let tz = tz_part.strip_prefix(['+', '-'])?;
+  let (oh, om) = match tz.split_once(':') {
+    Some((oh, om)) => (oh.parse::<i64>().ok()?, om.parse::<i64>().ok()?),
+    None if tz.len() == 4 => {
+      let (oh, om) = tz.split_at_checked(2)?;
+      (oh.parse::<i64>().ok()?, om.parse::<i64>().ok()?)
+    },
     None if tz.len() == 2 => (tz.parse::<i64>().ok()?, 0),
     _ => return None,
   };
@@ -420,14 +410,12 @@ fn parse_tz_offset(tz_part: &str) -> Option<i64> {
   Some(offset_minutes)
 }
 
-fn civil_to_utc_ms(year: i64, month: u32, day: u32, hms: (u32, u32, u32, f64), offset_minutes: i64) -> f64 {
+fn civil_to_utc_ms(year: i64, month: u32, day: u32, hms: (u32, u32, u32, f64), offset_minutes: i64) -> Option<f64> {
   let (hour, minute, second, millis) = hms;
-  let days = days_from_civil(year, month, day);
-  let secs = days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second);
-  // Civil-date seconds stay far below 2^53 — exact in f64.
-  #[allow(clippy::cast_precision_loss)]
-  let utc_ms = secs as f64 * 1000.0 + millis - (offset_minutes as f64) * 60_000.0;
-  utc_ms
+  let days = i32::try_from(days_from_civil(year, month, day)).ok()?;
+  let offset_minutes = i32::try_from(offset_minutes).ok()?;
+  let secs = f64::from(days) * 86_400.0 + f64::from(hour) * 3600.0 + f64::from(minute) * 60.0 + f64::from(second);
+  Some(secs * 1000.0 + millis - f64::from(offset_minutes) * 60_000.0)
 }
 
 /// The common non-ISO shapes V8's `new Date(string)` accepts — month
@@ -502,13 +490,7 @@ fn parse_human_date_ms(text: &str) -> Option<f64> {
       None => return None,
     }
   }
-  Some(civil_to_utc_ms(
-    year,
-    month,
-    day,
-    (hour, minute, second, millis),
-    offset_minutes,
-  ))
+  civil_to_utc_ms(year, month, day, (hour, minute, second, millis), offset_minutes)
 }
 
 fn month_from_name(token: &str) -> Option<u32> {
