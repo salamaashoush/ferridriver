@@ -28,10 +28,11 @@ use crate::error::{FerriError, Result};
 
 /// Truncate a string for logging, appending "..." if truncated.
 fn truncate_for_log(s: &str, max: usize) -> String {
-  if s.len() <= max {
-    s.to_string()
+  let (head, tail) = s.split_at(s.floor_char_boundary(max));
+  if tail.is_empty() {
+    head.to_string()
   } else {
-    format!("{}...", &s[..max])
+    format!("{head}...")
   }
 }
 
@@ -183,7 +184,7 @@ fn rtt_stats_enabled() -> bool {
       // SAFETY: atexit takes a `extern "C" fn()` and stores it in a
       // process-global list. The handler reads from a `Mutex<RttStats>`
       // owned by a `OnceLock` so its lifetime spans process exit.
-      #[allow(unsafe_code)]
+      #[expect(unsafe_code, reason = "libc::atexit has no safe wrapper in std or rustix")]
       unsafe {
         libc::atexit(rtt_atexit_dump);
       }
@@ -562,13 +563,13 @@ impl IframeTargets {
         return;
       }
       self.attached.retain(|old| old["params"]["sessionId"] != *session);
-      self.attached.push(event.clone());
+      self.attached.push(Arc::clone(event));
     } else if let Some(session) = session.as_str() {
       self.forget_session(session);
     }
     self
       .taps
-      .retain(|tap| tap.send(IframeTargetEvent::Target(event.clone())).is_ok());
+      .retain(|tap| tap.send(IframeTargetEvent::Target(Arc::clone(event))).is_ok());
   }
 
   fn forget_session(&mut self, session: &str) {
@@ -589,7 +590,7 @@ impl IframeTargets {
 }
 
 impl CdpDispatcher {
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
     Self {
       disconnected: std::sync::atomic::AtomicBool::new(false),
@@ -608,14 +609,14 @@ impl CdpDispatcher {
     }
   }
 
-  pub fn tap_iframe_targets(&self) -> IframeTargetSubscription {
+  pub(crate) fn tap_iframe_targets(&self) -> IframeTargetSubscription {
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut targets = lock_or_recover(&self.iframe_targets);
     if self.is_disconnected() {
       let _ = sender.send(IframeTargetEvent::Closed);
     } else {
       for event in &targets.attached {
-        let _ = sender.send(IframeTargetEvent::Target(event.clone()));
+        let _ = sender.send(IframeTargetEvent::Target(Arc::clone(event)));
       }
       targets.taps.push(sender.clone());
     }
@@ -625,7 +626,7 @@ impl CdpDispatcher {
     }
   }
 
-  pub fn tap_event_methods(
+  pub(crate) fn tap_event_methods(
     &self,
     methods: &'static [&'static str],
     session_id: Option<&str>,
@@ -647,7 +648,10 @@ impl CdpDispatcher {
   /// Lossless, wire-ordered tap of EVERY event carried by exactly one
   /// session (strict match — browser-scoped events do not leak into a
   /// page-session stream). Backs the public `CDPSession` event surface.
-  pub fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+  pub(crate) fn tap_all_events(
+    &self,
+    session_id: &str,
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut taps = lock_or_recover(&self.wildcard_taps);
     if !self.is_disconnected() {
@@ -660,7 +664,7 @@ impl CdpDispatcher {
     rx
   }
 
-  pub fn tap_event_domains(
+  pub(crate) fn tap_event_domains(
     &self,
     domains: &'static [&'static str],
     session_id: Option<&str>,
@@ -679,7 +683,7 @@ impl CdpDispatcher {
     rx
   }
 
-  pub fn register_lifecycle_tracker(
+  pub(crate) fn register_lifecycle_tracker(
     &self,
     session_id: &str,
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
@@ -708,7 +712,7 @@ impl CdpDispatcher {
 
   /// Drop the lifecycle tracker and every tap belonging to
   /// `session_id`. See [`CdpTransport::unregister_session`].
-  pub fn unregister_session(&self, session_id: &str) {
+  pub(crate) fn unregister_session(&self, session_id: &str) {
     if session_id.is_empty() {
       return;
     }
@@ -729,7 +733,7 @@ impl CdpDispatcher {
     );
   }
 
-  pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
+  pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
     self
       .event_tx
       .load()
@@ -737,7 +741,7 @@ impl CdpDispatcher {
       .map_or_else(|| broadcast::channel(1).1, |sender| sender.subscribe())
   }
 
-  pub fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
+  pub(crate) fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
     let receiver = match self.method_event_txs.entry(method) {
       Entry::Occupied(entry) => entry.get().subscribe(),
       Entry::Vacant(entry) => {
@@ -752,7 +756,7 @@ impl CdpDispatcher {
     receiver
   }
 
-  pub fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
+  pub(crate) fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
     let receiver = match self.domain_event_txs.entry(domain) {
       Entry::Occupied(entry) => entry.get().subscribe(),
       Entry::Vacant(entry) => {
@@ -776,11 +780,11 @@ impl CdpDispatcher {
   /// OOM-killed leaves its instance entry behind otherwise, and every
   /// later session routed to that name gets `TargetClosed` forever
   /// instead of a fresh browser.
-  pub fn is_disconnected(&self) -> bool {
+  pub(crate) fn is_disconnected(&self) -> bool {
     self.disconnected.load(std::sync::atomic::Ordering::Acquire)
   }
 
-  pub fn fail_all_pending(&self, reason: &str) {
+  pub(crate) fn fail_all_pending(&self, reason: &str) {
     self.disconnected.store(true, std::sync::atomic::Ordering::Release);
     self.event_tx.store(None);
     self.method_event_txs.clear();
@@ -823,7 +827,7 @@ impl CdpDispatcher {
   /// timeout. Without this the entry lives in the map until transport
   /// teardown — a browser that stops responding but keeps the pipe open
   /// grows the map by one entry per retried command.
-  pub fn forget_pending(&self, id: u64) {
+  pub(crate) fn forget_pending(&self, id: u64) {
     self.pending.remove(&id);
   }
 
@@ -858,7 +862,7 @@ impl CdpDispatcher {
   /// writer task that has already stopped reading, and the caller waits
   /// the full 30s response timeout for an answer that can never come —
   /// which is exactly what every call did after an external browser kill.
-  pub fn build_command(
+  pub(crate) fn build_command(
     &self,
     session_id: Option<&str>,
     method: &str,
@@ -917,7 +921,7 @@ impl CdpDispatcher {
   }
 
   /// Dispatch a raw CDP message (response or event). Called by the reader task.
-  pub fn dispatch_message(&self, raw: &[u8]) {
+  pub(crate) fn dispatch_message(&self, raw: &[u8]) {
     if self.is_disconnected() {
       return;
     }
@@ -932,7 +936,7 @@ impl CdpDispatcher {
           Ok(serde_json::Value::Object(serde_json::Map::new()))
         } else {
           let val: serde_json::Value =
-            serde_json::from_slice(result_field).unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            serde_json::from_slice(result_field).unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
           Ok(val)
         }
       } else {
@@ -1053,10 +1057,10 @@ impl CdpDispatcher {
         send_to_taps(&mut lock_or_recover(&self.wildcard_taps), sid_str, &msg);
       }
       if needs_global && let Some(sender) = global.as_ref() {
-        let _ = sender.send(msg.clone());
+        let _ = sender.send(Arc::clone(&msg));
       }
       if needs_method && let Some(tx) = method_tx {
-        let _ = tx.send(msg.clone());
+        let _ = tx.send(Arc::clone(&msg));
       }
       if needs_domain && let Some(tx) = domain_tx {
         let _ = tx.send(msg);
@@ -1327,7 +1331,7 @@ mod tests {
         dispatcher.dispatch_message(&serde_json::to_vec(&retired).unwrap());
       }
       let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-      let observed = seen.clone();
+      let observed = Arc::clone(&seen);
       dispatcher.register_lifecycle_tracker(
         "session",
         std::sync::Arc::new(std::sync::Mutex::new(super::super::LifecycleState::new())),
@@ -1436,7 +1440,7 @@ mod tests {
     let mut global_handles = Vec::with_capacity(LISTENERS);
     for _ in 0..LISTENERS {
       let mut rx = global.subscribe_events();
-      let wakeups = global_wakeups.clone();
+      let wakeups = Arc::clone(&global_wakeups);
       global_handles.push(tokio::spawn(async move {
         for _ in 0..EVENTS {
           let event = rx.recv().await.expect("global event");
@@ -1470,7 +1474,7 @@ mod tests {
     ];
     let routed_wakeups = Arc::new(AtomicUsize::new(0));
     let mut network_rx = routed.subscribe_event_domain("Network");
-    let wakeups = routed_wakeups.clone();
+    let wakeups = Arc::clone(&routed_wakeups);
     let network_handle = tokio::spawn(async move {
       for _ in 0..EVENTS {
         let event = network_rx.recv().await.expect("routed network event");
@@ -1564,7 +1568,7 @@ mod tests {
     let notify = Arc::new(tokio::sync::Notify::new());
     dispatcher.register_lifecycle_tracker(
       session_id,
-      state.clone(),
+      Arc::clone(&state),
       notify,
       frame_state_observer(Arc::default(), crate::events::EventEmitter::new()),
     );
@@ -1578,7 +1582,7 @@ mod tests {
     let cache = Arc::default();
     dispatcher.register_lifecycle_tracker(
       "s1",
-      state.clone(),
+      Arc::clone(&state),
       Arc::default(),
       frame_state_observer(Arc::clone(&cache), crate::events::EventEmitter::new()),
     );
