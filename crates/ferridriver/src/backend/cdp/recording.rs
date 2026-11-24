@@ -19,10 +19,10 @@ use super::transport::CdpTransport;
 use crate::error::{FerriError, Result};
 
 /// A finished recording: the MP4, or why it could not be kept.
-pub type Recorded = std::result::Result<Arc<Vec<u8>>, String>;
+pub(crate) type Recorded = std::result::Result<Arc<Vec<u8>>, String>;
 
 #[derive(Debug, Clone, Copy)]
-pub struct RecordingParams {
+pub(crate) struct RecordingParams {
   pub max_width: u32,
   pub max_height: u32,
   pub frame_rate: u32,
@@ -30,7 +30,7 @@ pub struct RecordingParams {
 
 /// The page's native recording, shared by every handle to the page.
 #[derive(Clone, Default)]
-pub struct ScreenRecorder {
+pub(crate) struct ScreenRecorder {
   active: Arc<Mutex<Option<Active>>>,
 }
 
@@ -50,7 +50,7 @@ impl ScreenRecorder {
   /// will not: a Chrome before M153 lacks the command, and a page records
   /// one recording at a time. The caller records from the screencast
   /// instead.
-  pub async fn start<T: CdpTransport>(
+  pub(crate) async fn start<T: CdpTransport>(
     &self,
     transport: &T,
     target_id: &str,
@@ -115,7 +115,7 @@ impl ScreenRecorder {
   /// Stops the recording, if one runs, and hands its MP4 to whoever
   /// started it. Answers at once when nothing records, so every close path
   /// can call it.
-  pub async fn finish<T: CdpTransport>(&self, transport: &T) {
+  pub(crate) async fn finish<T: CdpTransport>(&self, transport: &T) {
     let Some(active) = self.active.lock().await.take() else {
       return;
     };

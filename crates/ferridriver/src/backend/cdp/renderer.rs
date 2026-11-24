@@ -14,15 +14,15 @@ pub(super) struct AdoptedPages<T: CdpWrap> {
 }
 
 impl<T: CdpWrap> AdoptedPages<T> {
-  pub fn new() -> Self {
+  pub(crate) fn new() -> Self {
     Self { pages: Vec::new() }
   }
 
-  pub fn track(&mut self, page: CdpPage<T>) {
+  pub(crate) fn track(&mut self, page: CdpPage<T>) {
     self.pages.push(page);
   }
 
-  pub fn finish(mut self) -> Vec<crate::backend::AnyPage> {
+  pub(crate) fn finish(mut self) -> Vec<crate::backend::AnyPage> {
     self.pages.drain(..).map(T::wrap_page).collect()
   }
 }
@@ -309,12 +309,12 @@ impl<T: CdpWrap> CdpPage<T> {
   ) -> super::transport::FrameStateObserver {
     let observer = match &root {
       Some((frame, parent)) => super::transport::frame_state_observer_for_renderer(
-        self.frame_cache.clone(),
+        Arc::clone(&self.frame_cache),
         self.events.clone(),
         frame.clone(),
         parent.clone(),
       ),
-      None => super::transport::frame_state_observer(self.frame_cache.clone(), self.events.clone()),
+      None => super::transport::frame_state_observer(Arc::clone(&self.frame_cache), self.events.clone()),
     };
     let renderers = Arc::downgrade(&self.renderers);
     let contexts = self.context_observer();
@@ -405,14 +405,14 @@ impl<T: CdpWrap> CdpPage<T> {
 
   fn renderer_page(&self, renderer: &Renderer) -> Self {
     let mut page = self.clone();
-    page.session_id = Some(renderer.session.clone());
-    page.main_frame_id = renderer.main_frame.clone();
-    page.frame_contexts = renderer.contexts.clone();
+    page.session_id = Some(Arc::clone(&renderer.session));
+    page.main_frame_id = Arc::clone(&renderer.main_frame);
+    page.frame_contexts = Arc::clone(&renderer.contexts);
     page.utility_contexts = Arc::default();
-    page.frame_contexts_notify = renderer.contexts_notify.clone();
-    page.injected_script = renderer.injected.clone();
-    page.fetch = renderer.fetch.clone();
-    page.listener_tasks = renderer.tasks.clone();
+    page.frame_contexts_notify = Arc::clone(&renderer.contexts_notify);
+    page.injected_script = Arc::clone(&renderer.injected);
+    page.fetch = Arc::clone(&renderer.fetch);
+    page.listener_tasks = Arc::clone(&renderer.tasks);
     page
   }
 
@@ -433,7 +433,7 @@ impl<T: CdpWrap> CdpPage<T> {
         if let Some(renderer) = sessions.get(&frame)
           && !renderer.swapped_in.load(Ordering::Acquire)
         {
-          found = Some(renderer.clone());
+          found = Some(Arc::clone(renderer));
           break;
         }
         current = cache.parent_id(&frame).map(|parent| parent.to_string());
@@ -592,7 +592,7 @@ impl<T: CdpWrap> CdpPage<T> {
         return;
       }
       self.renderers.generation.fetch_add(1, Ordering::AcqRel);
-      sessions.insert(frame.to_owned(), renderer.clone())
+      sessions.insert(frame.to_owned(), Arc::clone(&renderer))
     };
     if let Some(old) = previous {
       self.remove_renderer(&old.session);
@@ -601,7 +601,7 @@ impl<T: CdpWrap> CdpPage<T> {
     }
     let page = self.clone();
     let parent = params["targetInfo"]["parentFrameId"].as_str().map(str::to_owned);
-    let tasks = renderer.tasks.clone();
+    let tasks = Arc::clone(&renderer.tasks);
     let task = tokio::spawn(async move {
       let result = match page.initialize_renderer(&renderer, parent).await {
         Ok(()) => Ok(()),
@@ -652,7 +652,7 @@ impl<T: CdpWrap> CdpPage<T> {
       });
     let page = Box::new(self.renderer_page(renderer));
     let observer = page.renderer_observer(
-      Some(renderer.session.clone()),
+      Some(Arc::clone(&renderer.session)),
       Some((renderer.frame.clone(), parent.clone())),
     );
     self.transport.register_lifecycle_tracker(
@@ -750,7 +750,7 @@ mod tests {
         .sessions
         .lock()
         .unwrap()
-        .insert(item.frame.clone(), item.clone());
+        .insert(item.frame.clone(), Arc::clone(item));
     }
     assert_eq!(registry.remove_session_tree("parent").len(), 3);
     assert_eq!(registry.sessions.lock().unwrap().len(), 1);
@@ -771,12 +771,12 @@ mod tests {
       .sessions
       .lock()
       .unwrap()
-      .insert(replacement.frame.clone(), replacement.clone());
+      .insert(replacement.frame.clone(), Arc::clone(&replacement));
     registry
       .sessions
       .lock()
       .unwrap()
-      .insert(child.frame.clone(), child.clone());
+      .insert(child.frame.clone(), Arc::clone(&child));
     assert_eq!(registry.remove_session_tree("old-parent").len(), 1);
     assert!(replacement.active.load(Ordering::Acquire));
     assert!(!child.active.load(Ordering::Acquire));
