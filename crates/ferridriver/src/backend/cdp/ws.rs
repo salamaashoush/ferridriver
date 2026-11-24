@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::transport::CdpDispatcher;
+use crate::backend::process::ChildGroup;
 use crate::error::{FerriError, Result};
 
 pub struct WsTransport {
@@ -95,6 +96,10 @@ impl WsTransport {
 
   /// Spawn Chrome with `--remote-debugging-port` and connect via WebSocket.
   ///
+  /// The browser is owned by a [`ChildGroup`] from the moment it is
+  /// spawned, so a launch that fails before the handshake still takes down
+  /// everything the launched binary started, not only the leader.
+  ///
   /// # Errors
   ///
   /// Returns an error if Chrome fails to launch or the WebSocket connection fails.
@@ -104,7 +109,7 @@ impl WsTransport {
     extra_flags: &[String],
     owns_user_data_dir: bool,
     env: &rustc_hash::FxHashMap<String, String>,
-  ) -> Result<(Self, tokio::process::Child)> {
+  ) -> Result<(Self, ChildGroup)> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.envs(env);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
@@ -143,14 +148,13 @@ impl WsTransport {
 
     let mut child = crate::backend::process::spawn_exclusive(|| command.spawn())
       .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
-    // Track before the port-file wait + websocket connect below.
-    crate::backend::process::track_spawned(child.id().unwrap_or(0), Some(user_data_dir), owns_user_data_dir);
     let stderr_tail = crate::backend::process::drain_child_stderr(&mut child);
+    let mut group = ChildGroup::recorded(child, Some(user_data_dir), owns_user_data_dir);
 
-    let ws_url = discover_ws_url(&port_file, &mut child, chromium_path, &stderr_tail).await?;
+    let ws_url = discover_ws_url(&port_file, &mut group, chromium_path, &stderr_tail).await?;
 
     let transport = Box::pin(Self::connect(&ws_url)).await?;
-    Ok((transport, child))
+    Ok((transport, group))
   }
 }
 
@@ -256,7 +260,7 @@ impl super::transport::CdpTransport for WsTransport {
 
 async fn discover_ws_url(
   port_file: &Path,
-  child: &mut tokio::process::Child,
+  group: &mut ChildGroup,
   chromium_path: &str,
   stderr_tail: &crate::backend::process::StderrTail,
 ) -> Result<String> {
@@ -280,7 +284,11 @@ async fn discover_ws_url(
         return Ok(format!("ws://127.0.0.1:{port}{path}"));
       }
     }
-    if let Ok(Some(status)) = child.try_wait() {
+    // Observed without reaping: a launcher that forked the real browser
+    // and exited leaves that browser in its process group, and the group
+    // id stays ours to signal only while the leader is unreaped.
+    if !group.is_running() {
+      let status = group.wait().await?;
       return Err(FerriError::Backend(launch_failure_detail(
         &format!(
           "{chromium_path} exited with status {status} before writing {}",
@@ -318,6 +326,33 @@ fn launch_failure_detail(what: &str, stderr_tail: &crate::backend::process::Stde
 mod tests {
   use super::launch_failure_detail;
   use crate::backend::process::StderrTail;
+
+  /// The launched binary is only the group's leader. When it exits before
+  /// Chrome is reachable, the launch fails, and what it started must go
+  /// with it rather than outlive the run with its profile deleted.
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn a_failed_launch_kills_what_the_exited_launcher_forked() {
+    use crate::backend::process::test_support::{test_forking_launcher, test_process_ends, test_read_pid};
+    let dir = tempfile::tempdir().expect("fixture dir");
+    let (launcher, forked) = test_forking_launcher(dir.path());
+    let profile = dir.path().join("profile");
+    std::fs::create_dir(&profile).expect("profile dir");
+    let outcome = super::WsTransport::spawn(
+      &launcher.to_string_lossy(),
+      &profile,
+      &[],
+      false,
+      &rustc_hash::FxHashMap::default(),
+    )
+    .await;
+    assert!(outcome.is_err(), "a launcher that exits must fail the launch");
+    let forked = test_read_pid(&forked);
+    assert!(
+      test_process_ends(forked),
+      "pid {forked}, forked by the launcher, outlived the failed launch"
+    );
+  }
 
   #[tokio::test(start_paused = true)]
   async fn operation_budgets_cover_replies_queueing_and_cancellation() {

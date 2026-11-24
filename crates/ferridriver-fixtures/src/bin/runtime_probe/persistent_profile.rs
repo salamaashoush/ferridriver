@@ -39,7 +39,6 @@ async fn external_browser(profile: &Path) -> Result<(ChildGroup, String)> {
     &rustc_hash::FxHashMap::default(),
   )
   .await?;
-  let child = ChildGroup::recorded(child, Some(profile), false);
   drop(transport);
   let port_file = tokio::fs::read_to_string(profile.join("DevToolsActivePort")).await?;
   let mut lines = port_file.lines();

@@ -25,9 +25,15 @@ use std::sync::{Mutex, OnceLock};
 /// the pipe closes.
 ///
 /// A recycled pid is the one way this could signal something that is
-/// not ours, so a pid is only killed while it is still its own process
-/// group leader — which is true of every browser we spawn (they are
-/// `setsid`-ed) and false of almost anything else.
+/// not ours, so a live pid is only killed while it is still its own
+/// process group leader — which is true of every browser we spawn (they
+/// are `setsid`-ed) and false of almost anything else.
+///
+/// A watched leader with no process left was reaped by whoever inherited
+/// it when this process died, not by us: we forget a pid before reaping
+/// it. If its group still has members, the pid cannot have been reused,
+/// so those members are what the browser left running and the group is
+/// killed too.
 const REAPER_SH: &str = r#"
 watched=
 while IFS= read -r line; do
@@ -40,7 +46,11 @@ while IFS= read -r line; do
 done
 for p in $watched; do
   pgid=$(ps -p "$p" -o pgid= 2>/dev/null | tr -d ' ')
-  [ "$pgid" = "$p" ] && kill -9 -"$p" 2>/dev/null
+  if [ "$pgid" = "$p" ]; then
+    kill -9 -"$p" 2>/dev/null
+  elif [ -z "$pgid" ] && ps -A -o pgid= | tr -d ' ' | grep -qx "$p"; then
+    kill -9 -"$p" 2>/dev/null
+  fi
 done
 exit 0
 "#;
@@ -172,5 +182,52 @@ mod tests {
     );
     let _ = forgotten.kill();
     let _ = forgotten.wait();
+  }
+
+  /// When this process dies, whoever inherits a browser leader may reap it
+  /// before the watchdog looks, and a leader that forked the real browser
+  /// may have exited already. Neither leaves the watchdog a leader to see,
+  /// but the group it led is still ours and still running.
+  #[test]
+  fn the_watchdog_kills_the_group_a_reaped_leader_left_running() {
+    use std::io::{BufRead as _, Write as _};
+
+    let mut leader = Command::new("sh");
+    leader
+      .arg("-c")
+      .arg("sh -c 'sleep 30; wait' >/dev/null 2>&1 & echo $!; exit 0")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::null());
+    crate::backend::process::spawn_in_own_session(&mut leader);
+    let mut leader = leader.spawn().expect("spawn leader");
+    let mut line = String::new();
+    std::io::BufReader::new(leader.stdout.take().expect("stdout piped"))
+      .read_line(&mut line)
+      .expect("read member pid");
+    let member: u32 = line.trim().parse().expect("member pid");
+    let leader_pid = leader.id();
+    leader.wait().expect("reap leader");
+
+    let mut reaper = Command::new("sh")
+      .arg("-c")
+      .arg(super::REAPER_SH)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .expect("spawn reaper");
+    let mut stdin = reaper.stdin.take().expect("reaper stdin");
+    writeln!(stdin, "+{leader_pid}").expect("watch");
+    drop(stdin);
+    assert!(
+      reaper.wait().expect("reaper exits on EOF").success(),
+      "reaper exited cleanly"
+    );
+
+    let ended = crate::backend::process::test_support::test_process_ends(member);
+    if !ended {
+      crate::backend::process::kill_process_group(leader_pid);
+    }
+    assert!(ended, "the member a reaped leader left in its group must be killed");
   }
 }

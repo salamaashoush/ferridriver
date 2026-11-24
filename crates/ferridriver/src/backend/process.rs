@@ -702,10 +702,30 @@ fn write_record_file(path: &std::path::Path, record: &BrowserRecord) -> std::io:
     .parent()
     .ok_or_else(|| std::io::Error::other("process record has no parent directory"))?;
   let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
-  let mut file = tempfile::NamedTempFile::new_in(parent)?;
+  let mut file = staged_record(STAGED_RECORD_PREFIX, parent)?;
   file.write_all(&bytes)?;
   file.persist(path).map_err(|error| error.error)?;
   Ok(())
+}
+
+const STAGED_RECORD_PREFIX: &str = "staging-";
+const RECOVERY_RECORD_PREFIX: &str = "cleanup-";
+
+/// A record file being written, named `<prefix><writer pid>-<random>` so a
+/// writer killed before it renames the file into place leaves a stray that
+/// [`sweep_stale_browsers`] can attribute to a dead process.
+fn staged_record(prefix: &str, parent: &std::path::Path) -> std::io::Result<tempfile::NamedTempFile> {
+  tempfile::Builder::new()
+    .prefix(&format!("{prefix}{}-", std::process::id()))
+    .tempfile_in(parent)
+}
+
+/// The pid of the process that staged `name`, when it is a staged record.
+fn staged_record_writer(name: &str) -> Option<u32> {
+  let rest = name
+    .strip_prefix(STAGED_RECORD_PREFIX)
+    .or_else(|| name.strip_prefix(RECOVERY_RECORD_PREFIX))?;
+  rest.split_once('-')?.0.parse().ok()
 }
 
 /// A launch-record file, deleted when the browser it describes is
@@ -1066,7 +1086,7 @@ impl ProcRecord {
       record.browser_pid = 0;
       record.profile_dir = None;
       record.start_time = None;
-      let mut file = tempfile::Builder::new().prefix("cleanup-").tempfile_in(parent)?;
+      let mut file = staged_record(RECOVERY_RECORD_PREFIX, parent)?;
       file.write_all(&serde_json::to_vec(&record).map_err(std::io::Error::other)?)?;
       let recovery_path = file.path().with_extension("json");
       file.persist_noclobber(&recovery_path).map_err(|error| error.error)?;
@@ -1184,46 +1204,70 @@ fn process_group_exiting_settled(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn process_group_exiting(pid: u32) -> bool {
+  const PROC_FLAG_INEXIT: u32 = 4;
+  // XNU killpg1 also loses exiting members before they become waitable
+  // zombies. Require a complete group snapshot proving exit has begun;
+  // an unknown or live member must preserve the permission error.
+  let Some(members) = process_group_members(pid) else {
+    return false;
+  };
+  !members.is_empty()
+    && members.iter().all(|&member| {
+      proc_bsdinfo_including_exited(member, true).is_some_and(|info| {
+        info.pbi_pgid == pid && (info.pbi_status == libc::SZOMB || info.pbi_flags & PROC_FLAG_INEXIT != 0)
+      })
+    })
+}
+
+/// Every pid in process group `group`, or `None` when the table cannot be read.
+#[cfg(target_os = "macos")]
 #[expect(
   unsafe_code,
   reason = "libproc's proc_listpgrppids has no safe binding in libc or rustix"
 )]
-fn process_group_exiting(pid: u32) -> bool {
-  const PROC_FLAG_INEXIT: u32 = 4;
-  let Ok(group) = i32::try_from(pid) else { return false };
+fn process_group_members(group: u32) -> Option<Vec<u32>> {
+  let group = i32::try_from(group).ok()?;
   let mut members = vec![0_i32; 16];
   loop {
-    let Ok(size) = i32::try_from(std::mem::size_of_val(members.as_slice())) else {
-      return false;
-    };
-    // XNU killpg1 also loses exiting members before they become waitable
-    // zombies. Require a complete group snapshot proving exit has begun;
-    // an unknown or live member must preserve the permission error.
+    let size = i32::try_from(std::mem::size_of_val(members.as_slice())).ok()?;
     // SAFETY: libproc writes at most `size` bytes into this initialized PID
     // buffer. Its result is a PID count, checked before indexing the buffer.
-    let count = unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) };
-    let Ok(count) = usize::try_from(count) else {
-      return false;
-    };
-    if count == 0 {
-      return false;
-    }
+    let count = usize::try_from(unsafe { libc::proc_listpgrppids(group, members.as_mut_ptr().cast(), size) }).ok()?;
     if count >= members.len() {
-      let Some(capacity) = members.len().checked_mul(2) else {
-        return false;
-      };
+      let capacity = members.len().checked_mul(2)?;
       members.resize(capacity, 0);
       continue;
     }
-    return members[..count].iter().all(|&member| {
-      u32::try_from(member)
-        .ok()
-        .and_then(|pid| proc_bsdinfo_including_exited(pid, true))
-        .is_some_and(|info| {
-          info.pbi_pgid == pid && (info.pbi_status == libc::SZOMB || info.pbi_flags & PROC_FLAG_INEXIT != 0)
-        })
-    });
+    return Some(
+      members[..count]
+        .iter()
+        .filter_map(|&member| u32::try_from(member).ok())
+        .collect(),
+    );
   }
+}
+
+/// Every pid in process group `group`, read from each `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+fn process_group_members(group: u32) -> Option<Vec<u32>> {
+  let entries = std::fs::read_dir("/proc").ok()?;
+  let group = group.to_string();
+  Some(
+    entries
+      .flatten()
+      .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+      .filter(|pid| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+          // After the parenthesised comm field: state (3), ppid (4), pgrp (5).
+          stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(2))
+            .is_some_and(|pgrp| pgrp == group)
+        })
+      })
+      .collect(),
+  )
 }
 
 /// `/proc/<pid>/stat` field 22 — start time in clock ticks since boot.
@@ -1391,6 +1435,53 @@ pub(crate) fn test_sleeper(seconds: u32) -> std::process::Command {
   }
 }
 
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) mod test_support {
+  use super::process_is_live;
+
+  /// A stand-in for a browser binary that forks the real browser and exits,
+  /// leaving it in the launcher's process group. Returns the launcher and the
+  /// file it writes the forked pid to.
+  pub(crate) fn test_forking_launcher(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let launcher = dir.join("forking-launcher");
+    let forked = dir.join("forked.pid");
+    // `; wait` keeps the forked shell from exec-ing into sleep.
+    std::fs::write(
+      &launcher,
+      format!(
+        "#!/bin/sh\nsh -c 'sleep 60; wait' &\necho $! > '{}'\nexit 0\n",
+        forked.display()
+      ),
+    )
+    .expect("write launcher");
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).expect("make launcher executable");
+    (launcher, forked)
+  }
+
+  /// Whether `pid` is gone within a few seconds. A process whose parent
+  /// exited is reaped by init, so it reads as live only until then.
+  pub(crate) fn test_process_ends(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+      if !process_is_live(pid) {
+        return true;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+  }
+
+  pub(crate) fn test_read_pid(file: &std::path::Path) -> u32 {
+    std::fs::read_to_string(file)
+      .expect("read pid file")
+      .trim()
+      .parse()
+      .expect("pid")
+  }
+}
+
 /// What a live pid from a record turned out to be.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Identity {
@@ -1427,6 +1518,32 @@ fn identify_browser(record: &BrowserRecord) -> Identity {
     None => cmd.contains("--inspector-pipe") || cmd.contains("--remote-debugging"),
   };
   if looks_right { Identity::Ours } else { Identity::NotOurs }
+}
+
+/// Whether the recorded browser exited but left members of its process
+/// group running, as a launcher that forks the real browser and exits does.
+///
+/// The group id cannot be handed to a new process while the group has
+/// members, yet the pid could have been reused by an unrelated group leader
+/// that has since exited too. A member must therefore still name the
+/// record's profile directory, which no one else's process carries.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn orphaned_group_is_ours(record: &BrowserRecord) -> bool {
+  let Some(profile) = record.profile_dir.as_deref() else {
+    return false;
+  };
+  process_group_members(record.browser_pid).is_some_and(|members| {
+    members
+      .iter()
+      .any(|&member| process_command(member).is_some_and(|command| command.contains(profile)))
+  })
+}
+
+/// Windows has no process group to outlive its leader: a browser's tree is
+/// held by its job, which the job's own teardown ends.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn orphaned_group_is_ours(_record: &BrowserRecord) -> bool {
+  false
 }
 
 /// Whether a recorded directory is somewhere we are willing to delete
@@ -1470,6 +1587,7 @@ pub fn sweep_stale_browsers() -> usize {
   for entry in entries.flatten() {
     let path = entry.path();
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
+      reclaimed += usize::from(reclaim_staged_record(&path));
       continue;
     }
     let Ok(bytes) = std::fs::read(&path) else { continue };
@@ -1485,11 +1603,38 @@ pub fn sweep_stale_browsers() -> usize {
   reclaimed
 }
 
+/// A record its writer died before renaming into place. One that was fully
+/// written may be the only trace of a launched browser, so it is reclaimed
+/// like any record; a partial one names nothing and is removed.
+fn reclaim_staged_record(path: &std::path::Path) -> bool {
+  let Some(writer) = path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .and_then(staged_record_writer)
+  else {
+    return false;
+  };
+  if writer == std::process::id() || process_is_live(writer) {
+    return false;
+  }
+  if let Some(record) = std::fs::read(path)
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<BrowserRecord>(&bytes).ok())
+  {
+    reclaim_record(path, &record)
+  } else {
+    let _ = std::fs::remove_file(path);
+    false
+  }
+}
+
 fn reclaim_record(path: &std::path::Path, record: &BrowserRecord) -> bool {
   let identity = if record.browser_pid == 0 {
     Identity::NotOurs
   } else if process_is_live(record.browser_pid) {
     identify_browser(record)
+  } else if orphaned_group_is_ours(record) {
+    Identity::Ours
   } else {
     // Already gone: nothing to signal, and its leftovers are ours to clear.
     Identity::NotOurs
@@ -1557,6 +1702,7 @@ mod tests {
     assert!(context.contains("line 59"));
   }
 
+  use super::test_support::test_process_ends;
   use super::*;
 
   /// A pid that has exited and been reaped, so `process_is_live` is
@@ -1729,6 +1875,108 @@ mod tests {
     kill_group(&mut leader);
     let _ = std::fs::remove_file(&record);
     assert!(survived, "a non-leader pid must never be group-killed by the sweep");
+  }
+
+  /// A group whose leader has exited and been reaped, as a launcher that
+  /// forks the browser and exits leaves it. `marker` is the member's argv[0],
+  /// standing in for the `--user-data-dir` a browser carries. Returns
+  /// (dead leader pid, live member pid).
+  #[cfg(unix)]
+  fn spawn_orphaned_group(marker: &str) -> (u32, u32) {
+    use std::io::BufRead as _;
+    let mut cmd = std::process::Command::new("sh");
+    cmd
+      .arg("-c")
+      .arg(format!(
+        "sh -c 'sleep 300; wait' '{marker}' >/dev/null 2>&1 & echo $!; exit 0"
+      ))
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::null());
+    spawn_in_own_session(&mut cmd);
+    let mut leader = cmd.spawn().expect("spawn launcher");
+    let mut line = String::new();
+    std::io::BufReader::new(leader.stdout.take().expect("stdout piped"))
+      .read_line(&mut line)
+      .expect("read member pid");
+    let member = line.trim().parse().expect("member pid");
+    let leader_pid = leader.id();
+    leader.wait().expect("reap launcher");
+    (leader_pid, member)
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn sweep_kills_the_group_a_dead_recorded_leader_left_running() {
+    let profile = std::env::temp_dir().join(format!("ferridriver-orphaned-group-{}", std::process::id()));
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    let (leader, member) = spawn_orphaned_group(&format!("--user-data-dir={}", profile.display()));
+    let record = write_record(dead_pid(), leader, Some(&profile), true);
+
+    let _ = sweep_stale_browsers();
+
+    let ended = test_process_ends(member);
+    if !ended {
+      kill_process_group(leader);
+    }
+    let _ = std::fs::remove_file(&record);
+    let _ = std::fs::remove_dir_all(&profile);
+    assert!(ended, "the member a dead leader left in its group must be killed");
+  }
+
+  /// The pid of a dead leader may have been reused by an unrelated group
+  /// leader that exited too, so a surviving group is only ours while a
+  /// member names the record's profile.
+  #[cfg(unix)]
+  #[test]
+  fn sweep_spares_a_leftover_group_that_names_another_profile() {
+    let (leader, member) = spawn_orphaned_group("--user-data-dir=/elsewhere");
+    let profile = std::env::temp_dir().join(format!("ferridriver-not-this-group-{}", std::process::id()));
+    let record = write_record(dead_pid(), leader, Some(&profile), false);
+
+    let _ = sweep_stale_browsers();
+    settle();
+
+    let survived = is_running(member);
+    kill_process_group(leader);
+    let _ = std::fs::remove_file(&record);
+    assert!(
+      survived,
+      "a group none of whose members names the profile must be spared"
+    );
+  }
+
+  #[test]
+  fn sweep_reclaims_a_record_its_dead_writer_never_renamed_into_place() {
+    let dir = registry_dir().expect("registry dir");
+    let profile = std::env::temp_dir().join(format!("ferridriver-staged-record-{}", std::process::id()));
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    let record = BrowserRecord {
+      owner_pid: dead_pid(),
+      browser_pid: dead_pid(),
+      profile_dir: Some(profile.to_string_lossy().into_owned()),
+      owned_dirs: vec![profile.to_string_lossy().into_owned()],
+      start_time: None,
+    };
+    let writer = dead_pid();
+    let staged = dir.join(format!("{STAGED_RECORD_PREFIX}{writer}-a1b2c3"));
+    std::fs::write(&staged, serde_json::to_vec(&record).expect("encode")).expect("stage record");
+    let partial = dir.join(format!("{RECOVERY_RECORD_PREFIX}{writer}-d4e5f6"));
+    std::fs::write(&partial, b"{\"owner_pid\":").expect("stage partial record");
+    let live = dir.join(format!("{STAGED_RECORD_PREFIX}{}-g7h8i9", std::process::id()));
+    std::fs::write(&live, b"").expect("stage live record");
+
+    let _ = sweep_stale_browsers();
+
+    let left = [staged.exists(), partial.exists(), profile.exists(), live.exists()];
+    let _ = std::fs::remove_dir_all(&profile);
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_file(&partial);
+    let _ = std::fs::remove_file(&live);
+    assert_eq!(
+      left,
+      [false, false, false, true],
+      "[staged, partial, its profile, live writer's] after the sweep"
+    );
   }
 
   #[cfg(unix)]
