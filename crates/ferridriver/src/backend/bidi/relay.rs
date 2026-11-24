@@ -237,7 +237,7 @@ impl Relay {
       tree.add(context, None);
     }
     Ok(Arc::new_cyclic(|relay: &std::sync::Weak<Self>| {
-      let relay = relay.clone();
+      let relay = std::sync::Weak::clone(relay);
       let events = tokio::spawn(async move {
         while let Some(event) = tap.recv().await {
           let Some(relay) = relay.upgrade() else { return };

@@ -76,7 +76,7 @@ async fn missing_bidi_input_uses_the_owned_classic_session_and_caches_detection(
     "safari-contract".into(),
     json!({"browserName":"safari","browserVersion":"26.6.1"}),
     None,
-    owner.clone(),
+    Arc::clone(&owner),
   )
   .await
   .unwrap();

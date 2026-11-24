@@ -62,6 +62,12 @@ impl BidiElement {
   /// `Self::call_fn_value` in the frame's utility sandbox, where the
   /// element is the browser's own and nothing the page put on it (a
   /// framework's own `value` property) is seen.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `script.callFunction` command in the utility sandbox fails, for
+  /// example for a stale shared reference, `FerriError::Evaluation` when the function throws, and
+  /// `FerriError::Protocol` when the result cannot be parsed.
   pub async fn call_js_fn_value_in_utility(&self, func: &str) -> Result<Option<serde_json::Value>> {
     let result = self
       .session
@@ -125,6 +131,11 @@ impl BidiElement {
     Ok((x, y, w, h))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when reading the element's bounding box through `script.callFunction` fails
+  /// or returns null, or when the `input.performActions` command fails. A failure to scroll the
+  /// element into view is ignored.
   pub async fn click(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y, w, h) = self.bounding_box().await?;
@@ -138,6 +149,11 @@ impl BidiElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when reading the element's bounding box through `script.callFunction` fails
+  /// or returns null, or when the `input.performActions` command fails. A failure to scroll the
+  /// element into view is ignored.
   pub async fn dblclick(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y, w, h) = self.bounding_box().await?;
@@ -153,6 +169,11 @@ impl BidiElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when reading the element's bounding box through `script.callFunction` fails
+  /// or returns null, or when the `input.performActions` command fails. A failure to scroll the
+  /// element into view is ignored.
   pub async fn hover(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y, w, h) = self.bounding_box().await?;
@@ -165,6 +186,10 @@ impl BidiElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `click`, which focuses the element first, and returns an error when
+  /// the `input.performActions` command that types `text` fails.
   pub async fn type_str(&self, text: &str) -> Result<()> {
     // Click to focus first
     self.click().await?;
@@ -175,6 +200,11 @@ impl BidiElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.callFunction` command fails, for example for a stale shared
+  /// reference, `FerriError::Evaluation` when the function throws, and `FerriError::Protocol` when
+  /// the result cannot be parsed.
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     let result = self.call_fn(function).await?;
     let eval_result: EvaluateResult = serde_json::from_value(result)
@@ -189,10 +219,19 @@ impl BidiElement {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.callFunction` command fails, for example for a stale shared
+  /// reference, `FerriError::Evaluation` when the function throws, and `FerriError::Protocol` when
+  /// the result cannot be parsed.
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>> {
     self.call_fn_value(function).await
   }
 
+  /// # Errors
+  ///
+  /// Never fails; a `script.callFunction` error is ignored, and the `Result` matches the other
+  /// backends' signature.
   pub async fn scroll_into_view(&self) -> Result<()> {
     let _ = self
       .call_fn("(el) => el.scrollIntoView({block: 'center', inline: 'center'})")

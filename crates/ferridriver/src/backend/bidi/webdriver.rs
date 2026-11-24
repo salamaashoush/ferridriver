@@ -140,13 +140,13 @@ mod tests {
   #[tokio::test]
   async fn close_deletes_the_http_session_once_across_clones() {
     let mut server = server(false, None).await;
-    let mut browser = BidiBrowser::connect_webdriver(&server.endpoint, "safari", None, None, Some(1000))
+    let browser = BidiBrowser::connect_webdriver(&server.endpoint, "safari", None, None, Some(1000))
       .await
       .unwrap();
     assert_eq!(browser.version(), "safari/contract");
     assert!(server.requests.recv().await.unwrap().starts_with("POST "));
     assert_eq!(server.commands.recv().await.unwrap(), "session.subscribe");
-    let mut clone = browser.clone();
+    let clone = browser.clone();
     browser.close().await.unwrap();
     deleted(&mut server).await;
     clone.close().await.unwrap();

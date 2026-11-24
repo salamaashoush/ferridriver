@@ -132,10 +132,9 @@ fn u64_to_u32_saturating(n: u64) -> u32 {
 /// If no `': '` separator is present, `name` is empty and `message` is
 /// the full `text`.
 fn split_error_text(text: &str) -> (String, String) {
-  if let Some(idx) = text.find(": ") {
-    (text[..idx].to_string(), text[idx + 2..].to_string())
-  } else {
-    (String::new(), text.to_string())
+  match text.split_once(": ") {
+    Some((name, message)) => (name.to_string(), message.to_string()),
+    None => (String::new(), text.to_string()),
   }
 }
 
@@ -230,25 +229,55 @@ fn to_css_pixels(bytes: Vec<u8>, rect: &crate::options::ClipRect, capture: &Scre
   Ok(output.into_inner())
 }
 
-fn f64_to_u64_saturating(n: f64) -> u64 {
-  // Saturating cast — clippy's `cast_possible_truncation`/`cast_sign_loss`
-  // fire on a raw `as u64` cast. Manual range check + saturation is the
-  // documented workaround. `u64::MAX as f64` is over `2^63` so a
-  // `>=` comparison is safe even though f64 can't represent u64::MAX
-  // exactly (the comparison uses the closest f64 which is `2^64`).
-  #[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-  )]
-  let clamped = if !n.is_finite() || n < 0.0 {
-    0_u64
-  } else if n >= u64::MAX as f64 {
-    u64::MAX
+/// Every field `apply_context_options` failed to apply, then every one
+/// this backend cannot honour, as one error.
+fn context_option_errors(
+  applied: [(&str, Option<Result<()>>); 12],
+  opts: &crate::options::BrowserContextOptions,
+) -> Result<()> {
+  let errs: Vec<String> = applied
+    .into_iter()
+    .filter_map(|(label, r)| match r {
+      Some(Err(e)) => Some(format!("{label}: {e}")),
+      _ => None,
+    })
+    .chain(unsupported_context_options(opts))
+    .collect();
+  if errs.is_empty() {
+    Ok(())
   } else {
-    n as u64
-  };
-  clamped
+    Err(FerriError::Backend(errs.join("; ")))
+  }
+}
+
+/// Explicit unsupported fields — Firefox `BiDi` lacks these primitives.
+/// Surfacing the gap to the caller (vs. silently dropping) matches
+/// Playwright's Rule-4 "typed Unsupported for real protocol gaps".
+///
+/// Each is refused only when it asks for the behaviour the backend
+/// cannot produce. `hasTouch: false` asks for the default, which is
+/// what Firefox already does — and it is what a spread of a desktop
+/// device descriptor carries, so refusing it made `{ ...devices
+/// ['Desktop Firefox'] }` fail on Firefox.
+fn unsupported_context_options(opts: &crate::options::BrowserContextOptions) -> impl Iterator<Item = String> {
+  [
+    ("bypassCSP", opts.bypass_csp == Some(true)),
+    // browsingContext.setViewport has no touch-emulation field and
+    // Firefox exposes no other command for it.
+    ("hasTouch", opts.has_touch == Some(true)),
+  ]
+  .into_iter()
+  .filter(|(_, asked)| *asked)
+  .map(|(label, _)| format!("{label}: BiDi/Firefox backend does not yet support this context option"))
+}
+
+#[expect(
+  clippy::cast_possible_truncation,
+  clippy::cast_sign_loss,
+  reason = "`as` saturates a finite float, which is the intent: negatives give 0, values past `u64::MAX` give `u64::MAX`, fractions truncate"
+)]
+fn f64_to_u64_saturating(n: f64) -> u64 {
+  if n.is_finite() { n as u64 } else { 0 }
 }
 
 /// Insert text where the document's focus is, or answer the window of the
@@ -365,7 +394,7 @@ pub struct BidiPage {
   /// referencing a file under it.
   pub downloads_dir: Arc<tempfile::TempDir>,
   /// This page's own folder inside `downloads_dir`. See `create`.
-  pub downloads_subdir: Arc<std::path::PathBuf>,
+  pub downloads_subdir: Arc<std::path::Path>,
   /// Whether this context accepts downloads at all
   /// (`BrowserContextOptions::accept_downloads`, default `true`).
   ///
@@ -500,7 +529,7 @@ impl InjectedScriptManager {
   /// Engine into the page's main context. Back-compat entry point used
   /// by `ensure_engine_injected` / `injected_script`.
   async fn ensure(&self, page: &BidiPage) -> Result<()> {
-    let ctx = page.context_id.clone();
+    let ctx = Arc::clone(&page.context_id);
     self.ensure_in(page, &ctx).await
   }
 
@@ -551,7 +580,7 @@ impl BidiPage {
     let downloads_subdir = downloads_dir.path().join(&context_id);
     let _ = std::fs::create_dir_all(&downloads_subdir);
     Self {
-      downloads_subdir: Arc::new(downloads_subdir),
+      downloads_subdir: Arc::from(downloads_subdir),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       session,
       context_id: Arc::from(context_id),
@@ -634,11 +663,11 @@ impl BidiPage {
   /// them with their realms or the page.
   fn spawn_worker_listener(&self) {
     let mut tap = self.session.transport.tap_events();
-    let session = self.session.clone();
-    let context = self.context_id.clone();
+    let session = Arc::clone(&self.session);
+    let context = Arc::clone(&self.context_id);
     let emitter = self.events.clone();
     let task = tokio::spawn(async move {
-      let mut realms = super::worker::WorkerRealms::new(session.clone(), &context);
+      let mut realms = super::worker::WorkerRealms::new(Arc::clone(&session), &context);
       if let Ok(reply) = session
         .transport
         .send_command("script.getRealms", json!({ "context": &*context }))
@@ -718,6 +747,10 @@ impl BidiPage {
       || err.contains("BiDi error 'no such window'")
   }
 
+  /// # Errors
+  ///
+  /// Returns the error of the `script.evaluate` probe of `document.readyState`. A discarded or
+  /// missing browsing context is retried for up to 2 seconds before its error is returned.
   pub async fn wait_until_ready(&self) -> Result<()> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
 
@@ -779,6 +812,10 @@ impl BidiPage {
 
   // ── Frames ──────────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when `browsingContext.getTree` fails or its response has no `contexts` array.
+  /// A child frame whose name lookup fails keeps an empty name instead.
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     let result = self
       .cmd("browsingContext.getTree", json!({"root": &*self.context_id}))
@@ -818,6 +855,12 @@ impl BidiPage {
     Ok(frames)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` command fails or its result cannot be parsed, and
+  /// `FerriError::Evaluation` when the expression throws. For a child frame it also fails when
+  /// injecting the selector engine fails or the operation's deadline passes while waiting for the
+  /// frame to load.
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     // In BiDi, frames ARE browsing contexts. A frame-scoped eval
     // (selector engine queries) needs `window.__fd` in that child
@@ -836,6 +879,12 @@ impl BidiPage {
   /// `bidiPage.ts::getFrameElement`: `browsingContext.locateNodes` with
   /// a context locator in the parent, then `script.callFunction` in the
   /// parent realm with the element as argument).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `browsingContext.locateNodes` fails or finds no element for the child
+  /// frame or `script.callFunction` fails, and `FerriError::Evaluation` when the marking script
+  /// throws.
   pub async fn mark_snapshot_iframe(
     &self,
     child_frame_id: &str,
@@ -887,6 +936,11 @@ impl BidiPage {
 
   // ── Navigation ──────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when `browsingContext.navigate` fails, and a timeout error when the
+  /// navigation or the wait for its response outlasts `timeout_ms`. Failures of the
+  /// `network.setExtraHeaders` calls that carry `referer` are ignored.
   pub async fn goto(
     &self,
     url: &str,
@@ -1000,11 +1054,15 @@ impl BidiPage {
     .map_err(|_| FerriError::timeout("processing navigation events", timeout_ms))?
   }
 
+  /// # Errors
+  ///
+  /// Returns a timeout error when no `browsingContext.load` event for this context arrives within
+  /// 30 seconds, and a backend error when the event channel closes first.
   pub async fn wait_for_navigation(&self) -> Result<()> {
     // Tap the load event for this context and wait for it — a missed
     // event here is a 30s hang, so the wait must be lossless.
     let mut rx = self.session.transport.tap_events();
-    let ctx = self.context_id.clone();
+    let ctx = Arc::clone(&self.context_id);
     let timeout = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
       while let Some(event) = rx.recv().await {
         if event.method == "browsingContext.load"
@@ -1026,6 +1084,11 @@ impl BidiPage {
   /// `bidiPage.requestGC`: evaluate `TestUtils.gc()` and surface an
   /// exception result (Firefox builds without `TestUtils`) as
   /// `Unsupported` — Playwright's `BiDi` backend throws the same way.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` command fails, and `FerriError::Unsupported` when
+  /// `TestUtils.gc()` throws because the Firefox build has no `TestUtils`.
   pub async fn request_gc(&self) -> Result<()> {
     let result = self
       .cmd(
@@ -1045,6 +1108,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.activate` command fails.
   pub async fn bring_to_front(&self) -> Result<()> {
     self
       .cmd("browsingContext.activate", json!({"context": &*self.context_id}))
@@ -1052,6 +1118,10 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.reload` command fails, and a timeout error when the
+  /// reload or the wait for its response outlasts `timeout_ms`.
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     let deadline = crate::backend::deadline_for(timeout_ms);
     self.injected_script.reset();
@@ -1081,6 +1151,10 @@ impl BidiPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.traverseHistory` command fails, and a timeout error
+  /// when the traversal or the wait for its response outlasts `timeout_ms`.
   pub async fn go_back(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     let deadline = crate::backend::deadline_for(timeout_ms);
     self.nav_request_slot.clear();
@@ -1107,6 +1181,10 @@ impl BidiPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.traverseHistory` command fails, and a timeout error
+  /// when the traversal or the wait for its response outlasts `timeout_ms`.
   pub async fn go_forward(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     let deadline = crate::backend::deadline_for(timeout_ms);
     self.nav_request_slot.clear();
@@ -1133,6 +1211,10 @@ impl BidiPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` of `location.href` fails or its result cannot be
+  /// parsed, and `FerriError::Evaluation` when it throws.
   pub async fn url(&self) -> Result<Option<String>> {
     self
       .eval_internal("location.href", &self.context_id)
@@ -1140,6 +1222,10 @@ impl BidiPage {
       .map(|v| v.and_then(|val| val.as_str().map(String::from)))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` of `document.title` fails or its result cannot be
+  /// parsed, and `FerriError::Evaluation` when it throws.
   pub async fn title(&self) -> Result<Option<String>> {
     self
       .eval_internal("document.title", &self.context_id)
@@ -1149,6 +1235,10 @@ impl BidiPage {
 
   // ── JavaScript ──────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` that injects the selector engine into the main
+  /// context fails.
   pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
     Ok("window.__fd".to_string())
@@ -1156,6 +1246,11 @@ impl BidiPage {
 
   /// Ensures the selector engine is injected into the current execution context.
   /// Idempotent and navigation-aware.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` that injects the selector engine into the main
+  /// context fails.
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     self.injected_script.ensure(self).await
   }
@@ -1168,6 +1263,10 @@ impl BidiPage {
   /// Ensure the engine is injected into a specific browsing context.
   /// Used before frame-scoped queries so freshly-attached / `srcdoc` /
   /// `data:` child contexts have `window.__fd` (Residual 2).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` that injects the selector engine into `ctx` fails.
   pub async fn ensure_engine_injected_in(&self, ctx: &str) -> Result<()> {
     self.injected_script.ensure_in(self, ctx).await
   }
@@ -1216,6 +1315,10 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` command fails or its result cannot be parsed, and
+  /// `FerriError::Evaluation` when the expression throws.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     self.eval_internal(expression, &self.context_id).await
   }
@@ -1230,6 +1333,10 @@ impl BidiPage {
     self.context_id.to_string()
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the selector engine cannot be injected or `selector` cannot be parsed,
+  /// and `FerriError::ElementNotFound` when resolving the element fails for any reason.
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     self.ensure_engine_injected().await?;
     // `find_element` is a non-strict path (used by raw page.locator
@@ -1247,6 +1354,13 @@ impl BidiPage {
   /// it overrides the page's default `context_id` so element resolution
   /// runs inside the iframe's realm. Mirrors Playwright's `BiDi` backend
   /// (`/tmp/playwright/packages/playwright-core/src/server/bidi/bidiFrame.ts`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `script.callFunction` or `script.evaluate` fails or its result is not a
+  /// DOM node, and `FerriError::Evaluation` when the script throws. For a child frame it also fails
+  /// when injecting the selector engine fails or the operation's deadline passes while the frame
+  /// loads.
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     // The JS can be either an expression or a function.
     // Use script.evaluate for expressions, script.callFunction for functions.
@@ -1303,7 +1417,7 @@ impl BidiPage {
         // Element belongs to the realm we evaluated in.
         let owning_ctx: Arc<str> = match frame_id {
           Some(fid) => Arc::from(fid),
-          None => self.context_id.clone(),
+          None => Arc::clone(&self.context_id),
         };
         // Record the realm so that when this element is repackaged as a
         // `JSHandle`/`ElementHandle` and later evaluated against (with
@@ -1311,7 +1425,7 @@ impl BidiPage {
         // owning child context instead of the page's main context.
         self.remember_handle_realm(&shared_ref.shared_id, &owning_ctx);
         Ok(AnyElement::Bidi(BidiElement::new(
-          self.session.clone(),
+          Arc::clone(&self.session),
           owning_ctx,
           shared_ref.shared_id,
         )))
@@ -1325,6 +1439,10 @@ impl BidiPage {
 
   // ── Content ─────────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.evaluate` of `document.documentElement.outerHTML` fails or
+  /// its result cannot be parsed, and `FerriError::Evaluation` when it throws.
   pub async fn content(&self) -> Result<String> {
     let result = self
       .eval_internal("document.documentElement.outerHTML", &self.context_id)
@@ -1332,6 +1450,10 @@ impl BidiPage {
     Ok(result.and_then(|v| v.as_str().map(String::from)).unwrap_or_default())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.callFunction` command that writes `html` into the document
+  /// fails.
   pub async fn set_content(&self, html: &str) -> Result<()> {
     self
       .cmd(
@@ -1352,6 +1474,11 @@ impl BidiPage {
 
   /// `bidiPage.ts::setBackgroundColor`: no `BiDi` command overrides the
   /// default background, so only the reset is accepted.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `color` is `Some`, since no `BiDi` command overrides
+  /// the default background.
   pub fn set_background_color(color: Option<BackgroundColor>) -> Result<()> {
     if color.is_some() {
       return Err(FerriError::unsupported(
@@ -1365,6 +1492,12 @@ impl BidiPage {
   /// always captures at the device pixel ratio, and upstream lets `scale`
   /// go unhonoured there; `css` is met here by resampling the capture to
   /// the rect's CSS size, as the `WebDriver` backend does.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `capture` has no rect, when the scroll-offset `script.evaluate` or
+  /// `browsingContext.captureScreenshot` fails, or when the image data is missing or cannot be
+  /// decoded, resampled or re-encoded.
   pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     let (rect, origin) = match (capture.document_rect, capture.viewport_rect) {
       // Firefox clips a document-origin capture to the root element's
@@ -1432,10 +1565,18 @@ impl BidiPage {
 
   // ── Accessibility ───────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine or one of the `script.evaluate` calls
+  /// fails or throws, or when the returned tree is not valid JSON.
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     self.accessibility_tree_with_depth(-1).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine or one of the `script.evaluate` calls
+  /// fails or throws, or when the returned tree is not valid JSON.
   pub async fn accessibility_tree_with_depth(&self, max_depth: i32) -> Result<Vec<AxNodeData>> {
     let fd = self.injected_script().await?;
     self
@@ -1542,6 +1683,9 @@ impl BidiPage {
 
   // ── Input ───────────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self
       .cmd("input.performActions", input::click(&self.context_id, x, y))
@@ -1549,6 +1693,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let btn = input::button_name_to_id(button);
     self
@@ -1560,6 +1707,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &super::super::BackendClickArgs) -> Result<()> {
     self
       .cmd(
@@ -1570,6 +1720,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::super::BackendHoverArgs) -> Result<()> {
     self
       .cmd(
@@ -1595,6 +1748,11 @@ impl BidiPage {
   /// the tap sequence (verified empirically; the `BiDi` wire has no
   /// per-action modifier field to express it differently). Surface that
   /// as a typed error instead of silently dropping the modifiers.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when a keyboard modifier is held, and an error when the
+  /// `input.performActions` command fails.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     if self.keyboard.modifiers() != 0 {
       return Err(FerriError::unsupported(
@@ -1613,6 +1771,9 @@ impl BidiPage {
     &self.keyboard
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     self
       .cmd("input.performActions", input::pointer_move(&self.context_id, x, y))
@@ -1620,6 +1781,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     self
       .cmd(
@@ -1630,6 +1794,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .cmd(
@@ -1645,6 +1812,10 @@ impl BidiPage {
   /// counts clicks only within one action chain and resets the count at the
   /// end of each (`Actions.sys.mjs`), so presses sent one call at a time
   /// always report a click count of 1.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     let btn = input::button_name_to_id(button);
     self
@@ -1653,6 +1824,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `input.performActions` command fails.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     let btn = input::button_name_to_id(button);
     self
@@ -1665,6 +1839,11 @@ impl BidiPage {
   /// and no key events: Firefox's input actions can only press keys. The
   /// script reports a focused frame element by its window, whose context
   /// the text is then inserted in, until the focus is found.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when a `script.callFunction` command fails, and `FerriError::Evaluation` when
+  /// the insertion script throws in any frame it descends into.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
     let mut context = self.context_id.to_string();
     loop {
@@ -1723,6 +1902,9 @@ impl BidiPage {
     json!({"type": "storageKey", "userContext": &*self.user_context})
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when `storage.getCookies` fails or its response has no `cookies` array.
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     let result = self
       .cmd(
@@ -1745,6 +1927,9 @@ impl BidiPage {
     Ok(out)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `storage.setCookie` command fails.
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
     // BiDi `storage.setCookie` has no `url` field (unlike CDP), and
     // `domain` is mandatory. Match Playwright by deriving domain/path
@@ -1800,6 +1985,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `storage.deleteCookies` command fails.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     let mut filter = json!({"name": name});
     if let Some(d) = domain {
@@ -1817,6 +2005,9 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `storage.deleteCookies` command fails.
   pub async fn clear_cookies(&self) -> Result<()> {
     self
       .cmd(
@@ -1835,6 +2026,10 @@ impl BidiPage {
   ///
   /// Browser-scoped and best-effort in Firefox, the same way Playwright
   /// treats it; the tempdir drop cleans up if the command never landed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `browser.setDownloadBehavior` command fails.
   pub async fn send_download_behavior(&self) -> Result<()> {
     self
       .cmd(
@@ -1867,46 +2062,19 @@ impl BidiPage {
   /// `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiBrowser.ts::initialize`
   /// sequence. Unsupported fields return a typed error per field
   /// which is aggregated and surfaced to the caller.
-  #[allow(clippy::too_many_lines)]
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Backend` listing, per field, each override whose `BiDi` command failed
+  /// and each option this backend cannot honour (`bypassCSP` or `hasTouch` set to true). The
+  /// remaining fields are still applied.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     use futures::future::OptionFuture;
 
-    // Stored synchronously — the network tracker answers
-    // `network.authRequired` from this shared slot. A bag without the
-    // field leaves previously-set credentials alone (clearing rides the
-    // dedicated `set_http_credentials(None)` path, same as the other
-    // backends).
-    if let Some(c) = opts.http_credentials.clone()
-      && let Ok(mut slot) = self.http_credentials.lock()
-    {
-      *slot = Some(c);
-    }
-    if let Some(ignore) = opts.ignore_https_errors
-      && let Ok(mut network) = self.network.lock()
-    {
-      network.ignore_https_errors = ignore;
-    }
+    self.store_network_options(opts);
 
     let perms_fut: OptionFuture<_> = (opts.permissions.is_some() || !opts.origin_permissions.is_empty())
-      .then_some(async move {
-        if let Some(p) = &opts.permissions {
-          if let Ok(mut state) = self.permissions.lock() {
-            state.global = crate::permissions::bidi(p);
-          }
-          // Grant for the current document's origin right away —
-          // `grant_permissions` can arrive after the page already
-          // navigated. Future navigations re-grant from the event
-          // listener (`browsingContext.navigationStarted`).
-          let url = self.url().await.ok().flatten().unwrap_or_default();
-          self.grant_global_permissions_for_url(&url).await?;
-        }
-        for (origin, permissions) in &opts.origin_permissions {
-          self
-            .grant_permissions_for_origin(origin, crate::permissions::bidi(permissions))
-            .await?;
-        }
-        Ok(())
-      })
+      .then(|| self.apply_context_permissions(opts))
       .into();
     let viewport_fut: OptionFuture<_> = opts
       .resolved_viewport()
@@ -1924,156 +2092,51 @@ impl BidiPage {
           height: vp.height,
         })
       })
-      .map(|screen| async move {
-        let portrait = opts.is_mobile.unwrap_or(false) || screen.height >= screen.width;
-        let (kind, angle, natural) = if portrait {
-          ("portrait-primary", 0, "portrait")
-        } else {
-          ("landscape-primary", 0, "landscape")
-        };
-        self
-          .cmd(
-            "emulation.setScreenOrientationOverride",
-            json!({
-              "contexts": [&*self.context_id],
-              "screenOrientation": { "natural": natural, "type": kind, "angle": angle },
-            }),
-          )
-          .await?;
-        self
-          .cmd(
-            "emulation.setScreenSettingsOverride",
-            json!({
-              "contexts": [&*self.context_id],
-              "screenArea": { "width": screen.width, "height": screen.height },
-            }),
-          )
-          .await
-          .map(|_| ())
-      })
+      .map(|screen| self.emulate_screen(screen, opts.is_mobile.unwrap_or(false)))
       .into();
-    // The page's own media, layered over this, is applied by
-    // `AnyPage::apply_context_options`. The context's colour scheme also
-    // goes onto its user context, so a page the browser opens there has
-    // it before its first document rather than once it is registered.
-    let scheme_fut = async move {
-      if &*self.user_context == "default" {
-        return;
-      }
-      let scheme = match &opts.color_scheme {
-        crate::options::MediaOverride::Unchanged => {
-          crate::options::MediaOverride::Set(crate::backend::DEFAULT_COLOR_SCHEME.to_owned())
-        },
-        other => other.clone(),
-      };
-      let Ok(Some(value)) = color_scheme_feature(&scheme) else {
-        return;
-      };
-      let params = json!({
-        "features": { "prefers-color-scheme": value },
-        "userContexts": [&*self.user_context],
-      });
-      if let Err(error) = self.cmd("emulation.setMediaFeaturesOverride", params).await {
-        tracing::debug!("colour scheme for user context {}: {error}", self.user_context);
-      }
-    };
-    let ua_fut: OptionFuture<_> = opts
-      .user_agent
-      .as_deref()
-      .map(|ua| async move {
-        self
-          .emulate("emulation.setUserAgentOverride", json!({"userAgent": ua}))
-          .await
-      })
-      .into();
-    let locale_fut: OptionFuture<_> = opts
-      .locale
-      .as_deref()
-      .map(|l| async move { self.emulate("emulation.setLocaleOverride", json!({"locale": l})).await })
-      .into();
-    let tz_fut: OptionFuture<_> = opts
-      .timezone_id
-      .as_deref()
-      .map(|tz| async move {
-        self
-          .emulate("emulation.setTimezoneOverride", json!({"timezone": tz}))
-          .await
-      })
-      .into();
-    let js_fut: OptionFuture<_> = opts
-      .java_script_enabled
-      .map(|v| async move {
-        self
-          .emulate("emulation.setScriptingEnabled", json!({"enabled": v}))
-          .await
-      })
-      .into();
+    let scheme_fut = self.emulate_user_context_color_scheme(&opts.color_scheme);
+    let ua_fut = self.emulate_if(
+      "emulation.setUserAgentOverride",
+      opts.user_agent.as_deref().map(|ua| json!({"userAgent": ua})),
+    );
+    let locale_fut = self.emulate_if(
+      "emulation.setLocaleOverride",
+      opts.locale.as_deref().map(|l| json!({"locale": l})),
+    );
+    let tz_fut = self.emulate_if(
+      "emulation.setTimezoneOverride",
+      opts.timezone_id.as_deref().map(|tz| json!({"timezone": tz})),
+    );
+    let js_fut = self.emulate_if(
+      "emulation.setScriptingEnabled",
+      opts.java_script_enabled.map(|v| json!({"enabled": v})),
+    );
     let dl_fut: OptionFuture<_> = opts
       .accept_downloads
-      .map(|accept| async move {
-        // Record and re-assert: `attach_listeners` sends the same
-        // command with this page's real destination folder, and the two
-        // must not disagree. The re-send here is what makes a `denied`
-        // reach the browser before anything registers interest in
-        // downloads, since Firefox's own default is to allow.
-        self
-          .accept_downloads
-          .store(accept, std::sync::atomic::Ordering::Relaxed);
-        self.download_manager.set_accept_downloads(accept);
-        self.send_download_behavior().await
-      })
+      .map(|accept| self.apply_accept_downloads(accept))
       .into();
     let headers_fut: OptionFuture<_> = opts
       .extra_http_headers
       .as_ref()
-      .map(|h| async move { self.set_extra_http_headers(h).await })
+      .map(|h| self.set_extra_http_headers(h))
       .into();
-    let geo_fut: OptionFuture<_> = opts
-      .geolocation
-      .map(|g| async move {
-        self
-          .cmd(
-            "emulation.setGeolocationOverride",
-            json!({
-              "contexts": [&*self.context_id],
-              "coordinates": {"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy},
-            }),
-          )
-          .await
-          .map(|_| ())
-      })
-      .into();
-    let offline_fut: OptionFuture<_> = opts
-      .offline
-      .map(|o| async move {
-        // Playwright's BiDi backend shape (bidiBrowser.ts:406):
-        // `networkConditions: { type: 'offline' } | null`.
-        self
-          .cmd(
-            "emulation.setNetworkConditions",
-            json!({
-              "contexts": [&*self.context_id],
-              "networkConditions": if o { json!({"type": "offline"}) } else { serde_json::Value::Null },
-            }),
-          )
-          .await
-          .map(|_| ())
-      })
-      .into();
+    let geo_fut = self.context_command_if(
+      "emulation.setGeolocationOverride",
+      opts
+        .geolocation
+        .map(|g| json!({"coordinates": {"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}})),
+    );
+    // Playwright's BiDi backend shape (bidiBrowser.ts:406):
+    // `networkConditions: { type: 'offline' } | null`.
+    let offline_fut = self.context_command_if(
+      "emulation.setNetworkConditions",
+      opts
+        .offline
+        .map(|o| json!({"networkConditions": if o { json!({"type": "offline"}) } else { serde_json::Value::Null }})),
+    );
     let sw_fut: OptionFuture<_> = opts
       .service_workers
-      .map(|p| async move {
-        if matches!(p, crate::options::ServiceWorkerPolicy::Block) {
-          self
-            .add_init_script(
-              "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}",
-            )
-            .await
-            .map(|_| ())
-        } else {
-          Ok(())
-        }
-      })
+      .map(|policy| self.apply_service_workers(policy))
       .into();
 
     let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, (), r_geo, r_off, r_sw, r_perm) = tokio::join!(
@@ -2092,8 +2155,7 @@ impl BidiPage {
       perms_fut,
     );
 
-    let mut errs: Vec<String> = Vec::new();
-    for (label, r) in [
+    let applied = [
       ("viewport", r_vp),
       ("screen", r_scr),
       ("userAgent", r_ua),
@@ -2106,38 +2168,148 @@ impl BidiPage {
       ("offline", r_off),
       ("serviceWorkers", r_sw),
       ("permissions", r_perm),
-    ] {
-      if let Some(Err(e)) = r {
-        errs.push(format!("{label}: {e}"));
-      }
-    }
-    // Explicit unsupported fields — Firefox BiDi lacks these
-    // primitives. Surfacing the gap to the caller (vs. silently
-    // dropping) matches Playwright's Rule-4 "typed Unsupported for
-    // real protocol gaps".
-    //
-    // Each is refused only when it asks for the behaviour the backend
-    // cannot produce. `hasTouch: false` asks for the default, which is
-    // what Firefox already does — and it is what a spread of a desktop
-    // device descriptor carries, so refusing it made `{ ...devices
-    // ['Desktop Firefox'] }` fail on Firefox.
-    for (label, asked) in [
-      ("bypassCSP", opts.bypass_csp == Some(true)),
-      // browsingContext.setViewport has no touch-emulation field and
-      // Firefox exposes no other command for it.
-      ("hasTouch", opts.has_touch == Some(true)),
-    ] {
-      if asked {
-        errs.push(format!(
-          "{label}: BiDi/Firefox backend does not yet support this context option"
-        ));
-      }
-    }
+    ];
+    context_option_errors(applied, opts)
+  }
 
-    if errs.is_empty() {
-      Ok(())
+  /// Stored synchronously — the network tracker answers
+  /// `network.authRequired` from this shared slot. A bag without the
+  /// field leaves previously-set credentials alone (clearing rides the
+  /// dedicated `set_http_credentials(None)` path, same as the other
+  /// backends).
+  fn store_network_options(&self, opts: &crate::options::BrowserContextOptions) {
+    if let Some(c) = opts.http_credentials.clone()
+      && let Ok(mut slot) = self.http_credentials.lock()
+    {
+      *slot = Some(c);
+    }
+    if let Some(ignore) = opts.ignore_https_errors
+      && let Ok(mut network) = self.network.lock()
+    {
+      network.ignore_https_errors = ignore;
+    }
+  }
+
+  fn emulate_if(
+    &self,
+    method: &'static str,
+    params: Option<serde_json::Value>,
+  ) -> futures::future::OptionFuture<impl std::future::Future<Output = Result<()>> + '_> {
+    params.map(|params| self.emulate(method, params)).into()
+  }
+
+  /// `method` with `params` scoped to this page's browsing context, when
+  /// there are params to send.
+  fn context_command_if(
+    &self,
+    method: &'static str,
+    params: Option<serde_json::Value>,
+  ) -> futures::future::OptionFuture<impl std::future::Future<Output = Result<()>> + '_> {
+    params
+      .map(|mut params| async move {
+        params["contexts"] = json!([&*self.context_id]);
+        self.cmd(method, params).await.map(|_| ())
+      })
+      .into()
+  }
+
+  /// Record and re-assert: `attach_listeners` sends the same command
+  /// with this page's real destination folder, and the two must not
+  /// disagree. The re-send here is what makes a `denied` reach the
+  /// browser before anything registers interest in downloads, since
+  /// Firefox's own default is to allow.
+  async fn apply_accept_downloads(&self, accept: bool) -> Result<()> {
+    self
+      .accept_downloads
+      .store(accept, std::sync::atomic::Ordering::Relaxed);
+    self.download_manager.set_accept_downloads(accept);
+    self.send_download_behavior().await
+  }
+
+  async fn apply_service_workers(&self, policy: crate::options::ServiceWorkerPolicy) -> Result<()> {
+    if matches!(policy, crate::options::ServiceWorkerPolicy::Block) {
+      self
+        .add_init_script(
+          "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}",
+        )
+        .await
+        .map(|_| ())
     } else {
-      Err(FerriError::Backend(errs.join("; ")))
+      Ok(())
+    }
+  }
+
+  async fn apply_context_permissions(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+    if let Some(p) = &opts.permissions {
+      if let Ok(mut state) = self.permissions.lock() {
+        state.global = crate::permissions::bidi(p);
+      }
+      // Grant for the current document's origin right away —
+      // `grant_permissions` can arrive after the page already
+      // navigated. Future navigations re-grant from the event
+      // listener (`browsingContext.navigationStarted`).
+      let url = self.url().await.ok().flatten().unwrap_or_default();
+      self.grant_global_permissions_for_url(&url).await?;
+    }
+    for (origin, permissions) in &opts.origin_permissions {
+      self
+        .grant_permissions_for_origin(origin, crate::permissions::bidi(permissions))
+        .await?;
+    }
+    Ok(())
+  }
+
+  async fn emulate_screen(&self, screen: crate::options::ScreenSize, is_mobile: bool) -> Result<()> {
+    let portrait = is_mobile || screen.height >= screen.width;
+    let (kind, angle, natural) = if portrait {
+      ("portrait-primary", 0, "portrait")
+    } else {
+      ("landscape-primary", 0, "landscape")
+    };
+    self
+      .cmd(
+        "emulation.setScreenOrientationOverride",
+        json!({
+          "contexts": [&*self.context_id],
+          "screenOrientation": { "natural": natural, "type": kind, "angle": angle },
+        }),
+      )
+      .await?;
+    self
+      .cmd(
+        "emulation.setScreenSettingsOverride",
+        json!({
+          "contexts": [&*self.context_id],
+          "screenArea": { "width": screen.width, "height": screen.height },
+        }),
+      )
+      .await
+      .map(|_| ())
+  }
+
+  /// The page's own media, layered over this, is applied by
+  /// `AnyPage::apply_context_options`. The context's colour scheme also
+  /// goes onto its user context, so a page the browser opens there has
+  /// it before its first document rather than once it is registered.
+  async fn emulate_user_context_color_scheme(&self, color_scheme: &crate::options::MediaOverride) {
+    if &*self.user_context == "default" {
+      return;
+    }
+    let scheme = match color_scheme {
+      crate::options::MediaOverride::Unchanged => {
+        crate::options::MediaOverride::Set(crate::backend::DEFAULT_COLOR_SCHEME.to_owned())
+      },
+      other => other.clone(),
+    };
+    let Ok(Some(value)) = color_scheme_feature(&scheme) else {
+      return;
+    };
+    let params = json!({
+      "features": { "prefers-color-scheme": value },
+      "userContexts": [&*self.user_context],
+    });
+    if let Err(error) = self.cmd("emulation.setMediaFeaturesOverride", params).await {
+      tracing::debug!("colour scheme for user context {}: {error}", self.user_context);
     }
   }
 
@@ -2169,6 +2341,9 @@ impl BidiPage {
     std::future::ready(Ok(()))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.setViewport` command fails.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     let mut params = json!({
       "context": &*self.context_id,
@@ -2184,6 +2359,11 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `media`, `reducedMotion`, `forcedColors` or `contrast`
+  /// is specified or `colorScheme` is neither light nor dark, and an error when
+  /// `emulation.setMediaFeaturesOverride` fails.
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     tokio::task::yield_now().await;
     // `emulation.setMediaFeaturesOverride` is the only media command
@@ -2230,6 +2410,10 @@ impl BidiPage {
   /// Direct `BiDi` `network.setExtraHeaders` command. Backs
   /// [`crate::Page::set_extra_http_headers`] (Playwright's public
   /// `page.setExtraHTTPHeaders(headers)`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `network.setExtraHeaders` command fails.
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<()> {
     let header_list: Vec<serde_json::Value> = headers
       .iter()
@@ -2257,6 +2441,11 @@ impl BidiPage {
   /// (origin, permission) pair this page granted back to `"prompt"` and
   /// drops the context-wide grant list — mirrors Playwright's
   /// `bidiBrowser.ts::doClearPermissions`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when a `permissions.setPermission` call resetting a granted permission to
+  /// `prompt` fails, and stops at that permission.
   pub async fn reset_permissions(&self) -> Result<()> {
     let granted: Vec<(String, Vec<String>)> = match self.permissions.lock() {
       Ok(mut state) => {
@@ -2355,6 +2544,10 @@ impl BidiPage {
 
   // ── Ref resolution ──────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the selector engine cannot be injected, and
+  /// `FerriError::ElementNotFound` when no element carries the `data-fdref` value.
   pub async fn resolve_backend_node(&self, backend_node_id: i64, _ref_id: &str) -> Result<AnyElement> {
     // Resolve via data-fdref attribute (set during accessibility tree walk)
     self.find_element(&format!("[data-fdref='{backend_node_id}']")).await
@@ -2367,7 +2560,6 @@ impl BidiPage {
   // clippy's default 100-line cap. Splitting it into per-domain
   // sub-functions would require threading eight captured `Arc`s
   // through each call — the inline match is clearer as-is.
-  #[allow(clippy::too_many_lines)]
   pub fn attach_listeners(
     &self,
     console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
@@ -2392,9 +2584,9 @@ impl BidiPage {
     // cleans up any files if the command fails. Firing the setup on a
     // detached task because `attach_listeners` is synchronous.
     {
-      let session = self.session.clone();
-      let downloads_subdir = self.downloads_subdir.clone();
-      let accept_downloads = self.accept_downloads.clone();
+      let session = Arc::clone(&self.session);
+      let downloads_subdir = Arc::clone(&self.downloads_subdir);
+      let accept_downloads = Arc::clone(&self.accept_downloads);
       tokio::spawn(async move {
         let _ = session
           .transport
@@ -2408,37 +2600,22 @@ impl BidiPage {
 
     self.spawn_worker_listener();
     self.session.transport.observe_events(super::frames::frame_observer(
-      self.context_id.clone(),
+      Arc::clone(&self.context_id),
       Arc::clone(&self.frame_cache),
-      self.closed.clone(),
+      Arc::clone(&self.closed),
     ));
-    let mut rx = self.session.transport.tap_events();
+    let rx = self.session.transport.tap_events();
     *self
       .event_barrier
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx.barrier());
-    let ctx = self.context_id.clone();
-    let session = self.session.clone();
-    let dialog_manager = self.dialog_manager.clone();
-    let file_chooser_manager = self.file_chooser_manager.clone();
-    let download_manager = self.download_manager.clone();
-    let downloads_subdir = self.downloads_subdir.clone();
-    let page_backref = self.page_backref.clone();
-    let closed = self.closed.clone();
-    let emitter = self.events.clone();
-    let frame_cache = Arc::clone(&self.frame_cache);
-    let injected_script = self.injected_script.clone();
-    let exposed_fns = self.exposed_fns.clone();
-    let exposed_session = self.session.clone();
-    let exposed_ctx = self.context_id.clone();
     let tracker = Arc::new(BidiNetworkTracker::new(
-      self.session.clone(),
-      self.context_id.clone(),
+      Arc::clone(&self.session),
+      Arc::clone(&self.context_id),
       self.nav_request_slot.clone(),
-      self.http_credentials.clone(),
-      self.network.clone(),
+      Arc::clone(&self.http_credentials),
+      Arc::clone(&self.network),
     ));
-    let page_for_grants = self.clone();
     let (binding_tx, mut binding_rx) =
       tokio::sync::mpsc::unbounded_channel::<futures::future::BoxFuture<'static, ()>>();
     let binding_worker = tokio::spawn(async move {
@@ -2448,611 +2625,16 @@ impl BidiPage {
     });
     self.track_listener(binding_worker.abort_handle());
 
-    let main_listener = tokio::spawn(async move {
-      // Child browsing contexts (iframes) of this page, tracked from
-      // `contextCreated` / `contextDestroyed`. Used to scope events that
-      // only carry a `source.context` (exposed-binding dispatch via
-      // `log.entryAdded`) to this page's frame tree.
-      // Each child frame, at any depth, and the frame it is in.
-      let mut child_frames: rustc_hash::FxHashMap<String, String> = rustc_hash::FxHashMap::default();
-      while let Some(event) = rx.recv().await {
-        // Filter events for this context. Accepts events targeting this
-        // top-level context directly, events with no `context` field
-        // (session-wide), and events whose `parent` matches us — the
-        // latter covers `browsingContext.contextCreated` for child
-        // iframes that BiDi reports under the child's own id.
-        let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-        let event_parent = event.params.get("parent").and_then(|v| v.as_str()).unwrap_or("");
-        // A frame inside a frame names its own parent, which is one of ours.
-        let child_of_this =
-          !event_parent.is_empty() && (event_parent == &*ctx || child_frames.contains_key(event_parent));
-        if event_ctx != &*ctx && !event_ctx.is_empty() && !child_of_this && !child_frames.contains_key(event_ctx) {
-          continue;
-        }
-
-        // `browsingContext.contextCreated` events for child iframes
-        // surface here with their own (child) `context` id and the
-        // top-level `parent` set to our context. Emit a `FrameAttached`
-        // so the page-level frame cache (used by `page.frame(name)`,
-        // `page.frames()`) sees the iframe. Without this BiDi pages
-        // expose no child-frame metadata at all.
-        //
-        // BiDi's `contextCreated` payload does not carry the
-        // iframe's `name` attribute. Spawn a follow-up
-        // `browsingContext.getTree` to enrich the cache record with
-        // name + final url once Firefox has wired the iframe up.
-        if event.method == "browsingContext.contextCreated" && child_of_this {
-          child_frames.insert(event_ctx.to_string(), event_parent.to_string());
-          let frame_id = event_ctx.to_string();
-          let url = event
-            .params
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-          let parent_id = event_parent.to_string();
-          emitter.emit(PageEvent::FrameAttached(crate::backend::FrameInfo {
-            frame_id: frame_id.clone(),
-            parent_frame_id: Some(parent_id.clone()),
-            name: String::new(),
-            url: url.clone(),
-          }));
-          // Async refresh: fetch the iframe's `name` (and updated `url`)
-          // via `browsingContext.getTree`. Firefox populates `name` once
-          // the iframe element is parsed; we re-emit a `FrameNavigated`
-          // with the enriched info so the cache lookup picks up
-          // `page.frame('target')` matches.
-          let session_for_refresh = session.clone();
-          let emitter_for_refresh = emitter.clone();
-          let parent_for_refresh = parent_id.clone();
-          let child_for_refresh = frame_id.clone();
-          let cache_for_refresh = Arc::clone(&frame_cache);
-          tokio::spawn(async move {
-            let result = session_for_refresh
-              .transport
-              .send_command(
-                "browsingContext.getTree",
-                json!({"root": &parent_for_refresh, "maxDepth": 1}),
-              )
-              .await;
-            let Ok(tree) = result else { return };
-            let Some(contexts) = tree.get("contexts").and_then(|v| v.as_array()) else {
-              return;
-            };
-            // The returned array has the parent at index 0; its
-            // `children` array contains the iframe entries with `name`.
-            let Some(children) = contexts
-              .first()
-              .and_then(|p| p.get("children"))
-              .and_then(|v| v.as_array())
-            else {
-              return;
-            };
-            for child in children {
-              let cid = child.get("context").and_then(|v| v.as_str()).unwrap_or("");
-              if cid != child_for_refresh {
-                continue;
-              }
-              let cname = child.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              let curl = child.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              // Only the name: the frame may have navigated since the
-              // tree was read, and the reader keeps its URL in wire order.
-              {
-                let mut cache = cache_for_refresh
-                  .lock()
-                  .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if cache.record(cid).is_some_and(|record| !record.detached) {
-                  cache.attach(crate::backend::FrameInfo {
-                    frame_id: cid.to_string(),
-                    parent_frame_id: Some(parent_for_refresh.clone()),
-                    name: cname.clone(),
-                    url: String::new(),
-                  });
-                }
-              }
-              emitter_for_refresh.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
-                frame_id: cid.to_string(),
-                parent_frame_id: Some(parent_for_refresh.clone()),
-                name: cname,
-                url: curl,
-              }));
-              break;
-            }
-          });
-          continue;
-        }
-
-        match event.method.as_str() {
-          // Same-document navigations: `historyUpdated` covers
-          // `history.pushState` / `replaceState`, `fragmentNavigated`
-          // covers hash changes. The document (and `window.__fd`)
-          // persists, so no engine reset — just keep the tracked URL
-          // fresh. Mirrors Playwright's `bidiPage.ts::_onHistoryUpdated`
-          // / `_onFragmentNavigated`.
-          "browsingContext.historyUpdated" | "browsingContext.fragmentNavigated" => {
-            let url = event
-              .params
-              .get("url")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-            if event_ctx == &*ctx {
-              emitter.emit(PageEvent::FrameNavigatedWithinDocument(crate::backend::FrameInfo {
-                frame_id: (*ctx).to_string(),
-                parent_frame_id: None,
-                name: String::new(),
-                url,
-              }));
-            } else if let Some(parent) = child_frames.get(event_ctx) {
-              emitter.emit(PageEvent::FrameNavigatedWithinDocument(crate::backend::FrameInfo {
-                frame_id: event_ctx.to_string(),
-                parent_frame_id: Some(parent.clone()),
-                name: String::new(),
-                url,
-              }));
-            }
-          },
-          "browsingContext.navigationStarted"
-          | "browsingContext.navigationCommitted"
-          | "browsingContext.domContentLoaded"
-          | "browsingContext.load" => {
-            // Materialise context-wide permission grants for the newly
-            // navigated origin (mirrors Playwright's
-            // `doGrantGlobalPermissionsForURL` on navigation commit).
-            // Awaited inline so the grant lands before this same loop
-            // emits `load` — `goto` resolves on that event, so page
-            // code observing the document never races the grant. The
-            // helper sends nothing when the origin is already granted.
-            if event.method == "browsingContext.navigationStarted" {
-              let nav_url = event.params.get("url").and_then(|v| v.as_str()).unwrap_or("");
-              if let Err(e) = page_for_grants.grant_global_permissions_for_url(nav_url).await {
-                tracing::debug!("permissions grant for {nav_url} failed: {e}");
-              }
-            }
-            // Surface the main frame's cross-document navigation as
-            // `FrameNavigated` (CDP gets this from `Page.frameNavigated`;
-            // BiDi has no direct analogue). Keeps the frame cache's
-            // main-frame URL fresh and starts a new `since-navigation`
-            // window for `consoleMessages()` / `pageErrors()`. Only the
-            // `navigationCommitted` arm fires — marking again at
-            // `domContentLoaded` / `load` would wrongly evict console
-            // output from inline scripts that ran during parse.
-            if event.method == "browsingContext.navigationCommitted" && event_ctx == &*ctx {
-              let url = event
-                .params
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              emitter.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
-                frame_id: (*ctx).to_string(),
-                parent_frame_id: None,
-                name: String::new(),
-                url,
-              }));
-            } else if event.method == "browsingContext.navigationCommitted"
-              && let Some(parent) = child_frames.get(event_ctx)
-            {
-              // Child-iframe cross-document navigation — surface it like
-              // CDP's per-frame `Page.frameNavigated` so frame-scoped
-              // consumers (e.g. WebSocket-route teardown) observe it.
-              let url = event
-                .params
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              emitter.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
-                frame_id: event_ctx.to_string(),
-                parent_frame_id: Some(parent.clone()),
-                name: String::new(),
-                url,
-              }));
-            }
-            // Surface the main frame's lifecycle on the page emitter so
-            // `page.on('load' | 'domcontentloaded')` observes it.
-            if event_ctx == &*ctx {
-              match event.method.as_str() {
-                "browsingContext.domContentLoaded" => emitter.emit(PageEvent::DomContentLoaded),
-                "browsingContext.load" => emitter.emit(PageEvent::Load),
-                _ => {},
-              }
-            }
-            // Scope the engine-state reset to the context that actually
-            // navigated. A child iframe reloading must not wipe the
-            // main context's `window.__fd` (and vice-versa) — that
-            // blanket reset was forcing a redundant re-inject every
-            // time any frame fired a lifecycle event (Residual 2).
-            injected_script.reset_context(event_ctx);
-          },
-          "script.message" => {
-            // Exposed-binding dispatch. The shim installed by
-            // `expose_binding` sends `JSON.stringify({name, id, args})`
-            // through the `BINDING_CHANNEL` channel; the payload
-            // arrives as a string RemoteValue in `data` and
-            // `source.context` names the calling frame (an iframe
-            // caller surfaces its own frame, and the promise resolve
-            // below must target that same context). Mirrors
-            // Playwright's `bidiPage.ts::_onScriptMessage`.
-            if event.params.get("channel").and_then(|v| v.as_str()) != Some(BINDING_CHANNEL) {
-              continue;
-            }
-            let Some(text) = event
-              .params
-              .get("data")
-              .and_then(|d| d.get("value"))
-              .and_then(|v| v.as_str())
-            else {
-              continue;
-            };
-            let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) else {
-              continue;
-            };
-            let fn_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let args: Vec<serde_json::Value> = payload
-              .get("args")
-              .and_then(|v| v.as_array())
-              .cloned()
-              .unwrap_or_default();
-            let call_ctx = event
-              .params
-              .get("source")
-              .and_then(|s| s.get("context"))
-              .and_then(|v| v.as_str())
-              .unwrap_or(&exposed_ctx)
-              .to_string();
-            // `script.message` has no top-level `context`, so the page
-            // filter above can't scope it — every page's listener on
-            // this session sees every envelope. Only dispatch calls
-            // originating in THIS page's frame tree; otherwise a
-            // same-named binding on another page would double-fire.
-            if call_ctx != *ctx && !child_frames.contains_key(&call_ctx) {
-              continue;
-            }
-            let source = crate::events::BindingSource {
-              context: String::new(),
-              page: (*exposed_ctx).to_string(),
-              frame: call_ctx.clone(),
-              live: None,
-            };
-            let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
-            let exposed_session = exposed_session.clone();
-            let _ = binding_tx.send(Box::pin(async move {
-              let outcome = match maybe_fn {
-                Some(callback) => callback(source, args).await,
-                None => Err(format!("Function not found: {fn_name}")),
-              };
-              // The value is an expression evaluated in the calling
-              // context, only once its parked promise is found there.
-              let (settled, expression, message) = match outcome {
-                Ok(expression) => (true, expression, String::new()),
-                Err(message) => (false, String::from("undefined"), message),
-              };
-              let _ = exposed_session
-                .transport
-                .send_command(
-                  "script.callFunction",
-                  json!({
-                    "functionDeclaration": format!("(id, ok, message) => {{ const c = window.__ferri_exposed && window.__ferri_exposed[id]; if (c) {{ delete window.__ferri_exposed[id]; ok ? c.resolve({expression}) : c.reject(new Error(message)); }} }}"),
-                    "arguments": [
-                      {"type": "string", "value": id},
-                      {"type": "boolean", "value": settled},
-                      {"type": "string", "value": message},
-                    ],
-                    "target": {"context": call_ctx},
-                    "awaitPromise": false,
-                    "resultOwnership": "none"
-                  }),
-                )
-                .await;
-            }));
-          },
-          "log.entryAdded" => {
-            // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`.
-            // Routes `type: 'javascript'` + `level: 'error'` entries to
-            // `PageEvent::PageError(WebError)`; `type: 'console'`
-            // entries to `PageEvent::Console(ConsoleMessage)`; other
-            // entry types (`'deprecation'`, etc.) are ignored.
-            let entry_type = event.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let level = event.params.get("level").and_then(|v| v.as_str()).unwrap_or("");
-            if entry_type == "javascript" && level == "error" {
-              // Parity with `bidiPage.ts:267-286`: split `text` at the
-              // first `': '` for `name` / `message`, synthesise `stack`
-              // from the entry's `stackTrace.callFrames` (BiDi
-              // line/column are 0-based so Playwright adds `+ 1`).
-              let text = event
-                .params
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              let (name, message) = split_error_text(&text);
-              let stack = build_bidi_stack(&text, event.params.get("stackTrace"));
-              let details = crate::web_error::ErrorDetails { name, message, stack };
-              let location = bidi_stack_to_location(event.params.get("stackTrace"));
-              let web_err = match page_backref.upgrade() {
-                Some(page) => crate::web_error::WebError::new(&page, details, location),
-                None => crate::web_error::WebError::new_detached(details, location),
-              };
-              emitter.emit(PageEvent::PageError(web_err));
-              continue;
-            }
-            if entry_type != "console" {
-              continue;
-            }
-
-            let Some(page) = page_backref.upgrade() else {
-              continue;
-            };
-            // BiDi reports `method` for the console variant (e.g.
-            // 'log', 'warn', 'error'). Playwright remaps `'warn'` to
-            // `'warning'` for parity with CDP's `Runtime.consoleAPICalled.type`.
-            let method = event.params.get("method").and_then(|v| v.as_str()).unwrap_or("log");
-            let type_str = if method == "warn" { "warning" } else { method };
-            // `text` is explicit only for `timeLog` / `timeEnd`. For
-            // other variants Playwright leaves it undefined so the
-            // lazy `text()` falls back to args preview.
-            let text = if matches!(method, "timeLog" | "timeEnd") {
-              event
-                .params
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string)
-            } else {
-              None
-            };
-            let args_json = event
-              .params
-              .get("args")
-              .and_then(|v| v.as_array())
-              .cloned()
-              .unwrap_or_default();
-            let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
-            for arg in &args_json {
-              let backing = bidi_remote_value_to_backing(arg);
-              let is_node = arg.get("type").and_then(|v| v.as_str()) == Some("node");
-              args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing, is_node));
-            }
-            let location = bidi_stack_trace_to_location(event.params.get("stackTrace"), event.params.get("source"));
-            let timestamp = event
-              .params
-              .get("timestamp")
-              .and_then(serde_json::Value::as_f64)
-              .map_or(0, f64_to_u64_saturating);
-            let msg = ConsoleMessage::new(&page, type_str, text, args, location, timestamp);
-            crate::state::push_capped(
-              &mut *console_log.write().await,
-              msg.clone(),
-              crate::state::CONSOLE_LOG_CAP,
-            );
-            emitter.emit(PageEvent::Console(msg));
-          },
-          "network.beforeRequestSent" => {
-            tracker
-              .on_before_request_sent(&event.params, &emitter, &network_log)
-              .await;
-          },
-          "network.responseStarted" => {
-            tracker.on_response_started(&event.params, &emitter).await;
-          },
-          "network.responseCompleted" => {
-            tracker.on_response_completed(&event.params, &emitter).await;
-          },
-          "network.fetchError" => {
-            tracker.on_fetch_error(&event.params, &emitter).await;
-          },
-          "network.authRequired" => {
-            tracker.on_auth_required(&event.params).await;
-          },
-          "browsingContext.userPromptOpened" => {
-            let prompt_type_str = event
-              .params
-              .get("type")
-              .and_then(|v| v.as_str())
-              .unwrap_or("alert")
-              .to_string();
-            let message = event
-              .params
-              .get("message")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-            let default_value = event
-              .params
-              .get("defaultValue")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-            let dialog_type = crate::dialog::DialogType::parse(&prompt_type_str);
-
-            // Build the responder: translates the user's accept/dismiss
-            // into `browsingContext.handleUserPrompt`. Captures an Arc
-            // of the session + context id.
-            let responder_session = session.clone();
-            let responder_ctx = ctx.clone();
-            let responder: crate::dialog::DialogResponder = Arc::new(move |response| {
-              let session = responder_session.clone();
-              let ctx = responder_ctx.clone();
-              Box::pin(async move {
-                let accept = matches!(response, crate::dialog::DialogResponse::Accept { .. });
-                let mut handle_params = json!({
-                  "context": &*ctx,
-                  "accept": accept,
-                });
-                if let crate::dialog::DialogResponse::Accept { prompt_text: Some(t) } = response {
-                  handle_params["userText"] = json!(t);
-                }
-                session
-                  .transport
-                  .send_command("browsingContext.handleUserPrompt", handle_params)
-                  .await
-                  .map(|_| ())
-              })
-            });
-
-            let dialog = crate::dialog::Dialog::new_with_manager(
-              dialog_type,
-              message.clone(),
-              default_value,
-              responder,
-              Some(dialog_manager.clone()),
-              page_backref.weak(),
-            );
-
-            // Synchronous dialog dispatch — mirrors Playwright's
-            // `DialogManager.dialogDidOpen`. See the CDP equivalent
-            // in `backend/cdp/mod.rs` for the full rationale.
-            dialog_manager.did_open(dialog);
-
-            crate::state::push_capped(
-              &mut *dialog_log.write().await,
-              DialogEvent {
-                dialog_type: prompt_type_str,
-                message,
-                action: "dispatched".to_string(),
-              },
-              crate::state::DIALOG_LOG_CAP,
-            );
-          },
-          // Playwright's `_onUserPromptClosed`: a prompt the browser
-          // closed without us still closes the dialog it opened.
-          "browsingContext.userPromptClosed" => dialog_manager.closed_in_browser(),
-          "browsingContext.contextDestroyed" => {
-            if event_ctx == &*ctx {
-              // `swap` dedupes against `close_page`, which also emits
-              // `Close` (it can't rely on this event still being
-              // routed once the listener is aborted).
-              if !closed.swap(true, Ordering::SeqCst) {
-                emitter.emit(PageEvent::Close);
-              }
-              // This page is gone — stop consuming session-wide events.
-              break;
-            }
-            // A child iframe was removed — that's a frame detach, not
-            // a page close (treating it as Close bricked the page and
-            // tore down every page-scoped consumer).
-            child_frames.remove(event_ctx);
-            emitter.emit(PageEvent::FrameDetached {
-              frame_id: event_ctx.to_string(),
-            });
-          },
-          "input.fileDialogOpened" => {
-            // BiDi event shape:
-            // { "context": "<frameId>", "element": { "sharedId": "..." }, "multiple": bool }
-            // Per `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts::_onFileDialogOpened`.
-            let shared_id = event
-              .params
-              .get("element")
-              .and_then(|e| e.get("sharedId"))
-              .and_then(|v| v.as_str())
-              .map(std::string::ToString::to_string);
-            let is_multiple = event
-              .params
-              .get("multiple")
-              .and_then(serde_json::Value::as_bool)
-              .unwrap_or(false);
-            let Some(shared_id) = shared_id else {
-              continue;
-            };
-            // Resolve the element -> ElementHandle off the hot
-            // subscription loop. Same rationale as the CDP listener:
-            // we don't want rapid file-picker triggers queued
-            // behind a slow DOM round-trip.
-            let manager_clone = file_chooser_manager.clone();
-            let backref_clone = page_backref.clone();
-            let ctx_clone = ctx.clone();
-            let session_clone = session.clone();
-            tokio::spawn(async move {
-              let Some(page) = backref_clone.upgrade() else {
-                return;
-              };
-              // Build a BidiElement directly from the shared id so
-              // we don't need a page-scoped selector round-trip.
-              let element =
-                crate::backend::AnyElement::Bidi(super::BidiElement::new(session_clone, ctx_clone, shared_id));
-              let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(page.clone(), element).await
-              else {
-                return;
-              };
-              let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
-              manager_clone.did_open(&chooser);
-            });
-          },
-          "browsingContext.downloadWillBegin" => {
-            // BiDi correlates a download with its triggering navigation
-            // via the `navigation` id on the event. If the browser
-            // doesn't attribute it to a navigation, Playwright skips
-            // (see `bidiPage.ts::_onDownloadWillBegin`) — so do we.
-            let Some(navigation) = event
-              .params
-              .get("navigation")
-              .and_then(|v| v.as_str())
-              .map(std::string::ToString::to_string)
-            else {
-              continue;
-            };
-            let url = event
-              .params
-              .get("url")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-            let suggested = event
-              .params
-              .get("suggestedFilename")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-
-            let Some(page) = page_backref.upgrade() else {
-              continue;
-            };
-
-            // BiDi has no native cancel — Playwright's own
-            // `bidiBrowser.ts::cancelDownload` is a no-op. Surface
-            // typed `Unsupported` per Rule 4 so callers know.
-            let canceler: crate::download::DownloadCanceler = Arc::new(|| {
-              Box::pin(async {
-                Err(crate::error::FerriError::Unsupported(
-                  "Download.cancel is not supported on the BiDi backend: Firefox's BiDi implementation has no browser.cancelDownload command and Playwright's own BiDi backend leaves cancelDownload as a no-op (see bidiBrowser.ts::cancelDownload)".into(),
-                ))
-              })
-            });
-
-            let download =
-              crate::download::Download::new(&page, navigation, url, suggested, (*downloads_subdir).clone(), canceler);
-            download_manager.did_open(&download);
-          },
-          "browsingContext.downloadEnd" => {
-            let Some(navigation) = event.params.get("navigation").and_then(|v| v.as_str()) else {
-              continue;
-            };
-            let status = event
-              .params
-              .get("status")
-              .and_then(|v| v.as_str())
-              .unwrap_or("complete");
-            if let Some(d) = download_manager.take_for_guid(navigation) {
-              if status == "canceled" {
-                download_manager.report_canceled(&d, "canceled");
-              } else {
-                // `complete` carries the absolute `filepath` Firefox
-                // wrote to — override the default
-                // `<downloads_dir>/<guid>` path with the real one.
-                let filepath = event
-                  .params
-                  .get("filepath")
-                  .and_then(|v| v.as_str())
-                  .map(std::path::PathBuf::from);
-                d.report_finished(filepath, None);
-              }
-            }
-          },
-          _ => {},
-        }
-      }
-    });
+    let event_loop = PageEventLoop {
+      page: self.clone(),
+      console_log,
+      network_log,
+      dialog_log,
+      tracker,
+      binding_tx,
+      child_frames: FxHashMap::default(),
+    };
+    let main_listener = tokio::spawn(event_loop.run(rx));
     self.track_listener(main_listener.abort_handle());
   }
 
@@ -3071,6 +2653,11 @@ impl BidiPage {
   /// `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPdf.ts`;
   /// fields unsupported by `BiDi` are silently dropped here (Playwright does
   /// the same). Unit conversion mirrors the CDP backend.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` for an unknown paper `format`, and an error when
+  /// `browsingContext.print` fails or its PDF data is missing or not valid base64.
   pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     let mut paper_width = 8.5_f64;
     let mut paper_height = 11.0_f64;
@@ -3142,15 +2729,15 @@ impl BidiPage {
   ) -> impl std::future::Future<Output = Result<crate::backend::screencast::RawScreencast>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let session = self.session.clone();
-    let ctx_id = self.context_id.clone();
-    let closed = self.closed.clone();
+    let session = Arc::clone(&self.session);
+    let ctx_id = Arc::clone(&self.context_id);
+    let closed = Arc::clone(&self.closed);
 
     // Subscribe to navigation events to capture frames at key moments.
     let mut event_rx = self.session.transport.subscribe_events();
     let event_notify = Arc::new(tokio::sync::Notify::new());
-    let event_notify2 = event_notify.clone();
-    let event_ctx = self.context_id.clone();
+    let event_notify2 = Arc::clone(&event_notify);
+    let event_ctx = Arc::clone(&self.context_id);
 
     // Tracked in `listener_tasks` (below) so page close reclaims it —
     // the session-wide subscription otherwise keeps this tap alive
@@ -3241,6 +2828,10 @@ impl BidiPage {
   /// `BiDi` `input.setFiles` (Playwright's `bidiPage.ts::setInputFilePaths`).
   /// The element's owning context is used so iframe-scoped inputs
   /// resolve in their own browsing context.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `input.setFiles` command fails.
   pub async fn set_input_files_element(&self, element: &super::BidiElement, paths: &[String]) -> Result<()> {
     self
       .cmd(
@@ -3257,6 +2848,11 @@ impl BidiPage {
 
   // ── Network Interception ────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when `network.addIntercept` fails or answers without an intercept id, for
+  /// this page or, for a context route, for the session. A failed `network.setCacheBehavior` is
+  /// ignored.
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     if route.scope == crate::route::RouteScope::Context {
       self
@@ -3423,10 +3019,10 @@ impl BidiPage {
       .take();
     let mut tap = forwarded.is_none().then(|| self.session.transport.tap_events());
     let mut forwarded = forwarded;
-    let intercept_ids = self.intercept_ids.clone();
-    let session = self.session.clone();
-    let routes = self.routes.clone();
-    let network = self.network.clone();
+    let intercept_ids = Arc::clone(&self.intercept_ids);
+    let session = Arc::clone(&self.session);
+    let routes = Arc::clone(&self.routes);
+    let network = Arc::clone(&self.network);
 
     let route_listener = tokio::spawn(async move {
       loop {
@@ -3474,6 +3070,10 @@ impl BidiPage {
     self.track_listener(route_listener.abort_handle());
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature. Failures of
+  /// `network.removeIntercept` and `network.setCacheBehavior` are ignored.
   pub async fn unroute(
     &self,
     matcher: &crate::url_matcher::UrlMatcher,
@@ -3510,6 +3110,10 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature. Failures of
+  /// `network.removeIntercept` and `network.setCacheBehavior` are ignored.
   pub async fn unroute_all(
     &self,
     _behavior: crate::options::UnrouteBehavior,
@@ -3544,6 +3148,9 @@ impl BidiPage {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.close` command fails.
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     // BiDi's `browsingContext.close` takes an optional `promptUnload` flag
     // — true fires `beforeunload` handlers before unloading the context.
@@ -3596,6 +3203,9 @@ impl BidiPage {
 
   // ── Init Scripts ────────────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when `script.addPreloadScript` fails or its response has no script id.
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
     let wrapped = format!("() => {{ {source} }}");
     let result = self
@@ -3626,6 +3236,11 @@ impl BidiPage {
   /// first document, which a per-page preload registered after the page
   /// appeared would miss. `key` names the script across the context's
   /// pages.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the user-context `script.addPreloadScript` fails or its response has no
+  /// script id.
   pub async fn add_context_init_script(&self, key: u64, source: &str) -> Result<String> {
     self
       .session
@@ -3635,6 +3250,10 @@ impl BidiPage {
     Ok(format!("{CONTEXT_SCRIPT}{key}"))
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `identifier` is neither a context script identifier
+  /// nor an init script of this page, and an error when `script.removePreloadScript` fails.
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
     if let Some(key) = identifier.strip_prefix(CONTEXT_SCRIPT) {
       let key = key
@@ -3688,7 +3307,7 @@ impl BidiPage {
   /// needs to be re-packaged as an
   /// [`crate::element_handle::ElementHandle`].
   pub(crate) fn element_from_shared_id(&self, shared_id: String) -> super::BidiElement {
-    super::BidiElement::new(self.session.clone(), self.context_id.clone(), shared_id)
+    super::BidiElement::new(Arc::clone(&self.session), Arc::clone(&self.context_id), shared_id)
   }
 
   /// ferridriver's equivalent of Playwright's
@@ -3727,7 +3346,6 @@ impl BidiPage {
     }
   }
 
-  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
   async fn call_utility_evaluate_once(
     &self,
     fn_source: &str,
@@ -4046,7 +3664,7 @@ impl BidiPage {
     let ctx = handle
       .and_then(|h| self.handle_realm(h))
       .or_else(|| self.handle_realm(shared_id))
-      .unwrap_or_else(|| self.context_id.clone());
+      .unwrap_or_else(|| Arc::clone(&self.context_id));
     let result = self
       .cmd(
         "script.disown",
@@ -4066,6 +3684,10 @@ impl BidiPage {
 
   // ── Exposed Functions ───────────────────────────────────────────────────
 
+  /// # Errors
+  ///
+  /// Returns an error when the `script.addPreloadScript` that installs the binding fails.
+  /// Installing it in the frames already loaded is best effort.
   pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.expose_binding_in(name, binding, false).await
   }
@@ -4073,6 +3695,11 @@ impl BidiPage {
   /// [`Self::expose_binding`] for a binding its whole context has. Its
   /// preload goes onto the user context, so a page the browser opens in
   /// it has the function in its first document.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the user-context `script.addPreloadScript` that installs the binding
+  /// fails. Installing it in the frames already loaded is best effort.
   pub async fn expose_context_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.expose_binding_in(name, binding, true).await
   }
@@ -4122,6 +3749,11 @@ impl BidiPage {
 
   /// Register a binding the page reaches only through
   /// `__playwright__binding__controller__.callBinding`, never as a global.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `script.addPreloadScript` that installs the binding controller
+  /// fails.
   pub async fn expose_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_controller(false).await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -4129,6 +3761,11 @@ impl BidiPage {
   }
 
   /// [`Self::expose_callback`] for a callback its whole context has.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the user-context `script.addPreloadScript` that installs the binding
+  /// controller fails.
   pub async fn expose_context_callback(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_controller(true).await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -4204,6 +3841,10 @@ impl BidiPage {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature. Removing the global from each
+  /// frame is best effort.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     self.exposed_fns.write().await.remove(name);
     let js = format!("() => {{ delete window['{name}'] }}");
@@ -4254,6 +3895,597 @@ fn collect_frames(ctx: &serde_json::Value, parent_id: Option<&str>, frames: &mut
       collect_frames(child, Some(context_id), frames);
     }
   }
+}
+
+/// The session-wide event loop `BidiPage::attach_listeners` runs for one
+/// page: what it scopes to the page's frame tree and the logs it feeds.
+struct PageEventLoop {
+  page: BidiPage,
+  console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
+  network_log: Arc<RwLock<Vec<NetworkRequest>>>,
+  dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
+  tracker: Arc<BidiNetworkTracker>,
+  binding_tx: tokio::sync::mpsc::UnboundedSender<futures::future::BoxFuture<'static, ()>>,
+  /// Child browsing contexts (iframes) of this page, tracked from
+  /// `contextCreated` / `contextDestroyed`. Used to scope events that
+  /// only carry a `source.context` (exposed-binding dispatch via
+  /// `log.entryAdded`) to this page's frame tree.
+  /// Each child frame, at any depth, and the frame it is in.
+  child_frames: FxHashMap<String, String>,
+}
+
+fn param_str<'a>(params: &'a serde_json::Value, key: &str) -> &'a str {
+  params.get(key).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+impl PageEventLoop {
+  async fn run(mut self, mut rx: super::transport::EventTap) {
+    while let Some(event) = rx.recv().await {
+      if self.handle(&event).await.is_break() {
+        break;
+      }
+    }
+  }
+
+  async fn handle(&mut self, event: &super::transport::BidiEvent) -> std::ops::ControlFlow<()> {
+    use std::ops::ControlFlow;
+    let ctx: &str = &self.page.context_id;
+    // Filter events for this context. Accepts events targeting this
+    // top-level context directly, events with no `context` field
+    // (session-wide), and events whose `parent` matches us — the
+    // latter covers `browsingContext.contextCreated` for child
+    // iframes that BiDi reports under the child's own id.
+    let event_ctx = param_str(&event.params, "context");
+    let event_parent = param_str(&event.params, "parent");
+    // A frame inside a frame names its own parent, which is one of ours.
+    let child_of_this =
+      !event_parent.is_empty() && (event_parent == ctx || self.child_frames.contains_key(event_parent));
+    if event_ctx != ctx && !event_ctx.is_empty() && !child_of_this && !self.child_frames.contains_key(event_ctx) {
+      return ControlFlow::Continue(());
+    }
+
+    if event.method == "browsingContext.contextCreated" && child_of_this {
+      self.on_child_context_created(event_ctx, event_parent, param_str(&event.params, "url"));
+      return ControlFlow::Continue(());
+    }
+
+    match event.method.as_str() {
+      // Same-document navigations: `historyUpdated` covers
+      // `history.pushState` / `replaceState`, `fragmentNavigated`
+      // covers hash changes. The document (and `window.__fd`)
+      // persists, so no engine reset — just keep the tracked URL
+      // fresh. Mirrors Playwright's `bidiPage.ts::_onHistoryUpdated`
+      // / `_onFragmentNavigated`.
+      "browsingContext.historyUpdated" | "browsingContext.fragmentNavigated" => {
+        if let Some(frame) = self.frame_info(event_ctx, param_str(&event.params, "url")) {
+          self.page.events.emit(PageEvent::FrameNavigatedWithinDocument(frame));
+        }
+      },
+      "browsingContext.navigationStarted"
+      | "browsingContext.navigationCommitted"
+      | "browsingContext.domContentLoaded"
+      | "browsingContext.load" => self.on_navigation(event, event_ctx).await,
+      "script.message" => self.on_script_message(&event.params).await,
+      "log.entryAdded" => self.on_log_entry(&event.params).await,
+      "network.beforeRequestSent" => {
+        self
+          .tracker
+          .on_before_request_sent(&event.params, &self.page.events, &self.network_log)
+          .await;
+      },
+      "network.responseStarted" => {
+        self.tracker.on_response_started(&event.params, &self.page.events).await;
+      },
+      "network.responseCompleted" => {
+        self
+          .tracker
+          .on_response_completed(&event.params, &self.page.events)
+          .await;
+      },
+      "network.fetchError" => {
+        self.tracker.on_fetch_error(&event.params, &self.page.events).await;
+      },
+      "network.authRequired" => {
+        self.tracker.on_auth_required(&event.params).await;
+      },
+      "browsingContext.userPromptOpened" => self.on_user_prompt_opened(&event.params).await,
+      // Playwright's `_onUserPromptClosed`: a prompt the browser
+      // closed without us still closes the dialog it opened.
+      "browsingContext.userPromptClosed" => self.page.dialog_manager.closed_in_browser(),
+      "browsingContext.contextDestroyed" => {
+        if event_ctx == ctx {
+          // `swap` dedupes against `close_page`, which also emits
+          // `Close` (it can't rely on this event still being
+          // routed once the listener is aborted).
+          if !self.page.closed.swap(true, Ordering::SeqCst) {
+            self.page.events.emit(PageEvent::Close);
+          }
+          // This page is gone — stop consuming session-wide events.
+          return ControlFlow::Break(());
+        }
+        // A child iframe was removed — that's a frame detach, not
+        // a page close (treating it as Close bricked the page and
+        // tore down every page-scoped consumer).
+        self.child_frames.remove(event_ctx);
+        self.page.events.emit(PageEvent::FrameDetached {
+          frame_id: event_ctx.to_string(),
+        });
+      },
+      "input.fileDialogOpened" => self.on_file_dialog_opened(&event.params),
+      "browsingContext.downloadWillBegin" => self.on_download_will_begin(&event.params),
+      "browsingContext.downloadEnd" => self.on_download_end(&event.params),
+      _ => {},
+    }
+    ControlFlow::Continue(())
+  }
+
+  /// The main frame or a tracked child frame `frame_id` at `url`, or
+  /// `None` for a context outside this page.
+  fn frame_info(&self, frame_id: &str, url: &str) -> Option<crate::backend::FrameInfo> {
+    let parent_frame_id = if frame_id == &*self.page.context_id {
+      None
+    } else {
+      Some(self.child_frames.get(frame_id)?.clone())
+    };
+    Some(crate::backend::FrameInfo {
+      frame_id: frame_id.to_string(),
+      parent_frame_id,
+      name: String::new(),
+      url: url.to_string(),
+    })
+  }
+
+  /// `browsingContext.contextCreated` events for child iframes
+  /// surface here with their own (child) `context` id and the
+  /// top-level `parent` set to our context. Emit a `FrameAttached`
+  /// so the page-level frame cache (used by `page.frame(name)`,
+  /// `page.frames()`) sees the iframe. Without this `BiDi` pages
+  /// expose no child-frame metadata at all.
+  ///
+  /// `BiDi`'s `contextCreated` payload does not carry the
+  /// iframe's `name` attribute. Spawn a follow-up
+  /// `browsingContext.getTree` to enrich the cache record with
+  /// name + final url once Firefox has wired the iframe up.
+  fn on_child_context_created(&mut self, frame_id: &str, parent_id: &str, url: &str) {
+    self.child_frames.insert(frame_id.to_string(), parent_id.to_string());
+    self
+      .page
+      .events
+      .emit(PageEvent::FrameAttached(crate::backend::FrameInfo {
+        frame_id: frame_id.to_string(),
+        parent_frame_id: Some(parent_id.to_string()),
+        name: String::new(),
+        url: url.to_string(),
+      }));
+    // Async refresh: fetch the iframe's `name` (and updated `url`)
+    // via `browsingContext.getTree`. Firefox populates `name` once
+    // the iframe element is parsed; we re-emit a `FrameNavigated`
+    // with the enriched info so the cache lookup picks up
+    // `page.frame('target')` matches.
+    tokio::spawn(refresh_child_frame(
+      Arc::clone(&self.page.session),
+      self.page.events.clone(),
+      Arc::clone(&self.page.frame_cache),
+      parent_id.to_string(),
+      frame_id.to_string(),
+    ));
+  }
+
+  async fn on_navigation(&self, event: &super::transport::BidiEvent, event_ctx: &str) {
+    // Materialise context-wide permission grants for the newly
+    // navigated origin (mirrors Playwright's
+    // `doGrantGlobalPermissionsForURL` on navigation commit).
+    // Awaited inline so the grant lands before this same loop
+    // emits `load` — `goto` resolves on that event, so page
+    // code observing the document never races the grant. The
+    // helper sends nothing when the origin is already granted.
+    if event.method == "browsingContext.navigationStarted" {
+      let nav_url = param_str(&event.params, "url");
+      if let Err(e) = self.page.grant_global_permissions_for_url(nav_url).await {
+        tracing::debug!("permissions grant for {nav_url} failed: {e}");
+      }
+    }
+    // Surface the main frame's cross-document navigation as
+    // `FrameNavigated` (CDP gets this from `Page.frameNavigated`;
+    // BiDi has no direct analogue). Keeps the frame cache's
+    // main-frame URL fresh and starts a new `since-navigation`
+    // window for `consoleMessages()` / `pageErrors()`. Only the
+    // `navigationCommitted` arm fires — marking again at
+    // `domContentLoaded` / `load` would wrongly evict console
+    // output from inline scripts that ran during parse.
+    //
+    // A child-iframe cross-document navigation surfaces the same way,
+    // like CDP's per-frame `Page.frameNavigated`, so frame-scoped
+    // consumers (e.g. WebSocket-route teardown) observe it.
+    if event.method == "browsingContext.navigationCommitted"
+      && let Some(frame) = self.frame_info(event_ctx, param_str(&event.params, "url"))
+    {
+      self.page.events.emit(PageEvent::FrameNavigated(frame));
+    }
+    // Surface the main frame's lifecycle on the page emitter so
+    // `page.on('load' | 'domcontentloaded')` observes it.
+    if event_ctx == &*self.page.context_id {
+      match event.method.as_str() {
+        "browsingContext.domContentLoaded" => self.page.events.emit(PageEvent::DomContentLoaded),
+        "browsingContext.load" => self.page.events.emit(PageEvent::Load),
+        _ => {},
+      }
+    }
+    // Scope the engine-state reset to the context that actually
+    // navigated. A child iframe reloading must not wipe the
+    // main context's `window.__fd` (and vice-versa) — that
+    // blanket reset was forcing a redundant re-inject every
+    // time any frame fired a lifecycle event (Residual 2).
+    self.page.injected_script.reset_context(event_ctx);
+  }
+
+  /// Exposed-binding dispatch. The shim installed by
+  /// `expose_binding` sends `JSON.stringify({name, id, args})`
+  /// through the `BINDING_CHANNEL` channel; the payload
+  /// arrives as a string `RemoteValue` in `data` and
+  /// `source.context` names the calling frame (an iframe
+  /// caller surfaces its own frame, and the promise resolve
+  /// below must target that same context). Mirrors
+  /// Playwright's `bidiPage.ts::_onScriptMessage`.
+  async fn on_script_message(&self, params: &serde_json::Value) {
+    if params.get("channel").and_then(|v| v.as_str()) != Some(BINDING_CHANNEL) {
+      return;
+    }
+    let Some(text) = params.get("data").and_then(|d| d.get("value")).and_then(|v| v.as_str()) else {
+      return;
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) else {
+      return;
+    };
+    let fn_name = param_str(&payload, "name").to_string();
+    let id = param_str(&payload, "id").to_string();
+    let args: Vec<serde_json::Value> = payload
+      .get("args")
+      .and_then(|v| v.as_array())
+      .cloned()
+      .unwrap_or_default();
+    let page_ctx = &*self.page.context_id;
+    let call_ctx = params
+      .get("source")
+      .and_then(|s| s.get("context"))
+      .and_then(|v| v.as_str())
+      .unwrap_or(page_ctx)
+      .to_string();
+    // `script.message` has no top-level `context`, so the page
+    // filter above can't scope it — every page's listener on
+    // this session sees every envelope. Only dispatch calls
+    // originating in THIS page's frame tree; otherwise a
+    // same-named binding on another page would double-fire.
+    if call_ctx != page_ctx && !self.child_frames.contains_key(&call_ctx) {
+      return;
+    }
+    let source = crate::events::BindingSource {
+      context: String::new(),
+      page: page_ctx.to_string(),
+      frame: call_ctx.clone(),
+      live: None,
+    };
+    let maybe_fn = self.page.exposed_fns.read().await.get(&fn_name).cloned();
+    let exposed_session = Arc::clone(&self.page.session);
+    let _ = self.binding_tx.send(Box::pin(async move {
+      let outcome = match maybe_fn {
+        Some(callback) => callback(source, args).await,
+        None => Err(format!("Function not found: {fn_name}")),
+      };
+      // The value is an expression evaluated in the calling
+      // context, only once its parked promise is found there.
+      let (settled, expression, message) = match outcome {
+        Ok(expression) => (true, expression, String::new()),
+        Err(message) => (false, String::from("undefined"), message),
+      };
+      let _ = exposed_session
+        .transport
+        .send_command(
+          "script.callFunction",
+          json!({
+            "functionDeclaration": format!("(id, ok, message) => {{ const c = window.__ferri_exposed && window.__ferri_exposed[id]; if (c) {{ delete window.__ferri_exposed[id]; ok ? c.resolve({expression}) : c.reject(new Error(message)); }} }}"),
+            "arguments": [
+              {"type": "string", "value": id},
+              {"type": "boolean", "value": settled},
+              {"type": "string", "value": message},
+            ],
+            "target": {"context": call_ctx},
+            "awaitPromise": false,
+            "resultOwnership": "none"
+          }),
+        )
+        .await;
+    }));
+  }
+
+  /// Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`.
+  /// Routes `type: 'javascript'` + `level: 'error'` entries to
+  /// `PageEvent::PageError(WebError)`; `type: 'console'`
+  /// entries to `PageEvent::Console(ConsoleMessage)`; other
+  /// entry types (`'deprecation'`, etc.) are ignored.
+  async fn on_log_entry(&self, params: &serde_json::Value) {
+    let entry_type = param_str(params, "type");
+    let level = param_str(params, "level");
+    if entry_type == "javascript" && level == "error" {
+      // Parity with `bidiPage.ts:267-286`: split `text` at the
+      // first `': '` for `name` / `message`, synthesise `stack`
+      // from the entry's `stackTrace.callFrames` (BiDi
+      // line/column are 0-based so Playwright adds `+ 1`).
+      let text = param_str(params, "text");
+      let (name, message) = split_error_text(text);
+      let stack = build_bidi_stack(text, params.get("stackTrace"));
+      let details = crate::web_error::ErrorDetails { name, message, stack };
+      let location = bidi_stack_to_location(params.get("stackTrace"));
+      let web_err = match self.page.page_backref.upgrade() {
+        Some(page) => crate::web_error::WebError::new(&page, details, location),
+        None => crate::web_error::WebError::new_detached(details, location),
+      };
+      self.page.events.emit(PageEvent::PageError(web_err));
+      return;
+    }
+    if entry_type != "console" {
+      return;
+    }
+
+    let Some(page) = self.page.page_backref.upgrade() else {
+      return;
+    };
+    // BiDi reports `method` for the console variant (e.g.
+    // 'log', 'warn', 'error'). Playwright remaps `'warn'` to
+    // `'warning'` for parity with CDP's `Runtime.consoleAPICalled.type`.
+    let method = params.get("method").and_then(|v| v.as_str()).unwrap_or("log");
+    let type_str = if method == "warn" { "warning" } else { method };
+    // `text` is explicit only for `timeLog` / `timeEnd`. For
+    // other variants Playwright leaves it undefined so the
+    // lazy `text()` falls back to args preview.
+    let text = if matches!(method, "timeLog" | "timeEnd") {
+      params
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string)
+    } else {
+      None
+    };
+    let args = params
+      .get("args")
+      .and_then(|v| v.as_array())
+      .map(Vec::as_slice)
+      .unwrap_or_default()
+      .iter()
+      .map(|arg| {
+        let backing = bidi_remote_value_to_backing(arg);
+        let is_node = arg.get("type").and_then(|v| v.as_str()) == Some("node");
+        crate::js_handle::JSHandle::from_backing(Arc::clone(&page), backing, is_node)
+      })
+      .collect();
+    let location = bidi_stack_trace_to_location(params.get("stackTrace"), params.get("source"));
+    let timestamp = params
+      .get("timestamp")
+      .and_then(serde_json::Value::as_f64)
+      .map_or(0, f64_to_u64_saturating);
+    let msg = ConsoleMessage::new(&page, type_str, text, args, location, timestamp);
+    crate::state::push_capped(
+      &mut *self.console_log.write().await,
+      msg.clone(),
+      crate::state::CONSOLE_LOG_CAP,
+    );
+    self.page.events.emit(PageEvent::Console(msg));
+  }
+
+  async fn on_user_prompt_opened(&self, params: &serde_json::Value) {
+    let prompt_type_str = params
+      .get("type")
+      .and_then(|v| v.as_str())
+      .unwrap_or("alert")
+      .to_string();
+    let message = param_str(params, "message").to_string();
+    let default_value = param_str(params, "defaultValue").to_string();
+    let dialog_type = crate::dialog::DialogType::parse(&prompt_type_str);
+
+    // Build the responder: translates the user's accept/dismiss
+    // into `browsingContext.handleUserPrompt`. Captures an Arc
+    // of the session + context id.
+    let responder_session = Arc::clone(&self.page.session);
+    let responder_ctx = Arc::clone(&self.page.context_id);
+    let responder: crate::dialog::DialogResponder = Arc::new(move |response| {
+      let session = Arc::clone(&responder_session);
+      let ctx = Arc::clone(&responder_ctx);
+      Box::pin(async move {
+        let accept = matches!(response, crate::dialog::DialogResponse::Accept { .. });
+        let mut handle_params = json!({
+          "context": &*ctx,
+          "accept": accept,
+        });
+        if let crate::dialog::DialogResponse::Accept { prompt_text: Some(t) } = response {
+          handle_params["userText"] = json!(t);
+        }
+        session
+          .transport
+          .send_command("browsingContext.handleUserPrompt", handle_params)
+          .await
+          .map(|_| ())
+      })
+    });
+
+    let dialog = crate::dialog::Dialog::new_with_manager(
+      dialog_type,
+      message.clone(),
+      default_value,
+      responder,
+      Some(self.page.dialog_manager.clone()),
+      self.page.page_backref.weak(),
+    );
+
+    // Synchronous dialog dispatch — mirrors Playwright's
+    // `DialogManager.dialogDidOpen`. See the CDP equivalent
+    // in `backend/cdp/mod.rs` for the full rationale.
+    self.page.dialog_manager.did_open(dialog);
+
+    crate::state::push_capped(
+      &mut *self.dialog_log.write().await,
+      DialogEvent {
+        dialog_type: prompt_type_str,
+        message,
+        action: "dispatched".to_string(),
+      },
+      crate::state::DIALOG_LOG_CAP,
+    );
+  }
+
+  /// `BiDi` event shape:
+  /// { "context": "<frameId>", "element": { "sharedId": "..." }, "multiple": bool }
+  /// Per `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts::_onFileDialogOpened`.
+  fn on_file_dialog_opened(&self, params: &serde_json::Value) {
+    let Some(shared_id) = params
+      .get("element")
+      .and_then(|e| e.get("sharedId"))
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string)
+    else {
+      return;
+    };
+    let is_multiple = params
+      .get("multiple")
+      .and_then(serde_json::Value::as_bool)
+      .unwrap_or(false);
+    // Resolve the element -> ElementHandle off the hot
+    // subscription loop. Same rationale as the CDP listener:
+    // we don't want rapid file-picker triggers queued
+    // behind a slow DOM round-trip.
+    let manager = self.page.file_chooser_manager.clone();
+    let backref = self.page.page_backref.clone();
+    let ctx = Arc::clone(&self.page.context_id);
+    let session = Arc::clone(&self.page.session);
+    tokio::spawn(async move {
+      let Some(page) = backref.upgrade() else {
+        return;
+      };
+      // Build a BidiElement directly from the shared id so
+      // we don't need a page-scoped selector round-trip.
+      let element = crate::backend::AnyElement::Bidi(super::BidiElement::new(session, ctx, shared_id));
+      let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(Arc::clone(&page), element).await else {
+        return;
+      };
+      let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
+      manager.did_open(&chooser);
+    });
+  }
+
+  /// `BiDi` correlates a download with its triggering navigation
+  /// via the `navigation` id on the event. If the browser
+  /// doesn't attribute it to a navigation, Playwright skips
+  /// (see `bidiPage.ts::_onDownloadWillBegin`) — so do we.
+  fn on_download_will_begin(&self, params: &serde_json::Value) {
+    let Some(navigation) = params
+      .get("navigation")
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string)
+    else {
+      return;
+    };
+    let url = param_str(params, "url").to_string();
+    let suggested = param_str(params, "suggestedFilename").to_string();
+
+    let Some(page) = self.page.page_backref.upgrade() else {
+      return;
+    };
+
+    // BiDi has no native cancel — Playwright's own
+    // `bidiBrowser.ts::cancelDownload` is a no-op. Surface
+    // typed `Unsupported` per Rule 4 so callers know.
+    let canceler: crate::download::DownloadCanceler = Arc::new(|| {
+      Box::pin(async {
+        Err(crate::error::FerriError::Unsupported(
+          "Download.cancel is not supported on the BiDi backend: Firefox's BiDi implementation has no browser.cancelDownload command and Playwright's own BiDi backend leaves cancelDownload as a no-op (see bidiBrowser.ts::cancelDownload)".into(),
+        ))
+      })
+    });
+
+    let download = crate::download::Download::new(
+      &page,
+      navigation,
+      url,
+      suggested,
+      self.page.downloads_subdir.to_path_buf(),
+      canceler,
+    );
+    self.page.download_manager.did_open(&download);
+  }
+
+  fn on_download_end(&self, params: &serde_json::Value) {
+    let Some(navigation) = params.get("navigation").and_then(|v| v.as_str()) else {
+      return;
+    };
+    let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("complete");
+    let download_manager = &self.page.download_manager;
+    if let Some(d) = download_manager.take_for_guid(navigation) {
+      if status == "canceled" {
+        download_manager.report_canceled(&d, "canceled");
+      } else {
+        // `complete` carries the absolute `filepath` Firefox
+        // wrote to — override the default
+        // `<downloads_dir>/<guid>` path with the real one.
+        let filepath = params
+          .get("filepath")
+          .and_then(|v| v.as_str())
+          .map(std::path::PathBuf::from);
+        d.report_finished(filepath, None);
+      }
+    }
+  }
+}
+
+/// Re-read child frame `child_id` of `parent_id` with
+/// `browsingContext.getTree` and record the name Firefox filled in.
+async fn refresh_child_frame(
+  session: Arc<BidiSession>,
+  emitter: EventEmitter,
+  frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  parent_id: String,
+  child_id: String,
+) {
+  let result = session
+    .transport
+    .send_command("browsingContext.getTree", json!({"root": &parent_id, "maxDepth": 1}))
+    .await;
+  let Ok(tree) = result else { return };
+  let Some(contexts) = tree.get("contexts").and_then(|v| v.as_array()) else {
+    return;
+  };
+  // The returned array has the parent at index 0; its
+  // `children` array contains the iframe entries with `name`.
+  let Some(children) = contexts
+    .first()
+    .and_then(|p| p.get("children"))
+    .and_then(|v| v.as_array())
+  else {
+    return;
+  };
+  let Some(child) = children.iter().find(|child| param_str(child, "context") == child_id) else {
+    return;
+  };
+  let cid = param_str(child, "context");
+  let cname = param_str(child, "name").to_string();
+  let curl = param_str(child, "url").to_string();
+  // Only the name: the frame may have navigated since the
+  // tree was read, and the reader keeps its URL in wire order.
+  {
+    let mut cache = frame_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.record(cid).is_some_and(|record| !record.detached) {
+      cache.attach(crate::backend::FrameInfo {
+        frame_id: cid.to_string(),
+        parent_frame_id: Some(parent_id.clone()),
+        name: cname.clone(),
+        url: String::new(),
+      });
+    }
+  }
+  emitter.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
+    frame_id: cid.to_string(),
+    parent_frame_id: Some(parent_id),
+    name: cname,
+    url: curl,
+  }));
 }
 
 /// Per-page bookkeeping for live `Request` / `Response` lifecycle objects
@@ -4446,7 +4678,8 @@ impl BidiNetworkTracker {
       req.set_response(&response).await;
       emitter.emit(PageEvent::Response(response));
     }
-    if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
+    let response = self.responses.lock().await.get(&request_id).cloned();
+    if let Some(resp) = response {
       resp.finish_success().await;
     }
     forget_auth_attempts(&mut *self.attempted_auth.lock().await, &request_id);
@@ -4526,7 +4759,7 @@ impl BidiNetworkTracker {
       },
       None => json!({"request": request_id, "action": "cancel"}),
     };
-    let session = self.session.clone();
+    let session = Arc::clone(&self.session);
     tracing::debug!(
       context = %self.context_id,
       request = request_id,
@@ -4559,7 +4792,8 @@ impl BidiNetworkTracker {
       .unwrap_or("net::ERR_FAILED")
       .to_string();
     req.set_failure(error_text.clone());
-    if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
+    let response = self.responses.lock().await.get(&request_id).cloned();
+    if let Some(resp) = response {
       resp.finish_failure(error_text).await;
     }
     forget_auth_attempts(&mut *self.attempted_auth.lock().await, &request_id);
@@ -4604,10 +4838,10 @@ impl BidiNetworkTracker {
   }
 
   fn make_body_fn(self: &Arc<Self>, request_id: &str) -> BodyFn {
-    let session = self.session.clone();
+    let session = Arc::clone(&self.session);
     let request_id = request_id.to_string();
     Arc::new(move || {
-      let session = session.clone();
+      let session = Arc::clone(&session);
       let request_id = request_id.clone();
       Box::pin(async move {
         // Bytes are retained by the session's `network.addDataCollector`

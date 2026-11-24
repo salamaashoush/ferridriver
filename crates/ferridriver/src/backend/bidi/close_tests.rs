@@ -30,7 +30,7 @@ async fn forced_socket_close_releases_popup_listener_session_and_downloads() {
       }
     }
   });
-  let mut browser = BidiBrowser::connect(&endpoint).await.unwrap();
+  let browser = BidiBrowser::connect(&endpoint).await.unwrap();
   let session = Arc::downgrade(&browser.session);
   let downloads = Arc::downgrade(&browser.downloads_dir);
   let directory = browser.downloads_dir.path().to_owned();
