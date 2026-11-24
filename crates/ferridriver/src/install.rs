@@ -749,10 +749,7 @@ impl BrowserInstaller {
       ),
     };
 
-    // Determine if we need sudo (getuid is always safe, just FFI-marked unsafe).
-    #[allow(unsafe_code)]
-    let uid = unsafe { libc::getuid() };
-    let (cmd, args) = if uid == 0 {
+    let (cmd, args) = if rustix::process::getuid().is_root() {
       ("sh".to_string(), vec!["-c".to_string(), commands])
     } else {
       (
@@ -1125,7 +1122,7 @@ impl BrowserInstaller {
     progress(InstallProgress::Resolving);
 
     // Fetch the latest stable Firefox version from Mozilla's API
-    let versions: std::collections::HashMap<String, String> = self
+    let versions: rustc_hash::FxHashMap<String, String> = self
       .client()?
       .get(FIREFOX_VERSIONS_URL)
       .send()

@@ -115,13 +115,15 @@ fn expect_bool(v: &SerializedValue, what: &str) -> Result<bool> {
 #[derive(Clone)]
 pub struct ElementHandle {
   js_handle: JSHandle,
+  /// The remote `js_handle` is backed by, held here so the DOM-element
+  /// invariant holds by construction rather than by a match on the backing.
+  remote: HandleRemote,
   /// Backend element captured at materialisation time. Phase-E action
   /// methods delegate through this to the existing per-backend
   /// `AnyElement::click` / `fill` / etc. helpers rather than
   /// re-resolving the DOM node from the `HandleRemote` on every call.
   /// Carried as `Arc` so clones of `ElementHandle` share the backend
   /// element cheaply.
-  #[allow(dead_code)]
   element: Arc<AnyElement>,
 }
 
@@ -137,9 +139,10 @@ impl ElementHandle {
   /// / `evaluate_to_element`).
   pub(crate) async fn from_any_element(page: Arc<Page>, element: AnyElement) -> Result<Self> {
     let remote = crate::backend::element_handle_remote(&element).await?;
-    let js_handle = JSHandle::new(page, remote);
+    let js_handle = JSHandle::new(page, remote.clone());
     Ok(Self {
       js_handle,
+      remote,
       element: Arc::new(element),
     })
   }
@@ -149,9 +152,10 @@ impl ElementHandle {
   /// [`JSHandle::as_element`] when re-wrapping a `JSHandle` whose
   /// remote turns out to be a DOM node — the handle's disposed flag,
   /// page, and remote are reused so the two views share a lifecycle.
-  pub(crate) fn from_js_handle_and_element(js_handle: JSHandle, element: AnyElement) -> Self {
+  pub(crate) fn from_js_handle_and_element(js_handle: JSHandle, remote: HandleRemote, element: AnyElement) -> Self {
     Self {
       js_handle,
+      remote,
       element: Arc::new(element),
     }
   }
@@ -170,16 +174,7 @@ impl ElementHandle {
   /// invariant is relied upon.
   #[must_use]
   pub fn remote(&self) -> &HandleRemote {
-    match self.js_handle.backing() {
-      crate::js_handle::JSHandleBacking::Remote(r) => r,
-      // ElementHandle is only constructed via `from_any_element` and
-      // `from_js_handle_and_element`, both of which feed a
-      // remote-backed JSHandle. A value-backed ElementHandle is
-      // structurally impossible.
-      crate::js_handle::JSHandleBacking::Value(_) => {
-        unreachable!("ElementHandle invariant: always wraps a remote-backed JSHandle")
-      },
-    }
+    &self.remote
   }
 
   /// Owning page.
@@ -192,7 +187,6 @@ impl ElementHandle {
   /// delegate to the per-backend element implementations; phase F's
   /// materialisation helpers use it to round-trip through locator /
   /// frame APIs.
-  #[allow(dead_code)]
   pub(crate) fn any_element(&self) -> &AnyElement {
     &self.element
   }
@@ -961,16 +955,13 @@ impl ElementHandle {
     // is always a child of the current frame, never the main one.
     let main_id = page.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id);
     let match_id = page.with_frame_cache(|c| {
-      c.all_frame_ids()
-        .into_iter()
-        .filter(|fid| Some(fid) != main_id.as_ref())
-        .find(|fid| {
-          let rec = c.record(fid);
-          let Some(rec) = rec else { return false };
-          (!name.is_empty() && rec.info.name == name)
-            || (!id.is_empty() && rec.info.name == id)
-            || (!src.is_empty() && rec.info.url == src)
-        })
+      c.all_frame_ids().into_iter().filter(|fid| *fid != main_id).find(|fid| {
+        let rec = c.record(fid);
+        let Some(rec) = rec else { return false };
+        (!name.is_empty() && rec.info.name == name)
+          || (!id.is_empty() && rec.info.name == id)
+          || (!src.is_empty() && rec.info.url == src)
+      })
     });
     Ok(match_id.map(|fid| crate::frame::Frame::new(Arc::clone(page), fid)))
   }

@@ -241,9 +241,13 @@ async fn rt_eval_str(page: &AnyPage, js: &str) -> Result<String> {
 /// # Errors
 ///
 /// Returns an error if the ref is unknown, the selector is missing, or no element is found.
-pub async fn resolve_element<S: std::hash::BuildHasher>(
+#[expect(
+  clippy::implicit_hasher,
+  reason = "the hasher-generic form needs std::collections::HashMap, which disallowed-types bans; FxHashMap is the only map callers hold"
+)]
+pub async fn resolve_element(
   page: &AnyPage,
-  ref_map: &std::collections::HashMap<String, i64, S>,
+  ref_map: &rustc_hash::FxHashMap<String, i64>,
   r#ref: Option<&str>,
   selector: Option<&str>,
 ) -> Result<AnyElement> {
@@ -603,7 +607,7 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
     format!("{fd}.searchPage({pattern}, {is_regex}, {case_sensitive}, {context_chars}, {css_scope}, {max_results})");
 
   let result_str = rt_eval_str(page, &js).await?;
-  let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or(serde_json::json!({}));
+  let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or_else(|_| serde_json::json!({}));
 
   if let Some(err) = data["error"].as_str() {
     return Err(FerriError::Backend(err.to_string()));
@@ -701,7 +705,7 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
   let js = format!("{fd}.findElementsCSS({selector}, {attributes}, {max_results}, {include_text})");
 
   let result_str = rt_eval_str(page, &js).await?;
-  let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or(serde_json::json!({}));
+  let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or_else(|_| serde_json::json!({}));
 
   if let Some(err) = data["error"].as_str() {
     return Err(FerriError::Backend(err.to_string()));
@@ -752,12 +756,11 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
     if let Some(text) = &el.text
       && !text.is_empty()
     {
-      let display: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-      let display = if display.len() > 120 {
-        format!("{}...", &display[..120])
-      } else {
-        display
-      };
+      let mut display: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+      if let Some((cut, _)) = display.char_indices().nth(120) {
+        display.truncate(cut);
+        display.push_str("...");
+      }
       parts.push(format!("\"{display}\""));
     }
     if !el.attrs.is_empty() {
@@ -799,7 +802,7 @@ pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -
     .and_then(|v| v.as_str().map(std::string::ToString::to_string))
     .unwrap_or_else(|| "{}".into());
 
-  let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or(serde_json::json!({}));
+  let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or_else(|_| serde_json::json!({}));
 
   if let Some(err) = result["error"].as_str() {
     let mut msg = format!("{err}.");
@@ -833,7 +836,7 @@ pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Resul
     .and_then(|v| v.as_str().map(std::string::ToString::to_string))
     .unwrap_or_else(|| "{}".into());
 
-  let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or(serde_json::json!({}));
+  let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or_else(|_| serde_json::json!({}));
 
   if let Some(err) = result["error"].as_str() {
     return Err(FerriError::Backend(err.to_string()));
@@ -867,7 +870,7 @@ pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Resul
 pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo> {
   let fd = page.injected_script().await?;
   let result = rt_eval_str(page, &format!("{fd}.scrollInfo()")).await?;
-  let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or(serde_json::json!({}));
+  let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or_else(|_| serde_json::json!({}));
 
   Ok(ScrollInfo {
     scroll_y: parsed["scrollY"].as_i64().unwrap_or(0),
@@ -1552,7 +1555,7 @@ pub async fn select_options(
     .await?
     .and_then(|v| v.as_str().map(std::string::ToString::to_string))
     .unwrap_or_default();
-  let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+  let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
   if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
     return Err(FerriError::Backend(err.to_string()));
   }

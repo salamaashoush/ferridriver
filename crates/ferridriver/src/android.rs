@@ -180,7 +180,11 @@ pub(crate) fn command_line(pkg: &str, args: &[String], socket: &str, emulator: b
       if prefix.is_empty() {
         return arg.to_owned();
       }
-      format!("\"{}\"{}", prefix.replace('"', "\\\""), &arg[prefix.len()..])
+      format!(
+        "\"{}\"{}",
+        prefix.replace('"', "\\\""),
+        "\\".repeat(arg.len() - prefix.len())
+      )
     })
     .collect::<Vec<_>>()
     .join(" ");
@@ -201,7 +205,7 @@ pub(crate) struct AndroidSdk {
 }
 
 impl AndroidSdk {
-  pub fn command(&self, program: &Path) -> tokio::process::Command {
+  pub(crate) fn command(&self, program: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(program);
     command
       .env("ANDROID_HOME", &self.root)
@@ -260,7 +264,7 @@ impl AndroidOwner {
       && self.adb_group.try_lock().is_ok_and(|group| group.is_none())
   }
 
-  pub async fn close(&self) -> Result<()> {
+  pub(crate) async fn close(&self) -> Result<()> {
     let _cleanup = self.cleanup.lock().await;
     for resource in [&self.group, &self.adb_group] {
       let mut resource = resource.lock().await;
@@ -478,11 +482,11 @@ async fn connect_device(
     port: sdk
       .adb
       .as_ref()
-      .map_or(wire::AdbServer::default().port, |endpoint| endpoint.port),
+      .map_or_else(|| wire::AdbServer::default().port, |endpoint| endpoint.port),
     ..wire::AdbServer::default()
   };
   browser.set_remote_downloads(adb.remote_downloads(&serial));
-  browser.android = Some(owner.clone());
+  browser.android = Some(Arc::clone(owner));
   tracing::info!(%serial, pkg = options.pkg, "managed Android browser is ready");
   Ok(crate::backend::AnyBrowser::CdpWs(browser))
 }

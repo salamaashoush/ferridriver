@@ -31,19 +31,51 @@ pub(crate) struct FrameRecord {
   pub detached: bool,
 }
 
-/// Page-scoped cache of the frame tree.
-#[derive(Debug, Default)]
+/// Page-scoped cache of the frame tree. A page always has a main frame,
+/// so the cache is built around one.
+#[derive(Debug)]
 pub(crate) struct FrameCache {
   /// Ordered list of frame ids (Playwright preserves insertion order
   /// when iterating `_frames`).
   pub(crate) order: Vec<Arc<str>>,
   /// `frame_id -> record`.
   pub(crate) by_id: FxHashMap<Arc<str>, FrameRecord>,
-  /// Cached main-frame id (first frame whose `parent_frame_id` is `None`).
-  pub(crate) main_id: Option<Arc<str>>,
+  /// The main frame's current id: the latest top-level frame reported.
+  pub(crate) main_id: Arc<str>,
 }
 
 impl FrameCache {
+  /// A cache holding only the main frame, under the id the backend knows
+  /// it by when the page is created.
+  pub(crate) fn new(main_frame_id: &str) -> Self {
+    let main_id: Arc<str> = Arc::from(main_frame_id);
+    let record = FrameRecord {
+      info: FrameInfo {
+        frame_id: main_frame_id.to_string(),
+        parent_frame_id: None,
+        name: String::new(),
+        url: String::new(),
+      },
+      detached: false,
+    };
+    let mut by_id = FxHashMap::default();
+    by_id.insert(Arc::clone(&main_id), record);
+    Self {
+      order: vec![Arc::clone(&main_id)],
+      by_id,
+      main_id,
+    }
+  }
+
+  /// The page moved to a new process: every frame but the main one is
+  /// gone, and the main frame keeps its record until the new process
+  /// reports it under its new id.
+  pub(crate) fn new_process(&mut self) {
+    let main = Arc::clone(&self.main_id);
+    self.by_id.retain(|id, _| *id == main);
+    self.order.retain(|id| *id == main);
+  }
+
   /// Merge a fresh `get_frame_tree` response into the cache. Adds any
   /// frame the tree carries that we didn't already have and updates
   /// the name/url for frames whose record was previously attached with
@@ -68,6 +100,20 @@ impl FrameCache {
     }
   }
 
+  /// Make `id` the main frame. A top-level frame under a new id is the
+  /// main frame after a cross-process navigation, so the old id's record
+  /// goes and the main frame keeps its identity, as in Playwright's
+  /// `FrameManager.frameAttached`.
+  fn adopt_main(&mut self, id: &Arc<str>) {
+    if self.main_id == *id {
+      return;
+    }
+    let old = std::mem::replace(&mut self.main_id, Arc::clone(id));
+    self.detach_descendants(&old);
+    self.by_id.remove(&old);
+    self.order.retain(|known| *known != old);
+  }
+
   /// Apply a `Page.frameAttached`-equivalent event.
   ///
   /// A `FrameAttached` event carries `name` only when the backend can fill
@@ -82,8 +128,8 @@ impl FrameCache {
   /// keep the prior value when the new one is empty.
   pub(crate) fn attach(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
-    if info.parent_frame_id.is_none() && self.main_id.is_none() {
-      self.main_id = Some(Arc::clone(&id));
+    if info.parent_frame_id.is_none() {
+      self.adopt_main(&id);
     }
     let existing = self.by_id.get(&id);
     let merged_name = if info.name.is_empty() {
@@ -125,19 +171,19 @@ impl FrameCache {
   }
 
   /// Apply a `Page.frameNavigated` event — update name/url but preserve
-  /// the cached id and `detached` flag. Sets `main_id` when the
-  /// navigated frame is a top-level frame (`parent_frame_id == None`)
-  /// and no main frame is yet recorded — covers the bootstrap path
-  /// where the eager `Page.getFrameTree` RTT was dropped (`PERF_AUDIT`
-  /// §L.3.4 / §M.4): the user's first `page.goto` emits this event
-  /// for the main frame, populating the cache without an extra RTT.
+  /// the cached id and `detached` flag. A top-level frame
+  /// (`parent_frame_id == None`) becomes the main frame — covers the
+  /// bootstrap path where the eager `Page.getFrameTree` RTT was dropped
+  /// (`PERF_AUDIT` §L.3.4 / §M.4): the user's first `page.goto` emits
+  /// this event for the main frame, populating the cache without an
+  /// extra RTT.
   pub(crate) fn navigated(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
+    if info.parent_frame_id.is_none() {
+      self.adopt_main(&id);
+    }
     let existing = self.by_id.get(&id);
     let detached = existing.is_some_and(|r| r.detached);
-    if info.parent_frame_id.is_none() && self.main_id.is_none() {
-      self.main_id = Some(Arc::clone(&id));
-    }
     // Preserve a previously-resolved `name` when this navigation
     // arrives with an empty one (same reasoning as `attach` — BiDi's
     // navigation events do not carry the iframe's DOM-side name).
@@ -200,10 +246,8 @@ impl FrameCache {
     }
   }
 
-  /// Snapshot of the main frame record (`None` only before the first
-  /// `seed()` or `attach()` of a root frame).
-  pub(crate) fn main_frame_id(&self) -> Option<Arc<str>> {
-    self.main_id.clone()
+  pub(crate) fn main_frame_id(&self) -> Arc<str> {
+    Arc::clone(&self.main_id)
   }
 
   /// Cached record for `id`, if any (includes detached frames).
@@ -266,13 +310,13 @@ mod tests {
 
   #[test]
   fn seed_sets_main_and_order() {
-    let mut c = FrameCache::default();
+    let mut c = FrameCache::new("initial");
     c.seed(vec![
       mk("root", None, "", "about:blank"),
       mk("child-a", Some("root"), "a", "about:blank"),
       mk("child-b", Some("root"), "b", "about:blank"),
     ]);
-    assert_eq!(c.main_id.as_deref(), Some("root"));
+    assert_eq!(&*c.main_id, "root");
     assert_eq!(c.order.len(), 3);
     let live: Vec<_> = c.live_ids().map(|id| id.to_string()).collect();
     assert_eq!(live, vec!["root", "child-a", "child-b"]);
@@ -280,7 +324,7 @@ mod tests {
 
   #[test]
   fn navigated_preserves_detached_flag() {
-    let mut c = FrameCache::default();
+    let mut c = FrameCache::new("initial");
     c.seed(vec![mk("root", None, "", "about:blank")]);
     c.detach("root");
     c.navigated(mk("root", None, "", "https://example.com"));
@@ -290,7 +334,7 @@ mod tests {
 
   #[test]
   fn child_ids_filters_detached() {
-    let mut c = FrameCache::default();
+    let mut c = FrameCache::new("initial");
     c.seed(vec![
       mk("root", None, "", ""),
       mk("a", Some("root"), "a", ""),
@@ -303,7 +347,7 @@ mod tests {
 
   #[test]
   fn main_frame_leads_when_attached_after_its_children() {
-    let mut c = FrameCache::default();
+    let mut c = FrameCache::new("initial");
     c.attach(mk("child", Some("root"), "", ""));
     c.attach(mk("root", None, "", ""));
     let ids: Vec<_> = c.live_ids().map(|id| id.to_string()).collect();
@@ -311,8 +355,37 @@ mod tests {
   }
 
   #[test]
+  fn a_new_top_level_frame_takes_over_the_main_frame() {
+    let mut c = FrameCache::new("initial");
+    c.seed(vec![
+      mk("old", None, "", "https://a.test/"),
+      mk("kid", Some("old"), "", ""),
+    ]);
+    c.navigated(mk("new", None, "", "https://b.test/"));
+    assert_eq!(&*c.main_id, "new");
+    assert!(c.record("old").is_none());
+    assert!(c.by_id.get("kid").unwrap().detached);
+    let live: Vec<_> = c.live_ids().map(|id| id.to_string()).collect();
+    assert_eq!(live, vec!["new"]);
+  }
+
+  #[test]
+  fn a_new_process_keeps_only_the_main_frame() {
+    let mut c = FrameCache::new("initial");
+    c.seed(vec![
+      mk("root", None, "", "https://a.test/"),
+      mk("kid", Some("root"), "", ""),
+    ]);
+    c.new_process();
+    assert_eq!(&*c.main_id, "root");
+    assert_eq!(c.record("root").unwrap().info.url, "https://a.test/");
+    assert!(c.record("kid").is_none());
+    assert_eq!(c.order.len(), 1);
+  }
+
+  #[test]
   fn attach_appends_without_duplicates() {
-    let mut c = FrameCache::default();
+    let mut c = FrameCache::new("initial");
     c.seed(vec![mk("root", None, "", "")]);
     c.attach(mk("child", Some("root"), "x", ""));
     c.attach(mk("child", Some("root"), "x", "")); // idempotent

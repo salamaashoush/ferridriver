@@ -158,7 +158,7 @@ impl SnapshotTracker {
 
   /// Compute incremental diff. Returns the set of node IDs that are new or changed.
   /// Updates stored fingerprints for the track key.
-  fn compute_diff(&mut self, track_key: &str, nodes: &[AxNodeData]) -> Option<std::collections::HashSet<String>> {
+  fn compute_diff(&mut self, track_key: &str, nodes: &[AxNodeData]) -> Option<rustc_hash::FxHashSet<String>> {
     let current: Vec<(String, u64)> = nodes
       .iter()
       .filter(|n| !n.ignored)
@@ -171,7 +171,7 @@ impl SnapshotTracker {
       // Build a map of previous node_id -> fingerprint
       let prev_map: HashMap<&str, u64> = prev_fingerprints.iter().map(|(id, fp)| (id.as_str(), *fp)).collect();
 
-      let changed_ids: std::collections::HashSet<String> = current
+      let changed_ids: rustc_hash::FxHashSet<String> = current
         .iter()
         .filter(|(id, fp)| {
           match prev_map.get(id.as_str()) {
@@ -214,8 +214,8 @@ struct SnapshotCtx<'a> {
   output: String,
   ref_map: HashMap<String, i64>,
   truncated: bool,
-  filter_ids: Option<&'a std::collections::HashSet<String>>,
-  relevant_nodes: Option<std::collections::HashSet<&'a str>>,
+  filter_ids: Option<&'a rustc_hash::FxHashSet<String>>,
+  relevant_nodes: Option<rustc_hash::FxHashSet<&'a str>>,
 }
 
 fn get_role(node: &AxNodeData) -> &str {
@@ -235,7 +235,7 @@ fn get_desc(node: &AxNodeData) -> &str {
 /// chain context) are rendered.
 fn build_snapshot_filtered(
   nodes: &[AxNodeData],
-  filter_ids: Option<&std::collections::HashSet<String>>,
+  filter_ids: Option<&rustc_hash::FxHashSet<String>>,
 ) -> (String, HashMap<String, i64>) {
   let mut children_map: HashMap<&str, Vec<usize>> = HashMap::default();
   for (i, node) in nodes.iter().enumerate() {
@@ -246,8 +246,8 @@ fn build_snapshot_filtered(
 
   // When filtering, pre-compute which nodes are in the subtree leading to changed nodes.
   // We include a changed node and all its ancestors so the tree context is preserved.
-  let relevant_nodes: Option<std::collections::HashSet<&str>> = filter_ids.map(|changed| {
-    let mut relevant = std::collections::HashSet::new();
+  let relevant_nodes: Option<rustc_hash::FxHashSet<&str>> = filter_ids.map(|changed| {
+    let mut relevant = rustc_hash::FxHashSet::default();
     // Build parent lookup
     let parent_map: HashMap<&str, &str> = nodes
       .iter()
@@ -386,12 +386,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
   if s.len() <= max_bytes {
     return s;
   }
-  // Find the last char boundary at or before max_bytes.
-  let mut end = max_bytes;
-  while end > 0 && !s.is_char_boundary(end) {
-    end -= 1;
-  }
-  &s[..end]
+  s.get(..s.floor_char_boundary(max_bytes)).unwrap_or_default()
 }
 
 fn write_node_name(output: &mut String, name: &str) {

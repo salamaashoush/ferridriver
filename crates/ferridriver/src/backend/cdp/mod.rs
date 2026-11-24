@@ -528,12 +528,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // CDP session strictly serially, so each command in the batch
     // adds its own processing time (~7-15ms) to the wall-clock floor.
     //
-    // The frame tree is now seeded lazily in
-    // [`crate::Page::ensure_frame_cache_seeded`] (called from
-    // `Page::goto` after the navigate response carries the
-    // top-level frame_id) — no RTT for the navigate-then-query flow
-    // that all bench / typical tests follow. `peek_main_frame_id()`
-    // exposes the cached id from `Page.navigate`'s response.
+    // The frame cache starts from the target id, which is the main
+    // frame's id, and frame events fill it in — no RTT for the
+    // navigate-then-query flow that all bench / typical tests follow.
     // `DOM.enable` is NOT required, and Playwright does not send it —
     // the only one in its tree is `crCoverage.ts`, when coverage starts.
     // `DOM.getDocument` enables the agent implicitly, which is what
@@ -927,6 +924,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     injected_script
       .injected
       .store(true, std::sync::atomic::Ordering::Relaxed);
+    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
     let page = CdpPage {
       transport: Arc::clone(transport),
       session_id: Some(Arc::from(session_id)),
@@ -966,7 +964,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_cache,
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
@@ -1106,6 +1104,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   fn adopted_page(&self, target_id: String, sid: Option<String>) -> CdpPage<T> {
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
+    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
     CdpPage {
       transport: Arc::clone(&self.transport),
       session_id: sid.map(Arc::from),
@@ -1145,7 +1144,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_cache,
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
@@ -1327,8 +1326,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // The same parallel batch also pulls the IIFE engine inject, so
     // `ensure_engine_injected` becomes a no-op for first selector
     // use. Page.getFrameTree is intentionally NOT in the batch —
-    // see PERF_AUDIT §M.4: the post-`Page.navigate` path seeds the
-    // frame cache via `peek_main_frame_id()` for free.
+    // see PERF_AUDIT §M.4: the frame cache is built around the target
+    // id, which is the main frame's id.
     let init_script = (!engine_installed).then_some(inject_src.as_str());
     let frame_tree_seed = Self::enable_domains(&self.transport, sid.as_deref(), viewport, true, init_script).await?;
 
@@ -1341,6 +1340,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     injected_script
       .injected
       .store(true, std::sync::atomic::Ordering::Relaxed);
+    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
     let page = CdpPage {
       transport: Arc::clone(&self.transport),
       session_id: sid.map(Arc::from),
@@ -1384,7 +1384,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_cache,
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
@@ -3369,10 +3369,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Backend-level synchronous accessor for the cached top-level
   /// `frameId`. Populated by `CdpPage::goto` from the
   /// `Page.navigate` response (see `nav_result.frameId`) and by the
-  /// lazy `set_content` path. Used by `crate::Page::ensure_frame_cache_seeded`
-  /// to seed the wrapper's frame cache without a separate
-  /// `Page.getFrameTree` round-trip when the bootstrap batch no
-  /// longer fetches it (`PERF_AUDIT` §M.4).
+  /// lazy `set_content` path.
   #[must_use]
   pub fn peek_main_frame_id(&self) -> Option<String> {
     self.main_frame_id.get().cloned()
@@ -7509,10 +7506,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         .frame_cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-      if let Some(main) = cache.main_frame_id() {
-        cache.detach_descendants(&main);
-        cache.detach(&main);
-      }
+      let main = cache.main_frame_id();
+      cache.detach_descendants(&main);
+      cache.detach(&main);
     }
     if let Some(sid) = self.session_id.as_deref() {
       self.transport.unregister_session(sid);

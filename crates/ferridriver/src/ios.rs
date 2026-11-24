@@ -52,7 +52,7 @@ impl IosOwner {
     })));
     let (cleanup, mut requests) =
       tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>();
-    let owned = resources.clone();
+    let owned = Arc::clone(&resources);
     tokio::spawn(async move {
       while let Some(reply) = requests.recv().await {
         let result = cleanup_owned(&owned).await.map_err(|error| error.to_string());
@@ -70,7 +70,7 @@ impl IosOwner {
     Ok(Arc::new(Self { resources, cleanup }))
   }
 
-  pub async fn close(&self) -> Result<()> {
+  pub(crate) async fn close(&self) -> Result<()> {
     let (reply, completed) = tokio::sync::oneshot::channel();
     self
       .cleanup
@@ -83,7 +83,7 @@ impl IosOwner {
   }
 
   async fn create_device(&self, model: String, runtime: String) -> Result<String> {
-    let resources = self.resources.clone();
+    let resources = Arc::clone(&self.resources);
     // Creation can finish in CoreSimulator after its caller is cancelled. Record
     // its UUID before releasing the lock that the cleanup worker must acquire.
     tokio::spawn(async move {
@@ -264,7 +264,7 @@ async fn launch_owned(
     Some(options.timeout),
   )
   .await?;
-  browser.ios_owner = Some(owner.clone());
+  browser.ios_owner = Some(Arc::clone(owner));
   Ok(browser)
 }
 
@@ -639,7 +639,7 @@ mod tests {
       .directory
       .path()
       .to_owned();
-    let resources = owner.resources.clone();
+    let resources = Arc::clone(&owner.resources);
     drop(owner);
     tokio::time::timeout(Duration::from_secs(5), async {
       while resources.lock().await.is_some() {
@@ -657,7 +657,7 @@ mod tests {
     let owner = IosOwner::new().unwrap();
     let guard = owner.resources.lock().await;
     let path = guard.as_ref().unwrap().directory.path().to_owned();
-    let closing = owner.clone();
+    let closing = Arc::clone(&owner);
     let (queued, receipt) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
       let mut cleanup = std::pin::pin!(closing.close());

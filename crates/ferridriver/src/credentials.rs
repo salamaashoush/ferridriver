@@ -320,7 +320,8 @@ impl Credentials {
     let store = self.store().await;
     store.records().clear();
     if credentials.is_empty() {
-      if let Some((binding, script)) = store.installed.lock().await.take() {
+      let installed = store.installed.lock().await.take();
+      if let Some((binding, script)) = installed {
         binding.dispose().await?;
         script.dispose().await?;
       }

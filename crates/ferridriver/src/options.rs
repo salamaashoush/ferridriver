@@ -153,12 +153,12 @@ fn rust_regex_to_js(source: &str) -> (String, String) {
   let mut body = source;
   let mut flags = String::new();
   if let Some(rest) = source.strip_prefix("(?")
-    && let Some(end) = rest.find(')')
-    && end > 0
-    && rest[..end].chars().all(|c| matches!(c, 'i' | 'm' | 's'))
+    && let Some((group, after)) = rest.split_once(')')
+    && !group.is_empty()
+    && group.chars().all(|c| matches!(c, 'i' | 'm' | 's'))
   {
-    flags = rest[..end].to_string();
-    body = &rest[end + 1..];
+    flags = group.to_string();
+    body = after;
   }
   (body.replace("(?P<", "(?<"), flags)
 }
@@ -1952,28 +1952,25 @@ impl PdfSize {
   /// portion cannot be parsed.
   pub fn parse(text: &str) -> crate::error::Result<Self> {
     let trimmed = text.trim();
-    let (num_str, unit) = if trimmed.len() >= 2 {
-      let (head, tail) = trimmed.split_at(trimmed.len() - 2);
-      match tail.to_ascii_lowercase().as_str() {
-        "px" => (head, "px"),
-        "in" => (head, "in"),
-        "cm" => (head, "cm"),
-        "mm" => (head, "mm"),
-        _ => (trimmed, "px"),
-      }
-    } else {
-      (trimmed, "px")
-    };
+    let suffixed = trimmed
+      .len()
+      .checked_sub(2)
+      .and_then(|at| trimmed.split_at_checked(at))
+      .and_then(|(head, tail)| {
+        let unit: fn(f64) -> Self = match tail.to_ascii_lowercase().as_str() {
+          "px" => Self::Pixels,
+          "in" => Self::Inches,
+          "cm" => Self::Centimeters,
+          "mm" => Self::Millimeters,
+          _ => return None,
+        };
+        Some((head, unit))
+      });
+    let (num_str, unit) = suffixed.unwrap_or((trimmed, Self::Pixels));
     let value: f64 = num_str.trim().parse().map_err(|_| {
       crate::error::FerriError::invalid_argument("pdf size", format!("cannot parse numeric portion of {text:?}"))
     })?;
-    Ok(match unit {
-      "px" => Self::Pixels(value),
-      "in" => Self::Inches(value),
-      "cm" => Self::Centimeters(value),
-      "mm" => Self::Millimeters(value),
-      _ => unreachable!("unit matched above"),
-    })
+    Ok(unit(value))
   }
 }
 
@@ -3722,6 +3719,11 @@ mod pdf_option_tests {
   fn parses_suffix_case_insensitively() {
     assert_eq!(PdfSize::parse("8.5IN").unwrap(), PdfSize::Inches(8.5));
     assert_eq!(PdfSize::parse("100Px").unwrap(), PdfSize::Pixels(100.0));
+  }
+
+  #[test]
+  fn multibyte_suffix_is_a_parse_error_not_a_panic() {
+    assert!(PdfSize::parse("1\u{20ac}").is_err());
   }
 
   #[test]

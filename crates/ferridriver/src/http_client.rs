@@ -105,7 +105,7 @@ pub fn check_proxy(proxy: &ProxyConfig, guard: &NetGuard) -> crate::error::Resul
   let parsed = reqwest::Url::parse(&written)
     .map_err(|e| crate::error::FerriError::invalid_argument("proxy", format!("{server:?}: {e}")))?;
   let host = parsed.host_str().unwrap_or_default();
-  let port = parsed.port().unwrap_or(match parsed.scheme() {
+  let port = parsed.port().unwrap_or_else(|| match parsed.scheme() {
     "https" => 443,
     "http" => 80,
     _ => 1080,
@@ -280,8 +280,10 @@ fn security_details(certificate: &[u8]) -> Option<crate::network::SecurityDetail
       .and_then(|cn| cn.as_str().ok())
       .map(ToString::to_string)
   };
-  // Certificate dates are whole seconds, well inside what `f64` holds.
-  #[allow(clippy::cast_precision_loss)]
+  #[expect(
+    clippy::cast_precision_loss,
+    reason = "X.509 times are whole seconds before year 10000, far inside the 2^53 an f64 holds exactly"
+  )]
   let seconds = |time: x509_parser::time::ASN1Time| time.timestamp() as f64;
   Some(crate::network::SecurityDetails {
     protocol: None,
@@ -671,7 +673,9 @@ pub(crate) fn rewrite_cookie(
       let parsed = reqwest::Url::parse(&url).map_err(|e| invalid(format!("Invalid cookie url {url:?}: {e}")))?;
       cookie.domain = parsed.host_str().unwrap_or_default().to_string();
       let path = parsed.path();
-      cookie.path = path[..=path.rfind('/').unwrap_or(0)].to_string();
+      cookie.path = path
+        .rsplit_once('/')
+        .map_or_else(|| "/".to_string(), |(dir, _)| format!("{dir}/"));
       cookie.secure = parsed.scheme() == "https";
     },
     None if cookie.domain.is_empty() || cookie.path.is_empty() => {

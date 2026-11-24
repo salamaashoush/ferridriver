@@ -56,11 +56,11 @@ pub enum StepCategory {
 #[must_use]
 pub fn q(s: &str) -> String {
   let s = s.trim();
-  if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-    s[1..s.len() - 1].to_string()
-  } else {
-    s.to_string()
-  }
+  ['"', '\'']
+    .into_iter()
+    .find_map(|quote| s.strip_prefix(quote)?.strip_suffix(quote))
+    .unwrap_or(s)
+    .to_string()
 }
 
 /// Escape a string for safe embedding in JS single-quoted string literals.
@@ -101,5 +101,19 @@ pub async fn find(page: &Arc<Page>, selector: &str) -> crate::error::Result<crat
     crate::selectors::query_one(inner, selector, false, None).await
   } else {
     inner.find_element(selector).await
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::q;
+
+  #[test]
+  fn q_strips_matching_quotes_only() {
+    assert_eq!(q(" \"a b\" "), "a b");
+    assert_eq!(q("'x'"), "x");
+    assert_eq!(q("\"x'"), "\"x'");
+    assert_eq!(q("\""), "\"");
+    assert_eq!(q("bare"), "bare");
   }
 }

@@ -192,9 +192,10 @@ fn text_or_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::resu
 
 /// Playwright: `AndroidElementInfo`. UI Automator leaves a text it has
 /// no value for null; it is the empty string here, as upstream.
-// Nine independent properties of a view, as UI Automator reports them and as
-// Playwright's type has them: not states of one thing an enum could hold.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "nine independent view properties, as UI Automator reports them and Playwright's AndroidElementInfo types them"
+)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AndroidElementInfo {

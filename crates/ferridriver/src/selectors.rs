@@ -349,8 +349,8 @@ pub fn is_rich_selector(s: &str) -> bool {
     return true;
   }
   // Explicit engine prefix (`name=`, optionally `*`-captured)
-  if let Some(eq_idx) = trimmed.find('=') {
-    let raw_name = trimmed[..eq_idx].trim();
+  if let Some((raw_name, _)) = trimmed.split_once('=') {
+    let raw_name = raw_name.trim();
     if is_engine_name(raw_name) {
       let name = raw_name.strip_prefix('*').unwrap_or(raw_name);
       if engine_by_name(name).is_some() {
@@ -440,6 +440,8 @@ fn split_by_chain(s: &str) -> Vec<String> {
     return if t.is_empty() { Vec::new() } else { vec![t.to_string()] };
   }
 
+  // Cuts land only on ASCII bytes, so `get` never misses a boundary.
+  let slice = |from: usize, to: usize| s.get(from..to).unwrap_or_default();
   let mut parts = Vec::new();
   let bytes = s.as_bytes();
   let mut start = 0;
@@ -462,14 +464,14 @@ fn split_by_chain(s: &str) -> Vec<String> {
       continue;
     }
 
-    if (c == b'"' || c == b'\'' || c == b'`') && !should_ignore_text_selector_quote(&s[start..i]) {
+    if (c == b'"' || c == b'\'' || c == b'`') && !should_ignore_text_selector_quote(slice(start, i)) {
       in_quote = c;
       i += 1;
       continue;
     }
 
     if c == b'>' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-      let part = s[start..i].trim();
+      let part = slice(start, i).trim();
       if !part.is_empty() {
         parts.push(part.to_string());
       }
@@ -484,7 +486,7 @@ fn split_by_chain(s: &str) -> Vec<String> {
     i += 1;
   }
 
-  let part = s[start..].trim();
+  let part = slice(start, s.len()).trim();
   if !part.is_empty() {
     parts.push(part.to_string());
   }
@@ -573,8 +575,8 @@ fn parse_part(selector: &str, s: &str) -> Result<SelectorPart> {
   // the text engine (quotes kept in the body); then `//` (optionally
   // behind opening parentheses) or a leading `..` is xpath; everything
   // else is CSS. A leading `*` on the name marks the capture part.
-  if let Some(eq_idx) = s.find('=') {
-    let raw_name = s[..eq_idx].trim();
+  if let Some((raw_name, body)) = s.split_once('=') {
+    let raw_name = raw_name.trim();
     if is_engine_name(raw_name) {
       let (capture, name) = match raw_name.strip_prefix('*') {
         Some(rest) => (true, rest),
@@ -588,7 +590,7 @@ fn parse_part(selector: &str, s: &str) -> Result<SelectorPart> {
       };
       return Ok(SelectorPart {
         engine,
-        body: s[eq_idx + 1..].to_string(),
+        body: body.to_string(),
         capture,
       });
     }
@@ -986,8 +988,8 @@ pub fn parse_strict_violation_count<E: std::fmt::Display + ?Sized>(err: &E) -> O
   // after the colon.
   let message = err.to_string();
   let needle = "strict mode violation:";
-  let idx = message.find(needle)?;
-  let tail = message[idx + needle.len()..].trim();
+  let (_, tail) = message.split_once(needle)?;
+  let tail = tail.trim();
   let count_str: String = tail.chars().take_while(char::is_ascii_digit).collect();
   count_str.parse().ok()
 }

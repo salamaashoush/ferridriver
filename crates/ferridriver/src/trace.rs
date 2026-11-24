@@ -35,11 +35,10 @@ const TRACE_VERSION: u32 = 8;
 
 /// Options bag for `tracing.start` (Playwright:
 /// `tracing.start({ name?, title?, screenshots?, snapshots?, sources? })`).
-// Each flag is an independent thing to record — screencast frames, DOM
-// snapshots, source files, attachment bodies — set one at a time by a
-// caller. Grouping them into an enum would be ceremony, not a real state
-// machine (the same reading `ContextConfig` carries).
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "Playwright's tracing.start option bag: screenshots, snapshots, sources and attachments are independent switches, not states of one thing"
+)]
 #[derive(Clone)]
 pub struct TracingStartOptions {
   /// Prefix for intermediate artifacts (accepted for parity; the zip is
@@ -436,7 +435,10 @@ impl Drop for TraceSpool {
 /// `tracing.stop`. All interior mutability is sync — the action hot
 /// path appends a serialized line to the disk spool under a brief
 /// mutex.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "carries TracingStartOptions' four independent capture switches for the life of the recording"
+)]
 pub struct TraceRecorder {
   /// Monotonic origin: event times are milliseconds since this instant.
   origin: Instant,
@@ -675,17 +677,17 @@ impl TraceRecorder {
   /// Lift the screencast throttle for the next 500ms (mirrors
   /// Playwright's `unthrottleDuration` around every action boundary).
   fn bump_screencast_burst(&self) {
-    // Millisecond resolution is plenty for a 500ms window.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let until = (self.monotonic_ms() + SCREENCAST_BURST_MS) as u64;
+    let until = self.elapsed_whole_ms().saturating_add(SCREENCAST_BURST_MS);
     self.screencast_burst_until_ms.store(until, Ordering::Relaxed);
   }
 
-  /// Whether the around-action burst window is open at `now_ms`.
-  fn screencast_burst_active(&self, now_ms: f64) -> bool {
-    #[allow(clippy::cast_precision_loss)]
-    let until = self.screencast_burst_until_ms.load(Ordering::Relaxed) as f64;
-    now_ms < until
+  /// Whether the around-action burst window is open now.
+  fn screencast_burst_active(&self) -> bool {
+    self.elapsed_whole_ms() < self.screencast_burst_until_ms.load(Ordering::Relaxed)
+  }
+
+  fn elapsed_whole_ms(&self) -> u64 {
+    u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
   }
 
   /// Embed `file` as a `resources/src@<sha1-of-path>.txt` entry (the
@@ -1271,7 +1273,7 @@ pub fn export_live_snapshot(composite: &str, known_version: Option<u64>) -> Resu
 const MIN_FRAME_GAP_MS: f64 = 200.0;
 /// Around-action burst: every action boundary lifts the throttle for
 /// this long (Playwright's `unthrottleDuration`, `tracing.ts:784`).
-const SCREENCAST_BURST_MS: f64 = 500.0;
+const SCREENCAST_BURST_MS: u64 = 500;
 
 /// The `page@<id>` identity used for a page's trace events. Derived
 /// from the backend page's frame-cache Arc — the same pointer
@@ -1314,14 +1316,12 @@ pub(crate) async fn spawn_screencast_pump(recorder: &Arc<TraceRecorder>, page: &
     while let Some(frame) = rx.recv().await {
       let jpeg = frame.data;
       let timestamp = recorder.monotonic_ms();
-      if timestamp - last_ts < MIN_FRAME_GAP_MS && !recorder.screencast_burst_active(timestamp) {
+      if timestamp - last_ts < MIN_FRAME_GAP_MS && !recorder.screencast_burst_active() {
         continue;
       }
       last_ts = timestamp;
       let (width, height) = jpeg_dimensions(&jpeg).unwrap_or((800, 600));
-      // Epoch-ms wall clock: positive and below 2^53, exact as u64.
-      #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-      let name = format!("{page_id}-{}.jpeg", recorder.wall_ms() as u64);
+      let name = format!("{page_id}-{:.0}.jpeg", recorder.wall_ms().floor());
       recorder.push_resource(&TraceResource {
         name: name.clone(),
         bytes: jpeg,
@@ -1712,12 +1712,13 @@ impl PendingGuard {
     }
   }
 
+  /// Removes the entry, so the `Drop` that follows finds nothing to stamp.
   fn finished(self) {
     let mut guard = PENDING_CALLS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(map) = guard.as_mut() {
       map.remove(&self.call_id);
     }
-    std::mem::forget(self);
+    drop(guard);
   }
 }
 
@@ -2490,8 +2491,8 @@ mod tests {
 
     let a = recording("a");
     let b = recording("b");
-    let guard_a = observe_session_actions("s:a", a.clone());
-    let guard_b = observe_session_actions("s:b", b.clone());
+    let guard_a = observe_session_actions("s:a", Arc::<Recording>::clone(&a));
+    let guard_b = observe_session_actions("s:b", Arc::<Recording>::clone(&b));
 
     drop(begin_action(Some("s:a"), "Page", "goto", None, serde_json::json!({})));
     drop(begin_action(Some("s:b"), "Page", "click", None, serde_json::json!({})));
@@ -2504,7 +2505,7 @@ mod tests {
     // A global observer catches sessions that have no scoped one, while the
     // scoped ones keep winning for theirs.
     let global = recording("g");
-    set_action_observer(global.clone());
+    set_action_observer(Arc::<Recording>::clone(&global));
     drop(begin_action(Some("s:c"), "Page", "fill", None, serde_json::json!({})));
     drop(begin_action(Some("s:a"), "Page", "reload", None, serde_json::json!({})));
     assert_eq!(seen(&global), vec!["g:page.fill".to_string()]);
@@ -2559,8 +2560,8 @@ mod tests {
 
     let session = recording("session");
     let mine = recording("mine");
-    let session_guard = observe_session_actions("s:o", session.clone());
-    let owner_guard = observe_owner_actions("test A", mine.clone());
+    let session_guard = observe_session_actions("s:o", Arc::<Recording>::clone(&session));
+    let owner_guard = observe_owner_actions("test A", Arc::<Recording>::clone(&mine));
 
     call("test A", "Page", "goto", "s:o");
     call("test A", "Locator", "click", "s:other");
