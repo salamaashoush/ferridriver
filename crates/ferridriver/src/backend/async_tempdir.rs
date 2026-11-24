@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub struct AsyncTempDir {
+pub(crate) struct AsyncTempDir {
   state: Arc<RemovalState>,
 }
 
@@ -26,7 +26,7 @@ impl AsyncTempDir {
     self.state.path.try_lock().is_ok_and(|path| path.is_none())
   }
 
-  pub fn new(inner: tempfile::TempDir) -> Self {
+  pub(crate) fn new(inner: tempfile::TempDir) -> Self {
     // `keep` consumes the `TempDir` and disables its auto-removal,
     // handing back the raw `PathBuf` so we own the scheduling.
     Self {
@@ -43,7 +43,7 @@ impl AsyncTempDir {
   ///
   /// # Errors
   /// Failed filesystem removal or a failed cleanup task leaves the path retained for another attempt.
-  pub async fn remove_now(&self) -> crate::Result<()> {
+  pub(crate) async fn remove_now(&self) -> crate::Result<()> {
     self.remove_with(remove_dir_all_retrying).await
   }
 
@@ -242,7 +242,7 @@ mod tests {
     assert!(caller.await.unwrap_err().is_cancelled());
     assert!(path.join("owned").exists());
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = attempts.clone();
+    let observed = Arc::clone(&attempts);
     let retrying = Arc::clone(&directory);
     let (queued, receipt) = tokio::sync::oneshot::channel();
     let retry = tokio::spawn(async move {

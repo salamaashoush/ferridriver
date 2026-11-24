@@ -53,7 +53,7 @@ fn scan_value(data: &[u8], vstart: usize) -> &[u8] {
 /// Find the value for a top-level key in a JSON object. Matches at depth 1
 /// only (inside the outermost {}), so nested keys with the same name don't
 /// confuse it. Returns the raw value bytes (no quotes stripped for strings).
-pub fn json_field<'a>(data: &'a [u8], key: &[u8]) -> &'a [u8] {
+pub(crate) fn json_field<'a>(data: &'a [u8], key: &[u8]) -> &'a [u8] {
   let klen = key.len();
   let mut depth: i32 = 0;
   let mut in_str = false;
@@ -99,7 +99,7 @@ pub fn json_field<'a>(data: &'a [u8], key: &[u8]) -> &'a [u8] {
 }
 
 /// Extract numeric "id" field from CDP JSON. Returns 0 if not found.
-pub fn json_id(data: &[u8]) -> u64 {
+pub(crate) fn json_id(data: &[u8]) -> u64 {
   let slice = json_field(data, b"id");
   if slice.is_empty() {
     return 0;
@@ -116,7 +116,7 @@ pub fn json_id(data: &[u8]) -> u64 {
 
 /// Strip surrounding quotes from a JSON string value. Returns empty if not
 /// a quoted string.
-pub fn json_string(field: &[u8]) -> &[u8] {
+pub(crate) fn json_string(field: &[u8]) -> &[u8] {
   let f = field
     .iter()
     .position(|&b| b != b' ' && b != b'\t')
@@ -130,6 +130,6 @@ pub fn json_string(field: &[u8]) -> &[u8] {
 }
 
 /// Extract the "message" string from an error object.
-pub fn error_message(error_field: &[u8]) -> &[u8] {
+pub(crate) fn error_message(error_field: &[u8]) -> &[u8] {
   json_string(json_field(error_field, b"message"))
 }
