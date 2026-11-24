@@ -695,7 +695,7 @@ impl ContextRef {
     // created in the context; a `waitForEvent('page')` registered
     // before this `newPage` call resolves with the same wrapper the
     // caller receives.
-    self.emit_page_created(page.clone());
+    self.emit_page_created(Arc::clone(&page));
 
     Ok(page)
   }
@@ -827,7 +827,7 @@ impl ContextRef {
       let guard = bindings_handle.read().await;
       guard
         .get(&composite)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect::<Vec<_>>())
         .unwrap_or_default()
     };
     for (name, binding) in bindings {
@@ -843,11 +843,11 @@ impl ContextRef {
   }
 
   async fn context_callbacks(&self) -> Vec<(String, crate::events::ExposedBinding)> {
-    let callbacks = self.state.read().await.context_callbacks.clone();
+    let callbacks = Arc::clone(&self.state.read().await.context_callbacks);
     let guard = callbacks.read().await;
     guard
       .get(&self.key.to_composite())
-      .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+      .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect())
       .unwrap_or_default()
   }
 
@@ -875,7 +875,7 @@ impl ContextRef {
       let guard = bindings_handle.read().await;
       guard
         .get(&composite)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect::<Vec<_>>())
         .unwrap_or_default()
     };
     for (name, binding) in bindings {
@@ -960,7 +960,7 @@ impl ContextRef {
   }
 
   pub(crate) async fn credential_store(&self) -> Arc<crate::credentials::CredentialStore> {
-    let stores = self.state.read().await.context_credentials.clone();
+    let stores = Arc::clone(&self.state.read().await.context_credentials);
     let mut stores = stores.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     Arc::clone(stores.entry(self.key.to_composite()).or_default())
   }
@@ -1007,7 +1007,7 @@ impl ContextRef {
   pub(crate) async fn har_recorders(
     &self,
   ) -> Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::tracing::HarRecorder>>> {
-    self.state.read().await.har_recorders.clone()
+    Arc::clone(&self.state.read().await.har_recorders)
   }
 
   /// Handle to this context's accumulated network-request log, if the
@@ -1020,7 +1020,7 @@ impl ContextRef {
       .await
       .context(&self.name)
       .ok()
-      .map(|c| c.network_log.clone())
+      .map(|c| Arc::clone(&c.network_log))
   }
 
   /// Playwright: `browserContext.cookies(urls?)`. The cookies a request
@@ -1752,7 +1752,7 @@ impl ContextRef {
       return;
     }
     let recorder = crate::tracing::recorder_for_record_har(har);
-    let registry = self.state.read().await.context_har_updates.clone();
+    let registry = Arc::clone(&self.state.read().await.context_har_updates);
     registry
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1766,7 +1766,7 @@ impl ContextRef {
   /// not rewrite the files.
   pub(crate) async fn flush_har_updates(&self) -> Result<()> {
     let recorders = {
-      let registry = self.state.read().await.context_har_updates.clone();
+      let registry = Arc::clone(&self.state.read().await.context_har_updates);
       let mut guard = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       guard.remove(&self.key.to_composite()).unwrap_or_default()
     };
@@ -1985,11 +1985,11 @@ impl ContextRef {
     let source = crate::options::evaluation_script_exposing(script, &arg.value)?;
     let composite = self.key.to_composite();
     {
-      let callbacks = self.state.read().await.context_callbacks.clone();
+      let callbacks = Arc::clone(&self.state.read().await.context_callbacks);
       let mut guard = callbacks.write().await;
       let entry = guard.entry(composite.clone()).or_default();
       for function in &arg.functions {
-        entry.insert(function.name.clone(), function.binding.clone());
+        entry.insert(function.name.clone(), Arc::clone(&function.binding));
       }
     }
     let pages = {
@@ -1999,7 +1999,10 @@ impl ContextRef {
     for page in &pages {
       for function in &arg.functions {
         page
-          .expose_context_callback(&function.name, bind_source(function.binding.clone(), composite.clone()))
+          .expose_context_callback(
+            &function.name,
+            bind_source(Arc::clone(&function.binding), composite.clone()),
+          )
           .await?;
       }
     }
@@ -2014,7 +2017,7 @@ impl ContextRef {
     let names: Vec<String> = arg.functions.into_iter().map(|f| f.name).collect();
     Ok(crate::disposable::Disposable::new(move || async move {
       {
-        let callbacks = this.state.read().await.context_callbacks.clone();
+        let callbacks = Arc::clone(&this.state.read().await.context_callbacks);
         let mut guard = callbacks.write().await;
         if let Some(map) = guard.get_mut(&this.key.to_composite()) {
           for name in &names {
@@ -2046,7 +2049,7 @@ impl ContextRef {
       let id = state
         .context_init_script_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-      (state.context_init_scripts.clone(), id)
+      (Arc::clone(&state.context_init_scripts), id)
     };
     let installed = Arc::new(std::sync::Mutex::new(Vec::new()));
     registry
@@ -2125,7 +2128,7 @@ impl ContextRef {
     }
 
     let scripts = {
-      let registry = self.state.read().await.context_init_scripts.clone();
+      let registry = Arc::clone(&self.state.read().await.context_init_scripts);
       registry.write().await.remove(&composite).unwrap_or_default()
     };
     for script in scripts {
@@ -2170,7 +2173,7 @@ impl ContextRef {
   /// page.
   async fn apply_context_init_scripts(&self, page: &Arc<Page>) -> Result<()> {
     let scripts: Vec<_> = {
-      let registry = self.state.read().await.context_init_scripts.clone();
+      let registry = Arc::clone(&self.state.read().await.context_init_scripts);
       let guard = registry.read().await;
       guard
         .get(&self.key.to_composite())
@@ -2452,7 +2455,7 @@ impl ContextRef {
       guard
         .entry(self.key.to_composite())
         .or_default()
-        .push((matcher.clone(), handler.clone()));
+        .push((matcher.clone(), Arc::clone(&handler)));
     }
     // A context with no pages yet isn't registered in state (it
     // materialises on first `new_page`) — the registry entry above is
@@ -2467,7 +2470,7 @@ impl ContextRef {
       page
         .route_web_socket_scoped(
           matcher.clone(),
-          handler.clone(),
+          Arc::clone(&handler),
           crate::web_socket_route::WsRouteScope::Context,
         )
         .await?;
@@ -2532,7 +2535,7 @@ impl ContextRef {
       start_len,
       page_filter,
     };
-    let registry = self.state.read().await.context_har_updates.clone();
+    let registry = Arc::clone(&self.state.read().await.context_har_updates);
     registry
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2642,7 +2645,7 @@ impl ContextRef {
       guard
         .entry(self.key.to_composite())
         .or_default()
-        .insert(name.to_string(), callback.clone());
+        .insert(name.to_string(), Arc::clone(&callback));
     }
     // Apply to every page already open in this context.
     let pages = {
@@ -2651,7 +2654,7 @@ impl ContextRef {
     };
     let composite = self.key.to_composite();
     for page in &pages {
-      let binding_for_page = bind_source(callback.clone(), composite.clone());
+      let binding_for_page = bind_source(Arc::clone(&callback), composite.clone());
       page.expose_context_binding(name, binding_for_page).await?;
     }
     Ok(crate::disposable::Disposable::new({
@@ -2811,8 +2814,8 @@ pub(crate) fn spawn_popup_pump(
   let mut rx = browser.tap_popups();
   tokio::spawn(async move {
     while let Some(popup) = rx.recv().await {
-      let state = state.clone();
-      let instance = instance.clone();
+      let state = Arc::clone(&state);
+      let instance = Arc::clone(&instance);
       // Per-popup task: registration is a multi-await sequence and the
       // pump must keep consuming (two rapid popups must not serialize
       // behind each other's context configuration).
@@ -2860,9 +2863,9 @@ async fn register_popup(
   // transient emitter when the state lock is contended, and a popup
   // announced on one is a popup the suite's `waitForEvent('page')`
   // never sees.
-  let ctx_ref = ContextRef::new_async(state.clone(), composite.clone())
+  let ctx_ref = ContextRef::new_async(Arc::clone(&state), composite.clone())
     .await
-    .with_browser(crate::Browser::from_shared_state(state.clone()));
+    .with_browser(crate::Browser::from_shared_state(Arc::clone(&state)));
   let page = Page::with_context(popup.page.clone(), ctx_ref.clone());
 
   // While a CDP/WebKit popup is still paused only protocol-level
@@ -3031,7 +3034,7 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
     return;
   }
 
-  let page_for_task = page.clone();
+  let page_for_task = Arc::clone(page);
   tokio::spawn(async move {
     // Default CDP screencast quality matches Playwright's
     // `DEFAULT_SCREENCAST_OPTIONS.quality` (90).
@@ -3114,7 +3117,7 @@ mod tests {
     // only the page-side args to the user callback (Playwright:
     // `(source, ...args) => callback(...args)`).
     let seen = Arc::new(AtomicUsize::new(0));
-    let seen_cb = seen.clone();
+    let seen_cb = Arc::clone(&seen);
     let inner: crate::events::ExposedFn = Arc::new(move |args: Vec<serde_json::Value>| {
       seen_cb.store(args.len(), Ordering::SeqCst);
       Box::pin(
@@ -3136,9 +3139,9 @@ mod tests {
   #[tokio::test]
   async fn disposable_runs_once() {
     let count = Arc::new(AtomicUsize::new(0));
-    let c = count.clone();
+    let c = Arc::clone(&count);
     let d = crate::disposable::Disposable::new(move || {
-      let c = c.clone();
+      let c = c;
       async move {
         c.fetch_add(1, Ordering::SeqCst);
         Ok(())

@@ -166,11 +166,11 @@ impl Browser {
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
     let backend_kind = state
       .default_browser()
-      .map_or(state.backend_kind(), crate::backend::AnyBrowser::kind);
+      .map_or_else(|| state.backend_kind(), crate::backend::AnyBrowser::kind);
     let headless = state.headless;
-    let context_options = state.context_options.clone();
-    let record_video = state.record_video.clone();
-    let connected = state.connected.clone();
+    let context_options = Arc::clone(&state.context_options);
+    let record_video = Arc::clone(&state.record_video);
+    let connected = Arc::clone(&state.connected);
     Self::from_parts(
       state.into_shared(),
       version,
@@ -280,7 +280,7 @@ impl Browser {
     let mut contexts = Vec::with_capacity(names.len());
     for name in names {
       contexts.push(
-        ContextRef::new_async(self.state.clone(), name)
+        ContextRef::new_async(Arc::clone(&self.state), name)
           .await
           .with_browser(self.clone()),
       );
@@ -322,11 +322,11 @@ impl Browser {
               .map(crate::backend::AnyBrowser::version)
               .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
             s.default_browser()
-              .map_or(s.backend_kind(), crate::backend::AnyBrowser::kind),
+              .map_or_else(|| s.backend_kind(), crate::backend::AnyBrowser::kind),
             s.headless,
-            s.context_options.clone(),
-            s.record_video.clone(),
-            s.connected.clone(),
+            Arc::clone(&s.context_options),
+            Arc::clone(&s.record_video),
+            Arc::clone(&s.connected),
           )
         },
       );
@@ -491,7 +491,7 @@ impl Browser {
         listed,
       });
     }
-    let ctx = ContextRef::new(self.state.clone(), name).with_browser(self.clone());
+    let ctx = ContextRef::new(Arc::clone(&self.state), name).with_browser(self.clone());
     let defaults_apply = self
       .context_defaults
       .lock()
@@ -743,7 +743,7 @@ impl Browser {
     } else {
       format!("{}:default", self.instance)
     };
-    ContextRef::new(self.state.clone(), name).with_browser(self.clone())
+    ContextRef::new(Arc::clone(&self.state), name).with_browser(self.clone())
   }
 
   /// Whether the connected browser supports isolated contexts.
@@ -906,7 +906,7 @@ impl Browser {
     names
       .iter()
       .filter(|entry| entry.listed)
-      .map(|entry| ContextRef::new(self.state.clone(), entry.name.clone()).with_browser(self.clone()))
+      .map(|entry| ContextRef::new(Arc::clone(&self.state), entry.name.clone()).with_browser(self.clone()))
       .collect()
   }
 

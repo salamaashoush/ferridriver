@@ -22,7 +22,7 @@ use crate::options::ProxyConfig;
 
 /// A running relay. Stops when dropped.
 #[derive(Debug)]
-pub struct SocksRelay {
+pub(crate) struct SocksRelay {
   addr: SocketAddr,
   accept: tokio::task::AbortHandle,
 }
@@ -47,7 +47,7 @@ impl SocksRelay {
   ///
   /// The proxy is not SOCKS5, its credentials do not fit the protocol
   /// (255 bytes each), or no loopback port can be bound.
-  pub async fn start(upstream: &ProxyConfig) -> Result<Arc<Self>> {
+  pub(crate) async fn start(upstream: &ProxyConfig) -> Result<Arc<Self>> {
     let invalid = |message: String| FerriError::invalid_argument("proxy", message);
     let (scheme, rest) = upstream
       .server
@@ -102,7 +102,7 @@ impl SocksRelay {
   /// The proxy to give the browser in place of the one relayed: the
   /// relay's address, no credentials, the same bypass list.
   #[must_use]
-  pub fn browser_proxy(&self, original: &ProxyConfig) -> ProxyConfig {
+  pub(crate) fn browser_proxy(&self, original: &ProxyConfig) -> ProxyConfig {
     ProxyConfig {
       server: format!("socks5://{}", self.addr),
       bypass: original.bypass.clone(),

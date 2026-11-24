@@ -196,7 +196,7 @@ impl WebSocketRoute {
   pub fn connect_to_server(&self) -> WebSocketRouteServer {
     self.inner.connected.store(true, Ordering::SeqCst);
     WebSocketRouteServer {
-      inner: self.inner.clone(),
+      inner: Arc::clone(&self.inner),
     }
   }
 
@@ -536,14 +536,17 @@ impl PageWsRouter {
       page_routes
         .iter()
         .find(|(m, _)| m.matches(&url))
-        .map(|(_, h)| h.clone())
+        .map(|(_, h)| Arc::clone(h))
     }
     .or_else(|| {
       let ctx_routes = self
         .context_routes
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-      ctx_routes.iter().find(|(m, _)| m.matches(&url)).map(|(_, h)| h.clone())
+      ctx_routes
+        .iter()
+        .find(|(m, _)| m.matches(&url))
+        .map(|(_, h)| Arc::clone(h))
     });
 
     let Some(handler) = handler else {
@@ -627,7 +630,7 @@ fn was_clean(payload: &Value) -> bool {
 #[must_use]
 pub fn binding_callback(router: Arc<PageWsRouter>) -> crate::events::ExposedBinding {
   Arc::new(move |source: crate::events::BindingSource, args: Vec<Value>| {
-    let router = router.clone();
+    let router = Arc::clone(&router);
     Box::pin(async move {
       if let Some(payload) = args.into_iter().next() {
         let frame = (!source.frame.is_empty()).then_some(source.frame.as_str());

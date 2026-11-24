@@ -122,7 +122,7 @@ impl FulfillOptions {
     let mut status = self.status;
     let mut headers = self.headers;
     if let Some(response) = self.response {
-      status = status.or(Some(i32::from(response.status())));
+      status = status.or_else(|| Some(i32::from(response.status())));
       headers = headers.or_else(|| Some(response.headers_object()));
       if body.is_none() && self.path.is_none() {
         body = Some(response.body_shared()?.to_vec());
@@ -625,7 +625,9 @@ pub async fn run_route_chain(
     let mut route = Route::new(request.clone(), tx);
     route.client = picked.client.clone();
     (picked.handler)(route);
-    let action = rx.await.unwrap_or(RouteAction::Continue(ContinueOverrides::default()));
+    let action = rx
+      .await
+      .unwrap_or_else(|_| RouteAction::Continue(ContinueOverrides::default()));
     match action {
       RouteAction::Fallback(overrides) => {
         apply_overrides(&mut request, &overrides);

@@ -54,7 +54,7 @@ use crate::page::Page;
 /// sandbox consults this set so those exact files, and nothing else
 /// outside the root, are readable. Only paths ferridriver itself
 /// produced are ever added, and only for reading.
-static DOWNLOADED_FILES: std::sync::RwLock<Option<std::collections::HashSet<PathBuf>>> = std::sync::RwLock::new(None);
+static DOWNLOADED_FILES: std::sync::RwLock<Option<rustc_hash::FxHashSet<PathBuf>>> = std::sync::RwLock::new(None);
 
 fn register_downloaded_file(path: &Path) {
   let Ok(canonical) = std::fs::canonicalize(path) else {
@@ -62,7 +62,7 @@ fn register_downloaded_file(path: &Path) {
   };
   if let Ok(mut guard) = DOWNLOADED_FILES.write() {
     guard
-      .get_or_insert_with(std::collections::HashSet::default)
+      .get_or_insert_with(rustc_hash::FxHashSet::default)
       .insert(canonical);
   }
 }
@@ -623,7 +623,7 @@ mod tests {
   fn download_manager_add_remove_roundtrip() {
     let mgr = DownloadManager::new();
     let fired = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let fired_c = fired.clone();
+    let fired_c = Arc::clone(&fired);
     let id = mgr.add_handler(Arc::new(move |_| {
       fired_c.fetch_add(1, Ordering::Relaxed);
       true
