@@ -159,15 +159,15 @@ impl McpServerConfig for ferridriver_config::FerridriverConfig {
   }
 
   fn base_overrides(&self) -> ferridriver::options::InstanceOverrides {
-    McpServerConfig::base_overrides(&self.mcp)
+    McpServerConfig::base_overrides(&*self.mcp)
   }
 
   fn default_viewport(&self) -> Option<ferridriver::options::ViewportConfig> {
-    McpServerConfig::default_viewport(&self.mcp)
+    McpServerConfig::default_viewport(&*self.mcp)
   }
 
   fn default_context_options(&self) -> Option<ferridriver::options::BrowserContextOptions> {
-    McpServerConfig::default_context_options(&self.mcp)
+    McpServerConfig::default_context_options(&*self.mcp)
   }
 
   fn resolve_instance(&self, instance: &str) -> Option<ConnectMode> {
