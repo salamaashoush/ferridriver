@@ -328,6 +328,17 @@ pub async fn bind_in(
   options: BindOptions,
   script_host: Option<Arc<dyn ScriptHost>>,
 ) -> Result<BoundSession> {
+  // A bound browser is watched and driven as Playwright's dashboard drives
+  // one: when the selected page closes, the first page left is selected.
+  let instance = crate::browser_dispatch::context_key_for(browser, "default")
+    .map_err(|e| crate::SessionError::Dispatch(e.to_string()))?
+    .instance;
+  browser
+    .state()
+    .write()
+    .await
+    .set_refocus(&instance, ferridriver::context::Refocus::First)
+    .map_err(|e| crate::SessionError::Dispatch(e.to_string()))?;
   let mut dispatcher: BrowserDispatcher = dispatcher_for(browser);
   if let Some(host) = script_host {
     dispatcher = dispatcher.with_script_host(host);

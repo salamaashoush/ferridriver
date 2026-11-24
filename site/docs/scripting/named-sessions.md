@@ -425,18 +425,37 @@ An optional `"context"` field picks a browser context.
 and any other first command is refused and the connection closed.
 `SessionClient::connect` does this itself from the endpoint string.
 
-**Watching.** `screencast` streams frames until the client hangs up:
+**Watching.** `screencast` streams the selected page's frames, and the
+context's pages, until the client hangs up or no page is left:
 
 ```json
 {"id": 1, "verb": "screencast", "args": {"quality": 80, "max_width": 1280, "max_height": 720}}
 ```
 
 ```json
+{"type": "event", "id": 1, "event": "pages", "pages": [{"page": "8E1A...", "url": "https://example.com/", "title": "Shop", "selected": true}, {"page": "9F2B...", "url": "https://example.com/help", "title": "Help", "selected": false}]}
 {"type": "event", "id": 1, "event": "frame", "data": "<base64 JPEG>", "timestamp_ms": 1730000000500, "viewport_width": 1280, "viewport_height": 720}
 ```
 
 The image may be scaled down; `viewport_width` x `viewport_height` is the
 CSS-pixel viewport it depicts, the space input coordinates are in.
+
+A `pages` event comes first and again whenever a page opens, loads,
+navigates or closes, or the selection moves, as Playwright's dashboard
+pushes its tab list. `page` is the target id `input` and `page.select`
+take. The frames follow the selected page.
+
+**Selecting a page.** Each context has one selected page: the one a `run`,
+`input` without a `page`, and the screencast act on. A page the page opens
+(a popup, a `target=_blank` link) is listed and leaves the selection where
+it was; it is selected by opening only when the context has no other page.
+`page.select` moves it, answering with the pages:
+
+```json
+{"id": 9, "verb": "page.select", "args": {"page": "9F2B..."}}
+```
+
+When the selected page closes, the first page left is selected.
 
 **Driving.** `input` dispatches one event through the browser's own input
 protocol (CDP `Input.*` on Chromium), with no script compiled per event:
@@ -453,6 +472,8 @@ protocol (CDP `Input.*` on Chromium), with no script compiled per event:
 
 `click_count` is the press's place in a run of clicks, so a double click is
 two presses with 1 and then 2. A wheel scrolls whatever is under `(x, y)`.
+An event goes to the selected page, or to the page its `"page"` field
+names by target id.
 
 **Recording.** `recorder.start` records whatever reaches the page, a
 person at a headed window or relayed input alike, and streams each action

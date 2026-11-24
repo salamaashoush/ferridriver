@@ -12,9 +12,9 @@ use anyhow::{Context as _, bail, ensure};
 use ferridriver::codegen::{Action, RecordedAction};
 use ferridriver::options::LaunchOptions;
 use ferridriver_session::{
-  BindOptions, Command, EventPayload, INPUT_VERB, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB,
-  RECORDER_STOP_VERB, RUN_VERB, RecordingResult, Registry, Response, SCREENCAST_VERB, SessionClient, SessionError,
-  bind_in, page_for,
+  BindOptions, Command, EventPayload, INPUT_VERB, PAGE_SELECT_VERB, PageEntry, RECORDER_ASSERT_VERB,
+  RECORDER_MODE_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB, RecordingResult, Registry, Response,
+  SCREENCAST_VERB, SessionClient, SessionError, bind_in, page_for,
 };
 use tokio::sync::mpsc;
 
@@ -161,15 +161,24 @@ async fn record(endpoint: &str, page: &ferridriver::Page) -> anyhow::Result<(Rec
   Ok((result, streamed))
 }
 
-/// A frame arrives, with the viewport it depicts.
+/// A frame arrives, with the viewport it depicts, after the page list
+/// the stream opens with.
 async fn first_frame(
   frames: &mut mpsc::UnboundedReceiver<EventPayload>,
   watching: tokio::task::JoinHandle<ferridriver_session::Result<Response>>,
 ) -> anyhow::Result<()> {
-  let frame = match next_event(frames, "a screencast frame").await {
-    Ok(frame) => frame,
-    Err(error) => bail!("{error}: screencast answered {:?}", watching.await?),
+  let mut listed = false;
+  let frame = loop {
+    match next_event(frames, "a screencast frame").await {
+      Ok(EventPayload::Pages { pages }) => {
+        ensure!(pages.iter().filter(|page| page.selected).count() == 1, "{pages:?}");
+        listed = true;
+      },
+      Ok(frame) => break frame,
+      Err(error) => bail!("{error}: screencast answered {:?}", watching.await?),
+    }
   };
+  ensure!(listed, "the screencast sent a frame before the page list");
   watching.abort();
   let EventPayload::Frame {
     data,
@@ -358,8 +367,8 @@ async fn input_reaches_the_page_it_names(browser: ferridriver::Browser, cdp: boo
   opener.goto(OPENER).await?;
   let opener_id = target_id(&opener, cdp).await?;
 
-  // A click with no page goes to the active page, and the popup it opens
-  // becomes the active page.
+  // A click with no page goes to the selected page. The popup it opens is
+  // listed and leaves the selection where it was, until it is selected.
   let (popup, ()) = opener
     .expect_popup(|| async {
       click(&endpoint, (40.0, 20.0))
@@ -370,18 +379,33 @@ async fn input_reaches_the_page_it_names(browser: ferridriver::Browser, cdp: boo
   popup
     .set_content("<script>window.keys = []; addEventListener('keydown', e => keys.push(e.key));</script>")
     .await?;
+  let popup_id = target_id(&popup, cdp).await?;
+  let selected = page_for(&browser, "default").await?;
+  ensure!(
+    selected.main_frame().id() == opener.main_frame().id(),
+    "the popup took the selection by opening"
+  );
+  let listed: Vec<PageEntry> = serde_json::from_str(
+    &ok(&endpoint, PAGE_SELECT_VERB, serde_json::json!({"page": popup_id}))
+      .await?
+      .text,
+  )?;
+  let marks: Vec<(&str, bool)> = listed.iter().map(|page| (page.page.as_str(), page.selected)).collect();
+  ensure!(
+    marks == [(opener_id.as_str(), false), (popup_id.as_str(), true)],
+    "page.select answered {listed:?}"
+  );
   let active = page_for(&browser, "default").await?;
   ensure!(
     active.main_frame().id() == popup.main_frame().id(),
-    "the active page did not follow the popup"
+    "the selection did not move to the popup"
   );
   let reply = press(&endpoint, "a", None).await?;
   ensure!(reply.ok, "{:?}", reply.error);
 
-  // Named, the event goes to that page whichever is active.
+  // Named, the event goes to that page whichever is selected.
   let reply = press(&endpoint, "b", Some(&opener_id)).await?;
   ensure!(reply.ok, "{:?}", reply.error);
-  let popup_id = target_id(&popup, cdp).await?;
   let reply = press(&endpoint, "c", Some(&popup_id)).await?;
   ensure!(reply.ok, "{:?}", reply.error);
   assert_eq!(keys(&opener).await?, "b");
@@ -391,6 +415,17 @@ async fn input_reaches_the_page_it_names(browser: ferridriver::Browser, cdp: boo
   ensure!(!missing.ok, "an unknown page took the input");
   ensure!(
     missing.error.unwrap_or_default().contains("no-such-target"),
+    "the error does not name the page"
+  );
+  let unselectable = call(
+    &endpoint,
+    PAGE_SELECT_VERB,
+    serde_json::json!({"page": "no-such-target"}),
+  )
+  .await?;
+  ensure!(!unselectable.ok, "an unknown page was selected");
+  ensure!(
+    unselectable.error.unwrap_or_default().contains("no-such-target"),
     "the error does not name the page"
   );
 
@@ -431,6 +466,203 @@ async fn input_reaches_the_page_it_names_on_webkit() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn input_reaches_the_page_it_names_on_bidi() -> anyhow::Result<()> {
   input_reaches_the_page_it_names(launch(ferridriver::firefox()).await?, false).await
+}
+
+const KEYS: &str = "<script>window.keys = []; addEventListener('keydown', e => keys.push(e.key));</script>";
+
+/// Serve an opener whose link opens a tab, the tab, and a tab whose
+/// document takes a while to arrive, each keeping the keys it is sent.
+fn serve_tabs() -> anyhow::Result<String> {
+  use std::io::{Read as _, Write as _};
+  let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+  let origin = format!("http://{}", listener.local_addr()?);
+  std::thread::spawn(move || {
+    for stream in listener.incoming().flatten() {
+      std::thread::spawn(move || {
+        let mut stream = stream;
+        let mut request = [0_u8; 4096];
+        let read = stream.read(&mut request).unwrap_or(0);
+        let head = String::from_utf8_lossy(&request[..read]);
+        let body = match head.split_whitespace().nth(1) {
+          Some("/tab") => format!("<!doctype html><title>Tab</title>{KEYS}"),
+          Some("/slow") => {
+            std::thread::sleep(Duration::from_millis(1500));
+            format!("<!doctype html><title>Slow</title>{KEYS}")
+          },
+          _ => format!(
+            "<!doctype html><title>Opener</title><body style=margin:0>\
+             <a href=/tab target=_blank style=position:absolute;left:10px;top:10px;width:120px;height:30px>open</a>\
+             {KEYS}</body>"
+          ),
+        };
+        let _ = write!(
+          stream,
+          "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+          body.len()
+        );
+      });
+    }
+  });
+  Ok(origin)
+}
+
+/// The next page list on the stream that `wanted` accepts.
+async fn pages_where(
+  events: &mut mpsc::UnboundedReceiver<EventPayload>,
+  what: &str,
+  wanted: impl Fn(&[PageEntry]) -> bool,
+) -> anyhow::Result<Vec<PageEntry>> {
+  let mut seen = Vec::new();
+  loop {
+    match next_event(events, what).await {
+      Ok(EventPayload::Pages { pages }) if wanted(&pages) => return Ok(pages),
+      Ok(EventPayload::Pages { pages }) => seen.push(pages),
+      Ok(_) => {},
+      Err(error) => bail!("{error}: listed {seen:#?}"),
+    }
+  }
+}
+
+fn titles(pages: &[PageEntry]) -> Vec<(&str, bool)> {
+  pages.iter().map(|page| (page.title.as_str(), page.selected)).collect()
+}
+
+/// A viewer holding a screencast is told the pages and which is selected.
+/// A popup is listed and never selected by opening while another page is
+/// open; `page.select` moves the selection, and the frames with it; when
+/// the selected page closes the first page left is selected; and a popup
+/// that arrives when no page is open is selected.
+async fn the_selection_moves_only_when_asked(browser: ferridriver::Browser) -> anyhow::Result<()> {
+  let origin = serve_tabs()?;
+  let (session, endpoint, _scratch) = bound(&browser, "tabs").await?;
+  let opener = page_for(&browser, "default").await?;
+  opener.goto(&format!("{origin}/")).await?;
+  let (mut events, watching) = stream(
+    &endpoint,
+    Command::new(1, SCREENCAST_VERB, serde_json::json!({"quality": 50})),
+  )
+  .await?;
+  let first = pages_where(&mut events, "the opening page list", |pages| pages.len() == 1).await?;
+  ensure!(titles(&first) == [("Opener", true)], "{first:?}");
+
+  // Each click goes to the opener, still selected after its first popup.
+  let mut popups = Vec::new();
+  let mut ids = Vec::new();
+  for count in [2, 3] {
+    let (popup, ()) = opener
+      .expect_popup(|| async {
+        click(&endpoint, (40.0, 25.0))
+          .await
+          .map_err(|error| ferridriver::FerriError::backend(error.to_string()))
+      })
+      .await?;
+    popup.wait_for_load_state(None).await?;
+    popups.push(popup);
+    let listed = pages_where(&mut events, "the popup in the page list", |pages| {
+      pages.len() == count && pages.iter().all(|page| !page.title.is_empty())
+    })
+    .await?;
+    let mut expected = vec![("Opener", true)];
+    expected.extend(std::iter::repeat_n(("Tab", false), count - 1));
+    ensure!(titles(&listed) == expected, "{listed:#?}");
+    ids = listed.into_iter().map(|page| page.page).collect();
+  }
+
+  // Selected, the first popup takes unnamed input and the screencast.
+  let answered: Vec<PageEntry> = serde_json::from_str(
+    &ok(&endpoint, PAGE_SELECT_VERB, serde_json::json!({"page": ids[1]}))
+      .await?
+      .text,
+  )?;
+  ensure!(
+    titles(&answered) == [("Opener", false), ("Tab", true), ("Tab", false)],
+    "{answered:#?}"
+  );
+  let streamed = pages_where(&mut events, "the selection in the page list", |pages| {
+    pages.get(1).is_some_and(|page| page.selected)
+  })
+  .await?;
+  ensure!(streamed == answered, "{streamed:#?}");
+  let reply = press(&endpoint, "a", None).await?;
+  ensure!(reply.ok, "{:?}", reply.error);
+  ensure!(keys(&popups[0]).await? == "a", "unnamed input missed the selected page");
+  ensure!(keys(&opener).await?.is_empty(), "unnamed input reached the opener");
+
+  // Closed from within, the selected page hands the selection to the first
+  // page left rather than to its neighbour, and the frames go with it.
+  popups[0]
+    .inner()
+    .evaluate("setTimeout(() => window.close(), 0)")
+    .await?;
+  let left = pages_where(&mut events, "the page list without the closed page", |pages| {
+    pages.len() == 2
+  })
+  .await?;
+  ensure!(titles(&left) == [("Opener", true), ("Tab", false)], "{left:#?}");
+  loop {
+    match next_event(&mut events, "a frame of the page selected next").await? {
+      EventPayload::Frame { .. } => break,
+      EventPayload::Pages { pages } => ensure!(pages.len() == 2 && pages[0].selected, "{pages:#?}"),
+      other => bail!("unexpected {other:?}"),
+    }
+  }
+  let reply = press(&endpoint, "b", None).await?;
+  ensure!(reply.ok, "{:?}", reply.error);
+  ensure!(keys(&opener).await? == "b", "unnamed input missed the first page left");
+
+  // A popup that arrives when every other page has closed is selected.
+  let context = opener.context().context("a page with a context")?.clone();
+  opener.inner().evaluate("void window.open('/slow')").await?;
+  opener.close().await?;
+  popups[1].close().await?;
+  let ended = tokio::time::timeout(Duration::from_secs(15), watching).await??;
+  ensure!(ended?.ok, "the screencast failed once no page was left");
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+  let slow = loop {
+    if let Some(page) = context.pages().into_iter().find(|page| page.url().ends_with("/slow")) {
+      break page;
+    }
+    ensure!(
+      tokio::time::Instant::now() < deadline,
+      "the slow popup never joined the context"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  };
+  slow.wait_for_load_state(None).await?;
+  let reply = press(&endpoint, "c", None).await?;
+  ensure!(reply.ok, "{:?}", reply.error);
+  ensure!(
+    keys(&slow).await? == "c",
+    "unnamed input missed the popup that arrived alone"
+  );
+  ensure!(context.pages().len() == 1, "input opened a page of its own");
+
+  drop(session);
+  browser.close().await?;
+  Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_selection_moves_only_when_asked_on_cdp_pipe() -> anyhow::Result<()> {
+  the_selection_moves_only_when_asked(launch(ferridriver::chromium()).await?).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_selection_moves_only_when_asked_on_cdp_raw() -> anyhow::Result<()> {
+  let raw = ferridriver::BrowserType::chromium_with(&ferridriver::options::BrowserTypeOptions {
+    transport: Some(ferridriver::options::ChromiumTransport::Ws),
+  });
+  the_selection_moves_only_when_asked(launch(raw).await?).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_selection_moves_only_when_asked_on_webkit() -> anyhow::Result<()> {
+  the_selection_moves_only_when_asked(launch(ferridriver::webkit()).await?).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_selection_moves_only_when_asked_on_bidi() -> anyhow::Result<()> {
+  the_selection_moves_only_when_asked(launch(ferridriver::firefox()).await?).await
 }
 
 /// A popup opened by a click dispatched through a passing handle to its
@@ -609,7 +841,7 @@ async fn a_popup_opened_after_another_step_replaces_the_step_that_opened_it() ->
   popup.wait_for_load_state(None).await?;
 
   // The opener's button opens its popup only after a step on the first
-  // popup has been recorded.
+  // popup has been recorded, in the popup a viewer selected.
   let later = opener.wait_for_event("popup", Some(15_000));
   for kind in ["mouse_move", "mouse_down", "mouse_up"] {
     ok(
@@ -619,6 +851,8 @@ async fn a_popup_opened_after_another_step_replaces_the_step_that_opened_it() ->
     )
     .await?;
   }
+  let popup_id = target_id(&popup, true).await?;
+  ok(&endpoint, PAGE_SELECT_VERB, serde_json::json!({"page": popup_id})).await?;
   click(&endpoint, (40.0, 20.0)).await?;
   later.await?;
 

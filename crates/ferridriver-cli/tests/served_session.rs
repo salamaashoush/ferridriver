@@ -2,8 +2,9 @@
 //! web app runs one: `browser serve` owns Chromium, `session open --connect`
 //! records and relays input to it, and a raw CDP client of the app's own
 //! watches the tabs. A popup a page opens has to become a page of the
-//! session's context there too: the active page, a page `input` can name by
-//! the target id the watcher saw, and a page the recorder records in.
+//! session's context there too: a page `input` can name by the target id
+//! the watcher saw, a page `page.select` makes the one unnamed input goes
+//! to, and a page the recorder records in.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::process::{Child, Command as Process, Stdio};
@@ -11,8 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail, ensure};
 use ferridriver_session::{
-  Command, EventPayload, INPUT_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RecordingResult, Registry, Response,
-  SessionClient,
+  Command, EventPayload, INPUT_VERB, PAGE_SELECT_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RecordingResult,
+  Registry, Response, SessionClient,
 };
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::sync::mpsc;
@@ -278,8 +279,9 @@ async fn drive(
   until_shown(&served.endpoint, &help, "Help").await?;
 
   // Named, the click lands in the popup. Unnamed, the text follows it
-  // there too: the popup is the active page.
+  // there too once the popup is the selected page.
   click(&endpoint, (150.0, 20.0), Some(&help)).await?;
+  call(&endpoint, PAGE_SELECT_VERB, serde_json::json!({"page": help})).await?;
   call(
     &endpoint,
     INPUT_VERB,
