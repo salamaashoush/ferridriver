@@ -106,6 +106,9 @@ sha2 = "0.11"
 hmac = "0.13"
 subtle = "2"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 tempfile = "3"
 tracing-subscriber = { workspace = true }

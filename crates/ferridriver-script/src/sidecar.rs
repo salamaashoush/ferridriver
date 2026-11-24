@@ -16,11 +16,11 @@
 //!   `{"id": <u64>, "error": {"code": <i64>, "message": <string>}}`
 //! - A frame WITHOUT an `id` is an event: `{"method": <string>, "params": <json>}`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferridriver::backend::process::ChildGroup;
+use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, broadcast, oneshot, watch};
@@ -61,7 +61,7 @@ pub struct SidecarSpec {
   pub cwd: Option<String>,
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, SidecarError>>>>>;
+type Pending = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<Value, SidecarError>>>>>;
 
 /// A live sidecar: owns the child process, the request/response sockets, and
 /// the background reader task. Cheap to share behind an `Arc`.
@@ -107,6 +107,11 @@ impl Sidecar {
   /// Spawn the child and complete a `ping`/handshake-free startup: the
   /// transport is ready as soon as the sockets are wired. The first
   /// [`Self::send`] proves the child is actually speaking.
+  ///
+  /// # Errors
+  ///
+  /// [`SidecarError::Spawn`] when the command is empty, the socket pairs
+  /// cannot be made, or the child cannot be spawned.
   pub async fn connect(spec: &SidecarSpec) -> Result<Arc<Self>, SidecarError> {
     if spec.command.is_empty() {
       return Err(SidecarError::Spawn("empty command".into()));
@@ -116,7 +121,7 @@ impl Sidecar {
     // `parent_in` carries requests to the child (fd 3); `parent_out` carries
     // responses back (fd 4). Each is half-duplex in use, so own the whole
     // stream rather than `io::split` (whose half-drops can shut the socket).
-    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let pending: Pending = Arc::new(Mutex::new(FxHashMap::default()));
     let (events, _) = broadcast::channel(1024);
     let closed = watch::channel(false).0;
 
@@ -125,7 +130,7 @@ impl Sidecar {
       child: Mutex::new(child),
       writer: Mutex::new(parent_in),
       next_id: AtomicU64::new(1),
-      pending: pending.clone(),
+      pending: Arc::clone(&pending),
       events: events.clone(),
       reader: Mutex::new(None),
       closed: closed.clone(),
@@ -137,9 +142,14 @@ impl Sidecar {
   }
 
   /// Send a request and await the matching response. `params` defaults to
-  /// `{}` when `None`. Fails with [`SidecarError::Timeout`] after
-  /// `timeout_ms` (0 = wait indefinitely), [`SidecarError::Closed`] if the
-  /// child dies first, or [`SidecarError::Remote`] on an `{error}` reply.
+  /// `{}` when `None`; `timeout_ms` of 0 waits indefinitely.
+  ///
+  /// # Errors
+  ///
+  /// [`SidecarError::Timeout`] after `timeout_ms`, [`SidecarError::Closed`]
+  /// if the child dies first, [`SidecarError::Remote`] on an `{error}` reply,
+  /// and [`SidecarError::Protocol`] when the request cannot be encoded or
+  /// written.
   pub async fn send(&self, method: &str, params: Option<Value>, timeout_ms: u64) -> Result<Value, SidecarError> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
@@ -260,6 +270,11 @@ impl Sidecar {
 
   /// Close the request socket and reap the child (and, via the child's
   /// process group, anything it spawned). Idempotent.
+  ///
+  /// # Errors
+  ///
+  /// None: a socket that will not shut down or a child that is already gone
+  /// is the state `close` is driving towards, so neither is reported.
   pub async fn close(&self) -> Result<(), SidecarError> {
     self.closed.send_replace(true);
     // Dropping the writer's stream closes fd 3 for the child -> it sees EOF
@@ -268,7 +283,8 @@ impl Sidecar {
       let mut w = self.writer.lock().await;
       let _ = w.shutdown().await;
     }
-    if let Some(task) = self.reader.lock().await.take() {
+    let reader = self.reader.lock().await.take();
+    if let Some(task) = reader {
       task.abort();
     }
     // The group reaches grandchildren too; killing the child alone would
@@ -303,42 +319,7 @@ fn spawn_child(spec: &SidecarSpec) -> Result<(ChildGroup, Wire, Wire), SidecarEr
   }
   cmd.kill_on_drop(true);
 
-  let read_fd = child_in.as_raw_fd();
-  let write_fd = child_out.as_raw_fd();
-  // SAFETY: post-fork, single-threaded child; only async-signal-safe
-  // calls. `setsid` makes the child a session/process-group leader so
-  // `close` can `kill(-pid)` the whole tree (same hygiene as
-  // `session_procs`). Then dup the child's ends onto the conventional
-  // fd 3 (read) / fd 4 (write) and clear CLOEXEC so they survive exec —
-  // mirrors the WebKit launcher's `pre_exec_setup_fds`.
-  #[allow(unsafe_code)]
-  unsafe {
-    cmd.pre_exec(move || {
-      libc::setsid();
-      if libc::dup2(read_fd, 3) == -1 {
-        return Err(std::io::Error::last_os_error());
-      }
-      if libc::dup2(write_fd, 4) == -1 {
-        return Err(std::io::Error::last_os_error());
-      }
-      for fd in [3i32, 4] {
-        // Survive exec.
-        let descriptor_flags = libc::fcntl(fd, libc::F_GETFD);
-        if descriptor_flags != -1 {
-          libc::fcntl(fd, libc::F_SETFD, descriptor_flags & !libc::FD_CLOEXEC);
-        }
-        // Hand the child BLOCKING descriptors. The socket inherits the
-        // parent's tokio O_NONBLOCK (shared status flags); a child reading
-        // fd 3 synchronously would otherwise get spurious EWOULDBLOCK. An
-        // async child re-enables non-blocking itself when it adopts the fd.
-        let status_flags = libc::fcntl(fd, libc::F_GETFL);
-        if status_flags != -1 {
-          libc::fcntl(fd, libc::F_SETFL, status_flags & !libc::O_NONBLOCK);
-        }
-      }
-      Ok(())
-    });
-  }
+  hand_fds_to_child(&mut cmd, child_in.as_raw_fd(), child_out.as_raw_fd());
   let child =
     ferridriver::backend::process::spawn_exclusive(|| cmd.spawn()).map_err(|e| SidecarError::Spawn(e.to_string()))?;
   // Parent does not need the child's ends; closing them lets the child see
@@ -346,6 +327,51 @@ fn spawn_child(spec: &SidecarSpec) -> Result<(ChildGroup, Wire, Wire), SidecarEr
   drop(child_in);
   drop(child_out);
   Ok((ChildGroup::unregistered(child), parent_in, parent_out))
+}
+
+/// Make the child a session and process-group leader, so `close` can
+/// `kill(-pid)` the whole tree (the same hygiene as `session_procs`), then
+/// place its socket ends on fd 3 (read) and fd 4 (write), the descriptors the
+/// wire contract names. Mirrors the `WebKit` launcher's `pre_exec_setup_fds`.
+#[cfg(unix)]
+#[expect(
+  unsafe_code,
+  reason = "pre_exec has no safe form, and the sidecar contract names the raw descriptor numbers 3 and 4, which no owned-fd API can name"
+)]
+fn hand_fds_to_child(cmd: &mut tokio::process::Command, read_fd: std::os::fd::RawFd, write_fd: std::os::fd::RawFd) {
+  let place_fds = move || -> std::io::Result<()> {
+    // EPERM means the child already leads a session, which is benign.
+    rustix::process::setsid().ok();
+    for (source, target) in [(read_fd, 3), (write_fd, 4)] {
+      // SAFETY: `dup2` takes plain descriptor numbers and is
+      // async-signal-safe; whatever held `target` in the child is closed and
+      // replaced, which is the point.
+      if unsafe { libc::dup2(source, target) } == -1 {
+        return Err(std::io::Error::last_os_error());
+      }
+    }
+    for target in [3, 4] {
+      // SAFETY: the `dup2` above just placed an open descriptor on `target`,
+      // and nothing in this closure closes it.
+      let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(target) };
+      // Survive exec.
+      let descriptor_flags = rustix::io::fcntl_getfd(fd)?;
+      rustix::io::fcntl_setfd(fd, descriptor_flags.difference(rustix::io::FdFlags::CLOEXEC))?;
+      // Hand the child BLOCKING descriptors. The socket inherits the
+      // parent's tokio O_NONBLOCK (shared status flags); a child reading
+      // fd 3 synchronously would otherwise get spurious EWOULDBLOCK. An
+      // async child re-enables non-blocking itself when it adopts the fd.
+      let status_flags = rustix::fs::fcntl_getfl(fd)?;
+      rustix::fs::fcntl_setfl(fd, status_flags.difference(rustix::fs::OFlags::NONBLOCK))?;
+    }
+    Ok(())
+  };
+  // SAFETY: `place_fds` runs between fork and exec, where only
+  // async-signal-safe work is sound. It makes only the `setsid`, `dup2` and
+  // `fcntl` syscalls and allocates nothing, errors included.
+  unsafe {
+    cmd.pre_exec(place_fds);
+  }
 }
 
 /// [`spawn_child`] on Windows: the child's C runtime inherits the pipes as

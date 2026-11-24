@@ -7,31 +7,40 @@
 //! (`env!("CARGO_BIN_EXE_sidecar_echo")`).
 
 #[cfg(unix)]
+#[expect(
+  unsafe_code,
+  reason = "the sidecar contract hands the sockets over as the raw descriptor numbers 3 and 4"
+)]
 fn main() {
   use std::os::fd::FromRawFd;
   use std::os::unix::net::UnixStream;
 
-  // SAFETY: the parent (the sidecar transport) dup'd its socket ends onto
-  // fd 3 (read) and fd 4 (write) before exec; we adopt them here.
-  #[allow(unsafe_code)]
-  let (rx, tx) = unsafe { (UnixStream::from_raw_fd(3), UnixStream::from_raw_fd(4)) };
+  // SAFETY: the parent (the sidecar transport) dup'd its request socket onto
+  // fd 3 before exec, and nothing else in this process owns it.
+  let rx = unsafe { UnixStream::from_raw_fd(3) };
+  // SAFETY: likewise for the response socket on fd 4.
+  let tx = unsafe { UnixStream::from_raw_fd(4) };
   serve(rx, tx);
 }
 
 #[cfg(windows)]
+#[expect(
+  unsafe_code,
+  reason = "the sidecar contract hands the pipes over as the C runtime descriptors 3 and 4"
+)]
 fn main() {
   use std::os::windows::io::{FromRawHandle, RawHandle};
 
-  // SAFETY: the parent handed its pipe ends over as C runtime descriptors
-  // 3 (read) and 4 (write); the runtime answers with their handles, which
-  // this process now owns.
-  #[allow(unsafe_code)]
-  let (rx, tx) = unsafe {
-    (
-      std::fs::File::from_raw_handle(libc::get_osfhandle(3) as RawHandle),
-      std::fs::File::from_raw_handle(libc::get_osfhandle(4) as RawHandle),
-    )
-  };
+  // SAFETY: the parent handed its request pipe over as C runtime descriptor
+  // 3, so the runtime holds a valid handle for it.
+  let rx_handle = unsafe { libc::get_osfhandle(3) } as RawHandle;
+  // SAFETY: likewise for the response pipe on descriptor 4.
+  let tx_handle = unsafe { libc::get_osfhandle(4) } as RawHandle;
+  // SAFETY: the handle came from descriptor 3 above, and nothing else in
+  // this process takes ownership of it.
+  let rx = unsafe { std::fs::File::from_raw_handle(rx_handle) };
+  // SAFETY: likewise for the handle behind descriptor 4.
+  let tx = unsafe { std::fs::File::from_raw_handle(tx_handle) };
   serve(rx, tx);
 }
 

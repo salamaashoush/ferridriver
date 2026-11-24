@@ -1953,6 +1953,7 @@ dependencies = [
  "rolldown_plugin",
  "rquickjs",
  "rustc-hash",
+ "rustix 1.1.6",
  "schemars",
  "serde",
  "serde_json",
