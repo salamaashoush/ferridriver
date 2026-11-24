@@ -112,7 +112,8 @@ impl Spares {
       engines.retain(|_, engine| engine.context != context);
     }
     lock(&self.idle).retain(|(id, _)| id != context);
-    if let Some(page) = lock(&self.handed).remove(context) {
+    let handed = lock(&self.handed).remove(context);
+    if let Some(page) = handed {
       lock(&self.sessions).remove(&page.target);
     }
   }
