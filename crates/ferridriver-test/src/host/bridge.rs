@@ -7,7 +7,7 @@
 //! so `testInfo.attach`, `test.step`, soft assertions and the snapshot
 //! matchers cannot behave differently depending on which one is running.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,7 +25,7 @@ pub struct InfoBridge {
   deadline: Arc<dyn DeadlineControl>,
   /// The host's map back to authored source, for step locations.
   source_map: Arc<dyn SourceMap>,
-  cwd: Arc<PathBuf>,
+  cwd: Arc<Path>,
   /// Base per-test timeout — `test.slow()` re-arms the VM deadline to
   /// three times this (the worker applies the same multiplier to its
   /// own budget).
@@ -46,7 +46,7 @@ impl InfoBridge {
     modifiers: Arc<TestModifiers>,
     deadline: Arc<dyn DeadlineControl>,
     source_map: Arc<dyn SourceMap>,
-    cwd: Arc<PathBuf>,
+    cwd: Arc<Path>,
     base_timeout: Duration,
     static_annotations: Vec<(String, Option<String>)>,
   ) -> Self {
@@ -104,7 +104,7 @@ impl InfoBridge {
   fn relative(&self, file: &str) -> String {
     let path = std::path::Path::new(file);
     path
-      .strip_prefix(self.cwd.as_path())
+      .strip_prefix(&*self.cwd)
       .map_or_else(|_| path.display().to_string(), |r| r.display().to_string())
   }
 }
@@ -120,7 +120,7 @@ impl InfoBridge {
         crate::step::StepFrame::Host { line, column } => self
           .remap_location(Some((line, column)))
           .map(crate::step::StepFrame::Source),
-        source => Some(source),
+        source @ crate::step::StepFrame::Source(_) => Some(source),
       })
       .collect();
     if let Some(location) = spec.options.location.as_mut() {
@@ -263,7 +263,9 @@ impl TestHostBridge for InfoBridge {
     let parsed = screenshot_options_from_json(&options, false)?;
     let comparator = crate::comparator::ImageComparatorOptions {
       threshold: parsed.threshold.or(defaults.threshold),
-      max_diff_pixels: parsed.max_diff_pixels.or(defaults.max_diff_pixels.map(u64::from)),
+      max_diff_pixels: parsed
+        .max_diff_pixels
+        .or_else(|| defaults.max_diff_pixels.map(u64::from)),
       max_diff_pixel_ratio: parsed.max_diff_pixel_ratio.or(defaults.max_diff_pixel_ratio),
       comparator: parsed.comparator,
     };
@@ -513,7 +515,7 @@ pub fn world_data(meta: WorldMeta<'_>) -> TestWorldData {
       .and_then(serde_json::Value::as_str)
       .map(String::from)
       .or_else(|| meta.base_url.map(String::from))
-      .or_else(crate::config::base_url_from_env),
+      .or_else(crate::config::run_base_url),
     use_options: meta.use_options,
     expect: Arc::clone(&info.expect),
     info: TestInfoData {
@@ -567,6 +569,7 @@ fn record_missing_baseline(info: &TestInfo, soft: Option<String>) {
 
 /// Annotations lowered for the `testInfo.annotations` getter from the
 /// plan's core annotations.
+#[must_use]
 pub fn static_annotation_pairs(annotations: &[TestAnnotation]) -> Vec<(String, Option<String>)> {
   annotations
     .iter()

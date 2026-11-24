@@ -58,6 +58,7 @@ impl Listing {
 }
 
 impl Driver {
+  #[must_use]
   pub fn new(runner: TestRunner, plan_factory: WatchPlanFactory, root_dir: PathBuf) -> Self {
     Self {
       runner,
@@ -68,6 +69,7 @@ impl Driver {
   }
 
   /// Give the runner back once the loop is done with it.
+  #[must_use]
   pub fn into_runner(self) -> TestRunner {
     self.runner
   }
@@ -184,6 +186,7 @@ impl Driver {
   /// Requests that arrive while a run is executing: only cancellation and
   /// liveness are answered inline, the rest are returned to be handled
   /// after the run.
+  #[must_use]
   pub fn handle_during_run(&self, request: Request) -> Option<Request> {
     match request.method.as_str() {
       "stopTests" => {
@@ -347,7 +350,6 @@ impl Driver {
   /// Execute `plan` across the run's projects, forwarding every reporter
   /// event as a teleReporter event, and keep answering cancellation
   /// while it runs.
-  #[allow(clippy::too_many_arguments)]
   async fn execute_streaming(
     &mut self,
     runner: TestRunner,
@@ -445,7 +447,7 @@ async fn pump_into(mut subscription: Subscription, bus: EventBus) {
 /// What a request narrowed its run to, applied per project because a
 /// test's id is hashed with the name of the project running it.
 struct RequestFilter {
-  test_ids: std::collections::HashSet<String>,
+  test_ids: rustc_hash::FxHashSet<String>,
   locations: Vec<String>,
   grep: Option<String>,
   grep_invert: Option<String>,
@@ -716,7 +718,7 @@ async fn install_browsers(events: &Events) -> Result<(), String> {
         total_bytes: Some(total),
       } => format!("downloading browser: {}%\n", bytes_downloaded * 100 / total.max(1)),
       InstallProgress::Downloading { bytes_downloaded, .. } => {
-        format!("downloading browser: {} bytes\n", bytes_downloaded)
+        format!("downloading browser: {bytes_downloaded} bytes\n")
       },
       InstallProgress::Extracting => "extracting browser\n".to_string(),
       InstallProgress::Complete { version, .. } => format!("installed {version}\n"),
@@ -751,10 +753,10 @@ pub async fn serve(
   mut server: TestServer,
   shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> TestRunner {
-  let root_dir = std::path::absolute(&watch_root).unwrap_or(watch_root.clone());
+  let root_dir = std::path::absolute(&watch_root).unwrap_or_else(|_| watch_root.clone());
   let mut driver = Driver::new(runner, plan_factory, root_dir);
 
-  let watcher = match crate::watch::FileWatcher::new(
+  let file_watcher = match crate::watch::FileWatcher::new(
     &watch_root,
     &driver.runner.config().test_match,
     &driver.runner.config().test_ignore,
@@ -785,7 +787,7 @@ pub async fn serve(
         Some(request) => Box::pin(dispatch(&mut driver, request, &mut server, &mut deferred)).await,
         None => break,
       },
-      change = watch_next(watcher.as_ref()) => {
+      change = watch_next(file_watcher.as_ref()) => {
         let Some(paths) = change else { continue };
         let watched: Vec<String> = paths
           .iter()
@@ -819,9 +821,8 @@ async fn dispatch(
 
 /// Next batch of changed files, or never when there is no watcher.
 async fn watch_next(watcher: Option<&crate::watch::FileWatcher>) -> Option<Vec<PathBuf>> {
-  let watcher = match watcher {
-    Some(watcher) => watcher,
-    None => return std::future::pending().await,
+  let Some(watcher) = watcher else {
+    return std::future::pending().await;
   };
   let change = watcher.recv().await?;
   let mut changes = vec![change];
@@ -951,7 +952,8 @@ mod tests {
     assert_eq!(workers_from(&request(json!({}))), Ok(None));
     assert_eq!(workers_from(&request(json!({ "workers": 3 }))), Ok(Some(3)));
     assert_eq!(workers_from(&request(json!({ "workers": "2" }))), Ok(Some(2)));
-    let cores = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+    let cores =
+      std::thread::available_parallelism().map_or(4, |n| u32::try_from(n.get()).expect("core count fits in u32"));
     assert_eq!(
       workers_from(&request(json!({ "workers": "50%" }))),
       Ok(Some((cores / 2).max(1)))

@@ -15,9 +15,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 /// Configuration for launching a dev server.
 #[derive(Debug, Clone)]
 pub struct DevServerConfig {
-  /// The command to run (e.g. "trunk", "dx", "npx", "bunx").
+  /// The command to run (e.g. `trunk`, `dx`, `npx`, `bunx`).
   pub cmd: String,
-  /// Arguments (e.g. ["serve", "--port", "0"]).
+  /// Arguments (e.g. `["serve", "--port", "0"]`).
   pub args: Vec<String>,
   /// Working directory (the project root).
   pub cwd: PathBuf,
@@ -28,6 +28,7 @@ pub struct DevServerConfig {
 /// Presets for common framework dev servers.
 impl DevServerConfig {
   /// Vite dev server (uses bun if available, falls back to npx).
+  #[must_use]
   pub fn vite(project_dir: &Path) -> Self {
     let (cmd, args) = if which("bunx") {
       ("bunx".into(), vec!["--bun".into(), "vite".into()])
@@ -43,6 +44,7 @@ impl DevServerConfig {
   }
 
   /// Trunk dev server (Leptos CSR, Yew).
+  #[must_use]
   pub fn trunk(project_dir: &Path) -> Self {
     Self {
       cmd: "trunk".into(),
@@ -53,6 +55,7 @@ impl DevServerConfig {
   }
 
   /// Dioxus dev server.
+  #[must_use]
   pub fn dioxus(project_dir: &Path) -> Self {
     Self {
       cmd: "dx".into(),
@@ -63,6 +66,7 @@ impl DevServerConfig {
   }
 
   /// cargo-leptos (Leptos SSR).
+  #[must_use]
   pub fn cargo_leptos(project_dir: &Path) -> Self {
     Self {
       cmd: "cargo".into(),
@@ -187,19 +191,18 @@ fn extract_url(line: &str) -> Option<String> {
   let trimmed = line.trim();
 
   for prefix in ["http://127.0.0.1:", "http://localhost:", "http://0.0.0.0:"] {
-    if let Some(start) = trimmed.find(prefix) {
-      let url_part = &trimmed[start..];
-      let end = url_part.find(|c: char| c.is_whitespace()).unwrap_or(url_part.len());
-      let url = url_part[..end].trim_end_matches('/');
-      return Some(url.replace("0.0.0.0", "127.0.0.1"));
+    if let Some((_, after_prefix)) = trimmed.split_once(prefix) {
+      let port_and_path = after_prefix.split(char::is_whitespace).next().unwrap_or_default();
+      let url = format!("{prefix}{port_and_path}");
+      return Some(url.trim_end_matches('/').replace("0.0.0.0", "127.0.0.1"));
     }
   }
 
   // Trunk-specific: "server listening at 0.0.0.0:8080"
   if trimmed.contains("listening at")
-    && let Some(addr_start) = trimmed.rfind("at ")
+    && let Some((_, after)) = trimmed.rsplit_once("at ")
   {
-    let addr = trimmed[addr_start + 3..].trim().replace("0.0.0.0", "127.0.0.1");
+    let addr = after.trim().replace("0.0.0.0", "127.0.0.1");
     if addr.contains(':') {
       return Some(format!("http://{addr}"));
     }

@@ -32,15 +32,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn every_verdict_and_diff_image_matches_upstream() -> Result<(), Box<dyn std::error::Error>> {
+fn every_verdict_and_diff_image_matches_upstream() {
   let recording: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string(fixtures().join("upstream.json")).expect("recording")).expect("json");
   let cases = recording["cases"].as_object().expect("cases");
   assert!(cases.len() >= 10, "the recording lost its cases");
   let mut mismatches = Vec::new();
   for (name, expected) in cases {
-    let a = load(&fixtures().join(name).join("expected.png"))?;
-    let b = load(&fixtures().join(name).join("actual.png"))?;
+    let a = load(&fixtures().join(name).join("expected.png")).expect("expected image");
+    let b = load(&fixtures().join(name).join("actual.png")).expect("actual image");
     let (width, height) = (a.width.max(b.width), a.height.max(b.height));
     let (a, b) = (a.padded(width, height), b.padded(width, height));
     assert_eq!(
@@ -86,5 +86,4 @@ fn every_verdict_and_diff_image_matches_upstream() -> Result<(), Box<dyn std::er
     "differs from upstream:\n{}",
     mismatches.join("\n")
   );
-  Ok(())
 }

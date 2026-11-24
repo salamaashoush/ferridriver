@@ -34,33 +34,33 @@
 pub mod devserver;
 pub mod server;
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::model::TestFailure;
 
 /// A component reference — serialized form sent from test to browser.
-/// The browser-side registry resolves this to the actual module via dynamic import().
+/// The browser-side registry resolves this to the actual module via dynamic `import()`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ComponentRef {
-  /// Import ID (e.g. "src_Counter_tsx" or "src_Counter_tsx_Counter").
+  /// Import ID (e.g. `"src_Counter_tsx"` or `"src_Counter_tsx_Counter"`).
   pub id: String,
   /// Props to pass to the component (JSON-serializable).
   #[serde(default)]
   pub props: serde_json::Value,
-  /// Children (nested ComponentRefs or strings).
+  /// Children (nested `ComponentRefs` or strings).
   #[serde(default)]
   pub children: Vec<serde_json::Value>,
 }
 
-/// Options passed to mount().
+/// Options passed to `mount()`.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct MountOptions {
   /// Props for the component.
   #[serde(default)]
   pub props: serde_json::Value,
   /// Hook config passed to beforeMount/afterMount.
-  #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-  pub hooks_config: HashMap<String, serde_json::Value>,
+  #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+  pub hooks_config: FxHashMap<String, serde_json::Value>,
 }
 
 /// Mount a component in the browser.
@@ -72,6 +72,11 @@ pub struct MountOptions {
 /// 4. Returns a locator pointing at the mounted component root
 ///
 /// The framework adapter's `registerSource` must define `window.__ferriMount`.
+///
+/// # Errors
+///
+/// Returns a [`TestFailure`] when the mount script throws in the page:
+/// no `#root` or `#app` element, or no adapter defining `__ferriMount`.
 pub async fn mount(
   page: &std::sync::Arc<ferridriver::Page>,
   _base_url: &str,
@@ -87,13 +92,13 @@ pub async fn mount(
 
   let escaped_json = payload.to_string().replace('\\', "\\\\").replace('`', "\\`");
   let js = format!(
-    r#"(() => {{
+    r"(() => {{
       const data = JSON.parse(`{escaped_json}`);
       const root = document.getElementById('root') || document.getElementById('app');
       if (!root) throw new Error('No #root or #app element found');
       window.__ferriMount(data.component, root, data.options);
       return root.innerHTML;
-    }})()"#,
+    }})()",
   );
 
   let eval_result = page
@@ -112,6 +117,10 @@ pub async fn mount(
 }
 
 /// Unmount the currently mounted component.
+///
+/// # Errors
+///
+/// Returns a [`TestFailure`] when the unmount script cannot be evaluated.
 pub async fn unmount(page: &std::sync::Arc<ferridriver::Page>) -> Result<(), TestFailure> {
   page
     .evaluate(
@@ -132,7 +141,7 @@ pub async fn unmount(page: &std::sync::Arc<ferridriver::Page>) -> Result<(), Tes
 
 /// The browser-side JavaScript that sets up the import registry.
 /// Framework adapters append their `registerSource` after this.
-pub const INJECTED_REGISTRY_JS: &str = r#"
+pub const INJECTED_REGISTRY_JS: &str = r"
 // ferridriver CT: import registry + component deserializer.
 window.__ferriRegistry = {};
 
@@ -146,4 +155,4 @@ window.__ferriResolve = async function(ref) {
   if (!loader) throw new Error(`Component not registered: ${ref.id}`);
   return await loader();
 };
-"#;
+";

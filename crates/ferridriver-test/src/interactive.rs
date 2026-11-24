@@ -5,7 +5,7 @@
 //! - Raw mode is DISABLED during test execution so output renders correctly
 //! - The watch loop in runner.rs owns the raw mode lifecycle
 //!
-//! The KeyHandler spawns a background thread that polls crossterm events.
+//! The `KeyHandler` spawns a background thread that polls crossterm events.
 //! Events are only read when raw mode is active (the thread polls a flag).
 //! Commands flow through an async channel to the watch loop.
 

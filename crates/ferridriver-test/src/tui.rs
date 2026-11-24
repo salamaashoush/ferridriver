@@ -158,6 +158,13 @@ pub struct WatchTui {
 }
 
 impl WatchTui {
+  /// Take over the terminal and return the TUI with the sender its
+  /// messages arrive on.
+  ///
+  /// # Errors
+  ///
+  /// Returns the reason when raw mode, the alternate screen or the
+  /// terminal backend cannot be set up.
   pub fn new() -> Result<(Self, mpsc::UnboundedSender<TuiMessage>), String> {
     crossterm::terminal::enable_raw_mode().map_err(|e| format!("enable raw mode: {e}"))?;
     execute!(io::stdout(), EnterAlternateScreen).map_err(|e| format!("enter alternate screen: {e}"))?;
@@ -449,7 +456,7 @@ impl WatchTui {
       let content_lines = Self::build_content_lines(&entries, width);
       let total_lines = content_lines.len();
 
-      let paragraph = Paragraph::new(content_lines).scroll((scroll_offset as u16, 0));
+      let paragraph = Paragraph::new(content_lines).scroll((u16::try_from(scroll_offset).unwrap_or(u16::MAX), 0));
       frame.render_widget(paragraph, body_area);
 
       // ── Scrollbar ──
@@ -757,7 +764,8 @@ fn render_status_line(status: &WatchStatus, width: usize) -> Line<'static> {
     } => {
       let elapsed = start.elapsed();
       let pct = if *total > 0 {
-        (*completed as f64 / *total as f64) * 100.0
+        f64::from(u32::try_from(*completed).unwrap_or(u32::MAX)) / f64::from(u32::try_from(*total).unwrap_or(u32::MAX))
+          * 100.0
       } else {
         0.0
       };
@@ -774,7 +782,7 @@ fn render_status_line(status: &WatchStatus, width: usize) -> Line<'static> {
         Span::styled(format!("/{total}  "), Style::default().fg(CLR_DIM)),
         Span::styled("\u{2588}".repeat(filled), Style::default().fg(CLR_PASS)),
         Span::styled("\u{2591}".repeat(empty), Style::default().fg(CLR_DIM)),
-        Span::styled(format!("  {:.0}%", pct), Style::default().fg(CLR_DIM)),
+        Span::styled(format!("  {pct:.0}%"), Style::default().fg(CLR_DIM)),
         Span::styled(format!("  {:.1}s", elapsed.as_secs_f64()), Style::default().fg(CLR_DIM)),
       ])
     },
@@ -829,10 +837,10 @@ fn render_hints(is_running: bool, has_filter: bool) -> Line<'static> {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-  if s.len() <= max_len {
+  if s.chars().nth(max_len).is_none() {
     s.to_string()
   } else {
-    format!("{}...", &s[..max_len.saturating_sub(3)])
+    format!("{}...", s.chars().take(max_len.saturating_sub(3)).collect::<String>())
   }
 }
 

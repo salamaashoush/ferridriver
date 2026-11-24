@@ -220,7 +220,7 @@ impl Reporter for CtrfReporter {
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     let json = serde_json::to_string_pretty(&self.serialize())?;
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).ok();
+      std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&self.output_path, json)?;
     tracing::info!("CTRF report written to {}", self.output_path.display());

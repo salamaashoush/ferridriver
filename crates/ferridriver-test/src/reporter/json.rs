@@ -164,6 +164,7 @@ struct JsonStep {
 }
 
 impl JsonReporter {
+  #[must_use]
   pub fn new(output_path: PathBuf) -> Self {
     Self {
       output_path,
@@ -412,7 +413,7 @@ impl Reporter for JsonReporter {
     }
     let json = serde_json::to_string_pretty(&report)?;
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).ok();
+      std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&self.output_path, json)?;
     tracing::info!("JSON report written to {}", self.output_path.display());

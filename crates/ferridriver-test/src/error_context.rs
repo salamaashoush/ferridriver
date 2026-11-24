@@ -152,10 +152,10 @@ fn first_user_frame(stack: &str) -> Option<(String, u32, u32)> {
   stack.lines().find_map(|raw| {
     let line = raw.trim();
     let line = line.strip_prefix("at ").unwrap_or(line);
-    let location = match (line.rfind('('), line.ends_with(')')) {
-      (Some(open), true) => &line[open + 1..line.len() - 1],
-      _ => line,
-    };
+    let location = line
+      .strip_suffix(')')
+      .and_then(|framed| framed.rsplit_once('('))
+      .map_or(line, |(_, location)| location);
     let mut parts = location.rsplitn(3, ':');
     let column = parts.next()?.parse::<u32>().ok()?;
     let line_number = parts.next()?.parse::<u32>().ok()?;

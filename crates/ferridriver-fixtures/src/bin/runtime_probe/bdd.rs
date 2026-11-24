@@ -101,7 +101,7 @@ pub async fn run(root: &Path, context: &RunContext, entries: Vec<PathBuf>, actio
     Arc::new(TestModifiers::default()),
     Arc::new(session.deadline()),
     Arc::new(BundleSourceMap::new(bundle.clone(), cwd.clone())),
-    cwd,
+    Arc::from(cwd.as_path()),
     Duration::from_secs(30),
     Vec::new(),
   ));

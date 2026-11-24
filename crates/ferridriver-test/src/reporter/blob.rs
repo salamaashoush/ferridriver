@@ -5,7 +5,7 @@
 //! The blob is the input to `ferridriver merge-reports <dir>`, which
 //! replays the merged event stream through whatever reporters the merge
 //! is configured with. That only works if the blob is *lossless*: a
-//! merged HTML or JUnit report is built from these events and nothing
+//! merged HTML or `JUnit` report is built from these events and nothing
 //! else, so an event shape that drops steps, attachments or stacks
 //! silently degrades every merged report. Everything an outcome carries
 //! round-trips.
@@ -569,8 +569,8 @@ fn runtime_failure(failure: WireFailure, resources: &FxHashMap<String, Vec<u8>>)
 }
 
 impl WireEvent {
-  pub(crate) fn from_runtime(event: &ReporterEvent, sink: &mut dyn ResourceSink) -> Option<Self> {
-    Some(match event {
+  pub(crate) fn from_runtime(event: &ReporterEvent, sink: &mut dyn ResourceSink) -> Self {
+    match event {
       ReporterEvent::RunStarted {
         total_tests,
         num_workers,
@@ -648,7 +648,7 @@ impl WireEvent {
         duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         status: status.as_str().to_string(),
       },
-    })
+    }
   }
 
   /// Lower a wire event back into the runtime variant. Header
@@ -682,6 +682,48 @@ impl WireEvent {
         attempt,
         worker_id,
       },
+      step @ (Self::StepStarted { .. } | Self::StepFinished { .. }) => return step.step_into_runtime(),
+      Self::TestOutput {
+        test_id,
+        project,
+        stderr,
+        text,
+      } => ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
+        test_id: test_id.into(),
+        project,
+        stderr,
+        text,
+      })),
+      Self::TestFinished { outcome } => ReporterEvent::TestFinished {
+        outcome: Arc::new(outcome.into_runtime(resources)),
+      },
+      Self::RunError { error } => ReporterEvent::RunError {
+        error: Box::new(runtime_failure(error, resources)),
+      },
+      Self::WorkerFinished { worker_id } => ReporterEvent::WorkerFinished { worker_id },
+      Self::RunFinished {
+        total,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration_ms,
+        status,
+      } => ReporterEvent::RunFinished {
+        total,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration: Duration::from_millis(duration_ms),
+        status: RunStatus::parse(&status),
+      },
+    })
+  }
+
+  /// The runtime variant of a step event; `None` for any other event.
+  fn step_into_runtime(self) -> Option<ReporterEvent> {
+    Some(match self {
       Self::StepStarted {
         test_id,
         project,
@@ -724,41 +766,7 @@ impl WireEvent {
         metadata,
         annotations,
       })),
-      Self::TestOutput {
-        test_id,
-        project,
-        stderr,
-        text,
-      } => ReporterEvent::TestOutput(Arc::new(TestOutputEvent {
-        test_id: test_id.into(),
-        project,
-        stderr,
-        text,
-      })),
-      Self::TestFinished { outcome } => ReporterEvent::TestFinished {
-        outcome: Arc::new(outcome.into_runtime(resources)),
-      },
-      Self::RunError { error } => ReporterEvent::RunError {
-        error: Box::new(runtime_failure(error, resources)),
-      },
-      Self::WorkerFinished { worker_id } => ReporterEvent::WorkerFinished { worker_id },
-      Self::RunFinished {
-        total,
-        passed,
-        failed,
-        skipped,
-        flaky,
-        duration_ms,
-        status,
-      } => ReporterEvent::RunFinished {
-        total,
-        passed,
-        failed,
-        skipped,
-        flaky,
-        duration: Duration::from_millis(duration_ms),
-        status: RunStatus::parse(&status),
-      },
+      _ => return None,
     })
   }
 }
@@ -780,7 +788,7 @@ pub struct BlobReporter {
 /// The zip under construction, plus the resource names already in it.
 struct ResourceWriter {
   zip: zip::ZipWriter<std::fs::File>,
-  seen: std::collections::HashSet<String>,
+  seen: rustc_hash::FxHashSet<String>,
   failed: bool,
 }
 
@@ -795,7 +803,7 @@ impl ResourceSink for ResourceWriter {
     let name = format!(
       "resources/{}-{}{}",
       sanitize(name_hint),
-      &digest[..16],
+      crate::model::hex_prefix(&digest, 16),
       extension_for(content_type)
     );
     if self.seen.contains(&name) {
@@ -869,6 +877,7 @@ impl BlobReporter {
     }
   }
 
+  #[must_use]
   pub fn with_shard(mut self, current: u32, total: u32) -> Self {
     self.shard_index = Some(current);
     self.shard_total = Some(total);
@@ -898,7 +907,7 @@ impl BlobReporter {
       };
       self.writer = Some(ResourceWriter {
         zip: zip::ZipWriter::new(file),
-        seen: std::collections::HashSet::new(),
+        seen: rustc_hash::FxHashSet::default(),
         failed: false,
       });
       let header = self.header();
@@ -917,9 +926,7 @@ impl Reporter for BlobReporter {
       Some(writer) => WireEvent::from_runtime(event, writer),
       None => WireEvent::from_runtime(event, &mut NoResources),
     };
-    if let Some(wire) = wire {
-      write_event(&mut self.buffer, &wire);
-    }
+    write_event(&mut self.buffer, &wire);
   }
 
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
@@ -1085,6 +1092,12 @@ mod tests {
   #[test]
   fn snapshot_comparisons_ride_the_wire_and_older_lines_still_read() {
     use crate::snapshot_record::{SnapshotComparison, SnapshotComparisonKind, SnapshotStatus};
+    struct NoSink;
+    impl ResourceSink for NoSink {
+      fn store(&mut self, _: &str, _: &str, _: &[u8]) -> Option<Stored> {
+        None
+      }
+    }
     let old = serde_json::json!({
       "test_id": { "file": "a.spec.ts", "suite": null, "name": "works", "line": 3 },
       "status": "passed", "duration_ms": 5, "attempt": 1,
@@ -1109,12 +1122,6 @@ mod tests {
       snapshots: vec![comparison.clone()],
       ..Default::default()
     };
-    struct NoSink;
-    impl ResourceSink for NoSink {
-      fn store(&mut self, _: &str, _: &str, _: &[u8]) -> Option<Stored> {
-        None
-      }
-    }
     let wire = WireOutcome::from_runtime(&outcome, &mut NoSink);
     let line = serde_json::to_string(&wire).unwrap();
     assert!(line.contains("\"snapshots\":[{\"name\":\"hero.png\""), "{line}");
@@ -1123,13 +1130,9 @@ mod tests {
     assert_eq!(runtime.snapshots, vec![comparison]);
   }
 
-  #[tokio::test]
-  async fn an_outcome_round_trips_with_its_steps_and_artifacts() {
-    let dir = std::env::temp_dir().join(format!("ferri-blob-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("report.zip");
-
-    let outcome = TestOutcome {
+  /// An outcome with every field the wire carries set.
+  fn round_trip_outcome() -> TestOutcome {
+    TestOutcome {
       test_id: TestId {
         root_path: None,
         repeat_each_index: 0,
@@ -1203,7 +1206,16 @@ mod tests {
       expected_status: ExpectedStatus::Fail,
       timeout: Duration::from_secs(30),
       ..Default::default()
-    };
+    }
+  }
+
+  #[tokio::test]
+  async fn an_outcome_round_trips_with_its_steps_and_artifacts() {
+    let dir = std::env::temp_dir().join(format!("ferri-blob-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("report.zip");
+
+    let outcome = round_trip_outcome();
 
     let mut reporter = BlobReporter::new(path.clone());
     reporter
@@ -1257,7 +1269,7 @@ mod tests {
     assert!(matches!(&back.attachments[0].body, AttachmentBody::Bytes(b) if b == &[9, 9, 9]));
     assert_eq!(back.annotations.len(), 1);
 
-    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&dir).expect("remove the test directory");
   }
 
   #[test]
@@ -1278,7 +1290,7 @@ mod tests {
       subtitle: Some("SKU 42".into()),
       params: Some(serde_json::json!({ "sku": 42 })),
     }));
-    let wire = WireEvent::from_runtime(&started, &mut NoResources).expect("wire");
+    let wire = WireEvent::from_runtime(&started, &mut NoResources);
     let line = serde_json::to_string(&wire).expect("serialize");
     let back: WireEvent = serde_json::from_str(&line).expect("parse");
     let Some(ReporterEvent::StepStarted(step)) = back.into_runtime_with(&FxHashMap::default()) else {

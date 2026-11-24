@@ -1,4 +1,3 @@
-#![allow(clippy::cast_precision_loss, clippy::uninlined_format_args)]
 //! Benchmark runner overhead for tests that never request browser fixtures.
 
 use std::sync::Arc;
@@ -30,7 +29,9 @@ fn make_test(i: usize) -> TestCase {
   }
 }
 
-async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration {
+/// Run `num_tests` no-browser tests on `num_workers` workers. Returns the
+/// line that reports the run.
+async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> String {
   let plan = TestPlan {
     repetitions_expanded: false,
     suites: vec![TestSuite {
@@ -61,18 +62,15 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
   let exit_code = runner.run(plan).await;
   let elapsed = started.elapsed();
   assert_eq!(exit_code, 0);
-  println!(
-    "  {label:<28} {num_tests:>4} tests, {num_workers} workers => {elapsed:>6.0?}, {:>6.1} us/test",
-    elapsed.as_micros() as f64 / num_tests as f64
-  );
-  elapsed
+  let per_test_us = elapsed.as_secs_f64() * 1_000_000.0 / f64::from(u32::try_from(num_tests).unwrap_or(u32::MAX));
+  format!("  {label:<28} {num_tests:>4} tests, {num_workers} workers => {elapsed:>6.0?}, {per_test_us:>6.1} us/test")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark, not for CI"]
 async fn bench_no_browser_lazy_launch() {
   println!("\n=== no-browser runner benchmark ===\n");
-  Box::pin(run_bench("100 no-browser", 100, 4)).await;
-  Box::pin(run_bench("500 no-browser", 500, 8)).await;
+  println!("{}", Box::pin(run_bench("100 no-browser", 100, 4)).await);
+  println!("{}", Box::pin(run_bench("500 no-browser", 500, 8)).await);
   println!("\n=== end ===\n");
 }

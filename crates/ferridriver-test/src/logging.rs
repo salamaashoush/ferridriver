@@ -126,32 +126,24 @@ fn parse_debug_categories(debug_val: &str) -> EnvFilter {
   let mut filter = EnvFilter::new("warn");
   for category in debug_val.split(',').map(str::trim) {
     let directive = match category {
-      "*" | "all" => "ferridriver=trace",
-      "cdp" => "ferridriver::cdp=trace",
-      "step" | "steps" => "ferridriver::bdd::step=trace",
-      "hook" | "hooks" => "ferridriver::bdd::hook=trace",
-      "worker" => "ferridriver::worker=trace",
-      "fixture" => "ferridriver::fixture=trace",
-      "reporter" => "ferridriver::reporter=trace",
-      "action" => "ferridriver::action=trace",
-      "runner" => "ferridriver::runner=trace",
-      "napi" => "napi=trace",
-      other => {
-        // Allow arbitrary target names.
-        let owned = format!("{other}=trace");
-        filter = filter.add_directive(
-          owned
-            .parse()
-            .unwrap_or_else(|_| "warn".parse().expect("'warn' is a valid directive")),
-        );
-        continue;
-      },
+      "*" | "all" => "ferridriver=trace".to_string(),
+      "cdp" => "ferridriver::cdp=trace".to_string(),
+      "step" | "steps" => "ferridriver::bdd::step=trace".to_string(),
+      "hook" | "hooks" => "ferridriver::bdd::hook=trace".to_string(),
+      "worker" => "ferridriver::worker=trace".to_string(),
+      "fixture" => "ferridriver::fixture=trace".to_string(),
+      "reporter" => "ferridriver::reporter=trace".to_string(),
+      "action" => "ferridriver::action=trace".to_string(),
+      "runner" => "ferridriver::runner=trace".to_string(),
+      "napi" => "napi=trace".to_string(),
+      // Allow arbitrary target names.
+      other => format!("{other}=trace"),
     };
-    filter = filter.add_directive(
-      directive
-        .parse()
-        .unwrap_or_else(|_| "warn".parse().expect("'warn' is a valid directive")),
-    );
+    // A category that is not a valid target leaves the `warn` base as it
+    // is, which is what adding `warn` again would do.
+    if let Ok(directive) = directive.parse() {
+      filter = filter.add_directive(directive);
+    }
   }
   filter
 }

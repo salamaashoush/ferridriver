@@ -167,6 +167,7 @@ fn name_with_project(project: &str, feature: &str) -> String {
 }
 
 impl CucumberJsonReporter {
+  #[must_use]
   pub fn new(output_path: PathBuf) -> Self {
     Self {
       output_path,
@@ -255,7 +256,7 @@ impl CucumberJsonReporter {
   /// the scenario's, joined by `;`. `playwright-bdd`'s
   /// `formatScenarioId` builds the feature part from the RAW feature
   /// name, unlike the feature's own `id`.
-  fn element_id(&self, source: &Source, name: &str) -> String {
+  fn element_id(source: &Source, name: &str) -> String {
     let mut parts = vec![name_to_id(&source.feature_name)];
     if let Some(rule) = &source.rule_name {
       parts.push(name_to_id(rule));
@@ -289,8 +290,9 @@ impl CucumberJsonReporter {
       hidden: None,
       keyword: Some(extract_keyword(step)),
       line: meta_value(step, "bdd_line")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize),
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok()),
       name: Some(extract_text(step)),
       result: step_result(step),
     }
@@ -393,7 +395,7 @@ impl Reporter for CucumberJsonReporter {
     let name = outcome.test_id.name.clone();
     let element = CucumberScenario {
       description: source.scenario_description.clone(),
-      id: self.element_id(&source, &name),
+      id: Self::element_id(&source, &name),
       keyword: if source.scenario_keyword.is_empty() {
         "Scenario".to_string()
       } else {

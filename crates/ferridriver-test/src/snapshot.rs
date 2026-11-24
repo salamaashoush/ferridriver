@@ -2,6 +2,7 @@
 //! side of `toHaveScreenshot`, with Playwright's update modes
 //! (`matchers/toMatchSnapshot.ts`).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::comparator::{ImageComparatorOptions, ImageComparison, ImageFormat, measure_images};
@@ -253,6 +254,7 @@ fn compare_text(actual: &str, expected: &str) -> Option<Difference> {
 /// `updateSnapshots: 'default'` and has just been written. A failure
 /// carries the comparison, with the actual value and any diff written
 /// into the test's output directory and attached.
+#[must_use]
 pub fn match_value_snapshot(
   test_info: &TestInfo,
   received: &SnapshotValue,
@@ -380,13 +382,14 @@ fn judge_value(
     message.push_str(line);
     message.push('\n');
   }
-  message.push_str(&format!(
+  let _ = write!(
+    message,
     "\nExpected: {}\nReceived: {}",
     path.display(),
     report.files.actual.display()
-  ));
+  );
   if difference.diff.is_some() {
-    message.push_str(&format!("\n    Diff: {}", report.files.diff.display()));
+    let _ = write!(message, "\n    Diff: {}", report.files.diff.display());
   }
   Ok(Err(TestFailure {
     message,
@@ -709,9 +712,7 @@ impl ScreenshotFiles {
 /// Snapshot directory for the non-runner path (`expect(locator)` used
 /// outside a test).
 fn env_snapshot_dir() -> PathBuf {
-  std::env::var("SNAPSHOT_DIR")
-    .map(PathBuf::from)
-    .unwrap_or_else(|_| PathBuf::from("__snapshots__"))
+  std::env::var("SNAPSHOT_DIR").map_or_else(|_| PathBuf::from("__snapshots__"), PathBuf::from)
 }
 
 /// What one `toHaveScreenshot` capture loop ended with
@@ -724,6 +725,33 @@ struct ScreenshotOutcome {
   diff: Option<Vec<u8>>,
   /// The last comparison against the baseline itself, diff image left out.
   measure: Option<ImageComparison>,
+}
+
+/// The outcome of a screenshot expectation that ran out of time: the last
+/// mismatch, or no stable pair of shots, or no capture at all.
+fn timed_out_screenshot(
+  intermediate: Option<(String, Vec<u8>, Option<Vec<u8>>)>,
+  actual: Option<Vec<u8>>,
+  measure: Option<ImageComparison>,
+  timeout: std::time::Duration,
+) -> ScreenshotOutcome {
+  let unstable = intermediate.as_ref().is_some_and(|(_, _, previous)| previous.is_some());
+  let (error, diff, previous) = match intermediate {
+    Some((_, diff, previous)) if unstable => (
+      "Failed to take two consecutive stable screenshots.".to_string(),
+      Some(diff),
+      previous,
+    ),
+    Some((message, diff, previous)) => (message, Some(diff), previous),
+    None => (format!("Timeout {}ms exceeded.", timeout.as_millis()), None, None),
+  };
+  ScreenshotOutcome {
+    actual,
+    previous,
+    error: Some(error),
+    diff,
+    measure,
+  }
 }
 
 /// `page.ts::expectScreenshot`. With `expected`, the first capture is
@@ -774,23 +802,7 @@ where
     let wait = intervals.next().unwrap_or(1000);
     let now = std::time::Instant::now();
     if now >= deadline || (wait > 0 && now + std::time::Duration::from_millis(wait) >= deadline) {
-      let unstable = intermediate.as_ref().is_some_and(|(_, _, previous)| previous.is_some());
-      let (error, diff, previous) = match intermediate {
-        Some((_, diff, previous)) if unstable => (
-          "Failed to take two consecutive stable screenshots.".to_string(),
-          Some(diff),
-          previous,
-        ),
-        Some((message, diff, previous)) => (message, Some(diff), previous),
-        None => (format!("Timeout {}ms exceeded.", timeout.as_millis()), None, None),
-      };
-      return Ok(ScreenshotOutcome {
-        actual,
-        previous,
-        error: Some(error),
-        diff,
-        measure,
-      });
+      return Ok(timed_out_screenshot(intermediate, actual, measure, timeout));
     }
     if wait > 0 {
       tokio::time::sleep(std::time::Duration::from_millis(wait)).await;

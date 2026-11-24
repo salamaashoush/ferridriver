@@ -70,11 +70,21 @@ const fn with_params(info: Metainfo, params: &'static [&'static str]) -> Metainf
   Metainfo { params, ..info }
 }
 
+const CONFIGURATION: &str = "configuration";
+const GETTER: &str = "getter";
+const ROUTE: &str = "route";
+
 /// The metadata of the protocol call a ferridriver client method makes.
 fn metainfo(class: &str, method: &str) -> Option<Metainfo> {
-  const CONFIGURATION: &str = "configuration";
-  const GETTER: &str = "getter";
-  const ROUTE: &str = "route";
+  match class {
+    "Page" | "Frame" | "BrowserContext" | "WebMCP" => page_metainfo(class, method),
+    "Locator" | "ElementHandle" => element_metainfo(class, method),
+    "Keyboard" | "Mouse" | "Touchscreen" => input_metainfo(class, method),
+    _ => None,
+  }
+}
+
+fn page_metainfo(class: &str, method: &str) -> Option<Metainfo> {
   Some(match (class, method) {
     ("Page" | "Frame", "goto") => with_params(
       Metainfo {
@@ -114,6 +124,27 @@ fn metainfo(class: &str, method: &str) -> Option<Metainfo> {
     ("Page" | "BrowserContext", "route") => grouped("Route requests", ROUTE),
     ("Page" | "BrowserContext", "unroute") => grouped("Unroute requests", ROUTE),
 
+    ("BrowserContext", "newPage") => meta("Create page"),
+    ("BrowserContext", "close") => meta("Close context"),
+    ("BrowserContext", "cookies") => grouped("Get cookies", GETTER),
+    ("BrowserContext", "addCookies") => grouped("Add cookies", CONFIGURATION),
+    ("BrowserContext", "clearCookies") => grouped("Clear cookies", CONFIGURATION),
+    ("BrowserContext", "grantPermissions") => grouped("Grant permissions", CONFIGURATION),
+    ("BrowserContext", "clearPermissions") => grouped("Clear permissions", CONFIGURATION),
+    ("BrowserContext", "setGeolocation") => grouped("Set geolocation", CONFIGURATION),
+    ("BrowserContext", "setHTTPCredentials") => grouped("Set HTTP credentials", CONFIGURATION),
+    ("BrowserContext", "storageState") => grouped("Get storage state", CONFIGURATION),
+    ("BrowserContext", "setOffline") => with_params(meta("Set offline mode"), &["offline"]),
+
+    ("WebMCP", "tools") => grouped("List WebMCP tools", GETTER),
+    ("WebMCP", "callTool") => meta("Call WebMCP tool"),
+    _ => return None,
+  })
+}
+
+fn element_metainfo(class: &str, method: &str) -> Option<Metainfo> {
+  Some(match (class, method) {
+    ("Locator", "evaluate" | "evaluateHandle" | "evaluateAll") => on_selector("Evaluate"),
     ("Locator", "click") => on_selector("Click"),
     ("Locator", "dblclick") => on_selector("Double click"),
     ("Locator", "hover") => on_selector("Hover"),
@@ -134,7 +165,6 @@ fn metainfo(class: &str, method: &str) -> Option<Metainfo> {
     ("Locator", "selectText") => on_selector("Select text"),
     ("Locator", "screenshot") => on_selector("Screenshot"),
     ("Locator", "boundingBox") => on_selector("Bounding box"),
-    ("Locator", "evaluate" | "evaluateHandle" | "evaluateAll") => on_selector("Evaluate"),
     ("Locator", "waitFor") => on_selector("Wait for selector"),
     ("Locator", "count") => on_selector("Query count"),
     ("Locator", "ariaSnapshot") => getter_on_selector("Aria snapshot"),
@@ -162,10 +192,15 @@ fn metainfo(class: &str, method: &str) -> Option<Metainfo> {
     ("ElementHandle", "focus") => meta("Focus"),
     ("ElementHandle", "scrollIntoViewIfNeeded") => meta("Scroll into view"),
     ("ElementHandle", "selectOption") => meta("Select option"),
-    ("ElementHandle", "setInputFiles") => meta("Set input files"),
     ("ElementHandle", "screenshot") => meta("Screenshot"),
+    ("ElementHandle", "setInputFiles") => meta("Set input files"),
     ("ElementHandle", "boundingBox") => meta("Get bounding box"),
+    _ => return None,
+  })
+}
 
+fn input_metainfo(class: &str, method: &str) -> Option<Metainfo> {
+  Some(match (class, method) {
     ("Keyboard", "down") => with_params(meta("Key down \"{key}\""), &["key"]),
     ("Keyboard", "up") => with_params(meta("Key up \"{key}\""), &["key"]),
     ("Keyboard", "press") => with_params(meta("Press \"{key}\""), &["key"]),
@@ -178,21 +213,6 @@ fn metainfo(class: &str, method: &str) -> Option<Metainfo> {
     ("Mouse", "dblclick") => with_params(meta("Double click"), &["x", "y"]),
     ("Mouse", "wheel") => with_params(meta("Mouse wheel"), &["deltaX", "deltaY"]),
     ("Touchscreen", "tap") => with_params(meta("Tap"), &["x", "y"]),
-
-    ("BrowserContext", "newPage") => meta("Create page"),
-    ("BrowserContext", "close") => meta("Close context"),
-    ("BrowserContext", "cookies") => grouped("Get cookies", GETTER),
-    ("BrowserContext", "addCookies") => grouped("Add cookies", CONFIGURATION),
-    ("BrowserContext", "clearCookies") => grouped("Clear cookies", CONFIGURATION),
-    ("BrowserContext", "grantPermissions") => grouped("Grant permissions", CONFIGURATION),
-    ("BrowserContext", "clearPermissions") => grouped("Clear permissions", CONFIGURATION),
-    ("BrowserContext", "setGeolocation") => grouped("Set geolocation", CONFIGURATION),
-    ("BrowserContext", "setHTTPCredentials") => grouped("Set HTTP credentials", CONFIGURATION),
-    ("BrowserContext", "storageState") => grouped("Get storage state", CONFIGURATION),
-    ("BrowserContext", "setOffline") => with_params(meta("Set offline mode"), &["offline"]),
-
-    ("WebMCP", "tools") => grouped("List WebMCP tools", GETTER),
-    ("WebMCP", "callTool") => meta("Call WebMCP tool"),
     _ => return None,
   })
 }
@@ -244,19 +264,20 @@ fn render_template(template: &str, params: &Value) -> (String, bool) {
   let mut out = String::with_capacity(template.len());
   let mut resolved = true;
   let mut rest = template;
-  while let Some(open) = rest.find('{') {
-    let Some(close) = rest[open..].find('}').map(|at| open + at) else {
+  while let Some((before, from_open)) = rest.split_once('{') {
+    let Some((alternatives, after)) = from_open.split_once('}') else {
       break;
     };
-    out.push_str(&rest[..open]);
-    let alternatives = &rest[open + 1..close];
+    out.push_str(before);
     if let Some(value) = alternatives.split('|').find_map(|name| format_param(params, name)) {
       out.push_str(&value.replace('\n', "\\n"));
     } else {
       resolved = false;
-      out.push_str(&rest[open..=close]);
+      out.push('{');
+      out.push_str(alternatives);
+      out.push('}');
     }
-    rest = &rest[close + 1..];
+    rest = after;
   }
   out.push_str(rest);
   (out, resolved)
@@ -275,7 +296,8 @@ fn format_param(params: &Value, name: &str) -> Option<String> {
       Ok(url) => {
         let mut shown = url.host_str().unwrap_or_default().to_string();
         if let Some(port) = url.port() {
-          shown.push_str(&format!(":{port}"));
+          shown.push(':');
+          shown.push_str(&port.to_string());
         }
         shown.push_str(url.path());
         if let Some(query) = url.query().filter(|q| !q.is_empty()) {
@@ -315,9 +337,10 @@ const MAX_PARAM_LENGTH: usize = 200;
 
 /// `truncateParam`.
 fn truncate(value: &str) -> String {
-  match value.char_indices().nth(MAX_PARAM_LENGTH) {
-    Some((cut, _)) => format!("{}…", &value[..cut]),
-    None => value.to_string(),
+  if value.chars().nth(MAX_PARAM_LENGTH).is_some() {
+    format!("{}…", value.chars().take(MAX_PARAM_LENGTH).collect::<String>())
+  } else {
+    value.to_string()
   }
 }
 
@@ -438,42 +461,42 @@ mod tests {
 
   use super::*;
 
-  fn step(class: &str, method: &str, params: Value) -> Option<ApiStep> {
-    api_step(class, method, &params)
+  fn step(class: &str, method: &str, params: &Value) -> Option<ApiStep> {
+    api_step(class, method, params)
   }
 
   #[test]
   fn titles_follow_playwright_protocol_metainfo() {
-    let goto = step("Page", "goto", json!({ "url": "https://example.com/a/b?q=1#frag" })).expect("reported");
+    let goto = step("Page", "goto", &json!({ "url": "https://example.com/a/b?q=1#frag" })).expect("reported");
     assert_eq!(goto.title, "Navigate");
     assert_eq!(goto.subtitle.as_deref(), Some("example.com/a/b?q=1"));
     assert_eq!(goto.params, Some(json!({ "url": "https://example.com/a/b?q=1#frag" })));
 
-    let data = step("Page", "goto", json!({ "url": "data:text/html,<h1>hi</h1>" })).expect("reported");
+    let data = step("Page", "goto", &json!({ "url": "data:text/html,<h1>hi</h1>" })).expect("reported");
     assert_eq!(data.subtitle.as_deref(), Some("data:"));
 
-    let click = step("Locator", "click", json!({ "selector": "internal:role=heading" })).expect("reported");
+    let click = step("Locator", "click", &json!({ "selector": "internal:role=heading" })).expect("reported");
     assert_eq!(click.title, "Click");
     assert_eq!(click.subtitle.as_deref(), Some("getByRole('heading')"));
     assert_eq!(click.params, Some(json!({ "locator": "getByRole('heading')" })));
 
-    let fill = step("Locator", "fill", json!({ "selector": "#name", "value": "a\nb" })).expect("reported");
+    let fill = step("Locator", "fill", &json!({ "selector": "#name", "value": "a\nb" })).expect("reported");
     assert_eq!(fill.title, "Fill \"a\\nb\"");
     assert_eq!(fill.subtitle.as_deref(), Some("locator('#name')"));
 
-    let press = step("Keyboard", "press", json!({ "key": "Enter" })).expect("reported");
+    let press = step("Keyboard", "press", &json!({ "key": "Enter" })).expect("reported");
     assert_eq!(press.title, "Press \"Enter\"");
     assert_eq!(press.subtitle, None);
   }
 
   #[test]
   fn grouped_calls_and_assertions_are_not_reported() {
-    assert_eq!(step("Page", "title", json!({})), None, "a getter is grouped");
-    assert_eq!(step("Locator", "textContent", json!({ "selector": "b" })), None);
-    assert_eq!(step("BrowserContext", "addCookies", json!({})), None, "configuration");
-    assert_eq!(step("Page", "route", json!({})), None, "route");
+    assert_eq!(step("Page", "title", &json!({})), None, "a getter is grouped");
+    assert_eq!(step("Locator", "textContent", &json!({ "selector": "b" })), None);
+    assert_eq!(step("BrowserContext", "addCookies", &json!({})), None, "configuration");
+    assert_eq!(step("Page", "route", &json!({})), None, "route");
     assert_eq!(
-      step("Expect", "toHaveTitle", json!({})),
+      step("Expect", "toHaveTitle", &json!({})),
       None,
       "expect has its own step"
     );
@@ -481,7 +504,7 @@ mod tests {
 
   #[test]
   fn a_call_without_metadata_is_titled_by_its_method() {
-    let other = step("Page", "snapshotForAI", json!({})).expect("reported");
+    let other = step("Page", "snapshotForAI", &json!({})).expect("reported");
     assert_eq!(other.title, "snapshotForAI");
     assert_eq!(other.subtitle, None);
   }
@@ -573,7 +596,7 @@ mod tests {
     let goto = action("call@1", "Page", "goto", json!({ "url": "https://example.com/" }));
     observer.action_begin(&goto);
     observer.action_end(&goto, Duration::ZERO, None);
-    futures::executor::block_on(hook.end(None));
+    hook.end(None);
     let after = action("call@2", "Page", "reload", json!({}));
     observer.action_begin(&after);
     observer.action_end(&after, Duration::ZERO, None);
@@ -619,10 +642,10 @@ mod tests {
 
   #[test]
   fn an_unresolved_subtitle_is_dropped_and_long_values_truncated() {
-    let click = step("Locator", "click", json!({})).expect("reported");
+    let click = step("Locator", "click", &json!({})).expect("reported");
     assert_eq!(click.subtitle, None);
     let long = "x".repeat(250);
-    let fill = step("Locator", "fill", json!({ "selector": "#a", "value": long })).expect("reported");
+    let fill = step("Locator", "fill", &json!({ "selector": "#a", "value": long })).expect("reported");
     let value = fill.params.and_then(|p| p["value"].as_str().map(ToString::to_string));
     assert_eq!(value.map(|v| v.chars().count()), Some(201));
   }

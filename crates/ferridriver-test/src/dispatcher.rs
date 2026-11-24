@@ -11,7 +11,7 @@ use crate::model::{Hooks, SuiteMode, TestCase};
 pub struct TestAssignment {
   pub test: TestCase,
   pub attempt: u32,
-  /// Suite key for hook tracking (e.g. "file.rs::suite_name").
+  /// Suite key for hook tracking (e.g. `"file.rs::suite_name"`).
   pub suite_key: String,
   /// Shared hooks for this test's suite.
   pub hooks: Arc<Hooks>,
@@ -41,7 +41,7 @@ pub struct Retry {
 /// Work item pulled by a worker.
 pub enum WorkItem {
   /// Single parallel test.
-  Single(TestAssignment),
+  Single(Box<TestAssignment>),
   /// Batch of serial tests (one worker runs all, in order).
   Serial(SerialBatch),
 }
@@ -60,7 +60,7 @@ impl WorkItem {
   /// The tests the item runs, in order.
   pub(crate) fn tests(&self) -> impl Iterator<Item = &TestCase> {
     let assignments = match self {
-      Self::Single(assignment) => std::slice::from_ref(assignment),
+      Self::Single(assignment) => std::slice::from_ref(&**assignment),
       Self::Serial(batch) => batch.assignments.as_slice(),
     };
     assignments.iter().map(|assignment| &assignment.test)
@@ -90,6 +90,7 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
+  #[must_use]
   pub fn new() -> Self {
     let (tx, rx) = async_channel::unbounded();
     Self {
@@ -101,7 +102,7 @@ impl Dispatcher {
 
   /// Enqueue a single parallel test.
   pub fn enqueue_single(&self, assignment: TestAssignment) {
-    let _ = self.tx.try_send(WorkItem::Single(assignment));
+    let _ = self.tx.try_send(WorkItem::Single(Box::new(assignment)));
   }
 
   /// Enqueue an entire serial suite as a batch.
@@ -130,12 +131,13 @@ impl Dispatcher {
         hooks: retry.hooks,
       })
     } else {
-      WorkItem::Single(assignment)
+      WorkItem::Single(Box::new(assignment))
     };
     let _ = self.tx.try_send(item);
   }
 
   /// Get a receiver clone for a worker.
+  #[must_use]
   pub fn receiver(&self) -> async_channel::Receiver<WorkItem> {
     self.rx.clone()
   }
@@ -153,11 +155,13 @@ impl Dispatcher {
   }
 
   /// Worker-side check: should the next item be processed or dropped?
+  #[must_use]
   pub fn is_stopped(&self) -> bool {
     self.stopped.load(std::sync::atomic::Ordering::SeqCst)
   }
 
   /// Worker-side handle to the same atomic flag (cheap clone of the Arc).
+  #[must_use]
   pub fn stop_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
     Arc::clone(&self.stopped)
   }
@@ -229,22 +233,26 @@ impl RunSlots {
 
   /// Wait for a slot for one of `roster`'s workers.
   pub(crate) async fn take(self: &Arc<Self>, roster: &Arc<WorkerRoster>) -> SlotLease {
-    let (grant, granted) = tokio::sync::oneshot::channel();
-    {
-      let mut state = self.lock();
-      state.asked += 1;
-      let asked = state.asked;
-      state.waiters.push(Waiter {
-        roster: Arc::clone(roster),
-        asked,
-        grant,
-      });
+    loop {
+      let (grant, granted) = tokio::sync::oneshot::channel();
+      {
+        let mut state = self.lock();
+        state.asked += 1;
+        let asked = state.asked;
+        state.waiters.push(Waiter {
+          roster: Arc::clone(roster),
+          asked,
+          grant,
+        });
+      }
+      self.assign();
+      // `assign` takes a waiter off the queue only to grant it a slot, so
+      // a dropped grant would mean that changed; asking again keeps the
+      // worker waiting rather than lost.
+      if let Ok(lease) = granted.await {
+        return lease;
+      }
     }
-    self.assign();
-    let Ok(lease) = granted.await else {
-      unreachable!("a waiter leaves the queue only with a slot");
-    };
-    lease
   }
 
   /// Hand free slots to the waiters with the longest critical path, ties
@@ -268,10 +276,10 @@ impl RunSlots {
       if state.starting.iter().any(|roster| roster.priority() > priority) {
         return;
       }
-      let waiter = state.waiters.remove(position);
       let Some(index) = state.free.pop_first() else {
         return;
       };
+      let waiter = state.waiters.remove(position);
       drop(state);
       let lease = SlotLease {
         slots: Some(Arc::clone(self)),

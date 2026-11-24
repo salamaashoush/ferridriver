@@ -28,6 +28,7 @@ pub struct TerminalReporter {
 }
 
 impl TerminalReporter {
+  #[must_use]
   pub fn new() -> Self {
     Self {
       screen: Screen::detect(),
@@ -38,6 +39,7 @@ impl TerminalReporter {
     }
   }
 
+  #[must_use]
   pub fn with_slow_tests_config(mut self, config: Option<ReportSlowTestsConfig>) -> Self {
     self.slow_tests_config = config;
     self
@@ -81,7 +83,7 @@ fn step_icon(status: StepStatus) -> &'static str {
   }
 }
 
-/// Check if a test outcome has BDD steps (any step with bdd_keyword metadata).
+/// Check if a test outcome has BDD steps (any step with `bdd_keyword` metadata).
 fn is_bdd_test(steps: &[TestStep]) -> bool {
   steps
     .iter()

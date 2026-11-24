@@ -589,7 +589,7 @@ impl JsBddSession {
         Arc::clone(&self.bundle),
         Arc::clone(&self.cwd),
       )),
-      Arc::clone(&self.cwd),
+      Arc::from(self.cwd.as_path()),
       world.test_info().timeout,
       static_annotation_pairs(&crate::translate::scenario_annotations(scenario)),
     ));
@@ -651,7 +651,7 @@ impl JsBddSession {
             )
             .await;
           handle.metadata = Some(step_meta);
-          handle.skip(None).await;
+          handle.skip(None);
           steps.push(JsStepResult {
             keyword: step.keyword.clone(),
             text: step.text.clone(),
@@ -749,11 +749,11 @@ impl JsBddSession {
         }
 
         match &status {
-          JsStepStatus::Passed => step_handle.end(None).await,
-          JsStepStatus::Skipped => step_handle.skip(None).await,
-          JsStepStatus::Pending => step_handle.pending(None).await,
-          JsStepStatus::Undefined(msg) => step_handle.pending(Some(msg.clone())).await,
-          JsStepStatus::Failed(msg) => step_handle.end(Some(msg.clone())).await,
+          JsStepStatus::Passed => step_handle.end(None),
+          JsStepStatus::Skipped => step_handle.skip(None),
+          JsStepStatus::Pending => step_handle.pending(None),
+          JsStepStatus::Undefined(msg) => step_handle.pending(Some(msg.clone())),
+          JsStepStatus::Failed(msg) => step_handle.end(Some(msg.clone())),
         }
         steps.push(JsStepResult {
           keyword: step.keyword.clone(),
@@ -780,17 +780,14 @@ impl JsBddSession {
       message: after_msg,
     };
     if let Err(msg) = self.run_hooks("After", Some(&scenario.tags), Some(&after_arg)).await {
-      world
-        .test_info()
-        .record_step(ferridriver_test::model::RecordedStep {
-          title: "After hook".to_string(),
-          category: ferridriver_test::model::StepCategory::Hook,
-          status: ferridriver_test::model::StepStatus::Failed,
-          duration: Duration::ZERO,
-          error: Some(msg.clone()),
-          metadata: None,
-        })
-        .await;
+      world.test_info().record_step(ferridriver_test::model::RecordedStep {
+        title: "After hook".to_string(),
+        category: ferridriver_test::model::StepCategory::Hook,
+        status: ferridriver_test::model::StepStatus::Failed,
+        duration: Duration::ZERO,
+        error: Some(msg.clone()),
+        metadata: None,
+      });
       steps.push(JsStepResult {
         keyword: "After".into(),
         text: "hook".into(),
@@ -1179,11 +1176,11 @@ pub fn translate_features_js(
           let test_info: Arc<TestInfo> = pool
             .get("test_info")
             .await
-            .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
+            .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", &e))?;
           let request = pool
             .get("request")
             .await
-            .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
+            .map_err(|e| TestFailure::wrap("fixture 'request' failed", &e))?;
 
           let session = worker_session(test_info.worker_index, bundle, step_graph, cwd, setup, &pool)
             .await
@@ -1193,15 +1190,15 @@ pub fn translate_features_js(
             let browser = pool
               .get("browser")
               .await
-              .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
+              .map_err(|e| TestFailure::wrap("fixture 'browser' failed", &e))?;
             let context = pool
               .get("context")
               .await
-              .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
+              .map_err(|e| TestFailure::wrap("fixture 'context' failed", &e))?;
             let page = pool
               .get("page")
               .await
-              .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
+              .map_err(|e| TestFailure::wrap("fixture 'page' failed", &e))?;
             BrowserWorld::new(TestFixtures {
               browser,
               page,

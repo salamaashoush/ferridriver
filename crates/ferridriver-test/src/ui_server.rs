@@ -10,6 +10,7 @@
 //! sync; a lagged tab is resynchronized from the state snapshot instead
 //! of silently missing updates.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -568,9 +569,8 @@ async fn client_session(mut socket: WebSocket, state: Arc<UiState>) {
               let _ = state.commands.send(command);
             }
           },
-          Some(Ok(Message::Close(_))) | None => break,
+          Some(Ok(Message::Close(_)) | Err(_)) | None => break,
           Some(Ok(_)) => {},
-          Some(Err(_)) => break,
         }
       }
     }
@@ -641,8 +641,7 @@ fn encode_query_value(value: &str) -> String {
     match byte {
       b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => encoded.push(byte as char),
       _ => {
-        encoded.push('%');
-        encoded.push_str(&format!("{byte:02X}"));
+        let _ = write!(encoded, "%{byte:02X}");
       },
     }
   }
@@ -657,8 +656,7 @@ fn encode_url_path(relative: &str) -> String {
     match byte {
       b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => encoded.push(byte as char),
       _ => {
-        encoded.push('%');
-        encoded.push_str(&format!("{byte:02X}"));
+        let _ = write!(encoded, "%{byte:02X}");
       },
     }
   }
@@ -775,7 +773,7 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
       "stepId": step.step_id,
       "title": step.title,
       "category": step.category.to_string(),
-      "durationMs": step.duration.as_millis() as u64,
+      "durationMs": u64::try_from(step.duration.as_millis()).unwrap_or(u64::MAX),
       "error": step.error,
     }),
     ReporterEvent::TestFinished { outcome } => serde_json::json!({
@@ -804,7 +802,7 @@ pub fn reporter_event_to_json(event: &ReporterEvent, artifacts_root: &Path) -> s
         "failed": failed,
         "skipped": skipped,
         "flaky": flaky,
-        "durationMs": duration.as_millis() as u64,
+        "durationMs": u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
       },
     }),
     ReporterEvent::TestOutput(output) => serde_json::json!({
@@ -853,7 +851,7 @@ fn outcome_json(outcome: &TestOutcome, artifacts_root: &Path) -> serde_json::Val
     // `outcome: "expected"`, and a UI colors by the latter.
     "outcome": crate::model::outcome_kind(&[outcome.status], outcome.expected_status).as_str(),
     "expectedStatus": crate::reporter::base::expected_status_str(outcome.expected_status),
-    "durationMs": outcome.duration.as_millis() as u64,
+    "durationMs": u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
     "attempt": outcome.attempt,
     "error": outcome.error.as_ref().map(ToString::to_string),
     "attachments": attachments,

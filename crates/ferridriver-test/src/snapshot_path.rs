@@ -376,33 +376,29 @@ pub fn node_platform() -> &'static str {
 fn replace_token(input: &str, token: &str, value: &str, omit_when_empty: bool) -> String {
   let mut out = String::with_capacity(input.len());
   let mut rest = input;
-  while let Some(open) = rest.find('{') {
-    let Some(close_rel) = rest[open..].find('}') else {
+  while let Some((before, from_open)) = rest.split_once('{') {
+    let Some((inner, after)) = from_open.split_once('}') else {
       break;
     };
-    let close = open + close_rel;
-    let inner = &rest[open + 1..close];
     let matched = if inner == token {
       Some("")
-    } else if inner.len() > token.len()
-      && inner.ends_with(token)
-      && inner[..inner.len() - token.len()].chars().count() == 1
-    {
-      Some(&inner[..inner.len() - token.len()])
     } else {
-      None
+      inner
+        .strip_suffix(token)
+        .filter(|separator| separator.chars().count() == 1)
     };
-    out.push_str(&rest[..open]);
-    match matched {
-      Some(separator) => {
-        if !(value.is_empty() && omit_when_empty) {
-          out.push_str(separator);
-          out.push_str(value);
-        }
-      },
-      None => out.push_str(&rest[open..=close]),
+    out.push_str(before);
+    if let Some(separator) = matched {
+      if !(value.is_empty() && omit_when_empty) {
+        out.push_str(separator);
+        out.push_str(value);
+      }
+    } else {
+      out.push('{');
+      out.push_str(inner);
+      out.push('}');
     }
-    rest = &rest[close + 1..];
+    rest = after;
   }
   out.push_str(rest);
   out
@@ -420,8 +416,8 @@ fn aria_aware_extname(kind: SnapshotKind, file_path: &str) -> String {
 /// for a dotfile or a name with no dot.
 fn extname(file_path: &str) -> String {
   let base = file_path.rsplit(['/', '\\']).next().unwrap_or(file_path);
-  match base.rfind('.') {
-    Some(idx) if idx > 0 => base[idx..].to_string(),
+  match base.rsplit_once('.') {
+    Some((stem, ext)) if !stem.is_empty() => format!(".{ext}"),
     _ => String::new(),
   }
 }
@@ -459,12 +455,12 @@ pub(crate) fn trim_long_string(s: &str, length: usize) -> String {
     return s.to_string();
   }
   let hash = ferridriver::tracing::sha1_hex(s.as_bytes());
-  let middle = format!("-{}-", &hash[..5]);
-  let start = (length - middle.len()) / 2;
-  let end = length - middle.len() - start;
+  let middle = format!("-{}-", hash.chars().take(5).collect::<String>());
+  let start = length.saturating_sub(middle.len()) / 2;
+  let end = length.saturating_sub(middle.len()) - start;
   let chars: Vec<char> = s.chars().collect();
-  let head: String = chars[..start].iter().collect();
-  let tail: String = chars[chars.len() - end..].iter().collect();
+  let head: String = chars.iter().take(start).collect();
+  let tail: String = chars.iter().skip(chars.len().saturating_sub(end)).collect();
   format!("{head}{middle}{tail}")
 }
 
@@ -472,7 +468,7 @@ pub(crate) fn trim_long_string(s: &str, length: usize) -> String {
 #[must_use]
 pub fn add_suffix_to_file_path(file_path: &str, suffix: &str) -> String {
   let ext = extname(file_path);
-  let base = &file_path[..file_path.len() - ext.len()];
+  let base = file_path.strip_suffix(ext.as_str()).unwrap_or(file_path);
   format!("{base}{suffix}{ext}")
 }
 

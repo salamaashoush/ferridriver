@@ -113,7 +113,7 @@ pub struct AllureReporter {
   results: Vec<PendingResult>,
   /// Run-level environment info.
   env: BTreeMap<String, String>,
-  /// Per-test start timestamps (recorded on TestStarted events).
+  /// Per-test start timestamps (recorded on `TestStarted` events).
   test_starts: FxHashMap<String, u64>,
   /// Run start timestamp (epoch ms).
   run_start: u64,
@@ -130,6 +130,7 @@ struct PendingAttachment {
 }
 
 impl AllureReporter {
+  #[must_use]
   pub fn new(output_dir: PathBuf) -> Self {
     Self {
       output_dir,
@@ -141,6 +142,7 @@ impl AllureReporter {
     }
   }
 
+  #[must_use]
   pub fn with_suite_title(mut self, title: String) -> Self {
     self.suite_title = Some(title);
     self
@@ -212,7 +214,7 @@ impl Reporter for AllureReporter {
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("\n");
-      std::fs::write(self.output_dir.join("environment.properties"), props).ok();
+      std::fs::write(self.output_dir.join("environment.properties"), props)?;
     }
 
     // Write categories.json (default error classification).
@@ -234,7 +236,7 @@ impl Reporter for AllureReporter {
       },
     ];
     let cats_json = serde_json::to_string_pretty(&categories)?;
-    std::fs::write(self.output_dir.join("categories.json"), cats_json).ok();
+    std::fs::write(self.output_dir.join("categories.json"), cats_json)?;
 
     let count = self.results.len();
     tracing::info!(
@@ -246,66 +248,9 @@ impl Reporter for AllureReporter {
 }
 
 impl AllureReporter {
-  fn collect_result(&mut self, outcome: &TestOutcome) {
-    let uuid = make_uuid();
-    // The attempt's own wall-clock start, which the worker records.
-    // Falling back to a `TestStarted` timestamp keyed by name would
-    // credit a retry with the first attempt's start, and a parallel run
-    // has several attempts of one name in flight at once.
-    let start_ms = match u64::try_from(outcome.start_epoch_ms()) {
-      Ok(ms) if ms > 0 => ms,
-      _ => self
-        .test_starts
-        .remove(&outcome.test_id.stable_id(&outcome.project_name))
-        .unwrap_or(self.run_start),
-    };
-    let stop_ms = start_ms + outcome.duration.as_millis() as u64;
-
-    let status = map_status(&outcome.status);
-    let status_details = outcome.error.as_ref().map(|e| AllureStatusDetails {
-      message: Some(e.message.clone()),
-      trace: e.stack.clone(),
-    });
-
-    // Convert steps.
-    let steps = convert_steps(&outcome.steps, start_ms);
-
-    // Convert attachments.
-    let mut allure_attachments = Vec::new();
-    let mut pending_attachments = Vec::new();
-    for attach in &outcome.attachments {
-      let ext = mime_to_ext(&attach.content_type);
-      let attach_uuid = make_uuid();
-      let filename = format!("{attach_uuid}-attachment.{ext}");
-      allure_attachments.push(AllureAttachment {
-        name: attach.name.clone(),
-        source: filename.clone(),
-        content_type: attach.content_type.clone(),
-      });
-      pending_attachments.push(PendingAttachment {
-        filename,
-        body: attach.body.clone(),
-      });
-    }
-
-    // Also handle screenshot-on-failure embedded in the error.
-    if let Some(ref err) = outcome.error
-      && let Some(ref screenshot) = err.screenshot
-    {
-      let attach_uuid = make_uuid();
-      let filename = format!("{attach_uuid}-attachment.png");
-      allure_attachments.push(AllureAttachment {
-        name: "Screenshot on failure".into(),
-        source: filename.clone(),
-        content_type: "image/png".into(),
-      });
-      pending_attachments.push(PendingAttachment {
-        filename,
-        body: AttachmentBody::Bytes(screenshot.clone()),
-      });
-    }
-
-    // Build labels from annotations.
+  /// Allure labels and links from the suite, the annotations and the
+  /// status.
+  fn labels_and_links(&self, outcome: &TestOutcome) -> (Vec<AllureLabel>, Vec<AllureLink>) {
     let suite_value = self
       .suite_title
       .clone()
@@ -402,6 +347,35 @@ impl AllureReporter {
         value: "flaky".into(),
       });
     }
+    (labels, links)
+  }
+
+  fn collect_result(&mut self, outcome: &TestOutcome) {
+    let uuid = make_uuid();
+    // The attempt's own wall-clock start, which the worker records.
+    // Falling back to a `TestStarted` timestamp keyed by name would
+    // credit a retry with the first attempt's start, and a parallel run
+    // has several attempts of one name in flight at once.
+    let start_ms = match u64::try_from(outcome.start_epoch_ms()) {
+      Ok(ms) if ms > 0 => ms,
+      _ => self
+        .test_starts
+        .remove(&outcome.test_id.stable_id(&outcome.project_name))
+        .unwrap_or(self.run_start),
+    };
+    let stop_ms = start_ms + u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX);
+
+    let status = map_status(outcome.status);
+    let status_details = outcome.error.as_ref().map(|e| AllureStatusDetails {
+      message: Some(e.message.clone()),
+      trace: e.stack.clone(),
+    });
+
+    // Convert steps.
+    let steps = convert_steps(&outcome.steps, start_ms);
+
+    let (allure_attachments, pending_attachments) = collect_attachments(outcome);
+    let (labels, links) = self.labels_and_links(outcome);
 
     // Parameters: attempt info if retried.
     let mut parameters = Vec::new();
@@ -416,7 +390,7 @@ impl AllureReporter {
     let history_id = format!("{:x}", simple_hash(&outcome.test_id.full_name()));
 
     let result = AllureResult {
-      uuid: uuid.clone(),
+      uuid,
       history_id,
       name: outcome.test_id.name.clone(),
       full_name: outcome.test_id.full_name(),
@@ -447,7 +421,7 @@ fn convert_steps(steps: &[TestStep], parent_start: u64) -> Vec<AllureStep> {
     .iter()
     .map(|s| {
       let start = offset;
-      let stop = start + s.duration.as_millis() as u64;
+      let stop = start + u64::try_from(s.duration.as_millis()).unwrap_or(u64::MAX);
       offset = stop;
       AllureStep {
         name: s.title.clone(),
@@ -461,7 +435,46 @@ fn convert_steps(steps: &[TestStep], parent_start: u64) -> Vec<AllureStep> {
     .collect()
 }
 
-fn map_status(status: &TestStatus) -> &'static str {
+/// The test's attachments as Allure records, and the files to write for
+/// them: the attachments themselves, then a failure screenshot.
+fn collect_attachments(outcome: &TestOutcome) -> (Vec<AllureAttachment>, Vec<PendingAttachment>) {
+  let mut allure_attachments = Vec::new();
+  let mut pending_attachments = Vec::new();
+  for attach in &outcome.attachments {
+    let ext = mime_to_ext(&attach.content_type);
+    let attach_uuid = make_uuid();
+    let filename = format!("{attach_uuid}-attachment.{ext}");
+    allure_attachments.push(AllureAttachment {
+      name: attach.name.clone(),
+      source: filename.clone(),
+      content_type: attach.content_type.clone(),
+    });
+    pending_attachments.push(PendingAttachment {
+      filename,
+      body: attach.body.clone(),
+    });
+  }
+
+  // Also handle screenshot-on-failure embedded in the error.
+  if let Some(ref err) = outcome.error
+    && let Some(ref screenshot) = err.screenshot
+  {
+    let attach_uuid = make_uuid();
+    let filename = format!("{attach_uuid}-attachment.png");
+    allure_attachments.push(AllureAttachment {
+      name: "Screenshot on failure".into(),
+      source: filename.clone(),
+      content_type: "image/png".into(),
+    });
+    pending_attachments.push(PendingAttachment {
+      filename,
+      body: AttachmentBody::Bytes(screenshot.clone()),
+    });
+  }
+  (allure_attachments, pending_attachments)
+}
+
+fn map_status(status: TestStatus) -> &'static str {
   match status {
     TestStatus::Passed | TestStatus::Flaky => "passed",
     TestStatus::Failed => "failed",
@@ -474,8 +487,7 @@ fn map_step_status(step: &TestStep) -> &'static str {
   match step.status {
     crate::model::StepStatus::Passed => "passed",
     crate::model::StepStatus::Failed => "failed",
-    crate::model::StepStatus::Skipped => "skipped",
-    crate::model::StepStatus::Pending => "skipped",
+    crate::model::StepStatus::Skipped | crate::model::StepStatus::Pending => "skipped",
   }
 }
 
@@ -507,10 +519,11 @@ fn make_uuid() -> String {
   use std::sync::atomic::{AtomicU64, Ordering};
   static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-  let ts = SystemTime::now()
+  let nanos = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or(Duration::ZERO)
-    .as_nanos() as u64;
+    .as_nanos();
+  let ts = u64::try_from(nanos).unwrap_or(u64::MAX);
   let count = COUNTER.fetch_add(1, Ordering::Relaxed);
 
   // Mix timestamp + counter for uniqueness.
@@ -519,19 +532,20 @@ fn make_uuid() -> String {
 
   format!(
     "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
-    (a >> 32) as u32,
-    (a >> 16) as u16,
-    a as u16 & 0x0fff,
-    ((b >> 48) as u16 & 0x3fff) | 0x8000,
+    a >> 32,
+    (a >> 16) & 0xffff,
+    a & 0x0fff,
+    ((b >> 48) & 0x3fff) | 0x8000,
     b & 0xffff_ffff_ffff,
   )
 }
 
 fn epoch_ms() -> u64 {
-  SystemTime::now()
+  let millis = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or(Duration::ZERO)
-    .as_millis() as u64
+    .as_millis();
+  u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -720,7 +734,7 @@ mod tests {
     second.attempt = 2;
     let results = results(&dir.0, vec![Arc::new(first), Arc::new(second)]).await;
     assert_eq!(results.len(), 2, "Allure history needs both attempts");
-    let history: std::collections::HashSet<&str> = results
+    let history: rustc_hash::FxHashSet<&str> = results
       .iter()
       .map(|r| r["historyId"].as_str().unwrap_or_default())
       .collect();

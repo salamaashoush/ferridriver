@@ -121,7 +121,7 @@ async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> ferridriver::Result
 }
 
 /// Returns true when [`ensure_page_alive`] should fire on a freshly
-/// created page. Only BiDi needs the probe; CDP and Playwright WebKit
+/// created page. Only `BiDi` needs the probe; CDP and Playwright `WebKit`
 /// pages skip the check (~1 RTT per test saved).
 fn needs_alive_check(backend: ferridriver::backend::BackendKind) -> bool {
   matches!(backend, ferridriver::backend::BackendKind::Bidi)
@@ -233,7 +233,7 @@ impl TestBrowserResources {
   }
 
   /// Discard a live trace on a context that is being torn down without
-  /// the worker's explicit stop (page-creation failure, BiDi retry).
+  /// the worker's explicit stop (page-creation failure, `BiDi` retry).
   async fn discard_tracing(&self, ctx: &ferridriver::ContextRef) {
     let Some(spec) = &self.trace else { return };
     let started = spec
@@ -260,8 +260,7 @@ impl TestBrowserResources {
   async fn context(&self) -> ferridriver::error::Result<Arc<ferridriver::ContextRef>> {
     let mut state = self.state.lock().await;
     match &mut *state {
-      TestBrowserState::Context(ctx) => Ok(Arc::clone(ctx)),
-      TestBrowserState::Page { ctx, .. } => Ok(Arc::clone(ctx)),
+      TestBrowserState::Context(ctx) | TestBrowserState::Page { ctx, .. } => Ok(Arc::clone(ctx)),
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Empty => {
         let browser = self.handle.get().await?;
@@ -422,6 +421,149 @@ async fn close_test_context(ctx: &ferridriver::ContextRef) {
   let _ = ctx.close().await;
 }
 
+/// The device and page emulation keys of a spec's `test.use({ ... })`.
+fn apply_spec_emulation(ctx_config: &mut ContextConfig, opts: &serde_json::Value) {
+  if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
+    ctx_config.locale = Some(v.to_string());
+  }
+  if let Some(screen) = opts.get("screen").and_then(|v| v.as_object())
+    && let (Some(w), Some(h)) = (
+      screen.get("width").and_then(serde_json::Value::as_i64),
+      screen.get("height").and_then(serde_json::Value::as_i64),
+    )
+  {
+    ctx_config.screen = Some(ViewportConfig { width: w, height: h });
+  }
+  match opts.get("colorScheme") {
+    Some(serde_json::Value::String(scheme)) => {
+      ctx_config.color_scheme = Some(ColorSchemeSetting::Scheme(scheme.clone()));
+    },
+    Some(serde_json::Value::Null) => ctx_config.color_scheme = Some(ColorSchemeSetting::Null),
+    _ => {},
+  }
+  if let Some(v) = opts.get("timezoneId").and_then(|v| v.as_str()) {
+    ctx_config.timezone_id = Some(v.to_string());
+  }
+  if let Some(v) = opts.get("isMobile").and_then(serde_json::Value::as_bool) {
+    ctx_config.is_mobile = v;
+  }
+  if let Some(v) = opts.get("hasTouch").and_then(serde_json::Value::as_bool) {
+    ctx_config.has_touch = v;
+  }
+  if let Some(v) = opts.get("offline").and_then(serde_json::Value::as_bool) {
+    ctx_config.offline = v;
+  }
+  if let Some(v) = opts
+    .get("networkConditions")
+    .and_then(|v| serde_json::from_value(v.clone()).ok())
+  {
+    ctx_config.network_conditions = Some(v);
+  }
+  if let Some(v) = opts.get("cpuThrottling").and_then(serde_json::Value::as_f64) {
+    ctx_config.cpu_throttling = Some(v);
+  }
+  if let Some(v) = opts.get("javaScriptEnabled").and_then(serde_json::Value::as_bool) {
+    ctx_config.java_script_enabled = v;
+  }
+  if let Some(v) = opts.get("bypassCSP").and_then(serde_json::Value::as_bool) {
+    ctx_config.bypass_csp = v;
+  }
+  if let Some(v) = opts.get("userAgent").and_then(|v| v.as_str()) {
+    ctx_config.user_agent = Some(v.to_string());
+  }
+  if let Some(v) = opts.get("testIdAttribute").and_then(|v| v.as_str()) {
+    ctx_config.test_id_attribute = Some(v.to_string());
+  }
+  if let Some(v) = opts.get("deviceScaleFactor").and_then(serde_json::Value::as_f64) {
+    ctx_config.device_scale_factor = Some(v);
+  }
+  // Test-scoped in Playwright, so a spec may set them; `trace`,
+  // `video` and `screenshot` are WORKER options there and stay
+  // config/project-level here for the same reason.
+  if let Some(v) = opts.get("actionTimeout").and_then(serde_json::Value::as_u64) {
+    ctx_config.action_timeout = Some(v);
+  }
+  if let Some(v) = opts.get("navigationTimeout").and_then(serde_json::Value::as_u64) {
+    ctx_config.navigation_timeout = Some(v);
+  }
+  if let Some(v) = opts.get("reducedMotion").and_then(|v| v.as_str()) {
+    ctx_config.reduced_motion = Some(v.to_string());
+  }
+  if let Some(v) = opts.get("forcedColors").and_then(|v| v.as_str()) {
+    ctx_config.forced_colors = Some(v.to_string());
+  }
+}
+
+/// The storage, permission and network keys of a spec's
+/// `test.use({ ... })`.
+fn apply_spec_environment(ctx_config: &mut ContextConfig, opts: &serde_json::Value) {
+  if let Some(v) = opts.get("serviceWorkers").and_then(|v| v.as_str()) {
+    ctx_config.service_workers = Some(v.to_string());
+  }
+  if let Some(v) = opts.get("storageState").and_then(|v| v.as_str()) {
+    ctx_config.storage_state = Some(v.to_string());
+  }
+  if let Some(v) = opts.get("acceptDownloads").and_then(serde_json::Value::as_bool) {
+    ctx_config.accept_downloads = v;
+  }
+  if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(serde_json::Value::as_bool) {
+    ctx_config.ignore_https_errors = v;
+  }
+  if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object())
+    && let (Some(lat), Some(lon)) = (
+      geo.get("latitude").and_then(serde_json::Value::as_f64),
+      geo.get("longitude").and_then(serde_json::Value::as_f64),
+    )
+  {
+    ctx_config.geolocation = Some(crate::config::GeolocationConfig {
+      latitude: lat,
+      longitude: lon,
+      accuracy: geo.get("accuracy").and_then(serde_json::Value::as_f64),
+    });
+  }
+  if let Some(arr) = opts.get("permissions").and_then(|v| v.as_array()) {
+    let perms: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    if !perms.is_empty() {
+      ctx_config.permissions = perms;
+    }
+  }
+  if let Some(obj) = opts.get("extraHTTPHeaders").and_then(|v| v.as_object()) {
+    let headers: std::collections::BTreeMap<String, String> = obj
+      .iter()
+      .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+      .collect();
+    if !headers.is_empty() {
+      ctx_config.extra_http_headers = headers;
+    }
+  }
+  if let Some(value) = opts.get("proxy") {
+    // A proxy that does not parse must not quietly send the test's
+    // traffic direct: the configured one stays, and the run says why.
+    match serde_json::from_value(value.clone()) {
+      Ok(proxy) => ctx_config.proxy = proxy,
+      Err(error) => tracing::warn!(target: "ferridriver::worker", %error, "test.use({{ proxy }}) ignored"),
+    }
+  }
+  if let Some(value) = opts.get("httpCredentials") {
+    let entries = value
+      .as_array()
+      .map_or_else(|| std::slice::from_ref(value), Vec::as_slice);
+    let credentials: Vec<_> = entries
+      .iter()
+      .filter_map(|entry| {
+        Some(crate::config::HttpCredentialsConfig {
+          username: entry.get("username")?.as_str()?.to_string(),
+          password: entry.get("password")?.as_str()?.to_string(),
+          origin: entry.get("origin").and_then(|v| v.as_str()).map(String::from),
+        })
+      })
+      .collect();
+    if !credentials.is_empty() {
+      ctx_config.http_credentials = credentials;
+    }
+  }
+}
+
 fn build_effective_context_config(config: &TestConfig, test: &crate::model::TestCase) -> EffectiveContextConfig {
   let mut ctx_config = config.browser.use_options.clone();
   // `test.use({ device })` pre-seeds the keys a config layer's `device`
@@ -433,138 +575,8 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     serde_json::Value::Object(expanded)
   });
   if let Some(ref opts) = spec_use {
-    if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
-      ctx_config.locale = Some(v.to_string());
-    }
-    if let Some(screen) = opts.get("screen").and_then(|v| v.as_object())
-      && let (Some(w), Some(h)) = (
-        screen.get("width").and_then(serde_json::Value::as_i64),
-        screen.get("height").and_then(serde_json::Value::as_i64),
-      )
-    {
-      ctx_config.screen = Some(ViewportConfig { width: w, height: h });
-    }
-    match opts.get("colorScheme") {
-      Some(serde_json::Value::String(scheme)) => {
-        ctx_config.color_scheme = Some(ColorSchemeSetting::Scheme(scheme.clone()));
-      },
-      Some(serde_json::Value::Null) => ctx_config.color_scheme = Some(ColorSchemeSetting::Null),
-      _ => {},
-    }
-    if let Some(v) = opts.get("timezoneId").and_then(|v| v.as_str()) {
-      ctx_config.timezone_id = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("isMobile").and_then(|v| v.as_bool()) {
-      ctx_config.is_mobile = v;
-    }
-    if let Some(v) = opts.get("hasTouch").and_then(|v| v.as_bool()) {
-      ctx_config.has_touch = v;
-    }
-    if let Some(v) = opts.get("offline").and_then(|v| v.as_bool()) {
-      ctx_config.offline = v;
-    }
-    if let Some(v) = opts
-      .get("networkConditions")
-      .and_then(|v| serde_json::from_value(v.clone()).ok())
-    {
-      ctx_config.network_conditions = Some(v);
-    }
-    if let Some(v) = opts.get("cpuThrottling").and_then(serde_json::Value::as_f64) {
-      ctx_config.cpu_throttling = Some(v);
-    }
-    if let Some(v) = opts.get("javaScriptEnabled").and_then(|v| v.as_bool()) {
-      ctx_config.java_script_enabled = v;
-    }
-    if let Some(v) = opts.get("bypassCSP").and_then(|v| v.as_bool()) {
-      ctx_config.bypass_csp = v;
-    }
-    if let Some(v) = opts.get("userAgent").and_then(|v| v.as_str()) {
-      ctx_config.user_agent = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("testIdAttribute").and_then(|v| v.as_str()) {
-      ctx_config.test_id_attribute = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("deviceScaleFactor").and_then(|v| v.as_f64()) {
-      ctx_config.device_scale_factor = Some(v);
-    }
-    // Test-scoped in Playwright, so a spec may set them; `trace`,
-    // `video` and `screenshot` are WORKER options there and stay
-    // config/project-level here for the same reason.
-    if let Some(v) = opts.get("actionTimeout").and_then(serde_json::Value::as_u64) {
-      ctx_config.action_timeout = Some(v);
-    }
-    if let Some(v) = opts.get("navigationTimeout").and_then(serde_json::Value::as_u64) {
-      ctx_config.navigation_timeout = Some(v);
-    }
-    if let Some(v) = opts.get("reducedMotion").and_then(|v| v.as_str()) {
-      ctx_config.reduced_motion = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("forcedColors").and_then(|v| v.as_str()) {
-      ctx_config.forced_colors = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("serviceWorkers").and_then(|v| v.as_str()) {
-      ctx_config.service_workers = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("storageState").and_then(|v| v.as_str()) {
-      ctx_config.storage_state = Some(v.to_string());
-    }
-    if let Some(v) = opts.get("acceptDownloads").and_then(|v| v.as_bool()) {
-      ctx_config.accept_downloads = v;
-    }
-    if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(|v| v.as_bool()) {
-      ctx_config.ignore_https_errors = v;
-    }
-    if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object())
-      && let (Some(lat), Some(lon)) = (
-        geo.get("latitude").and_then(|v| v.as_f64()),
-        geo.get("longitude").and_then(|v| v.as_f64()),
-      )
-    {
-      ctx_config.geolocation = Some(crate::config::GeolocationConfig {
-        latitude: lat,
-        longitude: lon,
-        accuracy: geo.get("accuracy").and_then(|v| v.as_f64()),
-      });
-    }
-    if let Some(arr) = opts.get("permissions").and_then(|v| v.as_array()) {
-      let perms: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-      if !perms.is_empty() {
-        ctx_config.permissions = perms;
-      }
-    }
-    if let Some(obj) = opts.get("extraHTTPHeaders").and_then(|v| v.as_object()) {
-      let headers: std::collections::BTreeMap<String, String> = obj
-        .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-        .collect();
-      if !headers.is_empty() {
-        ctx_config.extra_http_headers = headers;
-      }
-    }
-    if let Some(value) = opts.get("proxy") {
-      // A proxy that does not parse must not quietly send the test's
-      // traffic direct: the configured one stays, and the run says why.
-      match serde_json::from_value(value.clone()) {
-        Ok(proxy) => ctx_config.proxy = proxy,
-        Err(error) => tracing::warn!(target: "ferridriver::worker", %error, "test.use({{ proxy }}) ignored"),
-      }
-    }
-    if let Some(value) = opts.get("httpCredentials") {
-      let entries = value.as_array().map_or(std::slice::from_ref(value), Vec::as_slice);
-      let credentials: Vec<_> = entries
-        .iter()
-        .filter_map(|entry| {
-          Some(crate::config::HttpCredentialsConfig {
-            username: entry.get("username")?.as_str()?.to_string(),
-            password: entry.get("password")?.as_str()?.to_string(),
-            origin: entry.get("origin").and_then(|v| v.as_str()).map(String::from),
-          })
-        })
-        .collect();
-      if !credentials.is_empty() {
-        ctx_config.http_credentials = credentials;
-      }
-    }
+    apply_spec_emulation(&mut ctx_config, opts);
+    apply_spec_environment(&mut ctx_config, opts);
   }
 
   let viewport_override = spec_use.as_ref().and_then(|opts| {
@@ -572,8 +584,8 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
       if v.is_null() {
         return Some(ferridriver_config::browser::ViewportOverride::Disabled);
       }
-      let w = v.get("width").and_then(|w| w.as_i64());
-      let h = v.get("height").and_then(|h| h.as_i64());
+      let w = v.get("width").and_then(serde_json::Value::as_i64);
+      let h = v.get("height").and_then(serde_json::Value::as_i64);
       match (w, h) {
         (Some(w), Some(h)) => Some(ferridriver_config::browser::ViewportOverride::Size(ViewportConfig {
           width: w,
@@ -588,7 +600,7 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     .as_ref()
     .and_then(|opts| opts.get("baseURL").and_then(|v| v.as_str()).map(String::from))
     .or_else(|| config.base_url.clone())
-    .or_else(crate::config::base_url_from_env);
+    .or_else(crate::config::run_base_url);
 
   if ctx_config.storage_state.is_none() {
     ctx_config.storage_state.clone_from(&config.storage_state);
@@ -626,7 +638,7 @@ fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContext
     context: ctx_config,
     default_viewport: config_viewport(&config.browser),
     viewport_override: None,
-    request_base_url: config.base_url.clone().or_else(crate::config::base_url_from_env),
+    request_base_url: config.base_url.clone().or_else(crate::config::run_base_url),
   }
 }
 
@@ -634,7 +646,7 @@ fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContext
 /// passed to `browser.new_context()`. Creation-time options matter:
 /// document-time overrides (locale, userAgent, timezone) must be in the
 /// context's stashed options BEFORE the first page's process spawns —
-/// WebKit in particular latches languages at target creation and a
+/// `WebKit` in particular latches languages at target creation and a
 /// post-attach `Playwright.setLanguages` never reaches the already
 /// running web process.
 fn build_context_options(
@@ -761,7 +773,7 @@ const WORKER_BROWSER_LAUNCH: &str = "_browserLaunch";
 
 /// Worker-scope `browser` fixture backed by `BrowserHandle`, registered
 /// under `browser` and under [`WORKER_BROWSER_LAUNCH`]. Added to the
-/// custom_fixture_pool so every child suite/test pool can resolve it via
+/// `custom_fixture_pool` so every child suite/test pool can resolve it via
 /// the parent chain. Lazy: launches on first `get`.
 fn build_worker_browser_def(handle: Arc<crate::runner::BrowserHandle>) -> FixtureDef {
   FixtureDef {
@@ -782,7 +794,7 @@ fn build_worker_browser_def(handle: Arc<crate::runner::BrowserHandle>) -> Fixtur
 }
 
 fn build_browser_fixture_defs(
-  resources: Arc<TestBrowserResources>,
+  resources: &Arc<TestBrowserResources>,
   scope: FixtureScope,
 ) -> FxHashMap<String, FixtureDef> {
   // A test-scoped context or page is set up under the test's own budget,
@@ -805,7 +817,7 @@ fn build_browser_fixture_defs(
       scope,
       dependencies: vec![WORKER_BROWSER_LAUNCH.into()],
       setup: Arc::new({
-        let resources = Arc::clone(&resources);
+        let resources = Arc::clone(resources);
         move |_pool| {
           let resources = Arc::clone(&resources);
           Box::pin(async move {
@@ -827,7 +839,7 @@ fn build_browser_fixture_defs(
       scope,
       dependencies: vec!["browser".into()],
       setup: Arc::new({
-        let resources = Arc::clone(&resources);
+        let resources = Arc::clone(resources);
         move |_pool| {
           let resources = Arc::clone(&resources);
           Box::pin(async move {
@@ -849,7 +861,7 @@ fn build_browser_fixture_defs(
       scope,
       dependencies: vec!["browser".into()],
       setup: Arc::new({
-        let resources = Arc::clone(&resources);
+        let resources = Arc::clone(resources);
         move |_pool| {
           let resources = Arc::clone(&resources);
           Box::pin(async move {
@@ -922,11 +934,11 @@ fn build_request_def(
   }
 }
 
-fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
+fn build_test_fixture_defs(resources: &Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
   build_browser_fixture_defs(resources, FixtureScope::Test)
 }
 
-fn build_suite_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
+fn build_suite_fixture_defs(resources: &Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
   build_browser_fixture_defs(resources, FixtureScope::Worker)
 }
 
@@ -1031,7 +1043,12 @@ fn redact_trace(secrets: &[(String, String)], path: &std::path::Path) {
   if redactor.is_empty() {
     return;
   }
-  if let Err(e) = ferridriver_trace::redact::rewrite_zip(path, path, &redactor, Default::default()) {
+  if let Err(e) = ferridriver_trace::redact::rewrite_zip(
+    path,
+    path,
+    &redactor,
+    ferridriver_trace::redact::RewriteOptions::default(),
+  ) {
     tracing::warn!(target: "ferridriver::worker", "redacting secrets from the trace failed: {e}");
   }
 }
@@ -1097,7 +1114,10 @@ pub(crate) fn artifact_dir_name(file: &str, title: &str, project: &str) -> Strin
   if project.is_empty() {
     name
   } else {
-    format!("{name}-{}", &ferridriver::tracing::sha1_hex(project.as_bytes())[..12])
+    format!(
+      "{name}-{}",
+      crate::model::hex_prefix(&ferridriver::tracing::sha1_hex(project.as_bytes()), 12)
+    )
   }
 }
 
@@ -1134,6 +1154,7 @@ fn snapshot_dir(config: &crate::config::TestConfig) -> std::path::PathBuf {
 }
 
 impl Worker {
+  #[must_use]
   pub fn new(id: u32, slot: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>, live_traces: bool) -> Self {
     let pool = crate::context_pool::ContextPool::new(config.context_prewarm as usize);
     Self {
@@ -1230,6 +1251,77 @@ impl Worker {
     })
   }
 
+  /// The worker's own fixtures, registered on the custom pool so child
+  /// suite and test pools resolve them through the parent chain.
+  fn worker_fixture_defs(&self, browser_handle: &Arc<crate::runner::BrowserHandle>) -> FxHashMap<String, FixtureDef> {
+    // Register `browser` (worker scope) and `request` (test scope) on the
+    // custom pool so child suite/test pools resolve them via the parent
+    // chain. The backing `BrowserHandle` makes the browser launch lazy.
+    // `request` is a new client per test, as Playwright's fixture is a
+    // new `APIRequestContext` per test: one shared across the worker
+    // carried each test's cookies into the next.
+    let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
+    worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(browser_handle)));
+    worker_defs.insert(
+      WORKER_BROWSER_LAUNCH.into(),
+      build_worker_browser_def(Arc::clone(browser_handle)),
+    );
+    worker_defs.insert(
+      "request".into(),
+      build_request_def(
+        self.config.base_url.clone().or_else(crate::config::run_base_url),
+        core_http_credentials(&self.config.browser.use_options.http_credentials),
+        self
+          .config
+          .browser
+          .use_options
+          .proxy
+          .as_ref()
+          .map(crate::config::ProxyConfig::to_engine),
+      ),
+    );
+    worker_defs
+  }
+
+  /// Run `afterAll` for every suite whose `beforeAll` ran on this worker.
+  async fn run_after_all(&self, active_suites: &FxHashMap<String, SuiteState>) {
+    for (suite_key, state) in active_suites {
+      if !state.before_all_ran {
+        continue;
+      }
+      for (i, hook) in state.hooks.after_all.iter().enumerate() {
+        let title = hook_title("afterAll", i, state.hooks.after_all.len());
+        // afterAll has no test context: its steps go under a synthetic
+        // test named after the suite.
+        let step = SuiteHookStep {
+          test_id: crate::model::TestId {
+            root_path: None,
+            repeat_each_index: state.repeat_each_index,
+            file: suite_key.clone(),
+            suite: None,
+            name: title.clone(),
+            line: None,
+            column: None,
+          },
+          step_id: format!("hook:afterAll:{suite_key}:{i}"),
+          title,
+          describe: ToString::to_string,
+        };
+        if let Err(e) = self.run_suite_hook(hook, &state.fixture_pool, step).await {
+          tracing::warn!(target: "ferridriver::worker", "afterAll error: {e}");
+        }
+      }
+    }
+  }
+
+  /// Run work items from `rx` until it closes or `stop_flag` is set, then
+  /// tear down every fixture pool and close the browser. Returns the item
+  /// of the next `repeatEach` repetition, which this worker stopped at
+  /// rather than run.
+  ///
+  /// # Errors
+  ///
+  /// Returns every fixture teardown and browser close failure, joined.
   #[tracing::instrument(skip_all, fields(worker_id = self.id))]
   pub async fn run(
     &self,
@@ -1245,32 +1337,7 @@ impl Worker {
       event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
     }
 
-    // Register `browser` (worker scope) and `request` (test scope) on the
-    // custom pool so child suite/test pools resolve them via the parent
-    // chain. The backing `BrowserHandle` makes the browser launch lazy.
-    // `request` is a new client per test, as Playwright's fixture is a
-    // new `APIRequestContext` per test: one shared across the worker
-    // carried each test's cookies into the next.
-    let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
-    worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(&browser_handle)));
-    worker_defs.insert(
-      WORKER_BROWSER_LAUNCH.into(),
-      build_worker_browser_def(Arc::clone(&browser_handle)),
-    );
-    worker_defs.insert(
-      "request".into(),
-      build_request_def(
-        self.config.base_url.clone().or_else(crate::config::base_url_from_env),
-        core_http_credentials(&self.config.browser.use_options.http_credentials),
-        self
-          .config
-          .browser
-          .use_options
-          .proxy
-          .as_ref()
-          .map(crate::config::ProxyConfig::to_engine),
-      ),
-    );
+    let worker_defs = self.worker_fixture_defs(&browser_handle);
     let root_fixture_pool = custom_fixture_pool;
     let custom_fixture_pool = root_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
 
@@ -1298,7 +1365,7 @@ impl Worker {
         WorkItem::Single(assignment) => {
           let result = ferridriver_expect::with_expect_config(
             self.expect_config(),
-            Box::pin(self.run_single(&browser_handle, &custom_fixture_pool, &mut active_suites, assignment)),
+            Box::pin(self.run_single(&browser_handle, &custom_fixture_pool, &mut active_suites, *assignment)),
           )
           .await;
           if result_tx.send(result).await.is_err() {
@@ -1322,66 +1389,7 @@ impl Worker {
     }
 
     // Run afterAll for every suite that had beforeAll on this worker.
-    for (suite_key, state) in &active_suites {
-      if state.before_all_ran {
-        for (i, hook) in state.hooks.after_all.iter().enumerate() {
-          let step_title = if state.hooks.after_all.len() == 1 {
-            "afterAll".to_string()
-          } else {
-            format!("afterAll [{i}]")
-          };
-          // afterAll has no test context — emit synthetic step events.
-          let step_id = format!("hook:afterAll:{suite_key}:{i}");
-          // Use a synthetic TestId for the suite.
-          let synthetic_id = crate::model::TestId {
-            root_path: None,
-            repeat_each_index: state.repeat_each_index,
-            file: suite_key.clone(),
-            suite: None,
-            name: step_title.clone(),
-            line: None,
-            column: None,
-          };
-          if let Some(event_bus) = &self.event_bus {
-            event_bus.emit(ReporterEvent::StepStarted(Arc::new(
-              crate::reporter::StepStartedEvent {
-                project: self.config.name.clone().unwrap_or_default(),
-                test_id: synthetic_id.clone(),
-                step_id: step_id.clone(),
-                parent_step_id: None,
-                title: step_title.clone(),
-                category: StepCategory::Hook,
-                location: None,
-                subtitle: None,
-                params: None,
-              },
-            )));
-          }
-          let start = Instant::now();
-          let result = run_caught(hook(state.fixture_pool.clone())).await;
-          let duration = start.elapsed();
-          let error = result.as_ref().err().map(|e| format!("{e}"));
-          if let Some(event_bus) = &self.event_bus {
-            event_bus.emit(ReporterEvent::StepFinished(Arc::new(
-              crate::reporter::StepFinishedEvent {
-                project: self.config.name.clone().unwrap_or_default(),
-                test_id: synthetic_id,
-                step_id,
-                title: step_title,
-                category: StepCategory::Hook,
-                duration,
-                error: error.clone(),
-                metadata: None,
-                annotations: Vec::new(),
-              },
-            )));
-          }
-          if let Err(e) = result {
-            tracing::warn!(target: "ferridriver::worker", "afterAll error: {e}");
-          }
-        }
-      }
-    }
+    Box::pin(self.run_after_all(&active_suites)).await;
 
     let mut cleanup_errors = Vec::new();
     for state in active_suites.values() {
@@ -1521,29 +1529,101 @@ impl Worker {
     assignment: TestAssignment,
   ) -> WorkerTestResult {
     let test = &assignment.test;
-    let test_id = test.id.clone();
-    tracing::Span::current().record("test", test_id.full_name().as_str());
-    let fixture_requests = test.fixture_requests.clone();
-    let case = test.clone();
-    let suite_mode = assignment.suite_mode;
+    tracing::Span::current().record("test", test.id.full_name().as_str());
     let attempt = assignment.attempt;
-    let max_retries = test.retries.unwrap_or(self.config.retries);
-    let max_attempts = max_retries + 1;
-    let suite_key = assignment.suite_key.clone();
+    let max_attempts = test.retries.unwrap_or(self.config.retries) + 1;
 
     tracing::debug!(
       target: "ferridriver::worker",
       worker = self.id,
-      test = test_id.full_name(),
+      test = test.id.full_name(),
       attempt,
       max_attempts,
       "dispatching test",
     );
-    let hooks = Arc::clone(&assignment.hooks);
 
-    // ── beforeAll (once per suite on this worker) ──
+    // If beforeAll failed, skip this test.
+    if Box::pin(self.ensure_suite_ready(browser, custom_pool, active_suites, &assignment)).await {
+      let outcome = TestOutcome {
+        test_id: test.id.clone(),
+        status: TestStatus::Skipped,
+        duration: Duration::ZERO,
+        attempt,
+        max_attempts,
+        error: Some(TestFailure {
+          message: format!("skipped: beforeAll failed for suite '{}'", assignment.suite_key),
+          stack: None,
+          diff: None,
+          screenshot: None,
+          error_context: None,
+        }),
+        annotations: test.annotations.clone(),
+        ..self.outcome_base(test, SystemTime::now())
+      };
+      return self.finish(outcome, false, assignment);
+    }
+
+    if should_skip(test, &self.config.browser) {
+      let outcome = TestOutcome {
+        test_id: test.id.clone(),
+        status: TestStatus::Skipped,
+        duration: Duration::ZERO,
+        attempt,
+        max_attempts,
+        annotations: test.annotations.clone(),
+        ..self.outcome_base(test, SystemTime::now())
+      };
+      return self.finish(outcome, false, assignment);
+    }
+
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::TestStarted {
+        test_id: test.id.clone(),
+        project: self.config.name.clone().unwrap_or_default(),
+        attempt,
+        worker_id: self.id,
+      });
+    }
+
+    let (outcome, should_retry) = Box::pin(self.run_attempt(browser, custom_pool, &assignment, max_attempts)).await;
+    self.finish(outcome, should_retry, assignment)
+  }
+
+  /// Report a finished attempt and hand it back to the runner.
+  fn finish(&self, outcome: TestOutcome, should_retry: bool, assignment: TestAssignment) -> WorkerTestResult {
+    let outcome = Arc::new(outcome);
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::TestFinished {
+        outcome: Arc::clone(&outcome),
+      });
+    }
+    WorkerTestResult {
+      outcome,
+      should_retry,
+      test: assignment.test,
+      suite_key: assignment.suite_key,
+      hooks: assignment.hooks,
+      suite_mode: assignment.suite_mode,
+      serial_tail: Vec::new(),
+    }
+  }
+
+  /// Set up the test's suite on this worker the first time one of its
+  /// tests arrives: its fixture pool, its worker-scope `auto` fixtures and
+  /// its `beforeAll` hooks. Returns whether a `beforeAll` hook failed, in
+  /// which case none of the suite's tests run.
+  async fn ensure_suite_ready(
+    &self,
+    browser: &Arc<crate::runner::BrowserHandle>,
+    custom_pool: &FixturePool,
+    active_suites: &mut FxHashMap<String, SuiteState>,
+    assignment: &TestAssignment,
+  ) -> bool {
+    let test_id = &assignment.test.id;
+    let suite_key = &assignment.suite_key;
+    let hooks = &assignment.hooks;
     let suite_state = active_suites.entry(suite_key.clone()).or_insert_with(|| {
-      let suite_test_info = self.create_suite_test_info(&suite_key, test_id.repeat_each_index);
+      let suite_test_info = self.create_suite_test_info(suite_key, test_id.repeat_each_index);
       // Suite-hook contexts are not traced: per-test traces belong to
       // tests, and beforeAll/afterAll containers have no outcome to
       // attach one to.
@@ -1555,14 +1635,14 @@ impl Worker {
         Arc::clone(&self.pool),
         false,
       ));
-      let suite_pool = custom_pool.child_with_defs(build_suite_fixture_defs(suite_resources), FixtureScope::Worker);
+      let suite_pool = custom_pool.child_with_defs(build_suite_fixture_defs(&suite_resources), FixtureScope::Worker);
       suite_pool.inject("test_info", suite_test_info);
 
       SuiteState {
         repeat_each_index: test_id.repeat_each_index,
         before_all_ran: false,
         before_all_failed: false,
-        hooks: Arc::clone(&hooks),
+        hooks: Arc::clone(hooks),
         fixture_pool: suite_pool,
       }
     });
@@ -1576,45 +1656,13 @@ impl Worker {
 
     if !suite_state.before_all_ran && !hooks.before_all.is_empty() {
       for (i, hook) in hooks.before_all.iter().enumerate() {
-        let step_title = if hooks.before_all.len() == 1 {
-          "beforeAll".to_string()
-        } else {
-          format!("beforeAll [{i}]")
+        let step = SuiteHookStep {
+          test_id: test_id.clone(),
+          step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+          title: hook_title("beforeAll", i, hooks.before_all.len()),
+          describe: |failure| failure.message.clone(),
         };
-        if let Some(event_bus) = &self.event_bus {
-          event_bus.emit(ReporterEvent::StepStarted(Arc::new(
-            crate::reporter::StepStartedEvent {
-              project: self.config.name.clone().unwrap_or_default(),
-              test_id: test_id.clone(),
-              step_id: format!("hook:beforeAll:{suite_key}:{i}"),
-              parent_step_id: None,
-              title: step_title.clone(),
-              category: StepCategory::Hook,
-              location: None,
-              subtitle: None,
-              params: None,
-            },
-          )));
-        }
-        let start = Instant::now();
-        let result = run_caught(hook(suite_state.fixture_pool.clone())).await;
-        let duration = start.elapsed();
-        let error = result.as_ref().err().map(|e| e.message.clone());
-        if let Some(event_bus) = &self.event_bus {
-          event_bus.emit(ReporterEvent::StepFinished(Arc::new(
-            crate::reporter::StepFinishedEvent {
-              project: self.config.name.clone().unwrap_or_default(),
-              test_id: test_id.clone(),
-              step_id: format!("hook:beforeAll:{suite_key}:{i}"),
-              title: step_title,
-              category: StepCategory::Hook,
-              duration,
-              error: error.clone(),
-              metadata: None,
-              annotations: Vec::new(),
-            },
-          )));
-        }
+        let result = self.run_suite_hook(hook, &suite_state.fixture_pool, step).await;
         if let Err(e) = result {
           tracing::error!(target: "ferridriver::worker", "beforeAll failed for {suite_key}: {e}");
           suite_state.before_all_failed = true;
@@ -1623,123 +1671,64 @@ impl Worker {
       }
       suite_state.before_all_ran = true;
     }
+    suite_state.before_all_failed
+  }
 
-    // If beforeAll failed, skip this test.
-    if suite_state.before_all_failed {
-      let outcome = Arc::new(TestOutcome {
-        test_id: test_id.clone(),
-        status: TestStatus::Skipped,
-        duration: Duration::ZERO,
-        attempt,
-        max_attempts,
-        error: Some(TestFailure {
-          message: format!("skipped: beforeAll failed for suite '{suite_key}'"),
-          stack: None,
-          diff: None,
-          screenshot: None,
-          error_context: None,
-        }),
-        annotations: test.annotations.clone(),
-        ..self.outcome_base(test, SystemTime::now())
-      });
-      if let Some(event_bus) = &self.event_bus {
-        event_bus.emit(ReporterEvent::TestFinished {
-          outcome: Arc::clone(&outcome),
-        });
-      }
-      return WorkerTestResult {
-        outcome,
-        should_retry: false,
-        test: case,
-        suite_key,
-        hooks,
-        suite_mode,
-        serial_tail: Vec::new(),
-      };
-    }
-
-    // Check for skip/fixme (with conditional evaluation).
-    let browser_config = &self.config.browser;
-    let should_skip = test.annotations.iter().any(|a| match a {
-      TestAnnotation::Skip { condition: None, .. } => true,
-      TestAnnotation::Skip {
-        condition: Some(cond), ..
-      } => evaluate_condition(cond, browser_config),
-      TestAnnotation::Fixme { condition: None, .. } => true,
-      TestAnnotation::Fixme {
-        condition: Some(cond), ..
-      } => evaluate_condition(cond, browser_config),
-      _ => false,
-    });
-    if should_skip {
-      let outcome = Arc::new(TestOutcome {
-        test_id: test_id.clone(),
-        status: TestStatus::Skipped,
-        duration: Duration::ZERO,
-        attempt,
-        max_attempts,
-        annotations: test.annotations.clone(),
-        ..self.outcome_base(test, SystemTime::now())
-      });
-      if let Some(event_bus) = &self.event_bus {
-        event_bus.emit(ReporterEvent::TestFinished {
-          outcome: Arc::clone(&outcome),
-        });
-      }
-      return WorkerTestResult {
-        outcome,
-        should_retry: false,
-        test: case,
-        suite_key,
-        hooks,
-        suite_mode,
-        serial_tail: Vec::new(),
-      };
-    }
-
+  /// Run one `beforeAll` / `afterAll` hook, reported as a step of
+  /// `step.test_id`.
+  async fn run_suite_hook(
+    &self,
+    hook: &crate::model::SuiteHookFn,
+    pool: &FixturePool,
+    step: SuiteHookStep,
+  ) -> Result<(), TestFailure> {
     if let Some(event_bus) = &self.event_bus {
-      event_bus.emit(ReporterEvent::TestStarted {
-        test_id: test_id.clone(),
-        project: self.config.name.clone().unwrap_or_default(),
-        attempt,
-        worker_id: self.id,
-      });
+      event_bus.emit(ReporterEvent::StepStarted(Arc::new(
+        crate::reporter::StepStartedEvent {
+          project: self.config.name.clone().unwrap_or_default(),
+          test_id: step.test_id.clone(),
+          step_id: step.step_id.clone(),
+          parent_step_id: None,
+          title: step.title.clone(),
+          category: StepCategory::Hook,
+          location: None,
+          subtitle: None,
+          params: None,
+        },
+      )));
     }
-
-    // Evaluate Fail condition: if condition matches, expect failure (invert pass/fail).
-    let mut expected_status = test.expected_status;
-    for ann in &test.annotations {
-      if let TestAnnotation::Fail { condition, .. } = ann {
-        let applies = match condition {
-          None => true,
-          Some(cond) => evaluate_condition(cond, browser_config),
-        };
-        if applies {
-          expected_status = ExpectedStatus::Fail;
-        }
-      }
-    }
-
-    // Timeout with slow multiplier (conditional).
-    let mut timeout_dur = test.timeout.unwrap_or(Duration::from_millis(self.config.timeout));
-    let is_slow = test.annotations.iter().any(|a| match a {
-      TestAnnotation::Slow { condition: None, .. } => true,
-      TestAnnotation::Slow {
-        condition: Some(cond), ..
-      } => evaluate_condition(cond, browser_config),
-      _ => false,
-    });
-    if is_slow {
-      timeout_dur *= 3;
-    }
-
     let start = Instant::now();
-    let started_at = SystemTime::now();
-    let effective_config = build_effective_context_config(&self.config, test);
-    let trace_composite: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let result = run_caught(hook(pool.clone())).await;
+    let duration = start.elapsed();
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::StepFinished(Arc::new(
+        crate::reporter::StepFinishedEvent {
+          project: self.config.name.clone().unwrap_or_default(),
+          test_id: step.test_id,
+          step_id: step.step_id,
+          title: step.title,
+          category: StepCategory::Hook,
+          duration,
+          error: result.as_ref().err().map(step.describe),
+          metadata: None,
+          annotations: Vec::new(),
+        },
+      )));
+    }
+    result
+  }
 
-    // Create TestInfo for this test execution.
-    let test_info = Arc::new(TestInfo {
+  /// The test's own `TestInfo` for this attempt.
+  fn new_test_info(
+    &self,
+    test: &crate::model::TestCase,
+    attempt: u32,
+    timeout: Duration,
+    start: Instant,
+    trace_composite: &Arc<std::sync::Mutex<Option<String>>>,
+  ) -> Arc<TestInfo> {
+    let test_id = &test.id;
+    Arc::new(TestInfo {
       test_id: test_id.clone(),
       title_path: test_id.title_path(),
       retry: attempt.saturating_sub(1),
@@ -1747,7 +1736,7 @@ impl Worker {
       parallel_index: self.slot,
       repeat_each_index: test_id.repeat_each_index,
       output_dir: absolutize(self.config.output_dir.join(test_artifact_dir_name(
-        &test_id,
+        test_id,
         self.config.name.as_deref().unwrap_or_default(),
       ))),
       snapshot_dir: snapshot_dir(&self.config),
@@ -1774,7 +1763,7 @@ impl Worker {
         .map_or_else(std::path::PathBuf::new, std::path::PathBuf::from),
       snapshot_names: Arc::new(std::sync::Mutex::new(crate::snapshot_path::SnapshotNames::default())),
       aria_snapshot_names: Arc::new(std::sync::Mutex::new(crate::snapshot_path::SnapshotNames::default())),
-      timeout: timeout_dur,
+      timeout,
       tags: test
         .annotations
         .iter()
@@ -1786,11 +1775,27 @@ impl Worker {
       start_time: start,
       event_bus: self.event_bus.clone(),
       annotations: Arc::new(Mutex::new(Vec::new())),
-      trace_composite: Arc::clone(&trace_composite),
+      trace_composite: Arc::clone(trace_composite),
       trace_step_calls: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       open_steps: Arc::default(),
       output: std::sync::Arc::new(std::sync::Mutex::new(crate::model::TestOutput::default())),
-    });
+    })
+  }
+
+  /// Everything one attempt runs against: its `TestInfo`, its browser
+  /// resources and the fixture pool built on them.
+  fn prepare_attempt(
+    &self,
+    browser: &Arc<crate::runner::BrowserHandle>,
+    custom_pool: &FixturePool,
+    test: &crate::model::TestCase,
+    attempt: u32,
+    timeout: Duration,
+    start: Instant,
+  ) -> AttemptRun {
+    let test_id = &test.id;
+    let trace_composite: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let test_info = self.new_test_info(test, attempt, timeout, start, &trace_composite);
     let trace_spec = self.config.trace.should_record(attempt, false).then(|| TraceSpec {
       key: test_id.execution_key(),
       title: test_id.full_name(),
@@ -1805,22 +1810,215 @@ impl Worker {
     });
     let resources = Arc::new(TestBrowserResources::new(
       Arc::clone(browser),
-      effective_config,
+      build_effective_context_config(&self.config, test),
       test_info.output_dir.clone(),
       trace_spec,
       Arc::clone(&self.pool),
-      fixture_requests.iter().any(|f| f == "page"),
+      test.fixture_requests.iter().any(|f| f == "page"),
     ));
-    let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
+    let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(&resources), FixtureScope::Test);
     test_pool.inject("test_info", Arc::clone(&test_info));
     let modifiers = Arc::new(crate::TestModifiers::default());
-    modifiers.timeout_updates.send_replace(timeout_dur);
+    modifiers.timeout_updates.send_replace(timeout);
     test_pool.inject("__test_modifiers", Arc::clone(&modifiers));
+    AttemptRun {
+      call_owner: Arc::from(test_info.call_owner()),
+      test_info,
+      resources,
+      test_pool,
+      modifiers,
+      trace_composite,
+    }
+  }
 
+  /// One attempt of the test, from fixture setup to the outcome, and
+  /// whether it should be retried.
+  async fn run_attempt(
+    &self,
+    browser: &Arc<crate::runner::BrowserHandle>,
+    custom_pool: &FixturePool,
+    assignment: &TestAssignment,
+    max_attempts: u32,
+  ) -> (TestOutcome, bool) {
+    let test = &assignment.test;
+    let test_id = &test.id;
+    let attempt = assignment.attempt;
+    let hooks = &assignment.hooks;
+    let start = Instant::now();
+    let started_at = SystemTime::now();
+    let run = self.prepare_attempt(browser, custom_pool, test, attempt, self.timeout_for(test), start);
+
+    let setup = match Box::pin(self.set_up_attempt(&run, test, attempt, &hooks.before_each)).await {
+      Ok(setup) => setup,
+      Err(e) => {
+        let () = run.resources.close().await;
+        let failure = TestFailure::wrap("failed to create page", &e);
+        let outcome = TestOutcome {
+          test_id: test_id.clone(),
+          status: TestStatus::Failed,
+          duration: start.elapsed(),
+          attempt,
+          max_attempts,
+          errors: vec![failure.clone()],
+          error: Some(failure),
+          annotations: test.annotations.clone(),
+          ..self.outcome_base(test, started_at)
+        };
+        return (outcome, attempt < max_attempts);
+      },
+    };
+    let AttemptSetup {
+      budget,
+      budget_started,
+      before_each_err,
+      timed_out_while,
+      mut page_for_artifacts,
+      video_handle,
+      api_steps: _api_steps,
+    } = setup;
+
+    let debug_hook = crate::debug::debug_hook();
+    if let Some(hook) = &debug_hook {
+      Self::debug_before_body(hook, browser, &run.resources, test_id).await;
+    }
+
+    let timeout_result = if timed_out_while.is_some() {
+      Err(ferridriver::pause::Timedout)
+    } else if let Some(err) = before_each_err {
+      Ok(Err(err))
+    } else {
+      // Soft assertions raised anywhere in the body land on this test's
+      // own collector and fail it at the end, instead of stopping here.
+      ferridriver::pause::run_within_updates_from(
+        budget,
+        run.modifiers.timeout_updates.subscribe(),
+        run.in_test_scope(run_caught((test.test_fn)(run.test_pool.clone()))),
+      )
+      .await
+    };
+    let timeout_dur = *run.modifiers.timeout_updates.borrow();
+    // Read before teardown: closing the context fails the stuck call, which
+    // then finishes and leaves the registry.
+    let interrupted = if timeout_result.is_err() {
+      ferridriver::trace::pending_calls(&run.call_owner, budget_started + timeout_dur)
+    } else {
+      Vec::new()
+    };
+    ferridriver::trace::forget_pending_calls(&run.call_owner);
+
+    if let Some(hook) = &debug_hook {
+      Self::debug_after_failure(hook, browser, &run.resources, test_id, &timeout_result, timeout_dur).await;
+    }
+
+    let after = AfterBudget::new(&self.config, timeout_dur);
+    let mut teardown_stuck = Box::pin(run.run_after_each(&hooks.after_each, &after)).await;
+
+    // Release the debugger's hold before the artifacts are collected: the
+    // session it published points at this test's context, and the next
+    // test must not inherit either it or the gate it armed.
+    if let Some(hook) = &debug_hook {
+      hook.test_finished().await;
+    }
+
+    if page_for_artifacts.is_none() {
+      page_for_artifacts = run.test_pool.try_get_cached::<ferridriver::Page>("page");
+    }
+    let test_failed =
+      timeout_result.as_ref().is_err() || timeout_result.as_ref().is_ok_and(std::result::Result::is_err);
+    let ended = AttemptEnd {
+      attempt,
+      test_failed,
+      timeout_result,
+      timeout_dur,
+      timed_out_while,
+    };
+    let artifacts = Box::pin(self.collect_artifacts(
+      &run,
+      &after,
+      &mut teardown_stuck,
+      page_for_artifacts.as_deref(),
+      video_handle,
+      &ended,
+    ))
+    .await;
+    ferridriver::trace::forget_pending_calls(&run.call_owner);
+    let settled = Settled {
+      start,
+      started_at,
+      max_attempts,
+      interrupted,
+      artifacts,
+      teardown_failure: teardown_stuck.map(|phase| after.exceeded_while(phase)),
+    };
+    Box::pin(self.settle_outcome(test, &run, ended, settled)).await
+  }
+
+  /// `--debug`: the body has not started and the context is live, which is
+  /// the point Playwright publishes a test from
+  /// (`runAfterCreateBrowserContext`). The hook arms rather than blocks —
+  /// the first API call is where the run actually stops.
+  ///
+  /// The context is normally created by the `page` fixture, i.e. inside
+  /// the body — too late for a client to attach before the first call.
+  /// Debugging is the one mode that pays for creating it up front.
+  async fn debug_before_body(
+    hook: &Arc<dyn crate::debug::DebugHook>,
+    browser: &Arc<crate::runner::BrowserHandle>,
+    resources: &Arc<TestBrowserResources>,
+    test_id: &crate::model::TestId,
+  ) {
+    if let Err(e) = resources.context().await {
+      tracing::warn!(target: "ferridriver::worker", "--debug: no context to publish: {e}");
+    }
+    if let Some(live) = Self::debug_test(browser, resources, test_id, None).await {
+      hook.test_starting(live).await;
+    }
+  }
+
+  /// Hold here, before `afterEach` and before the context closes, so
+  /// whoever attaches sees the page the failure left rather than its
+  /// wreckage. Only on a failure: a passing test has nothing to look at.
+  async fn debug_after_failure(
+    hook: &Arc<dyn crate::debug::DebugHook>,
+    browser: &Arc<crate::runner::BrowserHandle>,
+    resources: &Arc<TestBrowserResources>,
+    test_id: &crate::model::TestId,
+    timeout_result: &Result<Result<(), TestFailure>, ferridriver::pause::Timedout>,
+    timeout_dur: Duration,
+  ) {
+    let failure = match timeout_result {
+      Ok(Err(e)) => Some(e.message.clone()),
+      Err(_) => Some(format!("test timed out after {}ms", timeout_dur.as_millis())),
+      Ok(Ok(())) => None,
+    };
+    if let Some(error) = failure
+      && let Some(live) = Self::debug_test(browser, resources, test_id, Some(error)).await
+    {
+      hook.test_failed(live).await;
+    }
+  }
+
+  /// Set up what the attempt's body runs with: the worker-scope fixtures
+  /// outside the test's budget, then the test's budget, its `auto`
+  /// fixtures, its page when the video is recorded, and its `beforeEach`
+  /// hooks.
+  ///
+  /// # Errors
+  ///
+  /// Returns the failure to create the page the video records, which
+  /// fails the attempt.
+  async fn set_up_attempt(
+    &self,
+    run: &AttemptRun,
+    test: &crate::model::TestCase,
+    attempt: u32,
+    before_each: &[crate::model::HookFn],
+  ) -> Result<AttemptSetup, ferridriver::FerriError> {
     // Worker-scoped fixtures (the browser) are set up outside the test's
     // budget, as Playwright gives them a slot of their own.
-    let mut before_each_err = test_pool
-      .resolve_worker_dependencies(&fixture_requests)
+    let mut before_each_err = run
+      .test_pool
+      .resolve_worker_dependencies(&test.fixture_requests)
       .await
       .err()
       .map(TestFailure::from);
@@ -1833,459 +2031,148 @@ impl Worker {
     // Calls are filed under the test that made them, so a timeout can name
     // the one it interrupted, on whichever browser it ran.
     ferridriver::trace::track_pending_calls();
-    let call_owner: Arc<str> = Arc::from(test_info.call_owner());
     // The same identity reports each of those calls as a `pw:api` step.
-    let _api_steps = crate::api_steps::observe(&test_info);
+    let api_steps = crate::api_steps::observe(&run.test_info);
     let mut timed_out_while: Option<&'static str> = None;
     if before_each_err.is_none() {
-      let setup = ferridriver::pause::run_within_updates_from(budget, modifiers.timeout_updates.subscribe(), async {
-        // Playwright `auto: true` fixtures resolve regardless of whether
-        // the test body destructured them. Walk the full def graph for
-        // this scope (and any narrower parents) and pre-resolve.
-        for name in test_pool.auto_fixture_names_for(FixtureScope::Test) {
-          test_pool.resolve(&name).await?;
-        }
-        Ok::<(), ferridriver::FerriError>(())
-      })
-      .await;
-      if let Ok(result) = setup {
-        before_each_err = result.err().map(TestFailure::from);
-      } else {
-        timed_out_while = Some("setting up fixtures");
+      match run.set_up_auto_fixtures(budget).await {
+        Ok(result) => before_each_err = result.err().map(TestFailure::from),
+        Err(ferridriver::pause::Timedout) => timed_out_while = Some("setting up fixtures"),
       }
-    }
-
-    enum VideoHandle {
-      Eager(ferridriver::video::VideoRecordingHandle),
-      Buffered(ferridriver::video::BufferedRecordingHandle),
     }
 
     let mut page_for_artifacts = None;
-    let video_mode = self.config.video.mode;
-    let video_handle: Option<VideoHandle> =
-      if before_each_err.is_some() || timed_out_while.is_some() || !video_mode.should_record(attempt) {
-        None
-      } else {
-        match ferridriver::pause::run_within_updates_from(
-          budget,
-          modifiers.timeout_updates.subscribe(),
-          test_pool.get::<ferridriver::Page>("page"),
-        )
+    let mut video_handle = None;
+    if before_each_err.is_none() && timed_out_while.is_none() && self.config.video.mode.should_record(attempt) {
+      match Box::pin(self.start_video(run, budget, attempt)).await {
+        VideoStart::TimedOut => timed_out_while = Some("setting up fixtures"),
+        VideoStart::Started { page, handle } => {
+          page_for_artifacts = Some(page);
+          video_handle = handle;
+        },
+        VideoStart::PageFailed(e) => return Err(e),
+      }
+    }
+
+    if before_each_err.is_none() && timed_out_while.is_none() {
+      match Box::pin(run.run_before_each(before_each, budget)).await {
+        Ok(Ok(())) => {},
+        Ok(Err(e)) => before_each_err = Some(e),
+        Err(ferridriver::pause::Timedout) => timed_out_while = Some("running beforeEach hooks"),
+      }
+    }
+    Ok(AttemptSetup {
+      budget,
+      budget_started,
+      before_each_err,
+      timed_out_while,
+      page_for_artifacts,
+      video_handle,
+      api_steps,
+    })
+  }
+
+  /// The test's timeout: its own or the config's, tripled when a `slow`
+  /// annotation applies.
+  fn timeout_for(&self, test: &crate::model::TestCase) -> Duration {
+    let timeout = test
+      .timeout
+      .unwrap_or_else(|| Duration::from_millis(self.config.timeout));
+    let is_slow = test.annotations.iter().any(|a| match a {
+      TestAnnotation::Slow { condition: None, .. } => true,
+      TestAnnotation::Slow {
+        condition: Some(cond), ..
+      } => evaluate_condition(cond, &self.config.browser),
+      _ => false,
+    });
+    if is_slow { timeout * 3 } else { timeout }
+  }
+
+  /// Open the `page` for the video recording and start recording it, as
+  /// the mode asks: eagerly when the recording is kept even on a pass,
+  /// buffered when only a failure keeps it.
+  async fn start_video(&self, run: &AttemptRun, budget: ferridriver::pause::BudgetStart, attempt: u32) -> VideoStart {
+    let page = match ferridriver::pause::run_within_updates_from(
+      budget,
+      run.modifiers.timeout_updates.subscribe(),
+      run.test_pool.get::<ferridriver::Page>("page"),
+    )
+    .await
+    {
+      Err(ferridriver::pause::Timedout) => return VideoStart::TimedOut,
+      Ok(Err(e)) => return VideoStart::PageFailed(e),
+      Ok(Ok(page)) => page,
+    };
+    let test_info = &run.test_info;
+    let _ = std::fs::create_dir_all(&test_info.output_dir);
+    let (video_width, video_height) = self.config.video.frame_size(page.viewport_size());
+    let started = if self.config.video.mode.records_eagerly(attempt) {
+      ferridriver::video::start_recording(&page, video_file(test_info, attempt), video_width, video_height, 80)
         .await
-        {
-          Err(ferridriver::pause::Timedout) => {
-            timed_out_while = Some("setting up fixtures");
-            None
-          },
-          Ok(Ok(page)) => {
-            page_for_artifacts = Some(Arc::clone(&page));
-            let _ = std::fs::create_dir_all(&test_info.output_dir);
-            // Eager when the recording is kept even on a pass; buffered
-            // when only a failure keeps it.
-            let (video_width, video_height) = self.config.video.frame_size(page.viewport_size());
-            if video_mode.records_eagerly(attempt) {
-              let ext = ferridriver::video::video_extension();
-              let video_path =
-                test_info
-                  .output_dir
-                  .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-              match ferridriver::video::start_recording(&page, video_path, video_width, video_height, 80).await {
-                Ok(h) => Some(VideoHandle::Eager(h)),
-                Err(e) => {
-                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                  None
-                },
-              }
-            } else {
-              match ferridriver::video::start_buffered_recording(&page, video_width, video_height, 80).await {
-                Ok(h) => Some(VideoHandle::Buffered(h)),
-                Err(e) => {
-                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                  None
-                },
-              }
-            }
-          },
-          Ok(Err(e)) => {
-            let () = resources.close().await;
-            let duration = start.elapsed();
-            let failure = TestFailure::wrap("failed to create page", e);
-            let outcome = Arc::new(TestOutcome {
-              test_id: test_id.clone(),
-              status: TestStatus::Failed,
-              duration,
-              attempt,
-              max_attempts,
-              errors: vec![failure.clone()],
-              error: Some(failure),
-              annotations: test.annotations.clone(),
-              ..self.outcome_base(test, started_at)
-            });
-            if let Some(event_bus) = &self.event_bus {
-              event_bus.emit(ReporterEvent::TestFinished {
-                outcome: Arc::clone(&outcome),
-              });
-            }
-            return WorkerTestResult {
-              outcome,
-              should_retry: attempt <= max_retries,
-              test: case,
-              suite_key,
-              hooks,
-              suite_mode,
-              serial_tail: Vec::new(),
-            };
-          },
-        }
-      };
-
-    for (i, hook) in hooks.before_each.iter().enumerate() {
-      if before_each_err.is_some() || timed_out_while.is_some() {
-        break;
-      }
-      let title = if hooks.before_each.len() == 1 {
-        "beforeEach".to_string()
-      } else {
-        format!("beforeEach [{i}]")
-      };
-      let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let Ok(result) = ferridriver::pause::run_within_updates_from(
-        budget,
-        modifiers.timeout_updates.subscribe(),
-        ferridriver::trace::with_call_owner(
-          Arc::clone(&call_owner),
-          ferridriver_expect::with_sink(
-            Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-            run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
-          ),
-        ),
-      )
-      .await
-      else {
-        let limit = *modifiers.timeout_updates.borrow();
-        step_handle
-          .end(Some(format!("Test timeout of {}ms exceeded.", limit.as_millis())))
-          .await;
-        timed_out_while = Some("running beforeEach hooks");
-        break;
-      };
-      let err_msg = result.as_ref().err().map(|e| e.message.clone());
-      step_handle.end(err_msg).await;
-      if let Err(e) = result {
-        before_each_err = Some(e);
-        break;
-      }
-    }
-
-    let debug_hook = crate::debug::debug_hook();
-    // `--debug`: the body has not started and the context is live, which is
-    // the point Playwright publishes a test from
-    // (`runAfterCreateBrowserContext`). The hook arms rather than blocks —
-    // the first API call is where the run actually stops.
-    //
-    // The context is normally created by the `page` fixture, i.e. inside
-    // the body — too late for a client to attach before the first call.
-    // Debugging is the one mode that pays for creating it up front.
-    if let Some(hook) = &debug_hook {
-      if let Err(e) = resources.context().await {
-        tracing::warn!(target: "ferridriver::worker", "--debug: no context to publish: {e}");
-      }
-      if let Some(live) = Self::debug_test(browser, &resources, &test_id, None).await {
-        hook.test_starting(live).await;
-      }
-    }
-
-    let timeout_result = if timed_out_while.is_some() {
-      Err(ferridriver::pause::Timedout)
-    } else if let Some(err) = before_each_err {
-      Ok(Err(err))
+        .map(VideoHandle::Eager)
     } else {
-      // Soft assertions raised anywhere in the body land on this test's
-      // own collector and fail it at the end, instead of stopping here.
-      ferridriver::pause::run_within_updates_from(
-        budget,
-        modifiers.timeout_updates.subscribe(),
-        ferridriver::trace::with_call_owner(
-          Arc::clone(&call_owner),
-          ferridriver_expect::with_sink(
-            Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-            run_caught((test.test_fn)(test_pool.clone())),
-          ),
-        ),
-      )
-      .await
+      ferridriver::video::start_buffered_recording(&page, video_width, video_height, 80)
+        .await
+        .map(VideoHandle::Buffered)
     };
-    timeout_dur = *modifiers.timeout_updates.borrow();
-    // Read before teardown: closing the context fails the stuck call, which
-    // then finishes and leaves the registry.
-    let interrupted = if timeout_result.is_err() {
-      ferridriver::trace::pending_calls(&call_owner, budget_started + timeout_dur)
-    } else {
-      Vec::new()
+    let handle = match started {
+      Ok(handle) => Some(handle),
+      Err(e) => {
+        tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+        None
+      },
     };
-    ferridriver::trace::forget_pending_calls(&call_owner);
+    VideoStart::Started { page, handle }
+  }
 
-    // Hold here, before `afterEach` and before the context closes, so
-    // whoever attaches sees the page the failure left rather than its
-    // wreckage. Only on a failure: a passing test has nothing to look at.
-    if let Some(hook) = &debug_hook {
-      let failure = match &timeout_result {
-        Ok(Err(e)) => Some(e.message.clone()),
-        Err(_) => Some(format!("test timed out after {}ms", timeout_dur.as_millis())),
-        Ok(Ok(())) => None,
-      };
-      if let Some(error) = failure
-        && let Some(live) = Self::debug_test(browser, &resources, &test_id, Some(error)).await
+  /// Capture what the attempt leaves behind on the after-hooks budget:
+  /// the failure screenshot, the video, the trace (with the failure and
+  /// the screenshot recorded into it) and the page snapshot, then close
+  /// the context.
+  async fn collect_artifacts(
+    &self,
+    run: &AttemptRun,
+    after: &AfterBudget,
+    teardown_stuck: &mut Option<&'static str>,
+    page: Option<&ferridriver::Page>,
+    video_handle: Option<VideoHandle>,
+    ended: &AttemptEnd,
+  ) -> Artifacts {
+    let screenshot = match page {
+      Some(page)
+        if self
+          .config
+          .screenshot
+          .mode
+          .should_capture(ended.test_failed, ended.attempt) =>
       {
-        hook.test_failed(live).await;
-      }
-    }
-
-    // After hooks get a budget of their own, the larger of the configured
-    // and the test's timeout (Playwright's `calculateMaxTimeout`), so a
-    // test that timed out still cleans up and a hung hook still ends.
-    let configured = Duration::from_millis(self.config.timeout);
-    let after_limit = if configured.is_zero() || timeout_dur.is_zero() {
-      Duration::ZERO
-    } else {
-      configured.max(timeout_dur)
-    };
-    let (_after_limit_tx, after_limit_rx) = tokio::sync::watch::channel(after_limit);
-    let after_budget = ferridriver::pause::BudgetStart::now();
-    // What ran the after-hooks budget out. Artifact capture and context
-    // teardown spend the same budget, as Playwright's fixture teardown
-    // shares the after-hooks slot, so a page that wedged the test cannot
-    // wedge the run.
-    let mut teardown_stuck: Option<&'static str> = None;
-    for (i, hook) in hooks.after_each.iter().enumerate() {
-      let title = if hooks.after_each.len() == 1 {
-        "afterEach".to_string()
-      } else {
-        format!("afterEach [{i}]")
-      };
-      let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-      let Ok(result) = ferridriver::pause::run_within_updates_from(
-        after_budget,
-        after_limit_rx.clone(),
-        ferridriver::trace::with_call_owner(
-          Arc::clone(&call_owner),
-          ferridriver_expect::with_sink(
-            Arc::clone(&test_info) as Arc<dyn ferridriver_expect::SoftSink>,
-            run_caught(hook(test_pool.clone(), Arc::clone(&test_info))),
-          ),
-        ),
-      )
-      .await
-      else {
-        let message = format!("afterEach timeout of {}ms exceeded.", after_limit.as_millis());
-        tracing::warn!(target: "ferridriver::worker", "{message}");
-        step_handle.end(Some(message)).await;
-        teardown_stuck = Some("running afterEach hooks");
-        break;
-      };
-      let err_msg = result.as_ref().err().map(|e| e.message.clone());
-      step_handle.end(err_msg).await;
-      if let Err(e) = result {
-        tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
-      }
-    }
-
-    // Release the debugger's hold before the artifacts are collected: the
-    // session it published points at this test's context, and the next
-    // test must not inherit either it or the gate it armed.
-    if let Some(hook) = &debug_hook {
-      hook.test_finished().await;
-    }
-
-    if page_for_artifacts.is_none() {
-      page_for_artifacts = test_pool.try_get_cached::<ferridriver::Page>("page");
-    }
-    let test_failed = timeout_result.as_ref().is_err() || timeout_result.as_ref().is_ok_and(|r| r.is_err());
-    let screenshot = if self.config.screenshot.mode.should_capture(test_failed, attempt) {
-      if let Some(ref page) = page_for_artifacts {
         after_hooks_step(
-          after_budget,
-          &after_limit_rx,
-          &mut teardown_stuck,
+          after.start,
+          &after.updates,
+          teardown_stuck,
           "capturing the failure screenshot",
           capture_screenshot(page, &self.config.screenshot),
         )
         .await
         .flatten()
-      } else {
-        None
-      }
-    } else {
-      None
+      },
+      _ => None,
     };
-    let video = Box::pin(async {
-      match video_handle {
-        Some(VideoHandle::Eager(handle)) => match handle.stop().await {
-          Ok(path) => Some(path),
-          Err(e) => {
-            tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
-            None
-          },
-        },
-        Some(VideoHandle::Buffered(handle)) => {
-          if test_failed {
-            let ext = ferridriver::video::video_extension();
-            let video_path =
-              test_info
-                .output_dir
-                .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-            let _ = std::fs::create_dir_all(&test_info.output_dir);
-            match handle.encode(video_path).await {
-              Ok(path) => Some(path),
-              Err(e) => {
-                tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
-                None
-              },
-            }
-          } else {
-            handle.discard().await;
-            None
-          }
-        },
-        None => None,
-      }
-    });
-    let video_path = after_hooks_step(
-      after_budget,
-      &after_limit_rx,
-      &mut teardown_stuck,
-      "saving the video",
-      video,
-    )
-    .await
-    .flatten();
-    // The failure itself goes into the trace, not just the call that
-    // raised it: the viewer's Errors tab is built from these, and an
-    // assertion message is what a reader is looking for first.
-    if test_failed {
-      let message = match &timeout_result {
-        Ok(Err(e)) => Some(e.message.clone()),
-        Err(_) => Some(format!(
-          "Test timeout of {}ms exceeded{}.",
-          timeout_dur.as_millis(),
-          timed_out_while
-            .map(|phase| format!(" while {phase}"))
-            .unwrap_or_default()
-        )),
-        Ok(Ok(())) => None,
-      };
-      let composite = trace_composite
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-      if let (Some(composite), Some(message)) = (composite, message) {
-        let stack = test_id
-          .line
-          .map(|line| ferridriver::trace::StackFrame {
-            file: test_id.file.clone(),
-            line: u32::try_from(line).unwrap_or_default(),
-            column: 0,
-          })
-          .into_iter()
-          .collect();
-        ferridriver::trace::record_error(&composite, message, stack);
-      }
-    }
-
-    // Mirror the failure screenshot into the trace as an `attach`
-    // action (Playwright's test runner does the same), so the viewer's
-    // Attachments tab carries it alongside the timeline.
-    if let Some(ref png) = screenshot {
-      let composite = trace_composite
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-      if let Some(composite) = composite
-        && let Some(mut span) = ferridriver::trace::begin_custom_action(
-          &composite,
-          ferridriver::trace::CustomAction {
-            class: "Test",
-            method: "attach",
-            title: "attach \"screenshot-on-failure\"".to_string(),
-            params: serde_json::json!({}),
-            parent_id: None,
-            step_id: None,
-            backdate_ms: 0.0,
-            stack: Vec::new(),
-          },
-        )
-      {
-        span.attach("screenshot-on-failure", "image/png", png.clone());
-        span.finish_message(None);
-      }
-    }
-    // Stop the per-test trace while the context is still alive: export
-    // to disk when the mode retains it, discard otherwise. Retention
-    // keys off the RAW body result (same signal as screenshot-on-failure
-    // and buffered video): an expected-failure test that fails as
-    // expected still retains its trace under retain-on-failure — the
-    // trace shows the deliberate failure.
-    let trace_path = {
-      let started = trace_composite
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-        .is_some();
-      // Stop the UI live-trace poller from exporting a recorder that is
-      // about to be torn down (the finished zip takes over at finish).
-      if started {
-        crate::ui_server::unregister_live_trace(&test_id.execution_key());
-      }
-      match (started, resources.current_context().await) {
-        (true, Some(ctx)) if teardown_stuck.is_none() => {
-          let path = self.config.trace.should_write(attempt, test_failed).then(|| {
-            let _ = std::fs::create_dir_all(&test_info.output_dir);
-            test_info.output_dir.join(format!(
-              "{}-attempt{}.trace.zip",
-              sanitize_filename(&test_id.name),
-              attempt
-            ))
-          });
-          let tracing = ctx.tracing();
-          let stop = std::future::IntoFuture::into_future(
-            tracing
-              .stop()
-              .options(ferridriver::trace::TracingStopOptions { path: path.clone() }),
-          );
-          match Box::pin(after_hooks_step(
-            after_budget,
-            &after_limit_rx,
-            &mut teardown_stuck,
-            "saving the trace",
-            stop,
-          ))
-          .await
-          {
-            Some(Ok(())) => {
-              if let Some(path) = &path {
-                redact_trace(&self.config.secrets, path);
-              }
-              path
-            },
-            Some(Err(e)) => {
-              tracing::warn!(target: "ferridriver::worker", "trace stop failed: {e}");
-              None
-            },
-            None => None,
-          }
-        },
-        _ => None,
-      }
-    };
+    let video = Box::pin(stop_video(video_handle, &run.test_info, ended));
+    let video_path = after_hooks_step(after.start, &after.updates, teardown_stuck, "saving the video", video)
+      .await
+      .flatten();
+    record_failure_in_trace(run, ended, screenshot.as_deref());
+    let trace_path = Box::pin(self.stop_trace(run, after, teardown_stuck, ended)).await;
     // Playwright's `_takePageSnapshot`: an `expect` failure brings the
     // tree it judged; any other failure gets the page as it was left.
-    let page_snapshot = if wants_page_snapshot(&timeout_result, &test_info) && teardown_stuck.is_none() {
+    let page_snapshot = if wants_page_snapshot(&ended.timeout_result, &run.test_info) && teardown_stuck.is_none() {
       Box::pin(after_hooks_step(
-        after_budget,
-        &after_limit_rx,
-        &mut teardown_stuck,
+        after.start,
+        &after.updates,
+        teardown_stuck,
         "capturing the page snapshot",
-        take_page_snapshot(resources.current_context().await),
+        take_page_snapshot(run.resources.current_context().await),
       ))
       .await
       .flatten()
@@ -2295,124 +2182,224 @@ impl Worker {
     // Out of budget, the context is left to the browser's own shutdown:
     // closing it is the step most likely to wait on whatever wedged.
     Box::pin(after_hooks_step(
-      after_budget,
-      &after_limit_rx,
-      &mut teardown_stuck,
+      after.start,
+      &after.updates,
+      teardown_stuck,
       "closing the browser context",
-      resources.close(),
+      run.resources.close(),
     ))
     .await;
-    ferridriver::trace::forget_pending_calls(&call_owner);
-    let teardown_failure = teardown_stuck.map(|phase| TestFailure {
-      message: format!(
-        "Tearing down the test exceeded the after-hooks timeout of {}ms while {phase}.",
-        after_limit.as_millis()
-      ),
-      stack: None,
-      diff: None,
-      screenshot: None,
-      error_context: None,
-    });
-
-    let duration = start.elapsed();
-    let result = (timeout_result, screenshot, video_path, Some(test_pool));
-    let (timeout_result, screenshot, video_path, test_pool) = result;
-
-    let mut attachments = Vec::new();
-    if let Some(ref png) = screenshot {
-      let _ = std::fs::create_dir_all(&test_info.output_dir);
-      let screenshot_path = test_info.output_dir.join(format!("test-failed-attempt{attempt}.png"));
-      match std::fs::write(&screenshot_path, png) {
-        Ok(()) => attachments.push(Attachment {
-          name: "screenshot-on-failure".into(),
-          content_type: "image/png".into(),
-          body: AttachmentBody::Path(screenshot_path),
-          step_id: None,
-        }),
-        Err(e) => {
-          tracing::warn!(target: "ferridriver::worker", "screenshot write failed: {e}");
-          attachments.push(Attachment {
-            name: "screenshot-on-failure".into(),
-            content_type: "image/png".into(),
-            body: AttachmentBody::Bytes(png.clone()),
-            step_id: None,
-          });
-        },
-      }
+    Artifacts {
+      screenshot,
+      video_path,
+      trace_path,
+      page_snapshot,
     }
-    if let Some(path) = trace_path {
-      attachments.push(Attachment {
-        name: "trace".into(),
-        content_type: "application/zip".into(),
-        body: AttachmentBody::Path(path),
-        step_id: None,
+  }
+
+  /// Stop the per-test trace while the context is still alive: export
+  /// to disk when the mode retains it, discard otherwise. Retention
+  /// keys off the RAW body result (same signal as screenshot-on-failure
+  /// and buffered video): an expected-failure test that fails as
+  /// expected still retains its trace under retain-on-failure — the
+  /// trace shows the deliberate failure.
+  async fn stop_trace(
+    &self,
+    run: &AttemptRun,
+    after: &AfterBudget,
+    teardown_stuck: &mut Option<&'static str>,
+    ended: &AttemptEnd,
+  ) -> Option<std::path::PathBuf> {
+    let test_info = &run.test_info;
+    let started = run
+      .trace_composite
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+      .is_some();
+    // Stop the UI live-trace poller from exporting a recorder that is
+    // about to be torn down (the finished zip takes over at finish).
+    if started {
+      crate::ui_server::unregister_live_trace(&test_info.test_id.execution_key());
+    }
+    let ctx = match (started, run.resources.current_context().await) {
+      (true, Some(ctx)) if teardown_stuck.is_none() => ctx,
+      _ => return None,
+    };
+    let path = self
+      .config
+      .trace
+      .should_write(ended.attempt, ended.test_failed)
+      .then(|| {
+        let _ = std::fs::create_dir_all(&test_info.output_dir);
+        test_info.output_dir.join(format!(
+          "{}-attempt{}.trace.zip",
+          sanitize_filename(&test_info.test_id.name),
+          ended.attempt
+        ))
       });
-    }
-
-    let (raw_status, raw_error) = match timeout_result {
-      Ok(Ok(())) => (TestStatus::Passed, None),
-      Ok(Err(failure)) => {
-        // Runtime skip: test body called test.skip() — treat as skip, not failure.
-        // This mirrors Playwright's TestSkipError thrown by test.skip() inside body.
-        if failure.message.contains("__FERRIDRIVER_SKIP__:") {
-          let reason = failure.message.split("__FERRIDRIVER_SKIP__:").nth(1).unwrap_or("");
-          tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
-          let mut annotations = test.annotations.clone();
-          annotations.extend(test_info.get_annotations().await);
-          let outcome = Arc::new(TestOutcome {
-            test_id: test_id.clone(),
-            status: TestStatus::Skipped,
-            duration: start.elapsed(),
-            attempt,
-            max_attempts,
-            annotations,
-            ..self.outcome_base(test, started_at)
-          });
-          if let Some(event_bus) = &self.event_bus {
-            event_bus.emit(ReporterEvent::TestFinished {
-              outcome: Arc::clone(&outcome),
-            });
-          }
-          return WorkerTestResult {
-            outcome,
-            should_retry: false,
-            test: case,
-            suite_key,
-            hooks,
-            suite_mode,
-            serial_tail: Vec::new(),
-          };
+    let tracing = ctx.tracing();
+    let stop = std::future::IntoFuture::into_future(
+      tracing
+        .stop()
+        .options(ferridriver::trace::TracingStopOptions { path: path.clone() }),
+    );
+    match Box::pin(after_hooks_step(
+      after.start,
+      &after.updates,
+      teardown_stuck,
+      "saving the trace",
+      stop,
+    ))
+    .await
+    {
+      Some(Ok(())) => {
+        if let Some(path) = &path {
+          redact_trace(&self.config.secrets, path);
         }
-
-        let mut failure = failure;
-        if failure.screenshot.is_none() {
-          failure.screenshot = screenshot;
-        }
-        (TestStatus::Failed, Some(failure))
+        path
       },
-      Err(_) => (
-        TestStatus::TimedOut,
-        Some(TestFailure {
-          message: format!(
-            "test timed out after {timeout_dur:?}{}{}",
-            timed_out_while
-              .map(|phase| format!(" while {phase}"))
-              .unwrap_or_default(),
-            describe_pending_calls(&interrupted, &test_info.config_dir),
-          ),
-          stack: None,
-          diff: None,
-          screenshot,
-          error_context: None,
-        }),
-      ),
+      Some(Err(e)) => {
+        tracing::warn!(target: "ferridriver::worker", "trace stop failed: {e}");
+        None
+      },
+      None => None,
+    }
+  }
+
+  /// The attempt's outcome from what it ended with and what it left, and
+  /// whether to retry it.
+  async fn settle_outcome(
+    &self,
+    test: &crate::model::TestCase,
+    run: &AttemptRun,
+    ended: AttemptEnd,
+    settled: Settled,
+  ) -> (TestOutcome, bool) {
+    let test_info = &run.test_info;
+    let test_id = &test.id;
+    let AttemptEnd {
+      attempt,
+      test_failed,
+      timeout_result,
+      timeout_dur,
+      timed_out_while,
+    } = ended;
+    let Settled {
+      start,
+      started_at,
+      max_attempts,
+      interrupted,
+      artifacts,
+      teardown_failure,
+    } = settled;
+    let Artifacts {
+      screenshot,
+      video_path,
+      trace_path,
+      page_snapshot,
+    } = artifacts;
+    let duration = start.elapsed();
+
+    let attachments = failure_attachments(test_info, attempt, screenshot.as_deref(), trace_path);
+
+    let raw = raw_result(
+      timeout_result,
+      screenshot,
+      timeout_dur,
+      timed_out_while,
+      &describe_pending_calls(&interrupted, &test_info.config_dir),
+    );
+    let (raw_status, raw_error) = match raw {
+      RawResult::Ended(status, error) => (status, error),
+      RawResult::SkippedAtRuntime => {
+        let mut annotations = test.annotations.clone();
+        annotations.extend(test_info.get_annotations().await);
+        let outcome = TestOutcome {
+          test_id: test_id.clone(),
+          status: TestStatus::Skipped,
+          duration: start.elapsed(),
+          attempt,
+          max_attempts,
+          annotations,
+          ..self.outcome_base(test, started_at)
+        };
+        return (outcome, false);
+      },
     };
 
+    let expected_status = self.effective_expected_status(test, run).await;
+
+    // Soft assertions are part of WHAT HAPPENED, so they settle before
+    // `test.fail()` is consulted: a test that only failed softly did
+    // fail, and `test.fail()` must be able to expect that.
+    let soft_errors = test_info.drain_soft_errors();
+    let error_context = write_error_context(
+      test_info,
+      attempt,
+      raw_error.iter().chain(&soft_errors).collect::<Vec<_>>().as_slice(),
+      page_snapshot.as_deref(),
+      &ferridriver_trace::redact::Redactor::new(self.config.secrets.iter().cloned()),
+    );
+    let (status, error) = judge(raw_status, raw_error, &soft_errors, expected_status);
+
+    let mut recorded = self
+      .take_recorded(test_info, attachments, video_path.as_deref(), test_failed, attempt)
+      .await;
+    recorded.attachments.extend(error_context);
+
+    // Merge compile-time annotations with runtime annotations.
+    let mut annotations = test.annotations.clone();
+    annotations.extend(test_info.get_annotations().await);
+
+    // What the test printed belongs to the test, not to the process:
+    // reporters, the HTML report and the UI's terminal read it here.
+    let output = test_info
+      .output
+      .lock()
+      .map(|mut held| std::mem::take(&mut *held))
+      .unwrap_or_default();
+
+    // `errors` leads with the hard failure and then the soft assertions
+    // the test collected: reporters that show every error read it, and
+    // `error` stays the first for the ones that show one.
+    let mut errors: Vec<TestFailure> = error.iter().cloned().collect();
+    errors.extend(soft_errors);
+    let (status, error) = with_teardown_failure(status, error, &mut errors, teardown_failure);
+    let outcome = TestOutcome {
+      test_id: test_id.clone(),
+      status,
+      duration,
+      attempt,
+      max_attempts,
+      error,
+      errors,
+      attachments: recorded.attachments,
+      snapshots: recorded.snapshots,
+      steps: recorded.steps,
+      stdout: output.stdout,
+      stderr: output.stderr,
+      annotations,
+      // The effective expectation, not the declared one: `test.fail()`
+      // called inside the body arms after the base was built.
+      expected_status,
+      ..self.outcome_base(test, started_at)
+    };
+
+    let should_retry = crate::model::outcome_kind(&[outcome.status], outcome.expected_status)
+      == crate::model::TestOutcomeKind::Unexpected
+      && attempt < max_attempts
+      && !test_info.non_retriable.load(std::sync::atomic::Ordering::Relaxed);
+    (outcome, should_retry)
+  }
+
+  /// The expectation the attempt is judged against: the declared one, a
+  /// `fail` annotation that applies, or `test.fail()` called at runtime.
+  async fn effective_expected_status(&self, test: &crate::model::TestCase, run: &AttemptRun) -> ExpectedStatus {
+    let mut expected_status = expected_status_for(test, &self.config.browser);
     // Read runtime modifiers set by test body (via NAPI TestInfo.skip/fail/slow/setTimeout).
     // These are injected into the fixture pool by the NAPI test_fn closure.
-    if let Some(ref pool) = test_pool
-      && let Ok(modifiers) = pool.get::<crate::TestModifiers>("__test_modifiers").await
-    {
+    if let Ok(modifiers) = run.test_pool.get::<crate::TestModifiers>("__test_modifiers").await {
       if modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
         expected_status = ExpectedStatus::Fail;
       }
@@ -2423,58 +2410,20 @@ impl Worker {
         tracing::debug!(target: "ferridriver::worker", "test.setTimeout({ms}ms) called at runtime");
       }
     }
+    expected_status
+  }
 
-    // Soft assertions are part of WHAT HAPPENED, so they settle before
-    // `test.fail()` is consulted: a test that only failed softly did
-    // fail, and `test.fail()` must be able to expect that.
-    let soft_errors = test_info.drain_soft_errors();
-    let error_context = write_error_context(
-      &test_info,
-      attempt,
-      raw_error.iter().chain(&soft_errors).collect::<Vec<_>>().as_slice(),
-      page_snapshot.as_deref(),
-      &ferridriver_trace::redact::Redactor::new(self.config.secrets.iter().cloned()),
-    );
-    let (raw_status, raw_error) = if !soft_errors.is_empty() && raw_status == TestStatus::Passed {
-      let msg = soft_errors
-        .iter()
-        .map(|e| format!("  - {}", e.message))
-        .collect::<Vec<_>>()
-        .join("\n");
-      (
-        TestStatus::Failed,
-        Some(TestFailure {
-          message: format!("{} soft assertion(s) failed:\n{msg}", soft_errors.len()),
-          stack: None,
-          diff: None,
-          screenshot: None,
-          error_context: None,
-        }),
-      )
-    } else {
-      (raw_status, raw_error)
-    };
-
-    // `test.fail()` does not rewrite what happened: the attempt keeps the
-    // status it ended with, and `expected_status` says which one counts as
-    // success. Every consumer compares the two through
-    // `model::outcome_kind` — inverting here instead would report a
-    // `test.fail` test as `passed` in the JSON report, where Playwright
-    // reports `failed` with `expectedStatus: "failed"`.
-    let (status, error) = match (&raw_status, &expected_status) {
-      (TestStatus::Passed, ExpectedStatus::Fail) => (
-        TestStatus::Passed,
-        Some(TestFailure {
-          message: "Expected to fail, but passed.".into(),
-          stack: None,
-          diff: None,
-          screenshot: None,
-          error_context: None,
-        }),
-      ),
-      _ => (raw_status, raw_error),
-    };
-
+  /// Take what the test recorded on its `TestInfo`: its steps, its
+  /// attachments after `attachments`, its snapshots, and the video when
+  /// the mode keeps it.
+  async fn take_recorded(
+    &self,
+    test_info: &TestInfo,
+    mut attachments: Vec<Attachment>,
+    video_path: Option<&std::path::Path>,
+    test_failed: bool,
+    attempt: u32,
+  ) -> Recorded {
     // A browser call a timeout cut short never reports its own end.
     test_info.close_open_steps("step never completed (test aborted)");
     // Collect tracked test steps and attachments.
@@ -2503,7 +2452,7 @@ impl Worker {
     // Attach or clean up video recording.
     // For buffered mode, video_path is only Some when the test failed (already filtered).
     // For eager mode, we keep or delete based on the mode.
-    if let Some(ref path) = video_path {
+    if let Some(path) = video_path {
       // The buffered path only produced a file when the mode's retain
       // rule already said yes, so asking again is the same answer.
       let keep = self.config.video.mode.should_retain(test_failed, attempt);
@@ -2511,84 +2460,557 @@ impl Worker {
         attachments.push(Attachment {
           name: "video".into(),
           content_type: ferridriver::video::video_content_type_of(path).into(),
-          body: AttachmentBody::Path(path.clone()),
+          body: AttachmentBody::Path(path.to_path_buf()),
           step_id: None,
         });
       } else {
         let _ = std::fs::remove_file(path);
       }
     }
-
-    attachments.extend(error_context);
-
-    // Merge compile-time annotations with runtime annotations.
-    let mut annotations = test.annotations.clone();
-    annotations.extend(test_info.get_annotations().await);
-
-    // What the test printed belongs to the test, not to the process:
-    // reporters, the HTML report and the UI's terminal read it here.
-    let output = test_info
-      .output
-      .lock()
-      .map(|mut held| std::mem::take(&mut *held))
-      .unwrap_or_default();
-
-    // `errors` leads with the hard failure and then the soft assertions
-    // the test collected: reporters that show every error read it, and
-    // `error` stays the first for the ones that show one.
-    let mut errors: Vec<TestFailure> = error.iter().cloned().collect();
-    errors.extend(soft_errors);
-    let (status, error) = match teardown_failure {
-      Some(failure) => {
-        errors.push(failure.clone());
-        if status == TestStatus::Passed {
-          (TestStatus::TimedOut, Some(failure))
-        } else {
-          (status, error.or(Some(failure)))
-        }
-      },
-      None => (status, error),
-    };
-    let outcome = Arc::new(TestOutcome {
-      test_id: test_id.clone(),
-      status,
-      duration,
-      attempt,
-      max_attempts,
-      error,
-      errors,
+    Recorded {
+      steps,
       attachments,
       snapshots,
-      steps,
-      stdout: output.stdout,
-      stderr: output.stderr,
-      annotations,
-      // The effective expectation, not the declared one: `test.fail()`
-      // called inside the body arms after the base was built.
-      expected_status,
-      ..self.outcome_base(test, started_at)
+    }
+  }
+}
+
+/// Everything one attempt of a test runs against.
+struct AttemptRun {
+  test_info: Arc<TestInfo>,
+  resources: Arc<TestBrowserResources>,
+  test_pool: FixturePool,
+  modifiers: Arc<crate::TestModifiers>,
+  /// The identity the attempt's browser calls are filed under.
+  call_owner: Arc<str>,
+  trace_composite: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl AttemptRun {
+  /// `fut` as the test's own code runs: its calls filed under the test,
+  /// its soft assertions collected on it.
+  fn in_test_scope<F: std::future::Future>(&self, fut: F) -> impl std::future::Future<Output = F::Output> {
+    ferridriver::trace::with_call_owner(
+      Arc::clone(&self.call_owner),
+      ferridriver_expect::with_sink(
+        Arc::clone(&self.test_info) as Arc<dyn ferridriver_expect::SoftSink>,
+        fut,
+      ),
+    )
+  }
+
+  /// Playwright `auto: true` fixtures resolve regardless of whether the
+  /// test body destructured them. Walk the full def graph for this scope
+  /// (and any narrower parents) and pre-resolve.
+  async fn set_up_auto_fixtures(
+    &self,
+    budget: ferridriver::pause::BudgetStart,
+  ) -> Result<ferridriver::Result<()>, ferridriver::pause::Timedout> {
+    ferridriver::pause::run_within_updates_from(budget, self.modifiers.timeout_updates.subscribe(), async {
+      for name in self.test_pool.auto_fixture_names_for(FixtureScope::Test) {
+        self.test_pool.resolve(&name).await?;
+      }
+      Ok::<(), ferridriver::FerriError>(())
+    })
+    .await
+  }
+
+  /// Run the `beforeEach` hooks in order on the test's budget, stopping
+  /// at the first that fails or runs the budget out.
+  async fn run_before_each(
+    &self,
+    hooks: &[crate::model::HookFn],
+    budget: ferridriver::pause::BudgetStart,
+  ) -> Result<Result<(), TestFailure>, ferridriver::pause::Timedout> {
+    for (i, hook) in hooks.iter().enumerate() {
+      let step_handle = self
+        .test_info
+        .begin_step(&hook_title("beforeEach", i, hooks.len()), StepCategory::Hook)
+        .await;
+      let Ok(result) = ferridriver::pause::run_within_updates_from(
+        budget,
+        self.modifiers.timeout_updates.subscribe(),
+        self.in_test_scope(run_caught(hook(self.test_pool.clone(), Arc::clone(&self.test_info)))),
+      )
+      .await
+      else {
+        let limit = *self.modifiers.timeout_updates.borrow();
+        step_handle.end(Some(format!("Test timeout of {}ms exceeded.", limit.as_millis())));
+        return Err(ferridriver::pause::Timedout);
+      };
+      step_handle.end(result.as_ref().err().map(|e| e.message.clone()));
+      if let Err(e) = result {
+        return Ok(Err(e));
+      }
+    }
+    Ok(Ok(()))
+  }
+
+  /// Run the `afterEach` hooks in order on the after-hooks budget. A
+  /// failing hook is logged and the rest still run; one that runs the
+  /// budget out stops them, and the phase it stopped in is returned.
+  async fn run_after_each(&self, hooks: &[crate::model::HookFn], after: &AfterBudget) -> Option<&'static str> {
+    for (i, hook) in hooks.iter().enumerate() {
+      let step_handle = self
+        .test_info
+        .begin_step(&hook_title("afterEach", i, hooks.len()), StepCategory::Hook)
+        .await;
+      let Ok(result) = ferridriver::pause::run_within_updates_from(
+        after.start,
+        after.updates.clone(),
+        self.in_test_scope(run_caught(hook(self.test_pool.clone(), Arc::clone(&self.test_info)))),
+      )
+      .await
+      else {
+        let message = format!("afterEach timeout of {}ms exceeded.", after.limit.as_millis());
+        tracing::warn!(target: "ferridriver::worker", "{message}");
+        step_handle.end(Some(message));
+        return Some("running afterEach hooks");
+      };
+      step_handle.end(result.as_ref().err().map(|e| e.message.clone()));
+      if let Err(e) = result {
+        tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
+      }
+    }
+    None
+  }
+}
+
+/// After hooks get a budget of their own, the larger of the configured
+/// and the test's timeout (Playwright's `calculateMaxTimeout`), so a test
+/// that timed out still cleans up and a hung hook still ends. Artifact
+/// capture and context teardown spend the same budget, as Playwright's
+/// fixture teardown shares the after-hooks slot, so a page that wedged
+/// the test cannot wedge the run.
+struct AfterBudget {
+  limit: Duration,
+  start: ferridriver::pause::BudgetStart,
+  updates: tokio::sync::watch::Receiver<Duration>,
+  /// Held so `updates` stays open: a closed channel would end the budget.
+  _limit: tokio::sync::watch::Sender<Duration>,
+}
+
+impl AfterBudget {
+  fn new(config: &TestConfig, test_timeout: Duration) -> Self {
+    let configured = Duration::from_millis(config.timeout);
+    let limit = if configured.is_zero() || test_timeout.is_zero() {
+      Duration::ZERO
+    } else {
+      configured.max(test_timeout)
+    };
+    let (sender, updates) = tokio::sync::watch::channel(limit);
+    Self {
+      limit,
+      start: ferridriver::pause::BudgetStart::now(),
+      updates,
+      _limit: sender,
+    }
+  }
+
+  /// The failure of a teardown that ran this budget out in `phase`.
+  fn exceeded_while(&self, phase: &str) -> TestFailure {
+    TestFailure {
+      message: format!(
+        "Tearing down the test exceeded the after-hooks timeout of {}ms while {phase}.",
+        self.limit.as_millis()
+      ),
+      stack: None,
+      diff: None,
+      screenshot: None,
+      error_context: None,
+    }
+  }
+}
+
+/// What [`Worker::set_up_attempt`] leaves for the hooks and the body.
+struct AttemptSetup {
+  budget: ferridriver::pause::BudgetStart,
+  budget_started: Instant,
+  before_each_err: Option<TestFailure>,
+  timed_out_while: Option<&'static str>,
+  page_for_artifacts: Option<Arc<ferridriver::Page>>,
+  video_handle: Option<VideoHandle>,
+  /// Reports the attempt's browser calls as `pw:api` steps until dropped.
+  api_steps: ferridriver::trace::OwnerObserverGuard,
+}
+
+/// How the attempt's hooks and body ended.
+struct AttemptEnd {
+  attempt: u32,
+  /// The raw body result failed, whatever `test.fail()` expects.
+  test_failed: bool,
+  timeout_result: Result<Result<(), TestFailure>, ferridriver::pause::Timedout>,
+  /// The test's timeout as it stood at the end, `test.setTimeout` included.
+  timeout_dur: Duration,
+  /// The phase the test's budget ran out in, when it ran out before the body.
+  timed_out_while: Option<&'static str>,
+}
+
+/// What the attempt left once torn down.
+struct Settled {
+  start: Instant,
+  started_at: SystemTime,
+  max_attempts: u32,
+  /// The browser calls a timeout interrupted.
+  interrupted: Vec<ferridriver::trace::PendingCall>,
+  artifacts: Artifacts,
+  teardown_failure: Option<TestFailure>,
+}
+
+/// What a test recorded on its `TestInfo` while it ran.
+struct Recorded {
+  steps: Vec<crate::model::TestStep>,
+  attachments: Vec<Attachment>,
+  snapshots: Vec<crate::snapshot_record::SnapshotComparison>,
+}
+
+/// What [`Worker::collect_artifacts`] captured.
+struct Artifacts {
+  screenshot: Option<Vec<u8>>,
+  video_path: Option<std::path::PathBuf>,
+  trace_path: Option<std::path::PathBuf>,
+  page_snapshot: Option<String>,
+}
+
+enum VideoHandle {
+  Eager(ferridriver::video::VideoRecordingHandle),
+  Buffered(ferridriver::video::BufferedRecordingHandle),
+}
+
+enum VideoStart {
+  /// The test's budget ran out opening the page.
+  TimedOut,
+  /// The page could not be created, which fails the attempt.
+  PageFailed(ferridriver::FerriError),
+  /// The page is open; the recording when it could be started.
+  Started {
+    page: Arc<ferridriver::Page>,
+    handle: Option<VideoHandle>,
+  },
+}
+
+/// A `beforeAll` / `afterAll` hook as the step it is reported as.
+struct SuiteHookStep {
+  test_id: crate::model::TestId,
+  step_id: String,
+  title: String,
+  /// How the step's error reads.
+  describe: fn(&TestFailure) -> String,
+}
+
+/// `beforeEach`, or `beforeEach [1]` when the suite has several.
+fn hook_title(kind: &str, index: usize, count: usize) -> String {
+  if count == 1 {
+    kind.to_string()
+  } else {
+    format!("{kind} [{index}]")
+  }
+}
+
+/// Whether a `skip` or `fixme` annotation applies to this run.
+fn should_skip(test: &crate::model::TestCase, browser_config: &crate::config::BrowserConfig) -> bool {
+  test.annotations.iter().any(|a| match a {
+    TestAnnotation::Skip { condition: None, .. } | TestAnnotation::Fixme { condition: None, .. } => true,
+    TestAnnotation::Skip {
+      condition: Some(cond), ..
+    }
+    | TestAnnotation::Fixme {
+      condition: Some(cond), ..
+    } => evaluate_condition(cond, browser_config),
+    _ => false,
+  })
+}
+
+/// The declared expectation, turned to failure by a `fail` annotation
+/// whose condition holds.
+fn expected_status_for(test: &crate::model::TestCase, browser_config: &crate::config::BrowserConfig) -> ExpectedStatus {
+  let fails = test.annotations.iter().any(|a| match a {
+    TestAnnotation::Fail { condition: None, .. } => true,
+    TestAnnotation::Fail {
+      condition: Some(cond), ..
+    } => evaluate_condition(cond, browser_config),
+    _ => false,
+  });
+  if fails {
+    ExpectedStatus::Fail
+  } else {
+    test.expected_status
+  }
+}
+
+/// Where an attempt's video is written.
+fn video_file(test_info: &TestInfo, attempt: u32) -> std::path::PathBuf {
+  let ext = ferridriver::video::video_extension();
+  test_info.output_dir.join(format!(
+    "{}-attempt{}.{ext}",
+    sanitize_filename(&test_info.test_id.name),
+    attempt
+  ))
+}
+
+/// Stop the recording: an eager one is kept as it is, a buffered one is
+/// encoded only when the attempt failed.
+async fn stop_video(
+  handle: Option<VideoHandle>,
+  test_info: &TestInfo,
+  ended: &AttemptEnd,
+) -> Option<std::path::PathBuf> {
+  match handle? {
+    VideoHandle::Eager(handle) => match handle.stop().await {
+      Ok(path) => Some(path),
+      Err(e) => {
+        tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
+        None
+      },
+    },
+    VideoHandle::Buffered(handle) => {
+      if ended.test_failed {
+        let video_path = video_file(test_info, ended.attempt);
+        let _ = std::fs::create_dir_all(&test_info.output_dir);
+        match handle.encode(video_path).await {
+          Ok(path) => Some(path),
+          Err(e) => {
+            tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
+            None
+          },
+        }
+      } else {
+        handle.discard().await;
+        None
+      }
+    },
+  }
+}
+
+/// Record the failure into the attempt's trace, and the failure
+/// screenshot as an `attach` action beside it.
+fn record_failure_in_trace(run: &AttemptRun, ended: &AttemptEnd, screenshot: Option<&[u8]>) {
+  let test_id = &run.test_info.test_id;
+  // The failure itself goes into the trace, not just the call that
+  // raised it: the viewer's Errors tab is built from these, and an
+  // assertion message is what a reader is looking for first.
+  if ended.test_failed {
+    let message = match &ended.timeout_result {
+      Ok(Err(e)) => Some(e.message.clone()),
+      Err(_) => Some(format!(
+        "Test timeout of {}ms exceeded{}.",
+        ended.timeout_dur.as_millis(),
+        ended
+          .timed_out_while
+          .map(|phase| format!(" while {phase}"))
+          .unwrap_or_default()
+      )),
+      Ok(Ok(())) => None,
+    };
+    let composite = run
+      .trace_composite
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    if let (Some(composite), Some(message)) = (composite, message) {
+      let stack = test_id
+        .line
+        .map(|line| ferridriver::trace::StackFrame {
+          file: test_id.file.clone(),
+          line: u32::try_from(line).unwrap_or_default(),
+          column: 0,
+        })
+        .into_iter()
+        .collect();
+      ferridriver::trace::record_error(&composite, message, stack);
+    }
+  }
+
+  // Mirror the failure screenshot into the trace as an `attach`
+  // action (Playwright's test runner does the same), so the viewer's
+  // Attachments tab carries it alongside the timeline.
+  if let Some(png) = screenshot {
+    let composite = run
+      .trace_composite
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    if let Some(composite) = composite
+      && let Some(mut span) = ferridriver::trace::begin_custom_action(
+        &composite,
+        ferridriver::trace::CustomAction {
+          class: "Test",
+          method: "attach",
+          title: "attach \"screenshot-on-failure\"".to_string(),
+          params: serde_json::json!({}),
+          parent_id: None,
+          step_id: None,
+          backdate_ms: 0.0,
+          stack: Vec::new(),
+        },
+      )
+    {
+      span.attach("screenshot-on-failure", "image/png", png.to_vec());
+      span.finish_message(None);
+    }
+  }
+}
+
+/// The failure screenshot, written beside the test's other output (or
+/// carried inline when it cannot be), and the trace.
+fn failure_attachments(
+  test_info: &TestInfo,
+  attempt: u32,
+  screenshot: Option<&[u8]>,
+  trace_path: Option<std::path::PathBuf>,
+) -> Vec<Attachment> {
+  let mut attachments = Vec::new();
+  if let Some(png) = screenshot {
+    let _ = std::fs::create_dir_all(&test_info.output_dir);
+    let screenshot_path = test_info.output_dir.join(format!("test-failed-attempt{attempt}.png"));
+    match std::fs::write(&screenshot_path, png) {
+      Ok(()) => attachments.push(Attachment {
+        name: "screenshot-on-failure".into(),
+        content_type: "image/png".into(),
+        body: AttachmentBody::Path(screenshot_path),
+        step_id: None,
+      }),
+      Err(e) => {
+        tracing::warn!(target: "ferridriver::worker", "screenshot write failed: {e}");
+        attachments.push(Attachment {
+          name: "screenshot-on-failure".into(),
+          content_type: "image/png".into(),
+          body: AttachmentBody::Bytes(png.to_vec()),
+          step_id: None,
+        });
+      },
+    }
+  }
+  if let Some(path) = trace_path {
+    attachments.push(Attachment {
+      name: "trace".into(),
+      content_type: "application/zip".into(),
+      body: AttachmentBody::Path(path),
+      step_id: None,
     });
+  }
+  attachments
+}
 
-    if let Some(event_bus) = &self.event_bus {
-      event_bus.emit(ReporterEvent::TestFinished {
-        outcome: Arc::clone(&outcome),
-      });
-    }
+/// How the body ended, before soft assertions and `test.fail()`.
+enum RawResult {
+  Ended(TestStatus, Option<TestFailure>),
+  /// The body called `test.skip()`.
+  SkippedAtRuntime,
+}
 
-    let should_retry = crate::model::outcome_kind(&[outcome.status], outcome.expected_status)
-      == crate::model::TestOutcomeKind::Unexpected
-      && attempt < max_attempts
-      && !test_info.non_retriable.load(std::sync::atomic::Ordering::Relaxed);
+/// The attempt's raw status: passed, failed (with the failure
+/// screenshot when the failure brought none), timed out, or skipped from
+/// inside the body.
+fn raw_result(
+  timeout_result: Result<Result<(), TestFailure>, ferridriver::pause::Timedout>,
+  screenshot: Option<Vec<u8>>,
+  timeout_dur: Duration,
+  timed_out_while: Option<&'static str>,
+  pending_calls: &str,
+) -> RawResult {
+  match timeout_result {
+    Ok(Ok(())) => RawResult::Ended(TestStatus::Passed, None),
+    Ok(Err(failure)) => {
+      // Runtime skip: test body called test.skip() — treat as skip, not failure.
+      // This mirrors Playwright's TestSkipError thrown by test.skip() inside body.
+      if failure.message.contains("__FERRIDRIVER_SKIP__:") {
+        let reason = failure.message.split("__FERRIDRIVER_SKIP__:").nth(1).unwrap_or("");
+        tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
+        return RawResult::SkippedAtRuntime;
+      }
 
-    WorkerTestResult {
-      outcome,
-      should_retry,
-      test: case,
-      suite_key,
-      hooks,
-      suite_mode,
-      serial_tail: Vec::new(),
-    }
+      let mut failure = failure;
+      if failure.screenshot.is_none() {
+        failure.screenshot = screenshot;
+      }
+      RawResult::Ended(TestStatus::Failed, Some(failure))
+    },
+    Err(_) => RawResult::Ended(
+      TestStatus::TimedOut,
+      Some(TestFailure {
+        message: format!(
+          "test timed out after {timeout_dur:?}{}{pending_calls}",
+          timed_out_while
+            .map(|phase| format!(" while {phase}"))
+            .unwrap_or_default(),
+        ),
+        stack: None,
+        diff: None,
+        screenshot,
+        error_context: None,
+      }),
+    ),
+  }
+}
+
+/// A teardown that ran out of time fails a test that had passed, and is
+/// one more error on one that had not.
+fn with_teardown_failure(
+  status: TestStatus,
+  error: Option<TestFailure>,
+  errors: &mut Vec<TestFailure>,
+  teardown_failure: Option<TestFailure>,
+) -> (TestStatus, Option<TestFailure>) {
+  match teardown_failure {
+    Some(failure) => {
+      errors.push(failure.clone());
+      if status == TestStatus::Passed {
+        (TestStatus::TimedOut, Some(failure))
+      } else {
+        (status, error.or(Some(failure)))
+      }
+    },
+    None => (status, error),
+  }
+}
+
+/// The attempt's status and error once its soft assertions and
+/// `test.fail()` are taken into account.
+fn judge(
+  raw_status: TestStatus,
+  raw_error: Option<TestFailure>,
+  soft_errors: &[TestFailure],
+  expected_status: ExpectedStatus,
+) -> (TestStatus, Option<TestFailure>) {
+  let (raw_status, raw_error) = if !soft_errors.is_empty() && raw_status == TestStatus::Passed {
+    let msg = soft_errors
+      .iter()
+      .map(|e| format!("  - {}", e.message))
+      .collect::<Vec<_>>()
+      .join("\n");
+    (
+      TestStatus::Failed,
+      Some(TestFailure {
+        message: format!("{} soft assertion(s) failed:\n{msg}", soft_errors.len()),
+        stack: None,
+        diff: None,
+        screenshot: None,
+        error_context: None,
+      }),
+    )
+  } else {
+    (raw_status, raw_error)
+  };
+
+  // `test.fail()` does not rewrite what happened: the attempt keeps the
+  // status it ended with, and `expected_status` says which one counts as
+  // success. Every consumer compares the two through
+  // `model::outcome_kind` — inverting here instead would report a
+  // `test.fail` test as `passed` in the JSON report, where Playwright
+  // reports `failed` with `expectedStatus: "failed"`.
+  match (&raw_status, &expected_status) {
+    (TestStatus::Passed, ExpectedStatus::Fail) => (
+      TestStatus::Passed,
+      Some(TestFailure {
+        message: "Expected to fail, but passed.".into(),
+        stack: None,
+        diff: None,
+        screenshot: None,
+        error_context: None,
+      }),
+    ),
+    _ => (raw_status, raw_error),
   }
 }
 
@@ -2661,10 +3083,10 @@ fn install_panic_capture() {
   HOOK.call_once(|| {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-      let location = info
-        .location()
-        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-        .unwrap_or_else(|| "<unknown>".to_string());
+      let location = info.location().map_or_else(
+        || "<unknown>".to_string(),
+        |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+      );
       let backtrace = std::backtrace::Backtrace::force_capture();
       LAST_PANIC_STACK.with(|cell| *cell.borrow_mut() = Some(format!("panicked at {location}\n{backtrace}")));
       previous(info);
@@ -2814,10 +3236,7 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
 
     // Generic env var: `env:VAR_NAME` — true if the env var is set and non-empty.
     // Example: `@skip(env:SKIP_SLOW_TESTS)`, `#[ferritest(skip = "env:NO_GPU")]`
-    other if other.starts_with("env:") => {
-      let var_name = &other[4..];
-      std::env::var(var_name).is_ok_and(|v| !v.is_empty())
-    },
+    other if let Some(var_name) = other.strip_prefix("env:") => std::env::var(var_name).is_ok_and(|v| !v.is_empty()),
 
     // Unknown condition: don't match.
     _ => false,
@@ -2826,7 +3245,6 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
 
 #[cfg(test)]
 mod tests {
-  #![allow(clippy::expect_used, clippy::unwrap_used)]
 
   use super::{EffectiveContextConfig, after_hooks_step, artifact_dir_name, build_context_options, config_viewport};
   use crate::config::{ContextConfig, ViewportConfig, expand_device_keys};
@@ -2883,7 +3301,9 @@ mod tests {
   /// A `use` block as a config layer leaves it: the device expanded,
   /// then deserialized into the typed bag.
   fn used(block: serde_json::Value) -> ContextConfig {
-    let mut map = block.as_object().cloned().expect("object");
+    let serde_json::Value::Object(mut map) = block else {
+      panic!("a use block is an object");
+    };
     expand_device_keys(&mut map);
     serde_json::from_value(serde_json::Value::Object(map)).expect("context config")
   }

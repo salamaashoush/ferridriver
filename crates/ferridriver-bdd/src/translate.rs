@@ -145,28 +145,28 @@ async fn build_world_from_pool(
   let browser: Arc<ferridriver::Browser> = pool
     .get("browser")
     .await
-    .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
+    .map_err(|e| TestFailure::wrap("fixture 'browser' failed", &e))?;
   let page: Arc<ferridriver::Page> = pool
     .get("page")
     .await
-    .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
+    .map_err(|e| TestFailure::wrap("fixture 'page' failed", &e))?;
   let context: Arc<ferridriver::context::ContextRef> = pool
     .get("context")
     .await
-    .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
+    .map_err(|e| TestFailure::wrap("fixture 'context' failed", &e))?;
   let request: Arc<ferridriver::http_client::HttpClient> = pool
     .get("request")
     .await
-    .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
+    .map_err(|e| TestFailure::wrap("fixture 'request' failed", &e))?;
   let test_info: Arc<TestInfo> = pool
     .get("test_info")
     .await
-    .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
+    .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", &e))?;
 
   let modifiers = pool
     .get("__test_modifiers")
     .await
-    .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", e))?;
+    .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", &e))?;
 
   Ok(BrowserWorld::new(ferridriver_test::model::TestFixtures {
     browser,
@@ -367,28 +367,28 @@ fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, 
       let browser: Arc<ferridriver::Browser> = pool
         .get("browser")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'browser' failed", &e))?;
       let page: Arc<ferridriver::Page> = pool
         .get("page")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'page' failed", &e))?;
       let context: Arc<ferridriver::context::ContextRef> = pool
         .get("context")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'context' failed", &e))?;
       let test_info: Arc<TestInfo> = pool
         .get("test_info")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", &e))?;
       let request: Arc<ferridriver::http_client::HttpClient> = pool
         .get("request")
         .await
-        .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture 'request' failed", &e))?;
 
       let modifiers = pool
         .get("__test_modifiers")
         .await
-        .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", e))?;
+        .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", &e))?;
 
       // Build unified TestFixtures and construct BrowserWorld from it.
       let fixtures = ferridriver_test::model::TestFixtures {
@@ -534,10 +534,10 @@ impl StepObserver for TestInfoObserver {
         },
       };
       match event.result.status {
-        StepStatus::Passed => handle.end(None).await,
-        StepStatus::Failed => handle.end(event.result.error.clone()).await,
-        StepStatus::Skipped => handle.skip(event.result.error.clone()).await,
-        StepStatus::Pending | StepStatus::Undefined => handle.pending(event.result.error.clone()).await,
+        StepStatus::Passed => handle.end(None),
+        StepStatus::Failed => handle.end(event.result.error.clone()),
+        StepStatus::Skipped => handle.skip(event.result.error.clone()),
+        StepStatus::Pending | StepStatus::Undefined => handle.pending(event.result.error.clone()),
       }
     })
   }

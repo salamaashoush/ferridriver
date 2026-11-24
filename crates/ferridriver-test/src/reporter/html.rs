@@ -186,6 +186,7 @@ pub struct HtmlReporter {
 }
 
 impl HtmlReporter {
+  #[must_use]
   pub fn new(output_path: PathBuf) -> Self {
     Self {
       output_path,
@@ -239,7 +240,7 @@ impl HtmlReporter {
       skipped: counts.skipped,
       flaky: counts.flaky,
       tests,
-      duration_ms: self.collector.run.duration.as_millis() as u64,
+      duration_ms: u64::try_from(self.collector.run.duration.as_millis()).unwrap_or(u64::MAX),
       started_at_ms: self
         .collector
         .run
@@ -248,10 +249,13 @@ impl HtmlReporter {
         .ok()
         .and_then(|d| i64::try_from(d.as_millis()).ok())
         .unwrap_or_default(),
-      generated_at_ms: std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64,
+      generated_at_ms: u64::try_from(
+        std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .unwrap_or_default()
+          .as_millis(),
+      )
+      .unwrap_or(u64::MAX),
       metadata: self.collector.run.metadata.clone(),
       merge_files: self.merge_files,
     }
@@ -331,12 +335,13 @@ fn html_test(record: &TestRecord, merge_files: bool) -> HtmlTest {
     id: record.stable_id(),
     location: id.line.map(|line| format!("{}:{line}", id.file)),
     status: match record.outcome_kind() {
-      crate::model::TestOutcomeKind::Expected => last.status.as_str().to_string(),
+      crate::model::TestOutcomeKind::Expected | crate::model::TestOutcomeKind::Unexpected => {
+        last.status.as_str().to_string()
+      },
       crate::model::TestOutcomeKind::Flaky => "flaky".to_string(),
       crate::model::TestOutcomeKind::Skipped => "skipped".to_string(),
-      crate::model::TestOutcomeKind::Unexpected => last.status.as_str().to_string(),
     },
-    duration_ms: record.total_duration().as_millis() as u64,
+    duration_ms: u64::try_from(record.total_duration().as_millis()).unwrap_or(u64::MAX),
     tags: tags_of(&last.annotations),
     annotations: annotations_of(&last.annotations),
     attempts: record.attempts.iter().map(|a| attempt_of(a)).collect(),
@@ -363,7 +368,7 @@ fn attempt_of(outcome: &TestOutcome) -> HtmlAttempt {
     attempt: outcome.attempt,
     retry: outcome.attempt.saturating_sub(1),
     status: outcome.status.as_str().to_string(),
-    duration_ms: outcome.duration.as_millis() as u64,
+    duration_ms: u64::try_from(outcome.duration.as_millis()).unwrap_or(u64::MAX),
     error: outcome.error.as_ref().map(|failure| failure.message.clone()),
     stack: outcome.error.as_ref().and_then(|failure| failure.stack.clone()),
     diff: outcome.error.as_ref().and_then(|failure| failure.diff.clone()),
@@ -477,10 +482,10 @@ fn html_attachment(attachment: &Attachment) -> HtmlAttachment {
 }
 
 fn data_url(content_type: &str, bytes: &[u8]) -> Option<String> {
+  use base64::Engine as _;
   if bytes.len() as u64 > INLINE_LIMIT {
     return None;
   }
-  use base64::Engine as _;
   let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
   Some(format!("data:{content_type};base64,{encoded}"))
 }
@@ -493,7 +498,7 @@ fn serialize_html_steps(steps: &[TestStep]) -> Vec<HtmlStep> {
       title: step.title.clone(),
       subtitle: step.subtitle.clone(),
       status: format!("{:?}", step.status).to_ascii_lowercase(),
-      duration_ms: step.duration.as_millis() as u64,
+      duration_ms: u64::try_from(step.duration.as_millis()).unwrap_or(u64::MAX),
       error: step.error.clone(),
       location: step.location.as_ref().map(ToString::to_string),
       steps: serialize_html_steps(&step.steps),
@@ -501,7 +506,7 @@ fn serialize_html_steps(steps: &[TestStep]) -> Vec<HtmlStep> {
     .collect()
 }
 
-const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
+const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -835,7 +840,7 @@ render();
 </script>
 </body>
 </html>
-"##;
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -1034,7 +1039,7 @@ mod tests {
 
   #[test]
   fn a_big_artifact_is_linked_rather_than_embedded() {
-    let big = vec![0u8; (INLINE_LIMIT + 1) as usize];
+    let big = vec![0u8; usize::try_from(INLINE_LIMIT + 1).expect("fits in usize")];
     assert!(data_url("video/webm", &big).is_none(), "too big to travel inline");
     assert!(data_url("image/png", &[1, 2, 3]).is_some());
   }

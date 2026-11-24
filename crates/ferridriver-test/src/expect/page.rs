@@ -40,17 +40,16 @@ where
 
 /// Snapshot matchers for `expect(page)`. Import via
 /// `use ferridriver_test::expect::PageSnapshotMatchers;`.
-#[allow(async_fn_in_trait)]
 pub trait PageSnapshotMatchers {
-  async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure>;
+  fn to_have_screenshot(&self, name: &str) -> impl Future<Output = Result<(), TestFailure>> + Send;
   /// Playwright `toHaveScreenshot(name, options?)` with the full capture
   /// option bag.
-  async fn to_have_screenshot_with(
+  fn to_have_screenshot_with(
     &self,
     name: &str,
     options: crate::expect::ScreenshotMatcherOptions,
-  ) -> Result<(), TestFailure>;
-  async fn to_match_aria_snapshot(&self, expected: &str) -> Result<(), TestFailure>;
+  ) -> impl Future<Output = Result<(), TestFailure>> + Send;
+  fn to_match_aria_snapshot(&self, expected: &str) -> impl Future<Output = Result<(), TestFailure>> + Send;
 }
 
 impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
@@ -70,8 +69,7 @@ impl PageSnapshotMatchers for Expect<'_, Arc<Page>> {
     let options = options.with_config_defaults(&crate::expect::current_expect_config().to_have_screenshot);
     let timeout = options.timeout.unwrap_or(self.timeout);
     let snap_dir = std::env::var("SNAPSHOT_DIR")
-      .map(std::path::PathBuf::from)
-      .unwrap_or_else(|_| std::path::PathBuf::from("__snapshots__"));
+      .map_or_else(|_| std::path::PathBuf::from("__snapshots__"), std::path::PathBuf::from);
     let paths = crate::snapshot::ScreenshotFiles::beside(&snap_dir, name);
     crate::snapshot::settle_outside_host(
       crate::snapshot::to_have_screenshot(

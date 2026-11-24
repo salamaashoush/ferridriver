@@ -1,65 +1,3 @@
-#![allow(
-  clippy::missing_errors_doc,
-  clippy::missing_panics_doc,
-  clippy::must_use_candidate,
-  clippy::must_use_unit,
-  clippy::return_self_not_must_use,
-  clippy::doc_markdown,
-  clippy::doc_link_with_quotes,
-  clippy::module_name_repetitions,
-  clippy::cast_possible_truncation,
-  clippy::cast_precision_loss,
-  clippy::redundant_closure_for_method_calls,
-  clippy::implicit_clone,
-  clippy::struct_excessive_bools,
-  clippy::large_enum_variant,
-  clippy::needless_raw_string_hashes,
-  clippy::should_implement_trait,
-  clippy::match_same_arms,
-  clippy::uninlined_format_args,
-  clippy::single_char_pattern,
-  clippy::unused_self,
-  clippy::unused_async,
-  clippy::bool_to_int_with_if,
-  clippy::manual_let_else,
-  clippy::too_many_lines,
-  clippy::impl_trait_in_params,
-  clippy::needless_pass_by_value,
-  clippy::match_wildcard_for_single_variants,
-  clippy::manual_string_new,
-  clippy::format_push_string,
-  clippy::trivially_copy_pass_by_ref,
-  clippy::unnecessary_wraps,
-  clippy::default_trait_access,
-  clippy::wildcard_imports,
-  clippy::items_after_statements,
-  clippy::field_reassign_with_default,
-  clippy::map_unwrap_or,
-  clippy::iter_on_single_items,
-  clippy::similar_names,
-  clippy::semicolon_if_nothing_returned,
-  clippy::inconsistent_struct_constructor,
-  clippy::derivable_impls,
-  clippy::used_underscore_items,
-  clippy::explicit_iter_loop,
-  clippy::iter_on_empty_collections,
-  clippy::wrong_self_convention,
-  clippy::unnecessary_sort_by,
-  clippy::iter_over_hash_type,
-  clippy::manual_assert,
-  clippy::explicit_deref_methods,
-  clippy::option_if_let_else,
-  clippy::match_bool,
-  clippy::ref_option,
-  clippy::needless_lifetimes,
-  clippy::type_complexity,
-  clippy::expect_used,
-  clippy::duration_subsec,
-  clippy::verbose_file_reads,
-  clippy::if_not_else,
-  clippy::implicit_hasher,
-  clippy::stable_sort_primitive
-)]
 //! ferridriver-test -- Rust-based E2E test runner for browser automation.
 //!
 //! Provides a Playwright Test-compatible API for writing and running browser tests
@@ -178,8 +116,8 @@ pub use inventory;
 #[macro_export]
 macro_rules! main {
   () => {
-    fn main() {
-      $crate::run_harness();
+    fn main() -> ::std::process::ExitCode {
+      $crate::run_harness()
     }
   };
 }
@@ -190,43 +128,60 @@ macro_rules! main {
 /// Without a publisher the flag is a clear error rather than a silent
 /// no-op: a run that quietly ignored `--debug` and finished normally
 /// would look like the debugger was broken.
-fn install_harness_debug(mode: debug::DebugMode, overrides: &mut ferridriver_config::test::CliOverrides) {
+fn install_harness_debug(
+  mode: debug::DebugMode,
+  overrides: &mut ferridriver_config::test::CliOverrides,
+) -> std::result::Result<(), String> {
   let Some(publisher) = debug::debug_publisher() else {
-    eprintln!(
+    return Err(
       "--debug needs a session publisher: stopping a test and handing it to a\n\
        debugger means publishing it as a scriptable session, which pulls in the\n\
        scripting engine a harness that never debugs should not pay to build.\n\
        Add it to the dev-dependency:\n\
        \n    ferridriver-script = \"…\"\n"
+        .to_string(),
     );
-    std::process::exit(2);
   };
-  if let Err(e) = (publisher.install_default)(mode, overrides) {
-    eprintln!("--debug: {e}");
-    std::process::exit(2);
-  }
+  (publisher.install_default)(mode, overrides).map_err(|e| format!("--debug: {e}"))
 }
 
 /// Entry point called by `main!()`. Parses CLI args, loads config,
-/// discovers tests, and runs them.
-pub fn run_harness() {
+/// discovers tests, and runs them, and returns the run's exit status
+/// for `main` to hand back to the process.
+pub fn run_harness() -> std::process::ExitCode {
   logging::init_from_env();
 
-  let rt = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .expect("failed to build tokio runtime");
+  let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    Ok(rt) => rt,
+    Err(e) => {
+      eprintln!("failed to build tokio runtime: {e}");
+      return to_exit_code(exit::INFRASTRUCTURE);
+    },
+  };
 
   let exit_code = rt.block_on(async {
     let mut overrides = config::parse_common_cli_args();
-    if let Some(mode) = config::parse_debug_mode() {
-      install_harness_debug(mode, &mut overrides);
+    let debug_mode = match config::parse_debug_mode() {
+      Ok(mode) => mode,
+      Err(e) => {
+        eprintln!("--debug: {e}");
+        return exit::USAGE;
+      },
+    };
+    if let Some(mode) = debug_mode
+      && let Err(message) = install_harness_debug(mode, &mut overrides)
+    {
+      eprintln!("{message}");
+      return exit::USAGE;
     }
     let overrides = overrides;
-    let config = config::resolve_config(&overrides).unwrap_or_else(|e| {
-      eprintln!("config error: {e}");
-      std::process::exit(exit::USAGE);
-    });
+    let config = match config::resolve_config(&overrides) {
+      Ok(config) => config,
+      Err(e) => {
+        eprintln!("config error: {e}");
+        return exit::USAGE;
+      },
+    };
     // Spawned by `ferridriver test --ui`: stream the plan + reporter
     // events back to the CLI's UI server over its unix socket.
     if let Some(sock_path) = std::env::var_os(ui_wire::UI_SOCK_ENV).filter(|v| !v.is_empty()) {
@@ -239,11 +194,14 @@ pub fn run_harness() {
 
   // Drain any still-running tasks so that child processes spawned via
   // `tokio::process::Command::kill_on_drop(true)` actually get their `Drop`
-  // impls run — `std::process::exit` below would otherwise abort the process
-  // without destructors, leaving browser zombies.
+  // impls run before the process exits, leaving no browser zombies.
   rt.shutdown_timeout(std::time::Duration::from_secs(5));
 
-  std::process::exit(exit_code);
+  to_exit_code(exit_code)
+}
+
+fn to_exit_code(code: i32) -> std::process::ExitCode {
+  u8::try_from(code).map_or(std::process::ExitCode::FAILURE, std::process::ExitCode::from)
 }
 
 /// Prelude for convenient imports in test files.

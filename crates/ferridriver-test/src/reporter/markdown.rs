@@ -66,7 +66,7 @@ impl MarkdownReporter {
     if !failures.is_empty() {
       let _ = writeln!(out, "### Failures\n");
       for record in &failures {
-        out.push_str(&self.render_failure(record));
+        out.push_str(&Self::render_failure(record));
       }
     }
 
@@ -94,7 +94,7 @@ impl MarkdownReporter {
     out
   }
 
-  fn render_failure(&self, record: &TestRecord) -> String {
+  fn render_failure(record: &TestRecord) -> String {
     let mut out = String::new();
     let title = base::format_test_title(record.last());
     let _ = writeln!(
@@ -168,7 +168,7 @@ impl Reporter for MarkdownReporter {
   async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     let text = self.render();
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).ok();
+      std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&self.output_path, &text)?;
 

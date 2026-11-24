@@ -37,7 +37,7 @@ struct Prepared {
 }
 
 /// Contexts are only interchangeable when they were created from
-/// identical options — WebKit latches languages at target spawn and
+/// identical options — `WebKit` latches languages at target spawn and
 /// document-time overrides (locale, timezone, `userAgent`) must be in the
 /// bag before the first page's process starts, so a context built for one
 /// `use` bag can never be handed to a test that asked for another. The

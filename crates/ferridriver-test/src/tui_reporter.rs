@@ -1,6 +1,6 @@
-//! TUI reporter: translates ReporterEvents into TuiMessages for the dashboard.
+//! TUI reporter: translates `ReporterEvents` into `TuiMessages` for the dashboard.
 //!
-//! Converts the raw event stream into state-update messages that the WatchTui
+//! Converts the raw event stream into state-update messages that the `WatchTui`
 //! dashboard uses to update test entries in-place (pending -> running -> passed/failed).
 
 use tokio::sync::mpsc;
@@ -11,11 +11,12 @@ use crate::tui::{EntryStatus, TestEntry, TuiMessage};
 pub struct TuiReporter {
   tx: mpsc::UnboundedSender<TuiMessage>,
   has_bdd: bool,
-  /// Accumulated test names from discovery (built during RunStarted).
+  /// Accumulated test names from discovery (built during `RunStarted`).
   pending_names: Vec<TestEntry>,
 }
 
 impl TuiReporter {
+  #[must_use]
   pub fn new(tx: mpsc::UnboundedSender<TuiMessage>, has_bdd: bool) -> Self {
     Self {
       tx,
@@ -80,7 +81,6 @@ impl crate::reporter::Reporter for TuiReporter {
           duration_ms: None,
         });
       },
-      ReporterEvent::StepStarted(_) => {},
 
       ReporterEvent::StepFinished(step) if self.shows(&step.category) => {
         let test_name = self.display_name(&step.test_id);
@@ -93,10 +93,9 @@ impl crate::reporter::Reporter for TuiReporter {
           test_name,
           step_title: step.title.clone(),
           status,
-          duration_ms: Some(step.duration.as_millis() as u64),
+          duration_ms: Some(u64::try_from(step.duration.as_millis()).unwrap_or(u64::MAX)),
         });
       },
-      ReporterEvent::StepFinished(_) => {},
 
       ReporterEvent::TestFinished { outcome } => {
         let test_id = &outcome.test_id;

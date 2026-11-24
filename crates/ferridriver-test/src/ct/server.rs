@@ -1,4 +1,4 @@
-//! ComponentServer: embedded HTTP server for component testing.
+//! `ComponentServer`: embedded HTTP server for component testing.
 //!
 //! Serves static files (HTML, JS, WASM, CSS) from a directory on a random port.
 //! Used by both WASM and Vite paths — the WASM path serves compiled output directly,
@@ -35,12 +35,14 @@ impl ComponentServer {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let handle = tokio::spawn(async move {
-      axum::serve(listener, app)
+      if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async {
           let _ = shutdown_rx.await;
         })
         .await
-        .ok();
+      {
+        tracing::error!("component test server stopped: {e}");
+      }
     });
 
     Ok(Self {
@@ -71,6 +73,7 @@ impl ComponentServer {
 
 /// The minimal HTML wrapper that loads a WASM component.
 /// Sets `data-mounted="true"` on body after WASM init completes.
+#[must_use]
 pub fn wasm_html_wrapper(wasm_js_path: &str) -> String {
   format!(
     r#"<!DOCTYPE html>
@@ -90,6 +93,7 @@ document.body.setAttribute('data-mounted', 'true');
 
 /// The minimal HTML wrapper that loads a JS component (from Vite).
 /// The Vite dev server handles HMR and bundling; this just provides the shell.
+#[must_use]
 pub fn vite_html_wrapper(entry_path: &str) -> String {
   format!(
     r#"<!DOCTYPE html>

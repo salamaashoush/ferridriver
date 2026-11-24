@@ -157,9 +157,10 @@ pub fn ms_to_string(duration: Duration) -> String {
 /// First `limit` characters, with an ellipsis when anything was cut.
 #[must_use]
 pub fn truncate_chars(text: &str, limit: usize) -> String {
-  match text.char_indices().nth(limit) {
-    Some((idx, _)) => format!("{}...", &text[..idx]),
-    None => text.to_string(),
+  if text.chars().nth(limit).is_some() {
+    format!("{}...", text.chars().take(limit).collect::<String>())
+  } else {
+    text.to_string()
   }
 }
 
@@ -288,13 +289,14 @@ impl TestKey {
 pub struct TestRecord {
   pub key: TestKey,
   pub attempts: Vec<Arc<TestOutcome>>,
+  latest: Arc<TestOutcome>,
 }
 
 impl TestRecord {
   /// The attempt that decided the result.
   #[must_use]
   pub fn last(&self) -> &Arc<TestOutcome> {
-    self.attempts.last().expect("a record always has one attempt")
+    &self.latest
   }
 
   #[must_use]
@@ -377,7 +379,7 @@ impl RunInfo {
 }
 
 /// Folds the attempt-level event stream back into per-test records.
-/// Every reporter that produces a document (JSON, JUnit, HTML, CTRF,
+/// Every reporter that produces a document (JSON, `JUnit`, HTML, CTRF,
 /// markdown) and every terminal reporter that prints an epilogue drives
 /// one of these instead of re-deriving the grouping.
 #[derive(Debug, Clone, Default)]
@@ -419,19 +421,23 @@ impl ResultCollector {
       ReporterEvent::TestFinished { outcome } => {
         let key = TestKey::of(outcome);
         let slot = if let Some(slot) = self.index.get(&key) {
+          let record = &mut self.records[*slot];
+          record.attempts.push(Arc::clone(outcome));
+          record.attempts.sort_by_key(|a| a.attempt);
+          if outcome.attempt >= record.latest.attempt {
+            record.latest = Arc::clone(outcome);
+          }
           *slot
         } else {
           let slot = self.records.len();
           self.index.insert(key.clone(), slot);
           self.records.push(TestRecord {
             key,
-            attempts: Vec::new(),
+            attempts: vec![Arc::clone(outcome)],
+            latest: Arc::clone(outcome),
           });
           slot
         };
-        let record = &mut self.records[slot];
-        record.attempts.push(Arc::clone(outcome));
-        record.attempts.sort_by_key(|a| a.attempt);
         Some(&self.records[slot])
       },
       ReporterEvent::RunFinished {
@@ -941,16 +947,11 @@ pub fn starting_message(screen: Screen, total: usize, workers: u32, metadata: &s
 /// Where a terminal reporter's bytes go. Stdout in a real run, a shared
 /// buffer under test — without the second arm the only way to check what
 /// `list` or `line` actually prints is to spawn a process and scrape it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Out {
+  #[default]
   Stdout,
   Buffer(Arc<std::sync::Mutex<String>>),
-}
-
-impl Default for Out {
-  fn default() -> Self {
-    Self::Stdout
-  }
 }
 
 impl Out {
@@ -1035,7 +1036,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 /// A string-valued reporter option under either the camelCase name the
-/// config file uses or the snake_case one a programmatic caller does.
+/// config file uses or the `snake_case` one a programmatic caller does.
 #[must_use]
 pub fn str_option(options: &std::collections::BTreeMap<String, serde_json::Value>, key: &str) -> Option<String> {
   options.get(key).and_then(|v| v.as_str()).map(ToString::to_string)
@@ -1043,7 +1044,7 @@ pub fn str_option(options: &std::collections::BTreeMap<String, serde_json::Value
 
 /// A boolean reporter option, also readable from the environment as
 /// `FERRIDRIVER_<REPORTER>_<KEY>` so CI can flip it without editing the
-/// config — the same escape hatch Playwright's JUnit options have.
+/// config — the same escape hatch Playwright's `JUnit` options have.
 #[must_use]
 pub fn bool_option(options: &std::collections::BTreeMap<String, serde_json::Value>, reporter: &str, key: &str) -> bool {
   let env_name = format!(
@@ -1195,7 +1196,12 @@ mod tests {
     options.insert("outputFile".to_string(), serde_json::json!("/tmp/custom.xml"));
     let path = resolve_output_file("junit", &options, Path::new("/out"), "junit.xml");
     assert_eq!(path, PathBuf::from("/tmp/custom.xml"));
-    let path = resolve_output_file("junit", &Default::default(), Path::new("/out"), "junit.xml");
+    let path = resolve_output_file(
+      "junit",
+      &std::collections::BTreeMap::default(),
+      Path::new("/out"),
+      "junit.xml",
+    );
     assert_eq!(path, PathBuf::from("/out/junit.xml"));
   }
 }

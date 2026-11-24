@@ -1,9 +1,3 @@
-#![allow(
-  clippy::cast_precision_loss,
-  clippy::cast_lossless,
-  clippy::uninlined_format_args,
-  clippy::implicit_clone
-)]
 //! Apples-to-apples bench against `bench/fd-bench/bench_compare.spec.ts`.
 //!
 //! Uses the production [`ferridriver_test::runner::TestRunner`] — same
@@ -236,7 +230,7 @@ async fn bench_pure_rust_runner() {
     println!(
       "  workers={w:<2}  {:>6.0?} total  {:>5.1}ms/test",
       elapsed,
-      elapsed.as_millis() as f64 / 100.0
+      elapsed.as_secs_f64() * 1000.0 / 100.0
     );
   }
   println!();
@@ -255,7 +249,7 @@ async fn bench_pure_rust_runner_3runs() {
     println!(
       "  workers={w:<2}  avg {:>6.0?}  {:>5.1}ms/test",
       avg,
-      avg.as_millis() as f64 / 100.0
+      avg.as_secs_f64() * 1000.0 / 100.0
     );
   }
   println!();

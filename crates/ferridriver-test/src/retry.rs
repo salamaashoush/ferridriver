@@ -8,6 +8,7 @@ pub struct RetryPolicy;
 impl RetryPolicy {
   /// After all attempts, determine final status.
   /// If it failed on some attempts but passed on the last -> `Flaky`.
+  #[must_use]
   pub fn final_status(attempts: &[TestStatus]) -> TestStatus {
     Self::final_status_for(attempts, ExpectedStatus::Pass)
   }
@@ -15,6 +16,7 @@ impl RetryPolicy {
   /// [`Self::final_status`] against a declared expectation, so a
   /// `test.fail()` test that fails counts as passing. Shares the
   /// outcome rule with every reporter ([`crate::model::outcome_kind`]).
+  #[must_use]
   pub fn final_status_for(attempts: &[TestStatus], expected: ExpectedStatus) -> TestStatus {
     let Some(last) = attempts.last().copied() else {
       return TestStatus::Skipped;

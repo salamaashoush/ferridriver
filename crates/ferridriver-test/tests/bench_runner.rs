@@ -1,9 +1,3 @@
-#![allow(
-  clippy::cast_precision_loss,
-  clippy::cast_lossless,
-  clippy::uninlined_format_args,
-  clippy::implicit_clone
-)]
 //! Performance benchmark: measures ferridriver-test runner overhead and parallelism.
 //!
 //! This reports ferridriver-test's own numbers (per-test latency, throughput,
@@ -143,7 +137,9 @@ fn make_tests(n: usize) -> Vec<TestCase> {
     .collect()
 }
 
-async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration {
+/// Run `num_tests` browser tests on `num_workers` workers. Returns how
+/// long the run took and the line that reports it.
+async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> (Duration, String) {
   let plan = TestPlan {
     repetitions_expanded: false,
     suites: vec![TestSuite {
@@ -175,15 +171,17 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
   let exit_code = runner.run(plan).await;
   let elapsed = start.elapsed();
 
-  let per_test = elapsed.as_millis() as f64 / num_tests as f64;
-  let tests_per_sec = num_tests as f64 / elapsed.as_secs_f64();
-
-  println!(
-    "  {label:<30} {num_tests:>3} tests, {num_workers} workers => {elapsed:>6.0?} total, {per_test:>5.1}ms/test, {tests_per_sec:>5.1} tests/sec",
-  );
+  let tests = f64::from(u32::try_from(num_tests).unwrap_or(u32::MAX));
+  let per_test = elapsed.as_secs_f64() * 1000.0 / tests;
+  let tests_per_sec = tests / elapsed.as_secs_f64();
 
   assert_eq!(exit_code, 0, "{label}: all tests should pass");
-  elapsed
+  (
+    elapsed,
+    format!(
+      "  {label:<30} {num_tests:>3} tests, {num_workers} workers => {elapsed:>6.0?} total, {per_test:>5.1}ms/test, {tests_per_sec:>5.1} tests/sec",
+    ),
+  )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -194,13 +192,16 @@ async fn bench_parallel_scaling() {
   println!("============================================================\n");
 
   // Warm up: single test to launch browser.
-  Box::pin(run_bench("warmup (browser launch)", 1, 1)).await;
+  println!("{}", Box::pin(run_bench("warmup (browser launch)", 1, 1)).await.1);
   println!();
 
   // Worker scaling: 20 tests.
-  let t1 = Box::pin(run_bench("20 tests, 1 worker", 20, 1)).await;
-  let t2 = Box::pin(run_bench("20 tests, 2 workers", 20, 2)).await;
-  let t4 = Box::pin(run_bench("20 tests, 4 workers", 20, 4)).await;
+  let (t1, line) = Box::pin(run_bench("20 tests, 1 worker", 20, 1)).await;
+  println!("{line}");
+  let (t2, line) = Box::pin(run_bench("20 tests, 2 workers", 20, 2)).await;
+  println!("{line}");
+  let (t4, line) = Box::pin(run_bench("20 tests, 4 workers", 20, 4)).await;
+  println!("{line}");
 
   println!();
   println!("  Speedup 1→2: {:.2}x", t1.as_secs_f64() / t2.as_secs_f64());
@@ -208,8 +209,10 @@ async fn bench_parallel_scaling() {
   println!();
 
   // Throughput: 50 tests (same workload size used for the optional Playwright baseline).
-  let t50_4 = Box::pin(run_bench("50 tests, 4 workers", 50, 4)).await;
-  let t50_6 = Box::pin(run_bench("50 tests, 6 workers", 50, 6)).await;
+  let (t50_4, line) = Box::pin(run_bench("50 tests, 4 workers", 50, 4)).await;
+  println!("{line}");
+  let (t50_6, line) = Box::pin(run_bench("50 tests, 6 workers", 50, 6)).await;
+  println!("{line}");
 
   println!();
   println!("  ferridriver-test (50 tests, 4w): {}ms", t50_4.as_millis());
@@ -227,11 +230,11 @@ async fn bench_parallel_scaling() {
     println!("  Playwright baseline (50 tests, measured): {baseline_ms:.0}ms");
     println!(
       "  Speedup vs Playwright (4w): {:.2}x",
-      baseline_ms / t50_4.as_millis() as f64
+      baseline_ms / (t50_4.as_secs_f64() * 1000.0)
     );
     println!(
       "  Speedup vs Playwright (6w): {:.2}x",
-      baseline_ms / t50_6.as_millis() as f64
+      baseline_ms / (t50_6.as_secs_f64() * 1000.0)
     );
   } else {
     println!("  Playwright baseline: NOT MEASURED (set FERRIDRIVER_PW_BASELINE_MS to compare)");
@@ -240,8 +243,8 @@ async fn bench_parallel_scaling() {
   println!();
 
   // Large scale: 100 tests.
-  Box::pin(run_bench("100 tests, 4 workers", 100, 4)).await;
-  Box::pin(run_bench("100 tests, 6 workers", 100, 6)).await;
+  println!("{}", Box::pin(run_bench("100 tests, 4 workers", 100, 4)).await.1);
+  println!("{}", Box::pin(run_bench("100 tests, 6 workers", 100, 6)).await.1);
 
   println!("\n============================================================\n");
 }
