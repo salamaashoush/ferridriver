@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Our heap snapshot analysis against the engine it is a port of.
 //!
 //! `scripts/perf-diff/record-heap.mjs` drives the real
@@ -236,33 +235,33 @@ fn fixtures_dir() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn recordings() -> BTreeMap<String, Recording> {
+fn recordings() -> Result<BTreeMap<String, Recording>, String> {
   let path = fixtures_dir().join("engine.json");
-  let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-  serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+  let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+  serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
-fn analysed(name: &str) -> Analysis {
-  Analysis::new(snapshot(name))
+fn analysed(name: &str) -> Result<Analysis, String> {
+  Ok(Analysis::new(snapshot(name)?))
 }
 
 /// Captured snapshots are stored gzipped, because even a trivial page's
 /// is megabytes; the hand-built one is stored plain, because the point
 /// of it is that a reader can follow it.
-fn snapshot(name: &str) -> Snapshot {
+fn snapshot(name: &str) -> Result<Snapshot, String> {
   let plain = fixtures_dir().join(format!("{name}.heapsnapshot"));
   let text = if plain.exists() {
-    std::fs::read_to_string(&plain).unwrap_or_else(|e| panic!("read {}: {e}", plain.display()))
+    std::fs::read_to_string(&plain).map_err(|e| format!("read {}: {e}", plain.display()))?
   } else {
     let path = fixtures_dir().join(format!("{name}.heapsnapshot.gz"));
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut text = String::new();
     flate2::read::GzDecoder::new(&bytes[..])
       .read_to_string(&mut text)
-      .unwrap_or_else(|e| panic!("decompress {}: {e}", path.display()));
+      .map_err(|e| format!("decompress {}: {e}", path.display()))?;
     text
   };
-  Snapshot::parse(&text).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+  Snapshot::parse(&text).map_err(|e| format!("parse {name}: {e}"))
 }
 
 /// The format layer: the column layout resolved from `meta`, and the
@@ -273,9 +272,9 @@ fn snapshot(name: &str) -> Snapshot {
 /// node count, and be reading the wrong column for every size in the
 /// file.
 #[test]
-fn nodes_decode_the_way_the_engine_decodes_them() {
-  for (name, recording) in recordings() {
-    let snapshot = snapshot(&name);
+fn nodes_decode_the_way_the_engine_decodes_them() -> Result<(), String> {
+  for (name, recording) in recordings()? {
+    let snapshot = snapshot(&name)?;
 
     assert_eq!(
       snapshot.node_layout.field_count, recording.node_field_count,
@@ -314,6 +313,7 @@ fn nodes_decode_the_way_the_engine_decodes_them() {
       differences.join("\n  ")
     );
   }
+  Ok(())
 }
 
 /// Everything derived from the graph: the sizes after an owned node's
@@ -324,9 +324,9 @@ fn nodes_decode_the_way_the_engine_decodes_them() {
 /// sum over a dominator tree built by an algorithm whose output is not
 /// inspectable by eye, and a wrong one still looks like a size.
 #[test]
-fn the_analysis_agrees_with_the_engine() {
-  for (name, recording) in recordings() {
-    let analysis = analysed(&name);
+fn the_analysis_agrees_with_the_engine() -> Result<(), String> {
+  for (name, recording) in recordings()? {
+    let analysis = analysed(&name)?;
 
     assert_eq!(
       analysis.total_size(),
@@ -389,6 +389,7 @@ fn the_analysis_agrees_with_the_engine() {
       differences.join("\n  ")
     );
   }
+  Ok(())
 }
 
 /// The reads the heap-snapshot tools are made of: what a node is, what
@@ -400,9 +401,9 @@ fn the_analysis_agrees_with_the_engine() {
 /// in would be invisible to a comparison that only checked the fields
 /// someone remembered to name.
 #[test]
-fn the_queries_answer_what_the_engine_answers() {
-  for (name, recording) in recordings() {
-    let analysis = analysed(&name);
+fn the_queries_answer_what_the_engine_answers() -> Result<(), String> {
+  for (name, recording) in recordings()? {
+    let analysis = analysed(&name)?;
     let mut differences = Vec::new();
 
     for queried in &recording.queried {
@@ -491,6 +492,7 @@ fn the_queries_answer_what_the_engine_answers() {
       differences.join("\n  ")
     );
   }
+  Ok(())
 }
 
 /// The searches: everything holding one node, every member of one
@@ -500,9 +502,9 @@ fn the_queries_answer_what_the_engine_answers() {
 /// has, and the two that answer with a LIST rather than a value, where
 /// the order is as much of the answer as the membership.
 #[test]
-fn the_searches_answer_what_the_engine_answers() {
-  for (name, recording) in recordings() {
-    let analysis = analysed(&name);
+fn the_searches_answer_what_the_engine_answers() -> Result<(), String> {
+  for (name, recording) in recordings()? {
+    let analysis = analysed(&name)?;
     let mut differences = Vec::new();
 
     for recorded in &recording.retaining_paths {
@@ -553,6 +555,7 @@ fn the_searches_answer_what_the_engine_answers() {
       differences.join("\n  ")
     );
   }
+  Ok(())
 }
 
 /// The named node filters, and the two summaries built on the same
@@ -564,13 +567,13 @@ fn the_searches_answer_what_the_engine_answers() {
 /// comparison that checked only the classes it expected would pass
 /// against a filter that kept the entire heap.
 #[test]
-fn the_named_filters_answer_what_the_engine_answers() {
-  for (name, recording) in recordings() {
-    let analysis = analysed(&name);
+fn the_named_filters_answer_what_the_engine_answers() -> Result<(), String> {
+  for (name, recording) in recordings()? {
+    let analysis = analysed(&name)?;
     let mut differences = Vec::new();
 
     for recorded in &recording.named_filters {
-      let filter = parse_filter(&analysis, &recorded.filter_name);
+      let filter = parse_filter(&analysis, &recorded.filter_name)?;
       let ours = analysis
         .aggregates_with_filter(filter)
         .unwrap_or_else(|e| panic!("{name}: filter {}: {e}", recorded.filter_name));
@@ -644,13 +647,14 @@ fn the_named_filters_answer_what_the_engine_answers() {
       differences.join("\n  ")
     );
   }
+  Ok(())
 }
 
 /// The engine names its filters with strings; the one that picks a
 /// single native context carries a node INDEX, which this turns back
 /// into the object id our surface takes.
-fn parse_filter(analysis: &Analysis, name: &str) -> NodeFilter {
-  match name {
+fn parse_filter(analysis: &Analysis, name: &str) -> Result<NodeFilter, String> {
+  Ok(match name {
     "objectsRetainedByContexts" => NodeFilter::ObjectsRetainedByContexts,
     "objectsRetainedByDetachedDomNodes" => NodeFilter::ObjectsRetainedByDetachedDomNodes,
     "objectsRetainedByConsole" => NodeFilter::ObjectsRetainedByConsole,
@@ -660,26 +664,26 @@ fn parse_filter(analysis: &Analysis, name: &str) -> NodeFilter {
     other => {
       let index: usize = other
         .strip_prefix("nativeContext_")
-        .unwrap_or_else(|| panic!("unknown filter {other}"))
+        .ok_or_else(|| format!("unknown filter {other}"))?
         .parse()
-        .unwrap_or_else(|e| panic!("filter {other}: {e}"));
+        .map_err(|e| format!("filter {other}: {e}"))?;
       let ordinal = index / analysis.snapshot.node_layout.field_count;
       NodeFilter::AttributedToNativeContext(analysis.snapshot.node_id(ordinal))
     },
-  }
+  })
 }
 
 /// What one snapshot holds that the earlier one did not.
 #[test]
-fn the_diff_agrees_with_the_engine() {
-  let recordings = recordings();
+fn the_diff_agrees_with_the_engine() -> Result<(), String> {
+  let recordings = recordings()?;
   let mut compared = 0;
   for (name, recording) in &recordings {
     let (Some(base), Some(engine)) = (recording.diff_from.as_ref(), recording.diff.as_ref()) else {
       continue;
     };
     compared += 1;
-    let ours = analysed(name).diff_since(&analysed(base));
+    let ours = analysed(name)?.diff_since(&analysed(base)?);
 
     let mut differences = Vec::new();
     for (key, engine) in engine {
@@ -705,6 +709,7 @@ fn the_diff_agrees_with_the_engine() {
     compared > 0,
     "no pair of snapshots was diffed, so this compared nothing"
   );
+  Ok(())
 }
 
 /// Every scalar, then the head of every list. The engine's recording
@@ -827,8 +832,8 @@ fn compare_edges(
 /// both sides finding nothing, which is how the accessibility
 /// comparison passed for a week over seven rules that all passed.
 #[test]
-fn the_fixtures_still_carry_something_worth_comparing() {
-  let recordings = recordings();
+fn the_fixtures_still_carry_something_worth_comparing() -> Result<(), String> {
+  let recordings = recordings()?;
   for (name, recording) in &recordings {
     let sampled = recording.nodes.len();
     // The hand-built snapshots are small on purpose: every node in them
@@ -902,13 +907,14 @@ fn the_fixtures_still_carry_something_worth_comparing() {
     );
 
     if handmade {
-      the_handmade_shapes_are_all_still_there(name, recording);
-      the_filters_still_discriminate(name, recording);
+      the_handmade_shapes_are_all_still_there(name, recording)?;
+      the_filters_still_discriminate(name, recording)?;
     }
     the_search_answers_are_worth_comparing(name, recording);
   }
 
   the_recording_covers_both_halves_of_a_pair(&recordings);
+  Ok(())
 }
 
 /// The one object each named filter was built to find, and nothing else.
@@ -923,35 +929,35 @@ fn the_fixtures_still_carry_something_worth_comparing() {
 /// `objectsRetainedByEventHandlers` find nothing at all on the captured
 /// page -- a headless run opens no console and the fixture installs no
 /// listener -- so this fixture is the only thing testing them.
-fn the_filters_still_discriminate(name: &str, recording: &Recording) {
+fn the_filters_still_discriminate(name: &str, recording: &Recording) -> Result<(), String> {
   let all = recording.aggregates.len();
-  let kept = |filter: &str| -> Vec<&str> {
+  let kept = |filter: &str| -> Result<Vec<&str>, String> {
     let recorded = recording
       .named_filters
       .iter()
       .find(|recorded| recorded.filter_name == filter)
-      .unwrap_or_else(|| panic!("{name}: the {filter} filter is not in the recording"));
+      .ok_or_else(|| format!("{name}: the {filter} filter is not in the recording"))?;
     assert!(
       recorded.aggregates.len() < all,
       "{name}: {filter} kept all {all} classes, so it is not filtering"
     );
     let mut keys: Vec<&str> = recorded.aggregates.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    keys
+    Ok(keys)
   };
 
   assert_eq!(
-    kept("objectsRetainedByContexts"),
+    kept("objectsRetainedByContexts")?,
     [",(system)", ",CapturedOnly"],
     "{name}: the object behind a closure scope is gone"
   );
   assert_eq!(
-    kept("objectsRetainedByDetachedDomNodes"),
+    kept("objectsRetainedByDetachedDomNodes")?,
     [",Detached HTMLDivElement", ",Detached HTMLParagraphElement"],
     "{name}: the detached subtree is gone"
   );
   assert_eq!(
-    kept("objectsRetainedByConsole"),
+    kept("objectsRetainedByConsole")?,
     [",ConsolePinned"],
     "{name}: nothing is pinned by a console-named edge from a synthetic node"
   );
@@ -959,12 +965,12 @@ fn the_filters_still_discriminate(name: &str, recording: &Recording) {
   // listener shapes contribute: one whose callback carries the code and
   // one whose callback is a wrapper with the code a level down.
   assert_eq!(
-    kept("objectsRetainedByEventHandlers"),
+    kept("objectsRetainedByEventHandlers")?,
     [",(compiled code)", ",Function", ",HandlerOnly"],
     "{name}: the event-handler shapes are gone"
   );
   assert_eq!(
-    kept("sharedNativeContext"),
+    kept("sharedNativeContext")?,
     [",SharedAcrossRealms"],
     "{name}: nothing is reached from two realms, so shared cannot tell itself from owned"
   );
@@ -987,6 +993,7 @@ fn the_filters_still_discriminate(name: &str, recording: &Recording) {
     recording.retained_by_context_summary.context_count > 0,
     "{name}: no closure scope survives the shallow-size pass, so the count is nought either way"
   );
+  Ok(())
 }
 
 /// A search that matches nothing agrees with the engine by both sides
@@ -1140,7 +1147,7 @@ fn the_recording_covers_both_halves_of_a_pair(recordings: &BTreeMap<String, Reco
 /// handles it and watching this comparison go red. Losing a shape turns
 /// a passing comparison back into a vacuous one, which is the failure
 /// this whole file is arranged against.
-fn the_handmade_shapes_are_all_still_there(name: &str, recording: &Recording) {
+fn the_handmade_shapes_are_all_still_there(name: &str, recording: &Recording) -> Result<(), String> {
   // The shapes this fixture exists for. Each is what makes one
   // branch tell itself apart from its own absence, so losing any of
   // them turns a passing comparison back into a vacuous one.
@@ -1194,7 +1201,7 @@ fn the_handmade_shapes_are_all_still_there(name: &str, recording: &Recording) {
     .duplicate_strings
     .iter()
     .find(|group| group.value == "dup text")
-    .unwrap_or_else(|| panic!("{name}: the duplicated-string group is gone"));
+    .ok_or_else(|| format!("{name}: the duplicated-string group is gone"))?;
   // Two concatenations and one plain string read the same. A
   // concatenation V8 has flattened and a zero-sized encoding of a
   // number read the same too and are excluded, so a count of anything
@@ -1204,4 +1211,5 @@ fn the_handmade_shapes_are_all_still_there(name: &str, recording: &Recording) {
     "{name}: the duplicated-string group holds {} members, so an exclusion has stopped discriminating",
     duplicated.count
   );
+  Ok(())
 }
