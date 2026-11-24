@@ -854,13 +854,11 @@ async fn build_entry(req: &Request, recorder: &HarRecorder, attachments: &mut Ve
 
   let timing = req.timing();
   let (timings, total_time) = build_timings(recorder.mode, &timing);
-  let started_date_time = if timing.start_time > 0.0 {
-    // Epoch ms stay far below 2^53 — exact in f64, in-range for i64.
-    #[allow(clippy::cast_possible_truncation)]
-    let ms = timing.start_time as i64;
-    epoch_ms_to_iso8601(ms)
-  } else {
-    now_iso8601()
+  let started_date_time = match std::time::Duration::try_from_secs_f64(timing.start_time / 1000.0) {
+    Ok(since_epoch) if timing.start_time > 0.0 => {
+      epoch_ms_to_iso8601(i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX))
+    },
+    _ => now_iso8601(),
   };
 
   HarEntryOut {
@@ -1087,9 +1085,10 @@ fn percent_decode(input: &str) -> String {
       },
       b'%' if i + 2 < bytes.len() => {
         let hex = |b: u8| (b as char).to_digit(16);
-        if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-          #[allow(clippy::cast_possible_truncation)]
-          out.push((hi * 16 + lo) as u8);
+        if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+          && let Ok(byte) = u8::try_from(hi * 16 + lo)
+        {
+          out.push(byte);
           i += 3;
         } else {
           out.push(bytes[i]);
