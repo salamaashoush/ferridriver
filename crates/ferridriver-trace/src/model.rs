@@ -425,17 +425,17 @@ fn parse_context(prefix: &str, trace: &str) -> ContextEntry {
         ordered.push(action);
       },
       "input" => {
-        if let Some(action) = action_mut(&mut actions, &mut ordered, &event) {
+        if let Some(action) = action_mut(&actions, &mut ordered, &event) {
           action.point = parse_point(&event);
         }
       },
       "after" => {
-        if let Some(action) = action_mut(&mut actions, &mut ordered, &event) {
+        if let Some(action) = action_mut(&actions, &mut ordered, &event) {
           apply_after(action, &event);
         }
       },
       "log" => {
-        if let Some(action) = action_mut(&mut actions, &mut ordered, &event) {
+        if let Some(action) = action_mut(&actions, &mut ordered, &event) {
           action.logs.push(string(&event, "message"));
         }
       },
@@ -552,7 +552,7 @@ fn parse_console(event: &serde_json::Value) -> ConsoleMessage {
 }
 
 fn action_mut<'a>(
-  index: &mut BTreeMap<String, usize>,
+  index: &BTreeMap<String, usize>,
   actions: &'a mut [Action],
   event: &serde_json::Value,
 ) -> Option<&'a mut Action> {
