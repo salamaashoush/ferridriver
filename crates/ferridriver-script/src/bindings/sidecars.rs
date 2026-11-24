@@ -113,15 +113,8 @@ struct SidecarListeners {
   by_handle: FxHashMap<u64, EventListeners>,
 }
 
+#[derive(JsLifetime)]
 struct SidecarListenersUd(RefCell<SidecarListeners>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles in a single-
-// threaded VM's userdata), so re-stating the unused `'js` lifetime is sound —
-// identical rationale to `PageCallbacksUd` / `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for SidecarListenersUd {
-  type Changed<'to> = SidecarListenersUd;
-}
 
 fn with_sidecar_listeners<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut SidecarListeners) -> R) -> R {
   if ctx.userdata::<SidecarListenersUd>().is_none() {

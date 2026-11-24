@@ -819,10 +819,8 @@ impl BrowserContextJs {
     let opts = ferridriver::options::RecordVideoOptions {
       dir: std::path::PathBuf::from(parsed.dir),
       size: parsed.size.map(|s| ferridriver::options::VideoSize {
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        width: s.width.max(0.0) as u32,
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        height: s.height.max(0.0) as u32,
+        width: crate::bindings::convert::f64_to_u32(s.width),
+        height: crate::bindings::convert::f64_to_u32(s.height),
       }),
     };
     self.inner.set_record_video(opts).await.into_js_with(&ctx)
@@ -1055,9 +1053,7 @@ impl BrowserContextJs {
   /// Node's `listenerCount(type)`.
   #[qjs(rename = "listenerCount")]
   pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()`.
@@ -1069,18 +1065,18 @@ impl BrowserContextJs {
   /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
   #[qjs(rename = "setMaxListeners")]
   pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let max = max.max(0.0) as usize;
-    this.0.borrow().inner.set_max_listeners(max);
+    this
+      .0
+      .borrow()
+      .inner
+      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
     this.0
   }
 
   /// Node's `getMaxListeners()`.
   #[qjs(rename = "getMaxListeners")]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
 
   // ── Context-level events ───────────────────────────────────────────────
@@ -1322,14 +1318,8 @@ struct ContextCallbacks {
   listeners: FxHashMap<u64, ContextListenerEntry>,
 }
 
+#[derive(JsLifetime)]
 struct ContextCallbacksUd(std::cell::RefCell<ContextCallbacks>);
-
-// SAFETY: holds only `'static` data (`Persistent` handles and owned
-// values), same rationale as the page-callbacks userdata.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ContextCallbacksUd {
-  type Changed<'to> = ContextCallbacksUd;
-}
 
 fn with_context_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ContextCallbacks) -> R) -> rquickjs::Result<R> {
   if ctx.userdata::<ContextCallbacksUd>().is_none() {
@@ -1355,12 +1345,8 @@ enum ContextEventMsg {
   Drain(tokio::sync::oneshot::Sender<()>),
 }
 
+#[derive(JsLifetime)]
 struct ContextEventPumpUd(tokio::sync::mpsc::Sender<ContextEventMsg>);
-
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ContextEventPumpUd {
-  type Changed<'to> = ContextEventPumpUd;
-}
 
 /// Capacity of the context-event pump channel — the page pump's
 /// rationale and bound, applied to the lower-rate context stream.

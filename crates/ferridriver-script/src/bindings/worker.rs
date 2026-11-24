@@ -11,14 +11,8 @@ const WORKER_PUMP_CAPACITY: usize = 64;
 
 type WorkerPumpMsg = (u64, ferridriver::worker::Worker);
 
+#[derive(JsLifetime)]
 struct WorkerEventPumpUd(tokio::sync::mpsc::Sender<WorkerPumpMsg>);
-
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `WsEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for WorkerEventPumpUd {
-  type Changed<'to> = WorkerEventPumpUd;
-}
 
 /// Get (or lazily start) this context's worker-listener pump: listeners
 /// run on the interpreter thread, never on the backend thread.

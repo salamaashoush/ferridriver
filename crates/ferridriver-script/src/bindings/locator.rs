@@ -117,7 +117,7 @@ fn parse_highlight_style(
         // Match `cssObjectToString`'s template-literal: integers print
         // without a trailing `.0`.
         if n.fract() == 0.0 && n.is_finite() {
-          format!("{}", n as i64)
+          format!("{}", crate::bindings::convert::f64_to_i64(n))
         } else {
           n.to_string()
         }

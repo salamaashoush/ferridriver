@@ -50,13 +50,8 @@ const WRAP_METHODS: &str = r"(proto, arm, disarm) => {
 }";
 
 /// The signal armed for the next binding call on this stack.
+#[derive(JsLifetime)]
 struct Pending(RefCell<Option<ferridriver::abort::AbortSignal>>);
-
-// SAFETY: holds only `'static` data.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for Pending {
-  type Changed<'to> = Pending;
-}
 
 /// Take the signal a wrapped method armed for this call.
 pub(crate) fn take_pending(ctx: &Ctx<'_>) -> Option<ferridriver::abort::AbortSignal> {

@@ -591,7 +591,7 @@ async fn install_one_extension(ctx: &Ctx<'_>, file: &ExtensionBinding) -> rquick
   // endianness, pointer width) plus transitive input hashes guarantee
   // an ABI-identical toolchain wrote it. That satisfies the
   // same-interpreter precondition `Module::load` documents.
-  #[allow(unsafe_code)]
+  #[expect(unsafe_code, reason = "rquickjs declares loading module bytecode unsafe")]
   let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
   // Evaluating the module runs its top-level `tool(...)` /
   // `Given(...)` calls, registering directly into the extension

@@ -6,8 +6,7 @@ use std::sync::Arc;
 
 use ferridriver::Page;
 
-#[allow(clippy::wildcard_imports)]
-use super::*;
+use super::page_event_to_js;
 use crate::bindings::convert::throw_named;
 
 /// A persisted JS callback. Every callback dispatched outside its
@@ -381,15 +380,8 @@ pub(crate) struct EventListenerEntry {
   listener: SavedCallback,
 }
 
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct PageCallbacksUd(std::cell::RefCell<PageCallbacks>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles), so
-// re-stating the unused `'js` lifetime is sound — identical rationale to
-// `BddUserData` / `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for PageCallbacksUd {
-  type Changed<'to> = PageCallbacksUd;
-}
 
 /// One `(listener_id, remove_after_dispatch, event)` message from a core
 /// `EventCallback` (backend task) to the context's event pump.
@@ -453,14 +445,8 @@ pub(crate) const PAGE_EVENT_PUMP_CAPACITY: usize = 1024;
 /// plain JS promises interleaves with a busy execute in ways the
 /// one-shot dispatch shape does not. Hence rule 1 for anything
 /// loop-shaped, rule 2 only for one-shot dispatch.
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct PageEventPumpUd(tokio::sync::mpsc::Sender<PageEventMsg>);
-
-// SAFETY: holds only a channel sender (`'static`), so re-stating the
-// unused `'js` lifetime is sound — identical rationale to `PageCallbacksUd`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for PageEventPumpUd {
-  type Changed<'to> = PageEventPumpUd;
-}
 
 /// Get (or lazily start) this context's page-event pump and return its
 /// sender. The pump future lives on the QuickJS runtime executor,

@@ -237,9 +237,7 @@ impl BrowserJs {
   /// Node's `listenerCount(type)`.
   #[qjs(rename = "listenerCount")]
   pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()`.
@@ -251,18 +249,18 @@ impl BrowserJs {
   /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
   #[qjs(rename = "setMaxListeners")]
   pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let max = max.max(0.0) as usize;
-    this.0.borrow().inner.set_max_listeners(max);
+    this
+      .0
+      .borrow()
+      .inner
+      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
     this.0
   }
 
   /// Node's `getMaxListeners()`.
   #[qjs(rename = "getMaxListeners")]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
 
   /// Playwright: `browser.waitForEvent(event, options?)`. Supports
@@ -370,10 +368,11 @@ impl BrowserJs {
   /// and removes the registry entry for whatever this browser is bound under.
   /// A no-op if never bound.
   #[qjs(rename = "unbind")]
-  #[allow(clippy::unused_async)]
-  // QuickJS method must be async to return a JS Promise
-  // QuickJS derives Promise conversion from the async signature.
-  #[allow(clippy::unused_async_trait_impl)]
+  #[expect(
+    clippy::unused_async,
+    clippy::unused_async_trait_impl,
+    reason = "Playwright's `unbind` returns a Promise, and rquickjs makes a method's Promise from its async signature"
+  )]
   pub async fn unbind(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     ferridriver_session::unbind_browser(&self.inner)
       .map_err(|e| crate::bindings::convert::throw_named(&ctx, "Error", e.to_string()))?;
@@ -567,7 +566,6 @@ fn lower_media(v: Option<serde_json::Value>) -> ferridriver::options::MediaOverr
 }
 
 impl JsBrowserContextOptions {
-  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
   pub(super) fn into_core(self) -> ferridriver::options::BrowserContextOptions {
     use ferridriver::options as fo;
 
@@ -596,8 +594,8 @@ impl JsBrowserContextOptions {
     let record_video = self.record_video.map(|rv| fo::RecordVideoOptions {
       dir: std::path::PathBuf::from(rv.dir),
       size: rv.size.map(|s| fo::VideoSize {
-        width: s.width.max(0.0) as u32,
-        height: s.height.max(0.0) as u32,
+        width: crate::bindings::convert::f64_to_u32(s.width),
+        height: crate::bindings::convert::f64_to_u32(s.height),
       }),
     });
     let screen = self.screen.map(|s| fo::ScreenSize {
@@ -686,14 +684,8 @@ struct BrowserCallbacks {
   listeners: rustc_hash::FxHashMap<u64, BrowserListenerEntry>,
 }
 
+#[derive(JsLifetime)]
 struct BrowserCallbacksUd(std::cell::RefCell<BrowserCallbacks>);
-
-// SAFETY: holds only `'static` data, same rationale as the page and
-// context callback registries.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for BrowserCallbacksUd {
-  type Changed<'to> = BrowserCallbacksUd;
-}
 
 fn with_browser_callbacks<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut BrowserCallbacks) -> R) -> rquickjs::Result<R> {
   if ctx.userdata::<BrowserCallbacksUd>().is_none() {
@@ -714,12 +706,8 @@ enum BrowserEventMsg {
   },
 }
 
+#[derive(JsLifetime)]
 struct BrowserEventPumpUd(tokio::sync::mpsc::Sender<BrowserEventMsg>);
-
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for BrowserEventPumpUd {
-  type Changed<'to> = BrowserEventPumpUd;
-}
 
 /// Browser events are rare (a context opening, the browser going away),
 /// so the pump is bounded well below the page one.

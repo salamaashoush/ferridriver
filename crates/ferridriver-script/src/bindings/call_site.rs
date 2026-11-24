@@ -128,13 +128,8 @@ pub fn capture(ctx: &Ctx<'_>) -> CallOrigin {
 // read by the runtime's own error remap and by the call sites here.
 
 /// The script identity a gate uses to recognise its own calls.
+#[derive(JsLifetime)]
 struct ScriptIdUd(Arc<str>);
-
-// SAFETY: holds only `'static` data.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ScriptIdUd {
-  type Changed<'to> = ScriptIdUd;
-}
 
 pub use ferrijs::source_map::{caller_source_file, register_bundle, remap_stack};
 

@@ -106,7 +106,7 @@ pub fn native_module_names() -> Vec<&'static str> {
 /// sites spread across three crates.
 /// Import specifier -> native module name, as configured by
 /// `[test.moduleAliases]`.
-type AliasTable = Arc<Vec<(String, String)>>;
+type AliasTable = Arc<[(String, String)]>;
 
 static MODULE_ALIASES: RwLock<Option<AliasTable>> = RwLock::new(None);
 
@@ -167,7 +167,7 @@ pub fn set_module_aliases(aliases: impl IntoIterator<Item = (String, String)>) -
   let mut guard = MODULE_ALIASES
     .write()
     .unwrap_or_else(std::sync::PoisonError::into_inner);
-  let mut merged: Vec<(String, String)> = guard.as_ref().map(|a| (**a).clone()).unwrap_or_default();
+  let mut merged: Vec<(String, String)> = guard.as_ref().map(|a| a.to_vec()).unwrap_or_default();
   for (from, to) in list {
     match merged.iter_mut().find(|(existing, _)| *existing == from) {
       Some(entry) if entry.1 == to => {},
@@ -184,7 +184,7 @@ pub fn set_module_aliases(aliases: impl IntoIterator<Item = (String, String)>) -
       None => merged.push((from, to)),
     }
   }
-  *guard = Some(Arc::new(merged));
+  *guard = Some(Arc::from(merged));
   Ok(())
 }
 
@@ -206,7 +206,7 @@ pub fn aliases_sealed() -> bool {
 }
 
 #[must_use]
-pub fn module_aliases() -> Arc<Vec<(String, String)>> {
+pub fn module_aliases() -> Arc<[(String, String)]> {
   MODULE_ALIASES
     .read()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -247,7 +247,7 @@ pub fn alias_fingerprint() -> u64 {
   // Reading it seals the table (a bundle keyed now must not be served
   // under a table that changes afterwards).
   seal_aliases();
-  let mut entries: Vec<(String, String)> = (*module_aliases()).clone();
+  let mut entries: Vec<(String, String)> = module_aliases().to_vec();
   entries.sort();
   let mut h = std::collections::hash_map::DefaultHasher::new();
   for (from, to) in &entries {
@@ -390,14 +390,8 @@ impl ferrijs::RequireHook for FerridriverRequire {
 /// `@playwright/test` (`test.mjs` re-exports `playwright.devices`), so
 /// `require('playwright').devices === require('@playwright/test').devices`
 /// holds there and has to hold here.
+#[derive(rquickjs::JsLifetime)]
 struct DevicesObject(rquickjs::Persistent<Object<'static>>);
-
-// SAFETY: holds only a `Persistent`, which is lifetime-erased by
-// construction — the same rationale as the registry userdata.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for DevicesObject {
-  type Changed<'to> = DevicesObject;
-}
 
 /// `devices['iPhone 15']` — Playwright's device registry.
 ///
@@ -443,16 +437,10 @@ fn fd_prop<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Value<'js>> {
 /// Namespaces of the package-provided modules this VM has evaluated,
 /// keyed by specifier. What `require('<specifier>')` answers, since it
 /// is synchronous and cannot await a dynamic import.
+#[derive(rquickjs::JsLifetime)]
 struct ProvidedNamespaces(
   std::cell::RefCell<std::collections::BTreeMap<String, rquickjs::Persistent<Object<'static>>>>,
 );
-
-// SAFETY: holds only `Persistent` values, which are lifetime-erased by
-// construction — the same rationale as the registry userdata.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for ProvidedNamespaces {
-  type Changed<'to> = ProvidedNamespaces;
-}
 
 /// Record a provider's namespace after its module evaluated.
 pub fn remember_provided_namespace<'js>(ctx: &Ctx<'js>, specifier: &str, namespace: &Object<'js>) {

@@ -109,7 +109,9 @@ fn timeout_from_opts(args: &[Value<'_>]) -> Option<u64> {
     if v.as_function().is_some() {
       return None;
     }
-    o.get::<_, f64>("timeout").ok().map(|ms| ms.max(0.0) as u64)
+    o.get::<_, f64>("timeout")
+      .ok()
+      .map(crate::bindings::convert::f64_to_u64)
   })
 }
 
@@ -316,20 +318,17 @@ fn register_hook_in(kind: &str, args: &[Value<'_>], fixture_set: Option<usize>) 
   .map_err(|e| throw_script_error(&ctx, &e))
 }
 
-// 0.13 forbids running JS while a buffer borrow is alive; these copy out
-// immediately.
-#[allow(unsafe_code)]
 fn value_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
   if let Ok(ta) = TypedArray::<u8>::from_value(v.clone())
-    && let Some(b) = unsafe { ta.as_bytes() }
+    && let Some(b) = crate::bindings::convert::typed_array_bytes(&ta)
   {
-    return Some(b.to_vec());
+    return Some(b);
   }
   if let Some(obj) = v.as_object()
     && let Some(buf) = ArrayBuffer::from_object(obj.clone())
-    && let Some(b) = unsafe { buf.as_bytes() }
+    && let Some(b) = crate::bindings::convert::array_buffer_bytes(&buf, 0, usize::MAX)
   {
-    return Some(b.to_vec());
+    return Some(b);
   }
   None
 }
@@ -509,7 +508,10 @@ pub fn install_bdd<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   bdd.set("defineParameterType", define_parameter_type)?;
 
   let set_default_timeout = Function::new(ctx.clone(), |ctx: Ctx<'_>, ms: f64| -> rquickjs::Result<()> {
-    with_registry(&ctx, |reg| reg.default_timeout_ms = ms.max(0.0) as u64).map_err(|e| throw_script_error(&ctx, &e))
+    with_registry(&ctx, |reg| {
+      reg.default_timeout_ms = crate::bindings::convert::f64_to_u64(ms)
+    })
+    .map_err(|e| throw_script_error(&ctx, &e))
   })?;
   g.set("setDefaultTimeout", set_default_timeout.clone())?;
   bdd.set("setDefaultTimeout", set_default_timeout)?;

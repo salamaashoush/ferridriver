@@ -22,14 +22,8 @@ const CDP_PUMP_CAPACITY: usize = 1024;
 
 type CdpPumpMsg = (u64, serde_json::Value);
 
+#[derive(JsLifetime)]
 struct CdpEventPumpUd(tokio::sync::mpsc::Sender<CdpPumpMsg>);
-
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `WsEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for CdpEventPumpUd {
-  type Changed<'to> = CdpEventPumpUd;
-}
 
 /// Get (or lazily start) this context's CDP-listener pump. Same
 /// single-owner-VM discipline as the WS pump: the pump future runs on

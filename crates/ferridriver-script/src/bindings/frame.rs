@@ -494,9 +494,10 @@ impl FrameJs {
   pub async fn wait_for_timeout(&self, call_site: crate::bindings::CallSite, timeout: f64) {
     call_site
       .scope(async move {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let ms = if timeout < 0.0 { 0 } else { timeout as u64 };
-        self.inner.wait_for_timeout(ms).await;
+        self
+          .inner
+          .wait_for_timeout(crate::bindings::convert::f64_to_u64(timeout))
+          .await;
       })
       .await;
   }

@@ -111,24 +111,88 @@ impl<T> FerriResultCtxExt<T> for Result<T, FerriError> {
 }
 
 /// Convert a JS millisecond value (`f64`) into a `u64`, clamping
-/// negatives to `0`. Single home for the otherwise-repeated f64->u64
-/// timeout cast so call sites stay lint-clean.
+/// negatives to `0` and NaN to `u64::MAX`. The fractional part is
+/// truncated: sub-millisecond precision is irrelevant for timeouts.
 #[must_use]
 pub fn ms_f64_to_u64(ms: f64) -> u64 {
-  if ms <= 0.0 {
-    return 0;
-  }
-  // `ms` is now strictly positive and finite-or-inf; `f64::min` against
-  // `u64::MAX` keeps the cast in range, and the fractional part is
-  // truncated (sub-millisecond precision is irrelevant for timeouts).
-  #[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-  )]
-  {
-    ms.min(u64::MAX as f64) as u64
-  }
+  if ms.is_nan() { u64::MAX } else { f64_to_u64(ms) }
+}
+
+/// A JS number as a `u64`: the fraction truncated, a negative or NaN value
+/// as `0`, a value past `u64::MAX` saturating.
+#[expect(
+  clippy::cast_possible_truncation,
+  clippy::cast_sign_loss,
+  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
+)]
+#[must_use]
+pub fn f64_to_u64(v: f64) -> u64 {
+  v as u64
+}
+
+/// [`f64_to_u64`], saturating at `u32::MAX`.
+#[must_use]
+pub fn f64_to_u32(v: f64) -> u32 {
+  u32::try_from(f64_to_u64(v)).unwrap_or(u32::MAX)
+}
+
+/// [`f64_to_u64`], saturating at `usize::MAX`.
+#[must_use]
+pub fn f64_to_usize(v: f64) -> usize {
+  usize::try_from(f64_to_u64(v)).unwrap_or(usize::MAX)
+}
+
+/// A JS number as an `i64`: the fraction truncated, NaN as `0`, a value
+/// past either bound saturating.
+#[expect(
+  clippy::cast_possible_truncation,
+  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
+)]
+#[must_use]
+pub fn f64_to_i64(v: f64) -> i64 {
+  v as i64
+}
+
+/// A count, id or millisecond value as the JS `number` it crosses as.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+#[must_use]
+pub fn u64_to_f64(v: u64) -> f64 {
+  v as f64
+}
+
+/// [`u64_to_f64`] for a signed value.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+#[must_use]
+pub fn i64_to_f64(v: i64) -> f64 {
+  v as f64
+}
+
+/// [`u64_to_f64`] for a `usize` count.
+#[must_use]
+pub fn usize_to_f64(v: usize) -> f64 {
+  u64_to_f64(u64::try_from(v).unwrap_or(u64::MAX))
+}
+
+/// A duration in whole milliseconds as the JS `number` it crosses as.
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "a JS number is an f64; a value past 2^53 rounds exactly as it would in JS"
+)]
+#[must_use]
+pub fn duration_ms_to_f64(d: std::time::Duration) -> f64 {
+  d.as_millis() as f64
+}
+
+/// A duration in whole milliseconds, saturating at `u64::MAX`.
+#[must_use]
+pub fn duration_ms_to_u64(d: std::time::Duration) -> u64 {
+  u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Parse a `waitForEvent`-style trailing argument: a bare timeout
@@ -562,7 +626,7 @@ impl<'js> ArgWalk<'_, 'js> {
     }
     if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
       return Ok(Some(SerializedValue::ArrayBuffer(ArrayBufferValue {
-        b: buffer_bytes(&buffer, 0, buffer.len()),
+        b: array_buffer_bytes(&buffer, 0, usize::MAX).unwrap_or_default(),
       })));
     }
     for (class, k) in TYPED_ARRAYS {
@@ -749,9 +813,7 @@ fn rehydrate<'js>(
 
 fn f64_as_exact_i32(n: f64) -> Option<i32> {
   if n.is_finite() && n.fract() == 0.0 && n >= f64::from(i32::MIN) && n <= f64::from(i32::MAX) {
-    // SAFETY: bounds-checked above. Direct cast preserves value for integers in i32 range.
-    let trunc = n.trunc();
-    i32::try_from(trunc as i64).ok()
+    i32::try_from(f64_to_i64(n)).ok()
   } else {
     None
   }
@@ -793,16 +855,49 @@ fn rehydrate_typed_array<'js>(
 }
 
 /// `length` bytes of `buffer` from `offset`, or none of them once it is
-/// detached. rquickjs forbids running JS while a buffer borrow is alive;
-/// this copies out at once.
-#[allow(unsafe_code)]
+/// detached or the range runs past its end.
 fn buffer_bytes(buffer: &rquickjs::ArrayBuffer<'_>, offset: usize, length: usize) -> Vec<u8> {
-  // SAFETY: the borrow ends inside this expression, before any JS can
-  // run to detach or resize the buffer.
-  unsafe { buffer.as_bytes() }
-    .and_then(|bytes| bytes.get(offset..offset.saturating_add(length)))
-    .map(<[u8]>::to_vec)
-    .unwrap_or_default()
+  copy_array_buffer(buffer, |bytes| bytes.get(offset..offset.saturating_add(length))).unwrap_or_default()
+}
+
+/// Up to `length` bytes of `buffer` from `offset`, the range clamped to the
+/// buffer; `None` once the buffer is detached.
+pub(crate) fn array_buffer_bytes(buffer: &rquickjs::ArrayBuffer<'_>, offset: usize, length: usize) -> Option<Vec<u8>> {
+  copy_array_buffer(buffer, |bytes| {
+    let start = offset.min(bytes.len());
+    let end = offset.saturating_add(length).min(bytes.len());
+    bytes.get(start..end)
+  })
+}
+
+/// A `Uint8Array`'s bytes; `None` once its buffer is detached.
+#[expect(
+  unsafe_code,
+  reason = "rquickjs exposes a typed array's bytes only through the unsafe `as_bytes`"
+)]
+pub(crate) fn typed_array_bytes(array: &rquickjs::TypedArray<'_, u8>) -> Option<Vec<u8>> {
+  // SAFETY: `as_bytes` requires that no JS runs while the slice lives. It
+  // is copied into a `Vec` within this expression, before control returns
+  // to anything that could run JS.
+  unsafe { array.as_bytes() }.map(<[u8]>::to_vec)
+}
+
+/// Copy the part of `buffer` that `select` picks out. `select` is a plain
+/// function of the bytes, which is what keeps the borrow below sound.
+#[expect(
+  unsafe_code,
+  reason = "rquickjs exposes an ArrayBuffer's bytes only through the unsafe `as_bytes`"
+)]
+fn copy_array_buffer(
+  buffer: &rquickjs::ArrayBuffer<'_>,
+  select: impl FnOnce(&[u8]) -> Option<&[u8]>,
+) -> Option<Vec<u8>> {
+  // SAFETY: `as_bytes` requires that no JS runs while the slice lives. The
+  // only code that sees it is `select`, which every caller in this module
+  // passes as a pure range computation, and the selection is copied into a
+  // `Vec` before this function returns.
+  let bytes = unsafe { buffer.as_bytes() }?;
+  select(bytes).map(<[u8]>::to_vec)
 }
 
 /// Each typed-array constructor and the tag it crosses the wire under.

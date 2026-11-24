@@ -52,15 +52,8 @@ impl Wrappers {
 
 const MAX_CLOSED_DIALOGS: usize = 16;
 
+#[derive(JsLifetime)]
 struct WrappersUserData(RefCell<Wrappers>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles and owned
-// values), so re-stating the unused `'js` lifetime is sound — same
-// rationale as `RegistryUserData`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for WrappersUserData {
-  type Changed<'to> = WrappersUserData;
-}
 
 fn with_wrappers<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut Wrappers) -> R) -> R {
   if ctx.userdata::<WrappersUserData>().is_none() {

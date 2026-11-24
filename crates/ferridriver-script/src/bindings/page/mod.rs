@@ -199,8 +199,7 @@ impl PageJs {
     with_page_callbacks(ctx, |r| {
       r.insert_event_listener(id.0, event.to_string(), page_key, saved);
     })?;
-    #[allow(clippy::cast_precision_loss)]
-    Ok(id.0 as f64)
+    Ok(crate::bindings::convert::u64_to_f64(id.0))
   }
 }
 
@@ -1406,9 +1405,7 @@ impl PageJs {
   /// Node's `listenerCount(type)`.
   #[qjs(rename = "listenerCount")]
   pub fn listener_count(&self, event: String) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let count = self.inner.listener_count(&event) as f64;
-    count
+    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()` — every event with a listener attached.
@@ -1420,18 +1417,18 @@ impl PageJs {
   /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
   #[qjs(rename = "setMaxListeners")]
   pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let max = max.max(0.0) as usize;
-    this.0.borrow().inner.set_max_listeners(max);
+    this
+      .0
+      .borrow()
+      .inner
+      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
     this.0
   }
 
   /// Node's `getMaxListeners()`.
   #[qjs(rename = "getMaxListeners")]
   pub fn get_max_listeners(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    let max = self.inner.max_listeners() as f64;
-    max
+    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
 
   /// `page.once(event, listener)`. Like [`Self::on`] but the listener
@@ -1536,9 +1533,10 @@ impl PageJs {
   pub async fn wait_for_timeout(&self, call_site: crate::bindings::CallSite, timeout: f64) {
     call_site
       .scope(async move {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let ms = if timeout < 0.0 { 0 } else { timeout as u64 };
-        self.inner.wait_for_timeout(ms).await;
+        self
+          .inner
+          .wait_for_timeout(crate::bindings::convert::f64_to_u64(timeout))
+          .await;
       })
       .await;
   }
@@ -2747,10 +2745,7 @@ impl PageJs {
     let mut no_wait_after = false;
     if let Some(bag) = options.0.as_ref().and_then(rquickjs::Value::as_object) {
       if let Ok(Some(t)) = bag.get::<_, Option<f64>>("times") {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-          times = Some(t as u32);
-        }
+        times = Some(crate::bindings::convert::f64_to_u32(t));
       }
       if let Ok(Some(n)) = bag.get::<_, Option<bool>>("noWaitAfter") {
         no_wait_after = n;
@@ -3311,7 +3306,7 @@ impl PageJs {
         }
         let ref_map = rquickjs::Object::new(ctx.clone())?;
         for (k, v) in snap.ref_map {
-          ref_map.set(k, v as f64)?;
+          ref_map.set(k, crate::bindings::convert::i64_to_f64(v))?;
         }
         obj.set("refMap", ref_map)?;
         rquickjs::IntoJs::into_js(obj, &ctx)

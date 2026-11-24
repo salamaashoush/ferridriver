@@ -36,14 +36,8 @@ type WsPumpMsg = (u64, WsPumpEvent);
 /// Per-context sender feeding the single WS-callback pump. Sibling of
 /// `PageEventPumpUd`; same rule-1 rationale (a long-lived loop resolving
 /// plain JS callbacks must stay on the interpreter thread).
+#[derive(JsLifetime)]
 struct WsEventPumpUd(tokio::sync::mpsc::Sender<WsPumpMsg>);
-
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `PageEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for WsEventPumpUd {
-  type Changed<'to> = WsEventPumpUd;
-}
 
 /// Get (or lazily start) this context's WS-callback pump. The pump future
 /// lives on the QuickJS runtime executor, polled only by the session's VM
@@ -127,23 +121,20 @@ pub(crate) fn build_ws_route_handler(
   })
 }
 
-// 0.13 forbids running JS while a buffer borrow is alive; these copy out
-// immediately.
-#[allow(unsafe_code)]
 fn ws_message_from_js(value: &Value<'_>) -> WsMessage {
   if let Some(s) = value.as_string() {
     return WsMessage::Text(s.to_string().unwrap_or_default());
   }
   if let Some(obj) = value.as_object() {
     if let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone())
-      && let Some(bytes) = unsafe { buf.as_bytes() }
+      && let Some(bytes) = crate::bindings::convert::array_buffer_bytes(&buf, 0, usize::MAX)
     {
-      return WsMessage::Binary(bytes.to_vec());
+      return WsMessage::Binary(bytes);
     }
     if let Ok(ta) = rquickjs::TypedArray::<u8>::from_object(obj.clone())
-      && let Some(bytes) = unsafe { ta.as_bytes() }
+      && let Some(bytes) = crate::bindings::convert::typed_array_bytes(&ta)
     {
-      return WsMessage::Binary(bytes.to_vec());
+      return WsMessage::Binary(bytes);
     }
   }
   WsMessage::Text(String::new())
@@ -160,7 +151,11 @@ fn parse_close(options: &Opt<Value<'_>>) -> (Option<u32>, Option<String>) {
   let Some(obj) = options.0.as_ref().and_then(rquickjs::Value::as_object) else {
     return (None, None);
   };
-  let code = obj.get::<_, Option<f64>>("code").ok().flatten().map(|c| c as u32);
+  let code = obj
+    .get::<_, Option<f64>>("code")
+    .ok()
+    .flatten()
+    .map(crate::bindings::convert::f64_to_u32);
   let reason = obj.get::<_, Option<String>>("reason").ok().flatten();
   (code, reason)
 }

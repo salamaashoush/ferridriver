@@ -389,14 +389,8 @@ const SOCKET_PUMP_CAPACITY: usize = 1024;
 
 type SocketPumpMsg = (u64, WebSocketEvent, CoreWebSocket);
 
+#[derive(JsLifetime)]
 struct SocketEventPumpUd(tokio::sync::mpsc::Sender<SocketPumpMsg>);
-
-// SAFETY: holds only a `'static` channel sender, so re-stating the unused
-// `'js` lifetime is sound — identical rationale to `WsEventPumpUd`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for SocketEventPumpUd {
-  type Changed<'to> = SocketEventPumpUd;
-}
 
 /// Get (or lazily start) this context's socket-listener pump. Listeners
 /// run on the interpreter thread, never on the backend thread that

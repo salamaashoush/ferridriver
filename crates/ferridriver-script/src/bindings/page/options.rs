@@ -128,8 +128,7 @@ pub(crate) fn opt_timeout_ms(options: &Opt<rquickjs::Value<'_>>) -> rquickjs::Re
   let Some(v) = options.0.as_ref() else { return Ok(None) };
   let Some(obj) = v.as_object() else { return Ok(None) };
   let field: rquickjs::Value<'_> = obj.get("timeout")?;
-  #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-  Ok(field.as_number().map(|n| if n < 0.0 { 0 } else { n as u64 }))
+  Ok(field.as_number().map(crate::bindings::convert::f64_to_u64))
 }
 
 /// `waitForNavigation`'s `{ timeout?, url?, waitUntil? }`, whose `url` is
@@ -217,8 +216,7 @@ pub(crate) fn parse_route_times(
   if t.is_undefined() || t.is_null() {
     return Ok(None);
   }
-  #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-  Ok(t.as_number().map(|n| if n < 0.0 { 0 } else { n as u32 }))
+  Ok(t.as_number().map(crate::bindings::convert::f64_to_u32))
 }
 
 /// Parse the `{ url?, notFound?, update?, updateContent?, updateMode? }`

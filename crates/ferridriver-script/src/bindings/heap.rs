@@ -13,18 +13,11 @@ use rquickjs::{Ctx, Value, class::Trace};
 
 use crate::bindings::convert::{FerriResultCtxExt, serde_from_js, serde_to_js};
 
-#[derive(Trace)]
+#[derive(Trace, rquickjs::JsLifetime)]
 #[rquickjs::class(rename = "HeapSnapshot")]
 pub struct HeapSnapshotJs {
   #[qjs(skip_trace)]
   inner: std::sync::Arc<ferridriver::heap::HeapSnapshot>,
-}
-
-// SAFETY: holds only a `'static` `Arc`, so re-stating the unused `'js`
-// lifetime is sound -- the same rationale as every other handle here.
-#[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for HeapSnapshotJs {
-  type Changed<'to> = HeapSnapshotJs;
 }
 
 impl HeapSnapshotJs {
@@ -55,13 +48,13 @@ impl HeapSnapshotJs {
   /// Every byte the snapshot accounts for.
   #[qjs(rename = "totalSize")]
   pub fn total_size(&self) -> f64 {
-    self.inner.total_size() as f64
+    crate::bindings::convert::u64_to_f64(self.inner.total_size())
   }
 
   /// How many nodes the graph holds.
   #[qjs(rename = "nodeCount")]
   pub fn node_count(&self) -> f64 {
-    self.inner.node_count() as f64
+    crate::bindings::convert::usize_to_f64(self.inner.node_count())
   }
 
   /// Every class, heaviest first.
@@ -219,7 +212,7 @@ struct JsNodeFilter {
 /// inside what one holds exactly.
 fn node_id_of(node_id: f64) -> u64 {
   if node_id.is_finite() && node_id >= 0.0 {
-    node_id as u64
+    crate::bindings::convert::f64_to_u64(node_id)
   } else {
     0
   }

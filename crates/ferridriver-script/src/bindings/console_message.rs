@@ -42,7 +42,14 @@ impl ConsoleMessageJs {
 
   /// Playwright: `consoleMessage.args(): JSHandle[]`.
   #[qjs(rename = "args")]
-  pub fn args<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+  pub fn args<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let mut out = Vec::with_capacity(self.inner.args().len());
     for h in self.inner.args() {
       let instance = Class::instance(ctx.clone(), JSHandleJs::new(h.clone()))?;
@@ -53,7 +60,14 @@ impl ConsoleMessageJs {
 
   /// Playwright: `consoleMessage.location(): { url, lineNumber, columnNumber }`.
   #[qjs(rename = "location")]
-  pub fn location<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+  pub fn location<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let loc = self.inner.location();
     let obj = rquickjs::Object::new(ctx.clone())?;
     obj.set("url", loc.url.clone())?;
@@ -79,9 +93,6 @@ impl ConsoleMessageJs {
   /// Playwright: `consoleMessage.timestamp(): number`.
   #[qjs(rename = "timestamp")]
   pub fn timestamp(&self) -> f64 {
-    #[allow(clippy::cast_precision_loss)]
-    {
-      self.inner.timestamp() as f64
-    }
+    crate::bindings::convert::u64_to_f64(self.inner.timestamp())
   }
 }

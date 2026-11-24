@@ -174,7 +174,7 @@ impl<'js> LiveValue for JsLive<'js> {
   fn length(&self) -> rquickjs::Result<Option<f64>> {
     // A JS string's `.length` counts UTF-16 code units, not characters.
     if let Some(s) = self.text() {
-      return Ok(Some(s.encode_utf16().count() as f64));
+      return Ok(Some(crate::bindings::convert::usize_to_f64(s.encode_utf16().count())));
     }
     let Some(obj) = self.0.as_object() else {
       return Ok(None);
@@ -368,15 +368,12 @@ impl<'js> JsLive<'js> {
 
   /// An `ArrayBuffer` or a typed array as its bytes, so two views with
   /// the same contents compare equal.
-  // 0.13 forbids running JS while a buffer borrow is alive; these copy out
-  // immediately.
-  #[allow(unsafe_code)]
   fn bytes(&self) -> rquickjs::Result<Option<Vec<u8>>> {
     let Some(obj) = self.0.as_object() else {
       return Ok(None);
     };
     if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
-      return Ok(unsafe { buffer.as_bytes() }.map(<[u8]>::to_vec));
+      return Ok(crate::bindings::convert::array_buffer_bytes(&buffer, 0, usize::MAX));
     }
     let brand = self.brand()?;
     if !brand.ends_with("Array") || brand == "Array" {
@@ -388,9 +385,9 @@ impl<'js> JsLive<'js> {
     let Some(buffer) = buffer.as_object().cloned().and_then(rquickjs::ArrayBuffer::from_object) else {
       return Ok(None);
     };
-    let offset: usize = obj.get::<_, Option<f64>>("byteOffset")?.unwrap_or(0.0) as usize;
-    let length: usize = obj.get::<_, Option<f64>>("byteLength")?.unwrap_or(0.0) as usize;
-    Ok(unsafe { buffer.as_bytes() }.map(|all| all[offset.min(all.len())..(offset + length).min(all.len())].to_vec()))
+    let offset = crate::bindings::convert::f64_to_usize(obj.get::<_, Option<f64>>("byteOffset")?.unwrap_or(0.0));
+    let length = crate::bindings::convert::f64_to_usize(obj.get::<_, Option<f64>>("byteLength")?.unwrap_or(0.0));
+    Ok(crate::bindings::convert::array_buffer_bytes(&buffer, offset, length))
   }
 }
 
@@ -399,14 +396,8 @@ impl<'js> JsLive<'js> {
 /// `expect(x)` in a spec starts from `[test.expect]` — or from the
 /// project's own `expect` block, which REPLACES the config's whole
 /// object rather than merging into it.
+#[derive(rquickjs::JsLifetime)]
 pub(crate) struct ExpectDefaultsUd(pub std::cell::RefCell<Arc<ferridriver_test::config::ExpectConfig>>);
-
-// SAFETY: holds only `'static` data, same rationale as the other
-// per-session registries in this crate.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ExpectDefaultsUd {
-  type Changed<'to> = ExpectDefaultsUd;
-}
 
 /// Publish the running test's resolved `expect` block to this VM.
 pub(crate) fn set_expect_defaults(ctx: &Ctx<'_>, expect: Arc<ferridriver_test::config::ExpectConfig>) {
@@ -824,9 +815,11 @@ fn opts_obj<'js>(options: &Opt<Value<'js>>) -> Option<Object<'js>> {
 
 fn u64_field(obj: Option<&Object<'_>>, key: &str) -> Option<u64> {
   let v = obj?.get::<_, rquickjs::Value<'_>>(key).ok()?;
-  v.as_int()
-    .and_then(|i| u64::try_from(i).ok())
-    .or_else(|| v.as_number().filter(|n| *n >= 0.0).map(|n| n as u64))
+  v.as_int().and_then(|i| u64::try_from(i).ok()).or_else(|| {
+    v.as_number()
+      .filter(|n| *n >= 0.0)
+      .map(crate::bindings::convert::f64_to_u64)
+  })
 }
 
 fn bool_field(obj: Option<&Object<'_>>, key: &str) -> Option<bool> {
@@ -846,9 +839,11 @@ fn u64_array_field(obj: Option<&Object<'_>>, key: &str) -> Option<Vec<u64>> {
     .iter::<rquickjs::Value<'_>>()
     .filter_map(std::result::Result::ok)
     .filter_map(|v| {
-      v.as_int()
-        .and_then(|i| u64::try_from(i).ok())
-        .or_else(|| v.as_number().filter(|n| *n >= 0.0).map(|n| n as u64))
+      v.as_int().and_then(|i| u64::try_from(i).ok()).or_else(|| {
+        v.as_number()
+          .filter(|n| *n >= 0.0)
+          .map(crate::bindings::convert::f64_to_u64)
+      })
     })
     .collect();
   (!out.is_empty()).then_some(out)
@@ -2273,11 +2268,15 @@ impl ExpectPollJs {
     info.set("generator", self.generator.clone().restore(&ctx)?)?;
     info.set(
       "timeout",
-      u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX) as f64,
+      crate::bindings::convert::u64_to_f64(crate::bindings::convert::duration_ms_to_u64(self.timeout)),
     )?;
     info.set(
       "intervals",
-      self.intervals.iter().map(|&ms| ms as f64).collect::<Vec<_>>(),
+      self
+        .intervals
+        .iter()
+        .map(|&ms| crate::bindings::convert::u64_to_f64(ms))
+        .collect::<Vec<_>>(),
     )?;
     info.set("isNot", self.is_not)?;
     Ok(info)
@@ -2519,7 +2518,8 @@ fn create_expect<'js>(
     ctx.clone(),
     move |ctx: Ctx<'js>, generator: Function<'js>, opts: Opt<Value<'js>>| -> rquickjs::Result<Value<'js>> {
       let o = opts_obj(&opts);
-      let default_timeout = poll_meta.timeout.unwrap_or_else(|| default_timeout(&ctx)).as_millis() as u64;
+      let default_timeout =
+        crate::bindings::convert::duration_ms_to_u64(poll_meta.timeout.unwrap_or_else(|| default_timeout(&ctx)));
       let timeout_ms = u64_field(o.as_ref(), "timeout").unwrap_or(default_timeout);
       let intervals = u64_array_field(o.as_ref(), "intervals").unwrap_or_else(|| POLL_INTERVALS.to_vec());
       let saved = Persistent::save(&ctx, generator);
@@ -2743,8 +2743,11 @@ fn parse_configure<'js>(
   }
   if obj.contains_key("timeout").unwrap_or(false) {
     let v: Value<'js> = obj.get("timeout")?;
-    out.timeout =
-      ferridriver_expect::Setting::from_optional(true, v.as_number().map(|ms| Duration::from_millis(ms as u64)));
+    out.timeout = ferridriver_expect::Setting::from_optional(
+      true,
+      v.as_number()
+        .map(|ms| Duration::from_millis(crate::bindings::convert::f64_to_u64(ms))),
+    );
   }
   if obj.contains_key("soft").unwrap_or(false) {
     let v: Value<'js> = obj.get("soft")?;
@@ -2811,7 +2814,7 @@ pub fn merge_expects<'js>(ctx: &Ctx<'js>, expects: Vec<Value<'js>>) -> rquickjs:
     let Some(index) = obj.get::<_, Value<'js>>(EXPECT_TABLE).ok().and_then(|v| v.as_number()) else {
       continue;
     };
-    let table = matcher_table(ctx, index as u32)?;
+    let table = matcher_table(ctx, crate::bindings::convert::f64_to_u32(index))?;
     for entry in table.props::<String, Value<'js>>() {
       let (name, value) = entry?;
       merged.set(name, value)?;
@@ -3020,7 +3023,7 @@ fn push_onto<'js>(ctx: &Ctx<'js>, arr: &Array<'js>, value: Value<'js>) -> rquick
   let push: Function<'js> = arr.as_object().get("push")?;
   let len: f64 = push.call((rquickjs::function::This(arr.clone()), value))?;
   let _ = ctx;
-  Ok(len as u32 - 1)
+  Ok(crate::bindings::convert::f64_to_u32(len).saturating_sub(1))
 }
 
 /// The matcher names currently in `table`.
@@ -3048,7 +3051,7 @@ fn matcher_context<'js>(ctx: &Ctx<'js>, cx: &ferridriver_expect::MatcherContext)
   obj.set("isNot", cx.is_not)?;
   obj.set("isSoft", cx.is_soft)?;
   obj.set("promise", cx.promise.map_or("", PromiseMode::as_str))?;
-  obj.set("timeout", cx.timeout.as_millis() as f64)?;
+  obj.set("timeout", crate::bindings::convert::duration_ms_to_f64(cx.timeout))?;
   obj.set("utils", matcher_utils(ctx)?)?;
   // Playwright hands custom matchers an `equals` that refuses to run:
   // a jest matcher relying on it is not compatible with this runner.
@@ -3113,7 +3116,7 @@ fn parse_property_path<'js>(
             "property path index must be a non-negative integer".to_string(),
           ));
         }
-        out.push(PropSegment::Index(n as usize));
+        out.push(PropSegment::Index(crate::bindings::convert::f64_to_usize(n)));
       } else {
         return Err(crate::bindings::convert::throw_named(
           ctx,
@@ -3641,14 +3644,8 @@ const MATCHER_STEPS: &str = r"(begin, end) => {
 /// Soft failures recorded before each open soft step, by step id: a soft
 /// assertion that fails returns normally, and the step learns it failed
 /// from the failure it left behind.
-#[derive(Default)]
+#[derive(Default, rquickjs::JsLifetime)]
 struct SoftBaselines(std::cell::RefCell<rustc_hash::FxHashMap<String, usize>>);
-
-// SAFETY: holds only `'static` data.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for SoftBaselines {
-  type Changed<'to> = SoftBaselines;
-}
 
 fn install_matcher_steps<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // Once per realm: wrapping a prototype twice would report every

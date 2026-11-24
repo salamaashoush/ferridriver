@@ -329,15 +329,8 @@ impl TestRegistry {
 
 /// Context userdata holding the test registry. Single-threaded VM ⇒
 /// `RefCell`, never `Arc`/`Mutex`.
+#[derive(JsLifetime)]
 struct TestRegistryUserData(RefCell<TestRegistry>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles and owned
-// values), so re-stating the unused `'js` lifetime is sound — same
-// rationale as `RegistryUserData`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for TestRegistryUserData {
-  type Changed<'to> = TestRegistryUserData;
-}
 
 pub(crate) fn with_test_registry<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut TestRegistry) -> R) -> Result<R, ScriptError> {
   let ud = ctx
@@ -476,10 +469,10 @@ fn parse_details<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> Result<ParsedDetails, r
   }
   out.annotations.extend(lock_annotations(ctx, o)?);
   if let Ok(t) = o.get::<_, f64>("timeout") {
-    out.timeout_ms = Some(t.max(0.0) as u64);
+    out.timeout_ms = Some(crate::bindings::convert::f64_to_u64(t));
   }
   if let Ok(r) = o.get::<_, f64>("retries") {
-    out.retries = Some(r.max(0.0) as u32);
+    out.retries = Some(crate::bindings::convert::f64_to_u32(r));
   }
   Ok(out)
 }
@@ -863,7 +856,11 @@ fn parse_fixture_entry<'js>(ctx: &Ctx<'js>, name: &str, v: Value<'js>) -> Result
       .get::<_, Value<'js>>("option")
       .is_ok_and(|v| !v.is_undefined() && !v.is_null());
     option = o.get::<_, bool>("option").unwrap_or(false);
-    timeout_ms = o.get::<_, Option<f64>>("timeout").ok().flatten().map(|ms| ms as u64);
+    timeout_ms = o
+      .get::<_, Option<f64>>("timeout")
+      .ok()
+      .flatten()
+      .map(crate::bindings::convert::f64_to_u64);
     title = o.get::<_, Option<String>>("title").ok().flatten();
     boxed = match o.get::<_, Value<'js>>("box") {
       Ok(v) if v.is_string() => match v.as_string().and_then(|s| s.to_string().ok()).as_deref() {
@@ -976,7 +973,7 @@ pub(crate) fn fixture_set_of<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> Option<
   let obj = value.as_object()?;
   let marked: Value<'js> = obj.get(test_type_key(ctx).ok()?).ok()?;
   let index = marked.as_number()?;
-  (index >= 0.0).then_some(index as usize)
+  (index >= 0.0).then(|| crate::bindings::convert::f64_to_usize(index))
 }
 
 /// `mergeTests(...tests)` — one `test` whose fixtures are the union of
@@ -1224,7 +1221,7 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
   obj.set("use", use_fn)?;
 
   let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
-    current_bridge(&ctx, "test.setTimeout()")?.set_timeout_override(ms.max(0.0) as u64);
+    current_bridge(&ctx, "test.setTimeout()")?.set_timeout_override(crate::bindings::convert::f64_to_u64(ms));
     Ok(())
   })?;
   obj.set("setTimeout", set_timeout)?;
@@ -1283,7 +1280,10 @@ fn make_test_object<'js>(ctx: &Ctx<'js>, fixture_set: usize) -> rquickjs::Result
 
   // Non-enumerable, non-writable: a spread of `test` must not copy it,
   // and a suite must not be able to forge a chain by assigning it.
-  obj.prop(test_type_key(ctx)?, rquickjs::object::Property::from(set as f64))?;
+  obj.prop(
+    test_type_key(ctx)?,
+    rquickjs::object::Property::from(crate::bindings::convert::usize_to_f64(set)),
+  )?;
 
   Ok(test_fn)
 }
@@ -1468,8 +1468,14 @@ fn make_describe_object<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
         }),
         Err(_) => None,
       };
-      let retries = opts.get::<_, f64>("retries").ok().map(|r| r.max(0.0) as u32);
-      let timeout_ms = opts.get::<_, f64>("timeout").ok().map(|t| t.max(0.0) as u64);
+      let retries = opts
+        .get::<_, f64>("retries")
+        .ok()
+        .map(crate::bindings::convert::f64_to_u32);
+      let timeout_ms = opts
+        .get::<_, f64>("timeout")
+        .ok()
+        .map(crate::bindings::convert::f64_to_u64);
       let locks = lock_annotations(&ctx, &opts)?;
       let (line, col) = capture_location(&ctx);
       with_test_registry(&ctx, |r| {
@@ -1756,7 +1762,7 @@ fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rqui
     timeout: options
       .get::<_, Option<f64>>("timeout")?
       .filter(|ms| *ms > 0.0)
-      .map(|ms| std::time::Duration::from_millis(ms as u64)),
+      .map(|ms| std::time::Duration::from_millis(crate::bindings::convert::f64_to_u64(ms))),
     subtitle: options.get::<_, Option<String>>("subtitle")?,
     // Reports carry the params as JSON, which is what they are written as.
     params: match options.get::<_, Option<Object<'js>>>("params")? {
@@ -1777,8 +1783,8 @@ fn parse_step_options<'js>(ctx: &Ctx<'js>, options: Option<&Value<'js>>) -> rqui
     })?;
     parsed.location = Some(StepLocation {
       file,
-      line: location.get::<_, Option<f64>>("line")?.unwrap_or(0.0) as u32,
-      column: location.get::<_, Option<f64>>("column")?.unwrap_or(0.0) as u32,
+      line: crate::bindings::convert::f64_to_u32(location.get::<_, Option<f64>>("line")?.unwrap_or(0.0)),
+      column: crate::bindings::convert::f64_to_u32(location.get::<_, Option<f64>>("column")?.unwrap_or(0.0)),
     });
   }
   let _ = ctx;
@@ -1916,7 +1922,7 @@ fn build_test_info<'js>(
   install_bridge_getter(ctx, &obj, "attachmentCount", {
     let bridge = Arc::clone(bridge);
     move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-      rquickjs::IntoJs::into_js(bridge.attachment_count() as u32, ctx)
+      rquickjs::IntoJs::into_js(u32::try_from(bridge.attachment_count()).unwrap_or(u32::MAX), ctx)
     }
   })
   .map_err(se)?;
@@ -1972,7 +1978,7 @@ fn build_test_info<'js>(
     obj.set(kind, f).map_err(se)?;
   }
   let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
-    current_bridge(&ctx, "testInfo.setTimeout()")?.set_timeout_override(ms.max(0.0) as u64);
+    current_bridge(&ctx, "testInfo.setTimeout()")?.set_timeout_override(crate::bindings::convert::f64_to_u64(ms));
     Ok(())
   })
   .map_err(se)?;
@@ -2834,7 +2840,7 @@ async fn drive_script(
   // bytecode disk cache whose ABI tag guarantees an ABI-identical
   // toolchain wrote it: the precondition `Module::load` documents. QuickJS
   // creates a new module at every load, so a retry evaluates it afresh.
-  #[allow(unsafe_code)]
+  #[expect(unsafe_code, reason = "rquickjs declares loading module bytecode unsafe")]
   let declared = unsafe { rquickjs::Module::load(ctx.clone(), &script.bytecode) }
     .catch(ctx)
     .map_err(|e| Thrown::caught(e, &script.module_name))?;

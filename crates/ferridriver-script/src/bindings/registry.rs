@@ -131,15 +131,8 @@ pub(crate) struct ParamTypeReg {
 /// declared manifest with it, so the `ToolReg` a session dispatches
 /// from already carries the effective grants. Declared hosts are retained
 /// separately so extraction can report permissions removed by the ceiling.
+#[derive(JsLifetime)]
 pub(crate) struct ExtensionPolicyUd(pub(crate) ferridriver_config::ExtensionPolicyConfig);
-
-// SAFETY: holds only owned config data (no JS values), so re-stating
-// the unused `'js` lifetime is sound — same rationale as
-// `RegistryUserData`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for ExtensionPolicyUd {
-  type Changed<'to> = ExtensionPolicyUd;
-}
 
 /// The effective `allow.net` for a declared list under the operator
 /// ceiling. `None` ⇒ unrestricted; `Some` ⇒ default-deny allow-list.
@@ -217,15 +210,8 @@ fn check_commands_ceiling(
 
 /// Context userdata holding the registry. Single-threaded VM ⇒
 /// `RefCell`, never `Arc`/`Mutex`.
+#[derive(JsLifetime)]
 struct RegistryUserData(RefCell<ExtensionRegistry>);
-
-// SAFETY: holds only `'static` data (`Persistent<…>` handles and owned
-// values), so re-stating the unused `'js` lifetime is sound — same
-// rationale as `SessionAsyncCtx`.
-#[allow(unsafe_code)]
-unsafe impl JsLifetime<'_> for RegistryUserData {
-  type Changed<'to> = RegistryUserData;
-}
 
 pub(crate) fn with_registry<R>(ctx: &Ctx<'_>, f: impl FnOnce(&mut ExtensionRegistry) -> R) -> Result<R, ScriptError> {
   let ud = ctx
@@ -274,7 +260,7 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   let timeout_ms = m
     .get::<_, f64>("timeoutMs")
     .ok()
-    .map(|ms| ms.max(0.0) as u64)
+    .map(crate::bindings::convert::f64_to_u64)
     .filter(|&v| v > 0);
 
   let (allowed_commands, allowed_net) = match m.get::<_, Value<'_>>("allow") {
