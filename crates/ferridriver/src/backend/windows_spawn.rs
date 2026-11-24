@@ -61,6 +61,10 @@ pub struct PipePair {
 /// "All pipe instances are busy".
 /// # Errors
 /// Fails when Windows cannot create or open the pipes.
+#[expect(
+  unsafe_code,
+  reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+)]
 pub fn pipe_pair(label: &str) -> io::Result<PipePair> {
   static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
   let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -78,14 +82,13 @@ pub fn pipe_pair(label: &str) -> io::Result<PipePair> {
   let ours_read = server(&from_child, PIPE_ACCESS_INBOUND)?;
   let theirs_read = client(&to_child, GENERIC_READ)?;
   let theirs_write = client(&from_child, GENERIC_WRITE)?;
-  // SAFETY: each handle is a fresh pipe server this value now owns alone.
-  #[allow(unsafe_code)]
-  let (ours_read, ours_write) = unsafe {
-    (
-      tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(ours_read.into_raw_handle())?,
-      tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(ours_write.into_raw_handle())?,
-    )
-  };
+  // SAFETY: the handle is a fresh overlapped pipe server, released from
+  // its `OwnedHandle` so the tokio pipe owns it alone.
+  let ours_read =
+    unsafe { tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(ours_read.into_raw_handle())? };
+  // SAFETY: as above, for the outbound server.
+  let ours_write =
+    unsafe { tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(ours_write.into_raw_handle())? };
   Ok(PipePair {
     ours_read,
     ours_write,
@@ -94,11 +97,15 @@ pub fn pipe_pair(label: &str) -> io::Result<PipePair> {
   })
 }
 
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+)]
 fn server(name: &[u16], access: u32) -> io::Result<OwnedHandle> {
-  // SAFETY: `name` is NUL-terminated; the handle is checked before it is owned.
-  unsafe {
-    let handle = CreateNamedPipeW(
+  // SAFETY: `name` is NUL-terminated and outlives the call; a null
+  // security attribute pointer means the default.
+  let handle = unsafe {
+    CreateNamedPipeW(
       name.as_ptr(),
       access | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_BYTE | PIPE_WAIT,
@@ -107,15 +114,19 @@ fn server(name: &[u16], access: u32) -> io::Result<OwnedHandle> {
       65536,
       0,
       std::ptr::null(),
-    );
-    if handle == INVALID_HANDLE_VALUE {
-      return Err(io::Error::last_os_error());
-    }
-    Ok(OwnedHandle::from_raw_handle(handle))
+    )
+  };
+  if handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
   }
+  // SAFETY: the handle is valid, checked above, and nothing else owns it.
+  Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+)]
 fn client(name: &[u16], access: u32) -> io::Result<OwnedHandle> {
   let attributes = SECURITY_ATTRIBUTES {
     nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).map_err(io::Error::other)?,
@@ -123,9 +134,9 @@ fn client(name: &[u16], access: u32) -> io::Result<OwnedHandle> {
     bInheritHandle: 0,
   };
   // SAFETY: `name` is NUL-terminated and `attributes` outlives the call;
-  // the handle is checked before it is owned.
-  unsafe {
-    let handle = CreateFileW(
+  // a null template handle means none.
+  let handle = unsafe {
+    CreateFileW(
       name.as_ptr(),
       access,
       0,
@@ -133,19 +144,23 @@ fn client(name: &[u16], access: u32) -> io::Result<OwnedHandle> {
       OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL,
       std::ptr::null_mut(),
-    );
-    if handle == INVALID_HANDLE_VALUE {
-      return Err(io::Error::last_os_error());
-    }
-    Ok(OwnedHandle::from_raw_handle(handle))
+    )
+  };
+  if handle == INVALID_HANDLE_VALUE {
+    return Err(io::Error::last_os_error());
   }
+  // SAFETY: the handle is valid, checked above, and nothing else owns it.
+  Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
 /// Let a child spawned through `Command` inherit `handle`.
 ///
 /// # Errors
 /// Fails when Windows refuses the flag.
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+)]
 pub fn inheritable(handle: &OwnedHandle) -> io::Result<()> {
   // SAFETY: the handle is live for the duration of this call.
   if unsafe {
@@ -191,7 +206,10 @@ impl RawChild {
 
   /// # Errors
   /// Fails when Windows cannot report on the process.
-  #[allow(unsafe_code)]
+  #[expect(
+    unsafe_code,
+    reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+  )]
   pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
     if let Some(status) = self.status {
       return Ok(Some(status));
@@ -216,7 +234,10 @@ impl RawChild {
 
   /// # Errors
   /// Fails when the process is still running and refuses to end.
-  #[allow(unsafe_code)]
+  #[expect(
+    unsafe_code,
+    reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+  )]
   pub fn start_kill(&mut self) -> io::Result<()> {
     if self.status.is_some() {
       return Ok(());
@@ -232,7 +253,10 @@ impl RawChild {
 
   /// # Errors
   /// Fails when Windows cannot report on the process.
-  #[allow(unsafe_code)]
+  #[expect(
+    unsafe_code,
+    reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+  )]
   pub async fn wait(&mut self) -> io::Result<ExitStatus> {
     if let Some(status) = self.try_wait()? {
       return Ok(status);
@@ -286,7 +310,10 @@ pub fn resolve_program(program: &Path) -> io::Result<std::path::PathBuf> {
 ///
 /// # Errors
 /// Fails when the program cannot be found or Windows cannot create it.
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "named pipes and process creation are reachable only through the Win32 FFI in windows-sys"
+)]
 pub fn spawn(
   program: &Path,
   args: &[std::ffi::OsString],
@@ -318,19 +345,23 @@ pub fn spawn(
     }
   }
 
-  // SAFETY: the attribute list is sized by Windows, initialised once,
-  // updated with a handle list that outlives `CreateProcessW`, and deleted
-  // on every path; every pointer passed refers to a buffer above.
-  unsafe {
-    let mut size = 0usize;
-    InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &raw mut size);
-    let mut list_storage = vec![0u8; size];
-    let list: LPPROC_THREAD_ATTRIBUTE_LIST = list_storage.as_mut_ptr().cast();
-    if InitializeProcThreadAttributeList(list, 1, 0, &raw mut size) == 0 {
-      return Err(io::Error::last_os_error());
-    }
-    let created = (|| {
-      if UpdateProcThreadAttribute(
+  let mut size = 0usize;
+  // SAFETY: a null list asks only for the size one attribute needs,
+  // written into `size`, which outlives the call. The call reports
+  // failure by design here, so its result is not checked.
+  unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &raw mut size) };
+  let mut list_storage = vec![0u8; size];
+  let list: LPPROC_THREAD_ATTRIBUTE_LIST = list_storage.as_mut_ptr().cast();
+  // SAFETY: `list` points at `size` writable bytes, the size Windows
+  // asked for, and `list_storage` outlives every use of `list`.
+  if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &raw mut size) } == 0 {
+    return Err(io::Error::last_os_error());
+  }
+  let created = (|| {
+    // SAFETY: `list` is initialised, and the handle list it is given is
+    // `inherit`, which outlives `CreateProcessW` below.
+    let updated = unsafe {
+      UpdateProcThreadAttribute(
         list,
         0,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
@@ -338,23 +369,33 @@ pub fn spawn(
         inherit.len() * std::mem::size_of::<HANDLE>(),
         std::ptr::null_mut(),
         std::ptr::null(),
-      ) == 0
-      {
-        return Err(io::Error::last_os_error());
-      }
-      let mut startup: STARTUPINFOEXW = std::mem::zeroed();
-      startup.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).map_err(io::Error::other)?;
-      startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-      startup.StartupInfo.hStdInput = handles[0];
-      startup.StartupInfo.hStdOutput = handles[1];
-      startup.StartupInfo.hStdError = handles[2];
-      startup.StartupInfo.cbReserved2 = u16::try_from(block.len()).map_err(io::Error::other)?;
-      startup.StartupInfo.lpReserved2 = block.as_mut_ptr();
-      startup.lpAttributeList = list;
-      let mut info: PROCESS_INFORMATION = std::mem::zeroed();
-      let application = wide(program.as_os_str());
-      let directory = cwd.map(|cwd| wide(cwd.as_os_str()));
-      if CreateProcessW(
+      )
+    };
+    if updated == 0 {
+      return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `STARTUPINFOEXW` is integers and pointers, for which
+    // all-zero bytes are a valid value (null pointers).
+    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    startup.StartupInfo.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).map_err(io::Error::other)?;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = handles[0];
+    startup.StartupInfo.hStdOutput = handles[1];
+    startup.StartupInfo.hStdError = handles[2];
+    startup.StartupInfo.cbReserved2 = u16::try_from(block.len()).map_err(io::Error::other)?;
+    startup.StartupInfo.lpReserved2 = block.as_mut_ptr();
+    startup.lpAttributeList = list;
+    // SAFETY: `PROCESS_INFORMATION` is handles and integers, for which
+    // all-zero bytes are a valid value.
+    let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let application = wide(program.as_os_str());
+    let directory = cwd.map(|cwd| wide(cwd.as_os_str()));
+    // SAFETY: every string is NUL-terminated, and every buffer passed
+    // (strings, environment block, C runtime block, startup info and
+    // attribute list) outlives the call; `command_line` is mutable, as
+    // `CreateProcessW` requires.
+    let created = unsafe {
+      CreateProcessW(
         application.as_ptr(),
         command_line.as_mut_ptr(),
         std::ptr::null(),
@@ -365,20 +406,27 @@ pub fn spawn(
         directory.as_ref().map_or(std::ptr::null(), Vec::as_ptr),
         &raw const startup.StartupInfo,
         &raw mut info,
-      ) == 0
-      {
-        return Err(io::Error::last_os_error());
-      }
-      CloseHandle(info.hThread);
-      Ok(RawChild {
-        process: OwnedHandle::from_raw_handle(info.hProcess),
-        pid: info.dwProcessId,
-        status: None,
-      })
-    })();
-    DeleteProcThreadAttributeList(list);
-    created
-  }
+      )
+    };
+    if created == 0 {
+      return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `CreateProcessW` returned a live thread handle that only
+    // this function holds and never uses.
+    unsafe { CloseHandle(info.hThread) };
+    // SAFETY: `CreateProcessW` returned a live process handle that
+    // nothing else owns.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    Ok(RawChild {
+      process,
+      pid: info.dwProcessId,
+      status: None,
+    })
+  })();
+  // SAFETY: `list` was initialised above and this is its one deletion,
+  // after its last use.
+  unsafe { DeleteProcThreadAttributeList(list) };
+  created
 }
 
 /// The C runtime's inheritance block: a count, a flag byte per

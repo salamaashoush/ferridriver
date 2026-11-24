@@ -103,24 +103,31 @@ pub(crate) async fn output(
 /// Runs inside the forked child before `exec`, putting the child in its
 /// own session and process group. Any error is silently ignored —
 /// failing `setsid` only matters when the current process is already a
-/// session leader, which is fine for tests.
-///
-/// # Safety
-///
-/// `setsid()` is async-signal-safe per POSIX.1-2017, so it is safe to
-/// call from `pre_exec`. No allocation, no mutex, no non-reentrant C
-/// functions. The returned closure captures nothing.
+/// session leader, which is fine for tests. `setsid` is async-signal-safe
+/// per POSIX.1-2017, and the closure allocates nothing and captures nothing.
 #[cfg(unix)]
-#[allow(unsafe_code)]
 pub fn setsid_pre_exec() -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
   || {
-    // SAFETY: `setsid` is async-signal-safe and has no side effects on
-    // the parent. A return of -1 means we're already a session leader
-    // (errno=EPERM) which is benign for our purposes.
-    unsafe {
-      libc::setsid();
-    }
+    // EPERM means the child already leads a session, which is benign.
+    rustix::process::setsid().ok();
     Ok(())
+  }
+}
+
+/// Make `command`'s child the leader of a new session and process group,
+/// through [`setsid_pre_exec`]. Pass a tokio command's `as_std_mut()`.
+#[cfg(unix)]
+#[expect(
+  unsafe_code,
+  reason = "std's safe `CommandExt::setsid` is unstable, and `pre_exec` is the only stable way to run setsid in the child"
+)]
+pub fn spawn_in_own_session(command: &mut std::process::Command) {
+  use std::os::unix::process::CommandExt as _;
+  // SAFETY: the hook runs in the child between fork and exec, where only
+  // async-signal-safe work is sound. `setsid_pre_exec` calls setsid(2)
+  // alone, allocates nothing, and shares no state with the parent.
+  unsafe {
+    command.pre_exec(setsid_pre_exec());
   }
 }
 
@@ -257,16 +264,13 @@ impl StderrTail {
 /// think a parallel test run's freshly-launched Firefox dying
 /// mid-startup). [`ChildGroup`] retains the unreaped child until cleanup.
 #[cfg(unix)]
-#[allow(unsafe_code)]
 pub fn kill_process_group(pid: u32) {
-  // Cast is safe: Chrome PIDs fit in i32 on every platform we target.
-  #[allow(clippy::cast_possible_wrap)]
-  let group_id = pid as i32;
-  // SAFETY: `killpg` is async-signal-safe. `SIGKILL` is always
-  // deliverable.
-  unsafe {
-    libc::killpg(group_id, libc::SIGKILL);
-  }
+  // Pid 0 would address our own group; a pid past `i32::MAX` names no
+  // process. Neither is a browser to kill.
+  let Some(group) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) else {
+    return;
+  };
+  rustix::process::kill_process_group(group, rustix::process::Signal::KILL).ok();
 }
 
 /// Windows has no process groups to signal: `taskkill /T` walks the tree
@@ -817,48 +821,66 @@ mod job {
 
     /// A new kill-on-close job holding `pid`, or `None` (logged) when
     /// Windows refuses: the browser then lives only as long as teardown.
-    #[allow(unsafe_code)]
+    #[expect(
+      unsafe_code,
+      reason = "Job Objects are reachable only through the Win32 FFI in windows-sys"
+    )]
     fn holding(pid: u32) -> Option<Self> {
-      // SAFETY: an unnamed job with default security; the limits struct
-      // is plain data that outlives the call; every handle is checked
-      // before use, and the job is closed by `Drop` if a later step fails.
-      unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-          warn(pid, "cannot create a job for the browser");
-          return None;
-        }
-        let job = Self(job as usize);
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).ok()?;
-        if SetInformationJobObject(
+      // SAFETY: both pointers may be null: an unnamed job with default
+      // security. The handle is checked before use.
+      let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+      if job.is_null() {
+        warn(pid, "cannot create a job for the browser");
+        return None;
+      }
+      // From here `Drop` closes the job if a later step fails.
+      let job = Self(job as usize);
+      // SAFETY: the limits struct is plain integers, for which all-zero
+      // bytes are a valid value.
+      let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+      limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      let size = u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).ok()?;
+      // SAFETY: the handle is a live job this value owns, and `limits`
+      // is the struct the information class names, `size` bytes long,
+      // outliving the call.
+      let limited = unsafe {
+        SetInformationJobObject(
           job.handle(),
           JobObjectExtendedLimitInformation,
           (&raw const limits).cast(),
           size,
-        ) == 0
-        {
-          warn(pid, "cannot make the browser's job kill on close");
-          return None;
-        }
-        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-        if process.is_null() {
-          warn(pid, "cannot open the browser to put it in a job");
-          return None;
-        }
-        let assigned = AssignProcessToJobObject(job.handle(), process);
-        CloseHandle(process);
-        if assigned == 0 {
-          warn(pid, "cannot put the browser in a job");
-          return None;
-        }
-        Some(job)
+        )
+      };
+      if limited == 0 {
+        warn(pid, "cannot make the browser's job kill on close");
+        return None;
       }
+      // SAFETY: plain integer arguments; the handle is checked before use.
+      let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+      if process.is_null() {
+        warn(pid, "cannot open the browser to put it in a job");
+        return None;
+      }
+      // SAFETY: both handles are live: the job this value owns and the
+      // process opened above.
+      let assigned = unsafe { AssignProcessToJobObject(job.handle(), process) };
+      // SAFETY: `process` is live, owned here alone, and not used again.
+      unsafe { CloseHandle(process) };
+      if assigned == 0 {
+        warn(pid, "cannot put the browser in a job");
+        return None;
+      }
+      Some(job)
     }
 
     /// Kill every process in the job.
-    #[allow(unsafe_code)]
+    ///
+    /// # Errors
+    /// Returns the OS error when Windows refuses to terminate the job.
+    #[expect(
+      unsafe_code,
+      reason = "Job Objects are reachable only through the Win32 FFI in windows-sys"
+    )]
     pub(crate) fn terminate(&self) -> std::io::Result<()> {
       // SAFETY: the handle is a live job this value owns.
       if unsafe { TerminateJobObject(self.handle(), 1) } == 0 {
@@ -868,26 +890,31 @@ mod job {
     }
 
     /// How many processes in the job are still running.
-    #[allow(unsafe_code)]
+    #[expect(
+      unsafe_code,
+      reason = "Job Objects are reachable only through the Win32 FFI in windows-sys"
+    )]
     fn active_processes(&self) -> std::io::Result<u32> {
       let size =
         u32::try_from(std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>()).map_err(std::io::Error::other)?;
-      // SAFETY: the handle is a live job this value owns, and the
-      // accounting struct is plain data sized as the call is told.
-      unsafe {
-        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
-        if QueryInformationJobObject(
+      // SAFETY: the accounting struct is plain integers, for which all-zero
+      // bytes are a valid value.
+      let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+      // SAFETY: the handle is a live job this value owns, and `info` is the
+      // struct the information class names, `size` bytes long.
+      let queried = unsafe {
+        QueryInformationJobObject(
           self.handle(),
           JobObjectBasicAccountingInformation,
           (&raw mut info).cast(),
           size,
           std::ptr::null_mut(),
-        ) == 0
-        {
-          return Err(std::io::Error::last_os_error());
-        }
-        Ok(info.ActiveProcesses)
+        )
+      };
+      if queried == 0 {
+        return Err(std::io::Error::last_os_error());
       }
+      Ok(info.ActiveProcesses)
     }
 
     /// Wait until every process in the job has gone. `TerminateJobObject`
@@ -913,7 +940,10 @@ mod job {
   }
 
   impl Drop for ProcessJob {
-    #[allow(unsafe_code)]
+    #[expect(
+      unsafe_code,
+      reason = "Job Objects are reachable only through the Win32 FFI in windows-sys"
+    )]
     fn drop(&mut self) {
       // SAFETY: the handle is a live job this value owns; closing the last
       // handle kills what is left in it.
@@ -1051,14 +1081,18 @@ impl ProcRecord {
 /// Whether `pid` names a live process. A recycled pid reads as live,
 /// which keeps the sweep conservative: it never kills on a maybe.
 #[cfg(unix)]
-#[allow(unsafe_code)]
 pub(crate) fn process_is_live(pid: u32) -> bool {
   let Ok(pid) = i32::try_from(pid) else {
     return false;
   };
-  // SAFETY: signal 0 performs the existence/permission check only and
-  // delivers nothing.
-  unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+  // kill(0, 0) probes our own process group, which always exists.
+  let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+    return true;
+  };
+  matches!(
+    rustix::process::test_kill_process(pid),
+    Ok(()) | Err(rustix::io::Errno::PERM)
+  )
 }
 
 #[cfg(windows)]
@@ -1093,7 +1127,6 @@ fn windows_process<T>(pid: u32, read: impl FnOnce(Option<&sysinfo::Process>) -> 
 /// child closes its pipes, which under a full parallel suite could
 /// wedge a worker for the rest of the run.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 fn process_start_time(pid: u32) -> Option<String> {
   let info = proc_bsdinfo(pid)?;
   Some(format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec))
@@ -1107,10 +1140,11 @@ fn proc_bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+#[expect(unsafe_code, reason = "libproc's proc_pidinfo has no safe binding in libc or rustix")]
 fn proc_bsdinfo_including_exited(pid: u32, include_exited: bool) -> Option<libc::proc_bsdinfo> {
-  #[allow(clippy::cast_possible_wrap)]
-  let pid = pid as i32;
+  let pid = i32::try_from(pid).ok()?;
+  // SAFETY: `proc_bsdinfo` is a C struct of integers and byte arrays, for
+  // which all-zero bytes are a valid value.
   let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
   let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
   // SAFETY: `info` is a live, correctly sized `proc_bsdinfo`; the call
@@ -1150,7 +1184,10 @@ fn process_group_exiting_settled(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "libproc's proc_listpgrppids has no safe binding in libc or rustix"
+)]
 fn process_group_exiting(pid: u32) -> bool {
   const PROC_FLAG_INEXIT: u32 = 4;
   let Ok(group) = i32::try_from(pid) else { return false };
@@ -1207,10 +1244,12 @@ fn process_start_time(pid: u32) -> Option<String> {
 /// The process's full command line (arguments joined by spaces), or
 /// `None` when it cannot be read.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
+#[expect(
+  unsafe_code,
+  reason = "the KERN_PROCARGS2 sysctl has no safe binding in libc or rustix"
+)]
 fn process_command(pid: u32) -> Option<String> {
-  #[allow(clippy::cast_possible_wrap)]
-  let pid_arg = pid as i32;
+  let pid_arg = i32::try_from(pid).ok()?;
   let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid_arg];
   let mut len: libc::size_t = 0;
   // SAFETY: a null buffer with a live length pointer asks for the size.
@@ -1574,7 +1613,6 @@ mod tests {
   /// child's pgid is the leader, so it is not a group leader itself.
   fn spawn_fake_browser_group() -> (u32, std::process::Child) {
     use std::io::BufRead as _;
-    use std::os::unix::process::CommandExt as _;
 
     let mut cmd = std::process::Command::new("sh");
     // The inner `sh` carries the automation marker in its argv and is a
@@ -1584,15 +1622,8 @@ mod tests {
       .arg("sh -c 'sleep 300; wait' --remote-debugging-port=59999 & echo $!; sleep 300; wait")
       .stdout(std::process::Stdio::piped())
       .stderr(std::process::Stdio::null());
-    #[allow(unsafe_code)]
-    unsafe {
-      // SAFETY: `setsid` is async-signal-safe and the closure allocates
-      // nothing. Own session so the group kill under test cannot reach us.
-      cmd.pre_exec(|| {
-        libc::setsid();
-        Ok(())
-      });
-    }
+    // Own session so the group kill under test cannot reach us.
+    spawn_in_own_session(&mut cmd);
     let mut leader = cmd.spawn().expect("spawn fake browser group");
     let mut line = String::new();
     let stdout = leader.stdout.take().expect("stdout piped");
@@ -1610,7 +1641,6 @@ mod tests {
     children: usize,
     spawn: fn(&mut std::process::Command) -> std::io::Result<std::process::Child>,
   ) -> usize {
-    use std::os::unix::process::CommandExt;
     let (started, starts) = std::sync::mpsc::channel();
     let together = std::sync::Arc::new(std::sync::Barrier::new(children));
     for _ in 0..children {
@@ -1618,13 +1648,9 @@ mod tests {
       std::thread::spawn(move || {
         let mut command = std::process::Command::new("sleep");
         command.arg("30");
-        #[allow(unsafe_code)]
-        unsafe {
-          // SAFETY: `setsid` is async-signal-safe and the closure allocates
-          // nothing. It is what puts std on its fork path, as a browser
-          // launch is.
-          command.pre_exec(setsid_pre_exec());
-        }
+        // A `pre_exec` hook is what puts std on its fork path, as a
+        // browser launch is.
+        spawn_in_own_session(&mut command);
         together.wait();
         let _ = started.send(spawn(&mut command));
       });

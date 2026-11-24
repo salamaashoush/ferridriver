@@ -65,18 +65,10 @@ fn spawn_reaper() -> Option<Reaper> {
     .stdin(Stdio::piped())
     .stdout(Stdio::null())
     .stderr(Stdio::null());
+  // Own session: terminal signals aimed at our foreground group must not
+  // take the watchdog down with us.
   #[cfg(unix)]
-  #[allow(unsafe_code)]
-  unsafe {
-    use std::os::unix::process::CommandExt;
-    // SAFETY: `setsid` is async-signal-safe and the closure allocates
-    // nothing. Own session: terminal signals aimed at our foreground
-    // group must not take the watchdog down with us.
-    command.pre_exec(|| {
-      libc::setsid();
-      Ok(())
-    });
-  }
+  super::process::spawn_in_own_session(&mut command);
   let mut child = match super::process::spawn_exclusive(|| command.spawn()) {
     Ok(c) => c,
     Err(e) => {
@@ -127,20 +119,12 @@ mod tests {
   #[test]
   fn the_watchdog_kills_watched_groups_when_the_pipe_closes() {
     use std::io::Write;
-    use std::os::unix::process::CommandExt;
 
     let spawn_group_leader = || {
       let mut cmd = Command::new("sleep");
       cmd.arg("30").stdout(Stdio::null()).stderr(Stdio::null());
-      #[allow(unsafe_code)]
-      unsafe {
-        // SAFETY: `setsid` is async-signal-safe; the closure captures
-        // nothing. Mirrors how browsers are spawned.
-        cmd.pre_exec(|| {
-          libc::setsid();
-          Ok(())
-        });
-      }
+      // Mirrors how browsers are spawned.
+      crate::backend::process::spawn_in_own_session(&mut cmd);
       cmd.spawn().expect("spawn sleep")
     };
 
