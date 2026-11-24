@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-pub fn dead_endpoint() -> std::io::Result<(socket2::Socket, u16)> {
+pub(crate) fn dead_endpoint() -> std::io::Result<(socket2::Socket, u16)> {
   let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
   // Binding without listening rejects connections while preventing another process from taking the port.
   socket.bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())?;

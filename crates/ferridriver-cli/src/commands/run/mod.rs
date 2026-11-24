@@ -167,7 +167,7 @@ pub async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> anyhow::
     context: browser_context,
     browser,
     owned: owned_browser,
-  } = provision_for_run(file_config.mcp, &args).await?;
+  } = provision_for_run(*file_config.mcp, &args).await?;
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),

@@ -10,12 +10,13 @@
 //! with `[test.browser]`, so a suite and an MCP session can target the
 //! same environment through the same declarations.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use ferridriver::backend::BackendKind;
 use ferridriver::options::InstanceOverrides;
 use ferridriver::state::ConnectMode;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::browser::{
@@ -141,7 +142,7 @@ pub struct BrowserConfig {
   #[serde(alias = "command_cache_ttl")]
   pub command_cache_ttl: Option<u64>,
   /// Static per-instance overrides (keyed by instance name).
-  pub instances: HashMap<String, InstanceConfig>,
+  pub instances: FxHashMap<String, InstanceConfig>,
   /// Defaults for instances not listed in `instances`.
   #[serde(alias = "default_instance")]
   pub default_instance: Option<InstanceConfig>,
@@ -384,7 +385,7 @@ impl McpConfig {
 
     merged.kind = per_instance
       .kind
-      .or(merged.kind.filter(|_| per_instance.backend.is_none()));
+      .or_else(|| merged.kind.filter(|_| per_instance.backend.is_none()));
     merged.args.extend(per_instance.args);
     if per_instance.user_data_dir.is_some() {
       merged.user_data_dir = per_instance.user_data_dir;

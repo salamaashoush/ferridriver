@@ -531,12 +531,11 @@ fn positive_workers(count: i64) -> Result<u32, String> {
 /// anything after ignored. `None` when there are no digits (`NaN`).
 fn leading_int(text: &str) -> Option<i64> {
   let text = text.trim_start();
-  let (sign, rest) = match text.as_bytes().first() {
-    Some(b'-') => (-1, &text[1..]),
-    Some(b'+') => (1, &text[1..]),
-    _ => (1, text),
+  let (sign, rest) = match text.strip_prefix('-') {
+    Some(rest) => (-1, rest),
+    None => (1, text.strip_prefix('+').unwrap_or(text)),
   };
-  let digits: &str = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+  let digits = rest.split(|c: char| !c.is_ascii_digit()).next().unwrap_or_default();
   if digits.is_empty() {
     return None;
   }
@@ -580,9 +579,10 @@ pub enum StableCheck {
 }
 
 /// Test runner configuration.
-// Each bool field is an independent feature flag set in user TOML —
-// grouping into enums would be ceremony, not a real state machine.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "each bool is an independent key of the Playwright config schema; enums would change the wire format"
+)]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TestConfig {
@@ -809,7 +809,7 @@ pub struct BrowserConfig {
   pub connect: Option<ferridriver::state::ConnectMode>,
   /// Per-instance launch settings, keyed by instance name.
   #[serde(default)]
-  pub instances: std::collections::HashMap<String, crate::browser::InstanceConfig>,
+  pub instances: rustc_hash::FxHashMap<String, crate::browser::InstanceConfig>,
   /// Defaults for instances not listed in `instances`.
   #[serde(default, alias = "default_instance")]
   pub default_instance: Option<crate::browser::InstanceConfig>,
@@ -877,9 +877,10 @@ pub fn expand_device_keys(block: &mut serde_json::Map<String, serde_json::Value>
   }
 }
 
-// Each bool field is an independent feature flag set in user TOML —
-// grouping into enums would be ceremony, not a real state machine.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "each bool is an independent key of Playwright's `use` options; enums would change the wire format"
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ContextConfig {
@@ -1307,7 +1308,7 @@ impl Default for BrowserConfig {
       use_options: ContextConfig::default(),
       instance: None,
       connect: None,
-      instances: std::collections::HashMap::new(),
+      instances: rustc_hash::FxHashMap::default(),
       default_instance: None,
       instance_args_command: None,
       instance_discover_command: None,
@@ -1703,9 +1704,10 @@ impl TestLocation {
 }
 
 /// CLI overrides that take highest priority.
-// Independent bool flags from `clap` parse — grouping into enums adds
-// no value; each flag has its own --foo.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "each bool is an independent command-line flag with its own `--foo`; no two of them form one state"
+)]
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
   pub workers: Option<u32>,
@@ -1727,7 +1729,7 @@ pub struct CliOverrides {
   /// `--shard-assignment`: stable test id to 1-based shard index. A test
   /// it names runs on that shard (its whole serial group with it); a test
   /// it does not name falls back to hash sharding.
-  pub shard_assignment: Option<std::collections::HashMap<String, u32>>,
+  pub shard_assignment: Option<rustc_hash::FxHashMap<String, u32>>,
   /// `--test-id` / `--test-list`: run only the tests with these stable ids.
   pub test_ids: Vec<String>,
   /// `file:line` positional arguments: run only the tests declared on
@@ -2267,6 +2269,8 @@ mod color_scheme_config_tests {
 
 #[cfg(test)]
 mod reporter_config_tests {
+  use std::collections::BTreeMap;
+
   use super::ReporterConfig;
 
   fn parse(toml_src: &str) -> Vec<ReporterConfig> {
@@ -2356,12 +2360,8 @@ mod reporter_config_tests {
 
   #[test]
   fn a_missing_name_is_an_error_rather_than_a_nameless_reporter() {
-    #[derive(serde::Deserialize)]
-    struct Wrapper {
-      #[allow(dead_code)]
-      reporter: Vec<ReporterConfig>,
-    }
-    assert!(toml::from_str::<Wrapper>("[[reporter]]\noutputFile = \"x\"\n").is_err());
+    let parsed = toml::from_str::<BTreeMap<String, Vec<ReporterConfig>>>("[[reporter]]\noutputFile = \"x\"\n");
+    assert!(parsed.is_err());
   }
 }
 

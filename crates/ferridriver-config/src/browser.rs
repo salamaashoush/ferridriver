@@ -347,7 +347,7 @@ pub struct BrowserSectionConfig {
   #[serde(default, deserialize_with = "written_viewport")]
   pub viewport: Option<ViewportOverride>,
   /// Instances every host can select by name.
-  pub instances: std::collections::HashMap<String, InstanceConfig>,
+  pub instances: rustc_hash::FxHashMap<String, InstanceConfig>,
   /// Settings for an instance no entry claims.
   pub default_instance: Option<InstanceConfig>,
   /// Args command for instances that declare none of their own.
@@ -362,7 +362,7 @@ pub struct BrowserSectionConfig {
 /// implementation serves `[mcp.browser]` and `[test.browser]`.
 pub struct RoutingView<'a> {
   pub browser: Option<ferridriver::options::BrowserKind>,
-  pub instances: &'a std::collections::HashMap<String, InstanceConfig>,
+  pub instances: &'a rustc_hash::FxHashMap<String, InstanceConfig>,
   /// The top-level `[browser]` registry, consulted when the section does not
   /// claim a name. A section entry of the same name wins outright.
   pub global: Option<&'a BrowserSectionConfig>,
@@ -607,7 +607,9 @@ impl RoutingView<'_> {
         });
       }
       let inherited_browser = self.browser.or_else(|| self.global.and_then(|global| global.browser));
-      let browser = cfg.browser.or(inherited_browser.filter(|_| cfg.backend.is_none()));
+      let browser = cfg
+        .browser
+        .or_else(|| inherited_browser.filter(|_| cfg.backend.is_none()));
       if cfg.connect_options.is_some()
         || ((matches!(
           cfg.backend.or_else(|| cfg.browser.is_none().then_some(self.backend)),
@@ -914,13 +916,13 @@ pub fn ws_endpoint_is_live(url: &str) -> bool {
 /// so two instances never share an entry.
 #[derive(Debug, Default)]
 pub struct CommandCache {
-  entries: Mutex<std::collections::HashMap<String, CacheEntry>>,
+  entries: Mutex<rustc_hash::FxHashMap<String, CacheEntry>>,
   /// One lock per key, so concurrent misses run the command ONCE.
   ///
   /// Without it every cold session spawned its own copy: a discover
   /// command that polls (`--wait 10`) then cost N × 10s of wall clock and
   /// N browser probes to answer a question with one answer.
-  inflight: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+  inflight: Mutex<rustc_hash::FxHashMap<String, Arc<Mutex<()>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1138,7 +1140,7 @@ mod tests {
   }
 
   fn view<'a>(
-    instances: &'a std::collections::HashMap<String, InstanceConfig>,
+    instances: &'a rustc_hash::FxHashMap<String, InstanceConfig>,
     args: Option<&'a CommandSpec>,
     discover: Option<&'a CommandSpec>,
     cache: &'a CommandCache,
@@ -1161,7 +1163,7 @@ mod tests {
   /// instead of the configured set — the one piece of information that answers it.
   #[test]
   fn an_unknown_instance_names_the_configured_ones_instead_of_running_the_command() {
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert("staging".to_string(), InstanceConfig::default());
     instances.insert("dev".to_string(), InstanceConfig::default());
     // Would exit non-zero with its own message if it were ever reached.
@@ -1194,7 +1196,7 @@ mod tests {
   /// config, and the copy goes stale the moment the launcher moves it.
   #[test]
   fn an_args_command_supplies_the_whole_launch_shape() {
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert("staging".to_string(), InstanceConfig::default());
     let launch =
       r#"{"args":["--flag"],"profileDir":"/managed/staging","executablePath":"/bin/cft","env":{"FROM_CMD":"1"}}"#;
@@ -1216,7 +1218,7 @@ mod tests {
   /// A value the operator wrote down is never replaced by a derived one.
   #[test]
   fn explicit_config_outranks_the_command_result() {
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "staging".to_string(),
       InstanceConfig {
@@ -1302,7 +1304,7 @@ mod tests {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
 
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "desktop".to_string(),
       InstanceConfig {
@@ -1339,7 +1341,7 @@ mod tests {
     global.instances.insert("prod".to_string(), InstanceConfig::default());
 
     // This section overrides `staging` and says nothing about `prod`.
-    let mut section = std::collections::HashMap::new();
+    let mut section = rustc_hash::FxHashMap::default();
     section.insert(
       "staging".to_string(),
       InstanceConfig {
@@ -1413,7 +1415,7 @@ mod tests {
 
   #[test]
   fn args_command_json_object_shape_is_accepted() {
-    let instances = std::collections::HashMap::new();
+    let instances = rustc_hash::FxHashMap::default();
     let cache = CommandCache::default();
     let launch = r#"{"environment":"staging","args":["--a","--b"]}"#;
     let s = shell(
@@ -1427,7 +1429,7 @@ mod tests {
 
   #[test]
   fn args_command_line_output_is_accepted() {
-    let instances = std::collections::HashMap::new();
+    let instances = rustc_hash::FxHashMap::default();
     let cache = CommandCache::default();
     let s = spec(r#""echo --one && echo --two""#);
     let v = view(&instances, Some(&s), None, &cache);
@@ -1436,7 +1438,7 @@ mod tests {
 
   #[test]
   fn args_command_failure_is_fatal_not_a_warning() {
-    let instances = std::collections::HashMap::new();
+    let instances = rustc_hash::FxHashMap::default();
     let cache = CommandCache::default();
     let s = shell(
       "echo bad env >&2; exit 2",
@@ -1454,7 +1456,7 @@ mod tests {
 
   #[test]
   fn command_timeout_is_bounded() {
-    let instances = std::collections::HashMap::new();
+    let instances = rustc_hash::FxHashMap::default();
     let cache = CommandCache::default();
     let s = shell(
       "sleep 5",
@@ -1473,7 +1475,7 @@ mod tests {
 
   #[test]
   fn per_instance_settings_are_resolved() {
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "staging".to_string(),
       InstanceConfig {
@@ -1514,7 +1516,7 @@ mod tests {
   #[test]
   fn an_instance_args_command_replaces_the_section_one() {
     let cache = CommandCache::default();
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "webkit".to_string(),
       InstanceConfig {
@@ -1543,7 +1545,7 @@ mod tests {
   #[test]
   fn a_webkit_instance_is_never_discovered() {
     let cache = CommandCache::default();
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "webkit".to_string(),
       InstanceConfig {
@@ -1627,7 +1629,7 @@ mod tests {
 
   #[test]
   fn proxy_credentials_reach_the_engine_rather_than_being_dropped() {
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "p".to_string(),
       InstanceConfig {
@@ -1663,7 +1665,7 @@ mod tests {
       "device": {"platform":"android", "apiLevel":35, "model":"pixel_7"}, "headless":true
     }))
     .unwrap();
-    let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+    let instances: rustc_hash::FxHashMap<_, _> = [("phone".into(), cfg)].into_iter().collect();
     let cache = CommandCache::default();
     let routing = view(&instances, None, None, &cache);
     routing.health("phone").unwrap();
@@ -1683,7 +1685,7 @@ mod tests {
       "device":{"platform":"android", "pkg":"org.chromium.chrome", "apkPath":"browser.apk"}
     }))
     .unwrap();
-    let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+    let instances: rustc_hash::FxHashMap<_, _> = [("phone".into(), cfg)].into_iter().collect();
     let cache = CommandCache::default();
     let routing = view(&instances, None, None, &cache);
     routing.health("phone").unwrap();
@@ -1708,7 +1710,7 @@ mod tests {
       "args":["--enable-features=WebMCP"], "device":{"platform":"ios"}
     }))
     .unwrap();
-    let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+    let instances: rustc_hash::FxHashMap<_, _> = [("phone".into(), cfg)].into_iter().collect();
     let cache = CommandCache::default();
     assert!(view(&instances, None, None, &cache).health("phone").is_err());
   }
@@ -1724,7 +1726,7 @@ mod tests {
       ("ios", ferridriver::options::BrowserKind::Safari, BackendKind::WebDriver),
     ] {
       let cfg: InstanceConfig = serde_json::from_value(serde_json::json!({"device":{"platform":platform}})).unwrap();
-      let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+      let instances: rustc_hash::FxHashMap<_, _> = [("phone".into(), cfg)].into_iter().collect();
       let cache = CommandCache::default();
       let routing = view(&instances, None, None, &cache);
       let overrides = routing.overrides_for("phone").unwrap();
@@ -1742,7 +1744,7 @@ mod tests {
     for platform in ["android", "ios"] {
       let cfg: InstanceConfig =
         serde_json::from_value(serde_json::json!({"browser":"firefox","device":{"platform":platform}})).unwrap();
-      let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+      let instances: rustc_hash::FxHashMap<_, _> = [("phone".into(), cfg)].into_iter().collect();
       let cache = CommandCache::default();
       assert!(view(&instances, None, None, &cache).overrides_for("phone").is_err());
     }
@@ -1754,7 +1756,7 @@ mod tests {
       let mut value = serde_json::json!({"device":{"platform":"android"}});
       value[field] = serde_json::json!("example");
       let cfg: InstanceConfig = serde_json::from_value(value).unwrap();
-      let instances = std::collections::HashMap::from([("phone".into(), cfg)]);
+      let instances: rustc_hash::FxHashMap<_, _> = [("phone".into(), cfg)].into_iter().collect();
       let cache = CommandCache::default();
       assert!(view(&instances, None, None, &cache).health("phone").is_err(), "{field}");
     }
@@ -1775,7 +1777,7 @@ mod tests {
       }
     }))
     .unwrap();
-    let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+    let instances: rustc_hash::FxHashMap<_, _> = [("remote".into(), cfg)].into_iter().collect();
     let cache = CommandCache::default();
     let routing = view(&instances, None, None, &cache);
     routing.health("remote").unwrap();
@@ -1817,7 +1819,7 @@ mod tests {
         }),
         ..Default::default()
       };
-      let instances = std::collections::HashMap::from([("grid".into(), cfg)]);
+      let instances: rustc_hash::FxHashMap<_, _> = [("grid".into(), cfg)].into_iter().collect();
       let cache = CommandCache::default();
       let Some(ConnectMode::ConnectUrlWith {
         url: endpoint,
@@ -1875,7 +1877,7 @@ mod tests {
         connect_options: Some(ferridriver::options::ConnectOptions::default()),
         ..Default::default()
       };
-      let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+      let instances: rustc_hash::FxHashMap<_, _> = [("remote".into(), cfg)].into_iter().collect();
       let cache = CommandCache::default();
       let global = BrowserSectionConfig {
         backend: Some(BackendKind::Bidi),
@@ -1908,7 +1910,7 @@ mod tests {
         connect_options: Some(ferridriver::options::ConnectOptions::default()),
         ..Default::default()
       };
-      let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+      let instances: rustc_hash::FxHashMap<_, _> = [("remote".into(), cfg)].into_iter().collect();
       let cache = CommandCache::default();
       let mut routing = view(&instances, None, None, &cache);
       routing.browser = Some(inherited);
@@ -1926,7 +1928,7 @@ mod tests {
       connect_options: Some(ferridriver::options::ConnectOptions::default()),
       ..Default::default()
     };
-    let instances = std::collections::HashMap::from([("remote".into(), cfg)]);
+    let instances: rustc_hash::FxHashMap<_, _> = [("remote".into(), cfg)].into_iter().collect();
     let cache = CommandCache::default();
     assert!(
       view(&instances, None, None, &cache)
@@ -1938,7 +1940,7 @@ mod tests {
 
   #[test]
   fn connect_url_wins_over_discovery() {
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "remote".to_string(),
       InstanceConfig {
@@ -1970,7 +1972,7 @@ mod tests {
     let live = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let live_port = live.local_addr().expect("addr").port();
 
-    let mut instances = std::collections::HashMap::new();
+    let mut instances = rustc_hash::FxHashMap::default();
     instances.insert(
       "staging".to_string(),
       InstanceConfig {
@@ -1994,7 +1996,7 @@ mod tests {
   fn dead_discovered_endpoint_is_rejected_and_evicted() {
     let _net = port_guard();
     let (_reservation, dead) = crate::test_support::dead_endpoint().expect("reserve dead endpoint");
-    let instances = std::collections::HashMap::new();
+    let instances = rustc_hash::FxHashMap::default();
     let cache = CommandCache::default();
     let discover = spec(&format!(r#""echo ws://127.0.0.1:{dead}/x""#));
     let v = view(&instances, None, Some(&discover), &cache);
@@ -2013,7 +2015,7 @@ mod tests {
   /// discover/args command looked like a hung one.
   #[test]
   fn output_larger_than_a_pipe_buffer_does_not_time_out() {
-    let instances = std::collections::HashMap::new();
+    let instances = rustc_hash::FxHashMap::default();
     let cache = CommandCache::default();
     // ~256KB of args, four times the usual 64KB pipe buffer.
     let s = shell(

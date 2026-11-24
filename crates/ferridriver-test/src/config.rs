@@ -281,7 +281,7 @@ pub fn resolve_config(overrides: &CliOverrides) -> ferridriver::error::Result<Te
   } else {
     ferridriver_config::FerridriverConfig::load(None).map_err(|e| FerriError::backend(e.to_string()))?
   };
-  resolve_config_from(cfg.test, overrides)
+  resolve_config_from(*cfg.test, overrides)
 }
 
 /// Apply profile, env, and CLI overrides to an already-loaded `TestConfig`.

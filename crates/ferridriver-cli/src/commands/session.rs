@@ -312,7 +312,7 @@ async fn host(mut config: FerridriverConfig, args: SessionHostArgs) -> anyhow::R
   let cwd = std::env::current_dir()?;
   let setup = crate::commands::script_setup::resolve(&config, &cwd, &args.extensions).await?;
   let provisioned = Box::pin(crate::commands::instance::provision_instance(
-    config.mcp,
+    *config.mcp,
     instance,
     args.browser.headed,
     false,

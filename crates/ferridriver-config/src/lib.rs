@@ -108,9 +108,13 @@ pub struct FerridriverConfig {
   /// caps, session-VM pool).
   pub engine: EngineConfig,
   /// MCP server configuration.
-  pub mcp: mcp::McpConfig,
+  ///
+  /// Boxed, as is [`Self::test`]: inline, the two sections make the document
+  /// about 8.6 KB, and its derived deserializer holds enough copies of it to
+  /// need a stack frame over 90 KB.
+  pub mcp: Box<mcp::McpConfig>,
   /// Test runner configuration.
-  pub test: test::TestConfig,
+  pub test: Box<test::TestConfig>,
   /// Directory of the highest-precedence config FILE that contributed
   /// to this document; `None` for a default/in-memory config. Paths
   /// inside the document are already anchored to their own layer's
@@ -707,7 +711,7 @@ impl FerridriverConfig {
   /// recognised (including inside a project), or `[mcp.browser]` names a
   /// device the registry does not have.
   pub fn validate(&self) -> anyhow::Result<()> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     for s in &self.sidecars {
       if s.command.is_empty() {
         anyhow::bail!("sidecar '{}' has an empty command", s.name);

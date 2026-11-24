@@ -152,13 +152,13 @@ impl RunnerArgs {
   pub fn shard_assignment(
     &self,
     shard: Option<&ferridriver_test::config::ShardArg>,
-  ) -> anyhow::Result<Option<std::collections::HashMap<String, u32>>> {
+  ) -> anyhow::Result<Option<rustc_hash::FxHashMap<String, u32>>> {
     let (Some(path), Some(shard)) = (&self.shard_assignment, shard) else {
       return Ok(None);
     };
     let text = std::fs::read_to_string(path)
       .map_err(|e| crate::error::usage(format!("--shard-assignment {}: {e}", path.display())))?;
-    let assignment: std::collections::HashMap<String, u32> = serde_json::from_str(&text).map_err(|e| {
+    let assignment: rustc_hash::FxHashMap<String, u32> = serde_json::from_str(&text).map_err(|e| {
       crate::error::usage(format!(
         "--shard-assignment {}: expected a JSON object of test id to shard index: {e}",
         path.display()

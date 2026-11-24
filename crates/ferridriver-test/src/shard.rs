@@ -6,7 +6,7 @@
 //! both computed from the config-root-relative file, so two machines with
 //! different working directories agree on every assignment.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::model::{ShardInfo, TestPlan};
 
@@ -20,9 +20,9 @@ pub fn filter_by_shard(
   plan: &mut TestPlan,
   shard: &ShardInfo,
   project: &str,
-  assignment: Option<&HashMap<String, u32>>,
+  assignment: Option<&FxHashMap<String, u32>>,
 ) -> Result<(), String> {
-  let mut groups: HashMap<String, Option<u32>> = HashMap::new();
+  let mut groups: FxHashMap<String, Option<u32>> = FxHashMap::default();
   if let Some(assignment) = assignment {
     for suite in &plan.suites {
       let Some(key) = suite.group_key(project) else { continue };
@@ -150,7 +150,7 @@ mod tests {
       .collect()
   }
 
-  fn shard_of(total: u32, assignment: Option<&HashMap<String, u32>>) -> Vec<Vec<String>> {
+  fn shard_of(total: u32, assignment: Option<&FxHashMap<String, u32>>) -> Vec<Vec<String>> {
     (1..=total)
       .map(|current| {
         let mut p = corpus();
@@ -197,7 +197,7 @@ mod tests {
         .map(|t| t.id.stable_id(""))
         .expect("test")
     };
-    let assignment: HashMap<String, u32> = [(id("p7"), 2), (id("s4"), 3)].into_iter().collect();
+    let assignment: FxHashMap<String, u32> = [(id("p7"), 2), (id("s4"), 3)].into_iter().collect();
     let shards = shard_of(3, Some(&assignment));
     assert!(shards[1].contains(&"p7".to_string()));
     for name in ["s1", "s2", "s3", "s4", "s5"] {
@@ -220,7 +220,7 @@ mod tests {
         .map(|t| t.id.stable_id(""))
         .expect("test")
     };
-    let assignment: HashMap<String, u32> = [(id("s1"), 1), (id("s5"), 2)].into_iter().collect();
+    let assignment: FxHashMap<String, u32> = [(id("s1"), 1), (id("s5"), 2)].into_iter().collect();
     let mut p = corpus.clone();
     let error =
       filter_by_shard(&mut p, &ShardInfo { current: 1, total: 2 }, "", Some(&assignment)).expect_err("split group");

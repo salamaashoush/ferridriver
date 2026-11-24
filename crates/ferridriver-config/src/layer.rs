@@ -816,7 +816,7 @@ struct Fold<'a> {
 
 fn apply_layer(layer: &ConfigLayer, fold: &mut Fold<'_>) -> anyhow::Result<()> {
   let canonical = std::fs::canonicalize(&layer.path).unwrap_or_else(|_| layer.path.clone());
-  if !fold.seen.insert(canonical.clone()) {
+  if !fold.seen.insert(canonical) {
     // Already applied (a diamond in `extends`, or the same file
     // discovered twice). Re-applying would only duplicate append-key
     // entries.

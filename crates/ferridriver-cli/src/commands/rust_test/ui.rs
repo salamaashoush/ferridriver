@@ -404,7 +404,7 @@ pub async fn run(config: FerridriverConfig, args: cli::RustTestArgs) -> anyhow::
     retries: args.retries,
     ..Default::default()
   };
-  let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
+  let test_config = ferridriver_test::config::resolve_config_from(*config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
   // Stop kills cycles with SIGKILL, so their trace spools never drop;
   // reclaim what dead processes left behind before producing our own.

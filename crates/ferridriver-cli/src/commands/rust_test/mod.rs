@@ -112,7 +112,7 @@ pub async fn run_watch(config: FerridriverConfig, args: cli::RustTestArgs) -> an
     retries: args.retries,
     ..Default::default()
   };
-  let test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
+  let test_config = ferridriver_test::config::resolve_config_from(*config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
   let cwd = std::env::current_dir()?;
   let watcher = ferridriver_test::watch::FileWatcher::new(&cwd, &["**/*.rs".to_string()], &test_config.test_ignore)

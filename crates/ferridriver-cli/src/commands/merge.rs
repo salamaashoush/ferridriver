@@ -25,7 +25,7 @@ use crate::ui;
 /// Fails when an input path holds no readable blob.
 pub async fn run(config: FerridriverConfig, args: MergeReportsArgs) -> anyhow::Result<()> {
   let caps = crate::commands::suite::caps(&config);
-  let mut test_config = config.test;
+  let mut test_config = *config.test;
   if let Some(dir) = args.output_dir.clone() {
     test_config.output_dir = dir;
   }

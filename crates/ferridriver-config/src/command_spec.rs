@@ -222,24 +222,16 @@ impl CommandSpec {
 /// templates that need a literal `${` should use argv form.
 fn subst(tpl: &str, mut repl: impl FnMut(&str) -> Result<String, String>) -> Result<String, String> {
   let mut out = String::with_capacity(tpl.len());
-  let b = tpl.as_bytes();
-  let mut i = 0;
-  while i < b.len() {
-    if b[i] == b'$'
-      && i + 1 < b.len()
-      && b[i + 1] == b'{'
-      && let Some(end_rel) = tpl[i + 2..].find('}')
-    {
-      let name = &tpl[i + 2..i + 2 + end_rel];
-      out.push_str(&repl(name)?);
-      i = i + 2 + end_rel + 1;
-      continue;
-    }
-    // push one UTF-8 char from i
-    let ch = tpl[i..].chars().next().unwrap_or('\u{FFFD}');
-    out.push(ch);
-    i += ch.len_utf8();
+  let mut rest = tpl;
+  while let Some((literal, after)) = rest.split_once("${") {
+    let Some((name, tail)) = after.split_once('}') else {
+      break;
+    };
+    out.push_str(literal);
+    out.push_str(&repl(name)?);
+    rest = tail;
   }
+  out.push_str(rest);
   Ok(out)
 }
 
