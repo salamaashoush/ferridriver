@@ -21,6 +21,8 @@
 //! FERRIDRIVER_TAGS="@smoke and not @skip"         # tag filter
 //! ```
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use ferridriver_bdd::prelude::*;
 
 // ── Custom step definitions ──
@@ -52,6 +54,24 @@ async fn store_info(world: &mut BrowserWorld) {
 
   let url = world.page()?.url();
   world.set_var("page_url", url);
+}
+
+// ── Suite hooks ──
+// A `BeforeAll` hook runs once per feature per worker, in a world of its
+// own, before that feature's first scenario.
+
+static BEFORE_ALL_RAN: AtomicBool = AtomicBool::new(false);
+
+#[before(all)]
+async fn mark_before_all() {
+  BEFORE_ALL_RAN.store(true, Ordering::SeqCst);
+}
+
+#[then("the before-all hook has run")]
+async fn before_all_has_run(_world: &mut BrowserWorld) {
+  if !BEFORE_ALL_RAN.load(Ordering::SeqCst) {
+    return Err(step_err!("the BeforeAll hook did not run before this scenario"));
+  }
 }
 
 // ── Rust value matchers (Jest-compatible) ───────────────────────────────

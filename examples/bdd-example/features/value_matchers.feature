@@ -14,3 +14,6 @@ Feature: Rust value matchers and asymmetric matchers in BDD step bodies
 
   Scenario: toThrow captures a synchronous Rust panic-equivalent
     Then a closure that throws is caught by toThrow
+
+  Scenario: Suite hooks run before the feature's scenarios
+    Then the before-all hook has run

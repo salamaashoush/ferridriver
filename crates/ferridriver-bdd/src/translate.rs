@@ -54,7 +54,7 @@ pub fn translate_features(
       name: feature_name,
       file: feature_path,
       tests: test_cases,
-      hooks: build_feature_hooks(Arc::clone(&registry), feature_tags, config),
+      hooks: build_feature_hooks(&registry, &feature_tags, config),
       annotations: Vec::new(),
       mode: if is_serial {
         SuiteMode::Serial
@@ -97,48 +97,52 @@ pub fn translate_features(
   }
 }
 
-fn build_feature_hooks(registry: Arc<StepRegistry>, feature_tags: Vec<String>, config: &TestConfig) -> Hooks {
-  let before_registry = Arc::clone(&registry);
-  let before_tags = feature_tags.clone();
-  let before_browser_config = config.browser.clone();
-
-  let after_registry = Arc::clone(&registry);
-  let after_tags = feature_tags;
-  let after_browser_config = config.browser.clone();
-
+fn build_feature_hooks(registry: &Arc<StepRegistry>, feature_tags: &[String], config: &TestConfig) -> Hooks {
   Hooks {
-    before_all: vec![Arc::new(move |pool| {
-      let registry = Arc::clone(&before_registry);
-      let feature_tags = before_tags.clone();
-      let browser_config = before_browser_config.clone();
-      Box::pin(async move {
-        let mut world = Box::pin(build_world_from_pool(pool, browser_config)).await?;
-        registry
-          .hooks()
-          .run_suite(HookPoint::BeforeAll, &mut world, &feature_tags)
-          .await
-          .map_err(TestFailure::from)
-      })
-    })],
-    after_all: vec![Arc::new(move |pool| {
-      let registry = Arc::clone(&after_registry);
-      let feature_tags = after_tags.clone();
-      let browser_config = after_browser_config.clone();
-      Box::pin(async move {
-        let mut world = Box::pin(build_world_from_pool(pool, browser_config)).await?;
-        registry
-          .hooks()
-          .run_suite(HookPoint::AfterAll, &mut world, &feature_tags)
-          .await
-          .map_err(TestFailure::from)
-      })
-    })],
+    before_all: suite_hook(registry, HookPoint::BeforeAll, feature_tags, config)
+      .into_iter()
+      .collect(),
+    after_all: suite_hook(registry, HookPoint::AfterAll, feature_tags, config)
+      .into_iter()
+      .collect(),
     before_each: Vec::new(),
     after_each: Vec::new(),
   }
 }
 
-async fn build_world_from_pool(
+/// The feature's `BeforeAll`/`AfterAll` hook, or `None` when no registered
+/// hook applies to it, so the runner opens no suite browser context for a
+/// feature that has nothing to run there.
+fn suite_hook(
+  registry: &Arc<StepRegistry>,
+  point: HookPoint,
+  feature_tags: &[String],
+  config: &TestConfig,
+) -> Option<ferridriver_test::model::SuiteHookFn> {
+  if registry.hooks().get(point, feature_tags).is_empty() {
+    return None;
+  }
+  let registry = Arc::clone(registry);
+  let feature_tags = feature_tags.to_vec();
+  let browser_config = config.browser.clone();
+  Some(Arc::new(move |pool| {
+    let registry = Arc::clone(&registry);
+    let feature_tags = feature_tags.clone();
+    let browser_config = browser_config.clone();
+    Box::pin(async move {
+      let mut world = build_suite_world(pool, browser_config).await?;
+      registry
+        .hooks()
+        .run_suite(point, &mut world, &feature_tags)
+        .await
+        .map_err(TestFailure::from)
+    })
+  }))
+}
+
+/// The world a suite hook runs in. A suite pool holds no test, so there are
+/// no per-test modifiers to read: the hook gets its own.
+async fn build_suite_world(
   pool: FixturePool,
   browser_config: ferridriver_test::config::BrowserConfig,
 ) -> Result<BrowserWorld, TestFailure> {
@@ -163,18 +167,13 @@ async fn build_world_from_pool(
     .await
     .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", &e))?;
 
-  let modifiers = pool
-    .get("__test_modifiers")
-    .await
-    .map_err(|e| TestFailure::wrap("fixture \'__test_modifiers\' failed", &e))?;
-
   Ok(BrowserWorld::new(ferridriver_test::model::TestFixtures {
     browser,
     page,
     context,
     request,
     test_info,
-    modifiers,
+    modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
     browser_config,
     bdd_args: None,
     bdd_data_table: None,
