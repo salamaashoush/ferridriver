@@ -385,7 +385,7 @@ struct TestFnParams {
   /// The module the body's frames map through: the test bundle, or the
   /// script's own.
   bundle: Arc<CompiledBundle>,
-  cwd: Arc<std::path::PathBuf>,
+  cwd: Arc<Path>,
   /// The root config's `use` block. Only the fallback: a run resolves
   /// the project's block off the worker's own config snapshot, because
   /// the plan is translated once and then filtered per project.
@@ -393,11 +393,11 @@ struct TestFnParams {
   /// This test's own `use` bag — file `test.use` overlaid with its
   /// describe chain, nothing from any config layer.
   spec_use: Arc<serde_json::Value>,
-  static_annotations: Arc<Vec<(String, Option<String>)>>,
-  tags: Arc<Vec<String>>,
-  title_path: Arc<Vec<String>>,
-  file: Arc<String>,
-  title: Arc<String>,
+  static_annotations: Arc<[(String, Option<String>)]>,
+  tags: Arc<[String]>,
+  title_path: Arc<[String]>,
+  file: Arc<str>,
+  title: Arc<str>,
   browser_config: ferridriver_test::config::BrowserConfig,
   base_url: Option<String>,
   expected_status: ExpectedStatus,
@@ -423,9 +423,9 @@ async fn build_world_data(
   let use_options = ferridriver_test::host::merge_use_options(Some(&config_use), Some(&p.spec_use));
   let mut world = ferridriver_test::host::world_data(ferridriver_test::host::WorldMeta {
     test_info,
-    title: p.title.as_str(),
+    title: &p.title,
     title_path: &p.title_path,
-    file: p.file.as_str(),
+    file: &p.file,
     line: u32::try_from(test_info.test_id.line.unwrap_or(0)).unwrap_or(0),
     tags: &p.tags,
     expected_status: p.expected_status,
@@ -521,16 +521,16 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
       let base_timeout = test_info.timeout;
       let source_map = Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&p.bundle),
-        Arc::from(p.cwd.as_path()),
+        Arc::clone(&p.cwd),
       ));
       let bridge = Arc::new(InfoBridge::new(
         Arc::clone(&test_info),
         modifiers,
         Arc::new(session.session().deadline()),
-        source_map.clone(),
-        Arc::from(p.cwd.as_path()),
+        Arc::clone(&source_map) as _,
+        Arc::clone(&p.cwd),
         base_timeout,
-        (*p.static_annotations).clone(),
+        p.static_annotations.to_vec(),
       ));
 
       // What the body prints is this test's output, from here until the
@@ -554,13 +554,18 @@ fn make_test_fn(p: TestFnParams) -> TestFn {
             modifiers: modifiers.clone(),
             hooks_before: hooks_before.clone(),
             hooks_after: hooks_after.clone(),
-            source_label: p.file.as_str().to_string(),
+            source_label: p.file.to_string(),
           };
-          ferridriver_script::run_test(&session.vm_handle(), spec, world, bridge.clone() as _).await
+          ferridriver_script::run_test(&session.vm_handle(), spec, world, Arc::clone(&bridge) as _).await
         },
         TestBody::Script => {
-          ferridriver_script::run_script_test(&session.vm_handle(), Arc::clone(&p.bundle), world, bridge.clone() as _)
-            .await
+          ferridriver_script::run_script_test(
+            &session.vm_handle(),
+            Arc::clone(&p.bundle),
+            world,
+            Arc::clone(&bridge) as _,
+          )
+          .await
         },
       };
       halt.clean = !session.session().deadline().force_halted();
@@ -614,7 +619,7 @@ struct PlanCx<'a> {
   source: &'a TsTestSource,
   config: &'a TestConfig,
   cwd: &'a Path,
-  cwd_arc: Arc<std::path::PathBuf>,
+  cwd_arc: Arc<Path>,
   config_use: Arc<serde_json::Value>,
   sessions: Arc<crate::SessionPool>,
 }
@@ -785,11 +790,11 @@ fn lower_test(
     cwd: Arc::clone(&cx.cwd_arc),
     config_use: Arc::clone(&cx.config_use),
     spec_use: Arc::new(meta.use_bag.clone().unwrap_or_else(|| serde_json::json!({}))),
-    static_annotations: Arc::new(static_annotation_pairs(&meta.annotations)),
-    tags: Arc::new(tags),
-    title_path: Arc::new(title_path),
-    file: Arc::new(file),
-    title: Arc::new(test.title.clone()),
+    static_annotations: Arc::from(static_annotation_pairs(&meta.annotations)),
+    tags: Arc::from(tags),
+    title_path: Arc::from(title_path),
+    file: Arc::from(file),
+    title: Arc::from(test.title.as_str()),
     browser_config: cx.config.browser.clone(),
     base_url: cx.config.base_url.clone(),
     expected_status: meta.expected_status,
@@ -858,11 +863,11 @@ fn lower_script(cx: &PlanCx<'_>, script: &crate::ScriptSource, builder: &mut Tes
     cwd: Arc::clone(&cx.cwd_arc),
     config_use: Arc::clone(&cx.config_use),
     spec_use: Arc::new(serde_json::json!({})),
-    static_annotations: Arc::new(static_annotation_pairs(&annotations)),
-    tags: Arc::new(tags),
-    title_path: Arc::new(title_path),
-    file: Arc::new(file),
-    title: Arc::new(title),
+    static_annotations: Arc::from(static_annotation_pairs(&annotations)),
+    tags: Arc::from(tags),
+    title_path: Arc::from(title_path),
+    file: Arc::from(file),
+    title: Arc::from(title),
     browser_config: cx.config.browser.clone(),
     base_url: cx.config.base_url.clone(),
     expected_status: ExpectedStatus::Pass,
@@ -887,7 +892,7 @@ fn lower_all_hooks(
   source: &TsTestSource,
   config: &TestConfig,
   cwd: &Path,
-  cwd_arc: &Arc<std::path::PathBuf>,
+  cwd_arc: &Arc<Path>,
   sessions: &Arc<crate::SessionPool>,
   builder: &mut TestPlanBuilder,
 ) {
@@ -925,7 +930,7 @@ fn lower_all_hooks(
       sessions: Arc::clone(sessions),
       browser_config: config.browser.clone(),
       base_url: config.base_url.clone(),
-      label: file.clone(),
+      label: file,
       spec_use,
       config_use,
     });
@@ -943,7 +948,7 @@ fn lower_all_hooks(
 struct SuiteHookParams {
   hook_idx: usize,
   bundle: Arc<CompiledBundle>,
-  cwd: Arc<std::path::PathBuf>,
+  cwd: Arc<Path>,
   sessions: Arc<crate::SessionPool>,
   browser_config: ferridriver_test::config::BrowserConfig,
   base_url: Option<String>,
@@ -1033,20 +1038,26 @@ fn suite_hook_fn(p: SuiteHookParams) -> ferridriver_test::model::SuiteHookFn {
       };
       let source_map = Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&bundle),
-        Arc::from(cwd.as_path()),
+        Arc::clone(&cwd),
       ));
       let bridge = Arc::new(InfoBridge::new(
         test_info,
         modifiers,
         Arc::new(session.session().deadline()),
-        source_map.clone(),
-        Arc::from(cwd.as_path()),
+        Arc::clone(&source_map) as _,
+        Arc::clone(&cwd),
         Duration::from_secs(30),
         Vec::new(),
       ));
-      ferridriver_script::run_standalone_hook(&session.vm_handle(), h_idx, world, bridge.clone() as _, label.clone())
-        .await
-        .map_err(|e| script_failure(&bundle, &source_map, &e, bridge.take_failure_context()))
+      ferridriver_script::run_standalone_hook(
+        &session.vm_handle(),
+        h_idx,
+        world,
+        Arc::clone(&bridge) as _,
+        label.clone(),
+      )
+      .await
+      .map_err(|e| script_failure(&bundle, &source_map, &e, bridge.take_failure_context()))
     })
   })
 }
@@ -1089,7 +1100,7 @@ pub fn translate_tests(
     source,
     config,
     cwd,
-    cwd_arc: Arc::new(cwd.to_path_buf()),
+    cwd_arc: Arc::from(cwd),
     // Effective config `use` bag every test starts from.
     config_use: Arc::new(serde_json::to_value(&config.browser.use_options).unwrap_or_else(|_| serde_json::json!({}))),
     sessions: Arc::clone(sessions),

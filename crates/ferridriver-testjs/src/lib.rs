@@ -333,7 +333,7 @@ impl Drop for ConsoleBinding<'_> {
 
 pub struct SessionPool {
   bundle: Arc<CompiledBundle>,
-  cwd: Arc<PathBuf>,
+  cwd: Arc<Path>,
   expected: Registrations,
   slots: DashMap<u32, Arc<OnceCell<Arc<JsTestSession>>>>,
 }
@@ -342,7 +342,7 @@ impl SessionPool {
   fn new(bundle: Arc<CompiledBundle>, cwd: PathBuf, expected: Registrations) -> Self {
     Self {
       bundle,
-      cwd: Arc::new(cwd),
+      cwd: Arc::from(cwd),
       expected,
       slots: DashMap::new(),
     }
@@ -377,7 +377,7 @@ impl SessionPool {
         let sessions = Arc::clone(self);
         owner.register_teardown(
           &key,
-          session.clone(),
+          Arc::clone(&session) as _,
           Arc::new(move |_| {
             let sessions = Arc::clone(&sessions);
             Box::pin(async move {
@@ -632,9 +632,9 @@ pub async fn run_ts_tests_with(mut config: TestConfig, overrides: CliOverrides) 
     });
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     return if ui_mode {
-      Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
+      runner.run_test_server(factory, cwd, None, ui_port).await
     } else {
-      Box::pin(runner.run_watch(factory, cwd)).await
+      runner.run_watch(factory, cwd).await
     };
   }
 
