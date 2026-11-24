@@ -1,4 +1,4 @@
-//! JavaScript step definitions driven by the shared QuickJS engine.
+//! JavaScript step definitions driven by the shared `QuickJS` engine.
 //!
 //! `ferridriver-script` owns the VM and every binding (`page`,
 //! `locator`, ...); this module loads cucumber-js-shaped `.js` step
@@ -29,13 +29,12 @@ use ferridriver_script::{
   CompiledBundle, CompiledBundleExt as _, HookArg, InMemoryVars, JsArg, RunContext, ScenarioSpec, ScriptAttachment,
   ScriptEngineConfig, Session, StepOutcome, VmHandle, begin_scenario, bundle_and_compile, collect_registry,
   drain_attachments, end_scenario, eval_bundle, invoke_hook, invoke_step, is_source_file, set_hook_world,
-  walk_source_files,
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::fixture_graph::dominant_fixture_set;
 use ferridriver_test::host::TestWorldData;
 use ferridriver_test::host::{InfoBridge, static_annotation_pairs};
-use ferridriver_test::model::{AttachmentBody, StepCategory, TestFixtures, TestInfo};
+use ferridriver_test::model::{AttachmentBody, TestFixtures, TestInfo};
 use tokio::sync::OnceCell;
 
 use crate::feature::FeatureSet;
@@ -102,7 +101,7 @@ pub struct JsBddSession {
   registry: Arc<StepRegistry>,
   hooks: Vec<HookEntry>,
   bundle: Arc<CompiledBundle>,
-  cwd: Arc<PathBuf>,
+  cwd: Arc<Path>,
   /// The `test.extend` chains the step bundle registered, indexed by
   /// fixture set — what a scenario's chain is picked out of.
   fixture_sets: Vec<Vec<usize>>,
@@ -123,11 +122,11 @@ pub struct BddSessionSetup {
   pub world_parameters: serde_json::Value,
   /// Config `use` keys no built-in option claims. Decided against the
   /// chains this VM registered, once it has evaluated.
-  pub open_use_keys: Arc<Vec<String>>,
+  pub open_use_keys: Arc<[String]>,
   /// Extensions, compiled and gated by the loader every host shares.
   /// Installed as bytecode, exactly as the MCP and script hosts install
   /// them — never bundled into the step module.
-  pub extensions: Arc<Vec<ferridriver_script::ExtensionBinding>>,
+  pub extensions: Arc<[ferridriver_script::ExtensionBinding]>,
   /// Include ferridriver's built-in Rust step library.
   pub builtin_steps: bool,
 }
@@ -136,8 +135,8 @@ impl Default for BddSessionSetup {
   fn default() -> Self {
     Self {
       world_parameters: serde_json::Value::Null,
-      open_use_keys: Arc::new(Vec::new()),
-      extensions: Arc::new(Vec::new()),
+      open_use_keys: Arc::from([]),
+      extensions: Arc::from([]),
       builtin_steps: true,
     }
   }
@@ -146,6 +145,7 @@ impl Default for BddSessionSetup {
 /// Discover step entry files for the given globs (relative globs are
 /// resolved against `cwd`). Empty globs fall back to the cucumber-js
 /// defaults. `.ts`/`.tsx` are included — rolldown transpiles them.
+#[must_use]
 pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
   let patterns: Vec<String> = if globs.is_empty() {
     DEFAULT_STEP_GLOBS.iter().map(|s| (*s).to_string()).collect()
@@ -155,7 +155,7 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
   let mut files = Vec::new();
   for pat in patterns {
     let full = if Path::new(&pat).is_absolute() {
-      pat.clone()
+      pat
     } else {
       cwd.join(&pat).to_string_lossy().into_owned()
     };
@@ -188,6 +188,10 @@ pub fn discover_extension_files(specs: &[ferridriver_script::ExtensionSpec]) -> 
 /// Discover the step entry files and rolldown-bundle + tree-shake +
 /// transpile them (plus `node_modules` / shared utils) into one module
 /// compiled to bytecode, once, before workers spawn.
+///
+/// # Errors
+///
+/// As [`bundle_steps_with`].
 pub async fn bundle_steps(globs: &[String], cwd: &Path) -> anyhow::Result<Arc<CompiledBundle>> {
   bundle_steps_with(globs, &[], cwd).await
 }
@@ -202,6 +206,11 @@ pub async fn bundle_steps(globs: &[String], cwd: &Path) -> anyhow::Result<Arc<Co
 /// extension entry must be bundled ONCE, or its steps register twice
 /// and every scenario using them fails Ambiguous. The extension entry
 /// wins, because that is the copy the session installs.
+///
+/// # Errors
+///
+/// When neither the globs nor the extensions name a file, or the step files fail to
+/// bundle or compile.
 pub async fn bundle_steps_with(
   globs: &[String],
   extensions: &[ferridriver_script::ExtensionSpec],
@@ -249,6 +258,32 @@ pub async fn bundle_steps_with(
   Ok(Arc::new(bundle))
 }
 
+/// Open the live reporter step for `step`: it streams `StepStarted`
+/// during the scenario and is the trace span protocol actions nest under
+/// while the handler runs.
+async fn open_step(
+  test_info: &TestInfo,
+  feature_path: &str,
+  step: &crate::scenario::ScenarioStep,
+) -> ferridriver_test::model::StepHandle {
+  let location =
+    ferridriver_test::model::StepLocation::new(feature_path.to_string(), u32::try_from(step.line).unwrap_or(0));
+  let mut handle = test_info
+    .begin_step_at(
+      format!("{}{}", step.keyword, step.text),
+      ferridriver_test::model::StepCategory::TestStep,
+      Some(location),
+    )
+    .await;
+  handle.metadata = Some(serde_json::json!({
+    "bdd_keyword": step.keyword.trim(),
+    "bdd_text": step.text,
+    "bdd_line": step.line,
+    "bdd_arguments": step.cucumber_arguments(),
+  }));
+  handle
+}
+
 /// Forward the scenario's queued `this.attach`/`this.log` attachments
 /// into the test result so the messages / HTML / Allure reporters
 /// surface them (the Cucumber screenshot-/text-on-failure idiom). The
@@ -284,6 +319,10 @@ impl JsBddSession {
   /// Discover, bundle and load step files in one call (convenience for
   /// single-session callers / tests). Production uses [`bundle_steps`]
   /// once + [`JsBddSession::load`] per worker.
+  ///
+  /// # Errors
+  ///
+  /// As [`bundle_steps`] and [`JsBddSession::load`].
   pub async fn from_globs(globs: &[String], cwd: &Path) -> anyhow::Result<Self> {
     let bundle = bundle_steps(globs, cwd).await?;
     Self::load(bundle, cwd, &BddSessionSetup::default()).await
@@ -293,6 +332,12 @@ impl JsBddSession {
   /// step module (one `Module::load`, no parse, no resolver — imports
   /// are inlined by rolldown). Builds the Rust step registry from what
   /// the module registered.
+  ///
+  /// # Errors
+  ///
+  /// When the session cannot be created, the bundle or an extension fails to evaluate, a
+  /// registered step or parameter type is invalid, a config `use` key matches no fixture,
+  /// or a `BeforeAll` hook throws.
   pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path, setup: &BddSessionSetup) -> anyhow::Result<Self> {
     let world_parameters = setup.world_parameters.clone();
     let open_use_keys: &[String] = &setup.open_use_keys;
@@ -304,7 +349,7 @@ impl JsBddSession {
       browser_context: None,
       request: None,
       browser: None,
-      extensions: (*setup.extensions).clone(),
+      extensions: setup.extensions.to_vec(),
       host: ferridriver_script::ExtensionHost::Bdd,
       // `[scripting]` caps threaded from resolved config by the
       // `ferridriver bdd` entry (`set_bdd_script_caps`), exactly like
@@ -364,7 +409,7 @@ impl JsBddSession {
       registry: Arc::new(registry),
       hooks,
       bundle,
-      cwd: Arc::new(cwd.to_path_buf()),
+      cwd: Arc::from(cwd),
       fixture_sets: snapshot.fixture_sets,
       fixture_slots,
       world_parameters,
@@ -412,6 +457,10 @@ impl JsBddSession {
   }
 
   /// Run-level `AfterAll` hooks (once per worker session).
+  ///
+  /// # Errors
+  ///
+  /// The formatted error of the first hook that throws.
   pub async fn after_all(&self) -> Result<(), String> {
     let vm = self.session.vm_handle();
     set_hook_world(&vm, &self.world_parameters)
@@ -423,6 +472,10 @@ impl JsBddSession {
   /// Resume every suspended worker-scoped fixture factory of this
   /// session's VM (the teardown half of each `use()`), after the last
   /// scenario the worker will run.
+  ///
+  /// # Errors
+  ///
+  /// The formatted error of a fixture teardown that throws.
   pub async fn teardown_worker_fixtures(&self) -> Result<(), String> {
     ferridriver_script::teardown_worker_fixtures(&self.session.vm_handle())
       .await
@@ -587,14 +640,14 @@ impl JsBddSession {
       Arc::new(self.session.deadline()),
       Arc::new(ferridriver_script::BundleSourceMap::new(
         Arc::clone(&self.bundle),
-        Arc::from(self.cwd.as_path()),
+        Arc::clone(&self.cwd),
       )),
-      Arc::from(self.cwd.as_path()),
+      Arc::clone(&self.cwd),
       world.test_info().timeout,
       static_annotation_pairs(&crate::translate::scenario_annotations(scenario)),
     ));
 
-    if let Err(e) = begin_scenario(&vm, spec, bridge.clone() as _).await {
+    if let Err(e) = begin_scenario(&vm, spec, Arc::clone(&bridge) as _).await {
       let message = self.bundle.format_error(&e);
       // A factory that failed halfway may have parked earlier ones at
       // their `use()`; resume them, or they leak into the next scenario
@@ -630,141 +683,75 @@ impl JsBddSession {
     }
 
     if !failed {
-      let test_info = std::sync::Arc::clone(world.test_info());
-      let feature_path = scenario.feature_path.display().to_string();
-      for (step, matched) in scenario.steps.iter().zip(matches) {
-        let step_meta = serde_json::json!({
-          "bdd_keyword": step.keyword.trim(),
-          "bdd_text": step.text,
-          "bdd_line": step.line,
-          "bdd_arguments": step.cucumber_arguments(),
-        });
-        let step_location =
-          ferridriver_test::model::StepLocation::new(feature_path.clone(), u32::try_from(step.line).unwrap_or(0));
-        let title = format!("{}{}", step.keyword, step.text);
-        if failed {
-          let mut handle = test_info
-            .begin_step_at(
-              &title,
-              ferridriver_test::model::StepCategory::TestStep,
-              Some(step_location),
-            )
-            .await;
-          handle.metadata = Some(step_meta);
-          handle.skip(None);
-          steps.push(JsStepResult {
-            keyword: step.keyword.clone(),
-            text: step.text.clone(),
-            line: step.line,
-            duration: Duration::ZERO,
-            status: JsStepStatus::Skipped,
-          });
-          continue;
-        }
-        let started = Instant::now();
-        // Live step boundary: streams StepStarted to reporters DURING
-        // the scenario and opens the trace span protocol actions nest
-        // under (the span is the recorder's current parent while the
-        // handler runs).
-        let mut step_handle = test_info
-          .begin_step_at(
-            &title,
-            ferridriver_test::model::StepCategory::TestStep,
-            Some(step_location),
-          )
-          .await;
-        step_handle.metadata = Some(step_meta);
+      failed = self.run_steps(world, scenario, matches, &mut steps).await;
+    }
+    if self.finish_scenario(&vm, world, scenario, failed, &mut steps).await {
+      failed = true;
+    }
 
-        // BeforeStep hooks — mirror the Rust executor: a failing
-        // step-scoped hook warns but never fails the step itself, and
-        // skipped steps (after a failure) get no step hooks at all.
-        let step_hook_arg = HookArg {
-          name: scenario.name.clone(),
-          tags: scenario.tags.clone(),
-          status: "PENDING".to_string(),
-          message: None,
-        };
-        if let Err(msg) = self
-          .run_hooks("BeforeStep", Some(&scenario.tags), Some(&step_hook_arg))
-          .await
-        {
-          tracing::warn!(step = %step.text, "BeforeStep hook failed: {msg}");
-        }
+    // Runtime annotations into the test result, and any step a mid-step
+    // failure left open closed, exactly as the spec host does.
+    bridge.flush().await;
 
-        let status = match matched {
-          // An ambiguous step is a definition bug, not a missing
-          // definition: it fails the scenario even under --no-strict,
-          // exactly as the Rust-step executor treats it.
-          Err(e @ crate::step::MatchError::Ambiguous { .. }) => {
-            failed = true;
-            JsStepStatus::Failed(e.to_string())
-          },
-          Err(e) => {
-            failed = true;
-            // JS step authors need a JS snippet, not a Rust skeleton.
-            let snip = crate::snippet::generate_js_snippet(
-              &step.keyword,
-              &step.text,
-              step.table.is_some(),
-              step.docstring.is_some(),
-            );
-            JsStepStatus::Undefined(format!("{e}\n\nImplement with:\n\n{snip}"))
-          },
-          Ok(m) => {
-            let fut = (m.def.handler)(world, m.params, step.table.as_ref(), step.docstring.as_deref());
-            match fut.await {
-              Ok(()) => JsStepStatus::Passed,
-              Err(e) if e.pending => {
-                failed = true;
-                JsStepStatus::Pending
-              },
-              Err(e) => {
-                failed = true;
-                JsStepStatus::Failed(e.to_string())
-              },
-            }
-          },
-        };
-        // AfterStep hooks — always run for an executed step (even on
-        // failure), reverse registration order, warn-only on error.
-        let after_step_arg = HookArg {
-          name: scenario.name.clone(),
-          tags: scenario.tags.clone(),
-          status: match &status {
-            JsStepStatus::Passed => "PASSED".to_string(),
-            JsStepStatus::Pending => "PENDING".to_string(),
-            JsStepStatus::Skipped => "SKIPPED".to_string(),
-            JsStepStatus::Failed(_) | JsStepStatus::Undefined(_) => "FAILED".to_string(),
-          },
-          message: match &status {
-            JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
-            _ => None,
-          },
-        };
-        if let Err(msg) = self
-          .run_hooks("AfterStep", Some(&scenario.tags), Some(&after_step_arg))
-          .await
-        {
-          tracing::warn!(step = %step.text, "AfterStep hook failed: {msg}");
-        }
+    JsScenarioResult {
+      name: scenario.name.clone(),
+      tags: scenario.tags.clone(),
+      passed: !failed,
+      steps,
+    }
+  }
 
-        match &status {
-          JsStepStatus::Passed => step_handle.end(None),
-          JsStepStatus::Skipped => step_handle.skip(None),
-          JsStepStatus::Pending => step_handle.pending(None),
-          JsStepStatus::Undefined(msg) => step_handle.pending(Some(msg.clone())),
-          JsStepStatus::Failed(msg) => step_handle.end(Some(msg.clone())),
-        }
+  /// Run the scenario's steps in order, each after its predecessor
+  /// passed; once one does not, the rest are reported skipped. Returns
+  /// whether a step did not pass.
+  async fn run_steps(
+    &self,
+    world: &mut BrowserWorld,
+    scenario: &ScenarioExecution,
+    matches: Vec<Result<StepMatch<'_>, MatchError>>,
+    steps: &mut Vec<JsStepResult>,
+  ) -> bool {
+    let mut failed = false;
+    let test_info = Arc::clone(world.test_info());
+    let feature_path = scenario.feature_path.display().to_string();
+    for (step, matched) in scenario.steps.iter().zip(matches) {
+      let handle = open_step(&test_info, &feature_path, step).await;
+      if failed {
+        handle.skip(None);
         steps.push(JsStepResult {
           keyword: step.keyword.clone(),
           text: step.text.clone(),
           line: step.line,
-          duration: started.elapsed(),
-          status,
+          duration: Duration::ZERO,
+          status: JsStepStatus::Skipped,
         });
+        continue;
       }
+      let started = Instant::now();
+      let status = self.run_step(world, scenario, step, matched, handle).await;
+      failed = !matches!(status, JsStepStatus::Passed);
+      steps.push(JsStepResult {
+        keyword: step.keyword.clone(),
+        text: step.text.clone(),
+        line: step.line,
+        duration: started.elapsed(),
+        status,
+      });
     }
+    failed
+  }
 
+  /// Run the `After` hooks, then tear the scenario's fixtures down.
+  /// Returns whether either failed.
+  async fn finish_scenario(
+    &self,
+    vm: &VmHandle,
+    world: &BrowserWorld,
+    scenario: &ScenarioExecution,
+    failed: bool,
+    steps: &mut Vec<JsStepResult>,
+  ) -> bool {
+    let mut teardown_failed = false;
     // After hooks always run (cleanup), even on failure. Pass the
     // scenario result so `After(s => { if (s.result.status === 'FAILED')
     // ... })` works (the screenshot-on-failure idiom).
@@ -795,12 +782,12 @@ impl JsBddSession {
         duration: Duration::ZERO,
         status: JsStepStatus::Failed(msg),
       });
-      failed = true;
+      teardown_failed = true;
     }
 
     // Teardown last: the fixture factories resume (LIFO) only once the
     // last step and every `After` hook are done with what they set up.
-    if let Err(e) = end_scenario(&vm).await {
+    if let Err(e) = end_scenario(vm).await {
       steps.push(JsStepResult {
         keyword: "Fixture".into(),
         text: "teardown".into(),
@@ -808,18 +795,92 @@ impl JsBddSession {
         duration: Duration::ZERO,
         status: JsStepStatus::Failed(self.bundle.format_error(&e)),
       });
-      failed = true;
+      teardown_failed = true;
     }
-    // Runtime annotations into the test result, and any step a mid-step
-    // failure left open closed, exactly as the spec host does.
-    bridge.flush().await;
+    teardown_failed
+  }
 
-    JsScenarioResult {
+  /// Run one matched step between its `BeforeStep` and `AfterStep`
+  /// hooks, closing `step_handle` with the outcome.
+  async fn run_step(
+    &self,
+    world: &mut BrowserWorld,
+    scenario: &ScenarioExecution,
+    step: &crate::scenario::ScenarioStep,
+    matched: Result<StepMatch<'_>, MatchError>,
+    step_handle: ferridriver_test::model::StepHandle,
+  ) -> JsStepStatus {
+    // BeforeStep hooks — mirror the Rust executor: a failing
+    // step-scoped hook warns but never fails the step itself, and
+    // skipped steps (after a failure) get no step hooks at all.
+    let step_hook_arg = HookArg {
       name: scenario.name.clone(),
       tags: scenario.tags.clone(),
-      passed: !failed,
-      steps,
+      status: "PENDING".to_string(),
+      message: None,
+    };
+    if let Err(msg) = self
+      .run_hooks("BeforeStep", Some(&scenario.tags), Some(&step_hook_arg))
+      .await
+    {
+      tracing::warn!(step = %step.text, "BeforeStep hook failed: {msg}");
     }
+
+    let status = match matched {
+      // An ambiguous step is a definition bug, not a missing
+      // definition: it fails the scenario even under --no-strict,
+      // exactly as the Rust-step executor treats it.
+      Err(e @ crate::step::MatchError::Ambiguous { .. }) => JsStepStatus::Failed(e.to_string()),
+      Err(e) => {
+        // JS step authors need a JS snippet, not a Rust skeleton.
+        let snip = crate::snippet::generate_js_snippet(
+          &step.keyword,
+          &step.text,
+          step.table.is_some(),
+          step.docstring.is_some(),
+        );
+        JsStepStatus::Undefined(format!("{e}\n\nImplement with:\n\n{snip}"))
+      },
+      Ok(m) => {
+        let fut = (m.def.handler)(world, m.params, step.table.as_ref(), step.docstring.as_deref());
+        match fut.await {
+          Ok(()) => JsStepStatus::Passed,
+          Err(e) if e.pending => JsStepStatus::Pending,
+          Err(e) => JsStepStatus::Failed(e.to_string()),
+        }
+      },
+    };
+    // AfterStep hooks — always run for an executed step (even on
+    // failure), reverse registration order, warn-only on error.
+    let after_step_arg = HookArg {
+      name: scenario.name.clone(),
+      tags: scenario.tags.clone(),
+      status: match &status {
+        JsStepStatus::Passed => "PASSED".to_string(),
+        JsStepStatus::Pending => "PENDING".to_string(),
+        JsStepStatus::Skipped => "SKIPPED".to_string(),
+        JsStepStatus::Failed(_) | JsStepStatus::Undefined(_) => "FAILED".to_string(),
+      },
+      message: match &status {
+        JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
+        _ => None,
+      },
+    };
+    if let Err(msg) = self
+      .run_hooks("AfterStep", Some(&scenario.tags), Some(&after_step_arg))
+      .await
+    {
+      tracing::warn!(step = %step.text, "AfterStep hook failed: {msg}");
+    }
+
+    match &status {
+      JsStepStatus::Passed => step_handle.end(None),
+      JsStepStatus::Skipped => step_handle.skip(None),
+      JsStepStatus::Pending => step_handle.pending(None),
+      JsStepStatus::Undefined(msg) => step_handle.pending(Some(msg.clone())),
+      JsStepStatus::Failed(msg) => step_handle.end(Some(msg.clone())),
+    }
+    status
   }
 
   /// A scenario that never got as far as its first step: the fixture
@@ -914,7 +975,7 @@ pub async fn collect_step_registry(
     browser_context: None,
     request: None,
     browser: None,
-    extensions: (*setup.extensions).clone(),
+    extensions: setup.extensions.to_vec(),
     host: ferridriver_script::ExtensionHost::Bdd,
     caps: BDD_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
     session: None,
@@ -1072,7 +1133,7 @@ async fn worker_session(
   worker_index: u32,
   bundle: Arc<CompiledBundle>,
   bundle_key: u64,
-  cwd: Arc<PathBuf>,
+  cwd: Arc<Path>,
   setup: BddSessionSetup,
   fixtures: &FixturePool,
 ) -> Result<Arc<JsBddSession>, String> {
@@ -1095,7 +1156,7 @@ async fn worker_session(
       owner.inject(&name, Arc::clone(&session));
       owner.register_teardown(
         &name,
-        session.clone(),
+        Arc::clone(&session) as _,
         Arc::new(move |_| {
           Box::pin(async move {
             teardown_worker_session((worker_index, bundle_key)).await;
@@ -1109,32 +1170,107 @@ async fn worker_session(
     .cloned()
 }
 
+/// The world a JS scenario runs in: browser fixtures only when one of its
+/// steps or hooks needs them.
+async fn scenario_world(
+  pool: &FixturePool,
+  session: &JsBddSession,
+  scenario: &ScenarioExecution,
+  test_info: &Arc<TestInfo>,
+  request: Arc<ferridriver::http_client::HttpClient>,
+  browser_config: &ferridriver_test::config::BrowserConfig,
+) -> Result<BrowserWorld, ferridriver_test::model::TestFailure> {
+  use ferridriver_test::model::TestFailure;
+  let world = if session.needs_browser(scenario).map_err(TestFailure::msg)? {
+    let browser = pool
+      .get("browser")
+      .await
+      .map_err(|e| TestFailure::wrap("fixture 'browser' failed", &e))?;
+    let context = pool
+      .get("context")
+      .await
+      .map_err(|e| TestFailure::wrap("fixture 'context' failed", &e))?;
+    let page = pool
+      .get("page")
+      .await
+      .map_err(|e| TestFailure::wrap("fixture 'page' failed", &e))?;
+    BrowserWorld::new(TestFixtures {
+      browser,
+      page,
+      context,
+      request,
+      test_info: Arc::clone(test_info),
+      modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
+      browser_config: browser_config.clone(),
+      bdd_args: None,
+      bdd_data_table: None,
+      bdd_doc_string: None,
+    })
+  } else {
+    BrowserWorld::without_browser(Arc::clone(test_info), request, browser_config.clone())
+  };
+  Ok(world)
+}
+
+/// The test outcome of a finished JS scenario.
+fn scenario_verdict(result: &JsScenarioResult, strict: bool) -> Result<(), ferridriver_test::model::TestFailure> {
+  if result.passed {
+    return Ok(());
+  }
+  // Non-strict mode: undefined / pending steps don't fail the
+  // test — they're reported as `StepStatus::Pending` and the
+  // scenario passes overall (mirrors the Rust executor's
+  // `Err(e) if e.pending && !self.strict` branch).
+  let only_pending = !strict
+    && result.steps.iter().all(|s| {
+      matches!(
+        s.status,
+        JsStepStatus::Passed | JsStepStatus::Skipped | JsStepStatus::Pending | JsStepStatus::Undefined(_)
+      )
+    });
+  if only_pending {
+    return Ok(());
+  }
+  let msg = result
+    .steps
+    .iter()
+    .find_map(|s| match &s.status {
+      JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
+      JsStepStatus::Pending => Some(format!("pending: {}{}", s.keyword, s.text)),
+      _ => None,
+    })
+    .unwrap_or_else(|| "scenario failed".to_string());
+  Err(ferridriver_test::model::TestFailure::msg(msg))
+}
+
 /// Translate parsed Gherkin features into a `TestPlan` whose scenarios
 /// execute through per-worker JS sessions. Reuses the core
 /// `feature`/`scenario`/`filter` expansion and the shared
 /// annotation/ordering helpers — only the per-scenario `test_fn`
 /// differs from the Rust-step path.
+#[must_use]
 pub fn translate_features_js(
   feature_set: &FeatureSet,
   config: &ferridriver_test::config::TestConfig,
-  bundle: Arc<CompiledBundle>,
-  cwd: PathBuf,
-  extensions: Arc<Vec<ferridriver_script::ExtensionBinding>>,
+  bundle: &Arc<CompiledBundle>,
+  cwd: &Path,
+  extensions: Arc<[ferridriver_script::ExtensionBinding]>,
   options: &crate::scenario::ExpandOptions,
 ) -> ferridriver_test::model::TestPlan {
   use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestSuite};
 
-  let cwd = Arc::new(cwd);
-  let step_graph = bundle_key(&bundle);
+  let cwd: Arc<Path> = Arc::from(cwd);
+  let step_graph = bundle_key(bundle);
   // Open `use` keys travel with the plan: what each one means is only
   // decidable once a worker VM has evaluated the step bundle and its
   // `test.extend` chains exist.
   let setup = BddSessionSetup {
     world_parameters: config.world_parameters.clone(),
-    open_use_keys: Arc::new(config.open_use_keys().into_iter().cloned().collect::<Vec<String>>()),
+    open_use_keys: config.open_use_keys().into_iter().cloned().collect(),
     extensions,
     builtin_steps: config.builtin_steps,
   };
+  let browser_config = Arc::new(config.browser.clone());
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
@@ -1158,9 +1294,9 @@ pub fn translate_features_js(
       let metadata = serde_json::to_value(&scenario.source).ok();
       let scenario = Arc::new(scenario);
 
-      let bundle = Arc::clone(&bundle);
+      let bundle = Arc::clone(bundle);
       let cwd = Arc::clone(&cwd);
-      let browser_config = config.browser.clone();
+      let browser_config = Arc::clone(&browser_config);
       let bdd_strict = config.strict;
       let setup = setup.clone();
 
@@ -1168,7 +1304,7 @@ pub fn translate_features_js(
         let scenario = Arc::clone(&scenario);
         let bundle = Arc::clone(&bundle);
         let cwd = Arc::clone(&cwd);
-        let browser_config = browser_config.clone();
+        let browser_config = Arc::clone(&browser_config);
         let bdd_strict = bdd_strict;
         let step_graph = step_graph;
         let setup = setup.clone();
@@ -1186,65 +1322,12 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::msg(format!("JS step load failed: {e}")))?;
 
-          let mut world = if session.needs_browser(&scenario).map_err(TestFailure::msg)? {
-            let browser = pool
-              .get("browser")
-              .await
-              .map_err(|e| TestFailure::wrap("fixture 'browser' failed", &e))?;
-            let context = pool
-              .get("context")
-              .await
-              .map_err(|e| TestFailure::wrap("fixture 'context' failed", &e))?;
-            let page = pool
-              .get("page")
-              .await
-              .map_err(|e| TestFailure::wrap("fixture 'page' failed", &e))?;
-            BrowserWorld::new(TestFixtures {
-              browser,
-              page,
-              context,
-              request,
-              test_info: Arc::clone(&test_info),
-              modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
-              browser_config,
-              bdd_args: None,
-              bdd_data_table: None,
-              bdd_doc_string: None,
-            })
-          } else {
-            BrowserWorld::without_browser(Arc::clone(&test_info), request, browser_config)
-          };
+          let mut world = scenario_world(&pool, &session, &scenario, &test_info, request, &browser_config).await?;
 
-          let result = Box::pin(session.run_scenario(&scenario, &mut world)).await;
+          let result = session.run_scenario(&scenario, &mut world).await;
           forward_attachments(&test_info, session.drain_attachments().await).await;
 
-          if result.passed {
-            return Ok(());
-          }
-          // Non-strict mode: undefined / pending steps don't fail the
-          // test — they're reported as `StepStatus::Pending` and the
-          // scenario passes overall (mirrors the Rust executor's
-          // `Err(e) if e.pending && !self.strict` branch).
-          let only_pending = !bdd_strict
-            && result.steps.iter().all(|s| {
-              matches!(
-                s.status,
-                JsStepStatus::Passed | JsStepStatus::Skipped | JsStepStatus::Pending | JsStepStatus::Undefined(_)
-              )
-            });
-          if only_pending {
-            return Ok(());
-          }
-          let msg = result
-            .steps
-            .iter()
-            .find_map(|s| match &s.status {
-              JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
-              JsStepStatus::Pending => Some(format!("pending: {}{}", s.keyword, s.text)),
-              _ => None,
-            })
-            .unwrap_or_else(|| "scenario failed".to_string());
-          Err(TestFailure::msg(msg))
+          scenario_verdict(&result, bdd_strict)
         })
       });
 

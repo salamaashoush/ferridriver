@@ -1,8 +1,8 @@
-//! Single BDD execution engine for all consumers (TestRunner, MCP, standalone).
+//! Single BDD execution engine for all consumers (`TestRunner`, MCP, standalone).
 //!
 //! `ScenarioExecutor` handles step matching, hooks, variable interpolation,
 //! timeouts, and result collection.  An optional `StepObserver` allows callers
-//! to receive per-step events in real-time (TestInfo reporting in the test
+//! to receive per-step events in real-time (`TestInfo` reporting in the test
 //! runner, progress notifications in MCP, etc.).
 
 use std::fmt::Write as _;
@@ -74,6 +74,7 @@ pub struct ScenarioExecutor {
 
 impl ScenarioExecutor {
   /// Create a new executor.
+  #[must_use]
   pub fn new(registry: Arc<StepRegistry>, step_timeout: Duration, strict: bool, screenshot_on_failure: bool) -> Self {
     Self {
       registry,
@@ -167,75 +168,12 @@ impl ScenarioExecutor {
         continue;
       }
 
-      let text = world.interpolate(&step.text);
-      let step_start = Instant::now();
-
-      // Live step boundary: the observer opens its step (reporter
-      // event + trace span) before the handler runs.
-      observer.on_step_start(step, &text).await;
-
-      // BeforeStep hooks.
-      if let Err(e) = self
-        .registry
-        .hooks()
-        .run_step(HookPoint::BeforeStep, world, &text, &scenario.tags)
-        .await
-      {
-        tracing::warn!("BeforeStep hook failed: {}", e.display_named());
+      let sr = self.execute_step(world, scenario, step, observer).await;
+      if sr.status == StepStatus::Failed {
+        had_failure = true;
+        failure_message.clone_from(&sr.error);
       }
-
-      // Match and execute.
-      let result = execute_bdd_step(&self.registry, world, &text, step, self.step_timeout, self.strict).await;
-
-      let step_duration = step_start.elapsed();
-
-      let sr = match result {
-        Ok(()) => StepResult {
-          keyword: step.keyword.clone(),
-          text: text.clone(),
-          status: StepStatus::Passed,
-          duration: step_duration,
-          error: None,
-        },
-        Err(e) if e.pending && !self.strict => StepResult {
-          keyword: step.keyword.clone(),
-          text: text.clone(),
-          status: StepStatus::Pending,
-          duration: step_duration,
-          error: Some(e.to_string()),
-        },
-        Err(e) => {
-          let msg = e.to_string();
-          had_failure = true;
-          failure_message = Some(msg.clone());
-          StepResult {
-            keyword: step.keyword.clone(),
-            text: text.clone(),
-            status: StepStatus::Failed,
-            duration: step_duration,
-            error: Some(msg),
-          }
-        },
-      };
-
-      observer
-        .on_step(StepEvent {
-          step,
-          text: &text,
-          result: &sr,
-        })
-        .await;
       step_results.push(sr);
-
-      // AfterStep hooks (always, even on failure).
-      if let Err(e) = self
-        .registry
-        .hooks()
-        .run_step(HookPoint::AfterStep, world, &text, &scenario.tags)
-        .await
-      {
-        tracing::warn!("AfterStep hook failed: {}", e.display_named());
-      }
     }
 
     // AfterScenario hooks (always, even on failure).
@@ -278,6 +216,70 @@ impl ScenarioExecutor {
       error: failure_message,
       failure_screenshot,
     }
+  }
+
+  /// Run one step with its `BeforeStep`/`AfterStep` hooks, reporting its
+  /// start and result to `observer`.
+  async fn execute_step(
+    &self,
+    world: &mut BrowserWorld,
+    scenario: &ScenarioExecution,
+    step: &ScenarioStep,
+    observer: &dyn StepObserver,
+  ) -> StepResult {
+    let text = world.interpolate(&step.text);
+    let step_start = Instant::now();
+
+    // Live step boundary: the observer opens its step (reporter
+    // event + trace span) before the handler runs.
+    observer.on_step_start(step, &text).await;
+
+    // BeforeStep hooks.
+    if let Err(e) = self
+      .registry
+      .hooks()
+      .run_step(HookPoint::BeforeStep, world, &text, &scenario.tags)
+      .await
+    {
+      tracing::warn!("BeforeStep hook failed: {}", e.display_named());
+    }
+
+    // Match and execute.
+    let result = execute_bdd_step(&self.registry, world, &text, step, self.step_timeout, self.strict).await;
+
+    let step_duration = step_start.elapsed();
+
+    let (status, error) = match result {
+      Ok(()) => (StepStatus::Passed, None),
+      Err(e) if e.pending && !self.strict => (StepStatus::Pending, Some(e.to_string())),
+      Err(e) => (StepStatus::Failed, Some(e.to_string())),
+    };
+    let sr = StepResult {
+      keyword: step.keyword.clone(),
+      text: text.clone(),
+      status,
+      duration: step_duration,
+      error,
+    };
+
+    observer
+      .on_step(StepEvent {
+        step,
+        text: &text,
+        result: &sr,
+      })
+      .await;
+
+    // AfterStep hooks (always, even on failure).
+    if let Err(e) = self
+      .registry
+      .hooks()
+      .run_step(HookPoint::AfterStep, world, &text, &scenario.tags)
+      .await
+    {
+      tracing::warn!("AfterStep hook failed: {}", e.display_named());
+    }
+    sr
   }
 
   /// Execute a single BDD step (for interactive / REPL use).
@@ -369,6 +371,7 @@ impl ScenarioExecutor {
   }
 
   /// Access the step registry.
+  #[must_use]
   pub fn registry(&self) -> &StepRegistry {
     &self.registry
   }

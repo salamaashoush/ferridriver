@@ -27,22 +27,23 @@ pub enum HookPoint {
 
 // ── Hook handler variants ──
 
+/// What every hook returns.
+pub type HookFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+/// A hook with no world context (`BeforeAll`/`AfterAll`).
+pub type GlobalHookFn = Arc<dyn Fn() -> HookFuture<'static> + Send + Sync>;
+/// A hook that runs against the scenario's world.
+pub type ScenarioHookFn = Arc<dyn for<'a> Fn(&'a mut BrowserWorld) -> HookFuture<'a> + Send + Sync>;
+/// A hook that runs against the world and the step's text.
+pub type StepHookFn = Arc<dyn for<'a> Fn(&'a mut BrowserWorld, &'a str) -> HookFuture<'a> + Send + Sync>;
+
 /// The actual hook function, typed by scope.
 pub enum HookHandler {
   /// Global hooks (BeforeAll/AfterAll): no world context.
-  Global(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>),
+  Global(GlobalHookFn),
   /// Scenario-scoped hooks (BeforeScenario/AfterScenario, BeforeFeature/AfterFeature).
-  Scenario(
-    Arc<dyn for<'a> Fn(&'a mut BrowserWorld) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> + Send + Sync>,
-  ),
+  Scenario(ScenarioHookFn),
   /// Step-scoped hooks (BeforeStep/AfterStep): receive step text.
-  Step(
-    Arc<
-      dyn for<'a> Fn(&'a mut BrowserWorld, &'a str) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
-        + Send
-        + Sync,
-    >,
-  ),
+  Step(StepHookFn),
 }
 
 // ── Hook definition ──
@@ -70,6 +71,7 @@ pub struct HookRegistry {
 }
 
 impl HookRegistry {
+  #[must_use]
   pub fn new() -> Self {
     Self { hooks: Vec::new() }
   }
@@ -80,6 +82,7 @@ impl HookRegistry {
   }
 
   /// Get all hooks for a given point, filtered by tags, sorted by order.
+  #[must_use]
   pub fn get(&self, point: HookPoint, tags: &[String]) -> Vec<&Hook> {
     let mut matched: Vec<&Hook> = self
       .hooks
@@ -96,6 +99,7 @@ impl HookRegistry {
   }
 
   /// Get global hooks (no tag filtering needed).
+  #[must_use]
   pub fn get_global(&self, point: HookPoint) -> Vec<&Hook> {
     let mut matched: Vec<&Hook> = self.hooks.iter().filter(|h| h.point == point).collect();
     matched.sort_by_key(|h| h.order);
@@ -103,6 +107,10 @@ impl HookRegistry {
   }
 
   /// Run all global hooks for a given point.
+  ///
+  /// # Errors
+  ///
+  /// The first hook error; later hooks do not run.
   pub async fn run_global(&self, point: HookPoint) -> Result<()> {
     for hook in self.get_global(point) {
       if let HookHandler::Global(handler) = &hook.handler {
@@ -113,6 +121,10 @@ impl HookRegistry {
   }
 
   /// Run all scenario hooks for a given point with the given world and tags.
+  ///
+  /// # Errors
+  ///
+  /// The first hook error; later hooks do not run.
   pub async fn run_scenario(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<()> {
     for hook in self.get(point, tags) {
       if let HookHandler::Scenario(handler) = &hook.handler {
@@ -126,6 +138,10 @@ impl HookRegistry {
   ///
   /// `BeforeAll` / `AfterAll` may come from either a world-aware TS hook or
   /// a world-less Rust hook, so this dispatch supports both variants.
+  ///
+  /// # Errors
+  ///
+  /// The first hook error; later hooks do not run.
   pub async fn run_suite(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<()> {
     for hook in self.get(point, tags) {
       match &hook.handler {
@@ -138,6 +154,10 @@ impl HookRegistry {
   }
 
   /// Run all step hooks for a given point.
+  ///
+  /// # Errors
+  ///
+  /// The first hook error; later hooks do not run.
   pub async fn run_step(
     &self,
     point: HookPoint,
@@ -159,17 +179,6 @@ impl HookRegistry {
 impl Default for HookRegistry {
   fn default() -> Self {
     Self::new()
-  }
-}
-
-pub fn runtime_hook_point(registration: &ferridriver_test::HookRegistration) -> Option<HookPoint> {
-  match (registration.phase, registration.scope) {
-    (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Suite) => Some(HookPoint::BeforeAll),
-    (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Suite) => Some(HookPoint::AfterAll),
-    (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Scenario) => Some(HookPoint::BeforeScenario),
-    (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Scenario) => Some(HookPoint::AfterScenario),
-    (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Step) => Some(HookPoint::BeforeStep),
-    (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Step) => Some(HookPoint::AfterStep),
   }
 }
 

@@ -657,7 +657,7 @@ async fn bdd_registry(root: &Path, globs: &[String], extensions: Vec<String>, qu
     bundle,
     root,
     &BddSessionSetup {
-      extensions: Arc::new(bindings),
+      extensions: Arc::from(bindings),
       ..Default::default()
     },
   )

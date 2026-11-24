@@ -25,7 +25,7 @@ use crate::world::BrowserWorld;
 /// Translate parsed Gherkin features into a `TestPlan` for the core test runner.
 pub fn translate_features(
   feature_set: &FeatureSet,
-  registry: Arc<StepRegistry>,
+  registry: &Arc<StepRegistry>,
   config: &TestConfig,
   options: &scenario::ExpandOptions,
 ) -> TestPlan {
@@ -46,7 +46,7 @@ pub fn translate_features(
 
     let test_cases: Vec<TestCase> = scenarios
       .into_iter()
-      .map(|s| translate_scenario(s, Arc::clone(&registry), config))
+      .map(|s| translate_scenario(s, Arc::clone(registry), config))
       .collect();
 
     suites.push(TestSuite {
@@ -54,7 +54,7 @@ pub fn translate_features(
       name: feature_name,
       file: feature_path,
       tests: test_cases,
-      hooks: build_feature_hooks(&registry, &feature_tags, config),
+      hooks: build_feature_hooks(registry, &feature_tags, config),
       annotations: Vec::new(),
       mode: if is_serial {
         SuiteMode::Serial
@@ -78,7 +78,7 @@ pub fn translate_features(
       // Use current time as seed when no explicit seed given.
       std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(42, |d| d.as_nanos() as u64)
+        .map_or(42, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
     };
 
     tracing::info!("shuffling scenarios with seed {seed}");
@@ -124,13 +124,13 @@ fn suite_hook(
   }
   let registry = Arc::clone(registry);
   let feature_tags = feature_tags.to_vec();
-  let browser_config = config.browser.clone();
+  let browser_config = Arc::new(config.browser.clone());
   Some(Arc::new(move |pool| {
     let registry = Arc::clone(&registry);
     let feature_tags = feature_tags.clone();
-    let browser_config = browser_config.clone();
+    let browser_config = Arc::clone(&browser_config);
     Box::pin(async move {
-      let mut world = build_suite_world(pool, browser_config).await?;
+      let mut world = build_suite_world(pool, &browser_config).await?;
       registry
         .hooks()
         .run_suite(point, &mut world, &feature_tags)
@@ -144,7 +144,7 @@ fn suite_hook(
 /// no per-test modifiers to read: the hook gets its own.
 async fn build_suite_world(
   pool: FixturePool,
-  browser_config: ferridriver_test::config::BrowserConfig,
+  browser_config: &ferridriver_test::config::BrowserConfig,
 ) -> Result<BrowserWorld, TestFailure> {
   let browser: Arc<ferridriver::Browser> = pool
     .get("browser")
@@ -174,7 +174,7 @@ async fn build_suite_world(
     request,
     test_info,
     modifiers: Arc::new(ferridriver_test::model::TestModifiers::default()),
-    browser_config,
+    browser_config: browser_config.clone(),
     bdd_args: None,
     bdd_data_table: None,
     bdd_doc_string: None,
@@ -190,6 +190,7 @@ async fn build_suite_world(
 /// at spawn. Repeatable; later tags override earlier keys. A bare key
 /// (`@use(hasTouch)`) means `true`; values parse as bool/number when
 /// they look like one, else string.
+#[must_use]
 pub fn scenario_use_options(scenario: &ScenarioExecution) -> Option<serde_json::Value> {
   let mut map = serde_json::Map::new();
   for tag in &scenario.tags {
@@ -235,6 +236,7 @@ fn parse_use_value(raw: &str) -> serde_json::Value {
 /// (`@wip`/`@only`/`@skip(...)`/`@fixme(...)`/`@fail(...)`/`@slow(...)`
 /// and `@key(value)` -> `Info`). Shared by the Rust-step and JS-step
 /// translation paths.
+#[must_use]
 pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation> {
   let mut annotations: Vec<TestAnnotation> = Vec::with_capacity(scenario.tags.len() + 1);
 
@@ -286,18 +288,14 @@ pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation>
             reason: Some(format!("tagged @slow({cond})")),
             condition: Some(cond.to_string()),
           });
-        } else if let Some(rest) = tag.strip_prefix('@')
-          && let Some(paren_pos) = rest.find('(')
-          && rest.ends_with(')')
+        } else if let Some(rest) = tag.strip_prefix('@').and_then(|r| r.strip_suffix(')'))
+          && let Some((key, value)) = rest.split_once('(')
+          && !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only" | "use")
         {
-          let key = &rest[..paren_pos];
-          let value = &rest[paren_pos + 1..rest.len() - 1];
-          if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only" | "use") {
-            annotations.push(TestAnnotation::Info {
-              type_name: key.to_string(),
-              description: value.to_string(),
-            });
-          }
+          annotations.push(TestAnnotation::Info {
+            type_name: key.to_string(),
+            description: value.to_string(),
+          });
         }
       },
     }
@@ -308,6 +306,7 @@ pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation>
 
 /// The test id of a scenario (or one row of an outline), the same for
 /// every translation of it: a run, a dry run, a listing.
+#[must_use]
 pub fn scenario_id(scenario: &ScenarioExecution, line: Option<usize>) -> TestId {
   TestId {
     repeat_each_index: 0,
@@ -331,6 +330,7 @@ pub fn scenario_id(scenario: &ScenarioExecution, line: Option<usize>) -> TestId 
 
 /// Extract the scenario's 1-based source line from its `file:line`
 /// location string.
+#[must_use]
 pub fn scenario_line(scenario: &ScenarioExecution) -> Option<usize> {
   scenario
     .location
@@ -518,19 +518,18 @@ impl StepObserver for TestInfoObserver {
     event: StepEvent<'a>,
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
-      let handle = match self.take_open() {
-        Some(handle) => handle,
-        None => {
-          // Skipped before starting (a previous step failed): open the
-          // boundary now so the step still shows up everywhere.
-          let title = format!("{}{}", event.step.keyword, event.text);
-          let mut handle = self
-            .test_info
-            .begin_step_at(&title, StepCategory::TestStep, Some(self.step_location(event.step)))
-            .await;
-          handle.metadata = Some(Self::step_metadata(event.step, event.text));
-          handle
-        },
+      let handle = if let Some(handle) = self.take_open() {
+        handle
+      } else {
+        // Skipped before starting (a previous step failed): open the
+        // boundary now so the step still shows up everywhere.
+        let title = format!("{}{}", event.step.keyword, event.text);
+        let mut handle = self
+          .test_info
+          .begin_step_at(&title, StepCategory::TestStep, Some(self.step_location(event.step)))
+          .await;
+        handle.metadata = Some(Self::step_metadata(event.step, event.text));
+        handle
       };
       match event.result.status {
         StepStatus::Passed => handle.end(None),
@@ -544,6 +543,7 @@ impl StepObserver for TestInfoObserver {
 
 /// What a run says about a step no definition matches: the step, the
 /// nearest definitions, and a snippet that would implement it.
+#[must_use]
 pub fn undefined_step_message(step: &ScenarioStep, text: &str, suggestions: &[String]) -> String {
   use std::fmt::Write as _;
   let keyword = step.keyword.trim();
@@ -560,6 +560,7 @@ pub fn undefined_step_message(step: &ScenarioStep, text: &str, suggestions: &[St
 }
 
 /// What a run says about a step more than one definition matches.
+#[must_use]
 pub fn ambiguous_step_message(text: &str, matches: &[crate::step::StepLocation], expressions: &[String]) -> String {
   use std::fmt::Write as _;
   let mut msg = format!("ambiguous step: \"{text}\" matched {} definitions:", matches.len());
@@ -570,6 +571,11 @@ pub fn ambiguous_step_message(text: &str, matches: &[crate::step::StepLocation],
 }
 
 /// Execute a single BDD step: match against registry, extract params, call handler.
+///
+/// # Errors
+///
+/// When no definition matches (pending unless `strict`), several do, the handler fails,
+/// or it runs past `timeout`.
 pub async fn execute_bdd_step(
   registry: &StepRegistry,
   world: &mut BrowserWorld,
@@ -637,7 +643,7 @@ fn fisher_yates_shuffle<T>(items: &mut [T], seed: u64) {
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^= z >> 31;
 
-    let j = (z as usize) % (i + 1);
+    let j = usize::try_from(z % (i as u64 + 1)).unwrap_or(i);
     items.swap(i, j);
   }
 }

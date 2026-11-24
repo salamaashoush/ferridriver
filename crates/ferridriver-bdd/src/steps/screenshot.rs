@@ -1,7 +1,6 @@
 //! Screenshot step definitions.
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::step;
 
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -24,7 +23,7 @@ async fn take_screenshot(world: &mut BrowserWorld) {
     .page()?
     .screenshot()
     .await
-    .map_err(|e| StepError::wrap("screenshot", e))?;
+    .map_err(|e| StepError::wrap("screenshot", &e))?;
   check_png("screenshot", &bytes)?;
 }
 
@@ -35,7 +34,7 @@ async fn take_full_page_screenshot(world: &mut BrowserWorld) {
     .screenshot()
     .full_page(true)
     .await
-    .map_err(|e| StepError::wrap("full page screenshot", e))?;
+    .map_err(|e| StepError::wrap("full page screenshot", &e))?;
   check_png("full page screenshot", &bytes)?;
 }
 
@@ -46,7 +45,7 @@ async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
     .locator(&selector)
     .screenshot()
     .await
-    .map_err(|e| StepError::wrap(format!("screenshot of \"{selector}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("screenshot of \"{selector}\""), &e))?;
   check_png(&format!("screenshot of \"{selector}\""), &bytes)?;
 }
 
@@ -56,7 +55,7 @@ async fn take_snapshot(world: &mut BrowserWorld) {
     .page()?
     .snapshot_for_ai()
     .await
-    .map_err(|e| StepError::wrap("snapshot", e))?;
+    .map_err(|e| StepError::wrap("snapshot", &e))?;
   if snapshot.full.trim().is_empty() {
     return Err(StepError::from(
       "snapshot returned an empty accessibility tree".to_string(),

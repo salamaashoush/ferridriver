@@ -1,11 +1,10 @@
 //! Step registry: collects step definitions from inventory + runtime registration.
 
 use std::fmt::Write as _;
-use std::sync::Arc;
 
 use crate::expression;
 use crate::filter::TagExpression;
-use crate::hook::{Hook, HookHandler, HookRegistration, HookRegistry};
+use crate::hook::{Hook, HookRegistration, HookRegistry};
 use crate::param_type::{CustomParamType, ParameterTypeRegistration, ParameterTypeRegistry};
 use crate::step::{MatchError, StepDef, StepHandler, StepLocation, StepMatch, StepParam, StepRegistration};
 
@@ -57,65 +56,25 @@ impl StepRegistry {
 
     // Collect step registrations from #[given], #[when], #[then], #[step] macros.
     for reg in inventory::iter::<StepRegistration> {
-      if reg.is_regex {
-        // Raw regex step: compile directly, all params are String.
-        match regex::Regex::new(reg.expression) {
-          Ok(regex) => {
-            let num_groups = regex.captures_len().saturating_sub(1);
-            registry.steps.push(StepDef {
-              kind: reg.kind,
-              expression: reg.expression.to_string(),
-              regex,
-              param_types: vec![expression::ParamType::Word; num_groups],
-              param_infos: (0..num_groups)
-                .map(|i| expression::ParamInfo::positional(expression::ParamType::Word, i, i + 1))
-                .collect(),
-              handler: (reg.handler_factory)(),
-              location: StepLocation {
-                file: reg.file,
-                line: reg.line,
-              },
-              fixtures: None,
-            });
-          },
-          Err(e) => {
-            tracing::error!(
-              "failed to compile regex step \"{}\" at {}:{}: {}",
-              reg.expression,
-              reg.file,
-              reg.line,
-              e
-            );
-          },
-        }
-      } else {
-        // Cucumber expression: compile via expression engine.
-        match expression::compile_with_custom(reg.expression, &registry.param_types) {
-          Ok(compiled) => {
-            registry.steps.push(StepDef {
-              kind: reg.kind,
-              expression: reg.expression.to_string(),
-              regex: compiled.regex,
-              param_types: compiled.param_types,
-              param_infos: compiled.param_infos,
-              handler: (reg.handler_factory)(),
-              location: StepLocation {
-                file: reg.file,
-                line: reg.line,
-              },
-              fixtures: None,
-            });
-          },
-          Err(e) => {
-            tracing::error!(
-              "failed to compile step expression \"{}\" at {}:{}: {}",
-              reg.expression,
-              reg.file,
-              reg.line,
-              e
-            );
-          },
-        }
+      let location = StepLocation {
+        file: reg.file,
+        line: reg.line,
+      };
+      if let Err(e) = registry.push_step(
+        reg.kind,
+        reg.expression,
+        reg.is_regex,
+        (reg.handler_factory)(),
+        location,
+        None,
+      ) {
+        tracing::error!(
+          "failed to compile step \"{}\" at {}:{}: {}",
+          reg.expression,
+          reg.file,
+          reg.line,
+          e
+        );
       }
     }
 
@@ -156,6 +115,10 @@ impl StepRegistry {
   }
 
   /// Register a step from an expression string and handler.
+  ///
+  /// # Errors
+  ///
+  /// When `expr` is not a valid Cucumber expression.
   pub fn register(
     &mut self,
     kind: crate::step::StepKind,
@@ -168,6 +131,10 @@ impl StepRegistry {
 
   /// Register a step from a raw regex pattern (not a Cucumber expression).
   /// All capture groups are extracted as string params.
+  ///
+  /// # Errors
+  ///
+  /// When `pattern` is not a valid regex.
   pub fn register_regex(
     &mut self,
     kind: crate::step::StepKind,
@@ -181,6 +148,10 @@ impl StepRegistry {
   /// Register a JS step together with the fixture chain its first
   /// parameter resolves from, so a scenario using it sets up exactly
   /// the fixtures its steps name.
+  ///
+  /// # Errors
+  ///
+  /// When `pattern` is not a valid regex or Cucumber expression.
   pub fn register_js(
     &mut self,
     kind: crate::step::StepKind,
@@ -228,11 +199,16 @@ impl StepRegistry {
   }
 
   /// Register a custom parameter type for Cucumber expressions.
+  ///
+  /// # Errors
+  ///
+  /// As [`ParameterTypeRegistry::register`](crate::param_type::ParameterTypeRegistry::register).
   pub fn register_param_type(&mut self, param_type: CustomParamType) -> ferridriver::error::Result<()> {
     self.param_types.register(param_type)
   }
 
   /// Access the hook registry.
+  #[must_use]
   pub fn hooks(&self) -> &HookRegistry {
     &self.hooks
   }
@@ -249,6 +225,11 @@ impl StepRegistry {
   ///
   /// Returns `Ambiguous` if multiple definitions match.
   /// Returns `Undefined` with suggestions if no definition matches.
+  ///
+  /// # Errors
+  ///
+  /// [`MatchError::Undefined`] when no definition matches, [`MatchError::Ambiguous`] when
+  /// more than one does.
   pub fn find_match(&self, text: &str) -> Result<StepMatch<'_>, MatchError> {
     // Fast path: find first match, then only continue scanning to detect ambiguity.
     // Most steps have exactly 1 match among 100+ definitions, so we avoid
@@ -256,66 +237,57 @@ impl StepRegistry {
     let mut first_match: Option<(&StepDef, Vec<StepParam>)> = None;
 
     for def in &self.steps {
-      if let Some(captures) = def.regex.captures(text) {
-        match expression::extract_params_with_custom(
-          &captures,
-          &def.param_types,
-          &def.param_infos,
-          Some(&self.param_types),
-        ) {
-          Ok(params) => {
-            if let Some((first_def, _)) = &first_match {
-              // Second match found -- ambiguous.
-              // Collect remaining matches for the error message.
-              let mut all = vec![(first_def.location.clone(), first_def.expression.clone())];
-              all.push((def.location.clone(), def.expression.clone()));
-              for remaining in self
-                .steps
-                .iter()
-                .skip(self.steps.iter().position(|d| std::ptr::eq(d, def)).unwrap_or(0) + 1)
-              {
-                if let Some(caps) = remaining.regex.captures(text)
-                  && expression::extract_params_with_custom(
-                    &caps,
-                    &remaining.param_types,
-                    &remaining.param_infos,
-                    Some(&self.param_types),
-                  )
-                  .is_ok()
-                {
-                  all.push((remaining.location.clone(), remaining.expression.clone()));
-                }
-              }
-              tracing::warn!(target: "ferridriver::bdd::step", text, count = all.len(), "step AMBIGUOUS");
-              return Err(MatchError::Ambiguous {
-                text: text.to_string(),
-                matches: all.iter().map(|(loc, _)| loc.clone()).collect(),
-                expressions: all.iter().map(|(_, expr)| expr.clone()).collect(),
-              });
+      if let Some(captures) = def.regex.captures(text)
+        && let Ok(params) =
+          expression::extract_params_with_custom(&captures, &def.param_types, &def.param_infos, Some(&self.param_types))
+      {
+        if let Some((first_def, _)) = &first_match {
+          // Second match found -- ambiguous.
+          // Collect remaining matches for the error message.
+          let mut all = vec![(first_def.location.clone(), first_def.expression.clone())];
+          all.push((def.location.clone(), def.expression.clone()));
+          for remaining in self
+            .steps
+            .iter()
+            .skip(self.steps.iter().position(|d| std::ptr::eq(d, def)).unwrap_or(0) + 1)
+          {
+            if let Some(caps) = remaining.regex.captures(text)
+              && expression::extract_params_with_custom(
+                &caps,
+                &remaining.param_types,
+                &remaining.param_infos,
+                Some(&self.param_types),
+              )
+              .is_ok()
+            {
+              all.push((remaining.location.clone(), remaining.expression.clone()));
             }
-            first_match = Some((def, params));
-          },
-          Err(_) => {},
+          }
+          tracing::warn!(target: "ferridriver::bdd::step", text, count = all.len(), "step AMBIGUOUS");
+          return Err(MatchError::Ambiguous {
+            text: text.to_string(),
+            matches: all.iter().map(|(loc, _)| loc.clone()).collect(),
+            expressions: all.iter().map(|(_, expr)| expr.clone()).collect(),
+          });
         }
+        first_match = Some((def, params));
       }
     }
 
-    match first_match {
-      Some((def, params)) => {
-        tracing::debug!(target: "ferridriver::bdd::step", text, expression = def.expression, "step matched");
-        Ok(StepMatch { def, params })
-      },
-      None => {
-        tracing::debug!(target: "ferridriver::bdd::step", text, "step UNDEFINED — no match");
-        Err(MatchError::Undefined {
-          text: text.to_string(),
-          suggestions: self.suggest(text),
-        })
-      },
+    if let Some((def, params)) = first_match {
+      tracing::debug!(target: "ferridriver::bdd::step", text, expression = def.expression, "step matched");
+      Ok(StepMatch { def, params })
+    } else {
+      tracing::debug!(target: "ferridriver::bdd::step", text, "step UNDEFINED — no match");
+      Err(MatchError::Undefined {
+        text: text.to_string(),
+        suggestions: self.suggest(text),
+      })
     }
   }
 
   /// List all registered step definitions.
+  #[must_use]
   pub fn steps(&self) -> &[StepDef] {
     &self.steps
   }
@@ -336,12 +308,13 @@ impl StepRegistry {
       .filter(|(score, _)| *score > 0)
       .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
     scored.truncate(5);
     scored.into_iter().map(|(_, expr)| expr.to_string()).collect()
   }
 
   /// Generate a markdown reference of all step definitions grouped by kind.
+  #[must_use]
   pub fn reference(&self) -> String {
     let mut output = String::from("# Step Reference\n\n");
 

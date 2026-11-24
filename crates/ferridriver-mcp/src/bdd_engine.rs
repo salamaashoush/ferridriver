@@ -196,7 +196,7 @@ impl BddEngine {
           cwd,
           &ferridriver_bdd::js::BddSessionSetup {
             world_parameters: world_params,
-            extensions: Arc::new(bindings),
+            extensions: Arc::from(bindings),
             ..Default::default()
           },
         )

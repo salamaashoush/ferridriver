@@ -1,7 +1,6 @@
 //! Variable management step definitions.
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{step, when};
 
 #[step("I set variable {string} to {string}")]
@@ -16,7 +15,7 @@ async fn store_text(world: &mut BrowserWorld, selector: String, var_name: String
     .locator(&selector)
     .text_content()
     .await
-    .map_err(|e| StepError::wrap(format!("get text of \"{selector}\""), e))?
+    .map_err(|e| StepError::wrap(format!("get text of \"{selector}\""), &e))?
     .unwrap_or_default();
 
   world.set_var(var_name, text);
@@ -29,7 +28,7 @@ async fn store_value(world: &mut BrowserWorld, selector: String, var_name: Strin
     .locator(&selector)
     .input_value()
     .await
-    .map_err(|e| StepError::wrap(format!("get value of \"{selector}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("get value of \"{selector}\""), &e))?;
 
   world.set_var(var_name, value);
 }

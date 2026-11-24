@@ -273,7 +273,7 @@ fn type_to_extraction(ty: &syn::Type, idx: usize) -> proc_macro2::TokenStream {
     },
     _ => quote! {
       __params.get(#idx)
-        .and_then(|p| p.as_string())
+        .map(|p| p.as_string())
         .unwrap_or_default()
     },
   }

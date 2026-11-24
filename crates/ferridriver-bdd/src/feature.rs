@@ -133,6 +133,10 @@ impl FeatureSet {
   /// If a pattern is a directory path (no glob chars, exists as dir), it is
   /// automatically expanded to `<dir>/**/*.feature` so users can pass bare
   /// directory paths like `tests/features/` or `tests/features`.
+  ///
+  /// # Errors
+  ///
+  /// When a pattern is not a valid glob.
   pub fn discover(patterns: &[String], ignore: &[String]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
@@ -176,11 +180,19 @@ impl FeatureSet {
   ///
   /// When `language` is `Some("fr")`, all features default to that language's keywords.
   /// Individual features can still override via `# language: xx` comments.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::parse_with_language`].
   pub fn parse(files: Vec<PathBuf>) -> Result<Self> {
     Self::parse_with_language(files, None)
   }
 
   /// Parse feature files with an optional default language for i18n keyword support.
+  ///
+  /// # Errors
+  ///
+  /// When `language` names no Gherkin dialect, or a file fails to read or parse.
   pub fn parse_with_language(files: Vec<PathBuf>, language: Option<&str>) -> Result<Self> {
     let mut features = Vec::with_capacity(files.len());
 
@@ -207,6 +219,10 @@ impl FeatureSet {
   }
 
   /// Parse inline Gherkin text into a `FeatureSet`.
+  ///
+  /// # Errors
+  ///
+  /// When `text` is not valid Gherkin.
   pub fn parse_text(text: &str) -> Result<Self> {
     let env = gherkin::GherkinEnv::default();
     let feature = gherkin::Feature::parse(text, env)
@@ -217,6 +233,10 @@ impl FeatureSet {
   }
 
   /// Discover and parse in one step.
+  ///
+  /// # Errors
+  ///
+  /// As [`Self::discover`] and [`Self::parse`].
   pub fn discover_and_parse(patterns: &[String], ignore: &[String]) -> Result<Self> {
     let files = Self::discover(patterns, ignore)?;
     if files.is_empty() {
@@ -227,6 +247,7 @@ impl FeatureSet {
 }
 
 /// Extract tags from a Gherkin feature/scenario as `@tag` strings.
+#[must_use]
 pub fn extract_tags(tags: &[String]) -> Vec<String> {
   tags
     .iter()
@@ -235,6 +256,7 @@ pub fn extract_tags(tags: &[String]) -> Vec<String> {
 }
 
 /// Convert a `gherkin::Table` into a `DataTable`.
+#[must_use]
 pub fn table_to_vec(table: &gherkin::Table) -> crate::data_table::DataTable {
   crate::data_table::DataTable::new(table.rows.clone())
 }

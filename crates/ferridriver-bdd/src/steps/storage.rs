@@ -1,13 +1,12 @@
 //! LocalStorage/SessionStorage step definitions.
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{step, when};
 
 /// The step's text as the page function's argument, never spliced into its
 /// source, so no value can end the string it would sit in.
 fn strings(values: &[&str]) -> Result<ferridriver::protocol::SerializedArgument, StepError> {
-  ferridriver::protocol::argument_from_serde(values).map_err(|e| StepError::wrap("serialize the step's values", e))
+  ferridriver::protocol::argument_from_serde(values).map_err(|e| StepError::wrap("serialize the step's values", &e))
 }
 
 #[when("I set local storage {string} to {string}")]
@@ -20,7 +19,7 @@ async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String)
       Some(true),
     )
     .await
-    .map_err(|e| StepError::wrap(format!("set localStorage \"{key}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("set localStorage \"{key}\""), &e))?;
 }
 
 #[when("I remove local storage {string}")]
@@ -29,7 +28,7 @@ async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
     .page()?
     .evaluate("([key]) => localStorage.removeItem(key)", strings(&[&key])?, Some(true))
     .await
-    .map_err(|e| StepError::wrap(format!("remove localStorage \"{key}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("remove localStorage \"{key}\""), &e))?;
 }
 
 #[step("I clear local storage")]
@@ -42,7 +41,7 @@ async fn clear_local_storage(world: &mut BrowserWorld) {
       None,
     )
     .await
-    .map_err(|e| StepError::wrap("clear localStorage", e))?;
+    .map_err(|e| StepError::wrap("clear localStorage", &e))?;
 }
 
 #[when("I set session storage {string} to {string}")]
@@ -55,7 +54,7 @@ async fn set_session_storage(world: &mut BrowserWorld, key: String, value: Strin
       Some(true),
     )
     .await
-    .map_err(|e| StepError::wrap(format!("set sessionStorage \"{key}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("set sessionStorage \"{key}\""), &e))?;
 }
 
 #[when("I remove session storage {string}")]
@@ -68,7 +67,7 @@ async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
       Some(true),
     )
     .await
-    .map_err(|e| StepError::wrap(format!("remove sessionStorage \"{key}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("remove sessionStorage \"{key}\""), &e))?;
 }
 
 #[step("I clear session storage")]
@@ -81,7 +80,7 @@ async fn clear_session_storage(world: &mut BrowserWorld) {
       None,
     )
     .await
-    .map_err(|e| StepError::wrap("clear sessionStorage", e))?;
+    .map_err(|e| StepError::wrap("clear sessionStorage", &e))?;
 }
 
 // ── Storage State save/load (Playwright auth pattern) ──────────────────
@@ -97,7 +96,7 @@ async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
     .page()?
     .storage_state()
     .await
-    .map_err(|e| StepError::wrap("save storage state", e))?;
+    .map_err(|e| StepError::wrap("save storage state", &e))?;
 
   let json =
     serde_json::to_string_pretty(&state).map_err(|e| StepError::from(format!("serialize storage state: {e}")))?;
@@ -125,5 +124,5 @@ async fn load_storage_state(world: &mut BrowserWorld, file_path: String) {
     .page()?
     .set_storage_state(&state)
     .await
-    .map_err(|e| StepError::wrap("load storage state", e))?;
+    .map_err(|e| StepError::wrap("load storage state", &e))?;
 }

@@ -1,36 +1,3 @@
-#![allow(
-  clippy::missing_errors_doc,
-  clippy::missing_panics_doc,
-  clippy::must_use_candidate,
-  clippy::doc_markdown,
-  clippy::module_name_repetitions,
-  clippy::cast_possible_truncation,
-  clippy::cast_precision_loss,
-  clippy::cast_sign_loss,
-  clippy::redundant_closure_for_method_calls,
-  clippy::implicit_clone,
-  clippy::too_many_lines,
-  clippy::uninlined_format_args,
-  clippy::type_complexity,
-  clippy::unnecessary_map_or,
-  clippy::match_same_arms,
-  clippy::should_implement_trait,
-  clippy::unnecessary_wraps,
-  clippy::unused_async,
-  clippy::items_after_statements,
-  clippy::needless_pass_by_value,
-  clippy::single_match_else,
-  clippy::vec_init_then_push,
-  clippy::from_over_into,
-  clippy::single_char_pattern,
-  clippy::ptr_arg,
-  clippy::unnecessary_sort_by,
-  clippy::collapsible_match,
-  clippy::if_same_then_else,
-  clippy::single_match
-)]
-// BDD step proc macros use BrowserWorld, DataTable etc. in expanded code; clippy can't see through macros.
-#![allow(unused_imports)]
 //! ferridriver-bdd: BDD/Cucumber/Gherkin support for ferridriver.
 //!
 //! This crate provides:
@@ -40,7 +7,7 @@
 //! - Hook system with tag filtering
 //! - Translation of Gherkin features into `TestPlan` for the core `TestRunner`
 //! - 109 built-in step definitions covering navigation, interaction, assertions, etc.
-//! - BDD-specific reporters (Gherkin terminal, Cucumber JSON, JUnit, JSON)
+//! - BDD-specific reporters (Gherkin terminal, Cucumber JSON, `JUnit`, JSON)
 //!
 //! # Quick Start
 //!
@@ -150,8 +117,8 @@ macro_rules! step_err {
 #[macro_export]
 macro_rules! bdd_main {
   () => {
-    fn main() {
-      $crate::run_bdd_harness();
+    fn main() -> ::std::process::ExitCode {
+      $crate::run_bdd_harness()
     }
   };
 }
@@ -160,28 +127,35 @@ macro_rules! bdd_main {
 ///
 /// Discovers features, builds step registry, translates to `TestPlan`,
 /// and runs via the core `TestRunner` with full parallel execution,
-/// retries, sharding, and reporter support.
-pub fn run_bdd_harness() {
+/// retries, sharding, and reporter support. Returns the run's exit status
+/// for `main` to hand back to the process.
+pub fn run_bdd_harness() -> std::process::ExitCode {
   ferridriver_test::logging::init_from_env();
 
   let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
     Ok(rt) => rt,
     Err(e) => {
       eprintln!("failed to build tokio runtime: {e}");
-      std::process::exit(1);
+      return std::process::ExitCode::FAILURE;
     },
   };
 
   let exit_code = rt.block_on(async {
     let overrides = ferridriver_test::parse_common_cli_args();
-    let config = ferridriver_test::config::resolve_config(&overrides).unwrap_or_else(|e| {
-      eprintln!("config error: {e}");
-      std::process::exit(1);
-    });
-    Box::pin(run_bdd_with(config, overrides)).await
+    match ferridriver_test::config::resolve_config(&overrides) {
+      Ok(config) => run_bdd_with(config, overrides).await,
+      Err(e) => {
+        eprintln!("config error: {e}");
+        ferridriver_test::exit::FAILED
+      },
+    }
   });
 
-  std::process::exit(exit_code);
+  // Browser children are `kill_on_drop`; shutting the runtime down runs
+  // those drops before the process exits.
+  rt.shutdown_timeout(std::time::Duration::from_secs(5));
+
+  u8::try_from(exit_code).map_or(std::process::ExitCode::FAILURE, std::process::ExitCode::from)
 }
 
 /// Run BDD scenarios against a pre-resolved `TestConfig` and `CliOverrides`.
@@ -192,12 +166,79 @@ pub fn run_bdd_harness() {
 /// before calling this function.
 ///
 /// Returns the exit code for the run (0 = success).
-pub async fn run_bdd_with(
-  mut config: ferridriver_test::config::TestConfig,
+pub fn run_bdd_with(
+  config: ferridriver_test::config::TestConfig,
   overrides: ferridriver_test::config::CliOverrides,
-) -> i32 {
-  use std::sync::Arc;
+) -> impl std::future::Future<Output = i32> {
+  // Boxed before a future captures them: held by value, the two configs
+  // would sit in the run's future state twice, for the whole run.
+  run_bdd(Box::new(config), Box::new(overrides))
+}
 
+async fn run_bdd(
+  mut config: Box<ferridriver_test::config::TestConfig>,
+  overrides: Box<ferridriver_test::config::CliOverrides>,
+) -> i32 {
+  if let Err(code) = apply_bdd_overrides(&mut config, &overrides) {
+    return code;
+  }
+
+  // JS step files take the QuickJS path; otherwise inventory-collected
+  // Rust steps. `--steps` overrides `[test].steps`. Top-level
+  // `extensions` (config or `FERRIDRIVER_EXTENSIONS`) are bundled in the
+  // same module so one extension serves MCP tools AND BDD steps.
+  let js_globs: Vec<String> = if overrides.bdd_steps.is_empty() {
+    config.steps.clone()
+  } else {
+    overrides.bdd_steps.clone()
+  };
+  let extensions = extension_specs(&overrides);
+
+  config.has_bdd = true;
+
+  if overrides.ui || overrides.watch {
+    return run_bdd_watch(config, overrides, js_globs, extensions).await;
+  }
+
+  let plans = match build_bdd_plans(&config, &js_globs, &extensions, None).await {
+    Ok(built) => built,
+    Err(e) => {
+      eprintln!("{e}");
+      return e.exit_code();
+    },
+  };
+  let BddPlans {
+    shared: plan,
+    per_project: project_plans,
+    issues,
+  } = plans;
+  if plan.total_tests == 0 && project_plans.values().all(|p| p.total_tests == 0) && !overrides.list_only {
+    eprintln!("no scenarios found");
+    return 0;
+  }
+
+  let strict = config.strict;
+  let list_only = overrides.list_only;
+  let list_json = overrides.list_json;
+  // Boxed for the same reason as the configs it is built from.
+  let mut runner = Box::new(ferridriver_test::runner::TestRunner::new(*config, *overrides));
+  runner.set_project_plans(project_plans);
+  if list_only {
+    return list_scenarios(&runner, &plan, &issues, strict, list_json);
+  }
+  let code = runner.run_with_signals(plan).await;
+  js::teardown_worker_sessions().await;
+  code
+}
+
+/// Fold the BDD-only environment variables and flags into `config`.
+///
+/// Fails with the exit status to return when `--world-parameters` is not
+/// JSON.
+fn apply_bdd_overrides(
+  config: &mut ferridriver_test::config::TestConfig,
+  overrides: &ferridriver_test::config::CliOverrides,
+) -> Result<(), i32> {
   // BDD-specific feature glob defaults from env vars (used by the macro entry
   // point; the CLI subcommand sets `config.features` explicitly).
   let feature_patterns = std::env::var("FERRIDRIVER_FEATURES").ok().map_or_else(
@@ -238,31 +279,27 @@ pub async fn run_bdd_with(
     config.strict = strict;
   }
   if let Some(ref order) = overrides.bdd_order {
-    config.order = order.clone();
+    config.order.clone_from(order);
   }
   if overrides.bdd_language.is_some() {
-    config.language = overrides.bdd_language.clone();
+    config.language.clone_from(&overrides.bdd_language);
   }
   if let Some(s) = overrides.world_parameters.as_deref() {
     match serde_json::from_str::<serde_json::Value>(s) {
       Ok(v) => config.world_parameters = v,
       Err(e) => {
         eprintln!("--world-parameters: invalid JSON: {e}");
-        return 1;
+        return Err(1);
       },
     }
   }
 
-  // JS step files take the QuickJS path; otherwise inventory-collected
-  // Rust steps. `--steps` overrides `[test].steps`. Top-level
-  // `extensions` (config or `FERRIDRIVER_EXTENSIONS`) are bundled in the
-  // same module so one extension serves MCP tools AND BDD steps.
-  let js_globs: Vec<String> = if overrides.bdd_steps.is_empty() {
-    config.steps.clone()
-  } else {
-    overrides.bdd_steps.clone()
-  };
-  let extensions: Vec<ferridriver_script::ExtensionSpec> = if overrides.extensions.is_empty() {
+  Ok(())
+}
+
+/// The `--extension` flags, else the `FERRIDRIVER_EXTENSIONS` fallback.
+fn extension_specs(overrides: &ferridriver_test::config::CliOverrides) -> Vec<ferridriver_script::ExtensionSpec> {
+  if overrides.extensions.is_empty() {
     // The env fallback has no declaring file, so its entries resolve
     // against the process cwd.
     let base = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -281,76 +318,50 @@ pub async fn run_bdd_with(
       .unwrap_or_default()
   } else {
     overrides.extensions.clone()
+  }
+}
+
+/// Watch/UI mode: every cycle rebuilds the plan from disk — features
+/// re-discovered (narrowed to the changed `.feature` files when the
+/// watcher hands them over) and the JS/TS step graph re-bundled so step
+/// edits take effect without restarting. UI mode wins when both flags
+/// are passed.
+async fn run_bdd_watch(
+  config: Box<ferridriver_test::config::TestConfig>,
+  overrides: Box<ferridriver_test::config::CliOverrides>,
+  js_globs: Vec<String>,
+  extensions: Vec<ferridriver_script::ExtensionSpec>,
+) -> i32 {
+  let ui_mode = overrides.ui;
+  let ui_port = overrides.ui_port;
+  let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+  let factory_config = (*config).clone();
+  let factory: ferridriver_test::runner::WatchPlanFactory = Box::new(move |changed| {
+    let config = factory_config.clone();
+    let js_globs = js_globs.clone();
+    let extensions = extensions.clone();
+    Box::pin(async move {
+      match build_bdd_plans(&config, &js_globs, &extensions, changed.as_deref()).await {
+        // Watch and UI rebuild the shared plan only: a per-project
+        // rebuild would have to reach the runner between cycles, and
+        // the factory hands back one plan. A project-scoped BDD suite
+        // under `--watch` re-runs the union, which is a superset —
+        // never a silently narrower corpus.
+        Ok(plans) => ferridriver_test::runner::PlanBuild::ok(plans.shared),
+        Err(e) => {
+          ferridriver_test::runner::PlanBuild::failed(ferridriver_test::model::TestPlan::default(), e.to_string())
+        },
+      }
+    })
+  });
+  let mut runner = Box::new(ferridriver_test::runner::TestRunner::new(*config, *overrides));
+  let code = if ui_mode {
+    runner.run_test_server(factory, cwd, None, ui_port).await
+  } else {
+    runner.run_watch(factory, cwd).await
   };
-
-  config.has_bdd = true;
-
-  if overrides.ui || overrides.watch {
-    // Watch/UI mode: every cycle rebuilds the plan from disk — features
-    // re-discovered (narrowed to the changed `.feature` files when the
-    // watcher hands them over) and the JS/TS step graph re-bundled so
-    // step edits take effect without restarting. UI mode wins when both
-    // flags are passed.
-    let ui_mode = overrides.ui;
-    let ui_port = overrides.ui_port;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let factory_config = config.clone();
-    let factory: ferridriver_test::runner::WatchPlanFactory = Box::new(move |changed| {
-      let config = factory_config.clone();
-      let js_globs = js_globs.clone();
-      let extensions = extensions.clone();
-      Box::pin(async move {
-        match Box::pin(build_bdd_plans(&config, &js_globs, &extensions, changed.as_deref())).await {
-          // Watch and UI rebuild the shared plan only: a per-project
-          // rebuild would have to reach the runner between cycles, and
-          // the factory hands back one plan. A project-scoped BDD suite
-          // under `--watch` re-runs the union, which is a superset —
-          // never a silently narrower corpus.
-          Ok(plans) => ferridriver_test::runner::PlanBuild::ok(plans.shared),
-          Err(e) => {
-            ferridriver_test::runner::PlanBuild::failed(ferridriver_test::model::TestPlan::default(), e.to_string())
-          },
-        }
-      })
-    });
-    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-    let code = if ui_mode {
-      Box::pin(runner.run_test_server(factory, cwd, None, ui_port)).await
-    } else {
-      Box::pin(runner.run_watch(factory, cwd)).await
-    };
-    // Worker VMs outlive the individual cycles, so their `AfterAll`
-    // hooks and worker-scoped fixtures are torn down once, here.
-    js::teardown_worker_sessions().await;
-    return code;
-  }
-
-  let plans = match Box::pin(build_bdd_plans(&config, &js_globs, &extensions, None)).await {
-    Ok(built) => built,
-    Err(e) => {
-      eprintln!("{e}");
-      return e.exit_code();
-    },
-  };
-  let BddPlans {
-    shared: plan,
-    per_project: project_plans,
-    issues,
-  } = plans;
-  if plan.total_tests == 0 && project_plans.values().all(|p| p.total_tests == 0) && !overrides.list_only {
-    eprintln!("no scenarios found");
-    return 0;
-  }
-
-  let strict = config.strict;
-  let list_only = overrides.list_only;
-  let list_json = overrides.list_json;
-  let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-  runner.set_project_plans(project_plans);
-  if list_only {
-    return list_scenarios(&runner, &plan, &issues, strict, list_json);
-  }
-  let code = runner.run_with_signals(plan).await;
+  // Worker VMs outlive the individual cycles, so their `AfterAll`
+  // hooks and worker-scoped fixtures are torn down once, here.
   js::teardown_worker_sessions().await;
   code
 }
@@ -445,6 +456,9 @@ pub struct BddPlan {
   pub issues: dry_run::StepIssues,
 }
 
+/// What decides a project's BDD corpus: its features, steps and tags.
+type CorpusKey = (Vec<String>, Vec<String>, Option<String>);
+
 /// Build the plan every project shares, plus a plan of its own for each
 /// project that declares one.
 ///
@@ -483,15 +497,14 @@ pub async fn build_bdd_plans(
 
   // (features, steps, tags) -> the plan they produce. Two projects that
   // differ only in browser share one discovery and one step bundle.
-  let mut built: Vec<(
-    (Vec<String>, Vec<String>, Option<String>),
-    ferridriver_test::model::TestPlan,
-  )> = Vec::new();
+  let mut built: Vec<(CorpusKey, ferridriver_test::model::TestPlan)> = Vec::new();
   for project in &config.projects {
     if project.features.is_none() && project.steps.is_none() && project.tags.is_none() {
       continue;
     }
-    let merged = config.merge_project(project);
+    // Boxed: a whole `TestConfig` would otherwise sit in this future's
+    // state beside the nested plan build.
+    let merged = Box::new(config.merge_project(project));
     let globs: Vec<String> = project.steps.clone().unwrap_or_else(|| js_globs.to_vec());
     let key = (merged.features.clone(), globs.clone(), merged.tags.clone());
     let plan = if let Some((_, hit)) = built.iter().find(|(k, _)| *k == key) {
@@ -561,7 +574,7 @@ pub async fn build_bdd_plan(
       dry_run::translate(&feature_set, &registry, config, &options, true)
     } else {
       (
-        translate::translate_features(&feature_set, registry, config, &options),
+        translate::translate_features(&feature_set, &registry, config, &options),
         dry_run::StepIssues::default(),
       )
     };
@@ -595,11 +608,11 @@ pub async fn build_bdd_plan(
     let bundle = js::bundle_steps_with(js_globs, extensions, &cwd)
       .await
       .map_err(|e| PlanError::Suite(format!("step bundle error: {e}")))?;
-    let bindings = Arc::new(bindings);
+    let bindings: Arc<[ferridriver_script::ExtensionBinding]> = Arc::from(bindings);
     let (mut plan, issues) = if config.dry_run {
       let setup = js::BddSessionSetup {
         world_parameters: config.world_parameters.clone(),
-        open_use_keys: Arc::new(Vec::new()),
+        open_use_keys: Arc::from([]),
         extensions: Arc::clone(&bindings),
         builtin_steps: config.builtin_steps,
       };
@@ -609,7 +622,7 @@ pub async fn build_bdd_plan(
       dry_run::translate(&feature_set, &registry, config, &options, false)
     } else {
       (
-        js::translate_features_js(&feature_set, config, bundle, cwd, bindings, &options),
+        js::translate_features_js(&feature_set, config, &bundle, &cwd, bindings, &options),
         dry_run::StepIssues::default(),
       )
     };

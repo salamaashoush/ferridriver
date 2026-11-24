@@ -1,7 +1,6 @@
 //! Navigation step definitions.
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{given, step, then};
 use ferridriver_test::expect::{AssertionFailure, expect};
 
@@ -20,7 +19,7 @@ async fn navigate(world: &mut BrowserWorld, url: String) {
     .page()?
     .goto(&resolved)
     .await
-    .map_err(|e| StepError::wrap(format!("navigate to \"{resolved}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("navigate to \"{resolved}\""), &e))?;
 }
 
 #[given("I go back")]
@@ -29,7 +28,7 @@ async fn go_back(world: &mut BrowserWorld) {
     .page()?
     .go_back()
     .await
-    .map_err(|e| StepError::wrap("go back", e))?;
+    .map_err(|e| StepError::wrap("go back", &e))?;
 }
 
 #[given("I go forward")]
@@ -38,12 +37,16 @@ async fn go_forward(world: &mut BrowserWorld) {
     .page()?
     .go_forward()
     .await
-    .map_err(|e| StepError::wrap("go forward", e))?;
+    .map_err(|e| StepError::wrap("go forward", &e))?;
 }
 
 #[step("I reload the page")]
 async fn reload(world: &mut BrowserWorld) {
-  world.page()?.reload().await.map_err(|e| StepError::wrap("reload", e))?;
+  world
+    .page()?
+    .reload()
+    .await
+    .map_err(|e| StepError::wrap("reload", &e))?;
 }
 
 #[then("the URL should contain {string}")]

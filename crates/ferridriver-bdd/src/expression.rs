@@ -80,6 +80,7 @@ pub struct ParamInfo {
 
 impl ParamInfo {
   /// A parameter backed by a single positional capture group.
+  #[must_use]
   pub fn positional(ty: ParamType, id: usize, group: usize) -> Self {
     Self {
       ty,
@@ -102,6 +103,10 @@ pub struct CompiledExpression {
 
 /// Compile a cucumber expression into a regex with typed parameters,
 /// recognising only the built-in parameter types.
+///
+/// # Errors
+///
+/// As [`compile_with_custom`].
 pub fn compile(expression: &str) -> Result<CompiledExpression> {
   static EMPTY_REGISTRY: std::sync::LazyLock<ParameterTypeRegistry> =
     std::sync::LazyLock::new(ParameterTypeRegistry::new);
@@ -109,6 +114,11 @@ pub fn compile(expression: &str) -> Result<CompiledExpression> {
 }
 
 /// Compile a cucumber expression with a custom parameter type registry.
+///
+/// # Errors
+///
+/// When the expression does not parse, names a parameter type neither built in nor in
+/// `custom_types`, or expands to a regex that does not compile.
 pub fn compile_with_custom(expression: &str, custom_types: &ParameterTypeRegistry) -> Result<CompiledExpression> {
   let parsed = Expression::parse(expression)
     .map_err(|e| invalid_expr(format!("invalid cucumber expression \"{expression}\": {e}")))?;
@@ -218,6 +228,10 @@ fn assign_slots(expression: &str, regex: &Regex, declared: Vec<(ParamType, usize
 ///
 /// Each parameter reads the capture groups `assign_slots` mapped onto it at
 /// compile time.
+///
+/// # Errors
+///
+/// As [`extract_params_with_custom`].
 pub fn extract_params(
   captures: &regex::Captures<'_>,
   types: &[ParamType],
@@ -228,6 +242,10 @@ pub fn extract_params(
 
 /// Extract typed parameters from regex captures, with optional custom type registry
 /// for applying transformers.
+///
+/// # Errors
+///
+/// When an `{int}` or `{float}` capture does not parse as a number.
 pub fn extract_params_with_custom(
   captures: &regex::Captures<'_>,
   types: &[ParamType],

@@ -17,7 +17,7 @@ fn to_step_err(e: AssertionFailure) -> StepError {
   }
 }
 
-/// Stored in BrowserWorld typed state to track the currently active frame.
+/// Stored in `BrowserWorld` typed state to track the currently active frame.
 #[derive(Clone)]
 struct ActiveFrame(Frame);
 
@@ -42,10 +42,10 @@ async fn switch_to_main_frame(world: &mut BrowserWorld) {
 
 #[then("I should see {int} frame(s)")]
 async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
-  let page = world.page()?.clone();
-  let expected_count = expected as usize;
+  let page = std::sync::Arc::clone(world.page()?);
+  let expected_count = super::non_negative(expected, "a frame count")?;
   expect_poll(|| {
-    let p = page.clone();
+    let p = std::sync::Arc::clone(&page);
     async move {
       p.sync_frames().await.ok();
       p.frames().len()
@@ -58,10 +58,10 @@ async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
 
 #[then("the frame {string} should exist")]
 async fn frame_should_exist(world: &mut BrowserWorld, name_or_url: String) {
-  let page = world.page()?.clone();
+  let page = std::sync::Arc::clone(world.page()?);
   let name = name_or_url.clone();
   expect_poll(|| {
-    let p = page.clone();
+    let p = std::sync::Arc::clone(&page);
     let n = name.clone();
     async move {
       p.sync_frames().await.ok();
@@ -82,7 +82,7 @@ async fn evaluate_in_frame(world: &mut BrowserWorld, expression: String) {
     .0
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::wrap("evaluate in frame", e))?;
+    .map_err(|e| StepError::wrap("evaluate in frame", &e))?;
 }
 
 #[then("I evaluate {string} in the active frame and expect {string}")]
@@ -94,7 +94,7 @@ async fn evaluate_in_frame_expect(world: &mut BrowserWorld, expression: String, 
     .0
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::wrap("evaluate in frame", e))?;
+    .map_err(|e| StepError::wrap("evaluate in frame", &e))?;
 
   let actual = result.as_string_lossy();
 

@@ -52,3 +52,16 @@ pub(crate) fn resolve_url(url: &str) -> String {
   }
   url.to_string()
 }
+
+/// An `{int}` a step uses as a count or an index. Cucumber's `{int}`
+/// matches negative numbers, which would otherwise wrap to a huge count.
+pub(crate) fn non_negative(n: i64, what: &str) -> Result<usize, crate::step::StepError> {
+  usize::try_from(n).map_err(|_| crate::step::StepError::from(format!("{what} must be zero or more, got {n}")))
+}
+
+/// An `{int}` a step uses as a pixel coordinate or a wheel delta.
+pub(crate) fn pixels(n: i64) -> Result<f64, crate::step::StepError> {
+  i32::try_from(n)
+    .map(f64::from)
+    .map_err(|_| crate::step::StepError::from(format!("{n} is out of range for a pixel value")))
+}

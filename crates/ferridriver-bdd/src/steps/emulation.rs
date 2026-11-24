@@ -10,7 +10,7 @@ use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{given, step};
 
 async fn apply(
-  world: &mut BrowserWorld,
+  world: &BrowserWorld,
   label: &str,
   opts: ferridriver::options::BrowserContextOptions,
 ) -> Result<(), StepError> {
@@ -18,7 +18,7 @@ async fn apply(
     .page()?
     .apply_context_options(&opts)
     .await
-    .map_err(|e| StepError::wrap(label, e))
+    .map_err(|e| StepError::wrap(label, &e))
 }
 
 #[given("I set timezone to {string}")]
@@ -58,7 +58,7 @@ async fn emulate_color_scheme(world: &mut BrowserWorld, scheme: String) {
     .emulate_media()
     .options(opts)
     .await
-    .map_err(|e| StepError::wrap("emulate color scheme", e))?;
+    .map_err(|e| StepError::wrap("emulate color scheme", &e))?;
 }
 
 #[step("I set user agent to {string}")]
@@ -80,7 +80,7 @@ async fn set_viewport(world: &mut BrowserWorld, width: i64, height: i64) {
     .page()?
     .set_viewport_size(width, height)
     .await
-    .map_err(|e| StepError::wrap("set viewport", e))?;
+    .map_err(|e| StepError::wrap("set viewport", &e))?;
 }
 
 #[step("I set geolocation to {float},{float}")]

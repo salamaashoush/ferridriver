@@ -1,8 +1,7 @@
-//! Cookie management step definitions using the BrowserContext cookie API
+//! Cookie management step definitions using the `BrowserContext` cookie API
 //! (matches Playwright's context.cookies / context.addCookies / context.clearCookies).
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver::backend::CookieData;
 use ferridriver_bdd_macros::{step, when};
 
@@ -32,7 +31,7 @@ async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
       url: None,
     }])
     .await
-    .map_err(|e| StepError::wrap("set cookie", e))?;
+    .map_err(|e| StepError::wrap("set cookie", &e))?;
 }
 
 #[when("I delete cookie {string}")]
@@ -41,7 +40,7 @@ async fn delete_cookie(world: &mut BrowserWorld, name: String) {
     .context()?
     .delete_cookie(&name, None)
     .await
-    .map_err(|e| StepError::wrap(format!("delete cookie \"{name}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("delete cookie \"{name}\""), &e))?;
 }
 
 #[step("I clear all cookies")]
@@ -50,5 +49,5 @@ async fn clear_cookies(world: &mut BrowserWorld) {
     .context()?
     .clear_cookies()
     .await
-    .map_err(|e| StepError::wrap("clear cookies", e))?;
+    .map_err(|e| StepError::wrap("clear cookies", &e))?;
 }

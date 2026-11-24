@@ -225,13 +225,12 @@ fn fill_template(template: &str, params: &FxHashMap<String, String>) -> String {
       && close > i + 1
     {
       let key: String = chars[i + 1..close].iter().collect();
-      match params.get(&key) {
-        Some(value) => out.push_str(value),
-        None => {
-          out.push('<');
-          out.push_str(&key);
-          out.push('>');
-        },
+      if let Some(value) = params.get(&key) {
+        out.push_str(value);
+      } else {
+        out.push('<');
+        out.push_str(&key);
+        out.push('>');
       }
       i = close + 1;
       continue;
@@ -264,11 +263,13 @@ pub struct ExpandOptions {
 /// - Scenario Outlines are expanded with each Examples row, under a
 ///   describe named for the outline
 /// - Tags are merged (feature + rule + scenario + example)
+#[must_use]
 pub fn expand_feature(feature: &ParsedFeature) -> Vec<ScenarioExecution> {
   expand_feature_with(feature, &ExpandOptions::default())
 }
 
 /// [`expand_feature`] under a run's configuration.
+#[must_use]
 pub fn expand_feature_with(parsed: &ParsedFeature, options: &ExpandOptions) -> Vec<ScenarioExecution> {
   let feature = &parsed.feature;
   let feature_tags = extract_tags(&feature.tags);
@@ -281,14 +282,14 @@ pub fn expand_feature_with(parsed: &ParsedFeature, options: &ExpandOptions) -> V
     .unwrap_or_default();
 
   let mut scenarios = Vec::new();
-  let mut context = ExpandContext {
+  let context = ExpandContext {
     parsed,
     options,
     feature_tags: &feature_tags,
     feature_tag_refs: &feature_tag_refs,
     background: &background_steps,
   };
-  context.expand_scenarios(&feature.scenarios, None, &[], &mut scenarios);
+  context.expand_scenarios(&feature.scenarios, None, &mut scenarios);
 
   for rule in &feature.rules {
     let rule_background: Vec<ScenarioStep> = rule
@@ -300,13 +301,12 @@ pub fn expand_feature_with(parsed: &ParsedFeature, options: &ExpandOptions) -> V
     let rule_tag_refs = parsed.tag_lines(rule.position.line, &rule.tags);
     context.expand_scenarios(
       &rule.scenarios,
-      Some(RuleContext {
+      Some(&RuleContext {
         name: &rule.name,
         tags: &rule_tags,
         tag_refs: &rule_tag_refs,
         background: &rule_background,
       }),
-      &rule_background,
       &mut scenarios,
     );
   }
@@ -321,7 +321,6 @@ struct RuleContext<'a> {
   name: &'a str,
   tags: &'a [String],
   tag_refs: &'a [SourceTag],
-  #[allow(dead_code)]
   background: &'a [ScenarioStep],
 }
 
@@ -351,15 +350,14 @@ impl ExpandContext<'_> {
   }
 
   fn expand_scenarios(
-    &mut self,
+    &self,
     scenarios: &[gherkin::Scenario],
-    rule: Option<RuleContext<'_>>,
-    rule_background: &[ScenarioStep],
+    rule: Option<&RuleContext<'_>>,
     out: &mut Vec<ScenarioExecution>,
   ) {
     let parsed = self.parsed;
     let feature = &parsed.feature;
-    let rule = rule.as_ref();
+    let rule_background = rule.map_or(&[][..], |r| r.background);
     let describe_prefix: Vec<String> = rule.map(|r| vec![r.name.to_string()]).unwrap_or_default();
 
     for scenario in scenarios {
@@ -544,6 +542,7 @@ pub struct ScenarioResult {
 
 impl ScenarioResult {
   /// Whether this scenario should be retried.
+  #[must_use]
   pub fn should_retry(&self, max_retries: u32) -> bool {
     self.status == ScenarioStatus::Failed && self.attempt < max_retries
   }

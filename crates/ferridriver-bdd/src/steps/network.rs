@@ -45,7 +45,7 @@ async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, st
   let status = i32::try_from(status).map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
   let body_bytes = body.into_bytes();
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .route(
@@ -60,14 +60,14 @@ async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, st
       None,
     )
     .await
-    .map_err(|e| StepError::wrap(format!("mock requests to \"{pattern}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("mock requests to \"{pattern}\""), &e))?;
 }
 
 #[given("I mock requests to {string} with JSON {string}")]
 async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: String) {
   let body_bytes = json_body.into_bytes();
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .route(
@@ -83,7 +83,7 @@ async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: St
       None,
     )
     .await
-    .map_err(|e| StepError::wrap(format!("mock JSON requests to \"{pattern}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("mock JSON requests to \"{pattern}\""), &e))?;
 }
 
 #[given("I mock requests to {string} with fixture {string}")]
@@ -104,7 +104,7 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
   .to_string();
 
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .route(
@@ -120,7 +120,7 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
       None,
     )
     .await
-    .map_err(|e| StepError::wrap(format!("mock with fixture \"{fixture_path}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("mock with fixture \"{fixture_path}\""), &e))?;
 }
 
 #[given("I mock requests to {string} with fixture {string} and status {int}")]
@@ -141,7 +141,7 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
   .to_string();
 
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .route(
@@ -157,13 +157,13 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
       None,
     )
     .await
-    .map_err(|e| StepError::wrap(format!("mock with fixture \"{fixture_path}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("mock with fixture \"{fixture_path}\""), &e))?;
 }
 
 #[given("I block requests to {string}")]
 async fn block_requests(world: &mut BrowserWorld, pattern: String) {
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .route(
@@ -174,14 +174,14 @@ async fn block_requests(world: &mut BrowserWorld, pattern: String) {
       None,
     )
     .await
-    .map_err(|e| StepError::wrap(format!("block requests to \"{pattern}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("block requests to \"{pattern}\""), &e))?;
 }
 
 #[given("I intercept requests to {string}")]
 async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
   let tracker = intercepted_requests(world);
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .route(
@@ -193,18 +193,18 @@ async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
       None,
     )
     .await
-    .map_err(|e| StepError::wrap(format!("intercept requests to \"{pattern}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("intercept requests to \"{pattern}\""), &e))?;
 }
 
 #[when("I remove route for {string}")]
 async fn remove_route(world: &mut BrowserWorld, pattern: String) {
   let matcher =
-    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), e))?;
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::wrap(format!("invalid url pattern \"{pattern}\""), &e))?;
   world
     .page()?
     .unroute(&matcher, None)
     .await
-    .map_err(|e| StepError::wrap(format!("remove route for \"{pattern}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("remove route for \"{pattern}\""), &e))?;
 }
 
 #[then("a request to {string} should have been made")]
@@ -264,7 +264,7 @@ async fn fetch_url(world: &mut BrowserWorld, url: String) {
     .page()?
     .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::wrap(format!("fetch \"{url}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("fetch \"{url}\""), &e))?;
   let result = result.as_string_lossy();
 
   let parsed: serde_json::Value =
@@ -282,7 +282,11 @@ async fn fetch_url(world: &mut BrowserWorld, url: String) {
     .unwrap_or_default();
 
   world.set_state(LastFetchResponse {
-    status: parsed.get("status").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+    status: parsed
+      .get("status")
+      .and_then(serde_json::Value::as_i64)
+      .and_then(|s| i32::try_from(s).ok())
+      .unwrap_or(0),
     body: parsed.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
     headers,
   });
@@ -291,7 +295,7 @@ async fn fetch_url(world: &mut BrowserWorld, url: String) {
 #[then("the response status should be {int}")]
 async fn response_status_should_be(world: &mut BrowserWorld, expected: i64) {
   let resp = last_response(world)?;
-  let expected = expected as i32;
+  let expected = i32::try_from(expected).map_err(|_| StepError::from(format!("{expected} is not an HTTP status")))?;
   if resp.status != expected {
     return Err(StepError {
       message: format!("expected response status {expected}, got {}", resp.status),

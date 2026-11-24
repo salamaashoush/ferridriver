@@ -45,32 +45,54 @@ pub enum StepParam {
 }
 
 impl StepParam {
-  pub fn as_string(&self) -> Option<String> {
+  /// The parameter as the text a `String` step argument receives.
+  #[must_use]
+  pub fn as_string(&self) -> String {
     match self {
-      Self::String(s) | Self::Word(s) => Some(s.clone()),
-      Self::Int(i) => Some(i.to_string()),
-      Self::Float(f) => Some(f.to_string()),
-      Self::Custom { value, .. } => Some(value.clone()),
+      Self::String(s) | Self::Word(s) => s.clone(),
+      Self::Int(i) => i.to_string(),
+      Self::Float(f) => f.to_string(),
+      Self::Custom { value, .. } => value.clone(),
     }
   }
 
+  /// The parameter as an `i64`. A float truncates toward zero, saturating
+  /// at `i64`'s bounds.
+  #[must_use]
   pub fn as_int(&self) -> Option<i64> {
     match self {
       Self::Int(i) => Some(*i),
       Self::String(s) | Self::Word(s) => s.parse().ok(),
-      Self::Float(f) => Some(*f as i64),
+      Self::Float(f) => Some(float_to_int(*f)),
       Self::Custom { value, .. } => value.parse().ok(),
     }
   }
 
+  #[must_use]
   pub fn as_float(&self) -> Option<f64> {
     match self {
       Self::Float(f) => Some(*f),
-      Self::Int(i) => Some(*i as f64),
+      Self::Int(i) => Some(int_to_float(*i)),
       Self::String(s) | Self::Word(s) => s.parse().ok(),
       Self::Custom { value, .. } => value.parse().ok(),
     }
   }
+}
+
+#[expect(
+  clippy::cast_possible_truncation,
+  reason = "a float bound to an i64 step argument truncates toward zero and saturates at i64's bounds, which is what this conversion promises"
+)]
+fn float_to_int(f: f64) -> i64 {
+  f as i64
+}
+
+#[expect(
+  clippy::cast_precision_loss,
+  reason = "an integer read as a float rounds to the nearest f64, as parsing its text would"
+)]
+fn int_to_float(i: i64) -> f64 {
+  i as f64
 }
 
 // ── Data table ──
@@ -103,7 +125,7 @@ impl StepError {
   /// `TargetClosedError:`). Identical convention to
   /// [`ferridriver_test::TestFailure::wrap`].
   #[must_use]
-  pub fn wrap(prefix: impl std::fmt::Display, err: ferridriver::FerriError) -> Self {
+  pub fn wrap(prefix: impl std::fmt::Display, err: &ferridriver::FerriError) -> Self {
     Self {
       message: format!("{prefix}: {}", err.display_named()),
       diff: None,

@@ -4,9 +4,8 @@
 //! matching Playwright's behavior exactly.
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::then;
-use ferridriver_test::expect::{AssertionFailure, StringOrRegex, expect};
+use ferridriver_test::expect::{AssertionFailure, expect};
 
 fn to_step_err(e: AssertionFailure) -> StepError {
   StepError {
@@ -101,7 +100,7 @@ async fn should_have_class(world: &mut BrowserWorld, selector: String, expected_
 async fn should_have_count(world: &mut BrowserWorld, expected: i64, selector: String) {
   let locator = crate::steps::selector_locator(world.page()?, &selector);
   expect(&locator)
-    .to_have_count(expected as usize)
+    .to_have_count(super::non_negative(expected, "an element count")?)
     .await
     .map_err(to_step_err)?;
 }

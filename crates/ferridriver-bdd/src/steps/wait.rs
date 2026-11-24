@@ -1,8 +1,8 @@
-//! Wait step definitions using proper APIs (expect auto-retry, locator wait_for).
+//! Wait step definitions using proper APIs (expect auto-retry, locator `wait_for`).
 
 use std::time::Duration;
 
-use crate::step::{StepError, StepParam};
+use crate::step::StepError;
 use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::step;
 use ferridriver_test::expect::{self, AssertionFailure, expect};
@@ -17,12 +17,14 @@ fn to_step_err(e: AssertionFailure) -> StepError {
 
 #[step("I wait {int} millisecond(s)")]
 async fn wait_ms(world: &mut BrowserWorld, ms: i64) {
-  tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+  let ms = u64::try_from(ms).map_err(|_| StepError::from(format!("cannot wait {ms} milliseconds")))?;
+  tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
 #[step("I wait {int} second(s)")]
 async fn wait_seconds(world: &mut BrowserWorld, seconds: i64) {
-  tokio::time::sleep(Duration::from_secs(seconds as u64)).await;
+  let seconds = u64::try_from(seconds).map_err(|_| StepError::from(format!("cannot wait {seconds} seconds")))?;
+  tokio::time::sleep(Duration::from_secs(seconds)).await;
 }
 
 #[step("I wait for {string}")]
@@ -66,7 +68,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
   })?;
 
   let timeout = Duration::from_secs(timeout_secs);
-  let base_fixtures = world.fixtures()?.clone();
+  let base_fixtures = std::sync::Arc::new(world.fixtures()?.clone());
   let registry = world.registry_arc();
 
   // Pre-match the inner step once to validate it exists.
@@ -80,22 +82,24 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
     diff: None,
     pending: false,
   })?;
-  let handler = step_match.def.handler.clone();
+  let handler = std::sync::Arc::clone(&step_match.def.handler);
   let params = step_match.params;
 
-  Box::pin(expect::to_pass(timeout, || {
-    let handler = handler.clone();
+  // Each attempt's world is boxed: held by value, it would sit in every
+  // attempt's future, and those futures inside `to_pass`'s own state.
+  expect::to_pass(timeout, || {
+    let handler = std::sync::Arc::clone(&handler);
     let params = params.clone();
-    let base_fixtures = base_fixtures.clone();
-    let registry = registry.clone();
+    let base_fixtures = std::sync::Arc::clone(&base_fixtures);
+    let registry = std::sync::Arc::clone(&registry);
     async move {
-      let mut temp_world = BrowserWorld::new(base_fixtures);
+      let mut temp_world = Box::new(BrowserWorld::new((*base_fixtures).clone()));
       temp_world.set_registry(registry);
       handler(&mut temp_world, params, None, None)
         .await
         .map_err(|e| AssertionFailure::new(e.message, None))
     }
-  }))
+  })
   .await
   .map_err(to_step_err)?;
 }

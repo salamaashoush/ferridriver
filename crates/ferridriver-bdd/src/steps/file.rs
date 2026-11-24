@@ -2,8 +2,7 @@
 //!
 //! Uses `locator.set_input_files(&[paths])` to attach files to `<input type="file">` elements.
 
-use crate::step::{DataTable, StepError};
-use crate::world::BrowserWorld;
+use crate::step::StepError;
 use ferridriver_bdd_macros::when;
 
 #[when("I attach file {string} to {string}")]
@@ -15,7 +14,7 @@ async fn attach_file(world: &mut BrowserWorld, file_path: String, selector: Stri
       &file_path,
     )]))
     .await
-    .map_err(|e| StepError::wrap(format!("attach file \"{file_path}\" to \"{selector}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("attach file \"{file_path}\" to \"{selector}\""), &e))?;
 }
 
 #[when("I attach files to {string}")]
@@ -38,5 +37,5 @@ async fn attach_files(world: &mut BrowserWorld, selector: String, table: Option<
     .locator(&selector)
     .set_input_files(ferridriver::options::InputFiles::Paths(paths))
     .await
-    .map_err(|e| StepError::wrap(format!("attach files to \"{selector}\""), e))?;
+    .map_err(|e| StepError::wrap(format!("attach files to \"{selector}\""), &e))?;
 }

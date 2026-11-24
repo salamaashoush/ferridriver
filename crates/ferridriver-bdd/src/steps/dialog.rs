@@ -38,24 +38,32 @@ struct DialogLog {
 
 impl DialogLog {
   fn push(&self, dialog: DialogRecord) {
-    self.entries.lock().unwrap_or_else(|e| e.into_inner()).push(dialog);
+    self
+      .entries
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(dialog);
   }
 
   fn last_message(&self) -> Option<String> {
     self
       .entries
       .lock()
-      .unwrap_or_else(|e| e.into_inner())
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
       .last()
       .map(|d| d.message.clone())
   }
 
   fn len(&self) -> usize {
-    self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
+    self
+      .entries
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .len()
   }
 }
 
-/// Ensure DialogLog exists in world state; return a clone for handler use.
+/// Ensure `DialogLog` exists in world state; return a clone for handler use.
 fn ensure_dialog_log(world: &mut BrowserWorld) -> DialogLog {
   if world.get_state::<DialogLog>().is_none() {
     world.set_state(DialogLog::default());
@@ -82,7 +90,7 @@ where
         log.push(DialogRecord {
           message: dialog.message().to_string(),
         });
-        let respond = respond.clone();
+        let respond = Arc::clone(&respond);
         // Dispatch the user's intended response on a tokio task so
         // the broadcast callback stays non-blocking.
         tokio::spawn(async move {
@@ -114,11 +122,11 @@ async fn dismiss_dialog(world: &mut BrowserWorld) {
 
 #[given("I type {string} in the dialog")]
 async fn type_in_dialog(world: &mut BrowserWorld, text: String) {
-  let text = Arc::new(text);
+  let text: Arc<str> = Arc::from(text);
   install_dialog_listener(world, move |dialog| {
-    let text = text.clone();
+    let text = Arc::clone(&text);
     tokio::spawn(async move {
-      let _ = dialog.accept(Some((*text).clone())).await;
+      let _ = dialog.accept(Some(text.to_string())).await;
     });
   })?;
 }
@@ -134,7 +142,7 @@ async fn should_see_dialog_text(world: &mut BrowserWorld, expected: String) {
   expect_poll(move || {
     let l = log.clone();
     let e = exp.clone();
-    async move { l.last_message().map_or(false, |m| m.contains(&e)) }
+    async move { l.last_message().is_some_and(|m| m.contains(&e)) }
   })
   .with_timeout(std::time::Duration::from_secs(5))
   .to_equal(true)
@@ -149,7 +157,7 @@ async fn should_have_seen_dialog_count(world: &mut BrowserWorld, expected: i64) 
     .cloned()
     .ok_or_else(|| StepError::from("no dialog handler was set -- use 'I accept/dismiss the dialog' first"))?;
 
-  let expected_count = expected as usize;
+  let expected_count = super::non_negative(expected, "a dialog count")?;
   expect_poll(move || {
     let l = log.clone();
     async move { l.len() }

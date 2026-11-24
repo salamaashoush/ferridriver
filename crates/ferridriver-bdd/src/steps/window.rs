@@ -2,12 +2,11 @@
 //!
 //! Uses `context.new_page()`, `context.pages()`, `page.close()`, and
 //! `page.bring_to_front()` for tab management. The active page index is
-//! tracked via typed state in BrowserWorld.
+//! tracked via typed state in `BrowserWorld`.
 
 use std::time::Duration;
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{step, then, when};
 use ferridriver_test::expect::{AssertionFailure, expect_poll};
 
@@ -25,7 +24,7 @@ async fn open_new_tab(world: &mut BrowserWorld) {
     .context()?
     .new_page()
     .await
-    .map_err(|e| StepError::wrap("open new tab", e))?;
+    .map_err(|e| StepError::wrap("open new tab", &e))?;
 
   // Replace the active page with the newly opened tab.
   world.set_page(page)?;
@@ -37,9 +36,9 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
     .context()?
     .discover_pages()
     .await
-    .map_err(|e| StepError::wrap("list tabs", e))?;
+    .map_err(|e| StepError::wrap("list tabs", &e))?;
 
-  let idx = index as usize;
+  let idx = super::non_negative(index, "a tab index")?;
   let page = pages
     .into_iter()
     .nth(idx)
@@ -48,7 +47,7 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
   page
     .bring_to_front()
     .await
-    .map_err(|e| StepError::wrap(format!("bring tab {idx} to front"), e))?;
+    .map_err(|e| StepError::wrap(format!("bring tab {idx} to front"), &e))?;
 
   world.set_page(page)?;
 }
@@ -59,14 +58,14 @@ async fn close_current_tab(world: &mut BrowserWorld) {
     .page()?
     .close()
     .await
-    .map_err(|e| StepError::wrap("close tab", e))?;
+    .map_err(|e| StepError::wrap("close tab", &e))?;
 
   // After closing, switch to the first remaining page if available.
   let pages = world
     .context()?
     .discover_pages()
     .await
-    .map_err(|e| StepError::wrap("list tabs after close", e))?;
+    .map_err(|e| StepError::wrap("list tabs after close", &e))?;
 
   if let Some(page) = pages.into_iter().next() {
     world.set_page(page)?;
@@ -76,7 +75,7 @@ async fn close_current_tab(world: &mut BrowserWorld) {
 #[then("I should see {int} tab(s)")]
 async fn should_see_tab_count(world: &mut BrowserWorld, expected: i64) {
   let ctx = world.context()?.clone();
-  let expected_count = expected as usize;
+  let expected_count = super::non_negative(expected, "a tab count")?;
   expect_poll(move || {
     let c = ctx.clone();
     async move { c.discover_pages().await.map_or(0, |p| p.len()) }
@@ -93,5 +92,5 @@ async fn bring_to_front(world: &mut BrowserWorld) {
     .page()?
     .bring_to_front()
     .await
-    .map_err(|e| StepError::wrap("bring tab to front", e))?;
+    .map_err(|e| StepError::wrap("bring tab to front", &e))?;
 }

@@ -35,6 +35,10 @@ impl TagExpression {
   /// not_expr = "not" not_expr | atom
   /// atom     = "@" IDENT | "(" expr ")"
   /// ```
+  ///
+  /// # Errors
+  ///
+  /// When `input` does not follow the grammar above.
   pub fn parse(input: &str) -> Result<Self> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
@@ -46,6 +50,7 @@ impl TagExpression {
   }
 
   /// Evaluate the expression against a set of tags.
+  #[must_use]
   pub fn matches(&self, tags: &[String]) -> bool {
     match self {
       Self::Tag(t) => tags.iter().any(|tag| tag == t),

@@ -1,7 +1,6 @@
 //! JavaScript execution step definitions.
 
 use crate::step::StepError;
-use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::{step, then, when};
 
 #[when("I evaluate {string}")]
@@ -10,7 +9,7 @@ async fn evaluate(world: &mut BrowserWorld, expression: String) {
     .page()?
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::wrap("evaluate JS", e))?;
+    .map_err(|e| StepError::wrap("evaluate JS", &e))?;
 }
 
 #[step("I store the result of {string} as {string}")]
@@ -19,7 +18,7 @@ async fn store_result(world: &mut BrowserWorld, expression: String, var_name: St
     .page()?
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::wrap("evaluate JS for variable", e))?;
+    .map_err(|e| StepError::wrap("evaluate JS for variable", &e))?;
 
   world.set_var(var_name, result.as_string_lossy());
 }
@@ -30,7 +29,7 @@ async fn evaluate_and_expect(world: &mut BrowserWorld, expression: String, expec
     .page()?
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::wrap("evaluate JS", e))?;
+    .map_err(|e| StepError::wrap("evaluate JS", &e))?;
 
   let actual = result.as_string_lossy();
 

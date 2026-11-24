@@ -47,7 +47,7 @@ async fn send_get(world: &mut BrowserWorld, url: String) {
   let resp = ctx
     .get(&url_resolved)
     .await
-    .map_err(|e| StepError::wrap(format!("GET {url}"), e))?;
+    .map_err(|e| StepError::wrap(format!("GET {url}"), &e))?;
   world.set_state(LastHttpResponse(resp));
 }
 
@@ -58,7 +58,7 @@ async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
   let resp = ctx
     .post(&url_resolved)
     .await
-    .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
+    .map_err(|e| StepError::wrap(format!("POST {url}"), &e))?;
   world.set_state(LastHttpResponse(resp));
 }
 
@@ -80,7 +80,7 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
     .post(&url_resolved)
     .options(opts)
     .await
-    .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
+    .map_err(|e| StepError::wrap(format!("POST {url}"), &e))?;
   world.set_state(LastHttpResponse(resp));
 }
 
@@ -102,7 +102,7 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
     .put(&url_resolved)
     .options(opts)
     .await
-    .map_err(|e| StepError::wrap(format!("PUT {url}"), e))?;
+    .map_err(|e| StepError::wrap(format!("PUT {url}"), &e))?;
   world.set_state(LastHttpResponse(resp));
 }
 
@@ -113,7 +113,7 @@ async fn send_delete(world: &mut BrowserWorld, url: String) {
   let resp = ctx
     .delete(&url_resolved)
     .await
-    .map_err(|e| StepError::wrap(format!("DELETE {url}"), e))?;
+    .map_err(|e| StepError::wrap(format!("DELETE {url}"), &e))?;
   world.set_state(LastHttpResponse(resp));
 }
 
@@ -135,7 +135,7 @@ async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: 
     .patch(&url_resolved)
     .options(opts)
     .await
-    .map_err(|e| StepError::wrap(format!("PATCH {url}"), e))?;
+    .map_err(|e| StepError::wrap(format!("PATCH {url}"), &e))?;
   world.set_state(LastHttpResponse(resp));
 }
 

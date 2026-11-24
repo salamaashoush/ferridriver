@@ -107,12 +107,11 @@ fn substitute(text: &str, values: Option<&FxHashMap<String, String>>) -> String 
         break;
       }
     }
-    match values.get(&name) {
-      Some(value) => out.push_str(value),
-      None => {
-        out.push('$');
-        out.push_str(&name);
-      },
+    if let Some(value) = values.get(&name) {
+      out.push_str(value);
+    } else {
+      out.push('$');
+      out.push_str(&name);
     }
   }
   out
@@ -148,7 +147,7 @@ pub fn translate(
         use_options: crate::translate::scenario_use_options(&scenario),
         metadata: serde_json::to_value(&scenario.source).ok(),
         id,
-        test_fn: dry_run_fn(Arc::new(scenario), Arc::new(found), config.strict),
+        test_fn: dry_run_fn(Arc::new(scenario), Arc::from(found), config.strict),
         fixture_requests: vec!["test_info".to_string()],
         timeout: None,
         retries: None,
@@ -184,7 +183,7 @@ pub fn translate(
 /// A body that reports `scenario`'s steps and runs none: matched steps as
 /// skipped, the first problem as pending (undefined, not strict) or a
 /// failure, and every step after a failure as skipped.
-fn dry_run_fn(scenario: Arc<ScenarioExecution>, issues: Arc<Vec<StepIssue>>, strict: bool) -> TestFn {
+fn dry_run_fn(scenario: Arc<ScenarioExecution>, issues: Arc<[StepIssue]>, strict: bool) -> TestFn {
   Arc::new(move |pool| {
     let scenario = Arc::clone(&scenario);
     let issues = Arc::clone(&issues);

@@ -1,4 +1,4 @@
-//! BrowserWorld: shared scenario state with fixtures, variables, and typed extensions.
+//! `BrowserWorld`: shared scenario state with fixtures, variables, and typed extensions.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -27,6 +27,7 @@ pub struct BrowserWorld {
 
 impl BrowserWorld {
   /// Create a new world from the unified test fixtures.
+  #[must_use]
   pub fn new(fixtures: ferridriver_test::model::TestFixtures) -> Self {
     Self {
       test_info: Arc::clone(&fixtures.test_info),
@@ -41,6 +42,7 @@ impl BrowserWorld {
     }
   }
 
+  #[must_use]
   pub fn without_browser(
     test_info: Arc<ferridriver_test::model::TestInfo>,
     request: Arc<ferridriver::http_client::HttpClient>,
@@ -59,11 +61,16 @@ impl BrowserWorld {
     }
   }
 
+  #[must_use]
   pub fn modifiers(&self) -> &Arc<ferridriver_test::model::TestModifiers> {
     &self.modifiers
   }
 
   /// Access the unified test fixtures.
+  ///
+  /// # Errors
+  ///
+  /// When the scenario did not request browser fixtures.
   pub fn fixtures(&self) -> Result<&ferridriver_test::model::TestFixtures, crate::step::StepError> {
     self
       .fixtures
@@ -72,6 +79,10 @@ impl BrowserWorld {
   }
 
   /// Mutable access to the unified test fixtures.
+  ///
+  /// # Errors
+  ///
+  /// When the scenario did not request browser fixtures.
   pub fn fixtures_mut(&mut self) -> Result<&mut ferridriver_test::model::TestFixtures, crate::step::StepError> {
     self
       .fixtures
@@ -81,38 +92,55 @@ impl BrowserWorld {
 
   // ── Delegate accessors (used by built-in steps) ──
 
+  /// # Errors
+  ///
+  /// When the scenario did not request browser fixtures.
   pub fn page(&self) -> Result<&Arc<Page>, crate::step::StepError> {
     Ok(&self.fixtures()?.page)
   }
 
   /// Replace the active page Arc entirely (used for tab switching).
+  ///
+  /// # Errors
+  ///
+  /// When the scenario did not request browser fixtures.
   pub fn set_page(&mut self, page: Arc<Page>) -> Result<(), crate::step::StepError> {
     self.fixtures_mut()?.page = page;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// When the scenario did not request browser fixtures.
   pub fn context(&self) -> Result<&ContextRef, crate::step::StepError> {
     Ok(&self.fixtures()?.context)
   }
 
+  /// # Errors
+  ///
+  /// When the scenario did not request browser fixtures.
   pub fn browser(&self) -> Result<&ferridriver::Browser, crate::step::StepError> {
     Ok(&self.fixtures()?.browser)
   }
 
+  #[must_use]
   pub fn request(&self) -> &ferridriver::http_client::HttpClient {
     &self.request
   }
 
+  #[must_use]
   pub fn test_info(&self) -> &Arc<ferridriver_test::model::TestInfo> {
     &self.test_info
   }
 
+  #[must_use]
   pub fn browser_config(&self) -> &ferridriver_test::config::BrowserConfig {
     &self.browser_config
   }
 
   // ── Scenario variables ──
 
+  #[must_use]
   pub fn vars(&self) -> &FxHashMap<String, String> {
     &self.vars
   }
@@ -131,6 +159,7 @@ impl BrowserWorld {
 
   // ── Typed state extensions ──
 
+  #[must_use]
   pub fn get_state<T: Send + Sync + 'static>(&self) -> Option<&T> {
     self.state.get(&TypeId::of::<T>())?.downcast_ref()
   }
@@ -168,6 +197,7 @@ impl BrowserWorld {
     self.feature_dir = None;
   }
 
+  #[must_use]
   pub fn resolve_fixture_path(&self, relative: &str) -> std::path::PathBuf {
     if let Some(dir) = &self.feature_dir {
       dir.join(relative)
@@ -185,6 +215,7 @@ impl BrowserWorld {
   /// Reads should use [`Self::resolve_io_path`], which tries the
   /// output dir first (round-trips within a scenario) and falls back
   /// to the feature dir (committed fixtures).
+  #[must_use]
   pub fn resolve_output_path(&self, relative: &str) -> std::path::PathBuf {
     self.test_info.output_dir.join(relative)
   }
@@ -193,6 +224,7 @@ impl BrowserWorld {
   /// output dir first (so a `save → load` within one scenario reads
   /// what was just written), fall back to the feature dir for
   /// committed fixtures.
+  #[must_use]
   pub fn resolve_io_path(&self, relative: &str) -> std::path::PathBuf {
     let out = self.resolve_output_path(relative);
     if out.exists() {
@@ -201,6 +233,7 @@ impl BrowserWorld {
     self.resolve_fixture_path(relative)
   }
 
+  #[must_use]
   pub fn registry_arc(&self) -> Option<Arc<crate::registry::StepRegistry>> {
     self.registry.clone()
   }
@@ -220,6 +253,9 @@ impl BrowserWorld {
     self.attach("log", "text/plain", text.as_bytes().to_vec()).await;
   }
 
+  /// # Errors
+  ///
+  /// When the world has no registry, no single definition matches `text`, or the step fails.
   pub async fn run_step(&mut self, text: &str) -> Result<(), crate::step::StepError> {
     let registry = self
       .registry
@@ -231,6 +267,7 @@ impl BrowserWorld {
     (step_match.def.handler)(self, step_match.params, None, None).await
   }
 
+  #[must_use]
   pub fn interpolate(&self, text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

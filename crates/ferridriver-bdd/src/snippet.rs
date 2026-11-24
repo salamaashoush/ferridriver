@@ -10,12 +10,13 @@
 ///
 /// * `keyword` - The Gherkin keyword (`Given`, `When`, `Then`, `And`, `But`, `*`).
 /// * `text` - The step text (excluding the keyword), e.g. `I have 3 "apples" in my cart`.
-/// * `has_table` - Whether the step has a DataTable argument.
-/// * `has_docstring` - Whether the step has a DocString argument.
+/// * `has_table` - Whether the step has a `DataTable` argument.
+/// * `has_docstring` - Whether the step has a `DocString` argument.
 ///
 /// # Returns
 ///
 /// A complete Rust function skeleton with `todo!()` body.
+#[must_use]
 pub fn generate_snippet(keyword: &str, text: &str, has_table: bool, has_docstring: bool) -> String {
   // 1. Analyze the step text and build the expression pattern + parameter list.
   let (expression, params) = analyze_step_text(text);
@@ -174,7 +175,7 @@ fn is_number_start(chars: &[char], i: usize, len: usize) -> bool {
   false
 }
 
-/// Convert an expression pattern into a snake_case function name.
+/// Convert an expression pattern into a `snake_case` function name.
 /// - Replace placeholder tokens like `{int}`, `{string}`, `{float}` with their names.
 /// - Replace non-alphanumeric characters with `_`.
 /// - Deduplicate underscores.
@@ -230,12 +231,13 @@ fn to_snake_case_fn_name(expression: &str) -> String {
     return trimmed.to_string();
   }
 
-  let truncated = &trimmed[..60];
+  // `is_alphanumeric` keeps non-ASCII letters, so byte 60 can fall inside one.
+  let (truncated, _) = trimmed.split_at(trimmed.floor_char_boundary(60));
   // Try to cut at the last underscore to avoid splitting a word.
-  if let Some(last_underscore) = truncated.rfind('_')
-    && last_underscore > 30
+  if let Some((head, _)) = truncated.rsplit_once('_')
+    && head.len() > 30
   {
-    return truncated[..last_underscore].to_string();
+    return head.to_string();
   }
   truncated.to_string()
 }
@@ -339,10 +341,19 @@ mod tests {
     let long_text = "a very long step definition text that exceeds the sixty character limit for function names in generated snippets";
     let snippet = generate_snippet("Given", long_text, false, false);
     // Extract the function name from `async fn <name>(`
-    let fn_start = snippet.find("async fn ").unwrap() + "async fn ".len();
-    let fn_end = snippet[fn_start..].find('(').unwrap() + fn_start;
-    let fn_name = &snippet[fn_start..fn_end];
+    let (_, after) = snippet.split_once("async fn ").unwrap();
+    let (fn_name, _) = after.split_once('(').unwrap();
     assert!(fn_name.len() <= 60, "fn name too long: {fn_name} ({})", fn_name.len());
+  }
+
+  #[test]
+  fn fn_name_truncation_keeps_multibyte_letters_whole() {
+    // 58 letters and a separator, then two-byte letters: byte 60 falls
+    // inside the first of them.
+    let text = format!("{} äöüäöüäöü", "a".repeat(58));
+    let name = to_snake_case_fn_name(&text);
+    assert!(name.len() <= 60, "fn name too long: {name} ({})", name.len());
+    assert_eq!(name, "a".repeat(58));
   }
 
   #[test]
