@@ -352,6 +352,7 @@ fn spawn_command(
   #[cfg(unix)]
   cmd.process_group(0);
   cmd.current_dir(cwd);
+  cmd.envs(crate::config::run_env());
   for (k, v) in env {
     cmd.env(k, v);
   }

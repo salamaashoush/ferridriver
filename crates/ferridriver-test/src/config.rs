@@ -174,6 +174,22 @@ pub fn run_base_url() -> Option<String> {
     .filter(|v| !v.is_empty())
 }
 
+/// The variables the run hands to what it starts: the spec realms and the
+/// child processes they and the runner spawn.
+///
+/// Playwright's webServer plugin exports `PLAYWRIGHT_TEST_BASE_URL` into
+/// `process.env` (`plugins/webServerPlugin.ts`), so every worker and child
+/// inherits it. Here each consumer is handed the value explicitly instead,
+/// since writing the environment of a multi-threaded process is undefined
+/// behaviour.
+#[must_use]
+pub fn run_env() -> Vec<(String, String)> {
+  run_base_url()
+    .map(|url| ("FERRIDRIVER_BASE_URL".to_owned(), url))
+    .into_iter()
+    .collect()
+}
+
 /// Publish the run's `baseURL` to [`run_base_url`].
 ///
 /// A process-wide value rather than `std::env::set_var`: the run is

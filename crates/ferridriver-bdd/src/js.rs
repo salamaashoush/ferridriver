@@ -361,6 +361,7 @@ impl JsBddSession {
 
     let engine_config = ScriptEngineConfig {
       sidecars: BDD_SIDECARS.get().cloned().unwrap_or_default(),
+      env: ferridriver_test::config::run_env(),
       ..Default::default()
     };
     let session = Session::create(engine_config, &run_ctx)
@@ -982,6 +983,7 @@ pub async fn collect_step_registry(
   };
   let engine_config = ScriptEngineConfig {
     sidecars: BDD_SIDECARS.get().cloned().unwrap_or_default(),
+    env: ferridriver_test::config::run_env(),
     ..Default::default()
   };
   let session = Session::create(engine_config, &run_ctx)

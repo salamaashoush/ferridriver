@@ -114,6 +114,7 @@ pub async fn start(config: &DevServerConfig) -> ferridriver::error::Result<DevSe
     tokio::process::Command::new(&config.cmd)
       .args(&config.args)
       .current_dir(&config.cwd)
+      .envs(crate::config::run_env())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .spawn()

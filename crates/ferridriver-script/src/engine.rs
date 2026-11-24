@@ -99,6 +99,13 @@ pub struct ScriptEngineConfig {
   /// to tell a paused test's own calls from those of the client inspecting
   /// it -- pausing the inspector would leave nobody to resume.
   pub script_id: Option<String>,
+  /// Variables the host publishes to the session over the process
+  /// environment: into `process.env` where the realm's env grant covers
+  /// the name, to every sidecar, and to a command that declares the name.
+  /// A test run hands spec code its `baseURL` this way, because writing
+  /// the environment of a process whose threads read it is undefined
+  /// behaviour.
+  pub env: Vec<(String, String)>,
 }
 
 impl Default for ScriptEngineConfig {
@@ -119,6 +126,7 @@ impl Default for ScriptEngineConfig {
       artifacts_budget: None,
       test_debug: None,
       script_id: None,
+      env: Vec::new(),
     }
   }
 }
@@ -509,6 +517,36 @@ impl ferridriver_test::host::DeadlineControl for Deadline {
   }
 }
 
+/// Add the host's published variables to `process.env`, each only where
+/// the realm's env grant covers its name, as one from the process
+/// environment would be. The runtime builds `process.env` from the process
+/// environment alone and freezes it, so the object is rebuilt rather than
+/// written to.
+fn publish_process_env(ctx: &Ctx<'_>, caps: &ScriptCaps, published: &[(String, String)]) -> rquickjs::Result<()> {
+  let permissions = caps.realm_permissions();
+  let granted: Vec<&(String, String)> = published
+    .iter()
+    .filter(|(name, _)| permissions.check_env(name).is_ok())
+    .collect();
+  if granted.is_empty() {
+    return Ok(());
+  }
+  let process: rquickjs::Object<'_> = ctx.globals().get("process")?;
+  let inherited: rquickjs::Object<'_> = process.get("env")?;
+  let env = rquickjs::Object::new(ctx.clone())?;
+  for name in inherited.keys::<String>() {
+    let name = name?;
+    let value: rquickjs::Value<'_> = inherited.get(name.as_str())?;
+    env.set(name, value)?;
+  }
+  for (name, value) in granted {
+    env.set(name.as_str(), value.as_str())?;
+  }
+  let freeze: rquickjs::Function<'_> = ctx.globals().get::<_, rquickjs::Object<'_>>("Object")?.get("freeze")?;
+  freeze.call::<_, rquickjs::Value<'_>>((env.clone(),))?;
+  process.set("env", env)
+}
+
 /// Everything ferridriver installs once per realm, as the runtime's
 /// extension: userdata the bindings read, the class prototypes, the
 /// session-stable globals, the extension registry and every loaded
@@ -526,6 +564,7 @@ struct FerridriverExtension {
   script_id: Option<String>,
   fetch: Arc<crate::bindings::net_policy::SessionFetch>,
   env: Arc<crate::session_host::SessionScriptConfig>,
+  published_env: Vec<(String, String)>,
 }
 
 impl ferrijs::Extension for FerridriverExtension {
@@ -560,6 +599,7 @@ impl ferrijs::Extension for FerridriverExtension {
     let script_id = self.script_id.clone();
     let fetch = Arc::clone(&self.fetch);
     let env = Arc::clone(&self.env);
+    let published_env = self.published_env.clone();
     let browser_resources = Arc::clone(&self.resources.browsers);
     let procs = Arc::clone(&self.resources.procs);
     Box::pin(async move {
@@ -604,6 +644,7 @@ impl ferrijs::Extension for FerridriverExtension {
       // refresh in `execute`.
       crate::bindings::define_classes(&ctx)?;
       install_vars(&ctx, vars)?;
+      publish_process_env(&ctx, &caps, &published_env)?;
       crate::bindings::runtime::mirror_global(&ctx, "fs")?;
       crate::bindings::runtime::mirror_global(&ctx, "process")?;
       let _ = ctx.store_userdata(SessionProcsUd(Arc::clone(&procs)));
@@ -731,12 +772,21 @@ impl Session {
         caps: context.caps.clone(),
         session: context.session.clone(),
         extensions: context.extensions.clone(),
-        sidecars: config.sidecars.clone(),
+        sidecars: config
+          .sidecars
+          .iter()
+          .map(|spec| crate::sidecar::SidecarSpec {
+            env: config.env.iter().chain(&spec.env).cloned().collect(),
+            ..spec.clone()
+          })
+          .collect(),
         test_debug: config.test_debug.clone(),
         script_id: config.script_id.clone(),
         fetch: Arc::clone(&fetch),
         env,
+        published_env: config.env.clone(),
       };
+      resources.procs.publish_env(&config.env);
       let script_root = context.script_root.clone();
       let mut builder = Runtime::builder()
         .limits(config.limits())

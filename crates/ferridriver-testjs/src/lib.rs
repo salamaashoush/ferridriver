@@ -79,6 +79,7 @@ fn test_engine_config(
   ferridriver_script::ScriptEngineConfig {
     sidecars: TEST_SIDECARS.get().cloned().unwrap_or_default(),
     console_sink: console,
+    env: ferridriver_test::config::run_env(),
     ..Default::default()
   }
 }

@@ -40,13 +40,15 @@ const RING_CAP: usize = 64 * 1024;
 /// Max concurrently-running persistent processes per session.
 const MAX_PERSISTENT: usize = 16;
 
-fn configure(cmd: &mut Command, rc: &ResolvedCommand) {
+fn configure(cmd: &mut Command, rc: &ResolvedCommand, published: &[(String, String)]) {
   cmd.env_clear();
   if let Some(path) = std::env::var_os("PATH") {
     cmd.env("PATH", path);
   }
   for name in &rc.env {
-    if let Some(val) = std::env::var_os(name) {
+    if let Some((_, val)) = published.iter().find(|(published, _)| published == name) {
+      cmd.env(name, val);
+    } else if let Some(val) = std::env::var_os(name) {
       cmd.env(name, val);
     }
   }
@@ -62,7 +64,7 @@ fn configure(cmd: &mut Command, rc: &ResolvedCommand) {
   cmd.process_group(0);
 }
 
-fn build(rc: &ResolvedCommand) -> Command {
+fn build(rc: &ResolvedCommand, published: &[(String, String)]) -> Command {
   let mut cmd = match &rc.exec {
     ResolvedExec::Shell(line) => Command::from(ferridriver::backend::process::shell_command(line)),
     ResolvedExec::Argv(argv) => {
@@ -72,7 +74,7 @@ fn build(rc: &ResolvedCommand) -> Command {
       c
     },
   };
-  configure(&mut cmd, rc);
+  configure(&mut cmd, rc, published);
   cmd
 }
 
@@ -333,6 +335,7 @@ pub struct SessionProcs {
   inner: Mutex<FxHashMap<String, Proc>>,
   closing: std::sync::atomic::AtomicBool,
   jobs: Mutex<Vec<Job>>,
+  published: std::sync::RwLock<Arc<[(String, String)]>>,
 }
 
 impl Default for SessionProcs {
@@ -341,11 +344,26 @@ impl Default for SessionProcs {
       inner: Mutex::new(FxHashMap::default()),
       closing: std::sync::atomic::AtomicBool::new(false),
       jobs: Mutex::new(Vec::new()),
+      published: std::sync::RwLock::new(Arc::from([])),
     }
   }
 }
 
 impl SessionProcs {
+  /// Values the host publishes over the process environment
+  /// ([`crate::ScriptEngineConfig::env`]). A command still receives only
+  /// the names it declares; for those, a published value wins.
+  pub fn publish_env(&self, env: &[(String, String)]) {
+    *self
+      .published
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(env);
+  }
+
+  fn published_env(&self) -> Arc<[(String, String)]> {
+    Arc::clone(&self.published.read().unwrap_or_else(std::sync::PoisonError::into_inner))
+  }
+
   /// [`run_oneshot`], with the child tracked by this registry so closing
   /// the session reaps it.
   ///
@@ -375,13 +393,14 @@ impl SessionProcs {
     if rc.persistent {
       return Err("this command is declared `persistent`: use commands.start/status/stop, not run".into());
     }
+    let published = self.published_env();
     let (job, out, err, pid) = {
       let mut jobs = self.jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       if self.closing.load(std::sync::atomic::Ordering::Acquire) {
         return Err("session processes are closing".into());
       }
       jobs.retain(|job| job.exit.borrow().is_none());
-      let mut child = ferridriver::backend::process::spawn_exclusive(|| build(rc).spawn())
+      let mut child = ferridriver::backend::process::spawn_exclusive(|| build(rc, &published).spawn())
         .map_err(|e| format!("spawn command: {e}"))?;
       let pid = child.id();
       let out = child.stdout.take();
@@ -502,7 +521,7 @@ impl SessionProcs {
       ));
     }
 
-    let mut cmd = build(rc);
+    let mut cmd = build(rc, &self.published_env());
     if interactive {
       cmd.stdin(Stdio::piped());
     }
