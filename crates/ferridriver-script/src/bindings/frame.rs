@@ -44,6 +44,7 @@ impl FrameJs {
 #[rquickjs::methods]
 impl FrameJs {
   #[qjs(get)]
+  #[must_use]
   pub fn webmcp(&self) -> crate::bindings::web_mcp::WebMcpJs {
     crate::bindings::web_mcp::WebMcpJs::new(self.inner.webmcp())
   }
@@ -52,26 +53,37 @@ impl FrameJs {
 
   /// Frame name (from the `<iframe name=...>` attribute). Sync.
   #[qjs(rename = "name")]
+  #[must_use]
   pub fn name(&self) -> String {
     self.inner.name()
   }
 
   /// Frame URL. Sync.
   #[qjs(rename = "url")]
+  #[must_use]
   pub fn url(&self) -> String {
     self.inner.url()
   }
 
   /// True when this is the top-level page frame. Sync.
   #[qjs(rename = "isMainFrame")]
+  #[must_use]
   pub fn is_main_frame(&self) -> bool {
     self.inner.is_main_frame()
   }
 
   /// Parent frame (null for the main frame). Sync.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot create or restore the `Frame` object.
   #[qjs(rename = "parentFrame")]
   pub fn parent_frame<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, FrameJs>>> {
     let parent = self.inner.parent_frame();
@@ -83,8 +95,19 @@ impl FrameJs {
   }
 
   /// Child frames of this frame. Sync.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot create or restore a `Frame` object.
   #[qjs(rename = "childFrames")]
-  pub fn child_frames<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<Vec<rquickjs::Class<'js, FrameJs>>> {
+  pub fn child_frames<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'js>,
+  ) -> rquickjs::Result<Vec<rquickjs::Class<'js, FrameJs>>> {
     self
       .inner
       .child_frames()
@@ -95,6 +118,7 @@ impl FrameJs {
 
   /// Whether this frame has been detached from the page. Sync.
   #[qjs(rename = "isDetached")]
+  #[must_use]
   pub fn is_detached(&self) -> bool {
     self.inner.is_detached()
   }
@@ -102,6 +126,12 @@ impl FrameJs {
   // ── Evaluation (frame-scoped) ──────────────────────────────────────
 
   /// Playwright: `frame.evaluate(pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
+  /// when the page function throws or the page is gone.
   #[qjs(rename = "evaluate")]
   pub async fn evaluate<'js>(
     &self,
@@ -133,6 +163,12 @@ impl FrameJs {
   }
 
   /// Playwright: `frame.$eval(selector, pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function, and with the core error when no element matches or the page
+  /// function throws.
   #[qjs(rename = "$eval")]
   pub async fn eval_on_selector<'js>(
     &self,
@@ -157,6 +193,12 @@ impl FrameJs {
   }
 
   /// Playwright: `frame.$$eval(selector, pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function, and with the core error when the page function throws or the page
+  /// is gone.
   #[qjs(rename = "$$eval")]
   pub async fn eval_on_selector_all<'js>(
     &self,
@@ -181,6 +223,12 @@ impl FrameJs {
   }
 
   /// Playwright: `frame.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
+  /// when the page function throws or the page is gone.
   #[qjs(rename = "evaluateHandle")]
   pub async fn evaluate_handle<'js>(
     &self,
@@ -211,6 +259,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.title()`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading the title fails.
   #[qjs(rename = "title")]
   pub async fn title(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
     call_site
@@ -218,6 +272,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.content(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options.includeShadow` is not a boolean, and with the core
+  /// error under its Playwright name, such as `TargetClosedError`, when reading the document fails.
   #[qjs(rename = "content")]
   pub async fn content<'js>(
     &self,
@@ -237,6 +297,11 @@ impl FrameJs {
 
   /// Playwright: `frame.goto(url, options?: { referer?, timeout?,
   /// waitUntil? }): Promise<Response | null>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the navigation fails.
   #[qjs(rename = "goto")]
   pub async fn goto<'js>(
     &self,
@@ -249,13 +314,20 @@ impl FrameJs {
       .scope(async move {
         let opts = crate::bindings::page::parse_goto_options(&ctx, options)?;
         let response = self.inner.goto(&url).maybe_options(opts).await.into_js_with(&ctx)?;
-        Ok(response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.page_arc().clone())))
+        Ok(response.map(|r| {
+          crate::bindings::network::ResponseJs::new_with_page(r, std::sync::Arc::clone(self.inner.page_arc()))
+        }))
       })
       .await
       .map(crate::bindings::convert::Null)
   }
 
   /// Playwright: `frame.setContent(html, options?: { timeout?, waitUntil? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when setting the content fails.
   #[qjs(rename = "setContent")]
   pub async fn set_content<'js>(
     &self,
@@ -280,6 +352,12 @@ impl FrameJs {
 
   /// Playwright: `frame.addScriptTag(options?: { content?, path?, type?,
   /// url? }): Promise<ElementHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a `PermissionDeniedError` when the
+  /// realm may not read `options.path`, and with the core error under its Playwright name, such as
+  /// `TimeoutError`, when adding the tag fails.
   #[qjs(rename = "addScriptTag")]
   pub async fn add_script_tag<'js>(
     &self,
@@ -307,6 +385,12 @@ impl FrameJs {
 
   /// Playwright: `frame.addStyleTag(options?: { content?, path?, url? }):
   /// Promise<ElementHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a `PermissionDeniedError` when the
+  /// realm may not read `options.path`, and with the core error under its Playwright name, such as
+  /// `TimeoutError`, when adding the tag fails.
   #[qjs(rename = "addStyleTag")]
   pub async fn add_style_tag<'js>(
     &self,
@@ -334,6 +418,11 @@ impl FrameJs {
 
   /// Playwright: `frame.$(selector, options?: { strict?: boolean }):
   /// Promise<ElementHandle | null>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TargetClosedError`, when the query fails.
   #[qjs(rename = "$")]
   pub async fn dollar<'js>(
     &self,
@@ -353,6 +442,11 @@ impl FrameJs {
   }
 
   /// Playwright: `frame.$$(selector): Promise<ElementHandle[]>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// query fails.
   #[qjs(rename = "$$")]
   pub async fn dollar_dollar(
     &self,
@@ -374,6 +468,11 @@ impl FrameJs {
   }
 
   /// Playwright: `frame.frameElement(): Promise<ElementHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// resolving the element fails.
   #[qjs(rename = "frameElement")]
   pub async fn frame_element(
     &self,
@@ -389,6 +488,11 @@ impl FrameJs {
   }
 
   /// Playwright: `frame.waitForLoadState(state?, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the wait fails.
   #[qjs(rename = "waitForLoadState")]
   pub async fn wait_for_load_state<'js>(
     &self,
@@ -413,6 +517,12 @@ impl FrameJs {
 
   /// Playwright: `frame.waitForURL(url: string | RegExp | ((url: URL) =>
   /// boolean), options?: { timeout?, waitUntil? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a `TypeError` when `url` is not a
+  /// string, `RegExp` or function, what the predicate throws, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the wait fails.
   #[qjs(rename = "waitForURL")]
   pub async fn wait_for_url<'js>(
     &self,
@@ -436,10 +546,15 @@ impl FrameJs {
   /// Playwright: `frame.waitForNavigation(options?: { timeout?, url?,
   /// waitUntil? }): Promise<Response | null>`.
   #[qjs(rename = "waitForNavigation")]
+  #[must_use]
   pub fn wait_for_navigation<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
     impl std::future::Future<
@@ -452,7 +567,7 @@ impl FrameJs {
     let opts = crate::bindings::convert::arm_now(&ctx, || {
       crate::bindings::page::parse_wait_for_navigation_options(&ctx, &options)
     });
-    let page = self.inner.page_arc().clone();
+    let page = std::sync::Arc::clone(self.inner.page_arc());
     rquickjs::promise::Promised::from(call_site.scope(async move {
       let opts = opts.map_err(|deferred| deferred.raise(&ctx))?;
       let response = navigation.options(opts).await.into_js_with(&ctx)?;
@@ -464,6 +579,12 @@ impl FrameJs {
 
   /// Playwright: `frame.waitForFunction(pageFunction, arg?, options?: {
   /// polling?, timeout? }): Promise<JSHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function, a `TypeError` for a malformed `options` bag, and with the core
+  /// error when the page function throws or the wait times out.
   #[qjs(rename = "waitForFunction")]
   pub async fn wait_for_function<'js>(
     &self,
@@ -507,6 +628,11 @@ impl FrameJs {
   /// Options: `{ state?: 'visible'|'hidden'|'attached'|'detached', timeout?: ms }`.
   /// Resolves to the matched element handle for `state: 'attached'` /
   /// `'visible'` (default), or `null` for `state: 'hidden'` / `'detached'`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the wait fails.
   #[qjs(rename = "waitForSelector")]
   pub async fn wait_for_selector<'js>(
     &self,
@@ -534,13 +660,31 @@ impl FrameJs {
 
   /// Create a locator scoped to this frame.
   #[qjs(rename = "locator")]
-  pub fn locator(&self, selector: String) -> LocatorJs {
+  #[must_use]
+  pub fn locator(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    selector: String,
+  ) -> LocatorJs {
     LocatorJs::new(self.inner.locator(&selector))
   }
 
+  /// Playwright's `frame.getByRole(role, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `options.name` or `options.description` is neither a string nor a
+  /// `RegExp`.
   #[qjs(rename = "getByRole")]
   pub fn get_by_role(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     role: String,
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<LocatorJs> {
@@ -550,6 +694,11 @@ impl FrameJs {
     ))
   }
 
+  /// Playwright's `frame.getByText(text, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByText")]
   pub fn get_by_text(
     &self,
@@ -561,6 +710,11 @@ impl FrameJs {
     Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
   }
 
+  /// Playwright's `frame.getByLabel(text, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByLabel")]
   pub fn get_by_label(
     &self,
@@ -572,6 +726,11 @@ impl FrameJs {
     Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
   }
 
+  /// Playwright's `frame.getByPlaceholder(text, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByPlaceholder")]
   pub fn get_by_placeholder(
     &self,
@@ -585,6 +744,11 @@ impl FrameJs {
     ))
   }
 
+  /// Playwright's `frame.getByAltText(text, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByAltText")]
   pub fn get_by_alt_text(
     &self,
@@ -598,6 +762,11 @@ impl FrameJs {
     ))
   }
 
+  /// Playwright's `frame.getByTitle(text, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByTitle")]
   pub fn get_by_title(
     &self,
@@ -609,6 +778,11 @@ impl FrameJs {
     Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
   }
 
+  /// Playwright's `frame.getByTestId(testId)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` when `testId` is neither a string nor a `RegExp`.
   #[qjs(rename = "getByTestId")]
   pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
     let t = crate::bindings::page::string_or_regex_from_js(test_id)?;
@@ -617,8 +791,13 @@ impl FrameJs {
 
   /// Playwright: `frame.frameLocator(selector?: string): FrameLocator`.
   #[qjs(rename = "frameLocator")]
+  #[must_use]
   pub fn frame_locator(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     selector: rquickjs::function::Opt<String>,
   ) -> crate::bindings::frame_locator::FrameLocatorJs {
     crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(selector.0.as_deref()))
@@ -627,12 +806,20 @@ impl FrameJs {
   /// Playwright: `frame.page(): Page`. Returns the owning page; it
   /// carries the session's `AsyncContext` (via userdata) so
   /// `page.route` / `page.exposeFunction` work on the returned handle.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot create or restore the `Page` object.
   #[qjs(rename = "page")]
   pub fn page<'js>(
     &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::page::PageJs>> {
-    crate::bindings::identity::page_object(&ctx, self.inner.page_arc().clone())
+    crate::bindings::identity::page_object(&ctx, std::sync::Arc::clone(self.inner.page_arc()))
   }
 
   // ── Action methods (Playwright parity — task 3.9) ──────────────────
@@ -642,6 +829,12 @@ impl FrameJs {
   // Each delegates to the Rust core's `Frame::<action>`, which scopes
   // to this frame's execution context via `Frame::locator`.
 
+  /// Playwright's `frame.click`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the click fails.
   #[qjs(rename = "click")]
   pub async fn click<'js>(
     &self,
@@ -658,6 +851,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.dblclick`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the double click fails.
   #[qjs(rename = "dblclick")]
   pub async fn dblclick<'js>(
     &self,
@@ -679,6 +878,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.hover`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the hover fails.
   #[qjs(rename = "hover")]
   pub async fn hover<'js>(
     &self,
@@ -695,6 +900,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.tap`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the tap fails.
   #[qjs(rename = "tap")]
   pub async fn tap<'js>(
     &self,
@@ -711,6 +922,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.focus`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when focusing
+  /// fails.
   #[qjs(rename = "focus")]
   pub async fn focus(
     &self,
@@ -723,6 +940,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.fill`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the fill fails.
   #[qjs(rename = "fill")]
   pub async fn fill<'js>(
     &self,
@@ -745,6 +968,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.type`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when typing fails.
   #[qjs(rename = "type")]
   pub async fn type_text<'js>(
     &self,
@@ -767,6 +996,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.press`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the key press fails.
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
@@ -789,6 +1024,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.check`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when checking fails.
   #[qjs(rename = "check")]
   pub async fn check<'js>(
     &self,
@@ -805,6 +1046,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.uncheck`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when unchecking fails.
   #[qjs(rename = "uncheck")]
   pub async fn uncheck<'js>(
     &self,
@@ -826,6 +1073,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.setChecked`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the update fails.
   #[qjs(rename = "setChecked")]
   pub async fn set_checked<'js>(
     &self,
@@ -848,6 +1101,13 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.selectOption`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for malformed `values`, a `TypeError` for a malformed `options`
+  /// bag, and with the core error under its Playwright name, such as `TimeoutError`, when the
+  /// selection fails.
   #[qjs(rename = "selectOption")]
   pub async fn select_option<'js>(
     &self,
@@ -871,6 +1131,13 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.setInputFiles`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for malformed `files`, a `PermissionDeniedError` when the realm may
+  /// not read a named file, a `TypeError` for a malformed `options` bag, and with the core error
+  /// under its Playwright name, such as `TimeoutError`, when setting the files fails.
   #[qjs(rename = "setInputFiles")]
   pub async fn set_input_files<'js>(
     &self,
@@ -896,6 +1163,11 @@ impl FrameJs {
 
   /// Drag from `source` to `target` selectors within this frame.
   /// Options ride on Locator's drag option bag.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when the drag
+  /// fails.
   #[qjs(rename = "dragAndDrop")]
   pub async fn drag_and_drop(
     &self,
@@ -909,6 +1181,13 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.dispatchEvent`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `eventInit` cannot be serialized, a `TypeError` for a
+  /// malformed `options` bag, and with the core error under its Playwright name, such as
+  /// `TimeoutError`, when dispatching the event fails.
   #[qjs(rename = "dispatchEvent")]
   pub async fn dispatch_event<'js>(
     &self,
@@ -933,6 +1212,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.textContent`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when reading `textContent` fails.
   #[qjs(rename = "textContent")]
   pub async fn text_content<'js>(
     &self,
@@ -955,6 +1240,12 @@ impl FrameJs {
       .map(crate::bindings::convert::Null)
   }
 
+  /// Playwright's `frame.innerText`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when reading `innerText` fails.
   #[qjs(rename = "innerText")]
   pub async fn inner_text<'js>(
     &self,
@@ -976,6 +1267,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.innerHTML`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when reading `innerHTML` fails.
   #[qjs(rename = "innerHTML")]
   pub async fn inner_html<'js>(
     &self,
@@ -997,6 +1294,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.getAttribute`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when reading the attribute fails.
   #[qjs(rename = "getAttribute")]
   pub async fn get_attribute<'js>(
     &self,
@@ -1020,6 +1323,12 @@ impl FrameJs {
       .map(crate::bindings::convert::Null)
   }
 
+  /// Playwright's `frame.inputValue`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when reading the value fails.
   #[qjs(rename = "inputValue")]
   pub async fn input_value<'js>(
     &self,
@@ -1041,6 +1350,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.isVisible`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the check fails.
   #[qjs(rename = "isVisible")]
   pub async fn is_visible<'js>(
     &self,
@@ -1062,6 +1377,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.isHidden`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the check fails.
   #[qjs(rename = "isHidden")]
   pub async fn is_hidden<'js>(
     &self,
@@ -1083,6 +1404,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.isEnabled`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the check fails.
   #[qjs(rename = "isEnabled")]
   pub async fn is_enabled<'js>(
     &self,
@@ -1104,6 +1431,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.isDisabled`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the check fails.
   #[qjs(rename = "isDisabled")]
   pub async fn is_disabled<'js>(
     &self,
@@ -1125,6 +1458,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.isEditable`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the check fails.
   #[qjs(rename = "isEditable")]
   pub async fn is_editable<'js>(
     &self,
@@ -1146,6 +1485,12 @@ impl FrameJs {
       .await
   }
 
+  /// Playwright's `frame.isChecked`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the check fails.
   #[qjs(rename = "isChecked")]
   pub async fn is_checked<'js>(
     &self,

@@ -1,4 +1,4 @@
-//! `ElementHandleJs`: QuickJS wrapper around `ferridriver::ElementHandle`.
+//! `ElementHandleJs`: `QuickJS` wrapper around `ferridriver::ElementHandle`.
 //!
 //! Phase-C surface covers lifecycle — `dispose`, `isDisposed`, `asJSHandle`
 //! — enough to exercise the per-backend release paths from `run_script`.
@@ -54,11 +54,17 @@ impl ElementHandleJs {
   /// Playwright `elementHandle.isDisposed(): boolean` — METHOD (not a
   /// property). LLM-generated code calls `eh.isDisposed()` with parens.
   #[qjs(rename = "isDisposed")]
+  #[must_use]
   pub fn is_disposed(&self) -> bool {
     self.inner.is_disposed()
   }
 
   /// Release the underlying remote element. Idempotent.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// releasing the remote element fails.
   #[qjs(rename = "dispose")]
   pub async fn dispose(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     call_site
@@ -70,11 +76,18 @@ impl ElementHandleJs {
   /// same remote reference. Disposing either releases the remote and
   /// latches both into the disposed state.
   #[qjs(rename = "asJSHandle")]
+  #[must_use]
   pub fn as_js_handle(&self) -> crate::bindings::js_handle::JSHandleJs {
     crate::bindings::js_handle::JSHandleJs::new(self.inner.as_js_handle().clone())
   }
 
   /// Playwright: `elementHandle.evaluate(pageFunction, arg?): Promise<R>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
+  /// when the page function throws or the page is gone.
   #[qjs(rename = "evaluate")]
   pub async fn evaluate<'js>(
     &self,
@@ -107,6 +120,12 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
+  /// when the page function throws or the page is gone.
   #[qjs(rename = "evaluateHandle")]
   pub async fn evaluate_handle<'js>(
     &self,
@@ -140,6 +159,12 @@ impl ElementHandleJs {
 
   // ── Content reads (Phase E) ──────────────────────────────────────────
 
+  /// Playwright's `elementHandle.innerHTML`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading `innerHTML` fails.
   #[qjs(rename = "innerHTML")]
   pub async fn inner_html(
     &self,
@@ -151,6 +176,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.innerText`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading `innerText` fails.
   #[qjs(rename = "innerText")]
   pub async fn inner_text(
     &self,
@@ -162,6 +193,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.textContent`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading `textContent` fails.
   #[qjs(rename = "textContent")]
   pub async fn text_content(
     &self,
@@ -174,6 +211,12 @@ impl ElementHandleJs {
       .map(crate::bindings::convert::Null)
   }
 
+  /// Playwright's `elementHandle.getAttribute`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading the attribute fails.
   #[qjs(rename = "getAttribute")]
   pub async fn get_attribute(
     &self,
@@ -187,6 +230,12 @@ impl ElementHandleJs {
       .map(crate::bindings::convert::Null)
   }
 
+  /// Playwright's `elementHandle.inputValue`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// reading the value fails.
   #[qjs(rename = "inputValue")]
   pub async fn input_value(
     &self,
@@ -200,6 +249,12 @@ impl ElementHandleJs {
 
   // ── State predicates (Phase E) ───────────────────────────────────────
 
+  /// Playwright's `elementHandle.isVisible`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// check fails.
   #[qjs(rename = "isVisible")]
   pub async fn is_visible(
     &self,
@@ -211,6 +266,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.isHidden`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// check fails.
   #[qjs(rename = "isHidden")]
   pub async fn is_hidden(
     &self,
@@ -222,6 +283,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.isDisabled`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// check fails.
   #[qjs(rename = "isDisabled")]
   pub async fn is_disabled(
     &self,
@@ -233,6 +300,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.isEnabled`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// check fails.
   #[qjs(rename = "isEnabled")]
   pub async fn is_enabled(
     &self,
@@ -244,6 +317,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.isChecked`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// check fails.
   #[qjs(rename = "isChecked")]
   pub async fn is_checked(
     &self,
@@ -255,6 +334,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.isEditable`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// check fails.
   #[qjs(rename = "isEditable")]
   pub async fn is_editable(
     &self,
@@ -270,6 +355,11 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.boundingBox()`. Returns a plain object
   /// `{x, y, width, height}` or `null`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// measuring the element fails.
   #[qjs(rename = "boundingBox")]
   pub async fn bounding_box<'js>(
     &self,
@@ -296,6 +386,12 @@ impl ElementHandleJs {
 
   // ── Actions (Phase E) ────────────────────────────────────────────────
 
+  /// Playwright's `elementHandle.click`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the click fails.
   #[qjs(rename = "click")]
   pub async fn click<'js>(
     &self,
@@ -311,6 +407,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.dblclick`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the double click fails.
   #[qjs(rename = "dblclick")]
   pub async fn dblclick<'js>(
     &self,
@@ -326,6 +428,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.hover`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the hover fails.
   #[qjs(rename = "hover")]
   pub async fn hover<'js>(
     &self,
@@ -341,6 +449,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.type`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when typing fails.
   #[qjs(rename = "type")]
   pub async fn type_str<'js>(
     &self,
@@ -357,6 +471,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.focus`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// focusing fails.
   #[qjs(rename = "focus")]
   pub async fn focus(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     call_site
@@ -364,6 +484,12 @@ impl ElementHandleJs {
       .await
   }
 
+  /// Playwright's `elementHandle.scrollIntoViewIfNeeded`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// scrolling fails.
   #[qjs(rename = "scrollIntoViewIfNeeded")]
   pub async fn scroll_into_view_if_needed(
     &self,
@@ -376,6 +502,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.screenshot(options?: ElementHandleScreenshotOptions): Promise<Buffer>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the screenshot fails.
   #[qjs(rename = "screenshot")]
   pub async fn screenshot<'js>(
     &self,
@@ -395,6 +526,12 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?)`
   /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:215`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function, and with the core error when no element matches or the page
+  /// function throws.
   #[qjs(rename = "$eval")]
   pub async fn dollar_eval<'js>(
     &self,
@@ -420,6 +557,12 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?)`
   /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:220`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
+  /// when `arg` holds a function, and with the core error when the page function throws or the page
+  /// is gone.
   #[qjs(rename = "$$eval")]
   pub async fn dollar_dollar_eval<'js>(
     &self,
@@ -447,6 +590,11 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:206`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// query fails.
   #[qjs(rename = "$")]
   pub async fn query_selector(
     &self,
@@ -465,6 +613,11 @@ impl ElementHandleJs {
 
   /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:210`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
+  /// query fails.
   #[qjs(rename = "$$")]
   pub async fn query_selector_all(
     &self,
@@ -483,6 +636,11 @@ impl ElementHandleJs {
   // ── Frame accessors ──────────────────────────────────────────────────
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// resolving the frame fails.
   #[qjs(rename = "ownerFrame")]
   pub async fn owner_frame<'js>(
     &self,
@@ -501,6 +659,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// resolving the frame fails.
   #[qjs(rename = "contentFrame")]
   pub async fn content_frame<'js>(
     &self,
@@ -521,6 +684,12 @@ impl ElementHandleJs {
   // ── Wait helpers ─────────────────────────────────────────────────────
 
   /// Playwright: `elementHandle.waitForElementState(state, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `FerriError` for an unknown `state`, a `TypeError` for a malformed `options`
+  /// bag, and with the core error under its Playwright name, such as `TimeoutError`, when the wait
+  /// fails.
   #[qjs(rename = "waitForElementState")]
   pub async fn wait_for_element_state<'js>(
     &self,
@@ -543,6 +712,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.waitForSelector(selector, options?: { timeout? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the wait fails.
   #[qjs(rename = "waitForSelector")]
   pub async fn wait_for_selector<'js>(
     &self,
@@ -568,6 +742,11 @@ impl ElementHandleJs {
   // ── Action methods (temp-tag bridge) ─────────────────────────────────
 
   /// Playwright: `elementHandle.fill(value, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the fill fails.
   #[qjs(rename = "fill")]
   pub async fn fill<'js>(
     &self,
@@ -585,6 +764,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.check(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when checking fails.
   #[qjs(rename = "check")]
   pub async fn check<'js>(
     &self,
@@ -601,6 +785,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.uncheck(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when unchecking fails.
   #[qjs(rename = "uncheck")]
   pub async fn uncheck<'js>(
     &self,
@@ -617,6 +806,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.setChecked(checked, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the update fails.
   #[qjs(rename = "setChecked")]
   pub async fn set_checked<'js>(
     &self,
@@ -639,6 +833,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.tap(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the tap fails.
   #[qjs(rename = "tap")]
   pub async fn tap<'js>(
     &self,
@@ -655,6 +854,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.press(key, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
+  /// Playwright name, such as `TimeoutError`, when the key press fails.
   #[qjs(rename = "press")]
   pub async fn press<'js>(
     &self,
@@ -672,6 +876,12 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `eventInit` cannot be serialized, a `TypeError` for a
+  /// malformed `options` bag, and with the core error under its Playwright name, such as
+  /// `TimeoutError`, when dispatching the event fails.
   #[qjs(rename = "dispatchEvent")]
   pub async fn dispatch_event<'js>(
     &self,
@@ -696,6 +906,12 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.selectOption(values, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for malformed `values`, a `TypeError` for a malformed `options`
+  /// bag, and with the core error under its Playwright name, such as `TimeoutError`, when the
+  /// selection fails.
   #[qjs(rename = "selectOption")]
   pub async fn select_option<'js>(
     &self,
@@ -719,6 +935,11 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.selectText(options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
+  /// selecting the text fails.
   #[qjs(rename = "selectText")]
   pub async fn select_text(
     &self,
@@ -731,6 +952,12 @@ impl ElementHandleJs {
   }
 
   /// Playwright: `elementHandle.setInputFiles(files, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for malformed `files`, a `PermissionDeniedError` when the realm may
+  /// not read a named file, a `TypeError` for a malformed `options` bag, and with the core error
+  /// under its Playwright name, such as `TimeoutError`, when setting the files fails.
   #[qjs(rename = "setInputFiles")]
   pub async fn set_input_files<'js>(
     &self,
