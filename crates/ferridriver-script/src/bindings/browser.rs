@@ -42,6 +42,12 @@ impl BrowserJs {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:9851`.
   /// Accepts the full `BrowserContextOptions` bag via the
   /// isomorphic serde lowering.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a
+  /// `PermissionDeniedError` when a path it names is outside the realm's grants, or
+  /// the core error when the browser cannot create the context.
   #[qjs(rename = "newContext")]
   pub async fn new_context<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let core_opts = context_options(&ctx, options)?;
@@ -62,18 +68,21 @@ impl BrowserJs {
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts` on
   /// `Browser`. Returns the product version string captured at launch.
   #[qjs(rename = "version")]
+  #[must_use]
   pub fn version(&self) -> String {
     self.inner.version().to_string()
   }
 
   /// Playwright: `browser.browserType(): BrowserType`.
   #[qjs(rename = "browserType")]
+  #[must_use]
   pub fn browser_type(&self) -> crate::bindings::browser_type::BrowserTypeJs {
     crate::bindings::browser_type::BrowserTypeJs::new(self.inner.browser_type())
   }
 
   /// Playwright: `browser.isConnected(): boolean` (sync).
   #[qjs(rename = "isConnected")]
+  #[must_use]
   pub fn is_connected(&self) -> bool {
     self.inner.is_connected()
   }
@@ -81,6 +90,10 @@ impl BrowserJs {
   /// Playwright: `browser.close()`. Accepts no options here — the
   /// `BrowserCloseOptions { reason }` form can be added once a script
   /// case demands it.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser does not close cleanly.
   #[qjs(rename = "close")]
   pub async fn close(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self
@@ -96,10 +109,22 @@ impl BrowserJs {
   /// `browser.on('context', listener)` / `browser.on('disconnected',
   /// listener)`. Returns the browser so registrations chain, as
   /// Playwright's do.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "on")]
   pub fn on<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -111,6 +136,10 @@ impl BrowserJs {
   }
 
   /// Node's `addListener`, an alias of [`Self::on`].
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "addListener")]
   pub fn add_listener<'js>(
     this: This<Class<'js, Self>>,
@@ -122,10 +151,22 @@ impl BrowserJs {
   }
 
   /// `browser.once(event, listener)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "once")]
   pub fn once<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -134,10 +175,22 @@ impl BrowserJs {
   }
 
   /// Node's `prependListener`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "prependListener")]
   pub fn prepend_listener<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -146,10 +199,22 @@ impl BrowserJs {
   }
 
   /// Node's `prependOnceListener`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "prependOnceListener")]
   pub fn prepend_once_listener<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     listener: rquickjs::Function<'js>,
   ) -> rquickjs::Result<Class<'js, Self>> {
@@ -159,18 +224,38 @@ impl BrowserJs {
 
   /// `browser.off(event, listener)` — removal by function identity;
   /// `off(event)` alone drops every listener for that event.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "off")]
   pub fn off<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     listener: Opt<Value<'js>>,
   ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().off_impl(&ctx, &event, listener)?;
+    this.0.borrow().off_impl(&ctx, &event, listener.0.as_ref())?;
     Ok(this.0)
   }
 
   /// Node's `removeListener`, an alias of [`Self::off`].
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "removeListener")]
   pub fn remove_listener<'js>(
     this: This<Class<'js, Self>>,
@@ -182,10 +267,22 @@ impl BrowserJs {
   }
 
   /// `browser.removeAllListeners(type?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "removeAllListeners")]
   pub fn remove_all_listeners<'js>(
     this: This<Class<'js, Self>>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: Opt<String>,
   ) -> rquickjs::Result<Class<'js, Self>> {
     {
@@ -210,8 +307,24 @@ impl BrowserJs {
   }
 
   /// Node's `listeners(type)`, in the order they will fire.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "listeners")]
-  pub fn listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
+  pub fn listeners<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+  ) -> rquickjs::Result<Vec<Value<'js>>> {
     let saved = with_browser_callbacks(&ctx, |r| {
       r.listeners
         .iter()
@@ -229,6 +342,10 @@ impl BrowserJs {
   }
 
   /// Node's `rawListeners(type)`; see the page form.
+  ///
+  /// # Errors
+  ///
+  /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "rawListeners")]
   pub fn raw_listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
     self.listeners(ctx, event)
@@ -236,18 +353,28 @@ impl BrowserJs {
 
   /// Node's `listenerCount(type)`.
   #[qjs(rename = "listenerCount")]
-  pub fn listener_count(&self, event: String) -> f64 {
+  #[must_use]
+  pub fn listener_count(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    event: String,
+  ) -> f64 {
     crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
   }
 
   /// Node's `eventNames()`.
   #[qjs(rename = "eventNames")]
+  #[must_use]
   pub fn event_names(&self) -> Vec<String> {
     self.inner.event_names()
   }
 
   /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
   #[qjs(rename = "setMaxListeners")]
+  #[must_use]
   pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
     this
       .0
@@ -259,6 +386,7 @@ impl BrowserJs {
 
   /// Node's `getMaxListeners()`.
   #[qjs(rename = "getMaxListeners")]
+  #[must_use]
   pub fn get_max_listeners(&self) -> f64 {
     crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
@@ -267,9 +395,14 @@ impl BrowserJs {
   /// `'context'` — resolves with the live `BrowserContext` created by
   /// the next `browser.newContext(...)`.
   #[qjs(rename = "waitForEvent")]
+  #[must_use]
   pub fn wait_for_event<'js>(
     &self,
     ctx: Ctx<'js>,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
     event: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
@@ -287,8 +420,20 @@ impl BrowserJs {
 
   /// Playwright: `browser.contexts()`. Returns the list of contexts as
   /// JS handles.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the array or a `BrowserContext`
+  /// object.
   #[qjs(rename = "contexts")]
-  pub fn contexts<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn contexts<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let contexts = self.inner.contexts();
     let arr = rquickjs::Array::new(ctx.clone())?;
     for (i, c) in contexts.into_iter().enumerate() {
@@ -302,6 +447,12 @@ impl BrowserJs {
   /// Playwright: `browser.newPage(options?)`. A page in a context of its
   /// own, made from `options` as `newContext` makes one and closed with
   /// the page, so two such pages share no cookies or storage.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, a
+  /// `PermissionDeniedError` when a path it names is outside the realm's grants, or
+  /// the core error when the browser cannot open the page.
   #[qjs(rename = "newPage")]
   pub async fn new_page<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let options = context_options(&ctx, options)?.unwrap_or_default();
@@ -312,6 +463,11 @@ impl BrowserJs {
 
   /// Playwright: `browser.newBrowserCDPSession()`. Attaches a raw CDP
   /// session to the browser target. Chromium-only.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the browser target cannot be attached,
+  /// including off Chromium.
   #[qjs(rename = "newBrowserCDPSession")]
   pub async fn new_browser_cdp_session<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let session = self.inner.new_browser_cdp_session().await.into_js_with(&ctx)?;
@@ -320,6 +476,10 @@ impl BrowserJs {
   }
 
   /// The active page of the default context (mirrors NAPI `browser.page()`).
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the default context has no page to give.
   #[qjs(rename = "page")]
   pub async fn page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let page = self.inner.page().await.into_js_with(&ctx)?;
@@ -332,6 +492,11 @@ impl BrowserJs {
   /// Publishes this browser under session `title` and returns the endpoint
   /// clients connect to. `host`/`port` bind over TCP; otherwise a Unix socket.
   /// `token` is a ferridriver extension: what TCP clients must present.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` for a malformed `options` bag, or an `Error` when
+  /// the session server cannot be started or registered.
   #[qjs(rename = "bind")]
   pub async fn bind<'js>(
     &self,
@@ -367,6 +532,10 @@ impl BrowserJs {
   /// Playwright: `browser.unbind(): Promise<void>`. Stops the session server
   /// and removes the registry entry for whatever this browser is bound under.
   /// A no-op if never bound.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with an `Error` when the session server cannot be stopped.
   #[qjs(rename = "unbind")]
   #[expect(
     clippy::unused_async,
@@ -770,7 +939,7 @@ impl BrowserJs {
     let saved = crate::bindings::page::SavedCallback::save(ctx, listener);
     let tx = ensure_browser_event_pump(ctx);
     let id_slot = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let id_slot_cb = id_slot.clone();
+    let id_slot_cb = Arc::clone(&id_slot);
     let callback: ferridriver::events::BrowserEventCallback = Arc::new(move |ev: ferridriver::events::BrowserEvent| {
       let id = id_slot_cb.load(std::sync::atomic::Ordering::Relaxed);
       let msg = BrowserEventMsg::Event {
@@ -805,8 +974,8 @@ impl BrowserJs {
     Ok(())
   }
 
-  fn off_impl<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: Opt<Value<'js>>) -> rquickjs::Result<()> {
-    let Some(listener_fn) = listener.0.as_ref().and_then(|v| v.as_function().cloned()) else {
+  fn off_impl<'js>(&self, ctx: &Ctx<'js>, event: &str, listener: Option<&Value<'js>>) -> rquickjs::Result<()> {
+    let Some(listener_fn) = listener.and_then(|v| v.as_function().cloned()) else {
       let ids = with_browser_callbacks(ctx, |r| {
         let ids: Vec<u64> = r
           .listeners

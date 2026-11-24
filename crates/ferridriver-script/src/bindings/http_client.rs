@@ -169,7 +169,7 @@ impl HttpClientJs {
   /// session's `request` with a net allow-list without re-creating it.
   #[must_use]
   pub fn inner_arc(&self) -> Arc<HttpClient> {
-    self.inner.clone()
+    Arc::clone(&self.inner)
   }
 
   /// The policy this binding's requests answer to: the realm's, then the
@@ -209,7 +209,7 @@ impl HttpClientJs {
   ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
     let guard = crate::bindings::net_policy::guard(self.policy(&ctx));
     let opts = merge_over(base, parse_options(&ctx, options)?);
-    let inner = self.inner.clone();
+    let inner = Arc::clone(&self.inner);
     Ok(Promised::from(async move {
       let opts = Some(with_guard(opts, guard));
       let resp = match verb {
@@ -348,6 +348,7 @@ impl HttpClientJs {
   /// Playwright: `request.newContext(options?): Promise<APIRequestContext>`.
   /// A context made here answers to the same network policy as this one.
   #[qjs(rename = "newContext")]
+  #[must_use]
   pub fn new_context<'js>(
     &self,
     ctx: Ctx<'js>,
@@ -358,12 +359,23 @@ impl HttpClientJs {
   }
 
   /// Playwright: `apiRequestContext.storageState()`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with the core error when the client cannot read its cookie jar.
   #[qjs(rename = "storageState")]
   pub async fn storage_state<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let state = self.inner.storage_state().await.into_js_with(&ctx)?;
     crate::bindings::convert::serde_to_js(&ctx, &state)
   }
 
+  /// Playwright: `apiRequestContext.get(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "get")]
   pub fn get<'js>(
     &self,
@@ -374,6 +386,13 @@ impl HttpClientJs {
     self.dispatch(ctx, Verb::Get, url, options)
   }
 
+  /// Playwright: `apiRequestContext.post(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "post")]
   pub fn post<'js>(
     &self,
@@ -384,6 +403,13 @@ impl HttpClientJs {
     self.dispatch(ctx, Verb::Post, url, options)
   }
 
+  /// Playwright: `apiRequestContext.put(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "put")]
   pub fn put<'js>(
     &self,
@@ -394,6 +420,13 @@ impl HttpClientJs {
     self.dispatch(ctx, Verb::Put, url, options)
   }
 
+  /// Playwright: `apiRequestContext.delete(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "delete")]
   pub fn delete<'js>(
     &self,
@@ -404,6 +437,13 @@ impl HttpClientJs {
     self.dispatch(ctx, Verb::Delete, url, options)
   }
 
+  /// Playwright: `apiRequestContext.patch(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "patch")]
   pub fn patch<'js>(
     &self,
@@ -414,6 +454,13 @@ impl HttpClientJs {
     self.dispatch(ctx, Verb::Patch, url, options)
   }
 
+  /// Playwright: `apiRequestContext.head(url, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "head")]
   pub fn head<'js>(
     &self,
@@ -433,6 +480,12 @@ impl HttpClientJs {
   /// `Request` first and falling back to a string — so an argument that
   /// is neither is rejected by the conversion with rquickjs's own type
   /// error, instead of by a hand-written downcast chain.
+  ///
+  /// # Errors
+  ///
+  /// Throws a `TypeError` for a malformed `options` bag. The returned promise
+  /// rejects with the core error when the request fails or the network policy
+  /// refuses a hop.
   #[qjs(rename = "fetch")]
   pub fn fetch<'js>(
     &self,
@@ -455,10 +508,19 @@ impl HttpClientJs {
   /// context that vended it, so this drops this binding's handle rather
   /// than tearing the shared pool down under other holders.
   #[qjs(rename = "dispose")]
+  #[expect(
+    clippy::unused_self,
+    reason = "a JS instance method: `&self` is what makes rquickjs check `this` is an APIRequestContext"
+  )]
   pub fn dispose(&self) {}
 
   /// Playwright: `cookies(urls?: string | string[])`. The cookies of
   /// the browser context this client is bound to, or of its own jar.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `urls` is neither a string nor a string
+  /// array, or with the core error when the cookies cannot be read.
   #[qjs(rename = "cookies")]
   pub async fn cookies<'js>(&self, ctx: Ctx<'js>, urls: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let urls = crate::bindings::context::cookie_urls(&ctx, urls.0)?;
@@ -467,6 +529,11 @@ impl HttpClientJs {
   }
 
   /// Playwright: `addCookies(cookies)`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `cookies` is not an array of cookie
+  /// objects, or with the core error when one is refused.
   #[qjs(rename = "addCookies")]
   pub async fn add_cookies<'js>(&self, ctx: Ctx<'js>, cookies: Value<'js>) -> rquickjs::Result<()> {
     let parsed: Vec<ferridriver::backend::SetCookieParams> = serde_from_js(&ctx, cookies)?;
@@ -475,6 +542,11 @@ impl HttpClientJs {
   }
 
   /// Playwright: `clearCookies(options?: { name?, domain?, path? })`.
+  ///
+  /// # Errors
+  ///
+  /// Rejects with a `TypeError` when `options` is not an object or a filter is
+  /// neither a string nor a `RegExp`, or with the core error.
   #[qjs(rename = "clearCookies")]
   pub async fn clear_cookies<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<()> {
     let filter = crate::bindings::context::clear_cookie_options(&ctx, options.0, "APIRequestContext.clearCookies")?;
@@ -602,6 +674,10 @@ impl HttpResponseJs {
 
   /// Playwright: `apiResponse.timing(): ResourceTiming`. Milliseconds
   /// from `startTime`; `-1` for a phase that did not happen.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the timing object.
   #[qjs(rename = "timing")]
   pub fn timing<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let timing = self.inner.timing();
@@ -645,7 +721,14 @@ impl HttpResponseJs {
   /// the returned array throws rather than corrupting a buffer other
   /// readers of the same response still share.
   #[qjs(rename = "body")]
-  pub fn body<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
+  pub fn body<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> Settled<Value<'js>> {
     settled(self.inner.body_shared().into_js_with(&ctx).and_then(|bytes| {
       let buffer = rquickjs::ArrayBuffer::from_source_immutable(ctx.clone(), bytes)?;
       crate::bindings::convert::node_buffer(&ctx, buffer)
@@ -654,13 +737,27 @@ impl HttpResponseJs {
 
   /// Playwright: `apiResponse.text(): Promise<string>`.
   #[qjs(rename = "text")]
-  pub fn text(&self, ctx: rquickjs::Ctx<'_>) -> Settled<String> {
+  pub fn text(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: rquickjs::Ctx<'_>,
+  ) -> Settled<String> {
     settled(self.inner.text().into_js_with(&ctx))
   }
 
   /// Playwright: `apiResponse.json(): Promise<Serializable>`.
   #[qjs(rename = "json")]
-  pub fn json<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
+  pub fn json<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> Settled<Value<'js>> {
     // Parse the raw body straight into a JS value with QuickJS's C JSON
     // parser — no serde_json::Value middle allocation. `json_parse`
     // does not touch the JS `JSON` global, so a reassigned
@@ -676,8 +773,19 @@ impl HttpResponseJs {
 
   /// All response headers as an array of `{name, value}` tuples (Playwright's
   /// `headersArray` shape).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the array.
   #[qjs(rename = "headersArray")]
-  pub fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+  pub fn headers_array<'js>(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs hands a method its `Ctx` by value"
+    )]
+    ctx: Ctx<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
     let h = self.inner.headers();
     let pairs: Vec<(&str, &str)> = h.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
     crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
@@ -685,9 +793,13 @@ impl HttpResponseJs {
 
   /// All response headers as a flat object: lowercased names, duplicates
   /// combined (Playwright's `apiResponse.headers()`).
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the object.
   #[qjs(rename = "headers")]
   pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let obj = rquickjs::Object::new(ctx.clone())?;
+    let obj = rquickjs::Object::new(ctx)?;
     for (name, value) in self.inner.headers_object() {
       obj.set(name, value)?;
     }
@@ -696,7 +808,14 @@ impl HttpResponseJs {
 
   /// Combined value of a single header, or `null` if absent.
   #[qjs(rename = "header")]
-  pub fn header(&self, name: String) -> crate::bindings::convert::Null<String> {
+  pub fn header(
+    &self,
+    #[expect(
+      clippy::needless_pass_by_value,
+      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
+    )]
+    name: String,
+  ) -> crate::bindings::convert::Null<String> {
     crate::bindings::convert::Null(self.inner.header(&name))
   }
 }
