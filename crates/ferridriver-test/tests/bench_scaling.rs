@@ -1,9 +1,3 @@
-#![allow(
-  clippy::cast_precision_loss,
-  clippy::cast_lossless,
-  clippy::too_many_lines,
-  clippy::uninlined_format_args
-)]
 //! Diagnose why worker scaling is sub-linear.
 //! Measure: browser launch overlap, per-worker test time, idle time.
 
@@ -17,12 +11,10 @@ use ferridriver::options::LaunchOptions;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "benchmark, not for CI"]
-async fn diagnose_scaling() {
-  println!("\n=== Scaling Diagnosis ===\n");
-
+async fn diagnose_launch_scaling() {
   // 1. How long does parallel browser launch take vs sequential?
   println!("  [1] Browser launch scaling");
-  for n in [1, 2, 4, 6] {
+  for n in [1u32, 2, 4, 6] {
     let t = Instant::now();
     let mut handles = Vec::new();
     for _ in 0..n {
@@ -32,18 +24,22 @@ async fn diagnose_scaling() {
     for h in handles {
       browsers.push(h.await.unwrap().unwrap());
     }
-    let launch_ms = t.elapsed().as_millis();
+    let launch = t.elapsed();
+    let launch_ms = launch.as_millis();
     // Close all
     for b in &browsers {
-      b.close().await.ok();
+      b.close().await.expect("close browser");
     }
     println!(
       "      {n} browser(s) parallel: {launch_ms}ms (amortized: {:.1}ms each)",
-      launch_ms as f64 / n as f64
+      launch.as_secs_f64() * 1000.0 / f64::from(n)
     );
   }
-  println!();
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark, not for CI"]
+async fn diagnose_idle_chrome_processes() {
   // 2. Does per-test time degrade with more concurrent Chrome processes?
   println!("  [2] Per-test time with N Chrome processes running");
   // Launch N browsers and measure ctx+page+nav+close on one of them
@@ -56,7 +52,7 @@ async fn diagnose_scaling() {
 
     // Measure 10 test cycles on the first browser.
     let browser = &browsers[0];
-    let iters = 10;
+    let iters = 10u32;
     let t = Instant::now();
     for i in 0..iters {
       let ctx = browser.new_context().await.unwrap();
@@ -66,17 +62,20 @@ async fn diagnose_scaling() {
       page.goto(&url).await.unwrap();
       page.locator("#b").click().await.unwrap();
       let _ = page.locator("#b").text_content().await.unwrap();
-      ctx.close().await.ok();
+      ctx.close().await.expect("close context");
     }
-    let per_test = t.elapsed().as_millis() as f64 / iters as f64;
+    let per_test = t.elapsed().as_secs_f64() * 1000.0 / f64::from(iters);
     println!("      {n} Chrome process(es): {per_test:.1}ms/test");
 
     for b in &browsers {
-      b.close().await.ok();
+      b.close().await.expect("close browser");
     }
   }
-  println!();
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark, not for CI"]
+async fn diagnose_concurrent_workers() {
   // 3. Measure per-test time with N browsers ALL running tests concurrently.
   println!("  [3] Per-test time with N browsers ALL running tests concurrently");
   for n in [1u32, 2, 4, 6] {
@@ -106,10 +105,10 @@ async fn diagnose_scaling() {
           page.goto(&url).await.unwrap();
           page.locator("#b").click().await.unwrap();
           let _ = page.locator("#b").text_content().await.unwrap();
-          ctx.close().await.ok();
+          ctx.close().await.expect("close context");
           times.push(t.elapsed());
         }
-        let avg = times.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>() / times.len() as f64;
+        let avg = times.iter().map(|d| d.as_secs_f64() * 1000.0).sum::<f64>() / f64::from(per_worker);
         (wid, avg)
       }));
     }
@@ -119,25 +118,29 @@ async fn diagnose_scaling() {
       let (wid, avg) = h.await.unwrap();
       worker_avgs.push((wid, avg));
     }
-    let wall_ms = wall_start.elapsed().as_millis();
-    let overall_avg: f64 = worker_avgs.iter().map(|(_, a)| a).sum::<f64>() / worker_avgs.len() as f64;
-    let throughput = total_tests as f64 / (wall_ms as f64 / 1000.0);
+    let wall = wall_start.elapsed();
+    let wall_ms = wall.as_millis();
+    let overall_avg: f64 = worker_avgs.iter().map(|(_, a)| a).sum::<f64>() / f64::from(n);
+    let throughput = f64::from(total_tests) / wall.as_secs_f64();
 
     println!(
       "      {n} workers × {per_worker} tests: wall={wall_ms}ms, avg={overall_avg:.1}ms/test, {throughput:.1} tests/sec"
     );
 
     for b in &browsers {
-      b.close().await.ok();
+      b.close().await.expect("close browser");
     }
   }
-  println!();
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark, not for CI"]
+async fn diagnose_cpu_load() {
   // 4. Check if tokio runtime thread count matters.
   println!("  [4] Are we CPU-bound or I/O-bound?");
   {
     let browser = chromium().launch(LaunchOptions::default()).await.unwrap();
-    let iters = 10;
+    let iters = 10u32;
 
     // Measure with a CPU-heavy background task vs without.
     let t = Instant::now();
@@ -145,9 +148,9 @@ async fn diagnose_scaling() {
       let ctx = browser.new_context().await.unwrap();
       let page = ctx.new_page().await.unwrap();
       page.goto(&format!("data:text/html,<title>T{i}</title>")).await.unwrap();
-      ctx.close().await.ok();
+      ctx.close().await.expect("close context");
     }
-    let baseline = t.elapsed().as_millis() as f64 / iters as f64;
+    let baseline = t.elapsed().as_secs_f64() * 1000.0 / f64::from(iters);
 
     // Now with CPU load on tokio threads.
     let cpu_tasks: Vec<_> = (0..4)
@@ -171,14 +174,14 @@ async fn diagnose_scaling() {
       let ctx = browser.new_context().await.unwrap();
       let page = ctx.new_page().await.unwrap();
       page.goto(&format!("data:text/html,<title>T{i}</title>")).await.unwrap();
-      ctx.close().await.ok();
+      ctx.close().await.expect("close context");
     }
-    let with_load = t.elapsed().as_millis() as f64 / iters as f64;
+    let with_load = t.elapsed().as_secs_f64() * 1000.0 / f64::from(iters);
 
     for task in cpu_tasks {
       task.abort();
     }
-    browser.close().await.ok();
+    browser.close().await.expect("close browser");
 
     println!("      Without CPU load: {baseline:.1}ms/test");
     println!("      With CPU load:    {with_load:.1}ms/test");
@@ -187,6 +190,4 @@ async fn diagnose_scaling() {
       (with_load - baseline) / baseline * 100.0
     );
   }
-
-  println!("\n=== end ===\n");
 }

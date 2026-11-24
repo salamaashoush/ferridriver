@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::items_after_statements)]
 //! Cluster 7 — `git_info` helper unit coverage (§7.26 + §7.3 plumbing).
 
 use ferridriver_test::git_info::GitInfo;

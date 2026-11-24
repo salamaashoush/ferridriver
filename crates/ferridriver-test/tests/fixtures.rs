@@ -11,6 +11,10 @@ use ferridriver_test::fixture::{FixturePool, FixtureScope};
 use ferridriver_test::prelude::*;
 
 /// A plain data fixture — no browser needed.
+#[expect(
+  clippy::unnecessary_wraps,
+  reason = "`#[fixture]` maps the function's error into the setup failure, so a fixture returns `ferridriver_test::Result` even when it cannot fail"
+)]
 #[fixture(scope = "test")]
 fn seeded_users(_ctx: TestContext) -> ferridriver_test::Result<Vec<String>> {
   Ok(vec!["alice".to_string(), "bob".to_string()])
@@ -24,12 +28,22 @@ async fn first_user(ctx: TestContext) -> ferridriver_test::Result<String> {
 }
 
 /// A worker-scoped fixture, to prove the scope argument round-trips.
+#[expect(
+  clippy::unnecessary_wraps,
+  reason = "`#[fixture]` maps the function's error into the setup failure, so a fixture returns `ferridriver_test::Result` even when it cannot fail"
+)]
 #[fixture(scope = "worker")]
 fn worker_token(_ctx: TestContext) -> ferridriver_test::Result<String> {
   Ok("worker-secret".to_string())
 }
 
 /// Depends on `seeded_users` via a typed parameter (name = fixture name).
+#[expect(
+  clippy::unnecessary_wraps,
+  clippy::needless_pass_by_value,
+  clippy::rc_buffer,
+  reason = "`#[fixture]` hands a dependency over as the `Arc<T>` the pool shares, by value, and maps the function's error into the setup failure, so the signature is the macro's, not a choice"
+)]
 #[fixture(scope = "test")]
 fn user_count(seeded_users: Arc<Vec<String>>) -> ferridriver_test::Result<usize> {
   Ok(seeded_users.len())
@@ -58,11 +72,15 @@ async fn named_each_test(input: u32, output: u32) {
 static TORN_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A fixture with cleanup: returns `Fixture<T>` with an `on_teardown`.
+#[expect(
+  clippy::unnecessary_wraps,
+  reason = "`#[fixture]` maps the function's error into the setup failure, so a fixture returns `ferridriver_test::Result` even when it cannot fail"
+)]
 #[fixture(scope = "test")]
 fn tracked_resource(_ctx: TestContext) -> ferridriver_test::Result<Fixture<String>> {
+  // The test that reads the flag checks the teardown got setup's value.
   Ok(Fixture::new("resource".to_string()).on_teardown(|value| async move {
-    assert_eq!(&*value, "resource");
-    TORN_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    TORN_DOWN.store(*value == "resource", std::sync::atomic::Ordering::SeqCst);
   }))
 }
 
@@ -151,7 +169,7 @@ async fn failed_fixture_cleanup_retains_its_value_and_dependencies_for_retry() {
   pool.inject("consumer", Arc::clone(&attempts));
   pool.register_teardown(
     "consumer",
-    attempts.clone(),
+    Arc::<AtomicUsize>::clone(&attempts),
     Arc::new(move |value| {
       Box::pin(async move {
         let attempts = value.downcast::<AtomicUsize>().expect("same owned value");
