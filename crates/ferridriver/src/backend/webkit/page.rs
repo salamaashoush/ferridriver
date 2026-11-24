@@ -616,7 +616,8 @@ impl WebKitPage {
   ///
   /// Returns `BrowserError::Protocol` when the page proxy closes before announcing its page target,
   /// or an error when the `Page.enable`, `Runtime.enable`, `Network.enable`, `Console.enable`,
-  /// `Worker.enable`, `Dialog.enable` or `Emulation.setActiveAndFocused` command fails.
+  /// `Worker.enable`, `Dialog.enable`, `Emulation.setActiveAndFocused` or `Page.getResourceTree`
+  /// command fails.
   pub fn attach(
     browser: &WebKitBrowser,
     proxy: Session,
@@ -655,25 +656,7 @@ impl WebKitPage {
       frames.track_target(&target);
       frames.track_proxy(&proxy);
 
-      // Page agent before Runtime so executionContextCreated ordering holds.
-      target.send("Page.enable", json!({})).await?;
-      target.send("Runtime.enable", json!({})).await?;
-      target.send("Network.enable", json!({})).await?;
-      target.send("Console.enable", json!({})).await?;
-      target.send("Worker.enable", json!({})).await?;
-      // Dialog domain lives on the page-proxy session (per wkPage.ts);
-      // without `Dialog.enable` the `javascriptDialogOpening` event
-      // never fires and `window.alert` would wedge the page.
-      proxy.send("Dialog.enable", json!({})).await?;
-      // Mark the page active + focused (page-proxy session), mirroring
-      // `wkPage.ts::_initializePageProxySession`. Without it WebKit treats
-      // the page as a background/inactive window: a right-button click
-      // opens context-menu tracking that never resolves (no active window
-      // to dismiss it), and every subsequent synthetic mouse event is
-      // swallowed by that pending menu instead of reaching the document.
-      proxy
-        .send("Emulation.setActiveAndFocused", json!({ "active": true }))
-        .await?;
+      enable_page_domains(&target, &proxy).await?;
       // Apply per-page context overrides BEFORE the about:blank document
       // becomes scriptable. Mirrors `WKPage._initializeSessionMayThrow` —
       // userAgent / timezone / bypassCSP / offline / permissions live on
@@ -3366,6 +3349,32 @@ impl WebKitPage {
 /// hits the browser-root session (locale, geolocation) is sent from
 /// `WebKitBrowser::new_context_with_options` instead — that runs
 /// once per context, not once per page.
+async fn enable_page_domains(
+  target: &Session,
+  proxy: &Session,
+) -> std::result::Result<(), super::connection::ConnectionError> {
+  // Page agent before Runtime so executionContextCreated ordering holds.
+  target.send("Page.enable", json!({})).await?;
+  target.send("Runtime.enable", json!({})).await?;
+  target.send("Network.enable", json!({})).await?;
+  target.send("Console.enable", json!({})).await?;
+  target.send("Worker.enable", json!({})).await?;
+  // Dialog domain lives on the page-proxy session (per wkPage.ts);
+  // without `Dialog.enable` the `javascriptDialogOpening` event
+  // never fires and `window.alert` would wedge the page.
+  proxy.send("Dialog.enable", json!({})).await?;
+  // Mark the page active + focused (page-proxy session), mirroring
+  // `wkPage.ts::_initializePageProxySession`. Without it WebKit treats
+  // the page as a background/inactive window: a right-button click
+  // opens context-menu tracking that never resolves (no active window
+  // to dismiss it), and every subsequent synthetic mouse event is
+  // swallowed by that pending menu instead of reaching the document.
+  proxy
+    .send("Emulation.setActiveAndFocused", json!({ "active": true }))
+    .await?;
+  Ok(())
+}
+
 async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crate::options::BrowserContextOptions) {
   if let Some(ua) = opts.user_agent.as_deref() {
     let _ = target.send("Page.overrideUserAgent", json!({ "value": ua })).await;
