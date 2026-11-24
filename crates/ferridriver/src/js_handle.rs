@@ -480,7 +480,11 @@ impl JSHandle {
     }
     let remote = self.remote()?;
     let any_element = crate::backend::element_from_remote(self.any_page(), remote).ok()?;
-    Some(ElementHandle::from_js_handle_and_element(self.clone(), any_element))
+    Some(ElementHandle::from_js_handle_and_element(
+      self.clone(),
+      remote.clone(),
+      any_element,
+    ))
   }
 }
 
@@ -512,15 +516,15 @@ fn build_handle_evaluate_args(
     ..
   } = user_arg;
 
-  if let JSHandleBacking::Value(inline) = receiver {
-    // Value-backed receiver: no page-side reference to ship. Pass the
-    // primitive inline as arg[0]; user arg keeps its own handle table
-    // unshifted because no receiver handle was prepended.
-    let args = vec![inline.clone(), user_value];
-    return (args, user_handles);
-  }
-  let JSHandleBacking::Remote(remote) = receiver else {
-    unreachable!("JSHandleBacking has only Remote and Value variants");
+  let remote = match receiver {
+    JSHandleBacking::Value(inline) => {
+      // Value-backed receiver: no page-side reference to ship. Pass the
+      // primitive inline as arg[0]; user arg keeps its own handle table
+      // unshifted because no receiver handle was prepended.
+      let args = vec![inline.clone(), user_value];
+      return (args, user_handles);
+    },
+    JSHandleBacking::Remote(remote) => remote,
   };
 
   // Relocate `{h: i}` refs inside the user value by +1 so they index

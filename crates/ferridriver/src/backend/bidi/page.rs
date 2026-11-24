@@ -579,6 +579,7 @@ impl BidiPage {
     // folder turn a second `greeting.txt` into `greeting(1).txt`.
     let downloads_subdir = downloads_dir.path().join(&context_id);
     let _ = std::fs::create_dir_all(&downloads_subdir);
+    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&context_id)));
     Self {
       downloads_subdir: Arc::from(downloads_subdir),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -601,7 +602,7 @@ impl BidiPage {
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       downloads_dir,
       page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_cache,
       first_navigation: Arc::default(),
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       frame_listener_started: Arc::new(AtomicBool::new(false)),

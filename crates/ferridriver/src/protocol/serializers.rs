@@ -580,7 +580,10 @@ impl SerializedValue {
         // representable within f64's safe integer range (±2^53).
         const F64_INT_MAX: f64 = 9_007_199_254_740_992.0;
         if n.is_finite() && n.fract() == 0.0 && n.abs() <= F64_INT_MAX {
-          #[allow(clippy::cast_possible_truncation)]
+          #[expect(
+            clippy::cast_possible_truncation,
+            reason = "guarded above: finite, integral and within 2^53, so the cast is exact"
+          )]
           let as_i64 = *n as i64;
           Some(serde_json::Value::Number(as_i64.into()))
         } else {
@@ -783,13 +786,19 @@ impl<'de> Visitor<'de> for SerializedValueVisitor {
   }
 
   fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+      clippy::cast_precision_loss,
+      reason = "a JS number is an f64; JSON.parse rounds integers past 2^53 the same way"
+    )]
     let as_f64 = v as f64;
     Ok(SerializedValue::Number(as_f64))
   }
 
   fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+      clippy::cast_precision_loss,
+      reason = "a JS number is an f64; JSON.parse rounds integers past 2^53 the same way"
+    )]
     let as_f64 = v as f64;
     Ok(SerializedValue::Number(as_f64))
   }

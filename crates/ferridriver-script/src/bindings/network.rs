@@ -211,15 +211,10 @@ impl RequestJs {
   }
 
   /// Mirrors Playwright `request.serviceWorker(): Worker | null`.
-  /// Backed by `Request::service_worker` which always returns `None`
-  /// today (Tier-2 §2.7 hasn't landed). Surface kept stable so flipping
-  /// the implementation on later is non-breaking.
+  /// Service-worker requests are not attributed to their worker yet, so
+  /// this is always `null`, as in the NAPI binding.
   #[qjs(rename = "serviceWorker")]
   pub fn service_worker<'js>(&self, ctx: Ctx<'js>) -> Value<'js> {
-    // Query the core accessor so this stays self-aware once §2.7 fills
-    // in the Worker class — the binding then maps `Some(worker)` to a
-    // real WorkerJs instance.
-    let _ = self.inner.service_worker();
     Value::new_null(ctx)
   }
 }

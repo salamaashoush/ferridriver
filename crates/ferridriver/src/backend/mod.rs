@@ -1490,29 +1490,6 @@ impl AnyPage {
     page_dispatch!(self, get_frame_tree())
   }
 
-  /// Backend's cached top-level `frameId`, if a prior op (page-init
-  /// or navigation) populated it without a `Page.getFrameTree`
-  /// round-trip. Used by `crate::Page::ensure_frame_cache_seeded`
-  /// to seed the wrapper's frame cache for free after a `goto`,
-  /// avoiding the extra RTT that would otherwise fire when the
-  /// frameNavigated event hadn't propagated through the listener
-  /// yet by goto-return time.
-  #[must_use]
-  pub fn peek_main_frame_id(&self) -> Option<String> {
-    match self {
-      Self::CdpPipe(p) => p.peek_main_frame_id(),
-      Self::CdpWs(p) => p.peek_main_frame_id(),
-      Self::WebKit(p) => p.peek_main_frame_id(),
-      // BiDi's top-level browsing context id IS the page's main-frame
-      // identifier — `browsingContext.navigate` / `browsingContext.tree`
-      // all key off the same value. Surface it through the same peek
-      // hook so `Page::main_frame()` can seed the frame cache without
-      // an extra `browsingContext.getTree` RTT.
-      Self::Bidi(p) => Some(p.context_id.to_string()),
-      Self::WebDriver(p) => Some(p.frame_id()),
-    }
-  }
-
   /// # Errors
   ///
   /// Forwards the error of the active backend's `evaluate_in_frame`.

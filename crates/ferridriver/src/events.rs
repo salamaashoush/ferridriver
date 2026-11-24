@@ -1100,7 +1100,7 @@ mod tests {
     emitter.emit(PageEvent::Load);
     let mut subscription = emitter.subscribe();
     let calls = Arc::new(AtomicUsize::new(0));
-    let observed = calls.clone();
+    let observed = Arc::clone(&calls);
     emitter.once(
       "load",
       Arc::new(move |_| {
@@ -1130,7 +1130,7 @@ mod tests {
     source.emit(PageEvent::Load);
     let mut subscription = destination.subscribe();
     let calls = Arc::new(AtomicUsize::new(0));
-    let observed = calls.clone();
+    let observed = Arc::clone(&calls);
     destination.once(
       "load",
       Arc::new(move |_| {
@@ -1161,14 +1161,14 @@ mod tests {
   async fn state_updates_precede_listeners_and_raw_subscribers() -> Result<(), Box<dyn std::error::Error>> {
     let emitter = EventEmitter::new();
     let state = Arc::new(AtomicUsize::new(0));
-    let observed = state.clone();
+    let observed = Arc::clone(&state);
     assert!(emitter.set_state_observer(Arc::new(move |_| {
       observed.fetch_add(1, Ordering::SeqCst);
     })));
     assert!(!emitter.set_state_observer(Arc::new(|_| {})));
     emitter.remove_all_listeners();
     let (tx, mut delivered) = mpsc::unbounded_channel();
-    let observed = state.clone();
+    let observed = Arc::clone(&state);
     emitter.prepend_once(
       "load",
       Arc::new(move |_| {

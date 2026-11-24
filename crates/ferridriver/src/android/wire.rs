@@ -91,7 +91,7 @@ impl AdbServer {
   }
 
   /// A connection handed to `service` on the device `serial`.
-  pub async fn open(&self, serial: &str, service: &str) -> Result<TcpStream> {
+  pub(super) async fn open(&self, serial: &str, service: &str) -> Result<TcpStream> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, &format!("host:transport:{serial}")).await?;
     Self::request(&mut stream, service).await?;
@@ -99,7 +99,7 @@ impl AdbServer {
   }
 
   /// The devices the server knows, usable or not.
-  pub async fn devices(&self) -> Result<Vec<DeviceEntry>> {
+  pub(super) async fn devices(&self) -> Result<Vec<DeviceEntry>> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, "host:devices").await?;
     let listing = Self::read_block(&mut stream).await?;
@@ -119,7 +119,7 @@ impl AdbServer {
 
   /// Forward a local TCP port the server picks to `remote` on the device,
   /// `localabstract:<socket>` for example, and return the port.
-  pub async fn forward(&self, serial: &str, remote: &str) -> Result<u16> {
+  pub(super) async fn forward(&self, serial: &str, remote: &str) -> Result<u16> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, &format!("host-serial:{serial}:forward:tcp:0;{remote}")).await?;
     // The first status says the request was understood, the second that
@@ -138,14 +138,14 @@ impl AdbServer {
   }
 
   /// Remove a forward [`Self::forward`] made.
-  pub async fn kill_forward(&self, serial: &str, port: u16) -> Result<()> {
+  pub(super) async fn kill_forward(&self, serial: &str, port: u16) -> Result<()> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, &format!("host-serial:{serial}:killforward:tcp:{port}")).await
   }
 
   /// Run `command` in the device's shell and return everything it wrote,
   /// byte for byte: a screenshot comes back through here.
-  pub async fn shell(&self, serial: &str, command: &str) -> Result<Vec<u8>> {
+  pub(super) async fn shell(&self, serial: &str, command: &str) -> Result<Vec<u8>> {
     let mut stream = self.open(serial, &format!("shell:{command}")).await?;
     let mut output = Vec::new();
     stream.read_to_end(&mut output).await?;
@@ -154,7 +154,7 @@ impl AdbServer {
 
   /// Write `content` to `path` on the device with `mode`, through the
   /// `sync:` service.
-  pub async fn push(&self, serial: &str, content: &[u8], path: &str, mode: u32) -> Result<()> {
+  pub(super) async fn push(&self, serial: &str, content: &[u8], path: &str, mode: u32) -> Result<()> {
     async fn send(stream: &mut TcpStream, id: &[u8; 4], data: &[u8]) -> Result<()> {
       let length = u32::try_from(data.len()).map_err(|_| failure("push", "chunk longer than 4 GiB"))?;
       stream.write_all(id).await?;
@@ -187,7 +187,7 @@ impl AdbServer {
 
   /// Copy the device's file at `path` to `destination` on this machine,
   /// through the `sync:` service.
-  pub async fn pull(&self, serial: &str, path: &str, destination: &std::path::Path) -> Result<()> {
+  pub(super) async fn pull(&self, serial: &str, path: &str, destination: &std::path::Path) -> Result<()> {
     let refused = |reason: &dyn std::fmt::Display| failure(&format!("pull of {path}"), reason);
     let length = u32::try_from(path.len()).map_err(|_| refused(&"path longer than 4 GiB"))?;
     let mut stream = self.open(serial, "sync:").await?;
@@ -232,7 +232,7 @@ impl AdbServer {
   /// a directory of the shell's own it reports as written and leaves
   /// empty. Chrome makes the directory with its first download, and it
   /// is removed again once the last file in it has been fetched.
-  pub fn remote_downloads(&self, serial: &str) -> crate::download::RemoteDownloads {
+  pub(super) fn remote_downloads(&self, serial: &str) -> crate::download::RemoteDownloads {
     static DIRECTORIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let directory = format!(
       "/sdcard/Download/ferridriver-{}-{}",
@@ -258,7 +258,7 @@ impl AdbServer {
 
   /// Install an APK by streaming it to the package manager, with the
   /// arguments Playwright's `installApk` passes when given none.
-  pub async fn install(&self, serial: &str, apk: &[u8], args: &[String]) -> Result<()> {
+  pub(super) async fn install(&self, serial: &str, apk: &[u8], args: &[String]) -> Result<()> {
     let args = if args.is_empty() {
       "-r -t -S".to_owned()
     } else {

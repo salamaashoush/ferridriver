@@ -46,13 +46,13 @@ impl Frame {
   /// frame stays itself through it, as Playwright's main `Frame` does;
   /// any other frame is this one.
   fn live(&self, main: bool) -> Frame {
-    if main
-      && let Some(id) = self
+    if main {
+      let id = self
         .page
-        .with_frame_cache(crate::frame_cache::FrameCache::main_frame_id)
-      && id != self.id
-    {
-      return Frame::new(Arc::clone(&self.page), id);
+        .with_frame_cache(crate::frame_cache::FrameCache::main_frame_id);
+      if id != self.id {
+        return Frame::new(Arc::clone(&self.page), id);
+      }
     }
     self.clone()
   }
@@ -83,7 +83,7 @@ impl Frame {
     let (url, is_main) = self.page.with_frame_cache(|c| {
       (
         c.record(&self.id).map(|r| r.info.url.clone()).unwrap_or_default(),
-        c.main_frame_id().as_deref() == Some(&*self.id),
+        c.main_frame_id() == self.id,
       )
     });
     // A page is on its initial empty document until a navigation
@@ -99,9 +99,7 @@ impl Frame {
   /// equivalent of `frame.parentFrame() === null`.
   #[must_use]
   pub fn is_main_frame(&self) -> bool {
-    self
-      .page
-      .with_frame_cache(|c| c.main_frame_id().as_deref() == Some(&*self.id))
+    self.page.with_frame_cache(|c| c.main_frame_id() == self.id)
   }
 
   /// Parent frame. Returns `None` for the main frame. Sync — reads from
@@ -2124,7 +2122,7 @@ impl std::fmt::Debug for Frame {
       (
         rec.map(|r| r.info.name.clone()),
         rec.map(|r| r.info.url.clone()),
-        c.main_frame_id().as_deref() == Some(&*self.id),
+        c.main_frame_id() == self.id,
       )
     });
     f.debug_struct("Frame")

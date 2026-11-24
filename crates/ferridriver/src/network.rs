@@ -251,7 +251,7 @@ impl Request {
     // slot at the new one. `ArcSwapOption::store` is sync — no need for
     // the listener to make a separate `link_redirect_chain().await` call.
     if let Some(prev) = inner.redirected_from.as_ref() {
-      prev.redirected_to.store(Some(inner.clone()));
+      prev.redirected_to.store(Some(Arc::clone(&inner)));
     }
 
     Self { inner }
@@ -389,7 +389,8 @@ impl Request {
         return Ok(raw);
       }
     }
-    if let Some(f) = self.inner.raw_headers_fn.lock().await.clone() {
+    let fetcher = self.inner.raw_headers_fn.lock().await.clone();
+    if let Some(f) = fetcher {
       let raw = f().await?;
       let mut state = self.inner.state.write().await;
       if state.raw_headers.is_none() {
@@ -403,20 +404,6 @@ impl Request {
 
   // -- Service worker -----------------------------------------------------
 
-  /// Mirrors Playwright `request.serviceWorker(): Worker | null` —
-  /// returns the Service Worker that initiated the request (if any).
-  /// Service-worker request observability is a Tier-2 subsystem
-  /// (`§2.7`), so we always return `None` for now. The signature
-  /// matches Playwright so flipping it on later is non-breaking; the
-  /// body genuinely doesn't need `self` until `§2.7` wires per-request
-  /// `SW` provenance, which is why the lint suppression below is local
-  /// and justified rather than a workspace-wide escape hatch.
-  #[must_use]
-  #[allow(clippy::unused_self)] // Playwright-required method shape; body fills in at §2.7.
-  pub const fn service_worker(&self) -> Option<()> {
-    None
-  }
-
   // -- Redirect chain ------------------------------------------------------
 
   #[must_use]
@@ -425,7 +412,7 @@ impl Request {
       .inner
       .redirected_from
       .as_ref()
-      .map(|r| Request { inner: r.clone() })
+      .map(|r| Request { inner: Arc::clone(r) })
   }
 
   /// Sync — Playwright's `Request.redirectedTo(): Request | null`.
@@ -542,7 +529,7 @@ impl Request {
 
   pub async fn set_response(&self, response: &Response) {
     let mut state = self.inner.state.write().await;
-    state.response = Some(response.inner.clone());
+    state.response = Some(Arc::clone(&response.inner));
     drop(state);
     self.inner.outcome_notify.notify_waiters();
   }
@@ -830,7 +817,7 @@ impl Response {
   #[must_use]
   pub fn new(init: ResponseInit) -> Self {
     let inner = Arc::new(ResponseState {
-      request: init.request.inner.clone(),
+      request: Arc::clone(&init.request.inner),
       url: without_fragment(init.url),
       status: init.status,
       status_text: init.status_text,
@@ -877,7 +864,7 @@ impl Response {
   #[must_use]
   pub fn request(&self) -> Request {
     Request {
-      inner: self.inner.request.clone(),
+      inner: Arc::clone(&self.inner.request),
     }
   }
   #[must_use]
@@ -945,7 +932,8 @@ impl Response {
         return Ok(raw);
       }
     }
-    if let Some(f) = self.inner.raw_headers_fn.lock().await.clone() {
+    let fetcher = self.inner.raw_headers_fn.lock().await.clone();
+    if let Some(f) = fetcher {
       let raw = f().await?;
       let mut state = self.inner.state.write().await;
       if state.raw_headers.is_none() {

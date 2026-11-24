@@ -31,6 +31,7 @@ pub struct WebDriverPage {
 impl WebDriverPage {
   #[must_use]
   pub fn new(session: Arc<WebDriverSession>, target: Target, timeout_ms: u64) -> Self {
+    let main_frame_id = super::api::frame_id_of(&target);
     Self {
       session,
       target,
@@ -38,7 +39,9 @@ impl WebDriverPage {
       closed: Arc::new(AtomicBool::new(false)),
       events: crate::events::EventEmitter::new(),
       page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::default(),
+      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(
+        &main_frame_id,
+      ))),
       media_emulation: crate::backend::SharedMediaEmulation::default(),
       observed: Arc::default(),
       frame_listener_started: Arc::default(),

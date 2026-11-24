@@ -274,13 +274,10 @@ pub(crate) fn action_log_line(msg: &str) -> String {
   if msg.contains("error:optionnotenabled") {
     return "option being selected is not enabled".to_string();
   }
-  let Some(at) = msg.find("error:not") else {
+  let Some((_, after)) = msg.split_once("error:not") else {
     return msg.strip_prefix("backend error: ").unwrap_or(msg).to_string();
   };
-  let state: String = msg[at + "error:not".len()..]
-    .chars()
-    .take_while(char::is_ascii_alphanumeric)
-    .collect();
+  let state: String = after.chars().take_while(char::is_ascii_alphanumeric).collect();
   match state.as_str() {
     "inviewport" => "element is outside of the viewport".to_string(),
     "connected" => "element is not attached to the DOM".to_string(),
@@ -1082,7 +1079,7 @@ impl Locator {
           .await?
           .and_then(|v| v.as_str().map(std::string::ToString::to_string))
           .unwrap_or_default();
-        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
         let is_radio = parsed
           .get("isRadio")
           .and_then(serde_json::Value::as_bool)
@@ -3527,7 +3524,7 @@ struct AriaRaw {
   #[serde(default, rename = "iframeRefs")]
   iframe_refs: Vec<Option<String>>,
   #[serde(default, rename = "iframeDepths")]
-  iframe_depths: std::collections::HashMap<String, i32>,
+  iframe_depths: rustc_hash::FxHashMap<String, i32>,
 }
 
 /// Build the `AriaTreeOptions` JSON for the injected call. The ref
@@ -3576,7 +3573,7 @@ fn aria_merge_frame(
       .filter(|r| raw.iframe_depths.contains_key(*r))
       .cloned()
       .collect();
-    let mut children = std::collections::HashMap::with_capacity(rendered.len());
+    let mut children = rustc_hash::FxHashMap::with_capacity_and_hasher(rendered.len(), rustc_hash::FxBuildHasher);
     for refv in &rendered {
       let child = aria_child_snapshot(&frame, refv, &mode, depth, boxes, &raw.iframe_depths, &seq).await?;
       children.insert(refv.clone(), child);
@@ -3595,7 +3592,7 @@ fn aria_merge_frame(
 /// applied here. A child tree arrives with its own prefix already.
 fn merge_iframe_children(
   node: &mut serde_json::Value,
-  children: &mut std::collections::HashMap<String, Vec<serde_json::Value>>,
+  children: &mut rustc_hash::FxHashMap<String, Vec<serde_json::Value>>,
   ref_prefix: &str,
 ) {
   let Some(object) = node.as_object_mut() else {
@@ -3648,7 +3645,7 @@ async fn aria_child_snapshot(
   mode: &str,
   depth: Option<i32>,
   boxes: Option<bool>,
-  depths: &std::collections::HashMap<String, i32>,
+  depths: &rustc_hash::FxHashMap<String, i32>,
   seq: &Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<Vec<serde_json::Value>> {
   // Tag the iframe in JS, then re-resolve it through the normal

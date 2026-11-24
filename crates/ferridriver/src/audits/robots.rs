@@ -239,35 +239,30 @@ fn matches(pattern: &[char], path: &[char]) -> bool {
 /// line parses to nothing either way — but it shifts every line number
 /// after it, and a line number is what `is-crawlable` reports.
 fn split_lines(contents: &str) -> Vec<&str> {
-  let bytes = contents.as_bytes();
   let mut lines = Vec::new();
-  let (mut start, mut i) = (0usize, 0usize);
-  while i < bytes.len() {
-    match bytes[i] {
-      b'\r' | b'\n' => {
-        lines.push(&contents[start..i]);
-        i += usize::from(bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n')) + 1;
-        start = i;
-      },
-      _ => i += 1,
-    }
+  let mut rest = contents;
+  while let Some((line, tail)) = rest.split_once(['\r', '\n']) {
+    lines.push(line);
+    let after_cr = rest.as_bytes().get(line.len()) == Some(&b'\r');
+    rest = if after_cr {
+      tail.strip_prefix('\n').unwrap_or(tail)
+    } else {
+      tail
+    };
   }
-  lines.push(&contents[start..]);
+  lines.push(rest);
   lines
 }
 
 fn remove_comments(line: &str) -> &str {
-  match line.find('#') {
-    Some(at) => &line[..at],
-    None => line,
-  }
+  line.split_once('#').map_or(line, |(head, _)| head)
 }
 
 /// Split at the first `:`, trimming both halves. `None` when the line
 /// carries no `:` at all.
 fn split_line(line: &str) -> Option<(&str, &str)> {
-  let at = line.find(':')?;
-  Some((trim(&line[..at]), trim(&line[at + 1..])))
+  let (key, value) = line.split_once(':')?;
+  Some((trim(key), trim(value)))
 }
 
 /// JavaScript's `String.prototype.trim`, which also strips the byte
@@ -279,10 +274,7 @@ fn trim(value: &str) -> &str {
 /// Lowercased, with any `robot/1.0` version suffix dropped.
 fn format_user_agent(user_agent: &str) -> String {
   let lowered = user_agent.to_lowercase();
-  let head = match lowered.find('/') {
-    Some(at) => &lowered[..at],
-    None => &lowered[..],
-  };
+  let head = lowered.split_once('/').map_or(lowered.as_str(), |(head, _)| head);
   trim(head).to_string()
 }
 

@@ -515,7 +515,7 @@ pub struct BrowserState {
   /// including ones that have since had them taken away. The browser
   /// caches what it authenticated with and offers no way to clear it, so
   /// such a context is never kept for another user.
-  pub http_authenticated: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+  pub http_authenticated: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
   /// Each context's open pages, readable without this state's lock:
   /// what makes `context.pages()` synchronous, as in Playwright.
   pub context_pages: ContextPages,
@@ -659,7 +659,7 @@ impl BrowserState {
   pub fn into_shared(self) -> Arc<tokio::sync::RwLock<Self>> {
     let state = Arc::new_cyclic(|shared| {
       let mut this = self;
-      this.shared = shared.clone();
+      this.shared = std::sync::Weak::clone(shared);
       tokio::sync::RwLock::new(this)
     });
     // Nothing else holds the lock yet, so this cannot wait.
@@ -929,7 +929,7 @@ impl BrowserState {
   pub fn context_bindings_handle(
     &self,
   ) -> Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>> {
-    self.context_bindings.clone()
+    Arc::clone(&self.context_bindings)
   }
 
   /// Shared handle to the per-context WebSocket-route registry. Used by
@@ -938,7 +938,7 @@ impl BrowserState {
   /// page.
   #[must_use]
   pub fn context_ws_routes_handle(&self) -> Arc<tokio::sync::RwLock<ContextWsRoutes>> {
-    self.context_ws_routes.clone()
+    Arc::clone(&self.context_ws_routes)
   }
 
   /// Shared handle to the per-context route registry. Used by
@@ -947,7 +947,7 @@ impl BrowserState {
   /// page.
   #[must_use]
   pub fn context_routes_handle(&self) -> Arc<tokio::sync::RwLock<ContextRoutes>> {
-    self.context_routes.clone()
+    Arc::clone(&self.context_routes)
   }
 
   /// Look up (or lazily create) the `ContextEventEmitter` for a
@@ -975,10 +975,11 @@ impl BrowserState {
       Ok(g) => g,
       Err(poisoned) => poisoned.into_inner(),
     };
-    map
-      .entry(key.to_string())
-      .or_insert_with(|| Arc::new(std::sync::RwLock::new(None)))
-      .clone()
+    Arc::clone(
+      map
+        .entry(key.to_string())
+        .or_insert_with(|| Arc::new(std::sync::RwLock::new(None))),
+    )
   }
 
   /// Look up (or lazily create) the shared closed-flag for a context's
@@ -989,10 +990,11 @@ impl BrowserState {
       Ok(g) => g,
       Err(poisoned) => poisoned.into_inner(),
     };
-    map
-      .entry(key.to_string())
-      .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-      .clone()
+    Arc::clone(
+      map
+        .entry(key.to_string())
+        .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false))),
+    )
   }
 
   /// Record the reason given to `Browser::close({ reason })` so downstream
@@ -1378,7 +1380,11 @@ impl BrowserState {
     let existing_pages = Box::pin(inst.browser.pages()).await?;
     let ctx = inst.context_mut("default");
     for page in existing_pages {
-      page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+      page.attach_listeners(
+        Arc::clone(&ctx.console_log),
+        Arc::clone(&ctx.network_log),
+        Arc::clone(&ctx.dialog_log),
+      );
       ctx.pages.push(page);
     }
     context_pages.set(&format!("{instance_name}:default"), &ctx.pages);
@@ -2289,7 +2295,11 @@ impl BrowserState {
     if let Some(id) = browser_context_id {
       ctx.cdp_context_id = Some(id);
     }
-    page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+    page.attach_listeners(
+      Arc::clone(&ctx.console_log),
+      Arc::clone(&ctx.network_log),
+      Arc::clone(&ctx.dialog_log),
+    );
     let _ = page.dialog_manager().register_context_bridge(context_events.clone());
 
     // Spawn the page→context bridge exactly once per registered page.
@@ -2837,7 +2847,11 @@ impl BrowserState {
       if owned_pages.contains(&page.page_guid()) {
         continue;
       }
-      page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+      page.attach_listeners(
+        Arc::clone(&ctx.console_log),
+        Arc::clone(&ctx.network_log),
+        Arc::clone(&ctx.dialog_log),
+      );
       adopted.push(page.clone());
       ctx.pages.push(page);
     }
@@ -2999,7 +3013,7 @@ async fn discover_ws_with_headers(
 fn pin_ws_authority(ws_url: &str, addr: std::net::SocketAddr) -> String {
   for scheme in ["ws://", "wss://"] {
     if let Some(rest) = ws_url.strip_prefix(scheme) {
-      let path = rest.find('/').map_or("", |i| &rest[i..]);
+      let path = rest.find('/').and_then(|i| rest.get(i..)).unwrap_or("");
       return format!("{scheme}{addr}{path}");
     }
   }
@@ -4317,7 +4331,7 @@ mod tests {
       headless: eff.headless,
       env: eff.env.clone(),
       user_data_dir: eff.user_data_dir.as_ref().map(std::path::PathBuf::from),
-      extra_args: eff.args.clone(),
+      extra_args: eff.args,
       ..Default::default()
     };
     assert_eq!(

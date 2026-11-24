@@ -9,7 +9,7 @@
 //! Fed from a page's own events by its state observer, so every backend
 //! that reports requests keeps it.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
@@ -21,7 +21,7 @@ const QUIET: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 pub(crate) struct NetworkIdle {
-  frames: Mutex<HashMap<Arc<str>, FrameIdle>>,
+  frames: Mutex<FxHashMap<Arc<str>, FrameIdle>>,
   timers: AtomicU64,
   changed: tokio::sync::Notify,
 }
@@ -183,7 +183,7 @@ impl NetworkIdle {
   /// (`frame._recalculateNetworkIdle`). Fired stays fired, except where
   /// a subtree that went busy again un-fires a frame other than the one
   /// whose commit asked for the recalculation.
-  fn recalculate(&self, frames: &mut HashMap<Arc<str>, FrameIdle>, committed: Option<&Arc<str>>) {
+  fn recalculate(&self, frames: &mut FxHashMap<Arc<str>, FrameIdle>, committed: Option<&Arc<str>>) {
     let roots: Vec<Arc<str>> = frames
       .iter()
       .filter(|(_, frame)| frame.parent.as_ref().is_none_or(|parent| !frames.contains_key(parent)))
@@ -198,14 +198,14 @@ impl NetworkIdle {
     }
   }
 
-  fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Arc<str>, FrameIdle>> {
+  fn lock(&self) -> std::sync::MutexGuard<'_, FxHashMap<Arc<str>, FrameIdle>> {
     self.frames.lock().unwrap_or_else(PoisonError::into_inner)
   }
 }
 
 /// Whether `id` and its subtree are idle, firing and un-firing on the way.
 fn settle(
-  frames: &mut HashMap<Arc<str>, FrameIdle>,
+  frames: &mut FxHashMap<Arc<str>, FrameIdle>,
   id: &Arc<str>,
   committed: Option<&Arc<str>>,
   changed: &mut bool,

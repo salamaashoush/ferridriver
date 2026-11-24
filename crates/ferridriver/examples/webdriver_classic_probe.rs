@@ -1,5 +1,6 @@
 use ferridriver::backend::webdriver::browser::WebDriverBrowser;
 use serde_json::json;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let result = probe(&browser).await;
   let cleanup = browser.close().await;
   match (result, cleanup) {
-    (Ok(report), Ok(())) => println!("{report}"),
+    (Ok(report), Ok(())) => writeln!(std::io::stdout().lock(), "{report}")?,
     (Err(error), Ok(())) => return Err(error),
     (Ok(_), Err(error)) => return Err(error.into()),
     (Err(error), Err(cleanup)) => return Err(format!("{error}; session cleanup failed: {cleanup}").into()),

@@ -1566,7 +1566,10 @@ mod tests {
       session_id,
       state.clone(),
       notify,
-      frame_state_observer(Arc::default(), crate::events::EventEmitter::new()),
+      frame_state_observer(
+        Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(session_id))),
+        crate::events::EventEmitter::new(),
+      ),
     );
     state
   }
@@ -1575,7 +1578,7 @@ mod tests {
   fn frame_cache_is_current_when_lifecycle_waiters_are_released() {
     let dispatcher = CdpDispatcher::new();
     let state = register_test_tracker(&dispatcher, "s1");
-    let cache = Arc::default();
+    let cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new("f1")));
     dispatcher.register_lifecycle_tracker(
       "s1",
       state.clone(),
