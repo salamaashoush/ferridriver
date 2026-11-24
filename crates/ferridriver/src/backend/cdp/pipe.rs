@@ -93,22 +93,21 @@ impl PipeTransport {
     //      without memmove. Prior `Vec::drain(..=nul_pos)` shifted
     //      remaining bytes — O(N²) for back-to-back small frames.
     //
-    // Reads land into a fixed `tmp` stack buffer first (kept for
-    // `AsyncRead::read` ergonomics), then are appended to `rx`. We
-    // only memchr-scan the bytes we just appended (`from_idx`) so
+    // Reads append straight into `rx` through `read_buf`. We
+    // only memchr-scan the bytes we just appended (`scan_from`) so
     // each message frame's NUL costs O(message-length) lookup, not
     // O(buffer-length) — keeps the per-message dispatch cost flat
     // across read sizes.
-    let dispatcher2 = dispatcher.clone();
+    let dispatcher2 = Arc::clone(&dispatcher);
     let reader_ended = shutdown.clone();
     let reader_task = tokio::spawn(async move {
       let mut reader: BoxReader = reader;
       let mut rx = bytes::BytesMut::with_capacity(64 * 1024);
-      #[allow(clippy::large_stack_arrays)]
-      let mut tmp = [0u8; 32768];
 
       loop {
-        let n = match reader.read(&mut tmp).await {
+        let scan_from = rx.len();
+        rx.reserve(32 * 1024);
+        match reader.read_buf(&mut rx).await {
           Ok(0) | Err(_) => {
             // Pipe EOF / error — chrome exited. Drain every pending
             // oneshot so in-flight `send_command` awaits return with
@@ -120,10 +119,8 @@ impl PipeTransport {
             reader_ended.send_replace(true);
             return;
           },
-          Ok(n) => n,
-        };
-        let scan_from = rx.len();
-        rx.extend_from_slice(&tmp[..n]);
+          Ok(_) => {},
+        }
 
         // Drain every complete (NUL-terminated) message currently in `rx`.
         let mut search_from = scan_from;
@@ -249,6 +246,48 @@ impl super::transport::CdpTransport for PipeTransport {
 
 // ── Platform-specific pipe spawning ──
 
+/// Places the child end of the socket pair on fds 3 and 4 of the forked
+/// Chrome, where `--remote-debugging-pipe` reads and writes, and puts Chrome
+/// in its own session so `kill_process_group` takes down every renderer, GPU
+/// and zygote helper with it (see `backend::process`). Any other number the
+/// socket has in the child is close-on-exec, as std opens every socket.
+#[cfg(unix)]
+#[expect(
+  unsafe_code,
+  reason = "pre_exec has no safe form, and Chrome reads the pipe from the raw descriptor numbers 3 and 4, which no owned-fd API can name"
+)]
+fn hand_pipe_to_child(command: &mut tokio::process::Command, child_fd: std::os::fd::RawFd) {
+  let place_fds = move || -> std::io::Result<()> {
+    rustix::process::setsid()?;
+    // SAFETY: `child_fd` belongs to the `UnixStream` that `spawn_with_pipes`
+    // keeps alive until `spawn` returns, and the forked child runs this on
+    // its own copy of the descriptor table, so the descriptor stays open for
+    // the whole closure.
+    let socket = unsafe { std::os::fd::BorrowedFd::borrow_raw(child_fd) };
+    for target in [3, 4] {
+      if child_fd == target {
+        let flags = rustix::io::fcntl_getfd(socket)?;
+        rustix::io::fcntl_setfd(socket, flags.difference(rustix::io::FdFlags::CLOEXEC))?;
+      } else {
+        // SAFETY: `dup2` takes plain descriptor numbers and is
+        // async-signal-safe; whatever held `target` in the child is closed
+        // and replaced, which is the point.
+        let placed = unsafe { libc::dup2(child_fd, target) };
+        if placed == -1 {
+          return Err(std::io::Error::last_os_error());
+        }
+      }
+    }
+    Ok(())
+  };
+  // SAFETY: `place_fds` runs between fork and exec, where only
+  // async-signal-safe work is sound. It makes only the `setsid`, `fcntl` and
+  // `dup2` syscalls and allocates nothing, errors included.
+  unsafe {
+    command.pre_exec(place_fds);
+  }
+}
+
 #[cfg(unix)]
 fn spawn_with_pipes(
   command: &mut tokio::process::Command,
@@ -270,29 +309,7 @@ fn spawn_with_pipes(
     // ate the full 30s timeout instead of failing fast.
     let child_fd = child_sock.as_raw_fd();
 
-    #[allow(unsafe_code)]
-    unsafe {
-      command.pre_exec(move || {
-        // Put the Chrome parent in its own session + process group so
-        // `kill_process_group` can take down every renderer/GPU/zygote
-        // helper together on teardown. See `backend::process`.
-        libc::setsid();
-        let flags = libc::fcntl(child_fd, libc::F_GETFD);
-        if flags != -1 {
-          libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-        }
-        if child_fd != 3 && libc::dup2(child_fd, 3) == -1 {
-          return Err(std::io::Error::last_os_error());
-        }
-        if child_fd != 4 && libc::dup2(child_fd, 4) == -1 {
-          return Err(std::io::Error::last_os_error());
-        }
-        if child_fd != 3 && child_fd != 4 {
-          libc::close(child_fd);
-        }
-        Ok(())
-      });
-    }
+    hand_pipe_to_child(command, child_fd);
 
     let child = command
       .spawn()
@@ -357,7 +374,7 @@ mod tests {
     let (write_tx, queued) = tokio::sync::mpsc::channel(1);
     let transport = PipeTransport {
       write_tx: write_tx.clone(),
-      dispatcher: dispatcher.clone(),
+      dispatcher: Arc::clone(&dispatcher),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     };
     super::super::transport::verify_operation_budgets(transport, dispatcher, write_tx, queued, vec![0]).await;
@@ -395,14 +412,14 @@ mod tests {
       let (write_tx, mut queued) = tokio::sync::mpsc::channel(4);
       let transport = Arc::new(PipeTransport {
         write_tx,
-        dispatcher: dispatcher.clone(),
+        dispatcher: Arc::clone(&dispatcher),
         tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
       });
-      let page = context_test_page(transport.clone(), session);
+      let page = context_test_page(Arc::clone(&transport), session);
       transport.register_lifecycle_tracker(
         session,
-        page.lifecycle.clone(),
-        page.lifecycle_notify.clone(),
+        Arc::clone(&page.lifecycle),
+        Arc::clone(&page.lifecycle_notify),
         page.frame_observer(),
       );
       let created = |session: &str, id| {
@@ -450,7 +467,7 @@ mod tests {
     let (write_tx, _queued) = tokio::sync::mpsc::channel(4);
     let transport = Arc::new(PipeTransport {
       write_tx,
-      dispatcher: dispatcher.clone(),
+      dispatcher: Arc::clone(&dispatcher),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     });
     let created = |session: &str, frame: &str, id, default| {
@@ -468,11 +485,11 @@ mod tests {
     ] {
       dispatcher.dispatch_message(&serde_json::to_vec(&event).unwrap());
     }
-    let page = context_test_page(transport.clone(), "existing");
+    let page = context_test_page(Arc::clone(&transport), "existing");
     transport.register_lifecycle_tracker(
       "existing",
-      page.lifecycle.clone(),
-      page.lifecycle_notify.clone(),
+      Arc::clone(&page.lifecycle),
+      Arc::clone(&page.lifecycle_notify),
       page.frame_observer(),
     );
     let child = page.peek_frame_context("child");
@@ -529,7 +546,7 @@ mod tests {
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel(1);
     let transport = Arc::new(PipeTransport {
       write_tx,
-      dispatcher: dispatcher.clone(),
+      dispatcher: Arc::clone(&dispatcher),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     });
     let listener = super::super::CdpPage::spawn_fetch_listener(
@@ -564,7 +581,7 @@ mod tests {
     let (write_tx, _write_rx) = tokio::sync::mpsc::channel(1);
     let transport = Arc::new(PipeTransport {
       write_tx,
-      dispatcher: dispatcher.clone(),
+      dispatcher: Arc::clone(&dispatcher),
       tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     });
     let log = Arc::new(tokio::sync::RwLock::new(Vec::new()));
@@ -573,7 +590,7 @@ mod tests {
       transport,
       Some(Arc::from("session")),
       Arc::from("page"),
-      log.clone(),
+      Arc::clone(&log),
       crate::events::EventEmitter::new(),
       navigation.clone(),
     );
