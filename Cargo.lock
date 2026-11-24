@@ -1839,7 +1839,7 @@ name = "ferridriver-gate"
 version = "0.8.0"
 dependencies = [
  "anyhow",
- "libc",
+ "rustix 1.1.6",
  "serde_json",
  "tokio",
 ]
@@ -2071,6 +2071,7 @@ name = "ferridriver-trace"
 version = "0.8.0"
 dependencies = [
  "base64 0.23.1",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",

@@ -8,13 +8,13 @@ use tokio::process::Command;
 
 use crate::Job;
 
-pub struct FixtureServer {
+pub(crate) struct FixtureServer {
   child: Option<tokio::process::Child>,
   group: Option<ProcessGroup>,
 }
 
 impl FixtureServer {
-  pub async fn start(root: &Path, logs: &Path) -> Result<Self> {
+  pub(crate) async fn start(root: &Path, logs: &Path) -> Result<Self> {
     use tokio::io::AsyncBufReadExt;
 
     if tokio::net::TcpStream::connect("127.0.0.1:47831").await.is_ok() {
@@ -64,7 +64,7 @@ impl FixtureServer {
     })
   }
 
-  pub async fn stop(&mut self) {
+  pub(crate) async fn stop(&mut self) {
     if let (Some(child), Some(group)) = (&mut self.child, &self.group) {
       group.terminate(child).await;
       child.wait().await.ok();
@@ -81,20 +81,17 @@ fn runtime_workers(parallelism: usize) -> std::ffi::OsString {
 
 impl ProcessGroup {
   #[cfg(unix)]
-  fn signal(&self, signal: i32) {
-    if let Ok(pid) = i32::try_from(self.0) {
-      // The child is a new process-group leader; this cannot signal the gate's
-      // own group.
-      #[allow(unsafe_code)]
-      unsafe {
-        libc::kill(-pid, signal);
-      }
+  fn signal(&self, signal: rustix::process::Signal) {
+    // The child is a new process-group leader; this cannot signal the gate's
+    // own group.
+    if let Some(pid) = i32::try_from(self.0).ok().and_then(rustix::process::Pid::from_raw) {
+      rustix::process::kill_process_group(pid, signal).ok();
     }
   }
 
   #[cfg(unix)]
   fn kill(&self) {
-    self.signal(libc::SIGKILL);
+    self.signal(rustix::process::Signal::KILL);
   }
 
   /// Windows has no process groups to signal; `taskkill /T` walks the tree
@@ -117,7 +114,7 @@ impl ProcessGroup {
   /// seconds go to seeing it gone.
   async fn terminate(&self, child: &mut tokio::process::Child) {
     #[cfg(unix)]
-    self.signal(libc::SIGTERM);
+    self.signal(rustix::process::Signal::TERM);
     #[cfg(windows)]
     self.kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
@@ -133,14 +130,14 @@ impl Drop for ProcessGroup {
   }
 }
 
-pub struct Finished {
-  pub name: String,
-  pub passed: bool,
-  pub elapsed: f64,
-  pub log: PathBuf,
+pub(crate) struct Finished {
+  pub(crate) name: String,
+  pub(crate) passed: bool,
+  pub(crate) elapsed: f64,
+  pub(crate) log: PathBuf,
 }
 
-pub async fn run(
+pub(crate) async fn run(
   job: &Job,
   root: &Path,
   logs: &Path,
