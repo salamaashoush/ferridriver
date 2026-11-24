@@ -5,6 +5,12 @@ use crate::backend::{AxNodeData, AxProperty, BackgroundColor, ImageFormat, Scree
 use crate::error::{FerriError, Result};
 
 impl WebDriverPage {
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` for header or footer templates, `prefer_css_page_size`,
+  /// `outline` or `tagged`, `FerriError::InvalidArgument` for an unknown paper `format`, and an
+  /// error when the `WebDriver` `POST /session/{id}/print` command fails or returns data that is not
+  /// base64.
   pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     use base64::Engine;
     if opts.display_header_footer == Some(true)
@@ -61,6 +67,10 @@ impl WebDriverPage {
   }
 
   /// Classic `WebDriver` has no background override.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `color` is `Some`.
   pub fn set_background_color(color: Option<BackgroundColor>) -> Result<()> {
     if color.is_some() {
       return Err(FerriError::unsupported(
@@ -72,6 +82,13 @@ impl WebDriverPage {
 
   /// Classic `WebDriver` captures the visible viewport only, so the rect is
   /// cropped out of that capture and anything beyond it is refused.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when the rect extends beyond the visible viewport,
+  /// `FerriError::InvalidArgument` when the clipped area is empty, and an error when reading the
+  /// viewport geometry, the `WebDriver` `GET /session/{id}/screenshot` command, or decoding and
+  /// encoding the image fails.
   pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     let geometry = self
       .execute_script(
@@ -143,10 +160,18 @@ impl WebDriverPage {
     Ok(output.into_inner())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `accessibility_tree_with_depth`.
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     self.accessibility_tree_with_depth(-1).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when injecting the selector engine and accessibility support or the `WebDriver`
+  /// `POST /session/{id}/execute/sync` command that collects the tree fails, and
+  /// `FerriError::Protocol` when the result is not an array of nodes with ids.
   pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     self.ensure_engine_injected().await?;
     self.execute_script(crate::selectors::AX_SUPPORT_JS, vec![]).await?;

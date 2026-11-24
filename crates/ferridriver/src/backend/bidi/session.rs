@@ -31,12 +31,9 @@ pub(crate) struct LaunchedProfile {
 /// A `BiDi` session -- holds the transport and session metadata.
 #[derive(Clone)]
 pub(crate) struct BidiSession {
-  #[allow(dead_code)]
   pub session_id: String,
   pub transport: Arc<BidiTransport>,
-  #[allow(dead_code)]
   pub browser_name: String,
-  #[allow(dead_code)]
   pub browser_version: String,
   pub classic: Option<Arc<crate::backend::webdriver::session::WebDriverSession>>,
   /// What `session.new` answered, which a served browser's clients are
@@ -51,22 +48,12 @@ pub(crate) struct BidiSession {
 // 291371), so lifecycle subscriptions must name their concrete events.
 
 impl BidiSession {
-  /// Connect to a `BiDi` endpoint directly via WebSocket.
-  ///
-  /// This is the native `BiDi` approach:
-  /// 1. Connect WebSocket to `ws://host:port/session`
-  /// 2. Send `session.new` to create a session
-  /// 3. Subscribe to all events
-  pub async fn connect(ws_url: &str) -> Result<Self> {
-    Box::pin(Self::connect_with_proxy(ws_url, None)).await
-  }
-
   /// Connect and open a session whose default context uses `proxy`.
   ///
   /// Firefox has no proxy command-line switch, so `launch({ proxy })` lands
   /// here: the `WebDriver` `proxy` capability is the browser-wide equivalent, and
   /// a user context created later with its own proxy still overrides it.
-  pub async fn connect_with_proxy(ws_url: &str, proxy: Option<&crate::options::ProxyConfig>) -> Result<Self> {
+  pub(crate) async fn connect_with_proxy(ws_url: &str, proxy: Option<&crate::options::ProxyConfig>) -> Result<Self> {
     Self::connect_with_options(ws_url, proxy, None).await
   }
 
@@ -107,14 +94,14 @@ impl BidiSession {
       .and_then(|v| v.as_str())
       .unwrap_or("unknown")
       .to_string();
-    let capabilities = result.get("capabilities").cloned().unwrap_or(json!({}));
+    let capabilities = result.get("capabilities").cloned().unwrap_or_else(|| json!({}));
     Self::finish(transport, session_id, capabilities, None).await
   }
 
   /// Attach to a `BiDi` WebSocket returned by a pre-existing `WebDriver` Classic
   /// session. The HTTP session already ran `session.new`, so sending a second
   /// `session.new` would create a different session or fail on Appium/Safari.
-  pub async fn connect_existing(
+  pub(crate) async fn connect_existing(
     ws_url: &str,
     session_id: String,
     capabilities: serde_json::Value,
@@ -202,7 +189,7 @@ impl BidiSession {
     })
   }
 
-  pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+  pub(crate) async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     if method == "input.performActions" && self.classic.is_some() {
       return Box::pin(self.send_input(params)).await;
     }
@@ -236,7 +223,7 @@ impl BidiSession {
       .and_then(serde_json::Value::as_str)
       .ok_or_else(|| FerriError::invalid_argument("context", "input requires a browsing context"))?;
     let page = crate::backend::webdriver::page::WebDriverPage::new(
-      classic.clone(),
+      Arc::clone(classic),
       crate::backend::webdriver::session::Target {
         window: Some(context.to_owned()),
         ..Default::default()
@@ -245,13 +232,6 @@ impl BidiSession {
     );
     page.perform_actions(params).await?;
     Ok(json!({}))
-  }
-
-  /// Connect to a `BiDi` endpoint at the given port.
-  /// Constructs `ws://127.0.0.1:{port}/session` and connects.
-  #[allow(dead_code, reason = "public library API for external consumers")]
-  pub async fn connect_to_port(port: u16) -> Result<Self> {
-    Box::pin(Self::connect(&format!("ws://127.0.0.1:{port}/session"))).await
   }
 
   /// Launch Firefox and create a `BiDi` session.
@@ -267,7 +247,7 @@ impl BidiSession {
   /// `profile` alive for the lifetime of the browser — the owned variant's
   /// `Drop` removes the directory from disk. Firefox is launched with
   /// `kill_on_drop(true)` so the process dies before the dir vanishes.
-  pub async fn launch_firefox(
+  pub(crate) async fn launch_firefox(
     firefox_path: &str,
     flags: &[String],
     headless: bool,
@@ -314,7 +294,7 @@ impl BidiSession {
       );
     }
 
-    let mut profile_guard = super::profile::ProfileGuard::acquire(&profile_dir.path)?;
+    let profile_guard = super::profile::ProfileGuard::acquire(&profile_dir.path)?;
 
     // Pre-create the per-profile downloads dir and pin Firefox to it
     // via `browser.download.dir` + `folderList=2`. Without these prefs
@@ -392,15 +372,8 @@ impl BidiSession {
 
     // Put Firefox into its own session+process group so content/plugin
     // subprocesses die together with the parent on teardown.
-    // SAFETY: `setsid` is async-signal-safe; the closure performs no
-    // allocation and captures nothing. `pre_exec` is unsafe on tokio's
-    // `Command` because arbitrary code runs post-fork; our closure is
-    // trivially sound.
     #[cfg(unix)]
-    #[allow(unsafe_code)]
-    unsafe {
-      command.pre_exec(crate::backend::process::setsid_pre_exec());
-    }
+    crate::backend::process::spawn_in_own_session(command.as_std_mut());
 
     debug!("Launching Firefox for BiDi: {firefox_path}");
     let mut child =
@@ -426,7 +399,7 @@ impl BidiSession {
   /// Launch a browser and create a `BiDi` session.
   /// Currently supports Firefox (native `BiDi`). Chrome does not have built-in
   /// `BiDi` support -- use the CDP backend for Chrome instead.
-  pub async fn launch(
+  pub(crate) async fn launch(
     browser_path: &str,
     flags: &[String],
     headless: bool,
@@ -454,13 +427,6 @@ impl BidiSession {
          Set FIREFOX_PATH or install Firefox."
       )))
     }
-  }
-
-  /// End the `BiDi` session gracefully.
-  #[allow(dead_code)]
-  pub async fn end(&self) -> Result<()> {
-    let _ = self.transport.send_command("session.end", json!({})).await;
-    Ok(())
   }
 }
 
@@ -518,8 +484,10 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
         // Look for the BiDi WebSocket URL
         // Firefox prints: "WebDriver BiDi listening on ws://127.0.0.1:PORT"
         // The actual BiDi endpoint is at ws://host:port/session
-        if let Some(pos) = line.find("ws://") {
-          let mut ws_url = line[pos..].trim().to_string();
+        if let Some(pos) = line.find("ws://")
+          && let Some(url) = line.get(pos..)
+        {
+          let mut ws_url = url.trim().to_string();
           // Ensure the URL ends with /session (Firefox's BiDi endpoint)
           if !ws_url.ends_with("/session") {
             if ws_url.ends_with('/') {

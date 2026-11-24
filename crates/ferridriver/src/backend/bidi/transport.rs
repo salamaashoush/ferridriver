@@ -58,7 +58,7 @@ pub(crate) struct EventBarrier {
 }
 
 impl EventBarrier {
-  pub async fn wait(&self) -> Result<()> {
+  pub(crate) async fn wait(&self) -> Result<()> {
     let (tx, rx) = oneshot::channel();
     self
       .sender
@@ -84,11 +84,11 @@ impl EventTap {
     (sender, Self { receiver, barrier })
   }
 
-  pub fn barrier(&self) -> EventBarrier {
+  pub(crate) fn barrier(&self) -> EventBarrier {
     self.barrier.clone()
   }
 
-  pub async fn recv(&mut self) -> Option<BidiEvent> {
+  pub(crate) async fn recv(&mut self) -> Option<BidiEvent> {
     while let Some(message) = self.receiver.recv().await {
       match message {
         TapMessage::Event(event) => return Some(event),
@@ -209,11 +209,11 @@ async fn connect_socket(
 
 impl BidiTransport {
   /// Connect to a `BiDi` WebSocket endpoint.
-  pub async fn connect(ws_url: &str) -> Result<Self> {
+  pub(crate) async fn connect(ws_url: &str) -> Result<Self> {
     Self::connect_with_headers(ws_url, None).await
   }
 
-  pub async fn connect_with_headers(
+  pub(crate) async fn connect_with_headers(
     ws_url: &str,
     headers: Option<&rustc_hash::FxHashMap<String, String>>,
   ) -> Result<Self> {
@@ -247,7 +247,7 @@ impl BidiTransport {
     let closing2 = Arc::clone(&closing);
 
     // Reader task -- hot path uses json_scan for zero-alloc field extraction
-    let pending2 = pending.clone();
+    let pending2 = Arc::clone(&pending);
     let reader_ended = shutdown.clone();
     let reader = tokio::spawn(async move {
       let mut read = read;
@@ -342,7 +342,7 @@ impl BidiTransport {
 
   /// Reject commands and request a close handshake independently of queue capacity.
   /// This also marks expected process termination for the reader's diagnostics.
-  pub fn start_close(&self) {
+  pub(crate) fn start_close(&self) {
     self.closing.store(true, Ordering::Release);
     self.event_tx.store(None);
     self
@@ -359,13 +359,13 @@ impl BidiTransport {
     self.tasks.start_close();
   }
 
-  pub async fn close(&self) -> Result<()> {
+  pub(crate) async fn close(&self) -> Result<()> {
     self.start_close();
     self.tasks.close().await
   }
 
   /// Send a `BiDi` command and await the response.
-  pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+  pub(crate) async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self.send_raw(method, params).await?.map_err(|e| {
       if matches!(e.error.as_str(), "no such frame" | "target closed") {
         FerriError::target_closed(Some(e.to_string()))
@@ -380,7 +380,7 @@ impl BidiTransport {
   /// Send a `BiDi` command and await the browser's answer as it gave it:
   /// its result, or its error code and message. The outer error is the
   /// transport's own, the connection closed or the time up.
-  pub async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
+  pub(crate) async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
     let budget = crate::operation_budget::OperationBudget::current(60_000)?;
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
@@ -411,13 +411,13 @@ impl BidiTransport {
   }
 
   /// Resolves once the connection to the browser has ended.
-  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+  pub(crate) fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
     self.tasks.closed()
   }
 
   /// Subscribe to `BiDi` events. Returns a broadcast receiver.
   /// Receivers filter by event method at the receive site.
-  pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
+  pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
     self
       .event_tx
       .load()
@@ -441,7 +441,7 @@ impl BidiTransport {
   /// Lossless, wire-ordered event tap. Never drops; consumers filter by
   /// method at the receive site. State-mutating consumers MUST use this
   /// instead of [`Self::subscribe_events`].
-  pub fn tap_events(&self) -> EventTap {
+  pub(crate) fn tap_events(&self) -> EventTap {
     let (tx, rx) = EventTap::new();
     let mut taps = self
       .event_taps

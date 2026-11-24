@@ -161,6 +161,10 @@ impl Connection {
     result
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when one of the inspector pipe's I/O tasks ends with a failure other than
+  /// cancellation during cleanup.
   pub async fn close(&self) -> crate::Result<()> {
     self.start_close();
     self.tasks.close().await
@@ -240,6 +244,11 @@ impl Connection {
   /// Fire a raw envelope onto the wire without expecting a response.
   /// Used by `Playwright.close`, which the child answers by closing
   /// the pipe rather than replying.
+  ///
+  /// # Errors
+  ///
+  /// Returns `ConnectionError::Transport` when the connection has closed, the writer task has
+  /// stopped, or `envelope` cannot be serialized.
   pub fn send_raw(&self, envelope: &Value) -> Result<(), ConnectionError> {
     if self.closed.load(Ordering::Acquire) {
       return Err(TransportError::Closed.into());
@@ -482,6 +491,14 @@ impl Session {
   }
 
   /// Send `method` and await its reply.
+  ///
+  /// # Errors
+  ///
+  /// Returns `ConnectionError::Timeout` when the operation budget (30 seconds by default) runs out
+  /// before the reply, `ConnectionError::Closed` when the connection closes first, and
+  /// `ConnectionError::Protocol` when the browser answers with an error, including a rejected
+  /// `Target.sendMessageToTarget` wrapper on a target session. `ConnectionError::Transport` or
+  /// `ConnectionError::Json` come back when the message cannot be encoded or written.
   pub async fn send(&self, method: &str, params: Value) -> Result<Value, ConnectionError> {
     let budget =
       OperationBudget::current(REPLY_TIMEOUT_MS).map_err(|error| ConnectionError::Protocol(error.to_string()))?;

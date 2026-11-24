@@ -10,6 +10,10 @@ pub struct WebDriverElement {
 }
 
 impl WebDriverElement {
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/element/{element id}/value` command
+  /// (or `/clear` when `paths` is empty) fails, for example when the element reference is stale.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
     let (command, body) = if paths.is_empty() {
       ("clear", json!({}))
@@ -28,6 +32,11 @@ impl WebDriverElement {
     Self { page, id }
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/element/{element id}/click` command
+  /// fails, for example when the element is stale or obscured. On `XCUITest`, forwards the error from
+  /// scrolling the element into view, reading its centre, or the pointer actions that tap it.
   pub async fn click(&self) -> Result<()> {
     if super::capabilities::uses_xcuitest(&self.page.capabilities) {
       self.scroll_into_view().await?;
@@ -41,18 +50,32 @@ impl WebDriverElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when scrolling the element into view or reading its centre through the
+  /// `WebDriver` `POST /session/{id}/execute/sync` command fails, or when the `WebDriver`
+  /// `POST /session/{id}/actions` command for the double click fails.
   pub async fn dblclick(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y) = self.center().await?;
     self.page.click_at_opts(x, y, "left", 2).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when scrolling the element into view or reading its centre through the
+  /// `WebDriver` `POST /session/{id}/execute/sync` command fails, or when the `WebDriver`
+  /// `POST /session/{id}/actions` command that moves the pointer fails.
   pub async fn hover(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y) = self.center().await?;
     self.page.move_mouse(x, y).await
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/element/{element id}/value` command
+  /// fails, for example when the element is stale or not interactable.
   pub async fn type_str(&self, text: &str) -> Result<()> {
     self
       .page
@@ -61,6 +84,11 @@ impl WebDriverElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session/{id}/execute/sync` command fails, for
+  /// example when the element reference is stale, and `FerriError::Evaluation` when the function
+  /// throws.
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<Value>> {
     let value = self
       .page
@@ -72,11 +100,18 @@ impl WebDriverElement {
     Ok(Some(value))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `call_js_fn_value`.
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     self.call_js_fn_value(function).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error from `call_js_fn` when the `WebDriver` `POST /session/{id}/execute/sync`
+  /// command that scrolls the element fails.
   pub async fn scroll_into_view(&self) -> Result<()> {
     self
       .call_js_fn("el => el.scrollIntoView({block:'center',inline:'center'})")

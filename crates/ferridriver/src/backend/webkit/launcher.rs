@@ -43,6 +43,11 @@ pub enum LaunchError {
 
 /// Resolve the `pw_run.sh` (or platform-equivalent) path. Returns the
 /// first existing candidate from the search order.
+///
+/// # Errors
+///
+/// Returns `LaunchError::BinaryNotFound` when `FERRIDRIVER_WEBKIT` names no file and no `WebKit`
+/// build is installed in the ferridriver or Playwright cache.
 pub fn locate_binary() -> Result<PathBuf, LaunchError> {
   if let Ok(path) = std::env::var("FERRIDRIVER_WEBKIT") {
     let p = PathBuf::from(path);
@@ -60,6 +65,10 @@ pub fn locate_binary() -> Result<PathBuf, LaunchError> {
 /// An explicit `executablePath`, refused up front when nothing is there:
 /// the operating system's own wording for a missing program differs per
 /// platform.
+///
+/// # Errors
+///
+/// Returns `LaunchError::ExecutableNotFound` when `path` is not a file.
 pub fn require_executable(path: PathBuf) -> Result<PathBuf, LaunchError> {
   if path.is_file() {
     Ok(path)
@@ -137,17 +146,27 @@ fn arguments(config: &LaunchConfig) -> Result<Vec<String>, LaunchError> {
 /// caller is responsible for keeping ownership of the parent ends of
 /// the pipe; this function only borrows the descriptors long enough to
 /// dup them into the child's environment.
+///
+/// # Errors
+///
+/// Returns `LaunchError::Io` when the user data directory cannot be created or the child process
+/// fails to spawn.
 #[cfg(unix)]
+#[expect(
+  unsafe_code,
+  reason = "placing the inspector pipe on fds 3 and 4 needs a `pre_exec` hook, which std only offers as unsafe"
+)]
 pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<ChildGroup, LaunchError> {
   let mut cmd = Command::new(binary);
   cmd.envs(&config.env);
   cmd.args(arguments(config)?);
 
   // The child expects fd 3 (its read end) and fd 4 (its write end).
-  // SAFETY: the dup2 + fcntl calls happen post-fork in `pre_exec`
-  // before any other thread can observe the descriptors. We do NOT
-  // close `read_fd` / `write_fd` here — the parent owns those.
-  #[allow(unsafe_code)]
+  // SAFETY: the hook runs in the child between fork and exec, so only
+  // async-signal-safe work is sound there: it makes only the setsid,
+  // dup2 and fcntl system calls, allocates nothing, and captures two
+  // plain descriptor numbers. We do NOT close `read_fd` / `write_fd`
+  // here — the parent owns those.
   unsafe {
     use std::os::unix::process::CommandExt;
     cmd.pre_exec(move || {
@@ -155,9 +174,7 @@ pub fn spawn(binary: &Path, config: &LaunchConfig, read_fd: i32, write_fd: i32) 
       // killing the direct child would leave the real WebKit process
       // and its helpers behind. `crate::backend::process::kill_process_group`
       // takes the whole group down on teardown instead.
-      if libc::setsid() == -1 {
-        return Err(std::io::Error::last_os_error());
-      }
+      rustix::process::setsid()?;
       pre_exec_setup_fds(read_fd, write_fd)
     });
   }
@@ -244,26 +261,31 @@ pub fn spawn(
 }
 
 #[cfg(unix)]
+#[expect(
+  unsafe_code,
+  reason = "fds 3 and 4 are bare numbers in the forked child; no owned descriptor exists to hand a safe wrapper"
+)]
 fn pre_exec_setup_fds(read_fd: i32, write_fd: i32) -> std::io::Result<()> {
   // Child reads its input from fd 3 (parent's write_fd) and writes its
   // output to fd 4 (parent's read_fd). Order matters: write_fd → 3
   // first, read_fd → 4 second; if we did it the other way around and
   // write_fd happened to be 4, the first dup2 would clobber it.
-  // SAFETY: post-fork, single-threaded child.
-  #[allow(unsafe_code)]
-  unsafe {
-    if libc::dup2(write_fd, 3) == -1 {
-      return Err(std::io::Error::last_os_error());
-    }
-    if libc::dup2(read_fd, 4) == -1 {
-      return Err(std::io::Error::last_os_error());
-    }
-    // Clear FD_CLOEXEC on fds 3 and 4 so they survive the exec.
-    for fd in [3i32, 4] {
-      let flags = libc::fcntl(fd, libc::F_GETFD);
-      if flags != -1 {
-        libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-      }
+  // SAFETY: dup2 only reads its integer arguments; in the single-threaded
+  // child no other thread can be using fd 3.
+  if unsafe { libc::dup2(write_fd, 3) } == -1 {
+    return Err(std::io::Error::last_os_error());
+  }
+  // SAFETY: as above, for fd 4.
+  if unsafe { libc::dup2(read_fd, 4) } == -1 {
+    return Err(std::io::Error::last_os_error());
+  }
+  // Clear FD_CLOEXEC on fds 3 and 4 so they survive the exec.
+  for fd in [3i32, 4] {
+    // SAFETY: F_GETFD takes no pointer argument and only reads the flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags != -1 {
+      // SAFETY: F_SETFD takes an integer flag set and touches only `fd`.
+      unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
     }
   }
   Ok(())

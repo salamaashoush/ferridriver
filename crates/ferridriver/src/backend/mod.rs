@@ -1,4 +1,3 @@
-#![allow(clippy::missing_errors_doc)]
 //! Backend abstraction layer for browser automation.
 //!
 //! Provides a unified API across multiple browser backends:
@@ -1021,6 +1020,10 @@ impl AnyBrowser {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's context creation, and returns
+  /// `FerriError::Unsupported` on Classic `WebDriver`, whose session has one context.
   pub async fn new_context(&self, options: Option<&crate::options::BrowserContextOptions>) -> Result<String> {
     let proxy = options.and_then(|o| o.proxy.as_ref());
     match self {
@@ -1059,6 +1062,10 @@ impl AnyBrowser {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `dispose_context`, and returns
+  /// `FerriError::Unsupported` on Classic `WebDriver`.
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     match self {
       Self::CdpPipe(b) => b.dispose_context(browser_context_id).await,
@@ -1237,6 +1244,11 @@ impl AnyPage {
   /// browser only emits `fileChooserOpened` after we ask it to.
   /// Called from `Page::wait_for_file_chooser` and
   /// `Page::on('filechooser', ...)`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `enable_file_chooser_intercept`, and returns
+  /// `FerriError::Unsupported` on Classic `WebDriver`. Never fails on `BiDi`, which needs no setup.
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.enable_file_chooser_intercept().await,
@@ -1253,6 +1265,11 @@ impl AnyPage {
   /// reporting. Lazy parity with Playwright's per-context
   /// `Browser.setDownloadBehavior` (`crBrowser.ts:354`). Called from
   /// `Page::wait_for_download` and `Page::on('download', ...)`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `enable_download_behavior`, and returns
+  /// `FerriError::Unsupported` on Classic `WebDriver`. Never fails on `BiDi`, which needs no setup.
   pub async fn enable_download_behavior(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.enable_download_behavior().await,
@@ -1427,6 +1444,10 @@ impl AnyPage {
 
   /// Force a garbage-collection pass in the page's JS engine.
   /// Playwright: `page.requestGC(): Promise<void>`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `request_gc`.
   pub async fn request_gc(&self) -> Result<()> {
     page_dispatch!(self, request_gc())
   }
@@ -1462,14 +1483,23 @@ impl AnyPage {
 
   // ── Frames ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `get_frame_tree`.
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     page_dispatch!(self, get_frame_tree())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `evaluate_in_frame`.
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     page_dispatch!(self, evaluate_in_frame(expression, frame_id))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `bring_to_front`.
   pub async fn bring_to_front(&self) -> Result<()> {
     page_dispatch!(self, bring_to_front())
   }
@@ -1477,6 +1507,11 @@ impl AnyPage {
   /// Bring the page to the front and return once it is drawn there, for
   /// a browser that draws only the tab in front. The CDP backends are
   /// the ones that drive such a browser.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `bring_to_front_drawn`, or of `bring_to_front` on
+  /// backends without one.
   pub async fn bring_to_front_drawn(&self) -> Result<()> {
     match self {
       Self::CdpPipe(page) => page.bring_to_front_drawn().await,
@@ -1491,6 +1526,10 @@ impl AnyPage {
   /// Protocol-level on every backend: CDP `DOM.getFrameOwner`,
   /// `WebKit` `DOM.resolveNode {frameId}`, `BiDi`
   /// `browsingContext.locateNodes` with a context locator.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `mark_snapshot_iframe`.
   pub async fn mark_snapshot_iframe(
     &self,
     child_frame_id: &str,
@@ -1508,6 +1547,11 @@ impl AnyPage {
   /// (`DOM.describeNode` → `contentFrameId`); `None` on `BiDi` (its
   /// deterministic path lives on the element handle via
   /// `content_frame_context`) or when the element hosts no frame.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `content_frame_id`. Never fails on `BiDi`, which
+  /// answers `None`.
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     match self {
       AnyPage::CdpPipe(p) => p.content_frame_id(object_id).await,
@@ -1520,6 +1564,9 @@ impl AnyPage {
 
   // ── Navigation ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `goto`.
   pub async fn goto(
     &self,
     url: &str,
@@ -1530,6 +1577,9 @@ impl AnyPage {
     page_dispatch!(self, goto(url, lifecycle, timeout_ms, referer))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `wait_for_navigation`.
   pub async fn wait_for_navigation(&self) -> Result<()> {
     page_dispatch!(self, wait_for_navigation())
   }
@@ -1557,22 +1607,37 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `reload`.
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, reload(lifecycle, timeout_ms))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `go_back`.
   pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, go_back(lifecycle, timeout_ms))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `go_forward`.
   pub async fn go_forward(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, go_forward(lifecycle, timeout_ms))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `url`.
   pub async fn url(&self) -> Result<Option<String>> {
     page_dispatch!(self, url())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `title`.
   pub async fn title(&self) -> Result<Option<String>> {
     page_dispatch!(self, title())
   }
@@ -1581,6 +1646,10 @@ impl AnyPage {
 
   /// Returns a script that ensures the selector engine is injected.
   /// Mirrored after Playwright's `injectedScript()`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `injected_script`.
   pub async fn injected_script(&self) -> Result<String> {
     page_dispatch!(self, injected_script())
   }
@@ -1617,6 +1686,9 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `ensure_engine_injected`.
   pub async fn ensure_engine_injected(&self) -> Result<()> {
     page_dispatch!(self, ensure_engine_injected())
   }
@@ -1633,12 +1705,18 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `evaluate`.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     page_dispatch!(self, evaluate(expression))
   }
 
   // ── Elements ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `find_element`.
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     match self {
       Self::CdpPipe(page) => page.find_element(selector).await,
@@ -1658,6 +1736,11 @@ impl AnyPage {
   /// realm; `WebKit` currently has no per-frame execution context, so
   /// non-main `frame_id` values fall back to the main page (DOM access
   /// via `WKFrameInfo` is a separate gap).
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `evaluate_to_element`, and on Classic `WebDriver` the
+  /// error of switching to `frame_id`.
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     match self {
       Self::CdpPipe(page) => page.evaluate_to_element(js, frame_id).await,
@@ -1674,10 +1757,16 @@ impl AnyPage {
 
   // ── Content ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `content`.
   pub async fn content(&self) -> Result<String> {
     page_dispatch!(self, content())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_content`.
   pub async fn set_content(&self, html: &str) -> Result<()> {
     page_dispatch!(self, set_content(html))
   }
@@ -1685,11 +1774,19 @@ impl AnyPage {
   // ── Screenshots ──
 
   /// The engine half of a screenshot (`PageDelegate.takeScreenshot`).
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `take_screenshot`.
   pub async fn take_screenshot(&self, capture: ScreenshotCapture) -> Result<Vec<u8>> {
     page_dispatch!(self, take_screenshot(capture))
   }
 
   /// `PageDelegate.setBackgroundColor`: `None` restores the default.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_background_color`.
   pub async fn set_background_color(&self, color: Option<BackgroundColor>) -> Result<()> {
     match self {
       Self::CdpPipe(p) => p.set_background_color(color).await,
@@ -1709,20 +1806,32 @@ impl AnyPage {
 
   // ── Accessibility ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `accessibility_tree`.
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     page_dispatch!(self, accessibility_tree())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `accessibility_tree_with_depth`.
   pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     page_dispatch!(self, accessibility_tree_with_depth(depth))
   }
 
   // ── Input ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `click_at`.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     page_dispatch!(self, click_at(x, y))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `click_at_opts`.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     page_dispatch!(self, click_at_opts(x, y, button, click_count))
   }
@@ -1732,12 +1841,20 @@ impl AnyPage {
   /// press/release, and `steps` interpolated `mousemove` events between
   /// the current cursor and the target. The events carry the held
   /// modifiers; [`Self::ensure_modifiers`] sets them for one action.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `click_at_with`.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &BackendClickArgs) -> Result<()> {
     page_dispatch!(self, click_at_with(x, y, args))
   }
 
   /// Dispatch a hover (no press/release) at `(x, y)` with `steps`
   /// interpolated `mousemove` events carrying the held modifiers.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `hover_at_with`.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
     page_dispatch!(self, hover_at_with(x, y, args))
   }
@@ -1745,6 +1862,10 @@ impl AnyPage {
   /// Dispatch a native tap at `(x, y)` — CDP `Input.dispatchTouchEvent`
   /// (`touchStart` + `touchEnd`), `WebKit` `Input.dispatchTapEvent`,
   /// `BiDi` a `touch`-pointer `input.performActions` sequence.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `tap_at_with`.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     page_dispatch!(self, tap_at_with(x, y))
   }
@@ -1762,6 +1883,11 @@ impl AnyPage {
   /// Hold exactly the modifiers in `modifiers` (a CDP mask), pressing
   /// the missing ones and releasing the extra ones, and return the mask
   /// that was held before, which restores it.
+  ///
+  /// # Errors
+  ///
+  /// Returns the first error from `key_down` or `key_up` while changing a modifier; modifiers
+  /// changed before it stay changed.
   pub async fn ensure_modifiers(&self, modifiers: u32) -> Result<u32> {
     let restore = self.keyboard().modifiers();
     for modifier in ferridriver_types::keyboard::Modifier::ALL {
@@ -1776,30 +1902,50 @@ impl AnyPage {
     Ok(restore)
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `move_mouse`.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     page_dispatch!(self, move_mouse(x, y))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `move_mouse_smooth`.
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     page_dispatch!(self, move_mouse_smooth(from_x, from_y, to_x, to_y, steps))
   }
 
   /// Dispatch a wheel event at `(x, y)`, the pointer's position: the
   /// browser scrolls whatever is under it, as a real wheel would.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `mouse_wheel`.
   pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     page_dispatch!(self, mouse_wheel(x, y, delta_x, delta_y))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `mouse_down`.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     page_dispatch!(self, mouse_down(x, y, button, click_count))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `mouse_up`.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     page_dispatch!(self, mouse_up(x, y, button, click_count))
   }
 
   /// Insert text at the focus without emitting keyboard events (only
   /// `input` event). This is Playwright's `keyboard.insertText()` semantic.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `insert_text`.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
     page_dispatch!(self, insert_text(text))
   }
@@ -1830,6 +1976,11 @@ impl AnyPage {
   /// Press a key or a `+` combination (`"Control+a"`): every key goes
   /// down in order, the last one is held for `delay_ms`, and they come
   /// up in reverse.
+  ///
+  /// # Errors
+  ///
+  /// Returns the first error from `key_down` or `key_up`, including `FerriError::InvalidArgument`
+  /// for a key the US layout does not have.
   pub async fn press_key(&self, key: &str, delay_ms: u64) -> Result<()> {
     let keys = split_key_combo(key);
     let Some((last, held)) = keys.split_last() else {
@@ -1851,6 +2002,10 @@ impl AnyPage {
 
   /// Type one character: a key press when the US layout has a key for
   /// it, inserted text otherwise.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of `press_key` or `insert_text`.
   pub async fn type_char(&self, ch: char) -> Result<()> {
     let mut buf = [0u8; 4];
     let ch = ch.encode_utf8(&mut buf);
@@ -1863,23 +2018,40 @@ impl AnyPage {
 
   // ── Cookies ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `get_cookies`.
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     page_dispatch!(self, get_cookies())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_cookie`.
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
     page_dispatch!(self, set_cookie(cookie))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `delete_cookie`.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     page_dispatch!(self, delete_cookie(name, domain))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `clear_cookies`.
   pub async fn clear_cookies(&self) -> Result<()> {
     page_dispatch!(self, clear_cookies())
   }
 
   /// Clear cookies matching the given filters. If no filters, clears all.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when a filter pattern does not compile, or when reading or deleting cookies
+  /// fails.
   pub async fn clear_cookies_filtered(&self, options: &ClearCookieOptions) -> Result<()> {
     if options.is_empty() {
       return self.clear_cookies().await;
@@ -1904,6 +2076,11 @@ impl AnyPage {
   /// `ContextRef::new_page` and the context-level public setters
   /// (`setOffline`, `setGeolocation`, etc.) mutate the bag and
   /// re-apply.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` for network or CPU throttling off Chromium, and otherwise
+  /// the error of the backend's `apply_context_options` or of applying the context's media.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     if !matches!(self, AnyPage::CdpPipe(_) | AnyPage::CdpWs(_)) {
       let throttled = [
@@ -1926,12 +2103,20 @@ impl AnyPage {
     applied.and(media)
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `emulate_viewport`.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     page_dispatch!(self, emulate_viewport(config))
   }
 
   /// `page.emulateMedia`: a partial update of the page's own overrides,
   /// which the context's media is the fallback for.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of sending the media overrides; the page's previous overrides are kept when
+  /// it fails.
   pub async fn emulate_media(&self, update: &crate::options::EmulateMediaOptions) -> Result<()> {
     let mut emulation = self.media_emulation().lock().await;
     let updated = update.layered_over(&emulation.page);
@@ -1974,6 +2159,9 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_extra_http_headers`.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
     page_dispatch!(self, set_extra_http_headers(headers))
   }
@@ -1981,12 +2169,21 @@ impl AnyPage {
   /// Set (or clear) HTTP credentials. Backs
   /// [`crate::ContextRef::set_http_credentials`] (Playwright
   /// `browserContext.setHTTPCredentials(creds | null)`).
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_http_credentials`.
   pub async fn set_http_credentials(&self, creds: Option<Vec<crate::options::HttpCredentials>>) -> Result<()> {
     page_dispatch!(self, set_http_credentials(creds))
   }
 
   /// The proxy this page's context sends through (its own, else the
   /// launch proxy): its credentials answer the proxy's challenges.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_proxy`, and returns `FerriError::Unsupported`
+  /// for a proxy on Classic `WebDriver`.
   pub async fn set_proxy(&self, proxy: Option<crate::options::ProxyConfig>) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.set_proxy(proxy).await,
@@ -2003,6 +2200,10 @@ impl AnyPage {
   /// Reset any context-granted permissions. Backs
   /// [`crate::ContextRef::clear_permissions`] (Playwright
   /// `browserContext.clearPermissions`).
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `reset_permissions`.
   pub async fn reset_permissions(&self) -> Result<()> {
     page_dispatch!(self, reset_permissions())
   }
@@ -2031,20 +2232,32 @@ impl AnyPage {
 
   // ── Tracing ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `start_tracing`.
   pub async fn start_tracing(&self, categories: Option<&[String]>) -> Result<()> {
     page_dispatch!(self, start_tracing(categories))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `stop_tracing`.
   pub async fn stop_tracing(&self) -> Result<Vec<serde_json::Value>> {
     page_dispatch!(self, stop_tracing())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `metrics`.
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     page_dispatch!(self, metrics())
   }
 
   // ── Ref resolution ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `resolve_backend_node`.
   pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     page_dispatch!(self, resolve_backend_node(backend_node_id, ref_id))
   }
@@ -2069,6 +2282,9 @@ impl AnyPage {
 
   // ── PDF generation ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `pdf`.
   pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     page_dispatch!(self, pdf(opts))
   }
@@ -2161,6 +2377,11 @@ impl AnyPage {
   /// locator funnel re-resolves. Dispatched through the page (not
   /// `AnyElement`) because `WebKit` pairs the DOM call with a
   /// browser-session `Playwright.grantFileReadAccess`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the backend's file-input call, and returns a backend error when
+  /// `element` belongs to another backend.
   pub async fn set_input_files_element(&self, element: &AnyElement, paths: &[String]) -> Result<()> {
     match (self, element) {
       (AnyPage::CdpPipe(_), AnyElement::CdpPipe(e)) => e.set_input_files(paths).await,
@@ -2207,6 +2428,10 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` off Chromium, and otherwise the error of attaching the
+  /// session to the page's target.
   pub async fn new_cdp_session(&self) -> Result<crate::cdp_session::CdpSession> {
     use crate::cdp_session::{CdpSession, SessionTransportSource};
     match self {
@@ -2239,10 +2464,16 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `route`.
   pub async fn route(&self, route: crate::route::RegisteredRoute) -> Result<()> {
     page_dispatch!(self, route(route))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `unroute`.
   pub async fn unroute(
     &self,
     matcher: &crate::url_matcher::UrlMatcher,
@@ -2252,6 +2483,9 @@ impl AnyPage {
     page_dispatch!(self, unroute(matcher, scope, handler_id))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `unroute_all`.
   pub async fn unroute_all(
     &self,
     behavior: crate::options::UnrouteBehavior,
@@ -2262,6 +2496,9 @@ impl AnyPage {
 
   // ── Lifecycle ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `close_page`.
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     page_dispatch!(self, close_page(opts))
   }
@@ -2299,6 +2536,10 @@ impl AnyPage {
   /// fills `source.page` (main frame id) and `source.frame` (the frame
   /// the page-side call originated from); `source.context` is filled by
   /// the context layer, which knows the composite session key.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `expose_binding`.
   pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     let binding = self.page_binding(binding);
     page_dispatch!(self, expose_binding(name, binding))
@@ -2361,17 +2602,27 @@ impl AnyPage {
     }
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of `expose_binding`.
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
     let binding: crate::events::ExposedBinding = std::sync::Arc::new(move |_source, args| func(args));
     self.expose_binding(name, binding).await
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `remove_exposed_function`.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     page_dispatch!(self, remove_exposed_function(name))
   }
 
   /// Register the callback behind a function passed as an argument: the
   /// page reaches it only through `__playwright__binding__controller__`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `expose_callback`.
   pub async fn expose_callback(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
     let binding = self.page_binding(binding);
     page_dispatch!(self, expose_callback(name, binding))
@@ -2402,33 +2653,22 @@ impl AnyPage {
 
   // ── Init Scripts ──
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `add_init_script`.
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
     page_dispatch!(self, add_init_script(source))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `remove_init_script`.
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
     page_dispatch!(self, remove_init_script(identifier))
   }
 
   // ── Handle lifecycle ──
 
-  /// Release the backend object the given [`crate::js_handle::HandleRemote`] refers to.
-  ///
-  /// Each backend uses its native release primitive:
-  ///
-  /// * CDP: `Runtime.releaseObject { objectId }`.
-  /// * `BiDi`: `script.disown { handles: [sharedId], target: {context} }`.
-  /// * `WebKit`: `Op::ReleaseRef` IPC — deletes the host-side
-  ///   `window.__wr` entry so a subsequent `window.__wr[id]` returns
-  ///   `undefined`.
-  ///
-  /// # Errors
-  ///
-  /// Forwards the backend's protocol error if the release call fails.
-  /// Already-released handles are silently tolerated where the backend
-  /// allows it (CDP raises an error only on structural issues like an
-  /// invalid session id; `BiDi` returns `invalid argument` for an unknown
-  /// `sharedId` which we surface).
   /// ferridriver's equivalent of Playwright's
   /// `evaluateExpression(context, expr, { returnByValue, isFunction }, ...args)`
   /// (`/tmp/playwright/packages/playwright-core/src/server/javascript.ts:248`).
@@ -2448,7 +2688,6 @@ impl AnyPage {
   ///
   /// Forwards backend errors (protocol failure, page-side exception,
   /// handle/backend mismatch).
-  #[allow(clippy::too_many_arguments)]
   pub async fn call_utility_evaluate(
     &self,
     fn_source: &str,
@@ -2482,6 +2721,23 @@ impl AnyPage {
     }
   }
 
+  /// Release the backend object the given [`crate::js_handle::HandleRemote`] refers to.
+  ///
+  /// Each backend uses its native release primitive:
+  ///
+  /// * CDP: `Runtime.releaseObject { objectId }`.
+  /// * `BiDi`: `script.disown { handles: [sharedId], target: {context} }`.
+  /// * `WebKit`: `Op::ReleaseRef` IPC — deletes the host-side
+  ///   `window.__wr` entry so a subsequent `window.__wr[id]` returns
+  ///   `undefined`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the backend's protocol error if the release call fails.
+  /// Already-released handles are silently tolerated where the backend
+  /// allows it (CDP raises an error only on structural issues like an
+  /// invalid session id; `BiDi` returns `invalid argument` for an unknown
+  /// `sharedId` which we surface).
   pub async fn release_handle(&self, remote: &crate::js_handle::HandleRemote) -> crate::error::Result<()> {
     use crate::js_handle::HandleRemote;
     match (self, remote) {
@@ -2546,10 +2802,10 @@ pub fn element_from_remote(
   use crate::js_handle::HandleRemote;
   match (page, remote) {
     (AnyPage::CdpPipe(p), HandleRemote::Cdp { object_id, session_id }) => Ok(AnyElement::CdpPipe(
-      p.element_from_object_id(object_id.clone(), session_id.clone()),
+      p.element_from_object_id(Arc::clone(object_id), session_id.clone()),
     )),
     (AnyPage::CdpWs(p), HandleRemote::Cdp { object_id, session_id }) => Ok(AnyElement::CdpWs(
-      p.element_from_object_id(object_id.clone(), session_id.clone()),
+      p.element_from_object_id(Arc::clone(object_id), session_id.clone()),
     )),
     (AnyPage::WebKit(p), HandleRemote::WebKit(obj)) => {
       Ok(AnyElement::WebKit(p.element_from_object_id(obj.to_string())))
@@ -2576,6 +2832,10 @@ pub fn element_from_remote(
   }
 }
 
+/// # Errors
+///
+/// On Chromium, returns the error of resolving the element's remote object id. Never fails on the
+/// other backends.
 pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result<crate::js_handle::HandleRemote> {
   use crate::js_handle::HandleRemote;
   match element {
@@ -2631,30 +2891,51 @@ macro_rules! element_dispatch {
 }
 
 impl AnyElement {
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `click`.
   pub async fn click(&self) -> Result<()> {
     element_dispatch!(self, click())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `dblclick`.
   pub async fn dblclick(&self) -> Result<()> {
     element_dispatch!(self, dblclick())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `hover`.
   pub async fn hover(&self) -> Result<()> {
     element_dispatch!(self, hover())
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `type_str`.
   pub async fn type_str(&self, text: &str) -> Result<()> {
     element_dispatch!(self, type_str(text))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `call_js_fn`.
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     element_dispatch!(self, call_js_fn(function))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `call_js_fn_value`.
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>> {
     element_dispatch!(self, call_js_fn_value(function))
   }
 
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `scroll_into_view`.
   pub async fn scroll_into_view(&self) -> Result<()> {
     element_dispatch!(self, scroll_into_view())
   }
@@ -2798,14 +3079,19 @@ impl screencast::ScreencastSource for AnyPage {
 /// `split('+')` leaves empty names behind.
 pub(crate) fn split_key_combo(combo: &str) -> Vec<&str> {
   let mut keys = Vec::new();
-  let mut start = 0;
-  for (at, ch) in combo.char_indices() {
-    if ch == '+' && at > start {
-      keys.push(&combo[start..at]);
-      start = at + 1;
-    }
+  let mut rest = combo;
+  loop {
+    // A `+` that starts `rest` is the key itself, so the separator is
+    // the next `+` after the first character.
+    let first = rest.chars().next().map_or(0, char::len_utf8);
+    let Some(at) = rest.get(first..).and_then(|tail| tail.find('+')).map(|at| at + first) else {
+      break;
+    };
+    let (key, tail) = rest.split_at(at);
+    keys.push(key);
+    rest = tail.get(1..).unwrap_or_default();
   }
-  keys.push(&combo[start..]);
+  keys.push(rest);
   keys
 }
 

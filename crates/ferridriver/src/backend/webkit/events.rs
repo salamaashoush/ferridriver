@@ -169,12 +169,12 @@ pub fn attach_listeners(
   let file_chooser_manager = page.file_chooser_manager.clone();
   let page_backref = page.page_backref.clone();
   let emitter = page.events.clone();
-  let requests = page.requests.clone();
+  let requests = Arc::clone(&page.requests);
   let nav_slot = page.nav_request_slot.clone();
-  let routes = page.routes.clone();
-  let frame_contexts = page.frame_contexts.clone();
-  let utility_contexts = page.utility_contexts.clone();
-  let websockets = page.websockets.clone();
+  let routes = Arc::clone(&page.routes);
+  let frame_contexts = Arc::clone(&page.frame_contexts);
+  let utility_contexts = Arc::clone(&page.utility_contexts);
+  let websockets = Arc::clone(&page.websockets);
   let emitter_frame = emitter.clone();
   let _ = dialog_manager.register_emitter_bridge(emitter.clone());
 
@@ -198,14 +198,14 @@ pub fn attach_listeners(
     frame_contexts,
     utility_contexts,
     websockets,
-    workers: page.workers.clone(),
+    workers: Arc::clone(&page.workers),
     console_log: Arc::clone(&page.console_log),
     network_log: Arc::clone(&page.network_log),
     lifecycle: Arc::clone(&page.lifecycle),
     main_frame_id_cache: Arc::clone(&page.main_frame_id_cache),
     engine_injected: page.engine_injected_flag(),
     global_object_id: page.global_object_id_slot(),
-    exposed_fns: page.exposed_fns.clone(),
+    exposed_fns: Arc::clone(&page.exposed_fns),
     page_proxy_id: Arc::from(page.page_proxy_id()),
   };
   let dialog_log = Arc::clone(&page.dialog_log);
@@ -229,7 +229,7 @@ pub fn attach_listeners(
               dispatch_dialog(&proxy, &env.params, &dialog_manager, &log, page.page_backref.weak()).await;
             },
             Some("Target.targetCreated") => {
-              handle_provisional_target_created(&env.params, &page, provisional.clone()).await;
+              handle_provisional_target_created(&env.params, &page, Arc::clone(&provisional)).await;
             },
             // A destroyed target answers nothing ever again. Without
             // this, a call already on the wire when the target went away
@@ -249,7 +249,7 @@ pub fn attach_listeners(
             },
             Some("Target.didCommitProvisionalTarget") => {
               if let Some(new_rx) =
-                handle_committed_provisional_target(&env.params, &page, provisional.clone()).await
+                handle_committed_provisional_target(&env.params, &page, Arc::clone(&provisional)).await
               {
                 target_rx = new_rx;
               }
@@ -536,7 +536,7 @@ async fn handle_binding_called(ctx: &TargetListenerCtx, params: &Value) {
   };
 
   let maybe_fn = ctx.exposed_fns.read().await.get(&fn_name).cloned();
-  let target_swap = ctx.target_swap.clone();
+  let target_swap = Arc::clone(&ctx.target_swap);
   let _ = ctx.binding_tx.send(Box::pin(async move {
     let outcome = match maybe_fn {
       Some(callback) => callback(source, args).await,
@@ -1021,9 +1021,8 @@ async fn handle_loading_failed(params: &Value, requests: &Requests, emitter: &cr
 /// `host:port` as `WebKit` reports it, an IPv6 host bare and bracketed in
 /// the result (`wkPage.ts::parseRemoteAddress`).
 fn parse_remote_address(value: &str) -> Option<RemoteAddr> {
-  let colon = value.rfind(':')?;
-  let port = value[colon + 1..].parse().ok()?;
-  let host = &value[..colon];
+  let (host, port) = value.rsplit_once(':')?;
+  let port = port.parse().ok()?;
   let ip_address = if host.contains(':') && !host.starts_with('[') {
     format!("[{host}]")
   } else {
@@ -1356,7 +1355,8 @@ async fn handle_websocket_closed(params: &Value, websockets: &WebSockets) {
   let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
     return;
   };
-  if let Some(ws) = websockets.lock().await.remove(request_id) {
+  let closed = websockets.lock().await.remove(request_id);
+  if let Some(ws) = closed {
     ws.emit_close();
   }
 }
@@ -1375,7 +1375,7 @@ fn handle_request_intercepted(params: &Value, target: &super::connection::Sessio
   }
   let request_payload = params.get("request").cloned().unwrap_or(Value::Null);
   let target = target.clone();
-  let routes = routes.clone();
+  let routes = Arc::clone(routes);
   tokio::spawn(async move { dispatch_intercepted(target, routes, request_id, request_payload).await });
 }
 
@@ -1636,8 +1636,8 @@ async fn dispatch_console(
   // [`PageEvent::PageError`].
   if level == "error" && source == "javascript" {
     let raw = message.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-    let (name, msg_body) = match raw.find(": ") {
-      Some(idx) => (raw[..idx].to_string(), raw[idx + 2..].to_string()),
+    let (name, msg_body) = match raw.split_once(": ") {
+      Some((name, body)) => (name.to_string(), body.to_string()),
       None => (String::new(), raw.clone()),
     };
     let stack = build_stack(&raw, message.get("stackTrace"));
@@ -1673,7 +1673,11 @@ async fn dispatch_console(
     for arg in parameters {
       let backing = pw_remote_object_to_backing(arg);
       let is_node = arg.get("subtype").and_then(Value::as_str) == Some("node");
-      args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing, is_node));
+      args.push(crate::js_handle::JSHandle::from_backing(
+        Arc::clone(&page),
+        backing,
+        is_node,
+      ));
     }
   }
   // PW `WebKit`'s `message.text` only carries the first formatted

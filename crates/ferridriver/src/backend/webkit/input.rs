@@ -75,6 +75,10 @@ async fn mouse_event(page: &WebKitPage, ev: MouseEvent<'_>) -> Result<()> {
   Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when an `Input.dispatchMouseEvent` command for the move, press or release
+/// fails; the events after it are not sent.
 pub async fn click(page: &WebKitPage, x: f64, y: f64, args: &BackendClickArgs) -> Result<()> {
   let mods = held(page);
   let btn = args.button.as_cdp();
@@ -126,6 +130,9 @@ pub async fn click(page: &WebKitPage, x: f64, y: f64, args: &BackendClickArgs) -
   Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchMouseEvent` command fails.
 pub async fn hover(page: &WebKitPage, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
   let _ = args;
   let (button, buttons) = pressed(page);
@@ -164,6 +171,9 @@ fn cdp_to_wk_mask(cdp: u32) -> u32 {
   wk
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchTapEvent` command fails.
 pub async fn tap(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
   page
     .proxy_session()
@@ -176,6 +186,9 @@ pub async fn tap(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
   Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchMouseEvent` command fails.
 pub async fn move_mouse(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
   let (button, buttons) = pressed(page);
   mouse_event(
@@ -193,6 +206,10 @@ pub async fn move_mouse(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
   .await
 }
 
+/// # Errors
+///
+/// Returns an error when an `Input.dispatchMouseEvent` move command fails; the remaining steps are
+/// not sent.
 pub async fn move_mouse_smooth(
   page: &WebKitPage,
   from_x: f64,
@@ -224,6 +241,10 @@ pub async fn move_mouse_smooth(
   Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the `Page.updateScrollingState` command, the wait for a compositor frame
+/// through `Runtime.callFunctionOn`, or the `Input.dispatchWheelEvent` command fails.
 pub async fn mouse_wheel(page: &WebKitPage, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
   page
     .target_session()
@@ -245,6 +266,10 @@ pub async fn mouse_wheel(page: &WebKitPage, x: f64, y: f64, delta_x: f64, delta_
   Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchMouseEvent` command fails; the button is recorded as
+/// held regardless.
 pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
   let buttons = {
@@ -268,6 +293,10 @@ pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str, click_c
   .await
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchMouseEvent` command fails; the button is recorded as
+/// released regardless.
 pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
   let buttons = {
@@ -291,6 +320,9 @@ pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str, click_cou
   .await
 }
 
+/// # Errors
+///
+/// Returns an error when the `Page.insertText` command fails.
 pub async fn type_text(page: &WebKitPage, text: &str) -> Result<()> {
   page
     .target_session()
@@ -337,6 +369,9 @@ fn key_up_params(stroke: &KeyStroke) -> Value {
   })
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchKeyEvent` command fails.
 pub async fn key_down(page: &WebKitPage, stroke: &KeyStroke) -> Result<()> {
   page
     .proxy_session()
@@ -346,6 +381,9 @@ pub async fn key_down(page: &WebKitPage, stroke: &KeyStroke) -> Result<()> {
   Ok(())
 }
 
+/// # Errors
+///
+/// Returns an error when the `Input.dispatchKeyEvent` command fails.
 pub async fn key_up(page: &WebKitPage, stroke: &KeyStroke) -> Result<()> {
   page
     .proxy_session()

@@ -79,11 +79,19 @@ impl WebKitElement {
     ))
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Runtime.callFunctionOn` call fails, or `FerriError::Evaluation`
+  /// when the element's `click()` throws.
   pub async fn click(&self) -> Result<()> {
     self.call_fn("function(){this.click();}", true).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Runtime.callFunctionOn` call fails, or `FerriError::Evaluation`
+  /// when dispatching the `dblclick` event throws.
   pub async fn dblclick(&self) -> Result<()> {
     self
       .call_fn(
@@ -94,6 +102,11 @@ impl WebKitElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when a `Runtime.callFunctionOn` call that scrolls the element into view and
+  /// reads its center, or that dispatches the mouse events, fails, or `FerriError::Evaluation` when
+  /// either function throws.
   pub async fn hover(&self) -> Result<()> {
     let (x, y) = self.center().await?;
     self
@@ -108,6 +121,10 @@ impl WebKitElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when focusing the element with `Runtime.callFunctionOn` fails or throws, or
+  /// when the `Page.insertText` command fails.
   pub async fn type_str(&self, text: &str) -> Result<()> {
     // Focus, then insert through the real input path (`Page.insertText`
     // — the same command the page-level keyboard uses). Unlike a JS
@@ -123,11 +140,19 @@ impl WebKitElement {
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Runtime.callFunctionOn` call fails, or `FerriError::Evaluation`
+  /// when `function` throws.
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     self.call_fn(function, true).await?;
     Ok(())
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Runtime.callFunctionOn` call fails, or `FerriError::Evaluation`
+  /// when `function` throws.
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<Value>> {
     self.call_fn_value(function).await
   }
@@ -173,6 +198,10 @@ impl WebKitElement {
     result
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `Runtime.callFunctionOn` call fails, or `FerriError::Evaluation`
+  /// when `scrollIntoView` throws.
   pub async fn scroll_into_view(&self) -> Result<()> {
     self
       .call_fn(
@@ -187,6 +216,10 @@ impl WebKitElement {
   /// `WebKit` Inspector protocol's `DOM.setInputFiles` (the method
   /// Playwright's `wkPage.ts::setInputFilePaths` uses), addressed by
   /// this handle's `objectId`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `DOM.setInputFiles` command fails.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
     self
       .target
@@ -200,6 +233,11 @@ impl WebKitElement {
   }
 
   /// Release the backing remote object (`Runtime.releaseObject`).
+  ///
+  /// # Errors
+  ///
+  /// Never fails; a failed `Runtime.releaseObject` is ignored and the `Result` matches the other
+  /// backends' signature.
   pub async fn release(&self) -> Result<()> {
     let _ = self
       .target

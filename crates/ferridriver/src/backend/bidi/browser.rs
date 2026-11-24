@@ -35,7 +35,7 @@ impl PopupAdopter {
     claim: Arc<crate::backend::PopupClaim>,
   ) {
     let page = BidiPage::create(
-      self.session.clone(),
+      Arc::clone(&self.session),
       context_id.to_string(),
       Some(&user_context),
       Arc::clone(&self.downloads_dir),
@@ -166,6 +166,13 @@ impl BidiBrowser {
   /// `user_data_dir` selects a persistent profile ferridriver does not
   /// own; without it a throwaway profile is created and removed on
   /// teardown.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::Unsupported` when `browser_path` is not a Firefox binary, and a timeout
+  /// when Firefox prints no `BiDi` WebSocket URL within 15 seconds. Also returns an error when
+  /// `firefox_user_prefs` are invalid, the profile or downloads directory cannot be prepared,
+  /// Firefox fails to spawn or exits during startup, or `session.new` or `session.subscribe` fails.
   pub async fn launch_with_flags(
     browser_path: &str,
     flags: &[String],
@@ -230,6 +237,11 @@ impl BidiBrowser {
   }
 
   /// Connect to an existing `BiDi` endpoint via WebSocket.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the WebSocket connection to `ws_url` fails, when `session.new` or
+  /// `session.subscribe` fails, or when the downloads directory cannot be created.
   pub async fn connect(ws_url: &str) -> Result<Self> {
     Self::connect_with_headers(ws_url, None).await
   }
@@ -248,6 +260,14 @@ impl BidiBrowser {
   /// returned `BiDi` connection carries all browser operations. This is the
   /// low-latency path for `WebDriver` servers that implement `BiDi`, including
   /// compatible Appium and Safari Technology Preview sessions.
+  ///
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `extra_capabilities` is not an object or the
+  /// endpoint or a header is invalid, `FerriError::Unsupported` when the created session has no
+  /// `webSocketUrl` capability, and a timeout when attaching exceeds `timeout_ms`. Otherwise
+  /// forwards errors from the `WebDriver` `POST /session` command, the WebSocket connection, or
+  /// `session.subscribe`, deleting the Classic session first.
   pub async fn connect_webdriver(
     endpoint: &str,
     browser_name: &str,
@@ -271,7 +291,7 @@ impl BidiBrowser {
       headers,
     )
     .await?;
-    let owner = created.session.clone();
+    let owner = Arc::clone(&created.session);
     let attach = Box::pin(Self::from_created(created, endpoint, headers));
     let result = if timeout_ms == 0 {
       attach.await
@@ -307,7 +327,14 @@ impl BidiBrowser {
     let socket_headers = headers.filter(|_| super::webdriver::same_origin(endpoint, &ws_url));
     let owner = created.session;
     let session = Arc::new(
-      BidiSession::connect_existing(&ws_url, created.id, created.capabilities, socket_headers, owner.clone()).await?,
+      BidiSession::connect_existing(
+        &ws_url,
+        created.id,
+        created.capabilities,
+        socket_headers,
+        Arc::clone(&owner),
+      )
+      .await?,
     );
     let mut browser = Self::from_session(session)?;
     browser.webdriver = Some(owner);
@@ -499,6 +526,11 @@ impl BidiBrowser {
   /// `acceptInsecureCerts` is always sent: left out, a user context
   /// inherits the session's, which accepts them so that the default
   /// context can serve `ignoreHTTPSErrors`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `browser.createUserContext` command fails, and
+  /// `FerriError::Protocol` when its result has no `userContext` id.
   pub async fn new_context(
     &self,
     proxy: Option<&crate::options::ProxyConfig>,
@@ -521,6 +553,12 @@ impl BidiBrowser {
   }
 
   /// Dispose an isolated user context.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `browser.removeUserContext` command fails, for example for an
+  /// unknown user context. Failures listing the context's pages or waiting for them to close are
+  /// ignored.
   pub async fn dispose_context(&self, user_context_id: &str) -> Result<()> {
     let context_ids = self
       .list_context_ids_for_user_context(user_context_id)
@@ -548,6 +586,11 @@ impl BidiBrowser {
   /// List the open pages (top-level browsing contexts) of the default user
   /// context. A user context another client created holds that client's
   /// pages, which are left alone.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.getTree` command fails, and `FerriError::Protocol`
+  /// when its result lacks the contexts array or a context id.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let result = self
       .session
@@ -570,7 +613,7 @@ impl BidiBrowser {
         continue;
       }
       pages.push(AnyPage::Bidi(BidiPage::create(
-        self.session.clone(),
+        Arc::clone(&self.session),
         context_id.to_string(),
         user_context,
         Arc::clone(&self.downloads_dir),
@@ -580,6 +623,12 @@ impl BidiBrowser {
   }
 
   /// Create a new page (tab) and optionally navigate.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `browsingContext.create` command fails or returns no context id, or
+  /// when waiting for the page to be ready, emulating `viewport`, or navigating to `url` fails,
+  /// including a timeout when that load takes longer than 30 seconds.
   pub async fn new_page(
     &self,
     url: &str,
@@ -622,7 +671,7 @@ impl BidiBrowser {
 
     debug!("BiDi new page: context={context_id}");
     let page = BidiPage::create(
-      self.session.clone(),
+      Arc::clone(&self.session),
       context_id,
       user_context_id,
       Arc::clone(&self.downloads_dir),
@@ -644,7 +693,13 @@ impl BidiBrowser {
   ///
   /// Caller-owned profiles flush through `browser.close`; throwaway
   /// profiles can be killed directly because they are discarded.
-  pub async fn close(&mut self) -> Result<()> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when deleting the Classic `WebDriver` session fails, when Firefox with a
+  /// caller-owned profile does not exit within the flush timeout after `browser.close`, or when
+  /// closing the `BiDi` transport fails.
+  pub async fn close(&self) -> Result<()> {
     if let Some(owner) = &self.webdriver {
       let result = owner.close().await;
       self.session.transport.start_close();

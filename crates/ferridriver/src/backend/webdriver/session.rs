@@ -99,6 +99,11 @@ impl WebDriverSession {
     *self.shutdown.borrow() || self.uncertain.load(std::sync::atomic::Ordering::Acquire)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `POST /session` request fails, exceeds `timeout_ms`, or is
+  /// answered with an error, and `FerriError::Protocol` when the response omits `sessionId` or
+  /// `capabilities`. A session created without capabilities is deleted before the error returns.
   pub async fn create(
     client: reqwest::Client,
     url: Url,
@@ -152,6 +157,10 @@ impl WebDriverSession {
     })
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `url` cannot hold path segments, such as a `data:`
+  /// URL.
   pub fn new(client: reqwest::Client, mut url: Url, session_id: &str) -> Result<Self> {
     url
       .path_segments_mut()
@@ -178,6 +187,12 @@ impl WebDriverSession {
     self.execute_sequence(target, vec![command], timeout_ms)
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `commands` is empty, `FerriError::TargetClosed`
+  /// when the session is closing, closed, or in an uncertain state, and a timeout when the
+  /// operation budget runs out. Otherwise forwards the first failing command's error, including
+  /// switching to the target's context, window and frames.
   pub async fn execute_sequence(
     self: &Arc<Self>,
     target: Target,
@@ -388,8 +403,8 @@ impl WebDriverSession {
   fn wire_excerpt(&self, value: &Value) -> String {
     let text = value.to_string();
     let text = self.secrets.redact(&text);
-    match text.char_indices().nth(600) {
-      Some((end, _)) => format!("{}...", &text[..end]),
+    match text.char_indices().nth(600).and_then(|(end, _)| text.get(..end)) {
+      Some(excerpt) => format!("{excerpt}..."),
       None => text.into_owned(),
     }
   }
@@ -398,6 +413,10 @@ impl WebDriverSession {
     self.closed.try_lock().is_ok_and(|closed| *closed)
   }
 
+  /// # Errors
+  ///
+  /// Returns an error when the `WebDriver` `DELETE /session/{id}` request fails or is answered with
+  /// an error other than `invalid session id`. A session that is already deleted succeeds.
   pub async fn close(&self) -> Result<()> {
     self.shutdown.send_replace(true);
     let mut closed = self.closed.lock().await;
@@ -710,7 +729,7 @@ pub(crate) mod tests {
         requests
       });
       let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "budget").unwrap());
-      let page = WebDriverPage::new(session.clone(), Target::default(), 30_000);
+      let page = WebDriverPage::new(Arc::clone(&session), Target::default(), 30_000);
       let mut command = Box::pin(
         OperationBudget::new(timeout)
           .unwrap()
@@ -789,7 +808,7 @@ pub(crate) mod tests {
       }
     });
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "admission").unwrap());
-    let page = WebDriverPage::new(session.clone(), Target::default(), 30_000);
+    let page = WebDriverPage::new(Arc::clone(&session), Target::default(), 30_000);
     let admission = OperationBudget::new(100).unwrap();
     let transport = OperationBudget::wall_clock(30_000).unwrap();
     let mut command = Box::pin(admission.wait(with_command_admission(
@@ -851,7 +870,7 @@ pub(crate) mod tests {
       requests
     });
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "queued").unwrap());
-    let page = WebDriverPage::new(session.clone(), Target::default(), 30_000);
+    let page = WebDriverPage::new(Arc::clone(&session), Target::default(), 30_000);
     let mut scoped = Box::pin(
       OperationBudget::new(1000)
         .unwrap()
@@ -892,7 +911,7 @@ pub(crate) mod tests {
       requests
     });
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "limited").unwrap());
-    let page = WebDriverPage::new(session.clone(), Target::default(), 30_000);
+    let page = WebDriverPage::new(Arc::clone(&session), Target::default(), 30_000);
     let error = OperationBudget::new(0)
       .unwrap()
       .scope(page.execute_script("must not run", vec![]))
@@ -914,7 +933,7 @@ pub(crate) mod tests {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = Url::parse(&format!("http://{}/session", listener.local_addr().unwrap())).unwrap();
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "unstarted").unwrap());
-    let mut page = WebDriverPage::new(session.clone(), Target::default(), 30_000);
+    let mut page = WebDriverPage::new(Arc::clone(&session), Target::default(), 30_000);
     page.capabilities = Arc::new(json!({"platformName":"iOS", "appium:automationName":"XCUITest"}));
     for timeout in [0, 121_000] {
       let error = OperationBudget::new(timeout)
@@ -1035,7 +1054,7 @@ pub(crate) mod tests {
         .unwrap();
     });
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "cancel-session").unwrap());
-    let operation = session.clone();
+    let operation = Arc::clone(&session);
     let task = tokio::spawn(async move {
       operation
         .execute(

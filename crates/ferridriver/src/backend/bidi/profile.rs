@@ -66,7 +66,7 @@ impl ProfileGuard {
   }
 
   #[cfg(unix)]
-  pub(super) fn allow_firefox_start(&mut self) -> Result<()> {
+  pub(super) fn allow_firefox_start(&self) -> Result<()> {
     if let Some(file) = &self.file {
       rustix::fs::fcntl_lock(file, rustix::fs::FlockOperation::Unlock).map_err(std::io::Error::from)?;
     }
@@ -469,7 +469,7 @@ mod tests {
   fn profile_guard_coordinates_with_firefox_record_locks_and_same_process_launches() {
     use std::io::BufRead as _;
     let profile = tempfile::tempdir().unwrap();
-    let mut guard = ProfileGuard::acquire(profile.path()).unwrap();
+    let guard = ProfileGuard::acquire(profile.path()).unwrap();
     assert!(ProfileGuard::acquire(profile.path()).is_err());
     let aliases = tempfile::tempdir().unwrap();
     let alias = aliases.path().join("same-profile");

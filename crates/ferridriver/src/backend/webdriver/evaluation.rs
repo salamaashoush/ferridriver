@@ -6,6 +6,13 @@ use crate::js_handle::{EvaluateResult, HandleRemote, JSHandleBacking};
 use crate::protocol::{HandleId, SerializedValue, SpecialValue};
 
 impl WebDriverPage {
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when the frame id is malformed or names another window,
+  /// or a handle belongs to another backend or frame, and an error when injecting the selector
+  /// engine or the `WebDriver` `POST /session/{id}/execute/sync` command fails, for example when a
+  /// referenced handle was disposed. Returns `FerriError::Protocol` when the script's result cannot
+  /// be decoded.
   pub async fn call_utility_evaluate(
     &self,
     source: &str,
@@ -92,6 +99,11 @@ return Promise.resolve(result).then(value=>{{
     evaluation_result(&result, frame, return_by_value)
   }
 
+  /// # Errors
+  ///
+  /// Returns `FerriError::InvalidArgument` when `frame` is malformed or names another window, and
+  /// an error when the `WebDriver` `POST /session/{id}/execute/sync` command that drops a non-element
+  /// handle fails. Releasing an element reference never fails.
   pub async fn release_handle(&self, id: &str, frame: &str, element: bool) -> Result<()> {
     // Classic element references are browser-owned and have no release endpoint.
     if !element {

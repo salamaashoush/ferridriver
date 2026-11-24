@@ -77,7 +77,7 @@ struct BrowserInner {
   /// Directory the browser writes downloads into; download behavior is
   /// per-context on the `WebKit` protocol, so every created context gets
   /// a `Playwright.setDownloadBehavior` pointing here.
-  downloads_dir: Arc<std::path::PathBuf>,
+  downloads_dir: Arc<std::path::Path>,
   /// Popup announcement subscriptions (see
   /// [`crate::backend::PopupInfo`]) fed by the
   /// `Playwright.pageProxyCreated` listener.
@@ -110,6 +110,13 @@ impl WebKitBrowser {
   }
 
   /// Spawn a Playwright `WebKit` child and complete `Playwright.enable`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when locating or spawning the browser or setting up its pipe fails, when the
+  /// `Playwright.enable`, `Playwright.createContext` or `Playwright.setDownloadBehavior` command
+  /// fails, or when a persistent profile does not open its startup page within 10 seconds or
+  /// attaching to it fails.
   pub async fn launch(config: &LaunchConfig) -> std::result::Result<Self, BrowserError> {
     let SpawnedBrowser {
       handle,
@@ -191,8 +198,8 @@ impl WebKitBrowser {
     let downloads = spawn_download_listener(
       &browser.inner.root,
       download_events,
-      browser.inner.pages.clone(),
-      browser.inner.downloads_dir.clone(),
+      Arc::clone(&browser.inner.pages),
+      Arc::clone(&browser.inner.downloads_dir),
       stopping.clone(),
     );
     let popups = browser.spawn_popup_listener(stopping, passes);
@@ -394,6 +401,11 @@ impl WebKitBrowser {
   /// Equivalent to [`Self::new_context_with_options`] with the full
   /// options bag stripped to just the proxy field — kept for state.rs's
   /// legacy `new_context(None)` callsite.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.createContext` or `Playwright.setDownloadBehavior`
+  /// command fails, or when the `Playwright.createContext` reply carries no context id.
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = CreateContextParams::default();
     if let Some(p) = proxy {
@@ -444,6 +456,13 @@ impl WebKitBrowser {
   /// overrides (userAgent, timezone, JS-disabled, bypassCSP, offline,
   /// permissions, extraHTTPHeaders) on the target session BEFORE the
   /// initial about:blank document becomes scriptable.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when [`Self::new_context`] fails, or when the
+  /// `Playwright.setDownloadBehavior` (for `accept_downloads: Some(false)`) or
+  /// `Playwright.setIgnoreCertificateErrors` command fails. A failed `Playwright.setLanguages` is
+  /// ignored.
   pub async fn new_context_with_options(
     &self,
     options: Option<&crate::options::BrowserContextOptions>,
@@ -519,6 +538,10 @@ impl WebKitBrowser {
   }
 
   /// Delete a context. `Playwright.deleteContext`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.deleteContext` command fails.
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     self
       .inner
@@ -534,6 +557,11 @@ impl WebKitBrowser {
 
   /// `Playwright.createPage` → returns the registered page-proxy [`Session`].
   /// Falls back to the default context when no explicit one is given.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.createPage` command fails or its reply carries no page
+  /// proxy id.
   pub async fn create_page(&self, browser_context_id: Option<&str>) -> Result<Session> {
     let params = CreatePageParams {
       browser_context_id: browser_context_id
@@ -566,6 +594,10 @@ impl WebKitBrowser {
   }
 
   /// List all open pages.
+  ///
+  /// # Errors
+  ///
+  /// Never fails; the `Result` matches the other backends' signature.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     tokio::task::yield_now().await;
     Ok(
@@ -583,6 +615,12 @@ impl WebKitBrowser {
   }
 
   /// Create a new page, attach it, and optionally navigate.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when [`Self::create_page`] or [`WebKitPage::attach`] fails, when applying
+  /// `viewport` fails, or when navigating to `url` fails or does not reach `load` within 30
+  /// seconds.
   pub async fn new_page(
     &self,
     url: &str,
@@ -610,7 +648,13 @@ impl WebKitBrowser {
   }
 
   /// Issue `Playwright.close` and reap the child.
-  pub async fn close(&mut self) -> Result<()> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when a listener or transport task ends with a failure during cleanup, when
+  /// waiting for or killing the browser process fails, or when removing the downloads directory
+  /// fails.
+  pub async fn close(&self) -> Result<()> {
     self.inner.handle.close().await
   }
 
@@ -619,6 +663,10 @@ impl WebKitBrowser {
   }
 
   /// `Playwright.getInfo` — `{ os }`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.getInfo` command fails.
   pub async fn info(&self) -> Result<serde_json::Value> {
     self
       .inner
@@ -633,7 +681,7 @@ struct SpawnedBrowser {
   version: Arc<str>,
   handle: Arc<super::owner::WebKitOwner>,
   conn: Arc<Connection>,
-  downloads_dir: Arc<std::path::PathBuf>,
+  downloads_dir: Arc<std::path::Path>,
 }
 
 #[cfg(unix)]
@@ -647,7 +695,7 @@ fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBr
   let downloads = tempfile::Builder::new()
     .prefix("ferridriver-webkit-downloads-")
     .tempdir()?;
-  let downloads_dir = Arc::new(downloads.path().to_owned());
+  let downloads_dir: Arc<std::path::Path> = Arc::from(downloads.path());
   let binary = config
     .executable_path
     .clone()
@@ -683,7 +731,7 @@ fn spawn_browser_process(config: &LaunchConfig) -> std::result::Result<SpawnedBr
   let downloads = tempfile::Builder::new()
     .prefix("ferridriver-webkit-downloads-")
     .tempdir()?;
-  let downloads_dir = Arc::new(downloads.path().to_owned());
+  let downloads_dir: Arc<std::path::Path> = Arc::from(downloads.path());
   let binary = config
     .executable_path
     .clone()
@@ -716,7 +764,7 @@ fn spawn_download_listener(
   root: &Session,
   mut rx: tokio::sync::mpsc::UnboundedReceiver<protocol::Envelope>,
   pages: Arc<Mutex<Vec<WebKitPage>>>,
-  downloads_dir: Arc<std::path::PathBuf>,
+  downloads_dir: Arc<std::path::Path>,
   mut stopping: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
   let cancel_session = root.clone();
@@ -908,7 +956,7 @@ mod ownership_tests {
           default_context: None,
           version: Arc::from("webkit-test"),
           context_options: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
-          downloads_dir: Arc::new(path.clone()),
+          downloads_dir: Arc::from(path.as_path()),
           popup_taps: Arc::new(Mutex::new(Vec::new())),
           create_ledger: Arc::new(crate::backend::CreateLedger::default()),
           popups,
