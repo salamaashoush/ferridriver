@@ -132,7 +132,19 @@ impl ContextPool {
       if inbox.in_flight == 0 {
         self.misses.fetch_add(1, Ordering::Relaxed);
         drop(inbox);
-        break Box::pin(create_prepared(browser, key.to_string(), opts.clone(), backend)).await?;
+        match Box::pin(create_prepared(browser, key.to_string(), opts.clone(), backend)).await {
+          Ok(prepared) => break prepared,
+          Err(error) => {
+            // A browser that holds only so many contexts at once refuses a
+            // new one while the pool sits on contexts built for other
+            // options. Those were speculative: give them back and try once
+            // more before failing the test that needed this one.
+            if !self.release_held().await {
+              return Err(error);
+            }
+            break Box::pin(create_prepared(browser, key.to_string(), opts.clone(), backend)).await?;
+          },
+        }
       }
       // Single-consumer: this worker is the only `acquire` in flight, so
       // awaiting here cannot strand another test's arrival.
@@ -207,6 +219,18 @@ impl ContextPool {
         });
       });
     }
+  }
+
+  /// Close the contexts ready in the pool and stop pre-creating more.
+  /// Answers whether there were any to close.
+  async fn release_held(&self) -> bool {
+    self.disabled.store(true, Ordering::Relaxed);
+    let held: Vec<Prepared> = self.inbox.lock().await.ready.drain(..).collect();
+    let released = !held.is_empty();
+    for prepared in held {
+      let _ = prepared.ctx.close().await;
+    }
+    released
   }
 
   /// Close every context the pool holds or is still creating, so the

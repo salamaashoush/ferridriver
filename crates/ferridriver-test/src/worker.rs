@@ -943,6 +943,31 @@ fn build_suite_fixture_defs(resources: &Arc<TestBrowserResources>) -> FxHashMap<
 }
 
 /// Result of a single test execution within a worker.
+/// Whether the test that just ended may have left the worker's browser
+/// unfit for the next one. A test that timed out may still be acting on
+/// it, as Playwright assumes when it replaces the worker. A failure in a
+/// browser with one context leaves that context, the only one the next
+/// test can have, in whatever state the failure left it.
+fn needs_fresh_browser(status: TestStatus, browser: &crate::runner::BrowserHandle) -> bool {
+  match status {
+    TestStatus::TimedOut => browser.try_get().is_some(),
+    TestStatus::Failed => browser
+      .try_get()
+      .is_some_and(|browser| !browser.supports_isolated_contexts()),
+    _ => false,
+  }
+}
+
+/// Why a worker stopped taking work.
+pub struct WorkerExit {
+  /// An item taken from the queue and not run, for the next worker.
+  pub pending: Option<WorkItem>,
+  /// The worker's browser cannot be trusted with another test: one timed
+  /// out on it, or failed in the only context it has. The next worker
+  /// launches a fresh one.
+  pub restart: bool,
+}
+
 pub struct WorkerTestResult {
   /// Shared with the reporter event that carried it: an outcome holds
   /// the attempt's screenshots and step tree, and copying it per
@@ -1332,7 +1357,7 @@ impl Worker {
     result_tx: mpsc::Sender<WorkerTestResult>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     mut pending: Option<WorkItem>,
-  ) -> ferridriver::Result<Option<WorkItem>> {
+  ) -> ferridriver::Result<WorkerExit> {
     if let Some(event_bus) = &self.event_bus {
       event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
     }
@@ -1344,6 +1369,7 @@ impl Worker {
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
 
     let mut repetition = None;
+    let mut restart = false;
     while let Some(item) = match pending.take() {
       Some(item) => Some(item),
       None => place.next_or_leave(&rx),
@@ -1368,7 +1394,8 @@ impl Worker {
             Box::pin(self.run_single(&browser_handle, &custom_fixture_pool, &mut active_suites, *assignment)),
           )
           .await;
-          if result_tx.send(result).await.is_err() {
+          restart = needs_fresh_browser(result.outcome.status, &browser_handle);
+          if result_tx.send(result).await.is_err() || restart {
             break;
           }
         },
@@ -1420,7 +1447,7 @@ impl Worker {
       cleanup_errors.push(error.to_string());
     }
     if cleanup_errors.is_empty() {
-      Ok(pending)
+      Ok(WorkerExit { pending, restart })
     } else {
       Err(ferridriver::FerriError::backend(cleanup_errors.join("; ")))
     }
