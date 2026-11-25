@@ -129,10 +129,10 @@ export interface StepFunction {
 }
 
 /**
- * The engine a project runs on: Playwright's three, and Safari, which
- * ferridriver also drives through WebDriver.
+ * The engine a project runs on: Playwright's three, and Safari,
+ * Ladybird and Lightpanda, which ferridriver also drives.
  */
-export type BrowserName = 'chromium' | 'firefox' | 'webkit' | 'safari';
+export type BrowserName = 'chromium' | 'firefox' | 'webkit' | 'safari' | 'ladybird' | 'lightpanda';
 
 export interface TestFixtures {
   page: Page;
@@ -495,6 +495,8 @@ export const chromium: (options?: { transport?: 'pipe' | 'ws' }) => BrowserType;
 export const firefox: () => BrowserType;
 export const webkit: () => BrowserType;
 export const safari: () => BrowserType;
+export const ladybird: () => BrowserType;
+export const lightpanda: () => BrowserType;
 /** The session's HTTP client, the same object the `request` fixture holds. */
 export const request: APIRequestContext;
 
@@ -3208,6 +3210,8 @@ declare global {
   function firefox(): BrowserType;
   function webkit(): BrowserType;
   function safari(): BrowserType;
+  function ladybird(): BrowserType;
+  function lightpanda(): BrowserType;
   const commands: Commands;
 
   // `require` serves the native specifiers; `require.resolve` answers a

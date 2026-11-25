@@ -760,11 +760,17 @@ impl BrowserState {
     self.backend_kind
   }
 
+  pub(crate) fn browser_kind(&self) -> crate::options::BrowserKind {
+    self.browser_kind
+  }
+
   pub(crate) fn engine_name(&self) -> &'static str {
     match self.browser_kind {
       crate::options::BrowserKind::Chromium => "chromium",
       crate::options::BrowserKind::Firefox => "firefox",
       crate::options::BrowserKind::WebKit | crate::options::BrowserKind::Safari => "webkit",
+      crate::options::BrowserKind::Ladybird => "ladybird",
+      crate::options::BrowserKind::Lightpanda => "lightpanda",
     }
   }
 
@@ -1641,7 +1647,12 @@ impl LaunchSpec {
     // Match the browser window to the viewport unless the caller
     // already pinned a size.
     if !matches!(&mode, ConnectMode::Device { .. })
-      && browser_kind != crate::options::BrowserKind::Safari
+      && !matches!(
+        browser_kind,
+        crate::options::BrowserKind::Safari
+          | crate::options::BrowserKind::Ladybird
+          | crate::options::BrowserKind::Lightpanda
+      )
       && selection.backend != BackendKind::WebKit
       && !args.iter().any(|a| a.starts_with("--window-size"))
       && let Some(ref vp) = self.default_viewport
@@ -1712,8 +1723,8 @@ impl LaunchSpec {
   }
 
   async fn launch_browser(&self, eff: &EffectiveLaunch) -> Result<AnyBrowser> {
-    if eff.browser_kind == crate::options::BrowserKind::Safari {
-      return launch_safari(eff).await;
+    if let Some(browser) = Box::pin(launch_with_own_launcher(eff)).await? {
+      return Ok(browser);
     }
     // `launch({ proxy })` is a per-process setting on every engine that has
     // one, so it is lowered here rather than at context creation: a context
@@ -1817,6 +1828,17 @@ impl LaunchSpec {
   }
 }
 
+/// Launch a product that has a launcher of its own rather than the
+/// backend's browser spawn; `None` for every other product.
+async fn launch_with_own_launcher(eff: &EffectiveLaunch) -> Result<Option<AnyBrowser>> {
+  Ok(Some(match eff.browser_kind {
+    crate::options::BrowserKind::Safari => launch_safari(eff).await?,
+    crate::options::BrowserKind::Ladybird => launch_ladybird(eff).await?,
+    crate::options::BrowserKind::Lightpanda => launch_lightpanda(eff).await?,
+    _ => return Ok(None),
+  }))
+}
+
 async fn launch_safari(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
   eff.reject_ignore_default_args("safari")?;
   if eff.headless || eff.user_data_dir.is_some() || !eff.args.is_empty() || eff.proxy.is_some() {
@@ -1843,6 +1865,75 @@ async fn launch_safari(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
   }
 }
 
+/// Ladybird is launched through the `WebDriver` service it ships, which
+/// builds the browser's command line itself: there is no channel for
+/// browser arguments or a launch proxy.
+async fn launch_ladybird(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
+  eff.reject_ignore_default_args("ladybird")?;
+  if !eff.args.is_empty() || eff.proxy.is_some() {
+    return Err(FerriError::unsupported(
+      "Ladybird's WebDriver service accepts no browser arguments or launch proxy",
+    ));
+  }
+  // `chromium_path` is the resolved executable of whichever browser this is.
+  let browser = if eff.chromium_path.is_empty() {
+    std::path::PathBuf::from(detect_ladybird()?)
+  } else {
+    std::path::PathBuf::from(&eff.chromium_path)
+  };
+  let webdriver = crate::backend::webdriver::launcher::ladybird_webdriver(&browser)?;
+  let user_data_dir = eff.user_data_dir.as_deref().map(std::path::Path::new);
+  if eff.backend_kind == BackendKind::WebDriver {
+    Ok(AnyBrowser::WebDriver(
+      Box::pin(crate::backend::webdriver::browser::WebDriverBrowser::launch_ladybird(
+        &webdriver,
+        eff.headless,
+        user_data_dir,
+        &eff.env,
+        eff.launch_timeout,
+      ))
+      .await?,
+    ))
+  } else {
+    Ok(AnyBrowser::Bidi(
+      Box::pin(crate::backend::bidi::BidiBrowser::launch_ladybird(
+        &webdriver,
+        eff.headless,
+        user_data_dir,
+        &eff.env,
+        eff.launch_timeout,
+      ))
+      .await?,
+    ))
+  }
+}
+
+/// Lightpanda serves CDP itself; its arguments are `lightpanda serve`
+/// options, and it has no window to show.
+async fn launch_lightpanda(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
+  eff.reject_ignore_default_args("lightpanda")?;
+  if !eff.headless {
+    return Err(FerriError::unsupported("Lightpanda is headless only"));
+  }
+  let binary = if eff.chromium_path.is_empty() {
+    detect_lightpanda()?
+  } else {
+    eff.chromium_path.clone()
+  };
+  let browser = crate::backend::cdp::CdpBrowser::<crate::backend::cdp::ws::WsTransport>::launch_lightpanda(
+    std::path::Path::new(&binary),
+    crate::backend::cdp::lightpanda::ServeOptions {
+      proxy: eff.proxy.as_ref(),
+      user_data_dir: eff.user_data_dir.as_deref().map(std::path::Path::new),
+      args: &eff.args,
+      env: &eff.env,
+      timeout_ms: eff.launch_timeout.unwrap_or(30_000),
+    },
+  )
+  .await?;
+  Ok(AnyBrowser::CdpWs(browser))
+}
+
 fn browser_executable(kind: crate::options::BrowserKind, headless: bool) -> String {
   match kind {
     crate::options::BrowserKind::Chromium => resolve_chromium(headless),
@@ -1851,6 +1942,8 @@ fn browser_executable(kind: crate::options::BrowserKind, headless: bool) -> Stri
       .or_else(|| detect_firefox().ok())
       .unwrap_or_else(|| "firefox".to_owned()),
     crate::options::BrowserKind::Safari => "/usr/bin/safaridriver".to_owned(),
+    crate::options::BrowserKind::Ladybird => detect_ladybird().unwrap_or_default(),
+    crate::options::BrowserKind::Lightpanda => detect_lightpanda().unwrap_or_default(),
     crate::options::BrowserKind::WebKit => String::new(),
   }
 }
@@ -3560,6 +3653,66 @@ pub fn detect_chromium() -> String {
   }
 
   "chromium".to_string()
+}
+
+/// The Ladybird browser executable: `LADYBIRD_PATH`, then ferridriver's
+/// own install, then the system's.
+///
+/// # Errors
+///
+/// Returns a backend error naming the install command when no Ladybird
+/// is found.
+pub fn detect_ladybird() -> Result<String> {
+  if let Ok(path) = std::env::var("LADYBIRD_PATH")
+    && std::path::Path::new(&path).exists()
+  {
+    return Ok(path);
+  }
+  if let Some(path) = crate::install::BrowserInstaller::new().find_installed_ladybird() {
+    return Ok(path);
+  }
+  let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+  let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+  if cfg!(target_os = "macos") {
+    candidates.push("/Applications/Ladybird.app/Contents/MacOS/Ladybird".into());
+    if let Some(home) = &home {
+      candidates.push(home.join("Applications/Ladybird.app/Contents/MacOS/Ladybird"));
+    }
+  } else if cfg!(target_os = "linux") {
+    candidates.push("/opt/ladybird/bin/Ladybird".into());
+  }
+  candidates
+    .into_iter()
+    .find(|path| path.is_file())
+    .map(|path| path.to_string_lossy().into_owned())
+    .ok_or_else(|| FerriError::backend("Ladybird not found. Run `ferridriver install ladybird` or set LADYBIRD_PATH"))
+}
+
+/// The Lightpanda executable: `LIGHTPANDA_PATH`, then ferridriver's own
+/// install, then one on `PATH` (Homebrew and the AUR install it there).
+///
+/// # Errors
+///
+/// Returns a backend error naming the install command when no Lightpanda
+/// is found.
+pub fn detect_lightpanda() -> Result<String> {
+  if let Ok(path) = std::env::var("LIGHTPANDA_PATH")
+    && std::path::Path::new(&path).exists()
+  {
+    return Ok(path);
+  }
+  if let Some(path) = crate::install::BrowserInstaller::new().find_installed_lightpanda() {
+    return Ok(path);
+  }
+  std::env::var_os("PATH")
+    .into_iter()
+    .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+    .map(|dir| dir.join("lightpanda"))
+    .find(|path| path.is_file())
+    .map(|path| path.to_string_lossy().into_owned())
+    .ok_or_else(|| {
+      FerriError::backend("Lightpanda not found. Run `ferridriver install lightpanda` or set LIGHTPANDA_PATH")
+    })
 }
 
 /// Detect Firefox binary on the system.

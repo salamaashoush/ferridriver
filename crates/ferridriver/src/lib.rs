@@ -77,7 +77,7 @@ pub mod web_mcp;
 pub use action::Action;
 pub use browser::Browser;
 pub use browser_resources::BrowserResources;
-pub use browser_type::{BrowserType, chromium, firefox, safari, webkit};
+pub use browser_type::{BrowserType, chromium, firefox, ladybird, lightpanda, safari, webkit};
 pub use cdp_session::CdpSession;
 pub use clock::Clock;
 pub use context::{BrowserContext, ContextRef};

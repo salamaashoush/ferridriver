@@ -1,17 +1,40 @@
 # Backends
 
-ferridriver has four browser backends behind one API. They all speak the
-same `Browser` / `Page` / `Locator` surface — switch with a single flag
-and every test keeps working.
+ferridriver has five backends, one per protocol, behind one API. Every
+browser runs through one of them; none has a backend of its own. They all
+speak the same `Browser` / `Page` / `Locator` surface, so a test moves
+between browsers by changing its project.
 
 ## At a glance
 
-| Backend     | Browser            | When to use                                           | Platform |
-|-------------|--------------------|-------------------------------------------------------|----------|
-| `cdp-pipe` (default) | Chromium / Chrome | Most things. Fastest.                          | Linux, macOS |
-| `cdp-raw`   | Chromium / Chrome  | Attach to an already-running Chrome, or when fd inheritance is awkward | Linux, macOS |
-| `webkit`    | Playwright WebKit  | Safari-family rendering coverage                       | Linux, macOS |
-| `bidi`      | Firefox            | Firefox coverage, BiDi interop                         | Linux, macOS |
+| Backend     | Protocol                    | Browsers                            | When to use |
+|-------------|-----------------------------|-------------------------------------|-------------|
+| `cdp-pipe` (default) | CDP over pipes     | Chromium                            | Most things. Fastest. |
+| `cdp-raw`   | CDP over WebSocket          | Chromium, Lightpanda                | Attach to a running Chrome; Lightpanda |
+| `webkit`    | Playwright WebKit Inspector | Playwright WebKit                   | Safari-family rendering coverage |
+| `bidi`      | WebDriver BiDi              | Firefox, Safari, Ladybird, Chromium | Firefox, Ladybird, BiDi interop |
+| `webdriver` | Classic WebDriver           | Safari, Ladybird, any W3C driver    | Real Safari, Selenium grids, Appium |
+
+## Browsers
+
+| Browser           | Default backend | Others                  | Platforms             |
+|-------------------|-----------------|-------------------------|-----------------------|
+| `chromium`        | `cdp-pipe`      | `cdp-raw`, `bidi`, `webdriver` (connect) | Linux, macOS, Windows |
+| `firefox`         | `bidi`          | `webdriver` (connect)   | Linux, macOS, Windows |
+| `webkit`          | `webkit`        |                         | Linux, macOS, Windows |
+| `safari`          | `webdriver`     | `bidi`                  | macOS |
+| `ladybird`        | `bidi`          | `webdriver`             | Linux, macOS |
+| `lightpanda`      | `cdp-raw`       |                         | Linux, macOS |
+
+A backend a browser lacks a protocol command for answers with a typed
+`Unsupported` error. Where the same session serves another protocol that
+has the feature, the backend uses it: a `BiDi` session created through
+Classic WebDriver reads cookies, sets file inputs and dispatches input
+through Classic when the browser has no `BiDi` command for them. A browser
+with no `BiDi` user contexts has one browsing context per session, and the
+test runner reuses it across tests, starting a fresh browser after a test
+fails in it. A test that times out gets the worker a fresh browser on every
+backend, since it may still be acting on the one it had.
 
 ## `cdp-pipe` — the default
 
@@ -131,17 +154,60 @@ WebSocket.
 - HAR recording and download interception return
   `FerriError::Unsupported` (BiDi protocol gap).
 
+## `ladybird` — Ladybird over WebDriver BiDi
+
+ferridriver starts the `WebDriver` service Ladybird ships beside its
+browser, creates a session with `webSocketUrl: true`, and drives the
+`BiDi` socket it returns through the `bidi` backend; `webdriver` drives the
+same session over Classic instead. `ferridriver install ladybird` fetches
+the official build, or point `LADYBIRD_PATH` / `executablePath` at the
+`Ladybird` executable of any build that includes `WebDriver`.
+
+**Limits**
+
+- One browsing context per session (no `BiDi` user contexts), so
+  `browser.newContext()` is unavailable and a test reuses the default
+  context.
+- No browser arguments or launch proxy: the `WebDriver` service builds
+  Ladybird's command line itself.
+- Ladybird is in alpha. A protocol command it has not implemented
+  (emulation, permissions, dialog events, sandbox realms) answers with
+  `Unsupported` or, for sandboxes, runs the script in the page's realm.
+
+## `lightpanda` — Lightpanda over CDP
+
+Lightpanda is a headless browser built for automation that serves CDP
+itself. ferridriver runs `lightpanda serve` on a free loopback port and
+drives it through the `cdp-raw` backend. Launch arguments are passed to
+`lightpanda serve` (`--obey-robots`, `--log-level`, ...); `proxy` maps to
+`--http-proxy`, and a `userDataDir` keeps cookies across launches (the only
+state Lightpanda persists). Lightpanda's usage telemetry is switched off
+unless the launch's own `env` sets `LIGHTPANDA_DISABLE_TELEMETRY`.
+
+Lightpanda holds one browser context per CDP connection, so every context
+ferridriver creates gets a connection of its own to the same server, and
+the server's connection cap is raised to 128 (`--cdp-max-connections` in
+the launch arguments overrides it). `serve` fetches no sub-resources by
+default; ferridriver has it load iframes, workers, stylesheets, images and
+beacons as a browser does, unless the launch arguments name
+`--load-resources` themselves.
+
+**Limits**
+
+- Headless only. Screenshots are PNG only and drawn by Lightpanda's own
+  layout, so pixel comparisons against other browsers will differ; there
+  is no screencast, so no video.
+- Not yet implemented by Lightpanda: popups that open a new window,
+  JavaScript dialogs, file choosers, downloads, colour-scheme and device
+  emulation, offline and throttling emulation.
+- No Windows build; run it in WSL.
+
 ## How browsers relate to backends
 
-Each browser has a sensible default backend, chosen by the Rust factory
-you call (`chromium()` / `firefox()` / `webkit()`) or by `[[test.projects]]`
-config:
-
-| Browser    | Default backend |
-|------------|-----------------|
-| `chromium` | `cdp-pipe`      |
-| `firefox`  | `bidi`          |
-| `webkit`   | `webkit`        |
+Each browser has a default backend, chosen by the factory you call
+(`chromium()`, `firefox()`, `webkit()`, `safari()`, `ladybird()`,
+`lightpanda()`) or by `[[test.projects]]` config; the table under
+[Browsers](#browsers) lists them.
 
 Chromium also supports `cdp-raw` (`chromium({ transport: 'ws' })` in JS,
 `BrowserType::chromium_with` in Rust). Pairings like Firefox-on-webkit or

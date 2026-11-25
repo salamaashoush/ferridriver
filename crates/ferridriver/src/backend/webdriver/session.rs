@@ -33,6 +33,48 @@ pub struct WebDriverSession {
   selected_window: std::sync::Mutex<Option<String>>,
 }
 
+/// The capabilities of a `POST /session`: what the session must have,
+/// and alternatives tried in order, each merged with it, for what it
+/// should have if the browser can give it.
+#[derive(Debug, Clone)]
+pub struct CapabilityRequest {
+  pub always_match: Value,
+  pub first_match: Vec<Value>,
+}
+
+impl From<Value> for CapabilityRequest {
+  fn from(always_match: Value) -> Self {
+    Self {
+      always_match,
+      first_match: Vec::new(),
+    }
+  }
+}
+
+impl CapabilityRequest {
+  /// Ask for `acceptInsecureCerts` without requiring it, unless the
+  /// caller already decided either way. A browser that cannot accept
+  /// insecure certificates refuses a session that requires it.
+  #[must_use]
+  pub fn preferring_insecure_certs(always_match: Value) -> Self {
+    if always_match.get("acceptInsecureCerts").is_some() {
+      return always_match.into();
+    }
+    Self {
+      always_match,
+      first_match: vec![json!({"acceptInsecureCerts": true}), json!({})],
+    }
+  }
+
+  fn payload(&self) -> Value {
+    if self.first_match.is_empty() {
+      json!({"capabilities": {"alwaysMatch": self.always_match}})
+    } else {
+      json!({"capabilities": {"alwaysMatch": self.always_match, "firstMatch": self.first_match}})
+    }
+  }
+}
+
 pub struct CreatedSession {
   pub session: Arc<WebDriverSession>,
   pub id: String,
@@ -107,14 +149,13 @@ impl WebDriverSession {
   pub async fn create(
     client: reqwest::Client,
     url: Url,
-    capabilities: Value,
+    capabilities: impl Into<CapabilityRequest>,
     timeout_ms: u64,
     headers: Option<&rustc_hash::FxHashMap<String, String>>,
   ) -> Result<CreatedSession> {
-    let secrets = connection_secrets(&url, &capabilities, headers);
-    let mut request = client
-      .post(url.clone())
-      .json(&json!({"capabilities": {"alwaysMatch": capabilities}}));
+    let capabilities = capabilities.into();
+    let secrets = connection_secrets(&url, &capabilities.always_match, headers);
+    let mut request = client.post(url.clone()).json(&capabilities.payload());
     if timeout_ms != 0 {
       request = request.timeout(std::time::Duration::from_millis(timeout_ms));
     }

@@ -52,6 +52,33 @@ impl WebDriverBrowser {
     Ok(browser)
   }
 
+  /// Launch Ladybird through its `WebDriver` service and drive the
+  /// Classic session it creates.
+  ///
+  /// # Errors
+  /// Reports driver startup failures, session creation errors, and a
+  /// launch that exceeds `timeout_ms` (30 seconds by default).
+  pub async fn launch_ladybird(
+    webdriver: &std::path::Path,
+    headless: bool,
+    user_data_dir: Option<&std::path::Path>,
+    env: &rustc_hash::FxHashMap<String, String>,
+    timeout_ms: Option<u64>,
+  ) -> Result<Self> {
+    let timeout_ms = timeout_ms.unwrap_or(30_000);
+    let (mut browser, group) = super::launcher::launch_ladybird(
+      webdriver,
+      headless,
+      user_data_dir,
+      env,
+      timeout_ms,
+      |endpoint| async move { Self::connect(&endpoint, "ladybird", None, None, Some(timeout_ms)).await },
+    )
+    .await?;
+    browser.child = group;
+    Ok(browser)
+  }
+
   #[must_use]
   pub fn version(&self) -> String {
     self.version.clone()

@@ -517,6 +517,8 @@ const FERRIDRIVER_EXPORTS: &[&str] = &[
   "firefox",
   "webkit",
   "safari",
+  "ladybird",
+  "lightpanda",
   "_android",
 ];
 
@@ -556,7 +558,18 @@ fn ferridriver_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   )?;
   ns.set("defineTool", fd_prop(ctx, "tool")?)?;
   for name in [
-    "page", "context", "browser", "request", "expect", "chromium", "firefox", "webkit", "safari", "_android",
+    "page",
+    "context",
+    "browser",
+    "request",
+    "expect",
+    "chromium",
+    "firefox",
+    "webkit",
+    "safari",
+    "ladybird",
+    "lightpanda",
+    "_android",
   ] {
     ns.set(name, global(ctx, name)?)?;
   }
@@ -606,6 +619,8 @@ const TEST_EXPORTS: &[&str] = &[
   "firefox",
   "webkit",
   "safari",
+  "ladybird",
+  "lightpanda",
   "_android",
   "request",
 ];
@@ -632,6 +647,8 @@ fn test_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     ("firefox", global(ctx, "firefox")?),
     ("webkit", global(ctx, "webkit")?),
     ("safari", global(ctx, "safari")?),
+    ("ladybird", global(ctx, "ladybird")?),
+    ("lightpanda", global(ctx, "lightpanda")?),
     ("_android", global(ctx, "_android")?),
     ("request", global(ctx, "request")?),
     ("totp", fd_prop(ctx, "totp")?),

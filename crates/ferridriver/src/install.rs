@@ -20,6 +20,8 @@
 
 mod android;
 mod ios;
+mod ladybird;
+mod lightpanda;
 #[cfg(any(target_os = "linux", test))]
 mod linux;
 mod playwright_cache;
@@ -233,6 +235,8 @@ pub enum CacheFamily {
   WebKit,
   AxeCore,
   Ffmpeg,
+  Ladybird,
+  Lightpanda,
 }
 
 impl CacheFamily {
@@ -248,6 +252,8 @@ impl CacheFamily {
       "webkit" => Self::WebKit,
       "axe" => Self::AxeCore,
       "ffmpeg" => Self::Ffmpeg,
+      "ladybird" => Self::Ladybird,
+      "lightpanda" => Self::Lightpanda,
       _ => return None,
     })
   }
@@ -268,6 +274,8 @@ impl CacheFamily {
       Self::WebKit => "webkit-",
       Self::AxeCore => "axe-core-",
       Self::Ffmpeg => "ffmpeg-",
+      Self::Ladybird => "ladybird-",
+      Self::Lightpanda => "lightpanda-",
     }
   }
 
@@ -418,6 +426,7 @@ impl BrowserInstaller {
       return Ok(client);
     }
     let built = Client::builder()
+      .user_agent(concat!("ferridriver/", env!("CARGO_PKG_VERSION")))
       .build()
       .map_err(|e| backend_err(format!("no HTTP client for downloads: {e}")))?;
     Ok(self.client.get_or_init(|| built))
@@ -706,6 +715,66 @@ impl BrowserInstaller {
     }
     file.flush().await?;
 
+    Ok(())
+  }
+
+  /// Download `url` to `dest`, retrying, and keep it only if its SHA-256
+  /// is `sha256`.
+  async fn download_verified<F>(&self, url: &str, dest: &Path, sha256: &str, product: &str, progress: &F) -> Result<()>
+  where
+    F: Fn(InstallProgress),
+  {
+    let mut last_error = String::new();
+    for attempt in 1..=DOWNLOAD_RETRIES {
+      match self.download_file(url, dest, progress).await {
+        Ok(()) => {
+          last_error.clear();
+          break;
+        },
+        Err(error) => {
+          let _ = tokio::fs::remove_file(dest).await;
+          last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {error}");
+        },
+      }
+    }
+    if !last_error.is_empty() {
+      return Err(backend_err(format!(
+        "{product} download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
+      )));
+    }
+    let path = dest.to_path_buf();
+    let digest = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
+      use sha2::{Digest, Sha256};
+      use std::io::Read as _;
+      let mut hasher = Sha256::new();
+      let mut file = std::fs::File::open(&path)?;
+      let mut chunk = vec![0; 1 << 20];
+      loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+          break;
+        }
+        hasher.update(&chunk[..read]);
+      }
+      Ok(
+        hasher
+          .finalize()
+          .iter()
+          .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+          }),
+      )
+    })
+    .await
+    .map_err(|e| backend_err(format!("hashing task failed: {e}")))??;
+    if !digest.eq_ignore_ascii_case(sha256) {
+      let _ = tokio::fs::remove_file(dest).await;
+      return Err(backend_err(format!(
+        "{product} download {url} has SHA-256 {digest}, expected {sha256}"
+      )));
+    }
     Ok(())
   }
 
@@ -1640,6 +1709,36 @@ impl BrowserInstaller {
     candidates.into_iter().find_map(|entry| {
       let exe = entry.path().join(executable);
       (entry.path().join(".downloaded").exists() && exe.is_file()).then(|| exe.to_string_lossy().to_string())
+    })
+  }
+
+  /// The newest Lightpanda `ferridriver install lightpanda` put in the cache.
+  #[must_use]
+  pub fn find_installed_lightpanda(&self) -> Option<String> {
+    let entries = std::fs::read_dir(&self.cache_dir).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_name().to_string_lossy().starts_with("lightpanda-"))
+      .collect();
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
+    candidates.into_iter().find_map(|entry| {
+      let exe = entry.path().join("lightpanda");
+      (entry.path().join(".downloaded").exists() && exe.is_file()).then(|| exe.to_string_lossy().into_owned())
+    })
+  }
+
+  /// The newest Ladybird `ferridriver install ladybird` put in the cache.
+  #[must_use]
+  pub fn find_installed_ladybird(&self) -> Option<String> {
+    let entries = std::fs::read_dir(&self.cache_dir).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_name().to_string_lossy().starts_with("ladybird-"))
+      .collect();
+    candidates.sort_by_key(|entry| std::cmp::Reverse(version_order(&entry.file_name().to_string_lossy())));
+    candidates.into_iter().find_map(|entry| {
+      let exe = ladybird::executable_path(&entry.path());
+      (entry.path().join(".downloaded").exists() && exe.exists()).then(|| exe.to_string_lossy().into_owned())
     })
   }
 

@@ -8,9 +8,10 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.97-c97b4a?logo=rust)](./rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-c97b4a.svg)](./README.md#license)
 
-Browser automation written in Rust with a Playwright-compatible API. Four
-backends (Chromium over CDP pipes, Chromium over CDP WebSocket, Playwright
-WebKit, Firefox over WebDriver BiDi) behind one surface. Ships as:
+Browser automation written in Rust with a Playwright-compatible API. Chromium,
+Firefox, Playwright WebKit, Safari, Ladybird and Lightpanda, over CDP,
+WebDriver BiDi, Classic WebDriver and Playwright's WebKit protocol, behind one
+surface. Ships as:
 
 - A Rust library — `ferridriver`
 - A test runner — `ferridriver-test` with `#[ferritest]`, fixtures, hooks, expect matchers
@@ -536,14 +537,36 @@ remote ones included.
 See [site/docs/scripting/named-sessions.md](./site/docs/scripting/named-sessions.md)
 for the wire format.
 
+## Browsers
+
+| Browser           | Backends (default first)              | Platforms             | Install                          |
+|-------------------|---------------------------------------|-----------------------|----------------------------------|
+| Chromium / Chrome | `cdp-pipe`, `cdp-raw`, `bidi`, `webdriver` | Linux, macOS, Windows | `ferridriver install chromium`   |
+| Firefox           | `bidi`, `webdriver`                   | Linux, macOS, Windows | `ferridriver install firefox`    |
+| Playwright WebKit | `webkit`                              | Linux, macOS, Windows | `ferridriver install webkit`     |
+| Safari            | `webdriver`, `bidi`                   | macOS                 | ships with macOS (`safaridriver`) |
+| Ladybird          | `bidi`, `webdriver`                   | Linux, macOS          | `ferridriver install ladybird`   |
+| Lightpanda        | `cdp-raw`                             | Linux, macOS          | `ferridriver install lightpanda` |
+
+Ladybird and Lightpanda are young engines: they run the same API through
+the same backends, and what they have not implemented yet answers with a
+typed `Unsupported` error rather than a workaround. Ladybird has one
+browsing context per session, so `browser.newContext()` is unavailable
+there and each test reuses the default context.
+
 ## Backends
 
-| Backend     | Browser            | Transport                                    | Default? |
-|-------------|--------------------|----------------------------------------------|----------|
-| `cdp-pipe`  | Chromium / Chrome  | CDP over Unix pipes (fd 3/4)                 | yes      |
-| `cdp-raw`   | Chromium / Chrome  | CDP over WebSocket (can attach via `connect`) |          |
-| `webkit`    | Playwright WebKit  | Playwright Inspector protocol over `pw_run.sh` |        |
-| `bidi`      | Firefox            | WebDriver BiDi over WebSocket                |          |
+| Backend     | Protocol                                       | Browsers                              |
+|-------------|------------------------------------------------|---------------------------------------|
+| `cdp-pipe`  | CDP over pipes (fd 3/4)                        | Chromium                              |
+| `cdp-raw`   | CDP over WebSocket (can attach via `connect`)  | Chromium, Lightpanda                  |
+| `webkit`    | Playwright's WebKit Inspector protocol over `pw_run.sh` | Playwright WebKit            |
+| `bidi`      | WebDriver BiDi over WebSocket                  | Firefox, Chromium, Safari, Ladybird   |
+| `webdriver` | Classic WebDriver over HTTP                    | Chromium, Firefox, Safari, Ladybird   |
+
+ferridriver launches Firefox, Safari and Ladybird over `bidi`, and Safari and
+Ladybird over `webdriver`. Every other pairing connects to a WebDriver server
+you run (`chromedriver`, `geckodriver`, a Selenium grid, Appium).
 
 Backends dispatch through a Rust `enum`, not a trait object — monomorphic
 calls, no vtable lookup.

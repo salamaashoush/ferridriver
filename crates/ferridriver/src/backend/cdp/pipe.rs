@@ -395,6 +395,8 @@ mod tests {
       create_ledger: Arc::default(),
       popups: crate::backend::PopupWatch::default(),
       user_data_dir: None,
+      flushes_on_close: false,
+      connections: None,
       downloads_dir: crate::backend::cdp::new_downloads_dir().unwrap(),
       attach_tasks: Arc::new(AttachTasks(Vec::new())),
       webdriver: None,

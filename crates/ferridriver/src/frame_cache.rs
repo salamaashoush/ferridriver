@@ -251,6 +251,13 @@ impl FrameCache {
   }
 
   /// Cached record for `id`, if any (includes detached frames).
+  /// Record the name a frame was found to have after it was cached.
+  pub(crate) fn rename(&mut self, id: &str, name: &str) {
+    if let Some(record) = self.by_id.get_mut(id) {
+      name.clone_into(&mut record.info.name);
+    }
+  }
+
   pub(crate) fn record(&self, id: &str) -> Option<&FrameRecord> {
     self.by_id.get(id)
   }

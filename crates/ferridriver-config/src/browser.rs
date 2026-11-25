@@ -616,7 +616,11 @@ impl RoutingView<'_> {
           Some(BackendKind::WebDriver | BackendKind::Bidi)
         ) || matches!(
           browser,
-          Some(ferridriver::options::BrowserKind::Safari | ferridriver::options::BrowserKind::Firefox)
+          Some(
+            ferridriver::options::BrowserKind::Safari
+              | ferridriver::options::BrowserKind::Firefox
+              | ferridriver::options::BrowserKind::Ladybird
+          )
         )) && (url.starts_with("http://") || url.starts_with("https://")))
       {
         let options = cfg.connect_options.clone().unwrap_or_default();
@@ -628,6 +632,8 @@ impl RoutingView<'_> {
           .unwrap_or_else(|| match browser {
             Some(ferridriver::options::BrowserKind::Safari | ferridriver::options::BrowserKind::WebKit) => "safari",
             Some(ferridriver::options::BrowserKind::Firefox) => "firefox",
+            Some(ferridriver::options::BrowserKind::Ladybird) => "ladybird",
+            Some(ferridriver::options::BrowserKind::Lightpanda) => "lightpanda",
             Some(ferridriver::options::BrowserKind::Chromium) => "chrome",
             None => match cfg.backend.map_or(self.backend, BackendChoice::kind) {
               BackendKind::WebKit => "safari",

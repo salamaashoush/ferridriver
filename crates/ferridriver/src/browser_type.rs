@@ -104,6 +104,24 @@ impl BrowserType {
     }
   }
 
+  #[must_use]
+  pub fn ladybird() -> Self {
+    Self {
+      kind: BrowserKind::Ladybird,
+      transport: None,
+      backend: None,
+    }
+  }
+
+  #[must_use]
+  pub fn lightpanda() -> Self {
+    Self {
+      kind: BrowserKind::Lightpanda,
+      transport: None,
+      backend: None,
+    }
+  }
+
   /// Rust-only escape hatch used by the test runner to pin both the
   /// product and the wire backend explicitly. NOT exposed in the JS
   /// bindings — it's intended for the test scaffolding that needs to
@@ -120,6 +138,17 @@ impl BrowserType {
       kind,
       transport,
       backend: Some(backend),
+    }
+  }
+
+  /// The type a browser launched as `kind` over `backend` answers
+  /// `browser.browserType()` with: `kind` when it can run on `backend`,
+  /// otherwise the product `backend` implies (a connection that never
+  /// named one).
+  pub(crate) fn launched(kind: BrowserKind, backend: BackendKind) -> Self {
+    match crate::options::BrowserSelection::resolve(Some(kind), Some(backend)) {
+      Ok(selection) => Self::with_backend(selection.browser, selection.backend),
+      Err(_) => Self::for_backend(backend),
     }
   }
 
@@ -164,6 +193,8 @@ impl BrowserType {
       BrowserKind::Safari => {
         cfg!(target_os = "macos").then(|| std::path::PathBuf::from("/Applications/Safari.app/Contents/MacOS/Safari"))
       },
+      BrowserKind::Ladybird => crate::state::detect_ladybird().ok().map(std::path::PathBuf::from),
+      BrowserKind::Lightpanda => crate::state::detect_lightpanda().ok().map(std::path::PathBuf::from),
     }
   }
 
@@ -210,7 +241,11 @@ impl BrowserType {
     options: ConnectOptions,
     resources: Option<&crate::BrowserResources>,
   ) -> Result<Browser> {
-    if ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://") {
+    // Lightpanda serves CDP, whose HTTP endpoint is its discovery page,
+    // not a WebDriver server.
+    if (ws_endpoint.starts_with("http://") || ws_endpoint.starts_with("https://"))
+      && self.kind != BrowserKind::Lightpanda
+    {
       if self.kind == BrowserKind::WebKit {
         return Err(crate::error::FerriError::unsupported(
           "Playwright WebKit cannot connect through WebDriver; use safari().connect() for real Safari",
@@ -236,6 +271,8 @@ impl BrowserType {
         BrowserKind::Chromium => "chrome",
         BrowserKind::Firefox => "firefox",
         BrowserKind::WebKit | BrowserKind::Safari => "safari",
+        BrowserKind::Ladybird => "ladybird",
+        BrowserKind::Lightpanda => "lightpanda",
       };
       let mode = ConnectMode::WebDriver {
         endpoint: ws_endpoint.to_string(),
@@ -248,7 +285,10 @@ impl BrowserType {
       let state = BrowserState::with_plan(mode, plan).start_owned(resources)?.await?;
       return Browser::from_ready_state(state, "default", self).await;
     }
-    if matches!(self.kind, BrowserKind::Firefox | BrowserKind::Safari) {
+    if matches!(
+      self.kind,
+      BrowserKind::Firefox | BrowserKind::Safari | BrowserKind::Ladybird
+    ) {
       let plan = LaunchPlan {
         backend: BackendKind::Bidi,
         kind: self.kind,
@@ -425,4 +465,14 @@ pub fn webkit() -> BrowserType {
 #[must_use]
 pub fn safari() -> BrowserType {
   BrowserType::safari()
+}
+
+#[must_use]
+pub fn ladybird() -> BrowserType {
+  BrowserType::ladybird()
+}
+
+#[must_use]
+pub fn lightpanda() -> BrowserType {
+  BrowserType::lightpanda()
 }

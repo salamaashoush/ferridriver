@@ -404,6 +404,8 @@ fn installed_browser(browser: ferridriver::options::BrowserKind) -> Option<Strin
       .is_file()
       .then(|| "/usr/bin/safaridriver".to_owned()),
     BrowserKind::Chromium => installer.find_installed_chromium(),
+    BrowserKind::Ladybird => ferridriver::state::detect_ladybird().ok(),
+    BrowserKind::Lightpanda => ferridriver::state::detect_lightpanda().ok(),
   }
 }
 

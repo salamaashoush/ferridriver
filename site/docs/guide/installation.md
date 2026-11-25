@@ -60,7 +60,8 @@ The platform binary is pulled in via `optionalDependencies`:
 ## Browsers
 
 Download browser binaries into the local cache. Supported targets:
-`chromium`, `chromium-headless-shell`, `chromedriver`, `firefox`, `webkit`.
+`chromium`, `chromium-headless-shell`, `chromedriver`, `firefox`, `webkit`,
+`ladybird`, `lightpanda`.
 
 ```bash
 ferridriver install chromium                          # default
@@ -68,6 +69,7 @@ ferridriver install --with-deps chromium              # Linux: also install syst
 ferridriver install firefox chromium-headless-shell
 ferridriver install webkit                            # Playwright WebKit build
 ferridriver install chromium chromedriver             # ChromeDriver of that Chromium's version
+ferridriver install ladybird lightpanda               # the two independent engines
 ```
 
 `chromedriver` follows the newest Chromium in the cache, since a driver
@@ -110,6 +112,32 @@ the download at a mirror instead of Playwright's CDN.
 WebKit is available on Linux and macOS only (the `--inspector-pipe`
 transport relies on a Unix fork/dup model). It is not native WKWebView.
 
+### Ladybird
+
+`ferridriver install ladybird` installs the newest release listed in
+`download.ladybird.org/releases.json`: the macOS disk image (Apple
+Silicon), or on Linux the package from Ladybird's apt repository for x86_64
+or arm64, unpacked into the cache rather than installed system-wide. Each
+download is checked against the SHA-256 Ladybird publishes. The Linux build
+needs glibc 2.39 or newer and the X11/Wayland libraries any desktop has.
+
+The browser is found in this order: `LADYBIRD_PATH` (the `Ladybird`
+executable), the ferridriver cache, then `/Applications/Ladybird.app` or
+`~/Applications/Ladybird.app` on macOS and `/opt/ladybird` on Linux. A
+source build works too: point `LADYBIRD_PATH` or `executablePath` at its
+`bin/Ladybird`. ferridriver drives it through the `WebDriver` service that
+sits beside the browser, so the build must include it.
+
+### Lightpanda
+
+`ferridriver install lightpanda` installs the newest Lightpanda release
+from its GitHub releases (macOS and Linux, x86_64 and arm64), checked
+against the SHA-256 GitHub lists for it. Set `GITHUB_TOKEN` to lift the
+anonymous API rate limit on shared CI addresses. The executable is found in
+this order: `LIGHTPANDA_PATH`, the ferridriver cache, then `lightpanda` on
+`PATH` (Homebrew's `lightpanda-io/browser/lightpanda`, the AUR's
+`lightpanda-nightly-bin`). Lightpanda has no Windows build; run it in WSL.
+
 ## System dependencies
 
 No build-time system libraries are required for the Rust crates beyond a
@@ -120,6 +148,7 @@ Runtime dependencies:
 - **Video recording (`--video`)** — `ferridriver install ffmpeg` fetches the ffmpeg Playwright records with; an `ffmpeg` on `PATH` works too.
 - **Firefox backend (`bidi`)** — install Firefox (`apt`, `brew`, `pacman`); ferridriver does not bundle it.
 - **WebKit backend** — Playwright WebKit binary as above.
+- **Ladybird, Lightpanda** — `ferridriver install ladybird` / `lightpanda` as above.
 
 ## Platform support
 

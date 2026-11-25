@@ -128,7 +128,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ///
   /// Returns the disposal's error when the context had to be disposed.
   pub async fn retire_context(&self, browser_context_id: &str, origins: &[String]) -> Result<()> {
-    if lock(&self.spares.proxied).contains(browser_context_id) {
+    // A context on a connection of its own goes with that connection.
+    if lock(&self.spares.proxied).contains(browser_context_id) || self.routes_context(browser_context_id) {
       return self.dispose_context(browser_context_id).await;
     }
     let emptied = tokio::time::timeout(RESET_BUDGET, self.empty_context(browser_context_id, origins)).await;

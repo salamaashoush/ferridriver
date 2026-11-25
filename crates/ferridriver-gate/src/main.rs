@@ -246,6 +246,11 @@ fn ready_jobs() -> Vec<Job> {
 /// `exclusive` is true when one browser suite was selected on its own,
 /// which is how CI runs them: that suite then owns every browser slot
 /// instead of the share it gets beside the others in a full gate run.
+/// The e2e projects the gate holds green. `ladybird` and `lightpanda` are
+/// projects too, run with `--project`; they fail the part of the suite
+/// their engines have not implemented yet.
+const GATED_PROJECTS: [&str; 4] = ["cdp-pipe", "cdp-raw", "bidi", "webkit"];
+
 fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> {
   let mut jobs = Vec::new();
   // Browser work is mostly waiting on independent renderer processes. The
@@ -268,8 +273,13 @@ fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> 
     ],
     &["build", "types"],
   );
+  let projects: Vec<&str> = if projects.is_empty() {
+    GATED_PROJECTS.to_vec()
+  } else {
+    projects.iter().map(String::as_str).collect()
+  };
   for project in projects {
-    e2e.command.extend(["--project".to_string(), project.clone()]);
+    e2e.command.extend(["--project".to_string(), project.to_string()]);
   }
   e2e.browsers = e2e_workers;
   jobs.push(e2e);

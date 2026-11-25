@@ -444,6 +444,14 @@ fn safari_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
   Class::instance(ctx, BrowserTypeJs::new(BrowserType::safari()))
 }
 
+fn ladybird_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
+  Class::instance(ctx, BrowserTypeJs::new(BrowserType::ladybird()))
+}
+
+fn lightpanda_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
+  Class::instance(ctx, BrowserTypeJs::new(BrowserType::lightpanda()))
+}
+
 fn webkit_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
   Class::instance(ctx, BrowserTypeJs::new(BrowserType::webkit()))
 }
@@ -478,6 +486,14 @@ pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     .globals()
     .set("safari", rquickjs::Function::new(ctx.clone(), safari_factory)?)?;
   crate::bindings::runtime::mirror_global(ctx, "safari")?;
+  ctx
+    .globals()
+    .set("ladybird", rquickjs::Function::new(ctx.clone(), ladybird_factory)?)?;
+  crate::bindings::runtime::mirror_global(ctx, "ladybird")?;
+  ctx
+    .globals()
+    .set("lightpanda", rquickjs::Function::new(ctx.clone(), lightpanda_factory)?)?;
+  crate::bindings::runtime::mirror_global(ctx, "lightpanda")?;
 
   Ok(())
 }

@@ -2129,6 +2129,10 @@ pub enum BrowserKind {
   /// Apple `WebKit` (macOS only)
   WebKit,
   Safari,
+  /// Ladybird, driven through the `WebDriver` service it ships.
+  Ladybird,
+  /// Lightpanda, the headless browser that serves CDP itself.
+  Lightpanda,
 }
 
 impl std::str::FromStr for BrowserKind {
@@ -2139,9 +2143,11 @@ impl std::str::FromStr for BrowserKind {
       "firefox" => Ok(Self::Firefox),
       "webkit" => Ok(Self::WebKit),
       "safari" => Ok(Self::Safari),
+      "ladybird" => Ok(Self::Ladybird),
+      "lightpanda" => Ok(Self::Lightpanda),
       _ => Err(crate::error::FerriError::invalid_argument(
         "browser",
-        format!("unknown browser {value:?}; expected chromium, firefox, webkit, or safari"),
+        format!("unknown browser {value:?}; expected chromium, firefox, webkit, safari, ladybird, or lightpanda"),
       )),
     }
   }
@@ -2157,6 +2163,8 @@ impl BrowserKind {
       Self::Firefox => "firefox",
       Self::WebKit => "webkit",
       Self::Safari => "safari",
+      Self::Ladybird => "ladybird",
+      Self::Lightpanda => "lightpanda",
     }
   }
 
@@ -2167,8 +2175,9 @@ impl BrowserKind {
   pub fn default_backend(self) -> crate::backend::BackendKind {
     match self {
       Self::Chromium => crate::backend::BackendKind::CdpPipe,
-      Self::Firefox => crate::backend::BackendKind::Bidi,
+      Self::Firefox | Self::Ladybird => crate::backend::BackendKind::Bidi,
       Self::Safari => crate::backend::BackendKind::WebDriver,
+      Self::Lightpanda => crate::backend::BackendKind::CdpWs,
       Self::WebKit => crate::backend::BackendKind::WebKit,
     }
   }
@@ -2200,9 +2209,10 @@ impl BrowserSelection {
         BrowserKind::Chromium,
         BackendKind::CdpPipe | BackendKind::CdpWs | BackendKind::Bidi | BackendKind::WebDriver
       ) | (
-        BrowserKind::Firefox | BrowserKind::Safari,
+        BrowserKind::Firefox | BrowserKind::Safari | BrowserKind::Ladybird,
         BackendKind::Bidi | BackendKind::WebDriver
       ) | (BrowserKind::WebKit, BackendKind::WebKit)
+        | (BrowserKind::Lightpanda, BackendKind::CdpWs)
     );
     if !compatible {
       return Err(crate::error::FerriError::invalid_argument(
@@ -4428,6 +4438,8 @@ mod browser_selection_tests {
       (BrowserKind::Firefox, BackendKind::Bidi),
       (BrowserKind::WebKit, BackendKind::WebKit),
       (BrowserKind::Safari, BackendKind::WebDriver),
+      (BrowserKind::Ladybird, BackendKind::Bidi),
+      (BrowserKind::Lightpanda, BackendKind::CdpWs),
     ] {
       assert_eq!(
         BrowserSelection::resolve(Some(browser), None).unwrap(),
@@ -4443,6 +4455,8 @@ mod browser_selection_tests {
       BrowserKind::Firefox,
       BrowserKind::WebKit,
       BrowserKind::Safari,
+      BrowserKind::Ladybird,
+      BrowserKind::Lightpanda,
     ] {
       for backend in [
         BackendKind::CdpPipe,
@@ -4453,8 +4467,11 @@ mod browser_selection_tests {
       ] {
         let expected = match browser {
           BrowserKind::Chromium => backend != BackendKind::WebKit,
-          BrowserKind::Firefox | BrowserKind::Safari => matches!(backend, BackendKind::Bidi | BackendKind::WebDriver),
+          BrowserKind::Firefox | BrowserKind::Safari | BrowserKind::Ladybird => {
+            matches!(backend, BackendKind::Bidi | BackendKind::WebDriver)
+          },
           BrowserKind::WebKit => backend == BackendKind::WebKit,
+          BrowserKind::Lightpanda => backend == BackendKind::CdpWs,
         };
         let result = BrowserSelection::resolve(Some(browser), Some(backend));
         assert_eq!(result.is_ok(), expected, "{browser:?} with {backend:?}");

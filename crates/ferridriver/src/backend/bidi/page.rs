@@ -1907,14 +1907,13 @@ impl BidiPage {
   ///
   /// Returns an error when `storage.getCookies` fails or its response has no `cookies` array.
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
-    let result = self
-      .cmd(
-        "storage.getCookies",
-        json!({
-          "partition": self.cookie_partition()
-        }),
-      )
-      .await?;
+    let Some(result) = self
+      .session
+      .try_command("storage.getCookies", json!({"partition": self.cookie_partition()}))
+      .await?
+    else {
+      return self.session.classic_page(&self.context_id)?.get_cookies().await;
+    };
 
     let cookies = result
       .get("cookies")
@@ -1932,6 +1931,9 @@ impl BidiPage {
   ///
   /// Returns an error when the `storage.setCookie` command fails.
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
+    if self.session.lacks("storage.setCookie") {
+      return self.session.classic_page(&self.context_id)?.set_cookie(cookie).await;
+    }
     // BiDi `storage.setCookie` has no `url` field (unlike CDP), and
     // `domain` is mandatory. Match Playwright by deriving domain/path
     // from `url` when domain/path are not given explicitly.
@@ -1974,15 +1976,10 @@ impl BidiPage {
       cookie_obj["sameSite"] = json!(ss.as_str().to_lowercase());
     }
 
-    self
-      .cmd(
-        "storage.setCookie",
-        json!({
-          "cookie": cookie_obj,
-          "partition": self.cookie_partition()
-        }),
-      )
-      .await?;
+    let params = json!({"cookie": cookie_obj, "partition": self.cookie_partition()});
+    if self.session.try_command("storage.setCookie", params).await?.is_none() {
+      return self.session.classic_page(&self.context_id)?.set_cookie(cookie).await;
+    }
     Ok(())
   }
 
@@ -1994,15 +1991,19 @@ impl BidiPage {
     if let Some(d) = domain {
       filter["domain"] = json!(d);
     }
-    self
-      .cmd(
-        "storage.deleteCookies",
-        json!({
-          "filter": filter,
-          "partition": self.cookie_partition()
-        }),
-      )
-      .await?;
+    let params = json!({"filter": filter, "partition": self.cookie_partition()});
+    if self
+      .session
+      .try_command("storage.deleteCookies", params)
+      .await?
+      .is_none()
+    {
+      return self
+        .session
+        .classic_page(&self.context_id)?
+        .delete_cookie(name, domain)
+        .await;
+    }
     Ok(())
   }
 
@@ -2010,14 +2011,15 @@ impl BidiPage {
   ///
   /// Returns an error when the `storage.deleteCookies` command fails.
   pub async fn clear_cookies(&self) -> Result<()> {
-    self
-      .cmd(
-        "storage.deleteCookies",
-        json!({
-          "partition": self.cookie_partition()
-        }),
-      )
-      .await?;
+    let params = json!({"partition": self.cookie_partition()});
+    if self
+      .session
+      .try_command("storage.deleteCookies", params)
+      .await?
+      .is_none()
+    {
+      return self.session.classic_page(&self.context_id)?.clear_cookies().await;
+    }
     Ok(())
   }
 
@@ -2832,18 +2834,21 @@ impl BidiPage {
   ///
   /// # Errors
   ///
-  /// Returns an error when the `input.setFiles` command fails.
+  /// Returns an error when the `input.setFiles` command fails, or on a
+  /// browser without it, when Classic `WebDriver` cannot send the paths.
   pub async fn set_input_files_element(&self, element: &super::BidiElement, paths: &[String]) -> Result<()> {
-    self
-      .cmd(
-        "input.setFiles",
-        json!({
-          "context": &*element.context_id,
-          "element": {"sharedId": element.shared_id},
-          "files": paths
-        }),
-      )
-      .await?;
+    let params = json!({
+      "context": &*element.context_id,
+      "element": {"sharedId": element.shared_id},
+      "files": paths
+    });
+    if self.session.try_command("input.setFiles", params).await?.is_none() {
+      // A node's shared id is its Classic element reference.
+      let page = self.session.classic_page(&element.context_id)?;
+      return crate::backend::webdriver::element::WebDriverElement::new(page, element.shared_id.clone())
+        .set_input_files(paths)
+        .await;
+    }
     Ok(())
   }
 

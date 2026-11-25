@@ -234,6 +234,42 @@ impl BidiBrowser {
     Ok(browser)
   }
 
+  /// Launch Ladybird through its `WebDriver` service and drive the `BiDi`
+  /// session it creates.
+  ///
+  /// # Errors
+  /// Reports driver startup failures, a session that does not negotiate
+  /// `BiDi`, and a launch that exceeds `timeout_ms` (30 seconds by default).
+  pub async fn launch_ladybird(
+    webdriver: &std::path::Path,
+    headless: bool,
+    user_data_dir: Option<&std::path::Path>,
+    env: &rustc_hash::FxHashMap<String, String>,
+    timeout_ms: Option<u64>,
+  ) -> Result<Self> {
+    let timeout_ms = timeout_ms.unwrap_or(30_000);
+    let (mut browser, group) = crate::backend::webdriver::launcher::launch_ladybird(
+      webdriver,
+      headless,
+      user_data_dir,
+      env,
+      timeout_ms,
+      |endpoint| async move {
+        Box::pin(Self::connect_webdriver(
+          &endpoint,
+          "ladybird",
+          None,
+          None,
+          Some(timeout_ms),
+        ))
+        .await
+      },
+    )
+    .await?;
+    browser.child = group;
+    Ok(browser)
+  }
+
   /// Connect to an existing `BiDi` endpoint via WebSocket.
   ///
   /// # Errors
@@ -279,7 +315,9 @@ impl BidiBrowser {
       return Err(FerriError::invalid_argument("capabilities", "expected an object"));
     }
     let session_url = webdriver_session_url(endpoint)?;
-    let always_match = webdriver_capabilities(browser_name, extra_capabilities);
+    let always_match = crate::backend::webdriver::session::CapabilityRequest::preferring_insecure_certs(
+      webdriver_capabilities(browser_name, extra_capabilities),
+    );
     let client = super::webdriver::http_client(headers)?;
     let created = crate::backend::webdriver::session::WebDriverSession::create(
       client,
@@ -748,7 +786,6 @@ pub(crate) use crate::backend::webdriver::session_url as webdriver_session_url;
 pub(crate) fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
   let mut always_match = serde_json::json!({
     "browserName": browser_name,
-    "acceptInsecureCerts": true,
     "webSocketUrl": true,
     "unhandledPromptBehavior": "ignore"
   });

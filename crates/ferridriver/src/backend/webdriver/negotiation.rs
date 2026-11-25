@@ -76,7 +76,10 @@ pub(crate) async fn connect(
   let request_bidi = protocol == WebDriverProtocol::Bidi
     || (protocol == WebDriverProtocol::Auto && !effective_name.eq_ignore_ascii_case("safari"));
   let requested = if request_bidi {
-    crate::backend::bidi::browser::webdriver_capabilities(browser_name, capabilities)
+    super::session::CapabilityRequest::preferring_insecure_certs(crate::backend::bidi::browser::webdriver_capabilities(
+      browser_name,
+      capabilities,
+    ))
   } else {
     let mut requested = json!({"browserName":browser_name,"unhandledPromptBehavior":"ignore"});
     if let Some(extra) = capabilities.and_then(Value::as_object)
@@ -84,7 +87,7 @@ pub(crate) async fn connect(
     {
       target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
     }
-    requested
+    requested.into()
   };
   let created = WebDriverSession::create(
     super::http_client(headers)?,
