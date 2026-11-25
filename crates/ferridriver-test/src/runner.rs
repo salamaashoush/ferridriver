@@ -3147,7 +3147,7 @@ impl WorkerSpawner {
               .recycling_contexts(config.context_reuse),
           )
         };
-        pending = Box::pin(worker.run(
+        let exit = Box::pin(worker.run(
           browser_handle,
           custom_pool,
           rx.clone(),
@@ -3157,7 +3157,8 @@ impl WorkerSpawner {
           pending,
         ))
         .await?;
-        if pending.is_none() || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        pending = exit.pending;
+        if (pending.is_none() && !exit.restart) || stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
           break;
         }
       }
