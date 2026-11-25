@@ -18,13 +18,15 @@ use crate::ui;
 /// engine and the video encoder, and they are here because they are
 /// provisioned the same way and to the same place, rather than vendored
 /// into the repository or left to the system.
-const KNOWN: [(&str, Target); 11] = [
+const KNOWN: [(&str, Target); 13] = [
   ("chromium", Target::Chromium),
   ("chromium-headless-shell", Target::ChromiumHeadlessShell),
   ("chromedriver", Target::Chromedriver),
   ("firefox", Target::Firefox),
   ("webkit", Target::Webkit),
   ("safari", Target::Safari),
+  ("ladybird", Target::Ladybird),
+  ("lightpanda", Target::Lightpanda),
   ("axe", Target::Axe),
   ("ffmpeg", Target::Ffmpeg),
   ("android", Target::Android),
@@ -40,6 +42,8 @@ enum Target {
   Firefox,
   Webkit,
   Safari,
+  Ladybird,
+  Lightpanda,
   Axe,
   Ffmpeg,
   Android,
@@ -85,6 +89,8 @@ pub(crate) async fn run(args: cli::InstallArgs) -> anyhow::Result<()> {
       Target::Firefox => installer.install_firefox(phase.callback()).await,
       Target::Webkit => installer.install_webkit(phase.callback()).await,
       Target::Safari => installer.install_safari(phase.callback()).await,
+      Target::Ladybird => installer.install_ladybird(phase.callback()).await,
+      Target::Lightpanda => installer.install_lightpanda(phase.callback()).await,
       Target::Ios => installer.install_ios(phase.callback()).await,
       Target::Axe => installer.install_axe_core(phase.callback()).await,
       Target::Ffmpeg => installer.install_ffmpeg(phase.callback()).await,

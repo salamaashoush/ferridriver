@@ -15,7 +15,7 @@ async fn missing_bidi_input_uses_the_owned_classic_session_and_caches_detection(
     let (stream, _) = websocket.accept().await.unwrap();
     let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
     let mut methods = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
       let request: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
       let method = request["method"].as_str().unwrap();
       methods.push(method.to_owned());
@@ -101,6 +101,7 @@ async fn missing_bidi_input_uses_the_owned_classic_session_and_caches_detection(
       "session.subscribe",
       "network.addDataCollector",
       "network.addIntercept",
+      "browser.getUserContexts",
       "input.performActions"
     ]
   );

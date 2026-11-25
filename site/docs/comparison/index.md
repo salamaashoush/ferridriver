@@ -14,9 +14,9 @@ packages rather than from their documentation.
 | **First language** | Rust | TypeScript / Node | Node | Java | JavaScript |
 | **Other bindings** | Node / Bun via NAPI | Python, Java, .NET | none | Python, JS, .NET, Ruby, Go (W3C) | none |
 | **Engine** | Rust core | Node core (TS) | Node core (TS) | per-language client | Browser-resident |
-| **Protocols** | CDP pipe, CDP WS, BiDi, Playwright WebKit Inspector | CDP, WebKit Inspector, Playwright FF | CDP, WebDriver BiDi | W3C WebDriver, CDP | none (runs in-page) |
-| **Browsers** | Chromium, Firefox, WebKit (PW build) | Chromium, Firefox, WebKit (PW build) | Chromium, Firefox | All major + niche | Chromium, Firefox, Edge |
-| **Real Safari** | no (Playwright WebKit) | no (Playwright WebKit) | no | yes (`safaridriver`) | no |
+| **Protocols** | CDP pipe, CDP WS, BiDi, Classic WebDriver, Playwright WebKit Inspector | CDP, WebKit Inspector, Playwright FF | CDP, WebDriver BiDi | W3C WebDriver, CDP | none (runs in-page) |
+| **Browsers** | Chromium, Firefox, WebKit (PW build), Safari, Ladybird, Lightpanda | Chromium, Firefox, WebKit (PW build) | Chromium, Firefox | All major + niche | Chromium, Firefox, Edge |
+| **Real Safari** | yes (`safaridriver`) | no (Playwright WebKit) | no | yes (`safaridriver`) | no |
 | **Auto-wait** | yes (Rust core) | yes | manual `waitForSelector` | manual | yes |
 | **Strict locators** | yes | yes | no | no | no |
 | **Network mocking** | `route` / `unroute` / HAR replay (all backends) | `route` / HAR | `setRequestInterception` | proxy / extension | `cy.intercept` |
@@ -66,8 +66,8 @@ packages rather than from their documentation.
 
 ## Pick Selenium when
 
-- **You need real Safari** (`safaridriver`), real Edge legacy, or
-  obscure browser-vendor drivers.
+- **You need real Edge legacy** or obscure browser-vendor drivers.
+  (ferridriver drives real Safari through `safaridriver` too.)
 - **You operate a grid** for distributed cross-browser, cross-OS runs.
 - **You're standardizing on W3C WebDriver** for vendor neutrality.
 

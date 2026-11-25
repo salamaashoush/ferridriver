@@ -8,6 +8,8 @@
 //! waiter before sending Page.navigate, then await the waiter which resolves
 //! when the reader task sees Page.loadEventFired for that session.
 
+mod connections;
+pub(crate) mod lightpanda;
 mod paused;
 pub mod pipe;
 pub(crate) mod recording;
@@ -165,6 +167,14 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// `kill_on_drop(true)`). `None` for `connect()` — we don't own the dir
   /// of a browser someone else launched.
   user_data_dir: Option<Arc<super::async_tempdir::AsyncTempDir>>,
+  /// Whether `close` lets the launched browser exit by itself so a profile
+  /// it keeps is written out. A throwaway profile, or a browser that keeps
+  /// none, is killed instead.
+  flushes_on_close: bool,
+  /// For a server that holds one browser context per connection, the
+  /// connections its contexts live on. `None`: every context is on this
+  /// browser's own connection.
+  connections: Option<Arc<connections::ContextConnections>>,
   /// One downloads directory per browser, shared by every page it
   /// opens. Chrome names downloads uniquely (`allowAndName`), so a
   /// per-page directory bought nothing and cost a mkdir on every page
@@ -307,6 +317,8 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
       create_ledger: Arc::clone(&self.create_ledger),
       popups: self.popups.clone(),
       user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
+      flushes_on_close: self.flushes_on_close,
+      connections: self.connections.clone(),
       downloads_dir: Arc::clone(&self.downloads_dir),
       attach_tasks: Arc::clone(&self.attach_tasks),
       webdriver: self.webdriver.clone(),
@@ -641,6 +653,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       headful,
       front_tab: Arc::default(),
       spares: Arc::default(),
+      flushes_on_close: user_data_dir.is_none(),
+      connections: None,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
       downloads_dir,
       popup_taps,
@@ -1008,6 +1022,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Arc::clone(&self.popup_taps)
   }
 
+  /// Whether `browser_context_id` lives on a connection of its own.
+  pub(crate) fn routes_context(&self, browser_context_id: &str) -> bool {
+    self
+      .connections
+      .as_ref()
+      .is_some_and(|connections| connections.route(browser_context_id).is_some())
+  }
+
   /// Resolves once every popup the browser announced before this call has
   /// been registered. Events and replies share one ordered connection, so
   /// the reply to a browser-level command comes after the attach event of
@@ -1018,6 +1040,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .send_command(None, "Browser.getVersion", &super::EMPTY_PARAMS)
       .await?;
     self.popups.settled().await;
+    if let Some(connections) = &self.connections {
+      connections.popups_settled().await?;
+    }
     Ok(())
   }
 
@@ -1171,6 +1196,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
         "Android Chrome does not support isolated browser contexts",
       ));
     }
+    if let Some(connections) = &self.connections {
+      return connections.new_context(proxy, &self.popup_taps).await;
+    }
     // A proxy is fixed when the context is created, so only a context
     // without one can stand in for another.
     if proxy.is_none()
@@ -1208,6 +1236,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// Returns an error if Chrome rejects `Target.disposeBrowserContext`, the target has closed, or the command
   /// outlives its time budget.
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
+    if let Some(connections) = &self.connections
+      && connections.dispose(browser_context_id).await?
+    {
+      return Ok(());
+    }
     self.forget_spare(browser_context_id);
     self
       .transport
@@ -1297,6 +1330,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
     browser_context_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
+    if let Some(page) = browser_context_id
+      .zip(self.connections.as_ref())
+      .and_then(|(context, connections)| connections.new_page(context, url, viewport))
+    {
+      return page.await;
+    }
     let kept = browser_context_id.and_then(|context| Some((context, self.spares.take_page(context)?)));
     let inject_src = crate::selectors::build_lazy_inject_js();
     // A recycled context comes with its page, already attached and with
@@ -1429,11 +1468,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// Returns an error if the profile did not flush before the browser exited, closing the attached
   /// `WebDriver` or Android session fails, or closing the transport fails.
   pub async fn close(&self) -> Result<()> {
+    if let Some(connections) = &self.connections {
+      let _ = connections.close().await;
+    }
     self.attach_tasks.abort();
     let mut child = self.child.lock().await;
     if let Some(group) = child.as_mut() {
       let mut flushed = Ok(());
-      if self.user_data_dir.is_none() {
+      if self.flushes_on_close {
         let timeout = crate::backend::process::PROFILE_FLUSH_TIMEOUT;
         let _ = tokio::time::timeout(
           timeout,
@@ -1622,6 +1664,26 @@ impl CdpBrowser<ws::WsTransport> {
     Self::init(Arc::new(transport), Some(group), None).await
   }
 
+  /// Launch Lightpanda's CDP server and drive it over WebSocket.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Lightpanda fails to start or listen, or the first protocol handshake fails.
+  pub(crate) async fn launch_lightpanda(
+    binary: &std::path::Path,
+    options: lightpanda::ServeOptions<'_>,
+  ) -> Result<Self> {
+    let (ws_url, group) = lightpanda::serve(binary, options).await?;
+    let transport = Box::pin(ws::WsTransport::connect_with_headers(&ws_url, &FxHashMap::default())).await?;
+    let mut browser = Self::init(Arc::new(transport), Some(group), None).await?;
+    // `lightpanda serve` outlives a closed connection, and writes its cookie
+    // jar as each context closes, not on exit.
+    browser.flushes_on_close = false;
+    // Lightpanda holds one browser context per connection.
+    browser.connections = Some(Arc::new(connections::ContextConnections::new(ws_url)));
+    Ok(browser)
+  }
+
   /// Attach to the first existing page target of a browser we just
   /// connected to, recording its session in `attached`. Returns whether
   /// one was found.
@@ -1680,7 +1742,72 @@ impl CdpBrowser<ws::WsTransport> {
     Ok(browser)
   }
 
+  /// Give a connected browser that has no page a blank one in its default
+  /// context, set up and resumed on the session auto-attach gave it.
+  async fn open_blank_page(
+    transport: &Arc<ws::WsTransport>,
+    create_ledger: &Arc<CreateLedger>,
+    attached: &mut FxHashMap<String, Option<String>>,
+  ) -> Result<()> {
+    // Same ledger bracket as `new_page` — auto-attach is armed, so
+    // this created target must not be mistaken for a noopener popup.
+    // Tapped before the create: the attach event can beat its response.
+    let mut attach_events = transport.tap_event_methods(&["Target.attachedToTarget"], None);
+    create_ledger.begin_create();
+    let create_result = transport
+      .send_command(None, "Target.createTarget", &serde_json::json!({"url": "about:blank"}))
+      .await;
+    let target_id = match &create_result {
+      Ok(r) => r.get("targetId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      Err(_) => String::new(),
+    };
+    create_ledger.end_create(if target_id.is_empty() { None } else { Some(&target_id) });
+    create_result?;
+    // Auto-attach parked the new target on waitForDebuggerOnStart, on a
+    // session of its own. That is the session to set up and resume: a
+    // second session attached by hand can run commands, but resuming
+    // there leaves the page frozen, never painting and never answering
+    // a navigation.
+    let tid = target_id.clone();
+    let sid = tokio::time::timeout(Duration::from_secs(30), async move {
+      while let Some(event) = attach_events.recv().await {
+        if let Some(params) = event.get("params")
+          && params
+            .get("targetInfo")
+            .and_then(|info| info.get("targetId"))
+            .and_then(|v| v.as_str())
+            == Some(tid.as_str())
+        {
+          return Ok(params.get("sessionId").and_then(|v| v.as_str()).map(String::from));
+        }
+      }
+      Err(FerriError::target_closed(Some(
+        "CDP event channel closed while waiting for Target.attachedToTarget".into(),
+      )))
+    })
+    .await
+    .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
+    Box::pin(Self::enable_domains(transport, sid.as_deref(), None, false, None)).await?;
+    let _ = transport
+      .send_command(sid.as_deref(), "Runtime.runIfWaitingForDebugger", &super::EMPTY_PARAMS)
+      .await;
+    attached.insert(target_id, sid);
+    Ok(())
+  }
+
   pub(crate) async fn connect_with_headers(ws_url: &str, headers: &FxHashMap<String, String>) -> Result<Self> {
+    Self::connect_opening(ws_url, headers, true).await
+  }
+
+  /// Connect, and with `open_default_page` give a browser with no page a
+  /// blank one in its default context. A connection that only exists to
+  /// hold a context of its own opens none: on a server with one context
+  /// per connection, that page would take the context's place.
+  pub(crate) async fn connect_opening(
+    ws_url: &str,
+    headers: &FxHashMap<String, String>,
+    open_default_page: bool,
+  ) -> Result<Self> {
     let transport = Arc::new(Box::pin(ws::WsTransport::connect_with_headers(ws_url, headers)).await?);
 
     // Capture product version for `browser.version()` — same handshake
@@ -1734,50 +1861,8 @@ impl CdpBrowser<ws::WsTransport> {
     let found_page = Self::attach_first_existing_page(&transport, &result, &mut attached).await?;
 
     // If no existing page, create one
-    if !found_page {
-      // Same ledger bracket as `new_page` — auto-attach is armed, so
-      // this created target must not be mistaken for a noopener popup.
-      // Tapped before the create: the attach event can beat its response.
-      let mut attach_events = transport.tap_event_methods(&["Target.attachedToTarget"], None);
-      create_ledger.begin_create();
-      let create_result = transport
-        .send_command(None, "Target.createTarget", &serde_json::json!({"url": "about:blank"}))
-        .await;
-      let target_id = match &create_result {
-        Ok(r) => r.get("targetId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        Err(_) => String::new(),
-      };
-      create_ledger.end_create(if target_id.is_empty() { None } else { Some(&target_id) });
-      create_result?;
-      // Auto-attach parked the new target on waitForDebuggerOnStart, on a
-      // session of its own. That is the session to set up and resume: a
-      // second session attached by hand can run commands, but resuming
-      // there leaves the page frozen, never painting and never answering
-      // a navigation.
-      let tid = target_id.clone();
-      let sid = tokio::time::timeout(Duration::from_secs(30), async move {
-        while let Some(event) = attach_events.recv().await {
-          if let Some(params) = event.get("params")
-            && params
-              .get("targetInfo")
-              .and_then(|info| info.get("targetId"))
-              .and_then(|v| v.as_str())
-              == Some(tid.as_str())
-          {
-            return Ok(params.get("sessionId").and_then(|v| v.as_str()).map(String::from));
-          }
-        }
-        Err(FerriError::target_closed(Some(
-          "CDP event channel closed while waiting for Target.attachedToTarget".into(),
-        )))
-      })
-      .await
-      .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
-      Box::pin(Self::enable_domains(&transport, sid.as_deref(), None, false, None)).await?;
-      let _ = transport
-        .send_command(sid.as_deref(), "Runtime.runIfWaitingForDebugger", &super::EMPTY_PARAMS)
-        .await;
-      attached.insert(target_id, sid);
+    if !found_page && open_default_page {
+      Self::open_blank_page(&transport, &create_ledger, &mut attached).await?;
     }
 
     // Hand the targets discovered above to the shared cache the attach
@@ -1801,6 +1886,8 @@ impl CdpBrowser<ws::WsTransport> {
       create_ledger,
       popups,
       user_data_dir: None,
+      flushes_on_close: false,
+      connections: None,
       webdriver: None,
       android: None,
     })
@@ -6221,6 +6308,11 @@ impl<T: CdpWrap> CdpPage<T> {
       session_id.as_ref(),
       &self.events,
     ));
+    tasks.push(Self::spawn_frame_name_listener(
+      &transport,
+      session_id.clone(),
+      Arc::clone(&self.frame_cache),
+    ));
     tasks.push(Self::spawn_network_listener(
       transport,
       session_id,
@@ -6516,6 +6608,79 @@ impl<T: CdpWrap> CdpPage<T> {
           None => crate::web_error::WebError::new_detached(details, location),
         };
         emitter.emit(crate::events::PageEvent::PageError(web_err));
+      }
+    })
+    .abort_handle()
+  }
+
+  /// `Page.frameNavigated`'s `frame.name` is optional, and a browser that
+  /// leaves it out still names a child frame in the `name` attribute of
+  /// the element that owns it, which is where this reads it from.
+  fn spawn_frame_name_listener(
+    transport: &Arc<T>,
+    session_id: Option<Arc<str>>,
+    cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  ) -> tokio::task::AbortHandle {
+    let mut rx = transport.tap_event_methods(&["Page.frameAttached", "Page.frameNavigated"], session_id.as_deref());
+    let transport = Arc::clone(transport);
+    tokio::spawn(async move {
+      while let Some(event) = rx.recv().await {
+        // Asked when the frame attaches, so the name is known before its
+        // first document finishes loading; asked again when a navigation
+        // arrives without it, since the owner's attribute may have changed.
+        let frame_id = match event.get("method").and_then(serde_json::Value::as_str) {
+          Some("Page.frameAttached") => event.pointer("/params/frameId"),
+          _ => event
+            .pointer("/params/frame")
+            .filter(|frame| frame.get("parentId").is_some() && frame.get("name").is_none())
+            .and_then(|frame| frame.get("id")),
+        };
+        let Some(frame_id) = frame_id.and_then(serde_json::Value::as_str).map(str::to_owned) else {
+          continue;
+        };
+        let (transport, session_id, cache) = (Arc::clone(&transport), session_id.clone(), Arc::clone(&cache));
+        tokio::spawn(async move {
+          let session = session_id.as_deref();
+          let Ok(owner) = transport
+            .send_command(
+              session,
+              "DOM.getFrameOwner",
+              &serde_json::json!({ "frameId": frame_id }),
+            )
+            .await
+          else {
+            return;
+          };
+          let Some(node) = owner.get("backendNodeId").cloned() else {
+            return;
+          };
+          let Ok(described) = transport
+            .send_command(
+              session,
+              "DOM.describeNode",
+              &serde_json::json!({ "backendNodeId": node }),
+            )
+            .await
+          else {
+            return;
+          };
+          let name = described
+            .pointer("/node/attributes")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|attributes| {
+              attributes
+                .chunks(2)
+                .find(|pair| pair.first().and_then(serde_json::Value::as_str) == Some("name"))
+                .and_then(|pair| pair.get(1)?.as_str())
+            })
+            .filter(|name| !name.is_empty());
+          if let Some(name) = name {
+            cache
+              .lock()
+              .unwrap_or_else(std::sync::PoisonError::into_inner)
+              .rename(&frame_id, name);
+          }
+        });
       }
     })
     .abort_handle()

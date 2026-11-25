@@ -190,6 +190,10 @@ pub fn browser_name_for(browser: &Browser) -> &str {
     "firefox"
   } else if product.eq_ignore_ascii_case("safari") {
     "safari"
+  } else if product.eq_ignore_ascii_case("ladybird") {
+    "ladybird"
+  } else if product.eq_ignore_ascii_case("lightpanda") {
+    "lightpanda"
   } else if ["webkit", "webkit-playwright"]
     .iter()
     .any(|name| product.eq_ignore_ascii_case(name))

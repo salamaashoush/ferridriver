@@ -39,7 +39,14 @@ pub(crate) struct BidiSession {
   /// What `session.new` answered, which a served browser's clients are
   /// answered with in turn.
   pub capabilities: serde_json::Value,
-  input_transport: Arc<std::sync::atomic::AtomicU8>,
+  /// Whether the browser implements the `browser` module's user
+  /// contexts. Without them every page shares the default context.
+  pub user_contexts: bool,
+  /// Commands the browser answered `unknown command`.
+  unknown_commands: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+  /// Whether scripts can run in a sandbox realm; cleared once the browser
+  /// shows it has none.
+  sandboxes: Arc<std::sync::atomic::AtomicBool>,
   /// What each user context hands the pages the browser opens in it.
   pub(super) scopes: Arc<super::scope::ContextScopes>,
 }
@@ -176,6 +183,15 @@ impl BidiSession {
       }
     }
 
+    let user_contexts = match transport.send_command("browser.getUserContexts", json!({})).await {
+      Ok(_) => true,
+      Err(FerriError::Unsupported(reason)) => {
+        tracing::debug!(%reason, "BiDi user contexts unavailable; pages share the default context");
+        false
+      },
+      Err(error) => return Err(error),
+    };
+
     info!("BiDi session ready: {browser_name} {browser_version}");
     Ok(Self {
       session_id,
@@ -184,7 +200,9 @@ impl BidiSession {
       browser_version,
       classic,
       capabilities: kept_capabilities,
-      input_transport: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+      user_contexts,
+      unknown_commands: Arc::default(),
+      sandboxes: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       scopes: Arc::default(),
     })
   }
@@ -193,45 +211,106 @@ impl BidiSession {
     if method == "input.performActions" && self.classic.is_some() {
       return Box::pin(self.send_input(params)).await;
     }
+    if matches!(method, "script.evaluate" | "script.callFunction") && params.pointer("/target/sandbox").is_some() {
+      return Box::pin(self.send_sandboxed(method, params)).await;
+    }
     self.transport.send_command(method, params).await
   }
 
+  /// Input over `BiDi`, or over Classic on a browser without
+  /// `input.performActions`.
   async fn send_input(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-    let method = "input.performActions";
-    let transport = self.input_transport.load(std::sync::atomic::Ordering::Acquire);
-    if transport == 1 {
-      return self.transport.send_command(method, params).await;
+    if let Some(result) = self.try_command("input.performActions", params.clone()).await? {
+      return Ok(result);
     }
-    if transport == 0 {
-      match self.transport.send_command(method, params.clone()).await {
-        Err(FerriError::Unsupported(_)) => {
-          self.input_transport.store(2, std::sync::atomic::Ordering::Release);
-        },
-        Ok(result) => {
-          self.input_transport.store(1, std::sync::atomic::Ordering::Release);
-          return Ok(result);
-        },
-        Err(error) => return Err(error),
-      }
-    }
-    let classic = self
-      .classic
-      .as_ref()
-      .ok_or_else(|| FerriError::unsupported("classic WebDriver input requires an HTTP-created session"))?;
     let context = params
       .get("context")
       .and_then(serde_json::Value::as_str)
       .ok_or_else(|| FerriError::invalid_argument("context", "input requires a browsing context"))?;
-    let page = crate::backend::webdriver::page::WebDriverPage::new(
+    Box::pin(self.classic_page(context)?.perform_actions(params)).await?;
+    Ok(json!({}))
+  }
+
+  /// Run a script in the sandbox its target names, or in the page's own
+  /// realm on a browser that has no sandboxes. A browser that refuses the
+  /// sandbox but runs the same script without it has none; that is
+  /// remembered, so later scripts go straight to the page realm.
+  async fn send_sandboxed(&self, method: &str, mut params: serde_json::Value) -> Result<serde_json::Value> {
+    let without_sandbox = |params: &mut serde_json::Value| {
+      if let Some(target) = params.get_mut("target").and_then(serde_json::Value::as_object_mut) {
+        target.remove("sandbox");
+      }
+    };
+    if !self.sandboxes.load(std::sync::atomic::Ordering::Acquire) {
+      without_sandbox(&mut params);
+      return self.transport.send_command(method, params).await;
+    }
+    match self.transport.send_raw(method, params.clone()).await? {
+      Ok(result) => Ok(result),
+      Err(error) if error.error == "unsupported operation" => {
+        without_sandbox(&mut params);
+        let result = self.transport.send_command(method, params).await?;
+        tracing::debug!(%method, %error, "BiDi sandboxes unavailable; scripts run in the page realm");
+        self.sandboxes.store(false, std::sync::atomic::Ordering::Release);
+        Ok(result)
+      },
+      Err(error) => Err(error.into_error(method)),
+    }
+  }
+
+  /// Send `method`, answering `None` when the browser does not implement
+  /// it. The answer is remembered, so a caller with another way to do the
+  /// same thing pays the round trip once.
+  ///
+  /// # Errors
+  /// Returns every other error `method` fails with.
+  pub(crate) async fn try_command(&self, method: &str, params: serde_json::Value) -> Result<Option<serde_json::Value>> {
+    if self.lacks(method) {
+      return Ok(None);
+    }
+    match self.transport.send_raw(method, params).await? {
+      Ok(result) => Ok(Some(result)),
+      Err(error) if error.error == "unknown command" => {
+        tracing::debug!(%method, %error, "BiDi command unavailable; using the fallback");
+        self
+          .unknown_commands
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .insert(method.to_owned());
+        Ok(None)
+      },
+      Err(error) => Err(error.into_error(method)),
+    }
+  }
+
+  /// Whether the browser has answered `method` as a command it does not know.
+  pub(crate) fn lacks(&self, method: &str) -> bool {
+    self
+      .unknown_commands
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .contains(method)
+  }
+
+  /// The Classic `WebDriver` view of top-level `context`, for what the
+  /// browser serves there and not over `BiDi`. A top-level browsing
+  /// context's id is its window handle.
+  ///
+  /// # Errors
+  /// Returns `FerriError::Unsupported` for a session not created over HTTP.
+  pub(crate) fn classic_page(&self, context: &str) -> Result<crate::backend::webdriver::page::WebDriverPage> {
+    let classic = self
+      .classic
+      .as_ref()
+      .ok_or_else(|| FerriError::unsupported("the fallback needs a session created through WebDriver Classic"))?;
+    Ok(crate::backend::webdriver::page::WebDriverPage::new(
       Arc::clone(classic),
       crate::backend::webdriver::session::Target {
         window: Some(context.to_owned()),
         ..Default::default()
       },
       30_000,
-    );
-    page.perform_actions(params).await?;
-    Ok(json!({}))
+    ))
   }
 
   /// Launch Firefox and create a `BiDi` session.

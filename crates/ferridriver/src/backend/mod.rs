@@ -857,7 +857,8 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(browser) => browser.isolated_contexts,
       Self::CdpWs(browser) => browser.isolated_contexts,
-      Self::WebKit(_) | Self::Bidi(_) => true,
+      Self::WebKit(_) => true,
+      Self::Bidi(browser) => browser.session.user_contexts,
       Self::WebDriver(_) => false,
     }
   }
@@ -1463,6 +1464,18 @@ impl AnyPage {
       AnyPage::WebKit(p) => &p.frame_listener_started,
       AnyPage::Bidi(p) => &p.frame_listener_started,
       AnyPage::WebDriver(p) => &p.frame_listener_started,
+    }
+  }
+
+  /// Whether cookies are read and cleared through the document the page
+  /// is on, as Classic `WebDriver` serves them, rather than for the whole
+  /// context. Known once the page has cleared its cookies.
+  #[must_use]
+  pub(crate) fn cookies_follow_the_document(&self) -> bool {
+    match self {
+      Self::WebDriver(_) => true,
+      Self::Bidi(page) => page.session.lacks("storage.deleteCookies"),
+      Self::CdpPipe(_) | Self::CdpWs(_) | Self::WebKit(_) => false,
     }
   }
 

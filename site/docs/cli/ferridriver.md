@@ -272,8 +272,8 @@ their options.
 ferridriver install [BROWSERS]... [--with-deps] [--no-remove]
 ```
 
-Browsers: `chromium`, `chromium-headless-shell`, `firefox`, `webkit`.
-Defaults to `chromium`. `--with-deps` also installs Linux system
+Browsers: `chromium`, `chromium-headless-shell`, `chromedriver`, `firefox`,
+`webkit`, `safari`, `ladybird`, `lightpanda`. Defaults to `chromium`. `--with-deps` also installs Linux system
 libraries via the platform package manager.
 
 An install removes the cached versions of that browser older than the
@@ -295,6 +295,8 @@ Playwright WebKit checkout, or install Playwright once
 | `FERRIDRIVER_TRACE_FILE`    | Override the Chrome trace output path. |
 | `FERRIDRIVER_BROWSERS_PATH` | Override the browser cache directory. |
 | `FERRIDRIVER_WEBKIT`        | Override the Playwright WebKit checkout path. |
+| `LADYBIRD_PATH`             | The Ladybird browser executable; its `WebDriver` service must sit beside it. |
+| `LIGHTPANDA_PATH`           | The Lightpanda executable. |
 | `FERRIDRIVER_INSTALL_DIR`   | Where the install script drops the binary (`install.sh` only). |
 
 ## Install the binary

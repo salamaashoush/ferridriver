@@ -65,3 +65,17 @@ name = "webkit"
 browser = "webkit"
 backend = "webkit"
 headless = true
+
+[[test.projects]]
+name = "ladybird"
+[test.projects.browser]
+browser = "ladybird"
+backend = "bidi"
+headless = true
+
+[[test.projects]]
+name = "lightpanda"
+[test.projects.browser]
+browser = "lightpanda"
+backend = "cdp-raw"
+headless = true

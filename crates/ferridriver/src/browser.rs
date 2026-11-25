@@ -121,6 +121,10 @@ impl Browser {
       .ok()
       .map(|state| Arc::clone(&state.context_defaults))
       .unwrap_or_default();
+    let factory = state.try_read().ok().map_or_else(
+      || crate::browser_type::BrowserType::for_backend(backend_kind),
+      |state| crate::browser_type::BrowserType::launched(state.browser_kind(), backend_kind),
+    );
     Self {
       isolated_contexts,
       state,
@@ -135,7 +139,7 @@ impl Browser {
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      factory: crate::browser_type::BrowserType::for_backend(backend_kind),
+      factory,
       inherited_context_options: None,
     }
   }
@@ -196,10 +200,11 @@ impl Browser {
     let closed = backend.closed();
     let default_context = format!("{instance}:default");
     let default_is_live = state.context(&default_context).is_ok();
+    let browser_kind = state.browser_kind();
     let mut browser = Self::from_state_unwatched(state);
     browser.version = Arc::from(version);
     browser.backend_kind = backend_kind;
-    browser.factory = crate::browser_type::BrowserType::for_backend(backend_kind);
+    browser.factory = crate::browser_type::BrowserType::launched(browser_kind, backend_kind);
     browser.isolated_contexts = isolated_contexts;
     browser.instance = Arc::from(instance);
     browser.context_names = Arc::new(std::sync::Mutex::new(vec![ContextEntry {
@@ -340,6 +345,10 @@ impl Browser {
       .ok()
       .map(|state| Arc::clone(&state.context_defaults))
       .unwrap_or_default();
+    let factory = state.try_read().ok().map_or_else(
+      || crate::browser_type::BrowserType::for_backend(backend_kind),
+      |state| crate::browser_type::BrowserType::launched(state.browser_kind(), backend_kind),
+    );
     Self {
       isolated_contexts,
       state,
@@ -354,7 +363,7 @@ impl Browser {
       context_names: default_context_registry(),
       events: crate::events::BrowserEventEmitter::new(),
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      factory: crate::browser_type::BrowserType::for_backend(backend_kind),
+      factory,
       inherited_context_options: None,
     }
   }
@@ -593,7 +602,7 @@ impl Browser {
       // A Classic WebDriver session reads and deletes the cookies of the
       // document it is on and no others, so the one above took nothing
       // from a blank page: each origin's go while the keeper stands on it.
-      let cookies_follow_the_document = keeper.inner().kind() == crate::backend::BackendKind::WebDriver;
+      let cookies_follow_the_document = keeper.inner().cookies_follow_the_document();
       for origin in &visited {
         keeper.restore_origin_storage(origin, None).await?;
         if cookies_follow_the_document {

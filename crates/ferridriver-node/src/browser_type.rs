@@ -369,3 +369,15 @@ pub fn webkit() -> BrowserType {
 pub fn safari() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::safari())
 }
+
+#[napi]
+#[must_use]
+pub fn ladybird() -> BrowserType {
+  BrowserType::wrap(ferridriver::BrowserType::ladybird())
+}
+
+#[napi]
+#[must_use]
+pub fn lightpanda() -> BrowserType {
+  BrowserType::wrap(ferridriver::BrowserType::lightpanda())
+}

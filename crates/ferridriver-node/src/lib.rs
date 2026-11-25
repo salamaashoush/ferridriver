@@ -55,7 +55,7 @@ mod worker;
 // compiles out under `cfg(test)`; exporting them from the crate root keeps
 // the unit-test build from reading them as dead.
 pub use android::{android_connect, android_devices, android_launch_server, android_set_default_timeout};
-pub use browser_type::{chromium, firefox, safari, webkit};
+pub use browser_type::{chromium, firefox, ladybird, lightpanda, safari, webkit};
 pub use http_client::new_context;
 pub use install::{
   dump_rtt_stats, find_installed_chromium, find_installed_firefox, find_installed_headless_shell,

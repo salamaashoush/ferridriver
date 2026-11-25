@@ -29,6 +29,18 @@ impl std::fmt::Display for BidiError {
   }
 }
 
+impl BidiError {
+  pub(crate) fn into_error(self, method: &str) -> FerriError {
+    if matches!(self.error.as_str(), "no such frame" | "target closed") {
+      FerriError::target_closed(Some(self.to_string()))
+    } else if matches!(self.error.as_str(), "unknown command" | "unsupported operation") {
+      FerriError::unsupported(format!("{method}: {self}"))
+    } else {
+      FerriError::protocol(method, self.to_string())
+    }
+  }
+}
+
 pub(crate) type BidiResult = std::result::Result<serde_json::Value, BidiError>;
 
 /// A `BiDi` event received from the browser.
@@ -366,15 +378,7 @@ impl BidiTransport {
 
   /// Send a `BiDi` command and await the response.
   pub(crate) async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
-    self.send_raw(method, params).await?.map_err(|e| {
-      if matches!(e.error.as_str(), "no such frame" | "target closed") {
-        FerriError::target_closed(Some(e.to_string()))
-      } else if matches!(e.error.as_str(), "unknown command" | "unsupported operation") {
-        FerriError::unsupported(format!("{method}: {e}"))
-      } else {
-        FerriError::protocol(method, e.to_string())
-      }
-    })
+    self.send_raw(method, params).await?.map_err(|e| e.into_error(method))
   }
 
   /// Send a `BiDi` command and await the browser's answer as it gave it:

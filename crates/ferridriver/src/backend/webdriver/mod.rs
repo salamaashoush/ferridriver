@@ -51,9 +51,16 @@ pub(crate) fn uses_android_chrome(capabilities: Option<&serde_json::Value>) -> b
 }
 
 pub(crate) fn http_client(headers: Option<&rustc_hash::FxHashMap<String, String>>) -> Result<reqwest::Client> {
-  let mut client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+  let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+  let mut request_headers = reqwest::header::HeaderMap::new();
+  // HTTP/1.1 keeps a connection open by default, but a server that only
+  // keeps it open when asked (Ladybird's) leaves the pooled connection
+  // unanswered after its first response.
+  request_headers.insert(
+    reqwest::header::CONNECTION,
+    reqwest::header::HeaderValue::from_static("keep-alive"),
+  );
   if let Some(headers) = headers {
-    let mut request_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers {
       let name = reqwest::header::HeaderName::try_from(name)
         .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header name '{name}': {e}")))?;
@@ -61,9 +68,9 @@ pub(crate) fn http_client(headers: Option<&rustc_hash::FxHashMap<String, String>
         .map_err(|e| FerriError::invalid_argument("headers", format!("invalid value for '{name}': {e}")))?;
       request_headers.insert(name, value);
     }
-    client = client.default_headers(request_headers);
   }
   client
+    .default_headers(request_headers)
     .build()
     .map_err(|e| FerriError::backend(format!("WebDriver HTTP client setup failed: {e}")))
 }
