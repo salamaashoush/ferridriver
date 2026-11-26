@@ -2,6 +2,7 @@
 
 pub mod common;
 pub mod disposable;
+pub mod event_sink;
 pub mod frame_cache;
 pub mod json_scan;
 pub mod keyboard;

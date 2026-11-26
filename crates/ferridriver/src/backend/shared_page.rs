@@ -7,17 +7,25 @@
 //! and closed flag without duplicating fields or match arms per backend.
 
 use std::any::Any;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
+use tokio::sync::RwLock;
+
 use crate::backend::keyboard::KeyboardState;
-use crate::backend::{PageBackref, SharedMediaEmulation};
-use crate::dialog::DialogManager;
-use crate::download::DownloadManager;
-use crate::events::EventEmitter;
-use crate::file_chooser::FileChooserManager;
+use crate::backend::{AnyElement, PageBackref, SharedMediaEmulation};
+use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
+use crate::dialog::{Dialog, DialogManager, DialogResponder, DialogType};
+use crate::download::{Download, DownloadCanceler, DownloadManager};
+use crate::element_handle::ElementHandle;
+use crate::events::{EventEmitter, PageEvent};
+use crate::file_chooser::{FileChooser, FileChooserManager};
 use crate::frame_cache::FrameCache;
+use crate::js_handle::{JSHandle, JSHandleBacking};
 use crate::observed::ObservedBuffers;
+use crate::web_error::{ErrorDetails, WebError};
+use ferridriver_driver::event_sink::{FrameSignal, PageEventSink, PageLifecycleSignal};
 
 /// Type-erased `Weak<crate::page::Page>` that breaks the recursive
 /// `AnyPage -> SharedPageState -> {Dialog, Download, PageBackref, ...} -> Page -> AnyPage`
@@ -112,6 +120,157 @@ impl SharedPageState {
   pub fn is_closed(&self) -> bool {
     self.closed.load(Ordering::Acquire)
   }
+
+  /// Register the broadcast emitter bridges for dialog, file chooser, and
+  /// download managers once per page.
+  pub(crate) fn register_emitter_bridges(&self) {
+    let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+    let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
+    let _ = self.download_manager.register_emitter_bridge(self.events.clone());
+  }
+}
+
+impl PageEventSink for SharedPageState {
+  fn on_lifecycle(&self, signal: PageLifecycleSignal) {
+    let ev = match signal {
+      PageLifecycleSignal::DomContentLoaded => PageEvent::DomContentLoaded,
+      PageLifecycleSignal::Load => PageEvent::Load,
+      PageLifecycleSignal::Close => PageEvent::Close,
+      PageLifecycleSignal::Crash => PageEvent::Crash,
+    };
+    self.events.emit(ev);
+  }
+
+  fn on_frame(&self, signal: FrameSignal) {
+    let ev = match signal {
+      FrameSignal::Attached(info) => PageEvent::FrameAttached(info),
+      FrameSignal::Navigated(info) => PageEvent::FrameNavigated(info),
+      FrameSignal::NavigatedWithinDocument(info) => PageEvent::FrameNavigatedWithinDocument(info),
+      FrameSignal::Detached { frame_id } => PageEvent::FrameDetached { frame_id },
+    };
+    self.events.emit(ev);
+  }
+}
+
+/// Parsed console event payload from any backend listener, ready to wrap
+/// into a [`ConsoleMessage`], append to the capped log, and emit.
+pub(crate) struct ConsoleEventInput {
+  pub kind: String,
+  pub explicit_text: Option<String>,
+  pub arg_backings: Vec<(JSHandleBacking, bool)>,
+  pub location: ConsoleMessageLocation,
+  pub timestamp: u64,
+}
+
+/// Unified console-message dispatch shared by CDP, `BiDi`, and `WebKit` listeners:
+/// upgrades the page backref, wraps remote object backings into `JSHandle`s,
+/// appends to the capped console log, and emits `PageEvent::Console`.
+pub(crate) async fn dispatch_console_event(
+  page_backref: &PageBackref,
+  console_log: &Arc<RwLock<Vec<ConsoleMessage>>>,
+  emitter: &EventEmitter,
+  input: ConsoleEventInput,
+) {
+  let Some(page) = page_backref.upgrade() else {
+    return;
+  };
+  let args: Vec<JSHandle> = input
+    .arg_backings
+    .into_iter()
+    .map(|(backing, is_node)| JSHandle::from_backing(Arc::clone(&page), backing, is_node))
+    .collect();
+  let msg = ConsoleMessage::new(
+    &page,
+    input.kind,
+    input.explicit_text,
+    args,
+    input.location,
+    input.timestamp,
+  );
+  crate::state::push_capped(
+    &mut *console_log.write().await,
+    msg.clone(),
+    crate::state::CONSOLE_LOG_CAP,
+  );
+  emitter.emit(PageEvent::Console(msg));
+}
+
+/// Unified uncaught page-error dispatch shared by CDP, `BiDi`, and `WebKit` listeners.
+pub(crate) fn dispatch_page_error_event(
+  page_backref: &PageBackref,
+  emitter: &EventEmitter,
+  details: ErrorDetails,
+  location: ConsoleMessageLocation,
+) {
+  let web_err = match page_backref.upgrade() {
+    Some(page) => WebError::new(&page, details, location),
+    None => WebError::new_detached(details, location),
+  };
+  emitter.emit(PageEvent::PageError(web_err));
+}
+
+/// Unified JavaScript dialog dispatch shared by CDP, `BiDi`, and `WebKit` listeners:
+/// constructs the live `Dialog`, invokes `DialogManager::did_open` synchronously
+/// (auto-closing if unclaimed), and appends to the capped dialog log.
+pub(crate) async fn dispatch_dialog_event(
+  page_backref: &PageBackref,
+  dialog_manager: &DialogManager,
+  dialog_log: &Arc<RwLock<Vec<crate::state::DialogEvent>>>,
+  dialog_type_str: String,
+  message: String,
+  default_value: String,
+  responder: DialogResponder,
+) {
+  let dialog_type = DialogType::parse(&dialog_type_str);
+  let dialog = Dialog::new_with_manager(
+    dialog_type,
+    message.clone(),
+    default_value,
+    responder,
+    Some(dialog_manager.clone()),
+    page_backref.weak(),
+  );
+  dialog_manager.did_open(dialog);
+  crate::state::push_capped(
+    &mut *dialog_log.write().await,
+    crate::state::DialogEvent {
+      dialog_type: dialog_type_str,
+      message,
+      action: "dispatched".to_string(),
+    },
+    crate::state::DIALOG_LOG_CAP,
+  );
+}
+
+/// Unified file-chooser dispatch shared by CDP, `BiDi`, and `WebKit` listeners.
+pub(crate) async fn dispatch_file_chooser_event(
+  page: Arc<crate::page::Page>,
+  file_chooser_manager: &FileChooserManager,
+  element: AnyElement,
+  is_multiple: bool,
+) {
+  let Ok(handle) = ElementHandle::from_any_element(page, element).await else {
+    return;
+  };
+  let chooser = FileChooser::new(handle, is_multiple);
+  file_chooser_manager.did_open(&chooser);
+}
+
+/// Unified download-start dispatch shared by CDP and `BiDi` listeners.
+pub(crate) fn dispatch_download_started(
+  page_backref: &PageBackref,
+  download_manager: &DownloadManager,
+  guid: String,
+  url: String,
+  suggested_filename: String,
+  downloads_dir: PathBuf,
+  canceler: DownloadCanceler,
+) {
+  let Some(page) = page_backref.upgrade() else {
+    return;
+  };
+  let download = Download::new(&page, guid, url, suggested_filename, downloads_dir, canceler);
+  download_manager.did_open(&download);
 }
 
 #[cfg(test)]
