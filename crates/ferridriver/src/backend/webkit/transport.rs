@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Error)]
@@ -141,8 +141,14 @@ impl Transport {
 }
 
 async fn drain_writer<W: AsyncWrite + Unpin>(mut write: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
+  let mut batch = Vec::with_capacity(4096);
   while let Some(frame) = rx.recv().await {
-    if write.write_all(&frame).await.is_err() || write.flush().await.is_err() {
+    batch.clear();
+    batch.extend_from_slice(&frame);
+    while let Ok(more) = rx.try_recv() {
+      batch.extend_from_slice(&more);
+    }
+    if write.write_all(&batch).await.is_err() || write.flush().await.is_err() {
       // Pipe gone — the reader thread sees EOF and fails pending
       // callbacks; nothing to report from here.
       break;
@@ -150,27 +156,32 @@ async fn drain_writer<W: AsyncWrite + Unpin>(mut write: W, mut rx: mpsc::Unbound
   }
 }
 
-async fn drain_reader<R: AsyncRead + Unpin>(read: R, tx: &mpsc::UnboundedSender<Result<Value, TransportError>>) {
-  // `BufRead::read_until` on a NUL terminator gives us exactly one
-  // envelope per call. The trailing NUL is included in the returned
-  // buffer; we strip it before decoding.
-  let mut buf = BufReader::new(read);
+async fn drain_reader<R: AsyncRead + Unpin>(mut read: R, tx: &mpsc::UnboundedSender<Result<Value, TransportError>>) {
+  use bytes::BytesMut;
+  use tokio::io::AsyncReadExt as _;
+
+  let mut buf = BytesMut::with_capacity(64 * 1024);
   loop {
-    let mut frame = Vec::with_capacity(1024);
-    match buf.read_until(0, &mut frame).await {
-      Ok(0) => break, // EOF
-      Ok(_) => {
-        if frame.last() == Some(&0) {
-          frame.pop();
+    while let Some(pos) = memchr::memchr(0, &buf) {
+      let frame = buf.split_to(pos + 1);
+      let slice = &frame[..pos];
+      if slice.is_empty() {
+        continue;
+      }
+      let parsed = serde_json::from_slice::<Value>(slice).map_err(TransportError::Json);
+      if tx.send(parsed).is_err() {
+        return;
+      }
+    }
+    match read.read_buf(&mut buf).await {
+      Ok(0) => {
+        if !buf.is_empty() {
+          let parsed = serde_json::from_slice::<Value>(&buf).map_err(TransportError::Json);
+          let _ = tx.send(parsed);
         }
-        if frame.is_empty() {
-          continue;
-        }
-        let parsed = serde_json::from_slice::<Value>(&frame).map_err(TransportError::Json);
-        if tx.send(parsed).is_err() {
-          break;
-        }
+        break;
       },
+      Ok(_) => {},
       Err(e) => {
         let _ = tx.send(Err(TransportError::Io(e)));
         break;

@@ -123,17 +123,6 @@ impl RttStats {
     }
   }
 
-  fn merge(&mut self, other: &RttStats) {
-    for (method, b) in &other.buckets {
-      let entry = self.buckets.entry(method.clone()).or_default();
-      entry.count += b.count;
-      entry.total_ns += b.total_ns;
-      if b.max_ns > entry.max_ns {
-        entry.max_ns = b.max_ns;
-      }
-    }
-  }
-
   fn dump(&self) {
     use std::fmt::Write as _;
     if self.buckets.is_empty() {
@@ -292,6 +281,108 @@ pub trait CdpTransport: Send + Sync + 'static {
   /// at all — both grew by an entry per page for the life of the
   /// browser.
   fn unregister_session(&self, session_id: &str);
+
+  /// Per-session dirty flags tracked by the transport so context recycling
+  /// knows whether the session can be kept alive and which clears can be skipped.
+  fn take_session_dirty(&self, _session_id: &str) -> SessionDirty {
+    SessionDirty {
+      pointer: true,
+      session_state: true,
+      network: true,
+    }
+  }
+
+  /// Clear all dirty flags for `session_id` after bootstrap or recycle setup.
+  fn reset_session_dirty(&self, _session_id: &str) {}
+
+  /// Mark `session_id`'s pointer state dirty (used when a keep-session check
+  /// consumed the flags before falling back to session replacement).
+  fn mark_pointer_dirty(&self, _session_id: &str) {}
+
+  /// Whether `Browser.grantPermissions` was called for `browser_context_id`,
+  /// clearing the flag.
+  fn take_permissions_dirty(&self, _browser_context_id: &str) -> bool {
+    true
+  }
+
+  /// Whether browser-scoped `Storage.setCookies` was called for
+  /// `browser_context_id`, clearing the flag.
+  fn take_cookies_dirty(&self, _browser_context_id: &str) -> bool {
+    true
+  }
+}
+
+/// Dirty state accumulated on a CDP session since its last clean setup.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionDirty {
+  /// Mouse or touch input was dispatched on this session.
+  pub pointer: bool,
+  /// A session-mutating command (emulation, init script, binding, Fetch,
+  /// custom headers, OOPIF attach, etc.) ran on this session, so recycling
+  /// must detach and replace the session instead of keeping it alive.
+  pub session_state: bool,
+  /// Real network traffic, cookie writes, or non-`about:blank` navigation
+  /// occurred on this session, so cache and cookies must be cleared.
+  pub network: bool,
+}
+
+/// Strict allowlist of CDP session methods that leave NO sticky session-level
+/// overrides behind (no emulation, init scripts, bindings, Fetch interception,
+/// headers, CSP bypass, etc.). Anything outside this set marks `session_state`
+/// dirty so recycling falls back to full session detachment.
+fn is_clean_session_command(method: &str) -> bool {
+  matches!(
+    method,
+    "Runtime.evaluate"
+      | "Runtime.callFunctionOn"
+      | "Runtime.releaseObject"
+      | "Runtime.getProperties"
+      | "Page.navigate"
+      | "Page.reload"
+      | "Page.setDocumentContent"
+      | "Page.getFrameTree"
+      | "Page.getNavigationHistory"
+      | "Page.navigateToHistoryEntry"
+      | "Page.resetNavigationHistory"
+      | "Page.captureScreenshot"
+      | "Page.printToPDF"
+      | "Page.bringToFront"
+      | "Page.handleJavaScriptDialog"
+      | "Page.createIsolatedWorld"
+      | "Page.getLayoutMetrics"
+      | "Page.stopLoading"
+      | "Input.dispatchMouseEvent"
+      | "Input.dispatchKeyEvent"
+      | "Input.insertText"
+      | "Input.dispatchTouchEvent"
+      | "Input.imeSetComposition"
+      | "DOM.describeNode"
+      | "DOM.resolveNode"
+      | "DOM.getDocument"
+      | "DOM.querySelector"
+      | "DOM.querySelectorAll"
+      | "DOM.getBoxModel"
+      | "DOM.getContentQuads"
+      | "DOM.scrollIntoViewIfNeeded"
+      | "DOM.focus"
+      | "DOM.getOuterHTML"
+      | "DOM.setFileInputFiles"
+      | "DOM.getFrameOwner"
+      | "DOM.requestNode"
+      | "Network.getCookies"
+      | "Network.setCookie"
+      | "Network.setCookies"
+      | "Network.deleteCookies"
+      | "Network.clearBrowserCookies"
+      | "Network.clearBrowserCache"
+      | "Storage.getCookies"
+      | "Storage.setCookies"
+      | "Storage.clearCookies"
+      | "Storage.clearDataForOrigin"
+      | "Accessibility.getFullAXTree"
+      | "Accessibility.getPartialAXTree"
+      | "CSS.getComputedStyleForNode"
+  )
 }
 
 // ── Shared dispatch state ──────────────────────────────────────────────────
@@ -379,7 +470,7 @@ impl Drop for PendingCommand<'_> {
 }
 
 #[derive(Default)]
-struct ContextSnapshots(FxHashMap<String, FxHashMap<String, CachedContext>>);
+struct ContextSnapshots(FxHashMap<String, FxHashMap<(String, bool), CachedContext>>);
 
 struct CachedContext {
   id: i64,
@@ -399,11 +490,13 @@ impl ContextSnapshots {
     match method {
       "Runtime.executionContextCreated" => {
         let context = &params["context"];
-        if context["auxData"]["isDefault"] == true
+        let is_default = context["auxData"]["isDefault"] == true;
+        let is_utility = !is_default && context["name"].as_str() == Some(super::UTILITY_WORLD);
+        if (is_default || is_utility)
           && let (Some(frame), Some(id)) = (context["auxData"]["frameId"].as_str(), context["id"].as_i64())
         {
           self.0.entry(session.to_owned()).or_default().insert(
-            frame.to_owned(),
+            (frame.to_owned(), is_utility),
             CachedContext {
               id,
               event: raw.to_vec(),
@@ -422,7 +515,7 @@ impl ContextSnapshots {
         if let Some(frame) = params["frameId"].as_str()
           && let Some(contexts) = self.0.get_mut(session)
         {
-          contexts.remove(frame);
+          contexts.retain(|(f, _), _| f != frame);
         }
       },
       _ => {},
@@ -472,6 +565,16 @@ pub(crate) struct CdpDispatcher {
   /// `FERRIDRIVER_RTT_STATS=1` is set; otherwise the entry insert /
   /// remove path skips the bookkeeping for zero-cost-when-unused.
   rtt_stats: Arc<std::sync::Mutex<RttStats>>,
+  /// Per-session dirty flags tracked for fast context recycling.
+  session_dirty: std::sync::Mutex<FxHashMap<String, SessionDirty>>,
+  /// Browser contexts that received `Browser.grantPermissions`.
+  permissions_dirty_contexts: std::sync::Mutex<rustc_hash::FxHashSet<String>>,
+  /// Set if `Browser.grantPermissions` was called without an explicit context id.
+  permissions_dirty_global: std::sync::atomic::AtomicBool,
+  /// Browser contexts that received browser-scoped `Storage.setCookies`.
+  cookies_dirty_contexts: std::sync::Mutex<rustc_hash::FxHashSet<String>>,
+  /// Set if `Storage.setCookies` was called without an explicit context id.
+  cookies_dirty_global: std::sync::atomic::AtomicBool,
 }
 
 /// Lock a `std::sync::Mutex`, recovering from poisoning.
@@ -606,7 +709,39 @@ impl CdpDispatcher {
       domain_taps: Arc::new(DashMap::default()),
       wildcard_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
+      session_dirty: std::sync::Mutex::default(),
+      permissions_dirty_contexts: std::sync::Mutex::default(),
+      permissions_dirty_global: std::sync::atomic::AtomicBool::new(false),
+      cookies_dirty_contexts: std::sync::Mutex::default(),
+      cookies_dirty_global: std::sync::atomic::AtomicBool::new(false),
     }
+  }
+
+  pub(crate) fn take_session_dirty(&self, session_id: &str) -> SessionDirty {
+    lock_or_recover(&self.session_dirty)
+      .remove(session_id)
+      .unwrap_or_default()
+  }
+
+  pub(crate) fn reset_session_dirty(&self, session_id: &str) {
+    lock_or_recover(&self.session_dirty).remove(session_id);
+  }
+
+  pub(crate) fn mark_pointer_dirty(&self, session_id: &str) {
+    lock_or_recover(&self.session_dirty)
+      .entry(session_id.to_string())
+      .or_default()
+      .pointer = true;
+  }
+
+  pub(crate) fn take_permissions_dirty(&self, browser_context_id: &str) -> bool {
+    let ctx_dirty = lock_or_recover(&self.permissions_dirty_contexts).remove(browser_context_id);
+    ctx_dirty || self.permissions_dirty_global.load(Ordering::Acquire)
+  }
+
+  pub(crate) fn take_cookies_dirty(&self, browser_context_id: &str) -> bool {
+    let ctx_dirty = lock_or_recover(&self.cookies_dirty_contexts).remove(browser_context_id);
+    ctx_dirty || self.cookies_dirty_global.load(Ordering::Acquire)
   }
 
   pub(crate) fn tap_iframe_targets(&self) -> IframeTargetSubscription {
@@ -793,6 +928,9 @@ impl CdpDispatcher {
     self.domain_taps.clear();
     lock_or_recover(&self.wildcard_taps).clear();
     lock_or_recover(&self.context_snapshots).0.clear();
+    lock_or_recover(&self.session_dirty).clear();
+    lock_or_recover(&self.permissions_dirty_contexts).clear();
+    lock_or_recover(&self.cookies_dirty_contexts).clear();
     self.lifecycle_trackers.clear();
     {
       let mut targets = lock_or_recover(&self.iframe_targets);
@@ -868,27 +1006,69 @@ impl CdpDispatcher {
     method: &str,
     params: &serde_json::Value,
   ) -> Result<(u64, Vec<u8>, oneshot::Receiver<CdpResult>)> {
+    use std::io::Write as _;
+
     if self.is_disconnected() {
       return Err(FerriError::target_closed(Some(format!(
         "browser connection is closed (sending {method})"
       ))));
     }
+    if method == "Browser.grantPermissions" {
+      if let Some(ctx_id) = params.get("browserContextId").and_then(serde_json::Value::as_str) {
+        lock_or_recover(&self.permissions_dirty_contexts).insert(ctx_id.to_string());
+      } else {
+        self.permissions_dirty_global.store(true, Ordering::Release);
+      }
+    } else if method == "Storage.setCookies" {
+      if let Some(ctx_id) = params.get("browserContextId").and_then(serde_json::Value::as_str) {
+        lock_or_recover(&self.cookies_dirty_contexts).insert(ctx_id.to_string());
+      } else {
+        self.cookies_dirty_global.store(true, Ordering::Release);
+      }
+    }
+    if let Some(sid) = session_id {
+      let pointer = method == "Input.dispatchTouchEvent"
+        || (method == "Input.dispatchMouseEvent"
+          && !(params.get("type").and_then(serde_json::Value::as_str) == Some("mouseMoved")
+            && params.get("x").and_then(serde_json::Value::as_i64) == Some(-1)
+            && params.get("y").and_then(serde_json::Value::as_i64) == Some(-1)));
+      let network = matches!(
+        method,
+        "Network.setCookie" | "Network.setCookies" | "Storage.setCookies" | "Page.reload"
+      ) || (method == "Page.navigate"
+        && params.get("url").and_then(serde_json::Value::as_str) != Some("about:blank"));
+      let session_state = !is_clean_session_command(method);
+      if pointer || network || session_state {
+        let mut map = lock_or_recover(&self.session_dirty);
+        let flags = map.entry(sid.to_string()).or_default();
+        flags.pointer |= pointer;
+        flags.network |= network;
+        flags.session_state |= session_state;
+      }
+    }
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-    let params_str = serde_json::to_string(params).map_err(|e| FerriError::Backend(format!("Serialize: {e}")))?;
-    let mut data = if let Some(sid) = session_id {
-      format!(r#"{{"id":{id},"method":"{method}","params":{params_str},"sessionId":"{sid}"}}"#).into_bytes()
+    let mut data = Vec::with_capacity(128 + method.len() + session_id.map_or(0, str::len));
+    let _ = write!(data, r#"{{"id":{id},"method":"{method}","params":"#);
+    let params_start = data.len();
+    serde_json::to_writer(&mut data, params).map_err(|e| FerriError::Backend(format!("Serialize: {e}")))?;
+    let params_end = data.len();
+    if let Some(sid) = session_id {
+      let _ = write!(data, r#","sessionId":"{sid}"}}"#);
     } else {
-      format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#).into_bytes()
-    };
+      data.push(b'}');
+    }
     data.push(0);
 
-    tracing::debug!(
-      target: "ferridriver::cdp::send",
-      id,
-      method,
-      params = truncate_for_log(&params_str, 200),
-      "CDP >>",
-    );
+    if tracing::enabled!(target: "ferridriver::cdp::send", tracing::Level::DEBUG) {
+      let params_str = std::str::from_utf8(&data[params_start..params_end]).unwrap_or("");
+      tracing::debug!(
+        target: "ferridriver::cdp::send",
+        id,
+        method,
+        params = truncate_for_log(params_str, 200),
+        "CDP >>",
+      );
+    }
 
     let rx = self.register_command(id, session_id, method)?;
     Ok((id, data, rx))
@@ -925,22 +1105,21 @@ impl CdpDispatcher {
     if self.is_disconnected() {
       return;
     }
-    let id = json_scan::json_id(raw);
+    let env = json_scan::scan_cdp_envelope(raw);
+    let id = env.id;
 
     if id > 0 {
       // Response
-      let error_field = json_scan::json_field(raw, b"error");
-      let payload = if error_field.is_empty() {
-        let result_field = json_scan::json_field(raw, b"result");
-        if result_field.is_empty() {
+      let payload = if env.error.is_empty() {
+        if env.result.is_empty() {
           Ok(serde_json::Value::Object(serde_json::Map::new()))
         } else {
           let val: serde_json::Value =
-            serde_json::from_slice(result_field).unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+            serde_json::from_slice(env.result).unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
           Ok(val)
         }
       } else {
-        let msg_bytes = json_scan::error_message(error_field);
+        let msg_bytes = json_scan::error_message(env.error);
         let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
         if msg_str == "Session with given id not found." {
           Err(FerriError::target_closed(Some(msg_str.to_owned())))
@@ -948,46 +1127,55 @@ impl CdpDispatcher {
           Err(FerriError::protocol("CDP", msg_str))
         }
       };
-      tracing::debug!(
-        target: "ferridriver::cdp::recv",
-        id,
-        ok = payload.is_ok(),
-        payload = truncate_for_log(&format!("{payload:?}"), 200),
-        "CDP << response",
-      );
+      if tracing::enabled!(target: "ferridriver::cdp::recv", tracing::Level::DEBUG) {
+        tracing::debug!(
+          target: "ferridriver::cdp::recv",
+          id,
+          ok = payload.is_ok(),
+          payload = truncate_for_log(&format!("{payload:?}"), 200),
+          "CDP << response",
+        );
+      }
       if let Some((_, entry)) = self.pending.remove(&id) {
         if rtt_stats_enabled()
           && let Some(send_at) = entry.send_at
         {
           let elapsed = send_at.elapsed().as_nanos();
-          // Record into both the per-dispatcher bucket (dump on
-          // graceful Drop) AND the process-global bucket (dump via
-          // libc atexit — covers `process::exit` paths where Drop
-          // never runs because reader/writer tokio tasks still hold
-          // dispatcher Arc clones).
           lock_or_recover(&self.rtt_stats).record(&entry.method, elapsed);
           lock_or_recover(global_rtt_stats()).record(&entry.method, elapsed);
         }
         let _ = entry.tx.send(payload);
       }
     } else {
-      self.dispatch_event(raw);
+      self.dispatch_event(raw, &env);
     }
   }
 
-  fn dispatch_event(&self, raw: &[u8]) {
+  fn dispatch_event(&self, raw: &[u8], env: &json_scan::CdpEnvelope<'_>) {
     // Event
-    let method = json_scan::json_string(json_scan::json_field(raw, b"method"));
-    let session_id = json_scan::json_string(json_scan::json_field(raw, b"sessionId"));
+    let method = env.method;
+    let session_id = env.session_id;
     let method_str = std::str::from_utf8(method).unwrap_or("");
     let sid_str = std::str::from_utf8(session_id).unwrap_or("");
 
+    if !sid_str.is_empty() {
+      if method_str == "Network.requestWillBeSent" {
+        lock_or_recover(&self.session_dirty)
+          .entry(sid_str.to_string())
+          .or_default()
+          .network = true;
+      } else if method_str == "Target.attachedToTarget" {
+        // Out-of-process iframe or child target attached under this session.
+        lock_or_recover(&self.session_dirty)
+          .entry(sid_str.to_string())
+          .or_default()
+          .session_state = true;
+      }
+    }
+
     let detached_session = match method_str {
       "Inspector.detached" => session_id,
-      "Target.detachedFromTarget" => {
-        let params = json_scan::json_field(raw, b"params");
-        json_scan::json_string(json_scan::json_field(params, b"sessionId"))
-      },
+      "Target.detachedFromTarget" => json_scan::json_string(json_scan::json_field(env.params, b"sessionId")),
       _ => b"",
     };
     if !detached_session.is_empty() {
@@ -1243,7 +1431,6 @@ impl Drop for CdpDispatcher {
     // [`rtt_stats_enabled`].
     if rtt_stats_enabled() {
       let local = lock_or_recover(&self.rtt_stats);
-      lock_or_recover(global_rtt_stats()).merge(&local);
       local.dump();
     }
   }

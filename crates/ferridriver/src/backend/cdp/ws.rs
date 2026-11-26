@@ -256,6 +256,26 @@ impl super::transport::CdpTransport for WsTransport {
   fn unregister_session(&self, session_id: &str) {
     self.dispatcher.unregister_session(session_id);
   }
+
+  fn take_session_dirty(&self, session_id: &str) -> super::transport::SessionDirty {
+    self.dispatcher.take_session_dirty(session_id)
+  }
+
+  fn reset_session_dirty(&self, session_id: &str) {
+    self.dispatcher.reset_session_dirty(session_id);
+  }
+
+  fn mark_pointer_dirty(&self, session_id: &str) {
+    self.dispatcher.mark_pointer_dirty(session_id);
+  }
+
+  fn take_permissions_dirty(&self, browser_context_id: &str) -> bool {
+    self.dispatcher.take_permissions_dirty(browser_context_id)
+  }
+
+  fn take_cookies_dirty(&self, browser_context_id: &str) -> bool {
+    self.dispatcher.take_cookies_dirty(browser_context_id)
+  }
 }
 
 async fn discover_ws_url(

@@ -190,6 +190,43 @@ impl From<BrowserInstance> for PendingOwner {
   }
 }
 
+/// Backend teardown extracted from [`BrowserState::detach_context`] so
+/// callers can release the global state write lock before awaiting protocol I/O.
+pub(crate) struct DetachedContext {
+  browser: AnyBrowser,
+  ctx_id: Option<String>,
+  pages: Vec<AnyPage>,
+  recycle: bool,
+  origins: Vec<String>,
+  hints: crate::backend::cdp::RetireHints,
+}
+
+impl DetachedContext {
+  pub(crate) async fn finish(self) {
+    // A page's native recording goes with its target; write it first.
+    for page in &self.pages {
+      page.finish_screen_recording().await;
+    }
+    if let Some(id) = self.ctx_id {
+      // Tear down local page state & listener tasks synchronously before
+      // handing the backend context to background retirement or disposal so
+      // `page.isClosed()` is immediately true when `context.close()` returns.
+      for page in &self.pages {
+        page.dispose_local();
+      }
+      let _ = if self.recycle {
+        Box::pin(self.browser.retire_context(&id, &self.origins, self.hints)).await
+      } else {
+        self.browser.dispose_context(&id).await
+      };
+    } else {
+      for page in self.pages {
+        let _ = page.close_page(crate::options::PageCloseOptions::default()).await;
+      }
+    }
+  }
+}
+
 #[derive(Clone)]
 pub struct PageOpenPlan {
   pub browser: AnyBrowser,
@@ -2708,47 +2745,68 @@ impl BrowserState {
     pages
   }
 
-  /// Remove a context. If it has a CDP browser context ID, dispose it
-  /// (one CDP call kills the context + all pages, matching Playwright's doClose).
-  pub async fn remove_context(&mut self, context: &str) {
+  /// Detach a context from in-memory state under the write lock, returning the
+  /// backend teardown work so callers can drop the global `BrowserState` lock
+  /// before awaiting CDP/BiDi/WebKit I/O.
+  pub(crate) async fn detach_context(&mut self, context: &str) -> Option<DetachedContext> {
     let key = self.session_key(context);
     let composite = key.to_composite();
-    let authenticated = self
-      .get_context_options(&composite)
-      .is_some_and(|options| options.http_credentials.is_some())
+    let opts = self.get_context_options(&composite);
+    let authenticated = opts.as_ref().is_some_and(|options| options.http_credentials.is_some())
       || self
         .http_authenticated
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(&composite);
-    if let Some(inst) = self.instances.get_mut(&*key.instance) {
-      let ctx_id = inst.context(&key.context).ok().and_then(|c| c.cdp_context_id.clone());
-      // A page's native recording goes with its target; write it first.
-      for page in inst.context(&key.context).map(|c| c.pages.clone()).unwrap_or_default() {
-        page.finish_screen_recording().await;
-      }
-      // One call kills a real browser context and all its pages
-      // (Playwright's doClose). The default context has no backend
-      // context of its own, so its tabs have to be closed one by one —
-      // dropping the handles alone left them open in the browser.
-      if let Some(id) = ctx_id {
-        let _ = if self.closed_contexts == ClosedContexts::Recycled && !authenticated {
-          let origins = self.visited_origins.of(&composite);
-          Box::pin(inst.browser.retire_context(&id, &origins)).await
-        } else {
-          inst.browser.dispose_context(&id).await
-        };
+    let download_opt_touched = opts.as_ref().is_some_and(|options| options.accept_downloads.is_some());
+    let recycle = self.closed_contexts == ClosedContexts::Recycled && !authenticated;
+    let origins = if recycle {
+      self.visited_origins.of(&composite)
+    } else {
+      Vec::new()
+    };
+
+    let detached = if let Some(inst) = self.instances.get_mut(&*key.instance) {
+      let (ctx_id, pages) = inst
+        .context(&key.context)
+        .ok()
+        .map(|c| (c.cdp_context_id.clone(), c.pages.clone()))
+        .unwrap_or_default();
+      let download_touched = download_opt_touched || pages.iter().any(AnyPage::download_behavior_touched);
+      let single_page_target = if pages.len() == 1 {
+        pages[0].cdp_target_id().map(str::to_string)
       } else {
-        let pages: Vec<AnyPage> = inst.context(&key.context).map(|c| c.pages.clone()).unwrap_or_default();
-        for page in pages {
-          let _ = page.close_page(crate::options::PageCloseOptions::default()).await;
-        }
-      }
+        None
+      };
+      let browser = inst.browser.clone();
       inst.remove_context(&key.context);
-    }
+      Some(DetachedContext {
+        browser,
+        ctx_id,
+        pages,
+        recycle,
+        origins,
+        hints: crate::backend::cdp::RetireHints {
+          download_touched,
+          single_page_target,
+        },
+      })
+    } else {
+      None
+    };
+
     // Registries are keyed by composite, and callers pass a bare context
     // name — purging with the raw argument would silently match nothing.
-    self.purge_context_registries(&key.to_composite()).await;
+    self.purge_context_registries(&composite).await;
+    detached
+  }
+
+  /// Remove a context. If it has a CDP browser context ID, dispose it
+  /// (one CDP call kills the context + all pages, matching Playwright's doClose).
+  pub async fn remove_context(&mut self, context: &str) {
+    if let Some(detached) = self.detach_context(context).await {
+      detached.finish().await;
+    }
   }
 
   /// # Errors

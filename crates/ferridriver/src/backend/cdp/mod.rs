@@ -14,6 +14,7 @@ mod paused;
 pub mod pipe;
 pub(crate) mod recording;
 mod recycle;
+pub use recycle::RetireHints;
 mod renderer;
 mod screenshot;
 pub mod transport;
@@ -368,6 +369,97 @@ fn metrics_params_for(
   })
 }
 
+/// Translate a Playwright glob into a CDP `Fetch.RequestPattern.urlPattern`
+/// that is guaranteed to be a strict superset of the glob (so Chrome never
+/// skips a request that `UrlMatcher::Glob` would accept, while avoiding pausing
+/// non-matching assets). Returns `None` when the pattern is effectively `"*"`
+/// or cannot be safely narrowed.
+fn glob_to_cdp_url_pattern(pattern: &str) -> Option<String> {
+  if pattern.is_empty() {
+    return None;
+  }
+  let mut out = String::with_capacity(pattern.len() + 2);
+  let bytes = pattern.as_bytes();
+  let mut i = 0;
+  let push_star = |s: &mut String| {
+    if !s.ends_with('*') {
+      s.push('*');
+    }
+  };
+  while i < bytes.len() {
+    match bytes[i] {
+      b'\\' if i + 1 < bytes.len() => {
+        let next = bytes[i + 1];
+        if matches!(next, b'*' | b'?' | b'\\') {
+          out.push('\\');
+        }
+        out.push(next as char);
+        i += 2;
+      },
+      b'*' => {
+        if i + 2 < bytes.len() && bytes[i + 1] == b'*' && bytes[i + 2] == b'/' {
+          // `**/` matches zero or more path segments in Playwright; `*` is a
+          // strict superset in CDP.
+          push_star(&mut out);
+          i += 3;
+        } else {
+          push_star(&mut out);
+          i += 1;
+        }
+      },
+      b'{' | b'[' => {
+        let close = if bytes[i] == b'{' { b'}' } else { b']' };
+        let mut depth = 1usize;
+        i += 1;
+        while i < bytes.len() && depth > 0 {
+          if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+          }
+          if bytes[i] == b'{' && close == b'}' {
+            depth += 1;
+          } else if bytes[i] == close {
+            depth -= 1;
+          }
+          i += 1;
+        }
+        if depth != 0 {
+          return None;
+        }
+        push_star(&mut out);
+      },
+      _ => {
+        let ch = pattern.get(i..)?.chars().next()?;
+        out.push(ch);
+        i += ch.len_utf8();
+      },
+    }
+  }
+  if !out.starts_with('*') && !out.contains("://") {
+    out.insert(0, '*');
+  }
+  if out == "*" {
+    return None;
+  }
+  Some(out)
+}
+
+/// Default `Emulation.setEmulatedMedia` params matching [`crate::backend::MediaEmulation::effective`]
+/// when neither context nor page specifies custom media overrides. Shipped in the
+/// initial `enable_domains` / recycle batch so `apply_context_options` skips the
+/// sequential `Emulation.setEmulatedMedia` RTT on every default page.
+pub(super) fn default_emulated_media_params() -> serde_json::Value {
+  serde_json::json!({
+    "features": [
+      { "name": "prefers-color-scheme", "value": crate::backend::DEFAULT_COLOR_SCHEME },
+      { "name": "prefers-reduced-motion", "value": "no-preference" },
+      { "name": "forced-colors", "value": "none" },
+      { "name": "prefers-contrast", "value": "no-preference" },
+    ],
+    "media": "",
+  })
+}
+
 /// How much bigger than its viewport a browser window has to be for the
 /// page to actually get that viewport.
 ///
@@ -414,7 +506,8 @@ struct AttachCtx<T: CdpTransport> {
   downloads_dir: Arc<DownloadsDir>,
   ledger: Arc<CreateLedger>,
   attached: AttachedTargets,
-  headful: bool,
+  spares: Arc<recycle::Spares>,
+  headful: Arc<std::sync::atomic::AtomicBool>,
   in_flight: crate::backend::PopupsInFlight,
 }
 
@@ -568,15 +661,18 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let focus_params = serde_json::json!({"enabled": true});
     // `Inspector.enable` is what makes Chromium report a renderer crash
     // (`Inspector.targetCrashed`, `page.on('crash')`).
+    // `DOM.enable` is omitted — `DOM.getDocument` enables it implicitly
+    // when needed, and Playwright never sends it during page bootstrap.
+    let default_media = default_emulated_media_params();
     let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep),
       transport.send_command(session_id, "Runtime.enable", ep),
       transport.send_command(session_id, "Network.enable", ep),
-      transport.send_command(session_id, "DOM.enable", ep),
       transport.send_command(session_id, "Page.setLifecycleEventsEnabled", &lifecycle_params),
       transport.send_command(session_id, "Target.setAutoAttach", &autoattach_params),
       transport.send_command(session_id, "Emulation.setFocusEmulationEnabled", &focus_params),
       transport.send_command(session_id, "Inspector.enable", ep),
+      transport.send_command(session_id, "Emulation.setEmulatedMedia", &default_media),
       vp_fut,
       inject_fut,
       unpause_fut,
@@ -607,9 +703,33 @@ impl<T: CdpWrap> CdpBrowser<T> {
     child: Option<super::process::ChildGroup>,
     user_data_dir: Option<tempfile::TempDir>,
   ) -> Result<Self> {
-    let version_resp = transport
-      .send_command(None, "Browser.getVersion", &super::EMPTY_PARAMS)
-      .await?;
+    let downloads_dir = new_downloads_dir()?;
+    let mut child = child;
+    if let Some(ref mut group) = child {
+      group.own_dir(downloads_dir.path());
+    }
+    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let spares = Arc::new(recycle::Spares::default());
+    let headful_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (popup_taps, create_ledger, attach_tasks, popups) = Self::spawn_attach_listener(
+      &transport,
+      &downloads_dir,
+      &attached_targets,
+      &spares,
+      Arc::clone(&headful_flag),
+    );
+
+    let auto_attach_params = serde_json::json!({
+      "autoAttach": true,
+      "waitForDebuggerOnStart": true,
+      "flatten": true,
+    });
+    // Pipeline Browser.getVersion and Target.setAutoAttach in one RTT:
+    // attach_listener already owns its tap so no startup attach event can be missed.
+    let (version_resp, _) = tokio::try_join!(
+      transport.send_command(None, "Browser.getVersion", &super::EMPTY_PARAMS),
+      transport.send_command(None, "Target.setAutoAttach", &auto_attach_params),
+    )?;
     // `product` is a string like "HeadlessChrome/120.0.6099.109" — mirrors
     // what Playwright surfaces via `browser.version()`.
     let version: Arc<str> = version_resp
@@ -618,31 +738,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
     // Chrome reports "HeadlessChrome/<v>" only when it has no UI window.
     let headful = !version.starts_with("HeadlessChrome");
+    headful_flag.store(headful, std::sync::atomic::Ordering::Release);
     let isolated_contexts = !version_resp
       .get("userAgent")
       .and_then(serde_json::Value::as_str)
       .is_some_and(|agent| agent.contains("Android"));
-
-    let downloads_dir = new_downloads_dir()?;
-    let mut child = child;
-    if let Some(ref mut group) = child {
-      group.own_dir(downloads_dir.path());
-    }
-    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
-    let (popup_taps, create_ledger, attach_tasks, popups) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
-
-    transport
-      .send_command(
-        None,
-        "Target.setAutoAttach",
-        &serde_json::json!({
-          "autoAttach": true,
-          "waitForDebuggerOnStart": true,
-          "flatten": true,
-        }),
-      )
-      .await?;
 
     Ok(Self {
       transport,
@@ -652,7 +752,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       isolated_contexts,
       headful,
       front_tab: Arc::default(),
-      spares: Arc::default(),
+      spares,
       flushes_on_close: user_data_dir.is_none(),
       connections: None,
       user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
@@ -690,7 +790,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
     transport: &Arc<T>,
     downloads_dir: &Arc<DownloadsDir>,
     attached: &AttachedTargets,
-    headful: bool,
+    spares: &Arc<recycle::Spares>,
+    headful: Arc<std::sync::atomic::AtomicBool>,
   ) -> (
     crate::backend::PopupTaps,
     Arc<CreateLedger>,
@@ -715,7 +816,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       downloads_dir: Arc::clone(downloads_dir),
       ledger: Arc::clone(&ledger),
       attached: Arc::clone(attached),
-      headful,
+      spares: Arc::clone(spares),
+      headful: Arc::clone(&headful),
       in_flight: popups.in_flight.clone(),
     };
     // Flush channel: `end_create` (called from new_page, no transport
@@ -728,8 +830,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let flush_headful = headful;
     let flush_task = tokio::spawn(async move {
       while flush_rx.recv().await.is_some() {
+        let is_headful = flush_headful.load(std::sync::atomic::Ordering::Acquire);
         for parked in flush_ledger.take_unowned_parked() {
-          Self::claim_parked_popup(&flush_transport, &flush_taps, &flush_downloads, parked, flush_headful);
+          Self::claim_parked_popup(&flush_transport, &flush_taps, &flush_downloads, parked, is_headful);
         }
       }
     });
@@ -755,52 +858,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           },
         };
         let Some(params) = event.get("params") else { continue };
-        // A target that went away must leave the session cache, or the
-        // map grows by one dead entry for every page ever opened.
-        if event.get("method").and_then(|m| m.as_str()) != Some("Target.attachedToTarget") {
-          if let Some(target_id) = params.get("targetId").and_then(|v| v.as_str()) {
-            claim_ctx
-              .attached
-              .lock()
-              .unwrap_or_else(std::sync::PoisonError::into_inner)
-              .remove(target_id);
-          }
-          continue;
-        }
-        let target_type = params
-          .pointer("/targetInfo/type")
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-        let waiting = params
-          .get("waitingForDebugger")
-          .and_then(serde_json::Value::as_bool)
-          .unwrap_or(false);
-        let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) else {
-          continue;
-        };
-        if target_type == "page" {
-          Self::maybe_claim_popup(&claim_ctx, &mut claimed_popups, params, waiting, session_id);
-          continue;
-        }
-        if target_type == "iframe" || !waiting {
-          continue;
-        }
-        // Fire-and-forget (Playwright's `_sendMayFail`): a worker can
-        // attach through two sessions (browser-level AND page-level
-        // auto-attach both see it), and a session Chrome never
-        // answers must not stall the other session's resume behind
-        // the 30s command timeout.
-        let session_id = session_id.to_string();
-        let transport = Arc::clone(&resume_transport);
-        tokio::spawn(async move {
-          let _ = transport
-            .send_command(
-              Some(&session_id),
-              "Runtime.runIfWaitingForDebugger",
-              &super::EMPTY_PARAMS,
-            )
-            .await;
-        });
+        Self::handle_attach_event(&claim_ctx, &resume_transport, &mut claimed_popups, &event, params);
       }
     });
     (
@@ -809,6 +867,67 @@ impl<T: CdpWrap> CdpBrowser<T> {
       AttachTasks(vec![flush_task.abort_handle(), attach_task.abort_handle()]),
       popups,
     )
+  }
+
+  fn handle_attach_event(
+    claim_ctx: &AttachCtx<T>,
+    resume_transport: &Arc<T>,
+    claimed_popups: &mut rustc_hash::FxHashSet<String>,
+    event: &serde_json::Value,
+    params: &serde_json::Value,
+  ) {
+    // A target that went away must leave the session cache, or the
+    // map grows by one dead entry for every page ever opened.
+    if event.get("method").and_then(|m| m.as_str()) != Some("Target.attachedToTarget") {
+      if let Some(target_id) = params.get("targetId").and_then(|v| v.as_str()) {
+        claim_ctx
+          .attached
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(target_id);
+      }
+      return;
+    }
+    let target_type = params
+      .pointer("/targetInfo/type")
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+    let waiting = params
+      .get("waitingForDebugger")
+      .and_then(serde_json::Value::as_bool)
+      .unwrap_or(false);
+    let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) else {
+      return;
+    };
+    if target_type == "page" {
+      if let (Some(ctx_id), Some(tid)) = (
+        params.pointer("/targetInfo/browserContextId").and_then(|v| v.as_str()),
+        params.pointer("/targetInfo/targetId").and_then(|v| v.as_str()),
+      ) {
+        claim_ctx.spares.note_attached_target(ctx_id, tid);
+      }
+      Self::maybe_claim_popup(claim_ctx, claimed_popups, params, waiting, session_id);
+      return;
+    }
+    if target_type == "iframe" || !waiting {
+      return;
+    }
+    // Fire-and-forget (Playwright's `_sendMayFail`): a worker can
+    // attach through two sessions (browser-level AND page-level
+    // auto-attach both see it), and a session Chrome never
+    // answers must not stall the other session's resume behind
+    // the 30s command timeout.
+    let session_id = session_id.to_string();
+    let transport = Arc::clone(resume_transport);
+    tokio::spawn(async move {
+      let _ = transport
+        .send_command(
+          Some(&session_id),
+          "Runtime.runIfWaitingForDebugger",
+          &super::EMPTY_PARAMS,
+        )
+        .await;
+    });
   }
 
   /// One auto-attached page target. Ownership resolution:
@@ -857,7 +976,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
       return;
     }
     claimed.insert(target_id);
-    Self::claim_parked_popup(&ctx.transport, &ctx.taps, &ctx.downloads_dir, parked, ctx.headful);
+    Self::claim_parked_popup(
+      &ctx.transport,
+      &ctx.taps,
+      &ctx.downloads_dir,
+      parked,
+      ctx.headful.load(std::sync::atomic::Ordering::Acquire),
+    );
   }
 
   /// Claim one resolved popup target: build the paused [`CdpPage`] and
@@ -933,7 +1058,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     browser_context_id: Option<&str>,
     headful: bool,
   ) -> Result<CdpPage<T>> {
-    let inject_src = crate::selectors::build_lazy_inject_js();
+    let inject_src = crate::selectors::lazy_inject_js();
     let injected_script = Arc::new(InjectedScriptManager::new());
     injected_script
       .injected
@@ -959,6 +1084,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       proxy_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+      last_media_params: Arc::new(std::sync::Mutex::new(Some(default_emulated_media_params()))),
       headful,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
@@ -986,6 +1112,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
       keyboard: Arc::default(),
+      touch_emulation_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     page.transport.register_lifecycle_tracker(
       page.session_id.as_deref().unwrap_or(""),
@@ -1150,6 +1277,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       proxy_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+      last_media_params: Arc::new(std::sync::Mutex::new(None)),
       headful: self.headful,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
@@ -1177,6 +1305,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
       keyboard: Arc::default(),
+      touch_emulation_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
   }
 
@@ -1202,7 +1331,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // A proxy is fixed when the context is created, so only a context
     // without one can stand in for another.
     if proxy.is_none()
-      && let Some(spare) = self.spares.take_context()
+      && let Some(spare) = self.spares.take_context_or_wait().await
     {
       return Ok(spare);
     }
@@ -1320,6 +1449,93 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Ok((target_id, sid))
   }
 
+  /// Either adopt a recycled kept page (adjusting viewport only when it
+  /// differs from what recycle pre-applied) or create and bootstrap a fresh
+  /// target.
+  async fn acquire_page_target(
+    &self,
+    browser_context_id: Option<&str>,
+    viewport: Option<&crate::options::ViewportConfig>,
+    desired_metrics: Option<&serde_json::Value>,
+  ) -> Result<(String, Option<String>, Option<Vec<super::FrameInfo>>, serde_json::Value)> {
+    use futures::FutureExt;
+    let kept = browser_context_id.and_then(|context| Some((context, self.spares.take_page(context)?)));
+    let inject_src = crate::selectors::lazy_inject_js();
+    if let Some((context, page)) = kept {
+      let adopted = self.adopt_kept_page(context, page, &inject_src).boxed().await?;
+      let sid = Some(adopted.session.clone());
+      if desired_metrics != adopted.applied_metrics.as_ref() {
+        match desired_metrics {
+          Some(metrics) => {
+            self
+              .transport
+              .send_command(sid.as_deref(), "Emulation.setDeviceMetricsOverride", metrics)
+              .await?;
+          },
+          None => {
+            self
+              .transport
+              .send_command(
+                sid.as_deref(),
+                "Emulation.clearDeviceMetricsOverride",
+                &super::EMPTY_PARAMS,
+              )
+              .await?;
+          },
+        }
+      }
+      self.spares.record_active_page(
+        context,
+        &adopted.target,
+        &adopted.session,
+        adopted.applied_metrics,
+        adopted.applied_media.clone(),
+        adopted.engine_on_session,
+        adopted.engine_source,
+      );
+      self
+        .attached_targets
+        .lock()
+        .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
+        .insert(adopted.target.clone(), sid.clone());
+      Ok((adopted.target, sid, None, adopted.applied_media))
+    } else {
+      let (target_id, sid) = self.create_attached_target(browser_context_id).await?;
+      self
+        .attached_targets
+        .lock()
+        .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
+        .insert(target_id.clone(), sid.clone());
+      let frame_tree_seed = Self::enable_domains(
+        &self.transport,
+        sid.as_deref(),
+        viewport,
+        true,
+        Some(inject_src.as_ref()),
+      )
+      .boxed()
+      .await?;
+      let default_media = default_emulated_media_params();
+      if let Some(session) = sid.as_deref() {
+        // Clear bootstrap commands from dirty tracking so a clean test on this
+        // fresh page can use the keep-session fast path on retirement.
+        self.transport.reset_session_dirty(session);
+        if let Some(ctx) = browser_context_id {
+          self.spares.record_active_page(
+            ctx,
+            &target_id,
+            session,
+            desired_metrics.cloned(),
+            default_media.clone(),
+            true,
+            inject_src.into_owned(),
+          );
+        }
+      }
+      Ok((target_id, sid, frame_tree_seed, default_media))
+    }
+  }
+
   /// # Errors
   ///
   /// Returns an error if creating or adopting the page's target fails, enabling its protocol domains fails, a
@@ -1336,39 +1552,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
     {
       return page.await;
     }
-    let kept = browser_context_id.and_then(|context| Some((context, self.spares.take_page(context)?)));
-    let inject_src = crate::selectors::build_lazy_inject_js();
-    // A recycled context comes with its page, already attached and with
-    // the engine in its blank document.
-    let engine_installed = kept.is_some();
-    let (target_id, sid) = match kept {
-      Some((context, page)) => self.adopt_kept_page(context, page, &inject_src).await?,
-      None => self.create_attached_target(browser_context_id).await?,
-    };
+    let desired_metrics = viewport.map(|vp| metrics_params_for(vp, None));
+    self.spares.record_default_metrics(desired_metrics.as_ref());
 
-    self
-      .attached_targets
-      .lock()
-      .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
-      .insert(target_id.clone(), sid.clone());
-
-    // Enable domains + unpause in one parallel batch (saves a round-trip).
-    // Eager-inject the lazy `window.__fd` selector engine in the same
-    // parallel batch as the per-page enables. Mirrors Playwright's
-    // `_evaluateOnNewDocument(initScript, 'main', runImmediately:true)`
-    // call inside `FrameSession._initialize` (crPage.ts:545). Saves
-    // the sequential RTT that an on-demand `ensure_engine_injected`
-    // otherwise pays before the first locator/selector use — the
-    // bench's `locator(...).click()` etc. fire immediately so the
-    // first selector lookup almost always finds the engine missing.
-    //
-    // The same parallel batch also pulls the IIFE engine inject, so
-    // `ensure_engine_injected` becomes a no-op for first selector
-    // use. Page.getFrameTree is intentionally NOT in the batch —
-    // see PERF_AUDIT §M.4: the frame cache is built around the target
-    // id, which is the main frame's id.
-    let init_script = (!engine_installed).then_some(inject_src.as_str());
-    let frame_tree_seed = Self::enable_domains(&self.transport, sid.as_deref(), viewport, true, init_script).await?;
+    let (target_id, sid, frame_tree_seed, applied_media) = self
+      .acquire_page_target(browser_context_id, viewport, desired_metrics.as_ref())
+      .await?;
 
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
@@ -1399,11 +1588,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       proxy_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
-      // Seed the metrics cache with the exact params `enable_domains`
-      // just shipped, so the first `apply_context_options` call
-      // skips the redundant `setDeviceMetricsOverride` RTT when the
-      // bag carries the same default size.
-      last_metrics_params: Arc::new(std::sync::Mutex::new(viewport.map(|vp| metrics_params_for(vp, None)))),
+      // Seed the metrics and media caches with the exact params just shipped,
+      // so `apply_context_options` skips redundant RTTs when defaults match.
+      last_metrics_params: Arc::new(std::sync::Mutex::new(desired_metrics)),
+      last_media_params: Arc::new(std::sync::Mutex::new(Some(applied_media))),
       headful: self.headful,
       window_id: Arc::new(tokio::sync::OnceCell::new()),
       context_screen: Arc::new(std::sync::Mutex::new(None)),
@@ -1431,6 +1619,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
       keyboard: Arc::default(),
+      touch_emulation_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -1835,8 +2024,10 @@ impl CdpBrowser<ws::WsTransport> {
 
     let downloads_dir = new_downloads_dir()?;
     let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let spares = Arc::new(recycle::Spares::default());
+    let headful_flag = Arc::new(std::sync::atomic::AtomicBool::new(headful));
     let (popup_taps, create_ledger, attach_tasks, popups) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, headful);
+      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, &spares, headful_flag);
 
     // CDP can emit attachedToTarget before setAutoAttach replies. The
     // listener must already own its tap or paused startup targets are lost.
@@ -1880,7 +2071,7 @@ impl CdpBrowser<ws::WsTransport> {
       isolated_contexts,
       headful,
       front_tab: Arc::default(),
-      spares: Arc::default(),
+      spares,
       attach_tasks: Arc::new(attach_tasks),
       popup_taps,
       create_ledger,
@@ -2351,6 +2542,9 @@ pub struct CdpPage<T: CdpTransport> {
   /// own idempotent path so changing `has_touch` doesn't get masked
   /// by a metrics-only cache hit.
   last_metrics_params: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+  /// Last `Emulation.setEmulatedMedia` params shipped on this session;
+  /// short-circuits redundant calls when context options match defaults.
+  last_media_params: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
   /// Whether the browser draws real window chrome (see
   /// [`CdpBrowser::headful`]).
   headful: bool,
@@ -2503,6 +2697,9 @@ pub struct CdpPage<T: CdpTransport> {
   /// Native drag-and-drop interception state. See [`DragManagerState`].
   drag_manager: Arc<DragManagerState>,
   keyboard: Arc<crate::backend::keyboard::KeyboardState>,
+  /// Cached latch for `Emulation.setTouchEmulationEnabled` so repeated `tap()`
+  /// calls on the same page skip the redundant enable RTT.
+  touch_emulation_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Port of Playwright's `crDragDrop.ts::DragManager` plus the
@@ -2758,6 +2955,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       proxy_credentials: Arc::clone(&self.proxy_credentials),
       main_frame_id: Arc::clone(&self.main_frame_id),
       last_metrics_params: Arc::clone(&self.last_metrics_params),
+      last_media_params: Arc::clone(&self.last_media_params),
       headful: self.headful,
       window_id: Arc::clone(&self.window_id),
       context_screen: Arc::clone(&self.context_screen),
@@ -2785,6 +2983,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       listener_tasks: Arc::clone(&self.listener_tasks),
       drag_manager: Arc::clone(&self.drag_manager),
       keyboard: Arc::clone(&self.keyboard),
+      touch_emulation_enabled: Arc::clone(&self.touch_emulation_enabled),
     }
   }
 }
@@ -3619,6 +3818,96 @@ impl<T: CdpWrap> CdpPage<T> {
       );
     }
     self.cmd("Browser.setDownloadBehavior", params).await.map(|_| ())
+  }
+
+  /// Evaluate `expression` directly inside the frame's isolated `UTILITY_WORLD`
+  /// execution context (where DOM prototypes and element setters are untouched
+  /// by page/framework scripts). Reuses the cached `utility_contexts` entry
+  /// populated by `ContextSnapshots` + `context_observer`, lazily creating the
+  /// world once via `Page.createIsolatedWorld` only when absent or stale.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome rejects `Page.createIsolatedWorld` or
+  /// `Runtime.evaluate`, the target has closed, or the expression throws.
+  pub async fn evaluate_in_utility_world(
+    &self,
+    frame_id: Option<&str>,
+    expression: &str,
+  ) -> Result<Option<serde_json::Value>> {
+    if let Some(fid) = frame_id
+      && let Some(renderer) = self.page_for_frame(fid).await?
+    {
+      return Box::pin(renderer.evaluate_in_utility_world(Some(fid), expression)).await;
+    }
+    let fid = match frame_id {
+      Some(id) => id.to_owned(),
+      None => self.peek_main_frame_id().unwrap_or_else(|| self.target_id.to_string()),
+    };
+    let mut ctx_id = self
+      .utility_contexts
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(&fid)
+      .copied();
+    for attempt in 0..2 {
+      let context_id = if let Some(id) = ctx_id {
+        id
+      } else {
+        let world = self
+          .cmd(
+            "Page.createIsolatedWorld",
+            serde_json::json!({
+              "frameId": fid,
+              "worldName": UTILITY_WORLD,
+              "grantUniveralAccess": true,
+            }),
+          )
+          .await?;
+        let id = world["executionContextId"]
+          .as_i64()
+          .ok_or_else(|| FerriError::protocol("Page.createIsolatedWorld", "missing execution context"))?;
+        self
+          .utility_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .insert(fid.clone(), id);
+        id
+      };
+      let eval_res = self
+        .cmd(
+          "Runtime.evaluate",
+          serde_json::json!({
+            "expression": expression,
+            "contextId": context_id,
+            "returnByValue": true,
+            "awaitPromise": true,
+          }),
+        )
+        .await;
+      match eval_res {
+        Ok(result) => {
+          if let Some(exception) = result.get("exceptionDetails") {
+            let text = exception
+              .get("text")
+              .and_then(|v| v.as_str())
+              .unwrap_or("Evaluation error");
+            return Err(FerriError::Backend(text.to_string()));
+          }
+          return Ok(result.get("result").and_then(|r| r.get("value")).cloned());
+        },
+        Err(err) if attempt == 0 && err.to_string().contains("Cannot find context") => {
+          self
+            .utility_contexts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&fid);
+          ctx_id = None;
+        },
+        Err(err) => return Err(err),
+      }
+    }
+    Err(FerriError::backend("failed to evaluate in utility world"))
   }
 
   /// # Errors
@@ -4976,8 +5265,40 @@ impl<T: CdpWrap> CdpPage<T> {
         Ok(g) => matches!(*g, Some((px, py)) if (px - x).abs() < 0.5 && (py - y).abs() < 0.5),
         Err(_) => false,
       };
-    if args.click_count == 1 && args.delay_ms == 0 && steps == 1 {
-      self.single_click_fast_path(x, y, button, mods, skip_move).await?;
+    if args.delay_ms == 0 && steps == 1 {
+      if args.click_count == 1 {
+        self.single_click_fast_path(x, y, button, mods, skip_move).await?;
+      } else {
+        // Pipeline move + all press/release pairs (e.g. dblclick) in one batch.
+        let mut events = Vec::with_capacity((usize::from(!skip_move)) + (args.click_count as usize) * 2);
+        if !skip_move {
+          events.push(serde_json::json!({
+            "type": "mouseMoved",
+            "x": x,
+            "y": y,
+            "modifiers": mods,
+          }));
+        }
+        for n in 1..=args.click_count {
+          events.push(serde_json::json!({
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": n,
+            "modifiers": mods,
+          }));
+          events.push(serde_json::json!({
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": n,
+            "modifiers": mods,
+          }));
+        }
+        futures::future::try_join_all(events.into_iter().map(|ev| self.cmd("Input.dispatchMouseEvent", ev))).await?;
+      }
       if let Ok(mut guard) = self.last_cursor_pos.lock() {
         *guard = Some((x, y));
       }
@@ -5110,32 +5431,34 @@ impl<T: CdpWrap> CdpPage<T> {
   /// the target has closed, or the command outlives its time budget.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     let mods = self.keyboard.modifiers();
-    self
-      .cmd(
-        "Emulation.setTouchEmulationEnabled",
-        serde_json::json!({ "enabled": true, "maxTouchPoints": 1 }),
-      )
-      .await?;
-    self
-      .cmd(
-        "Input.dispatchTouchEvent",
-        serde_json::json!({
-          "type": "touchStart",
-          "modifiers": mods,
-          "touchPoints": [{ "x": x, "y": y }],
-        }),
-      )
-      .await?;
-    self
-      .cmd(
-        "Input.dispatchTouchEvent",
-        serde_json::json!({
-          "type": "touchEnd",
-          "modifiers": mods,
-          "touchPoints": [],
-        }),
-      )
-      .await?;
+    if !self.touch_emulation_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+      self
+        .cmd(
+          "Emulation.setTouchEmulationEnabled",
+          serde_json::json!({ "enabled": true, "maxTouchPoints": 1 }),
+        )
+        .await?;
+      self
+        .touch_emulation_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let start = self.cmd(
+      "Input.dispatchTouchEvent",
+      serde_json::json!({
+        "type": "touchStart",
+        "modifiers": mods,
+        "touchPoints": [{ "x": x, "y": y }],
+      }),
+    );
+    let end = self.cmd(
+      "Input.dispatchTouchEvent",
+      serde_json::json!({
+        "type": "touchEnd",
+        "modifiers": mods,
+        "touchPoints": [],
+      }),
+    );
+    let _ = tokio::try_join!(start, end)?;
     Ok(())
   }
 
@@ -5974,7 +6297,21 @@ impl<T: CdpWrap> CdpPage<T> {
       MediaOverride::Disabled | MediaOverride::Unchanged => "",
     };
     let params = serde_json::json!({"features": features, "media": media});
-    self.configure("Emulation.setEmulatedMedia", params).await?;
+    let unchanged = {
+      let last = self
+        .last_media_params
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      last.as_ref() == Some(&params)
+    };
+    if unchanged {
+      return Ok(());
+    }
+    self.configure("Emulation.setEmulatedMedia", params.clone()).await?;
+    *self
+      .last_media_params
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(params);
     Ok(())
   }
 
@@ -7693,23 +8030,69 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
+  /// Build native CDP `Fetch.RequestPattern`s from the active routes. When
+  /// every route is a glob and no auth credentials require intercepting all
+  /// challenges, Chrome filters at the network stack and never pauses
+  /// non-matching assets (images/fonts/CSS/scripts). Falls back to `"*"`
+  /// whenever any route is `Any`, `Regex`, or `Predicate`, or auth handling
+  /// is enabled.
+  fn fetch_enable_params(routes: &[crate::route::RegisteredRoute], has_creds: bool) -> serde_json::Value {
+    let wildcard = || {
+      serde_json::json!({
+        "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
+        "handleAuthRequests": has_creds,
+      })
+    };
+    if has_creds || routes.is_empty() {
+      return wildcard();
+    }
+    let mut patterns: Vec<serde_json::Value> = Vec::with_capacity(routes.len());
+    let mut seen = rustc_hash::FxHashSet::default();
+    for route in routes {
+      let crate::url_matcher::UrlMatcher::Glob { pattern, .. } = &route.matcher else {
+        return wildcard();
+      };
+      let Some(cdp_pat) = glob_to_cdp_url_pattern(pattern) else {
+        return wildcard();
+      };
+      if seen.insert(cdp_pat.clone()) {
+        patterns.push(serde_json::json!({"urlPattern": cdp_pat, "requestStage": "Request"}));
+      }
+    }
+    if patterns.is_empty() {
+      return wildcard();
+    }
+    serde_json::json!({
+      "patterns": patterns,
+      "handleAuthRequests": false,
+    })
+  }
+
   async fn ensure_fetch_enabled_current(&self) -> Result<()> {
     let _transition = self.fetch.transition.lock().await;
     let has_creds = self.http_credentials.read().await.is_some() || self.proxy_credentials.read().await.is_some();
+    let enable = {
+      let routes = self.routes.read().await;
+      Self::fetch_enable_params(&routes, has_creds)
+    };
     if self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
-      // Already enabled — but may need to re-enable with auth handling.
-      if has_creds {
-        let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
-        self
-          .cmd(
-            "Fetch.enable",
-            serde_json::json!({
-                "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
-                "handleAuthRequests": true,
-            }),
-          )
-          .await?;
+      let unchanged = self
+        .fetch
+        .last_enable
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        == Some(&enable);
+      if unchanged {
+        return Ok(());
       }
+      // Patterns or auth handling changed: re-enable with the updated pattern set.
+      self.cmd("Fetch.enable", enable.clone()).await?;
+      *self
+        .fetch
+        .last_enable
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(enable);
       return Ok(());
     }
 
@@ -7736,15 +8119,16 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let _ = self
       .configure("Network.setCacheDisabled", serde_json::json!({ "cacheDisabled": true }))
       .await;
-    let enable = serde_json::json!({
-        "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
-        "handleAuthRequests": has_creds,
-    });
     if self.setup.is_paused() {
       // A popup in a browsing instance of its own (`noopener`) answers
       // nothing until it runs. Waiting here for the answer resumed it, and
       // its first request left before interception was on.
       self.fetch.enabled.store(true, std::sync::atomic::Ordering::SeqCst);
+      *self
+        .fetch
+        .last_enable
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(enable.clone());
       let fetch = Arc::clone(&self.fetch);
       let transport = Arc::clone(&self.transport);
       let session = self.session_id.clone();
@@ -7756,18 +8140,27 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
             .await;
           if answer.is_err() {
             fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+            *fetch
+              .last_enable
+              .lock()
+              .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             handle.abort();
           }
           answer.map(|_| ())
         }))
         .await;
     }
-    if let Err(error) = self.cmd("Fetch.enable", enable).await {
+    if let Err(error) = self.cmd("Fetch.enable", enable.clone()).await {
       self.fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       handle.abort();
       return Err(error);
     }
 
+    *self
+      .fetch
+      .last_enable
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(enable);
     self.fetch.enabled.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
   }
@@ -7800,6 +8193,11 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   async fn disable_fetch_interception_current(&self) {
     let _transition = self.fetch.transition.lock().await;
     self.fetch.enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+    *self
+      .fetch
+      .last_enable
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
     let _ = self
       .cmd(
@@ -8124,6 +8522,8 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     };
     if now_empty && self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.disable_fetch_interception().await;
+    } else if !now_empty && self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+      let _ = self.ensure_fetch_enabled().await;
     }
     Ok(())
   }
@@ -8146,6 +8546,8 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     };
     if now_empty && self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.disable_fetch_interception().await;
+    } else if !now_empty && self.fetch.enabled.load(std::sync::atomic::Ordering::SeqCst) {
+      let _ = self.ensure_fetch_enabled().await;
     }
     Ok(())
   }
@@ -8435,7 +8837,8 @@ impl<T: CdpTransport> CdpElement<T> {
       .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "the element is not in the utility world"))
   }
 
-  /// Call `function` on an adopted handle and release it.
+  /// Call `function` on an adopted handle and release it asynchronously so
+  /// callers never block on a trailing `Runtime.releaseObject` round trip.
   async fn call_adopted(&self, adopted: &str, function: &str) -> Result<Option<serde_json::Value>> {
     let result = self
       .cmd(
@@ -8448,9 +8851,14 @@ impl<T: CdpTransport> CdpElement<T> {
         }),
       )
       .await;
-    let _ = self
-      .cmd("Runtime.releaseObject", serde_json::json!({ "objectId": adopted }))
-      .await;
+    let transport = Arc::clone(&self.transport);
+    let session = self.session_id.clone();
+    let release_params = serde_json::json!({ "objectId": adopted });
+    tokio::spawn(async move {
+      let _ = transport
+        .send_command(session.as_deref(), "Runtime.releaseObject", &release_params)
+        .await;
+    });
     let result = result?;
     thrown_in_page(&result)?;
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())

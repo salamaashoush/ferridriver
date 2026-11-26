@@ -1055,10 +1055,15 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if the context had to be disposed and that failed.
-  pub async fn retire_context(&self, browser_context_id: &str, origins: &[String]) -> Result<()> {
+  pub async fn retire_context(
+    &self,
+    browser_context_id: &str,
+    origins: &[String],
+    hints: cdp::RetireHints,
+  ) -> Result<()> {
     match self {
-      Self::CdpPipe(b) => Box::pin(b.retire_context(browser_context_id, origins)).await,
-      Self::CdpWs(b) => Box::pin(b.retire_context(browser_context_id, origins)).await,
+      Self::CdpPipe(b) => Box::pin(b.retire_context(browser_context_id, origins, hints)).await,
+      Self::CdpWs(b) => Box::pin(b.retire_context(browser_context_id, origins, hints)).await,
       Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => self.dispose_context(browser_context_id).await,
     }
   }
@@ -1696,6 +1701,29 @@ impl AnyPage {
         element.call_js_fn_value_in(&page.utility_contexts, function).await
       },
       (_, other) => other.call_js_fn_value(function).await,
+    }
+  }
+
+  /// Evaluate an expression directly inside the frame's isolated utility
+  /// world when the backend supports it (`CDP`), returning `None` on
+  /// backends without a fast direct utility-eval path.
+  pub async fn evaluate_in_utility(
+    &self,
+    frame_id: Option<&str>,
+    expression: &str,
+  ) -> Option<Result<Option<serde_json::Value>>> {
+    match self {
+      Self::CdpPipe(page) => Some(page.evaluate_in_utility_world(frame_id, expression).await),
+      Self::CdpWs(page) => Some(page.evaluate_in_utility_world(frame_id, expression).await),
+      Self::WebKit(page) => Some(match frame_id {
+        Some(fid) => page.evaluate_in_frame(expression, fid).await,
+        None => page.evaluate(expression).await,
+      }),
+      Self::Bidi(page) => Some(match frame_id {
+        Some(fid) => page.evaluate_in_frame(expression, fid).await,
+        None => page.evaluate(expression).await,
+      }),
+      Self::WebDriver(_) => None,
     }
   }
 
@@ -2527,6 +2555,33 @@ impl AnyPage {
       Self::WebKit(p) => p.dispose_local(),
       Self::Bidi(p) => p.dispose_local(),
       Self::WebDriver(p) => p.dispose_local(),
+    }
+  }
+
+  /// CDP target id when this page is backed by CDP (`None` for other backends).
+  #[must_use]
+  pub(crate) fn cdp_target_id(&self) -> Option<&str> {
+    match self {
+      Self::CdpPipe(p) => Some(&p.target_id),
+      Self::CdpWs(p) => Some(&p.target_id),
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => None,
+    }
+  }
+
+  /// Whether this page modified browser-level download behaviour (enabled
+  /// download interception or set `acceptDownloads: false`).
+  #[must_use]
+  pub(crate) fn download_behavior_touched(&self) -> bool {
+    match self {
+      Self::CdpPipe(p) => {
+        p.download_behavior_enabled.load(std::sync::atomic::Ordering::Relaxed)
+          || !p.accept_downloads.load(std::sync::atomic::Ordering::Relaxed)
+      },
+      Self::CdpWs(p) => {
+        p.download_behavior_enabled.load(std::sync::atomic::Ordering::Relaxed)
+          || !p.accept_downloads.load(std::sync::atomic::Ordering::Relaxed)
+      },
+      Self::WebKit(_) | Self::Bidi(_) | Self::WebDriver(_) => false,
     }
   }
 

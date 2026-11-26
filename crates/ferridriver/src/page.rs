@@ -113,9 +113,6 @@ impl Page {
     self.main_frame().webmcp()
   }
 
-  /// Highlight helpers (`createHighlight`, `hideHighlight`) layered onto the
-  /// injected engine. Shared with the codegen recorder.
-  const RECORDER_SUPPORT_JS: &'static str = include_str!("injected/dist/recorder-support.min.js");
   /// Interactive locator picker injected by [`Page::pick_locator`].
   const PICKER_JS: &'static str = include_str!("picker.js");
 
@@ -682,8 +679,21 @@ impl Page {
     } else {
       resolved
     };
-    reqwest::Url::parse(&resolved)
+    let parsed_url = reqwest::Url::parse(&resolved)
       .map_err(|error| crate::error::FerriError::invalid_argument("url", error.to_string()))?;
+    // A URL carrying embedded credentials (`https://user:pass@host`) populates
+    // Chromium's context-scoped HTTP auth cache, which has no CDP clear API.
+    // Taint the context so `contextReuse` disposes instead of recycling it.
+    if (!parsed_url.username().is_empty() || parsed_url.password().is_some())
+      && let Some(ctx) = self.context_ref.as_ref()
+    {
+      let state = ctx.state.read().await;
+      state
+        .http_authenticated
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(ctx.key.to_composite());
+    }
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let trace_span = self.trace_span("goto", serde_json::json!({ "url": resolved }));
     let trace_span = crate::trace::open_action(self.snapshot_before(trace_span).await).await;
@@ -3950,7 +3960,7 @@ impl Page {
   /// closes before a selection is made, or the returned selector is empty.
   pub async fn pick_locator(self: &Arc<Self>) -> Result<Locator> {
     self.inner.ensure_engine_injected().await?;
-    self.inner.evaluate(Self::RECORDER_SUPPORT_JS).await?;
+    self.inner.evaluate(crate::selectors::RECORDER_SUPPORT_JS).await?;
     self.inner.evaluate(Self::PICKER_JS).await?;
 
     // Poll the page-side global for the picked selector. Playwright's
@@ -4024,14 +4034,13 @@ impl Page {
     for id in ids.iter().filter(|id| **id != main) {
       let _ = self
         .inner
-        .evaluate_in_frame("window.__fd && window.__fd._injected.hideHighlight()", id)
+        .evaluate_in_frame("window.__fd && window.__fd.hideHighlight()", id)
         .await;
     }
     self
       .inner
       .evaluate(
-        "(function(){ var i = window.__fd && window.__fd._injected; \
-         if (i && i.hideHighlight) i.hideHighlight(); \
+        "(function(){ if (window.__fd && window.__fd.hideHighlight) window.__fd.hideHighlight(); \
          if (window.__fdPickerCancel) window.__fdPickerCancel(); })()",
       )
       .await?;
