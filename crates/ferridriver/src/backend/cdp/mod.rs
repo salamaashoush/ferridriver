@@ -1,8 +1,8 @@
 //! Unified CDP backend -- Chrome `DevTools` Protocol over pipes or WebSocket.
 //!
-//! Generic over transport: `CdpBrowser<PipeTransport>` for pipe-based,
-//! `CdpBrowser<WsTransport>` for WebSocket-based. Both share identical page,
-//! element, and event handling logic.
+//! Uses a single concrete [`transport::CdpTransport`] backed by either the
+//! fd 3/4 debugging pipe or a WebSocket connection. Both share identical page,
+//! element, and event handling logic without monomorphising twice.
 //!
 //! Navigation follows Bun's ChromeBackend.cpp architecture: register a oneshot
 //! waiter before sending Page.navigate, then await the waiter which resolves
@@ -47,42 +47,17 @@ pub(crate) const LC_COMMIT: u8 = 0b001;
 pub(crate) const LC_DOMCONTENTLOADED: u8 = 0b010;
 pub(crate) const LC_LOAD: u8 = 0b100;
 
-/// Sealed trait mapping transport types to their `AnyPage`/`AnyElement` enum constructors.
-/// This avoids having "abstract" methods or duplicated impls on the generic types.
 /// The name of the isolated world ferridriver's own scripts run in where
 /// the page's changes to the DOM objects must not reach them.
 pub(crate) const UTILITY_WORLD: &str = "__ferridriver_utility";
 
-pub trait CdpWrap: CdpTransport + Sized {
-  fn wrap_page(page: CdpPage<Self>) -> AnyPage;
-  fn wrap_element(elem: CdpElement<Self>) -> AnyElement;
-}
-
-impl CdpWrap for pipe::PipeTransport {
-  fn wrap_page(page: CdpPage<Self>) -> AnyPage {
-    AnyPage::CdpPipe(page)
-  }
-  fn wrap_element(elem: CdpElement<Self>) -> AnyElement {
-    AnyElement::CdpPipe(elem)
-  }
-}
-
-impl CdpWrap for ws::WsTransport {
-  fn wrap_page(page: CdpPage<Self>) -> AnyPage {
-    AnyPage::CdpWs(page)
-  }
-  fn wrap_element(elem: CdpElement<Self>) -> AnyElement {
-    AnyElement::CdpWs(elem)
-  }
-}
-
 /// A dedicated worker's own session, auto-attached under its page's.
-pub struct CdpWorker<T: CdpTransport> {
-  transport: Arc<T>,
+pub struct CdpWorker {
+  transport: Arc<CdpTransport>,
   session_id: Arc<str>,
 }
 
-impl<T: CdpTransport> Clone for CdpWorker<T> {
+impl Clone for CdpWorker {
   fn clone(&self) -> Self {
     Self {
       transport: Arc::clone(&self.transport),
@@ -91,13 +66,13 @@ impl<T: CdpTransport> Clone for CdpWorker<T> {
   }
 }
 
-impl<T: CdpTransport + 'static> crate::worker::WorkerSession for CdpWorker<T> {
+impl crate::worker::WorkerSession for CdpWorker {
   fn evaluate<'a>(&'a self, expression: &'a str) -> futures::future::BoxFuture<'a, Result<serde_json::Value>> {
     Box::pin(self.evaluate_expression(expression))
   }
 }
 
-impl<T: CdpTransport> CdpWorker<T> {
+impl CdpWorker {
   async fn evaluate_expression(&self, expression: &str) -> Result<serde_json::Value> {
     let response = self
       .transport
@@ -119,10 +94,10 @@ impl<T: CdpTransport> CdpWorker<T> {
   }
 }
 
-// ---- CdpBrowser<T> --------------------------------------------------------
+// ---- CdpBrowser --------------------------------------------------------
 
-pub struct CdpBrowser<T: CdpTransport> {
-  transport: Arc<T>,
+pub struct CdpBrowser {
+  transport: Arc<CdpTransport>,
   child: Arc<tokio::sync::Mutex<Option<super::process::ChildGroup>>>,
   /// Track targetId -> sessionId for already-attached targets. Shared
   /// across clones: it is a cache of what the browser told us, and the
@@ -209,7 +184,7 @@ impl Drop for AttachTasks {
   }
 }
 
-impl<T: CdpTransport> CdpBrowser<T> {
+impl CdpBrowser {
   /// Every cookie of a browser context, without a page: Playwright's
   /// `CRBrowserContext.doGetCookies` (`Storage.getCookies` on the
   /// browser session). `None` is the default context.
@@ -298,12 +273,18 @@ impl<T: CdpTransport> CdpBrowser<T> {
 
   /// Shared transport handle for attaching a public raw
   /// [`crate::cdp_session::CdpSession`] to the browser target.
-  pub(crate) fn transport_arc(&self) -> Arc<T> {
+  pub(crate) fn transport_arc(&self) -> Arc<CdpTransport> {
     Arc::clone(&self.transport)
+  }
+
+  /// Transport flavour (`CdpPipe` or `CdpWs`) behind this browser.
+  #[must_use]
+  pub(crate) fn backend_kind(&self) -> super::BackendKind {
+    self.transport.kind()
   }
 }
 
-impl<T: CdpTransport> Clone for CdpBrowser<T> {
+impl Clone for CdpBrowser {
   fn clone(&self) -> Self {
     Self {
       transport: Arc::clone(&self.transport),
@@ -511,8 +492,8 @@ type AttachedTargets = Arc<std::sync::Mutex<FxHashMap<String, Option<String>>>>;
 
 /// The handles the attach listener needs to turn an announced target
 /// into a claimed popup.
-struct AttachCtx<T: CdpTransport> {
-  transport: Arc<T>,
+struct AttachCtx {
+  transport: Arc<CdpTransport>,
   taps: crate::backend::PopupTaps,
   downloads_dir: Arc<DownloadsDir>,
   ledger: Arc<CreateLedger>,
@@ -540,7 +521,7 @@ type CreateLedger = crate::backend::CreateLedger<ParkedTarget>;
 
 /// The browser contexts some client created, by id. The browser's own
 /// default context is never among them.
-async fn created_browser_contexts<T: CdpTransport>(transport: &T) -> Result<rustc_hash::FxHashSet<String>> {
+async fn created_browser_contexts(transport: &CdpTransport) -> Result<rustc_hash::FxHashSet<String>> {
   let contexts = transport
     .send_command(None, "Target.getBrowserContexts", &super::EMPTY_PARAMS)
     .await?;
@@ -569,7 +550,7 @@ fn is_default_context_page(target: &serde_json::Value, created: &rustc_hash::FxH
       .is_some_and(|id| created.contains(id))
 }
 
-impl<T: CdpWrap> CdpBrowser<T> {
+impl CdpBrowser {
   /// Enable required CDP domains on a session so events and queries work.
   /// If `viewport` is provided, sets viewport in the same parallel batch.
   /// If `unpause` is true, sends `Runtime.runIfWaitingForDebugger` in the same
@@ -581,7 +562,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// `tokio::join!` so Chrome amortises ordering over a single
   /// receive-loop pass instead of paying one full RTT per command.
   async fn enable_domains(
-    transport: &T,
+    transport: &CdpTransport,
     session_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
     unpause: bool,
@@ -707,7 +688,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ///
   /// No page creation here — pages are created on demand via `new_page()`.
   async fn init(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     child: Option<super::process::ChildGroup>,
     user_data_dir: Option<tempfile::TempDir>,
   ) -> Result<Self> {
@@ -795,7 +776,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// the state-level pump can register them and resume (Playwright's
   /// `crBrowser._onAttachedToTarget` → `CRPage` path).
   fn spawn_attach_listener(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     downloads_dir: &Arc<DownloadsDir>,
     attached: &AttachedTargets,
     spares: &Arc<recycle::Spares>,
@@ -878,8 +859,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
   }
 
   fn handle_attach_event(
-    claim_ctx: &AttachCtx<T>,
-    resume_transport: &Arc<T>,
+    claim_ctx: &AttachCtx,
+    resume_transport: &Arc<CdpTransport>,
     claimed_popups: &mut rustc_hash::FxHashSet<String>,
     event: &serde_json::Value,
     params: &serde_json::Value,
@@ -950,7 +931,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// multi-command round-trip and the loop must keep consuming attach
   /// events.
   fn maybe_claim_popup(
-    ctx: &AttachCtx<T>,
+    ctx: &AttachCtx,
     claimed: &mut rustc_hash::FxHashSet<String>,
     params: &serde_json::Value,
     waiting: bool,
@@ -997,7 +978,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// announce it, or resume the target if nothing is listening / the
   /// claim failed (never leave it parked on `waitForDebuggerOnStart`).
   fn claim_parked_popup(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     taps: &crate::backend::PopupTaps,
     downloads_dir: &Arc<DownloadsDir>,
     parked: ParkedTarget,
@@ -1027,7 +1008,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         Ok(page) => !crate::backend::push_popup(
           &taps,
           crate::backend::PopupInfo {
-            page: T::wrap_page(page),
+            page: AnyPage::Cdp(page),
             browser_context_id,
             opener_target_id: opener_id,
             claim,
@@ -1059,13 +1040,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// `Target.createTarget` and minus the resume — the popup pump
   /// resumes after context configuration is applied.
   async fn claim_popup(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     downloads_dir: &Arc<DownloadsDir>,
     session_id: &str,
     target_id: &str,
     browser_context_id: Option<&str>,
     headful: bool,
-  ) -> Result<CdpPage<T>> {
+  ) -> Result<CdpPage> {
     let inject_src = crate::selectors::lazy_inject_js();
     let injected_script = Arc::new(InjectedScriptManager::new());
     injected_script
@@ -1134,7 +1115,14 @@ impl<T: CdpWrap> CdpBrowser<T> {
       let session = session_id.to_string();
       let seed = Arc::clone(&page.seeded_frame_tree);
       async move {
-        let frames = Self::enable_domains(&transport, Some(&session), None, false, Some(&inject_src)).await?;
+        let frames = Box::pin(Self::enable_domains(
+          &transport,
+          Some(&session),
+          None,
+          false,
+          Some(&inject_src),
+        ))
+        .await?;
         if frames.is_some() {
           *seed.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = frames;
         }
@@ -1191,7 +1179,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// closed, or the command outlives its time budget. Also fails when enabling a newly attached page's
   /// domains fails, or a lock is poisoned.
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
-    let created = created_browser_contexts(&*self.transport).await?;
+    let created = created_browser_contexts(&self.transport).await?;
     let result = self
       .transport
       .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
@@ -1249,7 +1237,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
           .insert(target_id.clone(), sid.clone());
 
-        Self::enable_domains(&self.transport, sid.as_deref(), None, false, None).await?;
+        Box::pin(Self::enable_domains(&self.transport, sid.as_deref(), None, false, None)).await?;
 
         sid
       };
@@ -1261,7 +1249,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Ok(pages.finish())
   }
 
-  fn adopted_page(&self, target_id: String, sid: Option<String>) -> CdpPage<T> {
+  fn adopted_page(&self, target_id: String, sid: Option<String>) -> CdpPage {
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
     let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
@@ -1652,7 +1640,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page.goto(url, crate::backend::NavLifecycle::Load, 30_000, None).await?;
     }
 
-    Ok(T::wrap_page(page))
+    Ok(AnyPage::Cdp(page))
   }
 
   /// Close the browser process and release resources.
@@ -1722,15 +1710,15 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
 // ── Pipe-specific launch ───────────────���─────────────────────────────────────
 
-impl CdpBrowser<pipe::PipeTransport> {
+impl CdpBrowser {
   /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
   ///
   /// # Errors
   ///
   /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch, or the
   /// first protocol handshake fails.
-  pub async fn launch(chromium_path: &str) -> Result<Self> {
-    Self::launch_with_flags(
+  pub async fn launch_pipe(chromium_path: &str) -> Result<Self> {
+    Self::launch_pipe_with_flags(
       chromium_path,
       &crate::state::chrome_flags(true, &[]),
       &rustc_hash::FxHashMap::default(),
@@ -1744,7 +1732,7 @@ impl CdpBrowser<pipe::PipeTransport> {
   ///
   /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch, or the
   /// first protocol handshake fails.
-  pub async fn launch_with_flags(
+  pub async fn launch_pipe_with_flags(
     chromium_path: &str,
     flags: &[String],
     env: &rustc_hash::FxHashMap<String, String>,
@@ -1774,7 +1762,7 @@ impl CdpBrowser<pipe::PipeTransport> {
   ///
   /// Returns an error if `user_data_dir` cannot be prepared, Chrome fails to launch, or the first protocol
   /// handshake fails.
-  pub async fn launch_with_flags_in_dir(
+  pub async fn launch_pipe_with_flags_in_dir(
     chromium_path: &str,
     flags: &[String],
     user_data_dir: &std::path::Path,
@@ -1789,11 +1777,11 @@ impl CdpBrowser<pipe::PipeTransport> {
 
 // ── WS-specific launch + connect ─────────────────────────────────────────────
 
-impl CdpBrowser<ws::WsTransport> {
+impl CdpBrowser {
   /// The browser's own `DevTools` WebSocket endpoint, the one a second CDP
-  /// client can dial.
+  /// client can dial. `None` on a pipe-launched browser.
   #[must_use]
-  pub fn ws_endpoint(&self) -> &str {
+  pub fn ws_endpoint(&self) -> Option<&str> {
     self.transport.endpoint()
   }
 
@@ -1803,8 +1791,8 @@ impl CdpBrowser<ws::WsTransport> {
   ///
   /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch or expose
   /// its WebSocket, or the first protocol handshake fails.
-  pub async fn launch(chromium_path: &str) -> Result<Self> {
-    Box::pin(Self::launch_with_flags(
+  pub async fn launch_ws(chromium_path: &str) -> Result<Self> {
+    Box::pin(Self::launch_ws_with_flags(
       chromium_path,
       &crate::state::chrome_flags(true, &[]),
       &rustc_hash::FxHashMap::default(),
@@ -1818,7 +1806,7 @@ impl CdpBrowser<ws::WsTransport> {
   ///
   /// Returns an error if the throwaway profile directory cannot be created, Chrome fails to launch or expose
   /// its WebSocket, or the first protocol handshake fails.
-  pub async fn launch_with_flags(
+  pub async fn launch_ws_with_flags(
     chromium_path: &str,
     flags: &[String],
     env: &rustc_hash::FxHashMap<String, String>,
@@ -1850,7 +1838,7 @@ impl CdpBrowser<ws::WsTransport> {
   ///
   /// Returns an error if `user_data_dir` cannot be prepared, Chrome fails to launch or expose its WebSocket,
   /// or the first protocol handshake fails.
-  pub async fn launch_with_flags_in_dir(
+  pub async fn launch_ws_with_flags_in_dir(
     chromium_path: &str,
     flags: &[String],
     user_data_dir: &std::path::Path,
@@ -1885,14 +1873,14 @@ impl CdpBrowser<ws::WsTransport> {
   /// connected to, recording its session in `attached`. Returns whether
   /// one was found.
   async fn attach_first_existing_page(
-    transport: &Arc<ws::WsTransport>,
+    transport: &Arc<CdpTransport>,
     targets: &serde_json::Value,
     attached: &mut FxHashMap<String, Option<String>>,
   ) -> Result<bool> {
     let Some(targets) = targets.get("targetInfos").and_then(|t| t.as_array()) else {
       return Ok(false);
     };
-    let created = created_browser_contexts(&**transport).await?;
+    let created = created_browser_contexts(transport).await?;
     for target in targets {
       if !is_default_context_page(target, &created) {
         continue;
@@ -1942,7 +1930,7 @@ impl CdpBrowser<ws::WsTransport> {
   /// Give a connected browser that has no page a blank one in its default
   /// context, set up and resumed on the session auto-attach gave it.
   async fn open_blank_page(
-    transport: &Arc<ws::WsTransport>,
+    transport: &Arc<CdpTransport>,
     create_ledger: &Arc<CreateLedger>,
     attached: &mut FxHashMap<String, Option<String>>,
   ) -> Result<()> {
@@ -2093,7 +2081,7 @@ impl CdpBrowser<ws::WsTransport> {
   }
 }
 
-// ---- CdpPage<T> ------------------------------------------------------------
+// ---- CdpPage ------------------------------------------------------------
 
 /// Recursively collect frame info from a CDP frame tree node.
 /// Convert a CDP `Runtime.RemoteObject` JSON payload into a
@@ -2492,8 +2480,8 @@ struct Credentials {
   proxy: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
 }
 
-pub struct CdpPage<T: CdpTransport> {
-  transport: Arc<T>,
+pub struct CdpPage {
+  transport: Arc<CdpTransport>,
   session_id: Option<Arc<str>>,
   /// The setup of a popup that attached paused; idle on every other page.
   setup: Arc<paused::PausedSetup>,
@@ -2940,7 +2928,7 @@ impl InjectedScriptManager {
   // lifetime, so we never need to re-register on navigation /
   // context-cleared events.
 
-  async fn ensure<T: CdpWrap>(&self, page: &CdpPage<T>) -> Result<()> {
+  async fn ensure(&self, page: &CdpPage) -> Result<()> {
     if self.injected.load(std::sync::atomic::Ordering::Relaxed) {
       return Ok(());
     }
@@ -2966,7 +2954,7 @@ impl InjectedScriptManager {
   }
 }
 
-impl<T: CdpTransport> Clone for CdpPage<T> {
+impl Clone for CdpPage {
   fn clone(&self) -> Self {
     Self {
       transport: Arc::clone(&self.transport),
@@ -3021,7 +3009,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
   }
 }
 
-impl<T: CdpWrap> CdpPage<T> {
+impl CdpPage {
   async fn initialize_adopted_frame(&self) -> Result<()> {
     self.transport.register_lifecycle_tracker(
       self.session_id.as_deref().unwrap_or(""),
@@ -3757,7 +3745,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// renderer's) and the page has one frame, whose utility world has been
   /// announced.
   #[must_use]
-  pub fn known_utility_context(&self, element: &CdpElement<T>) -> Option<i64> {
+  pub fn known_utility_context(&self, element: &CdpElement) -> Option<i64> {
     if element.session_id().as_deref() != self.session_id.as_deref() {
       return None;
     }
@@ -4615,7 +4603,7 @@ impl<T: CdpWrap> CdpPage<T> {
       return Err(FerriError::invalid_selector(selector, "not found"));
     }
 
-    Ok(T::wrap_element(CdpElement {
+    Ok(AnyElement::Cdp(CdpElement {
       transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
@@ -4632,7 +4620,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// [`crate::element_handle::ElementHandle`] — the remote is already
   /// addressable, so we can skip a round-trip by seeding the element's
   /// `object_id` slot directly.
-  pub(crate) fn element_from_object_id(&self, object_id: Arc<str>, session_id: Option<Arc<str>>) -> CdpElement<T> {
+  pub(crate) fn element_from_object_id(&self, object_id: Arc<str>, session_id: Option<Arc<str>>) -> CdpElement {
     CdpElement {
       transport: Arc::clone(&self.transport),
       session_id,
@@ -4714,7 +4702,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(|v| v.as_str())
       .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "JS did not return a DOM element"))?;
 
-    Ok(T::wrap_element(CdpElement {
+    Ok(AnyElement::Cdp(CdpElement {
       transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
@@ -4925,7 +4913,7 @@ impl<T: CdpWrap> CdpPage<T> {
         .flatten()
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let bytes = screenshot::capture(&*self.transport, self.session_id.as_deref(), params).await?;
+    let bytes = screenshot::capture(&self.transport, self.session_id.as_deref(), params).await?;
     if had_touch {
       self
         .cmd(
@@ -5010,7 +4998,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// what keeps short recordings from losing the trailing frames
   /// Chrome emitted just before `Page.stopScreencast` landed.
   fn spawn_screencast_listener(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     frame_tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -5057,7 +5045,7 @@ impl<T: CdpWrap> CdpPage<T> {
   fn process_screencast_event(
     event: &serde_json::Value,
     session_id: Option<&Arc<str>>,
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     frame_tx: &tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
   ) {
     if let Some(expected_sid) = session_id {
@@ -6639,7 +6627,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(serde_json::Value::as_str)
       .ok_or_else(|| FerriError::protocol("Tracing.tracingComplete", "missing stream handle"))?;
 
-    let trace = recording::read_stream(&*self.transport, self.session_id.as_deref(), stream).await?;
+    let trace = recording::read_stream(&self.transport, self.session_id.as_deref(), stream).await?;
     Self::parse_trace_events(&trace)
   }
 
@@ -6693,7 +6681,7 @@ impl<T: CdpWrap> CdpPage<T> {
     // (e.g. `DOM.setFileInputFiles`) lazily request one via
     // `CdpElement::node_id()`; everywhere else, the cached
     // `Runtime` objectId is sufficient and bypasses the DOM agent.
-    Ok(T::wrap_element(CdpElement {
+    Ok(AnyElement::Cdp(CdpElement {
       transport: Arc::clone(&self.transport),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
@@ -6797,7 +6785,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   fn spawn_console_listener(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     emitter: crate::events::EventEmitter,
@@ -6880,7 +6868,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// onto the page emitter so `page.on('load' | 'domcontentloaded')`
   /// and `waitForEvent` observe them (Playwright parity).
   fn spawn_lifecycle_event_listener(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<&Arc<str>>,
     emitter: &crate::events::EventEmitter,
   ) -> Vec<tokio::task::AbortHandle> {
@@ -7009,7 +6997,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   fn spawn_web_error_listener(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     emitter: crate::events::EventEmitter,
     page_backref: crate::backend::PageBackref,
@@ -7045,7 +7033,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// leaves it out still names a child frame in the `name` attribute of
   /// the element that owns it, which is where this reads it from.
   fn spawn_frame_name_listener(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   ) -> tokio::task::AbortHandle {
@@ -7115,7 +7103,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   fn spawn_network_listener(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     target_id: Arc<str>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
@@ -7128,7 +7116,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let mut rx = transport.tap_event_domains(&["Network", "Page"], session_id.as_deref());
     let commits = nav_request_slot.clone();
     let main_frame = Arc::clone(&target_id);
-    let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(
+    let tracker: Arc<NetworkTracker> = Arc::new(NetworkTracker::new(
       transport,
       session_id.clone(),
       target_id,
@@ -7218,7 +7206,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   fn spawn_dialog_listener(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
     _emitter: crate::events::EventEmitter,
@@ -7342,7 +7330,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// populated (matches the Playwright server's "frame/context may go
   /// away" guard).
   fn spawn_file_chooser_listener(
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     file_chooser_manager: crate::file_chooser::FileChooserManager,
     page_backref: crate::backend::PageBackref,
@@ -7444,7 +7432,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `_findOwningPage` behaviour, which also falls through when it
   /// cannot resolve the frame.
   fn spawn_download_listener(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     browser_context_id: Option<Arc<str>>,
     download_manager: crate::download::DownloadManager,
@@ -7502,7 +7490,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   fn on_download_will_begin(
     params: &serde_json::Value,
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<&Arc<str>>,
     browser_context_id: Option<&Arc<str>>,
     download_manager: &crate::download::DownloadManager,
@@ -7854,7 +7842,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   async fn run_binding_call(
     call: BindingCall,
     fns: &Arc<tokio::sync::RwLock<FxHashMap<String, crate::backend::PageBinding>>>,
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<&Arc<str>>,
   ) {
     let BindingCall {
@@ -8013,7 +8001,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
     self
       .screen_recorder
-      .start(&*self.transport, &self.target_id, params)
+      .start(&self.transport, &self.target_id, params)
       .await
   }
 
@@ -8021,7 +8009,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// before anything closes the page's target, which takes the recording
   /// with it.
   pub(crate) async fn finish_screen_recording(&self) {
-    self.screen_recorder.finish(&*self.transport).await;
+    self.screen_recorder.finish(&self.transport).await;
   }
 
   // ---- Lifecycle ----
@@ -8257,7 +8245,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   }
 
   fn spawn_fetch_listener(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
     credentials: Credentials,
@@ -8304,7 +8292,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   }
 
   async fn handle_fetch_events(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
     credentials: Credentials,
@@ -8401,7 +8389,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   async fn on_request_paused(
     params: &serde_json::Value,
-    transport: &Arc<T>,
+    transport: &Arc<CdpTransport>,
     session_id: Option<&Arc<str>>,
     routes: &Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
   ) {
@@ -8482,7 +8470,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   }
 
   async fn execute_route_action(
-    transport: &T,
+    transport: &CdpTransport,
     session_id: Option<&str>,
     request_id: &str,
     action: Option<crate::route::RouteAction>,
@@ -8582,8 +8570,14 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   /// Shared transport handle + target id for attaching a public raw
   /// [`crate::cdp_session::CdpSession`] to this page's target.
-  pub(crate) fn session_parts(&self) -> (Arc<T>, &str) {
+  pub(crate) fn session_parts(&self) -> (Arc<CdpTransport>, &str) {
     (Arc::clone(&self.transport), &self.target_id)
+  }
+
+  /// Transport flavour (`CdpPipe` or `CdpWs`) behind this page.
+  #[must_use]
+  pub(crate) fn backend_kind(&self) -> super::BackendKind {
+    self.transport.kind()
   }
 
   /// # Errors
@@ -8681,10 +8675,10 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   }
 }
 
-// ---- CdpElement<T> ---------------------------------------------------------
+// ---- CdpElement ---------------------------------------------------------
 
-pub struct CdpElement<T: CdpTransport> {
-  transport: Arc<T>,
+pub struct CdpElement {
+  transport: Arc<CdpTransport>,
   session_id: Option<Arc<str>>,
   handles: Arc<tokio::sync::Mutex<CdpElementHandles>>,
 }
@@ -8694,7 +8688,7 @@ struct CdpElementHandles {
   object_id: Option<Arc<str>>,
 }
 
-impl<T: CdpTransport> Clone for CdpElement<T> {
+impl Clone for CdpElement {
   fn clone(&self) -> Self {
     Self {
       transport: Arc::clone(&self.transport),
@@ -8704,7 +8698,7 @@ impl<T: CdpTransport> Clone for CdpElement<T> {
   }
 }
 
-impl<T: CdpTransport> CdpElement<T> {
+impl CdpElement {
   pub(crate) fn session_id(&self) -> Option<Arc<str>> {
     self.session_id.clone()
   }
@@ -9162,8 +9156,8 @@ impl<T: CdpTransport> CdpElement<T> {
 // independently. Tracker indexes by request id and threads the same
 // `Request` Arc through every event so listeners see live state.
 
-struct NetworkTracker<T: CdpTransport> {
-  transport: Arc<T>,
+struct NetworkTracker {
+  transport: Arc<CdpTransport>,
   session_id: Option<Arc<str>>,
   /// Owning page's target id — stamped on every captured `Request` as
   /// its `page_guid` for context-level page attribution (HAR pages,
@@ -9178,9 +9172,9 @@ struct NetworkTracker<T: CdpTransport> {
   nav_request_slot: crate::network::NavRequestSlot,
 }
 
-impl<T: CdpTransport + 'static> NetworkTracker<T> {
+impl NetworkTracker {
   fn new(
-    transport: Arc<T>,
+    transport: Arc<CdpTransport>,
     session_id: Option<Arc<str>>,
     target_id: Arc<str>,
     nav_request_slot: crate::network::NavRequestSlot,
@@ -9675,13 +9669,13 @@ fn parse_timing(value: &serde_json::Value) -> RequestTiming {
 
 /// Cancels a `WebMCP` invocation whose caller stopped waiting, so the page's
 /// tool sees its signal abort instead of running on unobserved.
-struct PendingWebMcpInvocation<T: CdpTransport> {
-  transport: Arc<T>,
+struct PendingWebMcpInvocation {
+  transport: Arc<CdpTransport>,
   session_id: Option<Arc<str>>,
   id: Option<String>,
 }
 
-impl<T: CdpTransport> Drop for PendingWebMcpInvocation<T> {
+impl Drop for PendingWebMcpInvocation {
   fn drop(&mut self) {
     let Some(id) = self.id.take() else { return };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {

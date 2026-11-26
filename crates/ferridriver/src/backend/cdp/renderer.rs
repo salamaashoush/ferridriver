@@ -6,28 +6,28 @@ use serde_json::json;
 use tokio::sync::Notify;
 
 use super::transport::IframeTargetEvent;
-use super::{CdpPage, CdpWrap, InjectedScriptManager, LifecycleState};
+use super::{CdpPage, InjectedScriptManager, LifecycleState};
 use crate::error::{FerriError, Result};
 
-pub(super) struct AdoptedPages<T: CdpWrap> {
-  pages: Vec<CdpPage<T>>,
+pub(super) struct AdoptedPages {
+  pages: Vec<CdpPage>,
 }
 
-impl<T: CdpWrap> AdoptedPages<T> {
+impl AdoptedPages {
   pub(crate) fn new() -> Self {
     Self { pages: Vec::new() }
   }
 
-  pub(crate) fn track(&mut self, page: CdpPage<T>) {
+  pub(crate) fn track(&mut self, page: CdpPage) {
     self.pages.push(page);
   }
 
   pub(crate) fn finish(mut self) -> Vec<crate::backend::AnyPage> {
-    self.pages.drain(..).map(T::wrap_page).collect()
+    self.pages.drain(..).map(crate::backend::AnyPage::Cdp).collect()
   }
 }
 
-impl<T: CdpWrap> Drop for AdoptedPages<T> {
+impl Drop for AdoptedPages {
   fn drop(&mut self) {
     for page in &self.pages {
       page.dispose_local();
@@ -145,7 +145,7 @@ impl Renderer {
   }
 }
 
-impl<T: CdpWrap> CdpPage<T> {
+impl CdpPage {
   fn current_renderers(&self) -> Vec<Arc<Renderer>> {
     self
       .renderers

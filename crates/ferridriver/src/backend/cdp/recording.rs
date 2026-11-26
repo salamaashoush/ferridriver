@@ -50,9 +50,9 @@ impl ScreenRecorder {
   /// will not: a Chrome before M153 lacks the command, and a page records
   /// one recording at a time. The caller records from the screencast
   /// instead.
-  pub(crate) async fn start<T: CdpTransport>(
+  pub(crate) async fn start(
     &self,
-    transport: &T,
+    transport: &CdpTransport,
     target_id: &str,
     params: RecordingParams,
   ) -> Option<watch::Receiver<Option<Recorded>>> {
@@ -115,7 +115,7 @@ impl ScreenRecorder {
   /// Stops the recording, if one runs, and hands its MP4 to whoever
   /// started it. Answers at once when nothing records, so every close path
   /// can call it.
-  pub(crate) async fn finish<T: CdpTransport>(&self, transport: &T) {
+  pub(crate) async fn finish(&self, transport: &CdpTransport) {
     let Some(active) = self.active.lock().await.take() else {
       return;
     };
@@ -128,7 +128,7 @@ impl ScreenRecorder {
   }
 }
 
-async fn stop<T: CdpTransport>(transport: &T, active: &Active) -> Result<Vec<u8>> {
+async fn stop(transport: &CdpTransport, active: &Active) -> Result<Vec<u8>> {
   transport
     .send_command(
       Some(&active.session),
@@ -139,7 +139,7 @@ async fn stop<T: CdpTransport>(transport: &T, active: &Active) -> Result<Vec<u8>
   read_stream(transport, Some(&active.session), &active.stream).await
 }
 
-async fn detach<T: CdpTransport>(transport: &T, session: &str) {
+async fn detach(transport: &CdpTransport, session: &str) {
   let _ = transport
     .send_command(
       None,
@@ -152,11 +152,7 @@ async fn detach<T: CdpTransport>(transport: &T, session: &str) {
 /// Reads an IO stream to its end and closes it. Chromium answers `Read
 /// failed` while a stream has nothing yet, as a recording's does until
 /// its encoder flushes, so an empty read is tried again for a while.
-pub(crate) async fn read_stream<T: CdpTransport>(
-  transport: &T,
-  session: Option<&str>,
-  handle: &str,
-) -> Result<Vec<u8>> {
+pub(crate) async fn read_stream(transport: &CdpTransport, session: Option<&str>, handle: &str) -> Result<Vec<u8>> {
   use base64::Engine as _;
   const EMPTY_READS: u32 = 100;
   let mut bytes = Vec::new();

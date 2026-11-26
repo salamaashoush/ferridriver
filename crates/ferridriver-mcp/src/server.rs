@@ -1410,7 +1410,7 @@ impl McpServer {
   }
 
   async fn close_browsers(&self, terminal: bool) -> Result<(), String> {
-    let browsers = async {
+    let browsers = Box::pin(async {
       self
         .state
         .write()
@@ -1418,7 +1418,7 @@ impl McpServer {
         .shutdown()
         .await
         .map_err(|error| ferridriver_script::ScriptError::internal(error.to_string()))
-    };
+    });
     let result = if terminal {
       self.sessions.close_after(browsers).await
     } else {

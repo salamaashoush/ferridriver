@@ -260,7 +260,7 @@ async fn frame_tools(frame: &Frame) -> Result<Vec<WebMcpTool>> {
 /// or browser has none, so the caller falls back to the page's own API.
 async fn native_call(frame: &Frame, name: &str, input: &SerializedArgument) -> Result<Option<SerializedValue>> {
   let page = frame.page();
-  if !matches!(page.inner(), AnyPage::CdpPipe(_) | AnyPage::CdpWs(_)) {
+  if !matches!(page.inner(), AnyPage::Cdp(_)) {
     return Ok(None);
   }
   let input = match input.value.to_json_like() {
@@ -280,8 +280,7 @@ async fn native_call(frame: &Frame, name: &str, input: &SerializedArgument) -> R
   let frame_id = frame.frame_id().to_owned();
   let invocation = async {
     match page.inner() {
-      AnyPage::CdpPipe(backend) => backend.webmcp_invoke(&frame_id, name, &input).await,
-      AnyPage::CdpWs(backend) => backend.webmcp_invoke(&frame_id, name, &input).await,
+      AnyPage::Cdp(backend) => backend.webmcp_invoke(&frame_id, name, &input).await,
       _ => Ok(None),
     }
   };
@@ -369,8 +368,7 @@ fn page_script(name: Option<&str>, legacy_input: bool, deadline: u64) -> Result<
 async fn evaluate(frame: &Frame, source: &str, input: SerializedArgument, isolated: bool) -> Result<SerializedValue> {
   if isolated {
     match frame.page().inner() {
-      AnyPage::CdpPipe(page) => return page.evaluate_isolated(source, &input, frame.frame_id()).await,
-      AnyPage::CdpWs(page) => return page.evaluate_isolated(source, &input, frame.frame_id()).await,
+      AnyPage::Cdp(page) => return page.evaluate_isolated(source, &input, frame.frame_id()).await,
       AnyPage::Bidi(page) => return page.evaluate_isolated(source, &input, frame.frame_id()).await,
       _ => {},
     }
@@ -381,13 +379,9 @@ async fn evaluate(frame: &Frame, source: &str, input: SerializedArgument, isolat
 async fn legacy_chromium_input(frame: &Frame) -> Result<bool> {
   let page = frame.page();
   let version = match page.inner() {
-    AnyPage::CdpPipe(backend) => match page.context().and_then(|context| context.browser()) {
+    AnyPage::Cdp(backend) => match page.context().and_then(|context| context.browser()) {
       Some(browser) => browser.version().to_owned(),
-      None => cdp_version(&*backend.session_parts().0).await?,
-    },
-    AnyPage::CdpWs(backend) => match page.context().and_then(|context| context.browser()) {
-      Some(browser) => browser.version().to_owned(),
-      None => cdp_version(&*backend.session_parts().0).await?,
+      None => cdp_version(&backend.session_parts().0).await?,
     },
     AnyPage::Bidi(backend) if is_chromium(&backend.session.browser_name) => backend.session.browser_version.clone(),
     AnyPage::WebDriver(backend) if backend.capabilities["browserName"].as_str().is_some_and(is_chromium) => backend
@@ -460,7 +454,7 @@ fn is_chromium(name: &str) -> bool {
   name.eq_ignore_ascii_case("chrome") || name.eq_ignore_ascii_case("chromium")
 }
 
-async fn cdp_version(transport: &impl CdpTransport) -> Result<String> {
+async fn cdp_version(transport: &CdpTransport) -> Result<String> {
   let metadata = transport
     .send_command(None, "Browser.getVersion", &serde_json::json!({}))
     .await?;

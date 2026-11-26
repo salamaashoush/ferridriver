@@ -8,17 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::transport::CdpDispatcher;
+use super::transport::{CdpDispatcher, CdpTransport};
 use crate::backend::process::ChildGroup;
 use crate::error::{FerriError, Result};
 
-pub struct WsTransport {
-  write_tx: tokio::sync::mpsc::Sender<Message>,
-  dispatcher: Arc<CdpDispatcher>,
-  tasks: crate::backend::transport_tasks::TransportTasks,
-  /// The browser's own `DevTools` endpoint this transport dialled.
-  endpoint: Arc<str>,
-}
+/// WebSocket transport launcher and connector for CDP (`--remote-debugging-port` / `connectOverCDP`).
+pub struct WsTransport;
 
 impl WsTransport {
   /// Connect to a running Chrome instance via WebSocket.
@@ -26,7 +21,7 @@ impl WsTransport {
   /// # Errors
   ///
   /// Returns an error if the WebSocket connection fails.
-  pub async fn connect(ws_url: &str) -> Result<Self> {
+  pub async fn connect(ws_url: &str) -> Result<CdpTransport> {
     Box::pin(Self::connect_with_headers(ws_url, &rustc_hash::FxHashMap::default())).await
   }
 
@@ -36,7 +31,10 @@ impl WsTransport {
   ///
   /// Returns an error if `ws_url` is not a valid WebSocket request, a header name or value is invalid, or the
   /// connection fails.
-  pub async fn connect_with_headers(ws_url: &str, headers: &rustc_hash::FxHashMap<String, String>) -> Result<Self> {
+  pub async fn connect_with_headers(
+    ws_url: &str,
+    headers: &rustc_hash::FxHashMap<String, String>,
+  ) -> Result<CdpTransport> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http;
     let mut request = ws_url
@@ -82,18 +80,12 @@ impl WsTransport {
       reader_ended.send_replace(true);
     });
 
-    Ok(Self {
+    Ok(CdpTransport::from_ws(
       write_tx,
       dispatcher,
-      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
-      endpoint: Arc::from(ws_url),
-    })
-  }
-
-  /// The browser's own `DevTools` WebSocket endpoint.
-  #[must_use]
-  pub fn endpoint(&self) -> &str {
-    &self.endpoint
+      crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
+      Arc::from(ws_url),
+    ))
   }
 
   /// Spawn Chrome with `--remote-debugging-port` and connect via WebSocket.
@@ -111,7 +103,7 @@ impl WsTransport {
     extra_flags: &[String],
     owns_user_data_dir: bool,
     env: &rustc_hash::FxHashMap<String, String>,
-  ) -> Result<(Self, ChildGroup)> {
+  ) -> Result<(CdpTransport, ChildGroup)> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.envs(env);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
@@ -157,150 +149,6 @@ impl WsTransport {
 
     let transport = Box::pin(Self::connect(&ws_url)).await?;
     Ok((transport, group))
-  }
-}
-
-impl super::transport::CdpTransport for WsTransport {
-  async fn close(&self) -> Result<()> {
-    self.dispatcher.fail_all_pending("CDP transport closed");
-    self.tasks.close().await
-  }
-
-  fn is_disconnected(&self) -> bool {
-    self.dispatcher.is_disconnected()
-  }
-
-  fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
-    self.tasks.closed()
-  }
-
-  #[tracing::instrument(skip(self, session_id, params), fields(method))]
-  async fn send_command(
-    &self,
-    session_id: Option<&str>,
-    method: &str,
-    params: &serde_json::Value,
-  ) -> Result<serde_json::Value> {
-    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
-    let (id, mut data, rx) = self.dispatcher.build_command(session_id, method, params)?;
-    let mut pending = self.dispatcher.pending_command(id);
-    if data.last() == Some(&0) {
-      data.pop();
-    }
-    let text = String::from_utf8(data).map_err(|error| FerriError::backend(format!("UTF-8: {error}")))?;
-    budget.send(&self.write_tx, Message::Text(text.into())).await?;
-    let result = budget
-      .wait(rx)
-      .await
-      .map_err(|error| error.error(format!("waiting for {method} response")))?
-      .map_err(|_| FerriError::backend(format!("Response channel dropped for {method}")))?;
-    pending.completed();
-    result
-  }
-
-  #[tracing::instrument(skip(self, session_id, raw_params_json), fields(method))]
-  async fn send_command_raw(
-    &self,
-    session_id: Option<&str>,
-    method: &str,
-    raw_params_json: &str,
-  ) -> Result<serde_json::Value> {
-    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
-    let (id, mut data, rx) = self.dispatcher.build_command_raw(session_id, method, raw_params_json)?;
-    let mut pending = self.dispatcher.pending_command(id);
-    if data.last() == Some(&0) {
-      data.pop();
-    }
-    let text = String::from_utf8(data).map_err(|error| FerriError::backend(format!("UTF-8: {error}")))?;
-    budget.send(&self.write_tx, Message::Text(text.into())).await?;
-    let result = budget
-      .wait(rx)
-      .await
-      .map_err(|error| error.error(format!("waiting for {method} response")))?
-      .map_err(|_| FerriError::backend(format!("Response channel dropped for {method}")))?;
-    pending.completed();
-    result
-  }
-
-  fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
-    self.dispatcher.subscribe_events()
-  }
-
-  fn subscribe_event_method(
-    &self,
-    method: &'static str,
-  ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
-    self.dispatcher.subscribe_event_method(method)
-  }
-
-  fn subscribe_event_domain(
-    &self,
-    domain: &'static str,
-  ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
-    self.dispatcher.subscribe_event_domain(domain)
-  }
-
-  fn tap_event_methods(
-    &self,
-    methods: &'static [&'static str],
-    session_id: Option<&str>,
-  ) -> tokio::sync::mpsc::UnboundedReceiver<std::sync::Arc<serde_json::Value>> {
-    self.dispatcher.tap_event_methods(methods, session_id)
-  }
-
-  fn tap_event_domains(
-    &self,
-    domains: &'static [&'static str],
-    session_id: Option<&str>,
-  ) -> tokio::sync::mpsc::UnboundedReceiver<std::sync::Arc<serde_json::Value>> {
-    self.dispatcher.tap_event_domains(domains, session_id)
-  }
-
-  fn tap_all_events(
-    &self,
-    session_id: &str,
-  ) -> tokio::sync::mpsc::UnboundedReceiver<std::sync::Arc<serde_json::Value>> {
-    self.dispatcher.tap_all_events(session_id)
-  }
-
-  fn tap_iframe_targets(&self) -> super::transport::IframeTargetSubscription {
-    self.dispatcher.tap_iframe_targets()
-  }
-
-  fn register_lifecycle_tracker(
-    &self,
-    session_id: &str,
-    state: Arc<std::sync::Mutex<super::LifecycleState>>,
-    notify: Arc<tokio::sync::Notify>,
-    frame_observer: super::transport::FrameStateObserver,
-  ) {
-    self
-      .dispatcher
-      .register_lifecycle_tracker(session_id, state, notify, frame_observer);
-  }
-
-  fn unregister_session(&self, session_id: &str) {
-    self.dispatcher.unregister_session(session_id);
-  }
-
-  fn take_session_dirty(&self, session_id: &str) -> super::transport::SessionDirty {
-    self.dispatcher.take_session_dirty(session_id)
-  }
-
-  fn reset_session_dirty(&self, session_id: &str) {
-    self.dispatcher.reset_session_dirty(session_id);
-  }
-
-  fn mark_pointer_dirty(&self, session_id: &str) {
-    self.dispatcher.mark_pointer_dirty(session_id);
-  }
-
-  fn take_permissions_dirty(&self, browser_context_id: &str) -> bool {
-    self.dispatcher.take_permissions_dirty(browser_context_id)
-  }
-
-  fn take_cookies_dirty(&self, browser_context_id: &str) -> bool {
-    self.dispatcher.take_cookies_dirty(browser_context_id)
   }
 }
 
@@ -402,15 +250,15 @@ mod tests {
 
   #[tokio::test(start_paused = true)]
   async fn operation_budgets_cover_replies_queueing_and_cancellation() {
-    use super::{Arc, CdpDispatcher, Message, WsTransport};
+    use super::{Arc, CdpDispatcher, CdpTransport, Message};
     let dispatcher = Arc::new(CdpDispatcher::new());
     let (write_tx, queued) = tokio::sync::mpsc::channel(1);
-    let transport = WsTransport {
-      write_tx: write_tx.clone(),
-      dispatcher: Arc::clone(&dispatcher),
-      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
-      endpoint: Arc::from("ws://127.0.0.1:9/devtools/browser/test"),
-    };
+    let transport = CdpTransport::from_ws(
+      write_tx.clone(),
+      Arc::clone(&dispatcher),
+      crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+      Arc::from("ws://127.0.0.1:9/devtools/browser/test"),
+    );
     super::super::transport::verify_operation_budgets(
       transport,
       dispatcher,

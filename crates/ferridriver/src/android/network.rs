@@ -3,10 +3,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+use crate::backend::cdp::CdpBrowser;
 use crate::error::{FerriError, Result};
 
-pub(super) async fn wait_until_ready(browser: &CdpBrowser<WsTransport>) -> Result<()> {
+pub(super) async fn wait_until_ready(browser: &CdpBrowser) -> Result<()> {
   let listener = TcpListener::bind("127.0.0.1:0").await?;
   let endpoint = serde_json::to_string(&format!("http://10.0.2.2:{}/", listener.local_addr()?.port()))?;
   let script = format!(
@@ -26,7 +26,7 @@ pub(super) async fn wait_until_ready(browser: &CdpBrowser<WsTransport>) -> Resul
   }
 }
 
-async fn wait_for_browser_network(browser: &CdpBrowser<WsTransport>, script: &str) -> Result<()> {
+async fn wait_for_browser_network(browser: &CdpBrowser, script: &str) -> Result<()> {
   let mut page = None;
   loop {
     if page.is_none() {

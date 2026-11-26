@@ -4,11 +4,7 @@ use serde_json::{Value, json};
 use super::transport::CdpTransport;
 use crate::error::{FerriError, Result};
 
-pub(super) async fn capture<T: CdpTransport>(
-  transport: &T,
-  session_id: Option<&str>,
-  params: Value,
-) -> Result<Vec<u8>> {
+pub(super) async fn capture(transport: &CdpTransport, session_id: Option<&str>, params: Value) -> Result<Vec<u8>> {
   // Layout metrics can be valid before Chromium has a captureable surface.
   // Synchronize with rendering so the first capture cannot sample that gap.
   // The gap closes with the document's first frame, so only the first

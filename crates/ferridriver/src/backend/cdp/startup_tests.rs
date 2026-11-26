@@ -2,8 +2,7 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use super::{CdpBrowser, ws::WsTransport};
-use crate::backend::cdp::transport::CdpTransport as _;
+use super::CdpBrowser;
 
 #[tokio::test]
 async fn closing_an_attached_browser_disconnects_retained_protocol_handles() {
@@ -49,7 +48,7 @@ async fn closing_an_attached_browser_disconnects_retained_protocol_handles() {
     }
     methods
   });
-  let browser = CdpBrowser::<WsTransport>::connect(&endpoint).await.unwrap();
+  let browser = CdpBrowser::connect(&endpoint).await.unwrap();
   let retained = Arc::clone(&browser.transport);
   browser.close().await.unwrap();
   assert!(
@@ -114,7 +113,7 @@ async fn connect_resumes_targets_announced_before_auto_attach_response() {
         .unwrap();
     }
   });
-  let browser = CdpBrowser::<WsTransport>::connect(&url).await.unwrap();
+  let browser = CdpBrowser::connect(&url).await.unwrap();
   let resumed = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_rx).await;
   drop(browser);
   server.abort();
