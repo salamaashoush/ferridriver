@@ -61,36 +61,32 @@ impl ScreenRecorder {
       return None;
     }
     let session = match transport
-      .send_command(
+      .send(
         None,
-        "Target.attachToTarget",
-        &serde_json::json!({ "targetId": target_id, "flatten": true }),
+        &ferridriver_cdp_proto::target::AttachToTarget {
+          target_id,
+          flatten: Some(true),
+        },
       )
       .await
     {
-      Ok(attached) => attached
-        .get("sessionId")
-        .and_then(serde_json::Value::as_str)?
-        .to_owned(),
+      Ok(attached) => attached.session_id,
       Err(error) => {
         tracing::debug!(target: "ferridriver::video", "no session to record on: {error}");
         return None;
       },
     };
-    let request = serde_json::json!({
-      "maxWidth": params.max_width,
-      "maxHeight": params.max_height,
-      "frameRate": params.frame_rate,
-    });
+    let request = ferridriver_cdp_proto::page::StartScreenRecording {
+      max_width: params.max_width,
+      max_height: params.max_height,
+      frame_rate: params.frame_rate,
+    };
     let deadline = Instant::now() + START_WINDOW;
     let stream = loop {
-      match transport
-        .send_command(Some(&session), "Page.startScreenRecording", &request)
-        .await
-      {
+      match transport.send(Some(&session), &request).await {
         Ok(started) => {
-          if let Some(stream) = started.get("stream").and_then(serde_json::Value::as_str) {
-            break stream.to_owned();
+          if let Some(stream) = started.stream {
+            break stream;
           }
           detach(transport, &session).await;
           return None;
@@ -130,10 +126,9 @@ impl ScreenRecorder {
 
 async fn stop(transport: &CdpTransport, active: &Active) -> Result<Vec<u8>> {
   transport
-    .send_command(
+    .send(
       Some(&active.session),
-      "Page.stopScreenRecording",
-      &super::super::EMPTY_PARAMS,
+      &ferridriver_cdp_proto::page::StopScreenRecording {},
     )
     .await?;
   read_stream(transport, Some(&active.session), &active.stream).await
@@ -141,10 +136,12 @@ async fn stop(transport: &CdpTransport, active: &Active) -> Result<Vec<u8>> {
 
 async fn detach(transport: &CdpTransport, session: &str) {
   let _ = transport
-    .send_command(
+    .send(
       None,
-      "Target.detachFromTarget",
-      &serde_json::json!({ "sessionId": session }),
+      &ferridriver_cdp_proto::target::DetachFromTarget {
+        session_id: Some(session),
+        target_id: None,
+      },
     )
     .await;
 }
@@ -159,7 +156,14 @@ pub(crate) async fn read_stream(transport: &CdpTransport, session: Option<&str>,
   let mut empty = 0;
   loop {
     let chunk = match transport
-      .send_command(session, "IO.read", &serde_json::json!({ "handle": handle }))
+      .send(
+        session,
+        &ferridriver_cdp_proto::io::Read {
+          handle,
+          offset: None,
+          size: None,
+        },
+      )
       .await
     {
       Ok(chunk) => chunk,
@@ -170,26 +174,21 @@ pub(crate) async fn read_stream(transport: &CdpTransport, session: Option<&str>,
       },
       Err(error) => return Err(error),
     };
-    let data = chunk.get("data").and_then(serde_json::Value::as_str).unwrap_or("");
-    if chunk
-      .get("base64Encoded")
-      .and_then(serde_json::Value::as_bool)
-      .unwrap_or(false)
-    {
+    if chunk.base64_encoded {
       bytes.extend(
         base64::engine::general_purpose::STANDARD
-          .decode(data)
+          .decode(&chunk.data)
           .map_err(|error| FerriError::protocol("IO.read", format!("invalid base64 chunk: {error}")))?,
       );
     } else {
-      bytes.extend_from_slice(data.as_bytes());
+      bytes.extend_from_slice(chunk.data.as_bytes());
     }
-    if chunk.get("eof").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if chunk.eof {
       break;
     }
   }
   let _ = transport
-    .send_command(session, "IO.close", &serde_json::json!({ "handle": handle }))
+    .send(session, &ferridriver_cdp_proto::io::Close { handle })
     .await;
   Ok(bytes)
 }

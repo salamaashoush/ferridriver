@@ -14,6 +14,7 @@ use crate::error::{FerriError, Result};
 /// `Network.enable` / `DOM.enable`, fired on every new target) previously
 /// paid five `Map::clone()`s per page; it now borrows this static. Built
 /// once via `LazyLock`.
+#[cfg(test)]
 pub(crate) static EMPTY_PARAMS: std::sync::LazyLock<serde_json::Value> =
   std::sync::LazyLock::new(|| serde_json::Value::Object(serde_json::Map::new()));
 

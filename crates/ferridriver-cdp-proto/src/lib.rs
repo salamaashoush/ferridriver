@@ -14,6 +14,7 @@ pub mod events;
 pub mod fetch;
 pub mod heap_profiler;
 pub mod input;
+pub mod io;
 pub mod network;
 pub mod page;
 pub mod performance;
@@ -22,6 +23,7 @@ pub mod security;
 pub mod storage;
 pub mod target;
 pub mod tracing;
+pub mod web_mcp;
 
 pub use events::CdpEvent;
 use serde::Serialize;
@@ -50,6 +52,20 @@ mod tests {
     assert_eq!(serde_json::to_string(&browser::GetVersion {}).unwrap(), "{}");
     assert_eq!(serde_json::to_string(&target::GetTargets {}).unwrap(), "{}");
     assert_eq!(serde_json::to_string(&dom::Enable {}).unwrap(), "{}");
+    assert_eq!(serde_json::to_string(&page::StopScreenRecording {}).unwrap(), "{}");
+    assert_eq!(
+      serde_json::to_value(io::Read {
+        handle: "h1",
+        offset: None,
+        size: None,
+      })
+      .unwrap(),
+      serde_json::json!({ "handle": "h1" })
+    );
+    assert_eq!(
+      serde_json::to_value(web_mcp::CancelInvocation { invocation_id: "inv-1" }).unwrap(),
+      serde_json::json!({ "invocationId": "inv-1" })
+    );
   }
 
   #[test]

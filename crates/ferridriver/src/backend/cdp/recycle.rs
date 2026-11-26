@@ -41,7 +41,6 @@ use futures::FutureExt;
 use rustc_hash::FxHashMap;
 use serde_json::json;
 
-use super::super::EMPTY_PARAMS;
 use super::{AttachedTargets, CdpBrowser, CdpTransport};
 use crate::error::{FerriError, Result};
 
@@ -337,10 +336,11 @@ impl CdpBrowser {
       }
       spares.forget(&context_id);
       let _ = transport
-        .send_command(
+        .send(
           None,
-          "Target.disposeBrowserContext",
-          &json!({"browserContextId": context_id}),
+          &ferridriver_cdp_proto::target::DisposeBrowserContext {
+            browser_context_id: &context_id,
+          },
         )
         .await;
       guard.finish(None);
@@ -616,9 +616,22 @@ fn spawn_pointer_reset(transport: &Arc<CdpTransport>, session: &str) {
   let transport = Arc::clone(transport);
   let pointer_session = session.to_string();
   tokio::spawn(async move {
-    let away = json!({ "type": "mouseMoved", "x": -1, "y": -1 });
     let _ = transport
-      .send_command(Some(&pointer_session), "Input.dispatchMouseEvent", &away)
+      .send(
+        Some(&pointer_session),
+        &ferridriver_cdp_proto::input::DispatchMouseEvent {
+          event_type: ferridriver_cdp_proto::input::MouseEventType::Moved,
+          x: -1.0,
+          y: -1.0,
+          modifiers: None,
+          button: None,
+          buttons: None,
+          click_count: None,
+          delta_x: None,
+          delta_y: None,
+          pointer_type: None,
+        },
+      )
       .await;
   });
 }
@@ -713,10 +726,9 @@ async fn engine_registered_on(
       let session = held.session.as_str();
       async move {
         transport
-          .send_command(
+          .send(
             Some(session),
-            "Page.removeScriptToEvaluateOnNewDocument",
-            &json!({ "identifier": identifier }),
+            &ferridriver_cdp_proto::page::RemoveScriptToEvaluateOnNewDocument { identifier },
           )
           .await
           .map(|_| ())
@@ -726,17 +738,15 @@ async fn engine_registered_on(
     held.session
   } else {
     let attached = transport
-      .send_command(
+      .send(
         None,
-        "Target.attachToTarget",
-        &json!({ "targetId": target, "flatten": true }),
+        &ferridriver_cdp_proto::target::AttachToTarget {
+          target_id: target,
+          flatten: Some(true),
+        },
       )
       .await?;
-    let session = attached
-      .get("sessionId")
-      .and_then(serde_json::Value::as_str)
-      .ok_or_else(|| FerriError::protocol("Target.attachToTarget", "missing sessionId"))?
-      .to_string();
+    let session = attached.session_id;
     // A registration only takes effect on a session with `Page` enabled.
     transport
       .send_command_raw(Some(&session), "Page.enable", super::EMPTY_PARAMS_RAW)
@@ -774,26 +784,32 @@ async fn go_blank_on(transport: &CdpTransport, session: &str, enable_page: bool)
   // reaches a session with `Page` enabled.
   let mut dialogs = transport.tap_event_methods(&["Page.javascriptDialogOpening"], on_page);
   if enable_page {
-    transport.send_command(on_page, "Page.enable", &EMPTY_PARAMS).await?;
+    transport.send(on_page, &ferridriver_cdp_proto::page::Enable {}).await?;
   }
-  let blank = json!({ "url": "about:blank" });
-  let go = transport.send_command(on_page, "Page.navigate", &blank);
+  let blank = ferridriver_cdp_proto::page::Navigate {
+    url: "about:blank",
+    referrer: None,
+    frame_id: None,
+  };
+  let go = transport.send(on_page, &blank);
   tokio::pin!(go);
   let navigated = loop {
     tokio::select! {
       navigated = &mut go => break navigated?,
       Some(_) = dialogs.recv() => {
         transport
-          .send_command(on_page, "Page.handleJavaScriptDialog", &json!({ "accept": true }))
+          .send(
+            on_page,
+            &ferridriver_cdp_proto::page::HandleJavaScriptDialog {
+              accept: true,
+              prompt_text: None,
+            },
+          )
           .await?;
       },
     }
   };
-  if let Some(error) = navigated
-    .get("errorText")
-    .and_then(serde_json::Value::as_str)
-    .filter(|e| !e.is_empty())
-  {
+  if let Some(error) = navigated.error_text.as_deref().filter(|e| !e.is_empty()) {
     return Err(FerriError::backend(format!(
       "the page would not leave its document: {error}"
     )));

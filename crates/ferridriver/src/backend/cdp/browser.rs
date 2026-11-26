@@ -14,15 +14,9 @@ impl CdpBrowser {
   pub async fn context_cookies(&self, browser_context_id: Option<&str>) -> Result<Vec<CookieData>> {
     let result = self
       .transport
-      .send_command(None, "Storage.getCookies", &context_params(browser_context_id))
+      .send(None, &ferridriver_cdp_proto::storage::GetCookies { browser_context_id })
       .await?;
-    Ok(
-      result
-        .get("cookies")
-        .and_then(serde_json::Value::as_array)
-        .map(|cookies| cookies.iter().map(cookie_from_cdp).collect())
-        .unwrap_or_default(),
-    )
+    Ok(result.cookies.iter().map(cookie_from_cdp).collect())
   }
 
   /// Playwright's `CRBrowserContext.addCookies`: `Storage.setCookies`.
@@ -32,9 +26,17 @@ impl CdpBrowser {
   /// Returns an error if Chrome rejects `Storage.setCookies`, the target has closed, or the command outlives
   /// its time budget.
   pub async fn add_context_cookies(&self, browser_context_id: Option<&str>, cookies: &[CookieData]) -> Result<()> {
-    let mut params = context_params(browser_context_id);
-    params["cookies"] = cookies.iter().map(cookie_to_cdp).collect();
-    self.transport.send_command(None, "Storage.setCookies", &params).await?;
+    let cdp_cookies: Vec<serde_json::Value> = cookies.iter().map(cookie_to_cdp).collect();
+    self
+      .transport
+      .send(
+        None,
+        &ferridriver_cdp_proto::storage::SetCookies {
+          cookies: &cdp_cookies,
+          browser_context_id,
+        },
+      )
+      .await?;
     Ok(())
   }
 
@@ -47,7 +49,10 @@ impl CdpBrowser {
   pub async fn clear_context_cookies(&self, browser_context_id: Option<&str>) -> Result<()> {
     self
       .transport
-      .send_command(None, "Storage.clearCookies", &context_params(browser_context_id))
+      .send(
+        None,
+        &ferridriver_cdp_proto::storage::ClearCookies { browser_context_id },
+      )
       .await?;
     Ok(())
   }
@@ -341,30 +346,21 @@ pub(super) type CreateLedger = crate::backend::CreateLedger<ParkedTarget>;
 /// default context is never among them.
 pub(super) async fn created_browser_contexts(transport: &CdpTransport) -> Result<rustc_hash::FxHashSet<String>> {
   let contexts = transport
-    .send_command(None, "Target.getBrowserContexts", &super::super::EMPTY_PARAMS)
+    .send(None, &ferridriver_cdp_proto::target::GetBrowserContexts {})
     .await?;
-  Ok(
-    contexts
-      .get("browserContextIds")
-      .and_then(serde_json::Value::as_array)
-      .map(|ids| {
-        ids
-          .iter()
-          .filter_map(serde_json::Value::as_str)
-          .map(str::to_string)
-          .collect()
-      })
-      .unwrap_or_default(),
-  )
+  Ok(contexts.browser_context_ids.into_iter().collect())
 }
 
 /// Whether a `Target.getTargets` entry is a page of the default context:
 /// a page target in none of the `created` contexts.
-pub(super) fn is_default_context_page(target: &serde_json::Value, created: &rustc_hash::FxHashSet<String>) -> bool {
-  target.get("type").and_then(serde_json::Value::as_str) == Some("page")
+pub(super) fn is_default_context_page(
+  target: &ferridriver_cdp_proto::target::TargetInfo,
+  created: &rustc_hash::FxHashSet<String>,
+) -> bool {
+  target.target_type == "page"
     && !target
-      .get("browserContextId")
-      .and_then(serde_json::Value::as_str)
+      .browser_context_id
+      .as_deref()
       .is_some_and(|id| created.contains(id))
 }
 
@@ -526,30 +522,28 @@ impl CdpBrowser {
       Arc::clone(&headful_flag),
     );
 
-    let auto_attach_params = serde_json::json!({
-      "autoAttach": true,
-      "waitForDebuggerOnStart": true,
-      "flatten": true,
-    });
+    let auto_attach = ferridriver_cdp_proto::target::SetAutoAttach {
+      auto_attach: true,
+      wait_for_debugger_on_start: true,
+      flatten: Some(true),
+    };
     // Pipeline Browser.getVersion and Target.setAutoAttach in one RTT:
     // attach_listener already owns its tap so no startup attach event can be missed.
     let (version_resp, _) = tokio::try_join!(
-      transport.send_command(None, "Browser.getVersion", &super::super::EMPTY_PARAMS),
-      transport.send_command(None, "Target.setAutoAttach", &auto_attach_params),
+      transport.send(None, &ferridriver_cdp_proto::browser::GetVersion {}),
+      transport.send(None, &auto_attach),
     )?;
     // `product` is a string like "HeadlessChrome/120.0.6099.109" — mirrors
     // what Playwright surfaces via `browser.version()`.
-    let version: Arc<str> = version_resp
-      .get("product")
-      .and_then(|v| v.as_str())
-      .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    let version: Arc<str> = if version_resp.product.is_empty() {
+      Arc::from("Unknown")
+    } else {
+      Arc::from(version_resp.product.as_str())
+    };
     // Chrome reports "HeadlessChrome/<v>" only when it has no UI window.
     let headful = !version.starts_with("HeadlessChrome");
     headful_flag.store(headful, std::sync::atomic::Ordering::Release);
-    let isolated_contexts = !version_resp
-      .get("userAgent")
-      .and_then(serde_json::Value::as_str)
-      .is_some_and(|agent| agent.contains("Android"));
+    let isolated_contexts = !version_resp.user_agent.contains("Android");
 
     Ok(Self {
       transport,
@@ -728,10 +722,9 @@ impl CdpBrowser {
     let transport = Arc::clone(resume_transport);
     tokio::spawn(async move {
       let _ = transport
-        .send_command(
+        .send(
           Some(&session_id),
-          "Runtime.runIfWaitingForDebugger",
-          &super::super::EMPTY_PARAMS,
+          &ferridriver_cdp_proto::runtime::RunIfWaitingForDebugger {},
         )
         .await;
     });
@@ -842,10 +835,9 @@ impl CdpBrowser {
         // failed claim — resume so the popup at least runs instead of
         // staying parked on waitForDebuggerOnStart.
         let _ = transport
-          .send_command(
+          .send(
             Some(&session_id),
-            "Runtime.runIfWaitingForDebugger",
-            &super::super::EMPTY_PARAMS,
+            &ferridriver_cdp_proto::runtime::RunIfWaitingForDebugger {},
           )
           .await;
       }
@@ -967,7 +959,7 @@ impl CdpBrowser {
   pub(crate) async fn popups_settled(&self) -> Result<()> {
     self
       .transport
-      .send_command(None, "Browser.getVersion", &super::super::EMPTY_PARAMS)
+      .send(None, &ferridriver_cdp_proto::browser::GetVersion {})
       .await?;
     self.popups.settled().await;
     if let Some(connections) = &self.connections {
@@ -989,25 +981,15 @@ impl CdpBrowser {
     let created = created_browser_contexts(&self.transport).await?;
     let result = self
       .transport
-      .send_command(None, "Target.getTargets", &super::super::EMPTY_PARAMS)
+      .send(None, &ferridriver_cdp_proto::target::GetTargets {})
       .await?;
 
-    let targets = result
-      .get("targetInfos")
-      .and_then(|t| t.as_array())
-      .cloned()
-      .unwrap_or_default();
-
     let mut pages = renderer::AdoptedPages::new();
-    for target in targets {
+    for target in result.target_infos {
       if !is_default_context_page(&target, &created) {
         continue;
       }
-      let target_id = target
-        .get("targetId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+      let target_id = target.target_id;
 
       // Check if we already have a session for this target
       let existing_sid = {
@@ -1026,17 +1008,16 @@ impl CdpBrowser {
         // (connect flow) and targets created before setAutoAttach was enabled.
         let attach = self
           .transport
-          .send_command(
+          .send(
             None,
-            "Target.attachToTarget",
-            &serde_json::json!({"targetId": target_id, "flatten": true}),
+            &ferridriver_cdp_proto::target::AttachToTarget {
+              target_id: &target_id,
+              flatten: Some(true),
+            },
           )
           .await?;
 
-        let sid = attach
-          .get("sessionId")
-          .and_then(|v| v.as_str())
-          .map(std::string::ToString::to_string);
+        let sid = Some(attach.session_id);
 
         self
           .attached_targets
@@ -1128,23 +1109,21 @@ impl CdpBrowser {
     {
       return Ok(spare);
     }
-    let mut params = serde_json::json!({"disposeOnDetach": true});
-    if let Some(p) = proxy {
-      params["proxyServer"] = serde_json::json!(p.chromium_server());
-      if let Some(bypass) = p.chromium_bypass_list() {
-        params["proxyBypassList"] = serde_json::json!(bypass);
-      }
-    }
+    let proxy_server = proxy.map(crate::options::ProxyConfig::chromium_server);
+    let proxy_bypass = proxy.and_then(crate::options::ProxyConfig::chromium_bypass_list);
     let ctx = self
       .transport
-      .send_command(None, "Target.createBrowserContext", &params)
+      .send(
+        None,
+        &ferridriver_cdp_proto::target::CreateBrowserContext {
+          dispose_on_detach: Some(true),
+          proxy_server: proxy_server.as_deref(),
+          proxy_bypass_list: proxy_bypass.as_deref(),
+        },
+      )
       .await?;
 
-    let id = ctx
-      .get("browserContextId")
-      .and_then(|v| v.as_str())
-      .map(String::from)
-      .ok_or_else(|| FerriError::backend("No browserContextId"))?;
+    let id = ctx.browser_context_id;
     if proxy.is_some() {
       self.spares.mark_proxied(&id);
     }
@@ -1166,10 +1145,9 @@ impl CdpBrowser {
     self.forget_spare(browser_context_id);
     self
       .transport
-      .send_command(
+      .send(
         None,
-        "Target.disposeBrowserContext",
-        &serde_json::json!({"browserContextId": browser_context_id}),
+        &ferridriver_cdp_proto::target::DisposeBrowserContext { browser_context_id },
       )
       .await?;
     Ok(())
@@ -1184,23 +1162,21 @@ impl CdpBrowser {
   /// page targets instead of claiming them as `noopener` popups — the
   /// attach event can beat this response.
   async fn create_owned_target(&self, browser_context_id: Option<&str>) -> Result<String> {
-    let create_params = if let Some(ctx_id) = browser_context_id {
-      serde_json::json!({"url": "about:blank", "browserContextId": ctx_id})
-    } else {
-      serde_json::json!({"url": "about:blank"})
-    };
     self.create_ledger.begin_create();
     let result = self
       .transport
-      .send_command(None, "Target.createTarget", &create_params)
+      .send(
+        None,
+        &ferridriver_cdp_proto::target::CreateTarget {
+          url: "about:blank",
+          browser_context_id,
+          width: None,
+          height: None,
+        },
+      )
       .await;
     let target_id = result
-      .and_then(|r| {
-        r.get("targetId")
-          .and_then(|v| v.as_str())
-          .map(std::string::ToString::to_string)
-          .ok_or_else(|| FerriError::protocol("Target.createTarget", "response missing targetId"))
-      })
+      .map(|r| r.target_id)
       .inspect_err(|_| self.create_ledger.end_create(None))?;
     self.create_ledger.end_create(Some(&target_id));
     Ok(target_id)
@@ -1273,10 +1249,9 @@ impl CdpBrowser {
           None => {
             self
               .transport
-              .send_command(
+              .send(
                 sid.as_deref(),
-                "Emulation.clearDeviceMetricsOverride",
-                &super::super::EMPTY_PARAMS,
+                &ferridriver_cdp_proto::emulation::ClearDeviceMetricsOverride {},
               )
               .await?;
           },
@@ -1456,9 +1431,7 @@ impl CdpBrowser {
         let timeout = crate::backend::process::PROFILE_FLUSH_TIMEOUT;
         let _ = tokio::time::timeout(
           timeout,
-          self
-            .transport
-            .send_command(None, "Browser.close", &super::super::EMPTY_PARAMS),
+          self.transport.send(None, &ferridriver_cdp_proto::browser::Close {}),
         )
         .await;
         flushed = group.wait_for_exit(timeout).await;
@@ -1668,33 +1641,25 @@ impl CdpBrowser {
   /// one was found.
   async fn attach_first_existing_page(
     transport: &Arc<CdpTransport>,
-    targets: &serde_json::Value,
+    targets: &[ferridriver_cdp_proto::target::TargetInfo],
     attached: &mut FxHashMap<String, Option<String>>,
   ) -> Result<bool> {
-    let Some(targets) = targets.get("targetInfos").and_then(|t| t.as_array()) else {
-      return Ok(false);
-    };
     let created = created_browser_contexts(transport).await?;
     for target in targets {
       if !is_default_context_page(target, &created) {
         continue;
       }
-      let target_id = target
-        .get("targetId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+      let target_id = target.target_id.clone();
       let attach = transport
-        .send_command(
+        .send(
           None,
-          "Target.attachToTarget",
-          &serde_json::json!({"targetId": target_id, "flatten": true}),
+          &ferridriver_cdp_proto::target::AttachToTarget {
+            target_id: &target_id,
+            flatten: Some(true),
+          },
         )
         .await?;
-      let sid = attach
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .map(std::string::ToString::to_string);
+      let sid = Some(attach.session_id);
       Box::pin(Self::enable_domains(transport, sid.as_deref(), None, false, None)).await?;
       attached.insert(target_id, sid);
       return Ok(true);
@@ -1734,10 +1699,18 @@ impl CdpBrowser {
     let mut attach_events = transport.tap_event_methods(&["Target.attachedToTarget"], None);
     create_ledger.begin_create();
     let create_result = transport
-      .send_command(None, "Target.createTarget", &serde_json::json!({"url": "about:blank"}))
+      .send(
+        None,
+        &ferridriver_cdp_proto::target::CreateTarget {
+          url: "about:blank",
+          browser_context_id: None,
+          width: None,
+          height: None,
+        },
+      )
       .await;
     let target_id = match &create_result {
-      Ok(r) => r.get("targetId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      Ok(r) => r.target_id.clone(),
       Err(_) => String::new(),
     };
     create_ledger.end_create(if target_id.is_empty() { None } else { Some(&target_id) });
@@ -1768,10 +1741,9 @@ impl CdpBrowser {
     .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
     Box::pin(Self::enable_domains(transport, sid.as_deref(), None, false, None)).await?;
     let _ = transport
-      .send_command(
+      .send(
         sid.as_deref(),
-        "Runtime.runIfWaitingForDebugger",
-        &super::super::EMPTY_PARAMS,
+        &ferridriver_cdp_proto::runtime::RunIfWaitingForDebugger {},
       )
       .await;
     attached.insert(target_id, sid);
@@ -1796,23 +1768,20 @@ impl CdpBrowser {
     // Capture product version for `browser.version()` — same handshake
     // Playwright's CRBrowser.connect does.
     let version_resp = transport
-      .send_command(None, "Browser.getVersion", &super::super::EMPTY_PARAMS)
+      .send(None, &ferridriver_cdp_proto::browser::GetVersion {})
       .await?;
-    let version: Arc<str> = version_resp
-      .get("product")
-      .and_then(|v| v.as_str())
-      .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    let version: Arc<str> = if version_resp.product.is_empty() {
+      Arc::from("Unknown")
+    } else {
+      Arc::from(version_resp.product.as_str())
+    };
     let headful = !version.starts_with("HeadlessChrome");
-    let isolated_contexts = !version_resp
-      .get("userAgent")
-      .and_then(serde_json::Value::as_str)
-      .is_some_and(|agent| agent.contains("Android"));
+    let isolated_contexts = !version_resp.user_agent.contains("Android");
 
     transport
-      .send_command(
+      .send(
         None,
-        "Target.setDiscoverTargets",
-        &serde_json::json!({"discover": true}),
+        &ferridriver_cdp_proto::target::SetDiscoverTargets { discover: true },
       )
       .await?;
 
@@ -1826,24 +1795,23 @@ impl CdpBrowser {
     // CDP can emit attachedToTarget before setAutoAttach replies. The
     // listener must already own its tap or paused startup targets are lost.
     transport
-      .send_command(
+      .send(
         None,
-        "Target.setAutoAttach",
-        &serde_json::json!({
-          "autoAttach": true,
-          "waitForDebuggerOnStart": true,
-          "flatten": true,
-        }),
+        &ferridriver_cdp_proto::target::SetAutoAttach {
+          auto_attach: true,
+          wait_for_debugger_on_start: true,
+          flatten: Some(true),
+        },
       )
       .await?;
 
     // Find existing page targets
     let result = transport
-      .send_command(None, "Target.getTargets", &super::super::EMPTY_PARAMS)
+      .send(None, &ferridriver_cdp_proto::target::GetTargets {})
       .await?;
 
     let mut attached = FxHashMap::default();
-    let found_page = Self::attach_first_existing_page(&transport, &result, &mut attached).await?;
+    let found_page = Self::attach_first_existing_page(&transport, &result.target_infos, &mut attached).await?;
 
     // If no existing page, create one
     if !found_page && open_default_page {

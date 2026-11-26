@@ -45,9 +45,11 @@ pub(crate) use binding::{PageBinding, binding_settle_js};
 pub(crate) use media::{DEFAULT_COLOR_SCHEME, SharedMediaEmulation};
 pub use popups::PopupInfo;
 pub(crate) use popups::{BarrierPasses, CreateLedger, PopupClaim, PopupTaps, PopupWatch, PopupsInFlight, push_popup};
+#[cfg(test)]
+pub(crate) use types::EMPTY_PARAMS;
 pub use types::{
   AxNodeData, AxProperty, BackendClickArgs, BackendHoverArgs, BackendKind, BackgroundColor, ClearCookieOptions,
   CompiledCookieFilter, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, PageBackref, Protocol, SameSite,
   ScreenshotCapture, ScreenshotScale, SetCookieParams,
 };
-pub(crate) use types::{EMPTY_PARAMS, deadline_for, empty_params, encode_webp_from_png, ensure_user_data_dir};
+pub(crate) use types::{deadline_for, empty_params, encode_webp_from_png, ensure_user_data_dir};
