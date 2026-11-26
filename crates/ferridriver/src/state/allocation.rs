@@ -1,94 +1,17 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ferridriver_driver::allocation_resource::{self, AllocationResource, ResourceList};
 use tokio::sync::{Mutex, watch};
 
 use super::{AnyBrowser, ConnectMode, FerriError, LaunchSpec, Result, connect_browser};
-use crate::backend::webdriver::session::WebDriverSession;
 
-tokio::task_local! {
-  static CURRENT: Arc<Allocation>;
-}
-
-pub(crate) fn retain_session(session: &Arc<WebDriverSession>) {
-  retain(PartialResource::Session(Arc::clone(session)));
-}
-
-pub(crate) fn retain_ios(owner: &Arc<crate::ios::IosOwner>) {
-  retain(PartialResource::Ios(Arc::clone(owner)));
-}
-
-pub(crate) fn retain_android(owner: &Arc<crate::android::AndroidOwner>) {
-  retain(PartialResource::Android(Arc::clone(owner)));
-}
-
-pub(crate) fn retain_driver(owner: &Arc<Mutex<Option<crate::backend::process::ChildGroup>>>) {
-  retain(PartialResource::Driver(Arc::clone(owner)));
-}
-
-pub(crate) fn retain_webkit(owner: &Arc<crate::backend::webkit::owner::WebKitOwner>) {
-  retain(PartialResource::WebKit(Arc::clone(owner)));
-}
-
-fn retain(resource: PartialResource) {
-  let _ = CURRENT.try_with(|allocation| {
-    allocation
-      .partial
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(resource);
-  });
+pub(crate) fn retain_resource<R: AllocationResource + 'static>(resource: &Arc<R>) {
+  allocation_resource::retain(resource);
 }
 
 pub(crate) fn has_pending_sessions() -> bool {
-  CURRENT
-    .try_with(|allocation| {
-      allocation
-        .partial
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .any(|resource| matches!(resource, PartialResource::Session(session) if !session.deletion_complete()))
-    })
-    .unwrap_or(false)
-}
-
-#[derive(Clone)]
-enum PartialResource {
-  Session(Arc<WebDriverSession>),
-  Driver(Arc<Mutex<Option<crate::backend::process::ChildGroup>>>),
-  Ios(Arc<crate::ios::IosOwner>),
-  Android(Arc<crate::android::AndroidOwner>),
-  WebKit(Arc<crate::backend::webkit::owner::WebKitOwner>),
-}
-
-impl PartialResource {
-  fn cleanup_complete(&self) -> bool {
-    match self {
-      Self::Session(session) => session.deletion_complete(),
-      Self::Driver(driver) => driver.try_lock().is_ok_and(|driver| driver.is_none()),
-      Self::Ios(owner) => owner.cleanup_complete(),
-      Self::Android(owner) => owner.cleanup_complete(),
-      Self::WebKit(owner) => owner.cleanup_complete(),
-    }
-  }
-
-  async fn close(&self) -> Result<()> {
-    match self {
-      Self::Session(session) => session.close().await,
-      Self::Driver(driver) => {
-        let mut driver = driver.lock().await;
-        if let Some(group) = driver.as_mut() {
-          group.shutdown().await?;
-        }
-        *driver = None;
-        Ok(())
-      },
-      Self::Ios(owner) => owner.close().await,
-      Self::Android(owner) => owner.close().await,
-      Self::WebKit(owner) => owner.close().await,
-    }
-  }
+  allocation_resource::has_pending_sessions()
 }
 
 pub(super) struct Allocation {
@@ -96,7 +19,7 @@ pub(super) struct Allocation {
   done: watch::Sender<bool>,
   closing: AtomicBool,
   connection_budget: std::sync::OnceLock<crate::operation_budget::OperationBudget>,
-  partial: std::sync::Mutex<Vec<PartialResource>>,
+  partial: Arc<ResourceList>,
 }
 
 pub(super) struct Completion(Arc<Allocation>);
@@ -144,12 +67,7 @@ impl Drop for Allocation {
   fn drop(&mut self) {
     // Only explicit close can retain failed cleanup for retry. Final drop is best-effort.
     let browser = self.browser.get_mut().take();
-    let partial = std::mem::take(
-      self
-        .partial
-        .get_mut()
-        .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
+    let partial = self.partial.take_all();
     if browser.is_none() && partial.is_empty() {
       return;
     }
@@ -187,7 +105,7 @@ impl Allocation {
       done: watch::channel(false).0,
       closing: AtomicBool::new(false),
       connection_budget: std::sync::OnceLock::new(),
-      partial: std::sync::Mutex::new(Vec::new()),
+      partial: ResourceList::new(),
     });
     let completion = Completion(Arc::clone(&owner));
     (owner, completion)
@@ -206,22 +124,16 @@ impl Allocation {
   }
 
   pub(super) fn has_partial_resources(&self) -> bool {
-    !self
-      .partial
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .is_empty()
+    !self.partial.is_empty()
   }
 
   pub(super) async fn produce(self: &Arc<Self>, spec: LaunchSpec, instance: &str) -> Result<ConnectMode> {
-    let result = CURRENT
-      .scope(Arc::clone(self), Box::pin(self.produce_inner(spec, instance)))
-      .await;
-    let mut partial = self.partial.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let result =
+      allocation_resource::scope(Arc::clone(&self.partial), Box::pin(self.produce_inner(spec, instance))).await;
     if result.is_ok() {
-      partial.clear();
+      self.partial.clear();
     } else {
-      partial.retain(|resource| !resource.cleanup_complete());
+      self.partial.retain_incomplete();
     }
     result
   }
@@ -295,19 +207,11 @@ impl Allocation {
       browser.close().await?;
     }
     *browser = None;
-    let partial = self
-      .partial
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone();
+    let partial = self.partial.snapshot();
     for resource in partial.iter().rev() {
       resource.close().await?;
     }
-    self
-      .partial
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clear();
+    self.partial.clear();
     Ok(())
   }
 }
@@ -316,6 +220,8 @@ impl Allocation {
 mod tests {
   use super::*;
   use crate::backend::process::ChildGroup;
+  use crate::backend::webdriver::launcher::DriverResource;
+  use crate::backend::webdriver::session::WebDriverSession;
   use crate::backend::webdriver::session::tests::request;
   use serde_json::json;
   use tokio::io::AsyncWriteExt as _;
@@ -348,17 +254,16 @@ mod tests {
     let mut command = tokio::process::Command::from(crate::backend::process::test_sleeper(30));
     let driver = Arc::new(Mutex::new(Some(ChildGroup::new(command.spawn().unwrap()))));
     let (allocation, completion) = Allocation::new();
-    CURRENT
-      .scope(Arc::clone(&allocation), async {
-        retain_driver(&driver);
-        let error = WebDriverSession::create(reqwest::Client::new(), endpoint.parse().unwrap(), json!({}), 1000, None)
-          .await
-          .err()
-          .unwrap();
-        assert!(error.to_string().contains("cleanup failed"), "{error}");
-        assert!(has_pending_sessions());
-      })
-      .await;
+    allocation_resource::scope(Arc::clone(&allocation.partial), async {
+      retain_resource(&Arc::new(DriverResource(Arc::clone(&driver))));
+      let error = WebDriverSession::create(reqwest::Client::new(), endpoint.parse().unwrap(), json!({}), 1000, None)
+        .await
+        .err()
+        .unwrap();
+      assert!(error.to_string().contains("cleanup failed"), "{error}");
+      assert!(has_pending_sessions());
+    })
+    .await;
     drop(completion);
     assert!(driver.lock().await.as_mut().unwrap().is_running());
     assert!(
@@ -396,7 +301,7 @@ mod tests {
     let mut group = ChildGroup::new(child);
     group.own_dir(&directory);
     let driver = Arc::new(Mutex::new(Some(group)));
-    let resource = PartialResource::Driver(Arc::clone(&driver));
+    let resource = DriverResource(Arc::clone(&driver));
     assert!(resource.close().await.is_err());
     assert!(driver.lock().await.is_some(), "failed cleanup discarded its owner");
     assert!(!resource.cleanup_complete());

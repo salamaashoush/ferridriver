@@ -199,6 +199,16 @@ pub(crate) struct AndroidOwner {
   directory: crate::backend::async_tempdir::AsyncTempDir,
 }
 
+impl ferridriver_driver::allocation_resource::AllocationResource for AndroidOwner {
+  fn cleanup_complete(&self) -> bool {
+    Self::cleanup_complete(self)
+  }
+
+  fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(Self::close(self))
+  }
+}
+
 impl AndroidOwner {
   fn new(directory: tempfile::TempDir) -> Arc<Self> {
     let owner = Arc::new(Self {
@@ -207,7 +217,7 @@ impl AndroidOwner {
       cleanup: tokio::sync::Mutex::new(()),
       directory: crate::backend::async_tempdir::AsyncTempDir::new(directory),
     });
-    crate::state::allocation::retain_android(&owner);
+    crate::state::allocation::retain_resource(&owner);
     owner
   }
 

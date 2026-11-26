@@ -187,7 +187,7 @@ pub(crate) async fn launch(options: &IosOptions, headless: bool) -> Result<crate
       .map_err(|_| FerriError::timeout("provisioning iOS dependencies", options.timeout))??,
   );
   let owner = IosOwner::new()?;
-  crate::state::allocation::retain_ios(&owner);
+  crate::state::allocation::retain_resource(&owner);
   let result = tokio::time::timeout_at(deadline, launch_owned(options, headless, &installation, &owner))
     .await
     .unwrap_or_else(|_| Err(FerriError::timeout("launching iOS Safari", options.timeout)));
@@ -204,6 +204,16 @@ pub(crate) async fn launch(options: &IosOptions, headless: bool) -> Result<crate
       }
       Err(error)
     },
+  }
+}
+
+impl ferridriver_driver::allocation_resource::AllocationResource for IosOwner {
+  fn cleanup_complete(&self) -> bool {
+    Self::cleanup_complete(self)
+  }
+
+  fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(Self::close(self))
   }
 }
 

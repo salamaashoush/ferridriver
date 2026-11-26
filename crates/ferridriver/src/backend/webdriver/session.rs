@@ -46,6 +46,20 @@ pub struct WebDriverSession {
   selected_window: std::sync::Mutex<Option<String>>,
 }
 
+impl ferridriver_driver::allocation_resource::AllocationResource for WebDriverSession {
+  fn cleanup_complete(&self) -> bool {
+    self.deletion_complete()
+  }
+
+  fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(Self::close(self))
+  }
+
+  fn is_session(&self) -> bool {
+    true
+  }
+}
+
 /// The capabilities of a `POST /session`: what the session must have,
 /// and alternatives tried in order, each merged with it, for what it
 /// should have if the browser can give it.
@@ -217,7 +231,7 @@ impl WebDriverSession {
     let mut session = Self::new(client, url, &id)?;
     session.secrets = secrets;
     let session = Arc::new(session);
-    crate::state::allocation::retain_session(&session);
+    crate::state::allocation::retain_resource(&session);
     let Some(capabilities) = value.get("capabilities").filter(|value| value.is_object()).cloned() else {
       let error = FerriError::protocol("WebDriver /session", "response omitted capabilities");
       if let Err(cleanup) = session.close().await {

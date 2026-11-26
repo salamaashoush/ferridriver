@@ -13,6 +13,16 @@ pub(crate) struct WebKitOwner {
   close_mode: Mutex<CloseMode>,
 }
 
+impl ferridriver_driver::allocation_resource::AllocationResource for WebKitOwner {
+  fn cleanup_complete(&self) -> bool {
+    Self::cleanup_complete(self)
+  }
+
+  fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>> + Send + '_>> {
+    Box::pin(Self::close(self))
+  }
+}
+
 enum CloseMode {
   Open,
   Requested(tokio::time::Instant),
@@ -29,7 +39,7 @@ impl WebKitOwner {
       observers: std::sync::OnceLock::new(),
       close_mode: Mutex::new(CloseMode::Open),
     });
-    crate::state::allocation::retain_webkit(&owner);
+    crate::state::allocation::retain_resource(&owner);
     owner
   }
 
