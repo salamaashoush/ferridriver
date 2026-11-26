@@ -83,6 +83,42 @@ pub async fn click(page: &WebKitPage, x: f64, y: f64, args: &BackendClickArgs) -
   let mods = held(page);
   let btn = args.button.as_cdp();
   let bmask = button_mask(args.button);
+  let count = args.click_count.max(1);
+  if args.delay_ms == 0 {
+    // Pipeline move + all press/release pairs in a single FIFO batch.
+    let mut events = Vec::with_capacity(1 + (count as usize) * 2);
+    events.push(MouseEvent {
+      ty: "move",
+      button: "none",
+      buttons: 0,
+      x,
+      y,
+      click_count: 0,
+      modifiers: mods,
+    });
+    for n in 1..=count {
+      events.push(MouseEvent {
+        ty: "down",
+        button: btn,
+        buttons: bmask,
+        x,
+        y,
+        click_count: n,
+        modifiers: mods,
+      });
+      events.push(MouseEvent {
+        ty: "up",
+        button: btn,
+        buttons: 0,
+        x,
+        y,
+        click_count: n,
+        modifiers: mods,
+      });
+    }
+    futures::future::try_join_all(events.into_iter().map(|ev| mouse_event(page, ev))).await?;
+    return Ok(());
+  }
   mouse_event(
     page,
     MouseEvent {
@@ -96,7 +132,7 @@ pub async fn click(page: &WebKitPage, x: f64, y: f64, args: &BackendClickArgs) -
     },
   )
   .await?;
-  for n in 1..=args.click_count.max(1) {
+  for n in 1..=count {
     mouse_event(
       page,
       MouseEvent {

@@ -133,3 +133,102 @@ pub(crate) fn json_string(field: &[u8]) -> &[u8] {
 pub(crate) fn error_message(error_field: &[u8]) -> &[u8] {
   json_string(json_field(error_field, b"message"))
 }
+
+/// Top-level fields of a CDP JSON message extracted in a single pass.
+#[derive(Default)]
+pub(crate) struct CdpEnvelope<'a> {
+  pub id: u64,
+  pub method: &'a [u8],
+  pub session_id: &'a [u8],
+  pub result: &'a [u8],
+  pub error: &'a [u8],
+  pub params: &'a [u8],
+}
+
+/// Scan a CDP message once at depth 1 and extract its top-level envelope
+/// fields (`id`, `method`, `sessionId`, `result`, `error`, `params`),
+/// skipping over each field's value in one linear sweep.
+pub(crate) fn scan_cdp_envelope(data: &[u8]) -> CdpEnvelope<'_> {
+  let mut env = CdpEnvelope::default();
+  let mut depth: i32 = 0;
+  let mut in_str = false;
+  let mut esc = false;
+  let mut pos: usize = 0;
+  let len = data.len();
+  while pos < len {
+    let byte = data[pos];
+    if esc {
+      esc = false;
+      pos += 1;
+      continue;
+    }
+    if byte == b'\\' {
+      esc = true;
+      pos += 1;
+      continue;
+    }
+    if byte == b'"' {
+      if !in_str && depth == 1 {
+        let key_start = pos + 1;
+        let mut key_end = key_start;
+        while key_end < len && data[key_end] != b'"' {
+          if data[key_end] == b'\\' {
+            key_end += 2;
+          } else {
+            key_end += 1;
+          }
+        }
+        if key_end < len {
+          let key = &data[key_start..key_end];
+          let mut colon_pos = key_end + 1;
+          while colon_pos < len && (data[colon_pos] == b' ' || data[colon_pos] == b'\t') {
+            colon_pos += 1;
+          }
+          if colon_pos < len && data[colon_pos] == b':' {
+            let vstart = colon_pos + 1;
+            let val = scan_value(data, vstart);
+            match key {
+              b"id" => {
+                let mut parsed_id: u64 = 0;
+                for &digit in val {
+                  if digit == b' ' || digit == b'\t' {
+                    continue;
+                  }
+                  if !digit.is_ascii_digit() {
+                    break;
+                  }
+                  parsed_id = parsed_id * 10 + u64::from(digit - b'0');
+                }
+                env.id = parsed_id;
+              },
+              b"method" => env.method = json_string(val),
+              b"sessionId" => env.session_id = json_string(val),
+              b"result" => env.result = val,
+              b"error" => env.error = val,
+              b"params" => env.params = val,
+              _ => {},
+            }
+            pos = vstart + val.len();
+            continue;
+          }
+          pos = key_end + 1;
+          continue;
+        }
+      }
+      in_str = !in_str;
+      pos += 1;
+      continue;
+    }
+    if in_str {
+      pos += 1;
+      continue;
+    }
+    if byte == b'{' || byte == b'[' {
+      depth += 1;
+    } else if byte == b'}' || byte == b']' {
+      depth -= 1;
+    }
+    pos += 1;
+  }
+  env
+}

@@ -566,18 +566,16 @@ impl ContextRef {
     // including ones on a different instance.
     Box::pin(BrowserState::ensure_instance_shared(&self.state, &self.key.instance)).await?;
 
-    // Read the (optional) `BrowserContextOptions` bag before the open —
-    // a custom `viewport` (or `null` viewport) has to be known up-front
-    // so the backend opens the page at the right size rather than
-    // resizing afterwards.
-    let ctx_opts = {
+    let composite = self.key.to_composite();
+    // Read the (optional) `BrowserContextOptions` bag and page-open plan
+    // under a single read lock — a custom `viewport` (or `null` viewport)
+    // has to be known up-front so the backend opens the page at the right
+    // size rather than resizing afterwards.
+    let (ctx_opts, plan) = {
       let state = self.state.read().await;
-      state.get_context_options(&self.key.to_composite())
-    };
-
-    let plan = {
-      let state = self.state.read().await;
-      state.page_open_plan(&self.key)?
+      let opts = state.get_context_options(&composite);
+      let plan = state.page_open_plan(&self.key)?;
+      (opts, plan)
     };
     let effective_viewport = effective_viewport(ctx_opts.as_ref(), plan.viewport.clone());
 
@@ -621,66 +619,39 @@ impl ContextRef {
       (page, Some(ctx_id))
     };
 
-    {
+    let (proxy, record_opts, registries) = {
       let mut state = self.state.write().await;
       state.register_opened_page(&self.key, any_page.clone(), browser_context_id)?;
-    }
+      (
+        state.effective_proxy(&composite),
+        state.get_record_video(&composite),
+        PageRegistries {
+          bindings: state.context_bindings_handle(),
+          callbacks: Arc::clone(&state.context_callbacks),
+          ws_routes: state.context_ws_routes_handle(),
+          routes: state.context_routes_handle(),
+          init_scripts: Arc::clone(&state.context_init_scripts),
+        },
+      )
+    };
 
-    // `Page::with_context` spawns the FrameAttached/Detached/Navigated
-    // listener so sync accessors (`main_frame`, `frames`, `parent_frame`,
-    // `child_frames`, `is_detached`, `name`, `url`) see live state via
-    // the listener. Sync after the eager `Page.getFrameTree` RTT was
-    // dropped (`PERF_AUDIT` §M.4).
     let page = Page::with_context(any_page, self.clone());
     page.set_cached_viewport(effective_viewport.as_ref().map(|vp| (vp.width, vp.height)));
 
-    Box::pin(self.apply_effective_proxy(&page)).await?;
+    if proxy.is_some() {
+      Box::pin(page.inner().set_proxy(proxy)).await?;
+    }
 
-    // Apply the BrowserContextOptions bag to the fresh page. Fields
-    // without a backend implementation are silently skipped;
-    // backend-specific failures funnel up as `FerriError` and fail
-    // `new_page`, matching Playwright's "option applies or
-    // context.newPage rejects" contract.
     apply_context_options_or_defaults(&page, ctx_opts.as_ref()).await?;
     if let Some(opts) = ctx_opts.as_ref() {
       self.install_record_har(opts).await;
-
       Box::pin(self.hydrate_storage_state(opts)).await?;
     }
-
-    // If the context was configured with `recordVideo`, spawn the
-    // recording runtime now that we have the strong `Arc<Page>`.
-    // `start_video_recording` attaches a `Video` handle on the Page
-    // that resolves when the encoder finishes; the recording runs in
-    // the background via `tokio::spawn` and is stopped when the page
-    // closes.
-    let record_opts = {
-      let state = self.state.read().await;
-      state.get_record_video(&self.key.to_composite())
-    };
     if let Some(opts) = record_opts {
       start_video_recording(&page, &opts);
     }
 
-    // Re-apply every context-level binding (exposeBinding /
-    // exposeFunction) to the fresh page so it sees `window[name]`
-    // just like pages opened before the binding was registered.
-    self.apply_context_bindings(page.inner()).await?;
-
-    // Re-apply every context-level WebSocket route so sockets created
-    // in the fresh page are intercepted just like on pages that were
-    // open when `context.routeWebSocket` was called.
-    Box::pin(self.apply_context_ws_routes(&page)).await?;
-
-    // Re-apply every context-level route (`context.route` /
-    // `context.routeFromHAR`) so requests from the fresh page are
-    // intercepted and consume the shared `times` budget.
-    Box::pin(self.apply_context_routes(&page)).await?;
-
-    // Re-apply every context-level init script (`context.addInitScript`
-    // and the fake-clock engine + call log) so new documents in the
-    // fresh page replay them like pages that were already open.
-    self.apply_context_init_scripts(&page).await?;
+    Box::pin(registries.apply(&composite, &page)).await?;
 
     // A trace with screenshots films every page of the context —
     // including ones opened mid-recording.
@@ -717,16 +688,6 @@ impl ContextRef {
       .into_iter()
       .find(|page| page.page_backref_handle().same_page(slot))
       .map(|page| Page::with_context(page, self.clone()))
-  }
-
-  /// The proxy was fixed when the context was made; a page still has to
-  /// answer its challenges, and `BiDi` re-issues rewritten routes through it.
-  async fn apply_effective_proxy(&self, page: &Page) -> Result<()> {
-    let proxy = self.state.read().await.effective_proxy(&self.key.to_composite());
-    if proxy.is_some() {
-      Box::pin(page.inner().set_proxy(proxy)).await?;
-    }
-    Ok(())
   }
 
   /// Make this context in the browser if no page of it has yet, and
@@ -825,31 +786,6 @@ impl ContextRef {
     Ok(())
   }
 
-  /// Inject every registered context-level binding onto `page`.
-  /// Called from `new_page` so a freshly-opened page sees the same
-  /// `window[name]` proxies as pages opened before the binding existed.
-  async fn apply_context_bindings(&self, page: &AnyPage) -> Result<()> {
-    let composite = self.key.to_composite();
-    let bindings = {
-      let bindings_handle = self.state.read().await.context_bindings_handle();
-      let guard = bindings_handle.read().await;
-      guard
-        .get(&composite)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect::<Vec<_>>())
-        .unwrap_or_default()
-    };
-    for (name, binding) in bindings {
-      let binding_for_page = bind_source(binding, composite.clone());
-      page.expose_context_binding(&name, binding_for_page).await?;
-    }
-    for (name, binding) in self.context_callbacks().await {
-      page
-        .expose_context_callback(&name, bind_source(binding, composite.clone()))
-        .await?;
-    }
-    Ok(())
-  }
-
   async fn context_callbacks(&self) -> Vec<(String, crate::events::ExposedBinding)> {
     let callbacks = Arc::clone(&self.state.read().await.context_callbacks);
     let guard = callbacks.read().await;
@@ -872,7 +808,7 @@ impl ContextRef {
     Ok(())
   }
 
-  /// [`Self::apply_context_bindings`] via the paused-safe
+  /// Inject every registered context-level binding via the paused-safe
   /// [`AnyPage::expose_binding_pre_doc`] path — used by the popup pump
   /// before resuming, so the popup's first document sees every
   /// context-level binding from document-start.
@@ -1651,22 +1587,31 @@ impl ContextRef {
     // is still reachable — Playwright writes the updated HAR on context
     // close (`browserContext.ts` exports every live HAR recorder).
     self.flush_har_updates().await?;
-    let mut state = self.state.write().await;
-    if let Some(reason) = opts.and_then(|o| o.reason) {
-      state.set_close_reason(reason);
-    }
-    let persistent = state.persistent_context;
-    state.remove_context(&self.name).await;
-    if let Some(browser) = &self.browser {
-      browser.unregister_context(&self.name);
+    let (persistent, detached) = {
+      let mut state = self.state.write().await;
+      if let Some(reason) = opts.and_then(|o| o.reason) {
+        state.set_close_reason(reason);
+      }
+      let persistent = state.persistent_context;
+      let detached = state.detach_context(&self.name).await;
+      if let Some(browser) = &self.browser {
+        browser.unregister_context(&self.name);
+      }
+      (persistent, detached)
+    };
+    // Run protocol teardown (screen recording flush, page disposal, context
+    // recycling / disposal) off the global `BrowserState` write lock so
+    // concurrent sessions never stall waiting on another context's close.
+    if let Some(detached) = detached {
+      detached.finish().await;
     }
     if persistent {
       // Persistent-context launch contract: closing the context closes
       // the underlying browser too. Playwright:
       // `/tmp/playwright/packages/playwright-core/types/types.d.ts:15199`.
+      let mut state = self.state.write().await;
       state.shutdown().await?;
     }
-    drop(state);
     if first_close {
       self.events.emit(crate::events::ContextEvent::Close(self.clone()));
     }
@@ -2971,6 +2916,94 @@ async fn register_popup(
     }
   });
   Ok(())
+}
+
+/// Context-level registry handles captured under the single write lock in
+/// [`ContextRef::new_page`] so re-applying them onto a fresh page needs no
+/// further `BrowserState` locks.
+struct PageRegistries {
+  bindings: Arc<
+    tokio::sync::RwLock<rustc_hash::FxHashMap<String, rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
+  >,
+  callbacks: Arc<
+    tokio::sync::RwLock<rustc_hash::FxHashMap<String, rustc_hash::FxHashMap<String, crate::events::ExposedBinding>>>,
+  >,
+  ws_routes: Arc<tokio::sync::RwLock<crate::state::ContextWsRoutes>>,
+  routes: Arc<tokio::sync::RwLock<crate::state::ContextRoutes>>,
+  init_scripts: Arc<tokio::sync::RwLock<crate::state::ContextInitScripts>>,
+}
+
+impl PageRegistries {
+  async fn apply(self, composite: &str, page: &Arc<Page>) -> Result<()> {
+    let bindings = {
+      let guard = self.bindings.read().await;
+      guard
+        .get(composite)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect::<Vec<_>>())
+        .unwrap_or_default()
+    };
+    for (name, binding) in bindings {
+      page
+        .inner()
+        .expose_context_binding(&name, bind_source(binding, composite.to_owned()))
+        .await?;
+    }
+    let callbacks = {
+      let guard = self.callbacks.read().await;
+      guard
+        .get(composite)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect::<Vec<_>>())
+        .unwrap_or_default()
+    };
+    for (name, binding) in callbacks {
+      page
+        .inner()
+        .expose_context_callback(&name, bind_source(binding, composite.to_owned()))
+        .await?;
+    }
+    let ws_routes = {
+      let guard = self.ws_routes.read().await;
+      guard.get(composite).cloned().unwrap_or_default()
+    };
+    for (matcher, handler) in ws_routes {
+      page
+        .route_web_socket_scoped(matcher, handler, crate::web_socket_route::WsRouteScope::Context)
+        .await?;
+    }
+    let routes = {
+      let mut guard = self.routes.write().await;
+      match guard.get_mut(composite) {
+        Some(entries) => {
+          entries.retain(crate::route::RegisteredRoute::live);
+          entries.clone()
+        },
+        None => Vec::new(),
+      }
+    };
+    for registration in routes {
+      page.inner().route(registration).await?;
+    }
+    let scripts: Vec<_> = {
+      let guard = self.init_scripts.read().await;
+      guard
+        .get(composite)
+        .map(|entries| {
+          entries
+            .iter()
+            .map(|e| (e.id, e.source.clone(), Arc::clone(&e.installed)))
+            .collect()
+        })
+        .unwrap_or_default()
+    };
+    for (key, source, installed) in scripts {
+      let id = page.inner().add_context_init_script(key, &source).await?;
+      installed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((page.inner().clone(), id));
+    }
+    Ok(())
+  }
 }
 
 /// The viewport a backend should open a new page with: an explicit

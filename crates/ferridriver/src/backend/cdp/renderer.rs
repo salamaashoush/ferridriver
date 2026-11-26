@@ -39,6 +39,10 @@ impl<T: CdpWrap> Drop for AdoptedPages<T> {
 pub(super) struct FetchState {
   pub enabled: AtomicBool,
   pub transition: tokio::sync::Mutex<()>,
+  /// Last `Fetch.enable` params sent so `ensure_fetch_enabled_current` can
+  /// update Chrome's native `urlPattern` filter when routes change without
+  /// redundant `Fetch.enable` calls.
+  pub last_enable: std::sync::Mutex<Option<serde_json::Value>>,
   /// The live `Fetch.*` interceptor task, if interception is enabled.
   /// `unroute`/`unroute_all` MUST abort it when they `Fetch.disable` on
   /// the last route: a later `route` re-enables and spawns a fresh
