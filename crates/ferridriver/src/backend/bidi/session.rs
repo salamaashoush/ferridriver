@@ -165,31 +165,34 @@ impl BidiSession {
     } else {
       json!(["browsingContext", "network", "log", "script", "input"])
     };
-    transport
-      .send_command("session.subscribe", json!({"events": events}))
-      .await?;
-
-    for (method, params) in [
-      (
+    let startup: [futures::future::BoxFuture<'_, Result<serde_json::Value>>; 4] = [
+      Box::pin(transport.send_command("session.subscribe", json!({"events": events}))),
+      Box::pin(transport.send_command(
         "network.addDataCollector",
-        json!({"dataTypes": ["response"], "maxEncodedDataSize":20_000_000}),
-      ),
-      ("network.addIntercept", json!({"phases":["authRequired"]})),
-    ] {
-      match transport.send_command(method, params).await {
+        json!({"dataTypes": ["response"], "maxEncodedDataSize": 20_000_000}),
+      )),
+      Box::pin(transport.send_command("network.addIntercept", json!({"phases": ["authRequired"]}))),
+      Box::pin(transport.send_command("browser.getUserContexts", json!({}))),
+    ];
+    let mut results = futures::future::join_all(startup).await.into_iter();
+    if let Some(sub_res) = results.next() {
+      sub_res?;
+    }
+    for optional in results.by_ref().take(2) {
+      match optional {
         Ok(_) => {},
         Err(FerriError::Unsupported(reason)) => tracing::debug!(%reason, "optional BiDi capability unavailable"),
         Err(error) => return Err(error),
       }
     }
-
-    let user_contexts = match transport.send_command("browser.getUserContexts", json!({})).await {
-      Ok(_) => true,
-      Err(FerriError::Unsupported(reason)) => {
+    let user_contexts = match results.next() {
+      Some(Ok(_)) => true,
+      Some(Err(FerriError::Unsupported(reason))) => {
         tracing::debug!(%reason, "BiDi user contexts unavailable; pages share the default context");
         false
       },
-      Err(error) => return Err(error),
+      Some(Err(error)) => return Err(error),
+      None => false,
     };
 
     info!("BiDi session ready: {browser_name} {browser_version}");
