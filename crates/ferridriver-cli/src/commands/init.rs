@@ -136,7 +136,7 @@ fn config_document(format: &str, bdd: bool) -> String {
        {}\
        browser:\n    headless: true\n\n\
        mcp:\n  \
-       browser:\n    backend: cdp-pipe\n",
+       browser:\n    backend: cdp\n",
       if bdd {
         "features:\n    - 'tests/features/**/*.feature'\n  steps:\n    - 'tests/steps/**/*.ts'\n  "
       } else {
@@ -146,7 +146,7 @@ fn config_document(format: &str, bdd: bool) -> String {
     "json" => format!(
       "{{\n  \"test\": {{\n    \"testMatch\": [\"tests/**/*.spec.ts\", \"tests/**/*.test.ts\"],\n{}    \
        \"browser\": {{ \"headless\": true }}\n  }},\n  \
-       \"mcp\": {{ \"browser\": {{ \"backend\": \"cdp-pipe\" }} }}\n}}\n",
+       \"mcp\": {{ \"browser\": {{ \"backend\": \"cdp\" }} }}\n}}\n",
       if bdd {
         "    \"features\": [\"tests/features/**/*.feature\"],\n    \"steps\": [\"tests/steps/**/*.ts\"],\n"
       } else {
@@ -162,7 +162,7 @@ fn config_document(format: &str, bdd: bool) -> String {
        headless = true\n\n\
        # What `ferridriver mcp` serves to a coding agent.\n\
        [mcp.browser]\n\
-       backend = \"cdp-pipe\"\n",
+       backend = \"cdp\"\n",
       if bdd {
         format!("features = [\"tests/features/**/*.feature\"]\nsteps = [{steps}]\n")
       } else {

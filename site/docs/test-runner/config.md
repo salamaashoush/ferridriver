@@ -17,8 +17,9 @@ fullyParallel = true
 outputDir     = "test-results"
 
 [test.browser]
-backend  = "cdp-pipe"
-headless = true
+backend   = "cdp"
+transport = "pipe"
+headless  = true
 
 [test.browser.viewport]
 width  = 1280

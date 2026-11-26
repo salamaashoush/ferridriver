@@ -107,8 +107,9 @@ pub(crate) struct RustTestArgs {
   #[command(flatten)]
   pub windows: HarnessWindows,
 
-  /// Browser backend for ferritest harness binaries (`cdp-pipe`,
-  /// `cdp-raw`, `bidi`, `webkit`; exported as `FERRITEST_BACKEND`).
+  /// Browser backend for ferritest harness binaries (`cdp`, `bidi`,
+  /// `webkit`, `webdriver`, or `cdp-pipe`/`cdp-ws`; exported as
+  /// `FERRITEST_BACKEND`).
   #[arg(long, help_heading = "Harness")]
   pub backend: Option<String>,
 

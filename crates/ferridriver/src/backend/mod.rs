@@ -442,19 +442,66 @@ impl NavLifecycle {
   }
 }
 
-/// Which backend to use.
+/// Wire protocol spoken to the browser, independent of the transport layer
+/// (`pipe` vs `ws` for CDP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+  /// Chrome `DevTools` Protocol (Chromium, Chrome, Lightpanda).
+  Cdp,
+  /// `WebDriver` `BiDi` (Firefox, Ladybird, Chromium, Safari).
+  Bidi,
+  /// Playwright `WebKit` Inspector protocol.
+  #[serde(rename = "webkit")]
+  WebKit,
+  /// W3C Classic `WebDriver`.
+  #[serde(rename = "webdriver", alias = "web-driver")]
+  WebDriver,
+}
+
+impl Protocol {
+  pub const ALL: &'static [&'static str] = &["cdp", "bidi", "webkit", "webdriver"];
+
+  /// # Errors
+  /// Rejects unknown protocol names.
+  pub fn parse(value: &str) -> Result<Self> {
+    match value {
+      "cdp" => Ok(Self::Cdp),
+      "bidi" => Ok(Self::Bidi),
+      "webkit" => Ok(Self::WebKit),
+      "webdriver" | "web-driver" => Ok(Self::WebDriver),
+      _ => Err(FerriError::invalid_argument(
+        "protocol",
+        format!("unknown protocol {value:?}; expected {}", Self::ALL.join(", ")),
+      )),
+    }
+  }
+
+  #[must_use]
+  pub const fn name(self) -> &'static str {
+    match self {
+      Self::Cdp => "cdp",
+      Self::Bidi => "bidi",
+      Self::WebKit => "webkit",
+      Self::WebDriver => "webdriver",
+    }
+  }
+}
+
+/// Which backend (protocol + transport) to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
-  /// Chrome `DevTools` Protocol over pipes (--remote-debugging-pipe)
+  /// Chrome `DevTools` Protocol over pipes (`--remote-debugging-pipe`).
+  #[serde(rename = "cdp-pipe", alias = "cdp")]
   CdpPipe,
-  /// Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
+  /// Chrome `DevTools` Protocol over WebSocket.
   #[serde(rename = "cdp-ws", alias = "cdp-raw")]
   CdpWs,
-  /// Playwright `WebKit` Inspector protocol (cross-platform, bundled binary)
+  /// Playwright `WebKit` Inspector protocol (cross-platform, bundled binary).
   #[serde(rename = "webkit")]
   WebKit,
-  /// `WebDriver` `BiDi` protocol (cross-browser: Chrome, Firefox, future Safari)
+  /// `WebDriver` `BiDi` protocol (cross-browser: Firefox, Ladybird, Chromium, Safari).
   Bidi,
   #[serde(rename = "webdriver", alias = "web-driver")]
   WebDriver,
@@ -467,7 +514,7 @@ impl BackendKind {
   /// Rejects unknown protocol names.
   pub fn parse(value: &str) -> Result<Self> {
     match value {
-      "cdp-pipe" => Ok(Self::CdpPipe),
+      "cdp" | "cdp-pipe" => Ok(Self::CdpPipe),
       "cdp-ws" | "cdp-raw" => Ok(Self::CdpWs),
       "bidi" => Ok(Self::Bidi),
       "webkit" => Ok(Self::WebKit),
@@ -476,6 +523,60 @@ impl BackendKind {
         "backend",
         format!("unknown backend {value:?}; expected {}", Self::ALL.join(", ")),
       )),
+    }
+  }
+
+  /// Build a backend kind from a wire [`Protocol`] and an optional CDP transport.
+  ///
+  /// # Errors
+  /// Rejects a transport override paired with a non-CDP protocol.
+  pub fn from_protocol(protocol: Protocol, transport: Option<crate::options::ChromiumTransport>) -> Result<Self> {
+    match (protocol, transport) {
+      (Protocol::Cdp, None | Some(crate::options::ChromiumTransport::Pipe)) => Ok(Self::CdpPipe),
+      (Protocol::Cdp, Some(crate::options::ChromiumTransport::Ws)) => Ok(Self::CdpWs),
+      (Protocol::Bidi, None) => Ok(Self::Bidi),
+      (Protocol::WebKit, None) => Ok(Self::WebKit),
+      (Protocol::WebDriver, None) => Ok(Self::WebDriver),
+      (other, Some(t)) => Err(FerriError::invalid_argument(
+        "transport",
+        format!(
+          "transport '{}' only applies to CDP backends, not {}",
+          t.as_str(),
+          other.name()
+        ),
+      )),
+    }
+  }
+
+  /// The wire [`Protocol`] this backend speaks, independent of transport.
+  #[must_use]
+  pub const fn protocol(self) -> Protocol {
+    match self {
+      Self::CdpPipe | Self::CdpWs => Protocol::Cdp,
+      Self::WebKit => Protocol::WebKit,
+      Self::Bidi => Protocol::Bidi,
+      Self::WebDriver => Protocol::WebDriver,
+    }
+  }
+
+  /// The CDP wire transport, or `None` for non-CDP backends.
+  #[must_use]
+  pub const fn transport(self) -> Option<crate::options::ChromiumTransport> {
+    match self {
+      Self::CdpPipe => Some(crate::options::ChromiumTransport::Pipe),
+      Self::CdpWs => Some(crate::options::ChromiumTransport::Ws),
+      Self::WebKit | Self::Bidi | Self::WebDriver => None,
+    }
+  }
+
+  /// Apply an explicit CDP transport override to this backend.
+  ///
+  /// # Errors
+  /// Rejects a transport override on a non-CDP backend.
+  pub fn with_transport(self, transport: Option<crate::options::ChromiumTransport>) -> Result<Self> {
+    match transport {
+      None => Ok(self),
+      Some(t) => Self::from_protocol(self.protocol(), Some(t)),
     }
   }
 

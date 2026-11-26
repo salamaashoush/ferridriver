@@ -10,12 +10,18 @@ pub(crate) struct BrowserArgs {
   /// Browser to automate; its driver is selected automatically.
   #[arg(long, help_heading = "Browser")]
   pub browser: Option<ferridriver::options::BrowserKind>,
-  /// Browser backend to use. Unset means "whatever the config says",
-  /// falling back to `cdp-pipe`; there is deliberately no clap default,
-  /// because a default is indistinguishable from an explicit choice and
-  /// the config could then never be overridden on the command line.
-  #[arg(long, help_heading = "Browser")]
+  /// Browser protocol / backend to use (`cdp`, `bidi`, `webkit`,
+  /// `webdriver`; legacy `cdp-pipe`, `cdp-ws`, `cdp-raw` also accepted).
+  /// Unset means "whatever the config says", falling back to Chromium over
+  /// CDP pipe; there is deliberately no clap default, because a default is
+  /// indistinguishable from an explicit choice and the config could then
+  /// never be overridden on the command line.
+  #[arg(long, alias = "protocol", help_heading = "Browser")]
   pub backend: Option<Backend>,
+
+  /// CDP wire transport (`pipe` or `ws`). Applies only to CDP backends.
+  #[arg(long, help_heading = "Browser")]
+  pub cdp_transport: Option<CdpTransport>,
 
   /// Run the browser without a visible window. Off by default because
   /// MCP's canonical use case is an interactive debugging / agent
@@ -69,17 +75,24 @@ pub(crate) fn effective_browser(
   mcp: &ferridriver_config::mcp::McpConfig,
 ) -> anyhow::Result<EffectiveBrowser> {
   let cli_backend = args.backend_kind();
+  let cli_transport = args.transport_override();
   let cli_headless = args.headless_override();
   let (configured_browser, configured_backend) = mcp.browser_choices();
-  let selection = ferridriver::options::BrowserSelection::resolve(
+  let configured_transport = mcp.transport();
+  let selection = ferridriver::options::BrowserSelection::resolve_with_transport(
     args.browser.or(configured_browser),
     cli_backend.or_else(|| args.browser.is_none().then_some(configured_backend).flatten()),
+    cli_transport.or_else(|| {
+      (args.browser.is_none() && cli_backend.is_none())
+        .then_some(configured_transport)
+        .flatten()
+    }),
   )?;
   Ok(EffectiveBrowser {
     browser: selection.browser,
     backend: selection.backend,
     headless: cli_headless.unwrap_or_else(|| mcp.headless()),
-    backend_from_cli: cli_backend.is_some(),
+    backend_from_cli: cli_backend.is_some() || cli_transport.is_some(),
     headless_from_cli: cli_headless.is_some(),
   })
 }
@@ -89,6 +102,14 @@ impl BrowserArgs {
   /// `None` means "defer to the config file".
   pub(crate) fn backend_kind(&self) -> Option<BackendKind> {
     self.backend.as_ref().map(backend_to_kind)
+  }
+
+  /// Explicit CDP transport (`--cdp-transport pipe|ws`), if passed.
+  pub(crate) fn transport_override(&self) -> Option<ferridriver::options::ChromiumTransport> {
+    self.cdp_transport.map(|t| match t {
+      CdpTransport::Pipe => ferridriver::options::ChromiumTransport::Pipe,
+      CdpTransport::Ws => ferridriver::options::ChromiumTransport::Ws,
+    })
   }
 
   /// The backend wire name the user asked for, for the string-typed
@@ -144,6 +165,8 @@ pub(crate) struct TransportArgs {
 
 #[derive(Clone, ValueEnum)]
 pub(crate) enum Backend {
+  #[value(name = "cdp")]
+  Cdp,
   CdpPipe,
   #[value(name = "cdp-ws", alias = "cdp-raw")]
   CdpWs,
@@ -154,6 +177,12 @@ pub(crate) enum Backend {
   WebDriver,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum CdpTransport {
+  Pipe,
+  Ws,
+}
+
 #[derive(Clone, ValueEnum)]
 pub(crate) enum Transport {
   Stdio,
@@ -162,7 +191,7 @@ pub(crate) enum Transport {
 
 pub(super) fn backend_to_kind(b: &Backend) -> BackendKind {
   match b {
-    Backend::CdpPipe => BackendKind::CdpPipe,
+    Backend::Cdp | Backend::CdpPipe => BackendKind::CdpPipe,
     Backend::CdpWs => BackendKind::CdpWs,
     Backend::WebKit => BackendKind::WebKit,
     Backend::Bidi => BackendKind::Bidi,

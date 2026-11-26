@@ -2196,13 +2196,26 @@ impl BrowserSelection {
     browser: Option<BrowserKind>,
     backend: Option<crate::backend::BackendKind>,
   ) -> crate::error::Result<Self> {
+    Self::resolve_with_transport(browser, backend, None)
+  }
+
+  /// Resolve browser, backend protocol, and optional CDP wire transport together.
+  ///
+  /// # Errors
+  /// Rejects a protocol or transport that cannot drive the requested browser.
+  pub fn resolve_with_transport(
+    browser: Option<BrowserKind>,
+    backend: Option<crate::backend::BackendKind>,
+    transport: Option<ChromiumTransport>,
+  ) -> crate::error::Result<Self> {
     use crate::backend::BackendKind;
     let browser = browser.unwrap_or(match backend {
       Some(BackendKind::Bidi) => BrowserKind::Firefox,
       Some(BackendKind::WebKit) => BrowserKind::WebKit,
       _ => BrowserKind::Chromium,
     });
-    let backend = backend.unwrap_or_else(|| browser.default_backend());
+    let base_backend = backend.unwrap_or_else(|| browser.default_backend());
+    let backend = base_backend.with_transport(transport)?;
     let compatible = matches!(
       (browser, backend),
       (
@@ -2368,14 +2381,42 @@ pub struct BrowserTypeOptions {
   pub transport: Option<ChromiumTransport>,
 }
 
-/// Wire transport for the Chromium backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Wire transport for the CDP backend (`pipe` or `ws`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ChromiumTransport {
-  /// CDP over Unix pipe (fd 3/4). Default — lowest latency.
+  /// CDP over Unix pipe (fd 3/4). Default for Chromium — lowest latency.
   Pipe,
-  /// CDP over WebSocket. Used by `connectOverCDP` and explicitly
-  /// selectable via `chromium({ transport: 'ws' })`.
+  /// CDP over WebSocket. Used by `connectOverCDP`, Lightpanda, and explicitly
+  /// selectable via `chromium({ transport: 'ws' })` or `transport = "ws"`.
   Ws,
+}
+
+impl ChromiumTransport {
+  pub const ALL: &'static [&'static str] = &["pipe", "ws"];
+
+  #[must_use]
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Pipe => "pipe",
+      Self::Ws => "ws",
+    }
+  }
+}
+
+impl std::str::FromStr for ChromiumTransport {
+  type Err = crate::error::FerriError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s {
+      "pipe" => Ok(Self::Pipe),
+      "ws" | "websocket" => Ok(Self::Ws),
+      _ => Err(crate::error::FerriError::invalid_argument(
+        "transport",
+        format!("unknown transport {s:?}; expected {}", Self::ALL.join(", ")),
+      )),
+    }
+  }
 }
 
 /// Internal launch plan. Carries fields that are NOT exposed on the
@@ -4480,5 +4521,59 @@ mod browser_selection_tests {
         }
       }
     }
+  }
+
+  #[test]
+  fn protocol_and_transport_resolve_orthogonally() {
+    use super::ChromiumTransport;
+    use crate::backend::Protocol;
+
+    assert_eq!(BackendKind::parse("cdp").unwrap(), BackendKind::CdpPipe);
+    assert_eq!(BackendKind::CdpPipe.protocol(), Protocol::Cdp);
+    assert_eq!(BackendKind::CdpWs.protocol(), Protocol::Cdp);
+    assert_eq!(BackendKind::CdpPipe.transport(), Some(ChromiumTransport::Pipe));
+    assert_eq!(BackendKind::CdpWs.transport(), Some(ChromiumTransport::Ws));
+    assert_eq!(BackendKind::Bidi.transport(), None);
+
+    assert_eq!(
+      BrowserSelection::resolve_with_transport(
+        Some(BrowserKind::Chromium),
+        Some(BackendKind::parse("cdp").unwrap()),
+        Some(ChromiumTransport::Ws),
+      )
+      .unwrap(),
+      BrowserSelection {
+        browser: BrowserKind::Chromium,
+        backend: BackendKind::CdpWs,
+      }
+    );
+    assert_eq!(
+      BrowserSelection::resolve_with_transport(
+        Some(BrowserKind::Lightpanda),
+        Some(BackendKind::parse("cdp").unwrap()),
+        Some(ChromiumTransport::Ws),
+      )
+      .unwrap(),
+      BrowserSelection {
+        browser: BrowserKind::Lightpanda,
+        backend: BackendKind::CdpWs,
+      }
+    );
+    assert!(
+      BrowserSelection::resolve_with_transport(
+        Some(BrowserKind::Firefox),
+        Some(BackendKind::Bidi),
+        Some(ChromiumTransport::Ws),
+      )
+      .is_err()
+    );
+    assert!(
+      BrowserSelection::resolve_with_transport(
+        Some(BrowserKind::Lightpanda),
+        Some(BackendKind::parse("cdp").unwrap()),
+        Some(ChromiumTransport::Pipe),
+      )
+      .is_err()
+    );
   }
 }

@@ -39,21 +39,23 @@ reuseExistingServer = true
 # on the single [test.browser] above.
 
 [[test.projects]]
-name = "cdp-pipe"
+name = "chromium"
 [test.projects.browser]
 browser = "chromium"
-backend = "cdp-pipe"
+backend = "cdp"
+transport = "pipe"
 headless = true
 
 [[test.projects]]
-name = "cdp-raw"
+name = "chromium-ws"
 [test.projects.browser]
 browser = "chromium"
-backend = "cdp-raw"
+backend = "cdp"
+transport = "ws"
 headless = true
 
 [[test.projects]]
-name = "bidi"
+name = "firefox"
 [test.projects.browser]
 browser = "firefox"
 backend = "bidi"
@@ -77,5 +79,6 @@ headless = true
 name = "lightpanda"
 [test.projects.browser]
 browser = "lightpanda"
-backend = "cdp-raw"
+backend = "cdp"
+transport = "ws"
 headless = true

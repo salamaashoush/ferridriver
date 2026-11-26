@@ -774,7 +774,11 @@ pub struct TestConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct BrowserConfig {
   pub browser: String,
+  #[serde(alias = "protocol")]
   pub backend: String,
+  /// CDP wire transport (`pipe` or `ws`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub transport: Option<ferridriver::options::ChromiumTransport>,
   pub channel: Option<String>,
   pub headless: bool,
   pub executable_path: Option<String>,
@@ -1285,7 +1289,7 @@ impl BrowserConfig {
     let backend = (self.backend != "auto")
       .then(|| ferridriver::backend::BackendKind::parse(&self.backend))
       .transpose()?;
-    let selection = ferridriver::options::BrowserSelection::resolve(browser, backend)?;
+    let selection = ferridriver::options::BrowserSelection::resolve_with_transport(browser, backend, self.transport)?;
     Ok((selection.backend, selection.browser))
   }
 }
@@ -1295,6 +1299,7 @@ impl Default for BrowserConfig {
     Self {
       browser: "auto".into(),
       backend: "auto".into(),
+      transport: None,
       channel: None,
       global_browser: None,
       // Headless unless asked, as Playwright runs: `--headed` (or
@@ -1777,6 +1782,7 @@ pub struct CliOverrides {
   pub fail_on_flaky_tests: bool,
   pub browser: Option<String>,
   pub backend: Option<String>,
+  pub transport: Option<ferridriver::options::ChromiumTransport>,
   pub channel: Option<String>,
   pub executable_path: Option<String>,
   /// `--connect` / `--auto-connect`: run against this browser instead of
@@ -2066,6 +2072,9 @@ impl TestConfig {
       if pb.browser != "auto" || pb.backend != "auto" {
         merged.browser.browser.clone_from(&pb.browser);
         merged.browser.backend.clone_from(&pb.backend);
+        merged.browser.transport = pb.transport;
+      } else if pb.transport.is_some() {
+        merged.browser.transport = pb.transport;
       }
       if let Some(ref ch) = pb.channel {
         merged.browser.channel = Some(ch.clone());

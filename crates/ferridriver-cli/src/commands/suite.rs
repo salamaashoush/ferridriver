@@ -50,6 +50,7 @@ pub(crate) fn apply_shared(
   overrides.headless_override = browser.headless_override();
   overrides.browser = browser.browser.map(|kind| kind.name().to_owned());
   overrides.backend = browser.backend_name().map(str::to_string);
+  overrides.transport = browser.transport_override();
   overrides.executable_path.clone_from(&browser.executable_path);
   // Unset, the config decides: launch, or the instance's own connection.
   overrides.connect = (browser.connect.is_some() || browser.auto_connect.is_some()).then(|| browser.connect_mode());
