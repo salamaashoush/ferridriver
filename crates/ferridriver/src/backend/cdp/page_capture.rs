@@ -12,11 +12,16 @@ impl CdpPage {
   /// Returns an error if Chrome rejects `Emulation.setDefaultBackgroundColorOverride`, the target has closed,
   /// or the command outlives its time budget.
   pub async fn set_background_color(&self, color: Option<BackgroundColor>) -> Result<()> {
-    let params = match color {
-      Some(c) => serde_json::json!({ "color": { "r": c.r, "g": c.g, "b": c.b, "a": c.a } }),
-      None => serde_json::json!({}),
-    };
-    self.cmd("Emulation.setDefaultBackgroundColorOverride", params).await?;
+    self
+      .send_typed(&ferridriver_cdp_proto::emulation::SetDefaultBackgroundColorOverride {
+        color: color.map(|c| ferridriver_cdp_proto::emulation::Rgba {
+          r: c.r,
+          g: c.g,
+          b: c.b,
+          a: c.a,
+        }),
+      })
+      .await?;
     Ok(())
   }
 
@@ -105,10 +110,10 @@ impl CdpPage {
     let bytes = screenshot::capture(&self.transport, self.session_id.as_deref(), params).await?;
     if had_touch {
       self
-        .cmd(
-          "Emulation.setTouchEmulationEnabled",
-          serde_json::json!({ "enabled": true, "maxTouchPoints": 5 }),
-        )
+        .send_typed(&ferridriver_cdp_proto::emulation::SetTouchEmulationEnabled {
+          enabled: true,
+          max_touch_points: Some(5),
+        })
         .await?;
     }
     Ok(bytes)
@@ -149,16 +154,13 @@ impl CdpPage {
     Self::spawn_screencast_listener(Arc::clone(&self.transport), self.session_id.clone(), tx, shutdown_rx);
 
     self
-      .cmd(
-        "Page.startScreencast",
-        serde_json::json!({
-          "format": "jpeg",
-          "quality": quality,
-          "maxWidth": max_width,
-          "maxHeight": max_height,
-          "everyNthFrame": 1,
-        }),
-      )
+      .send_typed(&ferridriver_cdp_proto::page::StartScreencast {
+        format: Some("jpeg"),
+        quality: Some(quality),
+        max_width: Some(max_width),
+        max_height: Some(max_height),
+        every_nth_frame: Some(1),
+      })
       .await?;
 
     Ok((rx, shutdown_tx))
@@ -171,7 +173,7 @@ impl CdpPage {
   /// Returns an error if Chrome rejects `Page.stopScreencast`, the target has closed, or the command outlives
   /// its time budget.
   pub async fn stop_screencast(&self) -> Result<()> {
-    self.cmd("Page.stopScreencast", serde_json::json!({})).await?;
+    self.send_typed(&ferridriver_cdp_proto::page::StopScreencast {}).await?;
     Ok(())
   }
 
@@ -267,10 +269,9 @@ impl CdpPage {
     let sid = session_id.cloned();
     tokio::spawn(async move {
       let _ = t
-        .send_command(
+        .send(
           sid.as_deref(),
-          "Page.screencastFrameAck",
-          &serde_json::json!({ "sessionId": ack_id }),
+          &ferridriver_cdp_proto::page::ScreencastFrameAck { session_id: ack_id },
         )
         .await;
     });
@@ -321,31 +322,30 @@ impl CdpPage {
     let margin_bottom = margin.bottom.as_ref().map_or(0.0, crate::options::PdfSize::to_inches);
     let margin_left = margin.left.as_ref().map_or(0.0, crate::options::PdfSize::to_inches);
 
-    let params = serde_json::json!({
-      "landscape": opts.landscape.unwrap_or(false),
-      "displayHeaderFooter": opts.display_header_footer.unwrap_or(false),
-      "headerTemplate": opts.header_template.unwrap_or_default(),
-      "footerTemplate": opts.footer_template.unwrap_or_default(),
-      "printBackground": opts.print_background.unwrap_or(false),
-      "scale": opts.scale.unwrap_or(1.0),
-      "paperWidth": paper_width,
-      "paperHeight": paper_height,
-      "marginTop": margin_top,
-      "marginBottom": margin_bottom,
-      "marginLeft": margin_left,
-      "marginRight": margin_right,
-      "pageRanges": opts.page_ranges.unwrap_or_default(),
-      "preferCSSPageSize": opts.prefer_css_page_size.unwrap_or(false),
-      "generateTaggedPDF": opts.tagged.unwrap_or(false),
-      "generateDocumentOutline": opts.outline.unwrap_or(false),
-    });
-
-    let result = self.cmd("Page.printToPDF", params).await?;
-    let data = result
-      .get("data")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::backend("No PDF data"))?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+    let header_template = opts.header_template.unwrap_or_default();
+    let footer_template = opts.footer_template.unwrap_or_default();
+    let page_ranges = opts.page_ranges.unwrap_or_default();
+    let result = self
+      .send_typed(&ferridriver_cdp_proto::page::PrintToPdf {
+        landscape: opts.landscape.unwrap_or(false),
+        display_header_footer: opts.display_header_footer.unwrap_or(false),
+        header_template: &header_template,
+        footer_template: &footer_template,
+        print_background: opts.print_background.unwrap_or(false),
+        scale: opts.scale.unwrap_or(1.0),
+        paper_width,
+        paper_height,
+        margin_top,
+        margin_bottom,
+        margin_left,
+        margin_right,
+        page_ranges: &page_ranges,
+        prefer_css_page_size: opts.prefer_css_page_size.unwrap_or(false),
+        generate_tagged_pdf: opts.tagged.unwrap_or(false),
+        generate_document_outline: opts.outline.unwrap_or(false),
+      })
+      .await?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &result.data)
       .map_err(|e| FerriError::Backend(format!("Decode PDF: {e}")))
   }
 
@@ -367,54 +367,39 @@ impl CdpPage {
   /// outlives its time budget. Also fails when it returns no nodes.
   pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     let result = self
-      .cmd("Accessibility.getFullAXTree", serde_json::json!({"depth": depth}))
+      .send_typed(&ferridriver_cdp_proto::accessibility::GetFullAxTree {
+        depth: Some(i64::from(depth)),
+        frame_id: None,
+      })
       .await?;
 
-    let nodes = result
-      .get("nodes")
-      .and_then(|n| n.as_array())
-      .ok_or_else(|| FerriError::protocol("Accessibility.getFullAXTree", "No a11y nodes"))?;
-
     Ok(
-      nodes
-        .iter()
+      result
+        .nodes
+        .into_iter()
         .map(|node| {
-          let get_ax_value = |field: &str| -> Option<String> {
-            node
-              .get(field)
-              .and_then(|v| v.get("value"))
-              .and_then(|v| v.as_str())
-              .map(std::string::ToString::to_string)
+          let ax_str = |v: Option<ferridriver_cdp_proto::accessibility::AxValue>| -> Option<String> {
+            v.and_then(|av| av.value)
+              .and_then(|val| val.as_str().map(std::string::ToString::to_string))
           };
-
           let properties = node
-            .get("properties")
-            .and_then(|p| p.as_array())
-            .map(|props| {
-              props
-                .iter()
-                .map(|p| AxProperty {
-                  name: p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_lowercase(),
-                  value: p.get("value").and_then(|v| v.get("value")).cloned(),
-                })
-                .collect()
+            .properties
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| AxProperty {
+              name: p.name.to_lowercase(),
+              value: p.value.value,
             })
-            .unwrap_or_default();
+            .collect();
 
           AxNodeData {
-            node_id: node.get("nodeId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            parent_id: node
-              .get("parentId")
-              .and_then(|v| v.as_str())
-              .map(std::string::ToString::to_string),
-            backend_dom_node_id: node.get("backendDOMNodeId").and_then(serde_json::Value::as_i64),
-            ignored: node
-              .get("ignored")
-              .and_then(serde_json::Value::as_bool)
-              .unwrap_or(false),
-            role: get_ax_value("role"),
-            name: get_ax_value("name"),
-            description: get_ax_value("description"),
+            node_id: node.node_id,
+            parent_id: node.parent_id,
+            backend_dom_node_id: node.backend_dom_node_id,
+            ignored: node.ignored,
+            role: ax_str(node.role),
+            name: ax_str(node.name),
+            description: ax_str(node.description),
             properties,
           }
         })

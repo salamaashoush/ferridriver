@@ -351,6 +351,44 @@ impl Command for ScreencastFrameAck {
   type Response = EmptyResponse;
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[expect(
+  clippy::struct_excessive_bools,
+  reason = "CDP Page.printToPDF wire schema defines six boolean flags"
+)]
+pub struct PrintToPdf<'a> {
+  pub landscape: bool,
+  pub display_header_footer: bool,
+  pub header_template: &'a str,
+  pub footer_template: &'a str,
+  pub print_background: bool,
+  pub scale: f64,
+  pub paper_width: f64,
+  pub paper_height: f64,
+  pub margin_top: f64,
+  pub margin_bottom: f64,
+  pub margin_left: f64,
+  pub margin_right: f64,
+  pub page_ranges: &'a str,
+  #[serde(rename = "preferCSSPageSize")]
+  pub prefer_css_page_size: bool,
+  #[serde(rename = "generateTaggedPDF")]
+  pub generate_tagged_pdf: bool,
+  pub generate_document_outline: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintToPdfResponse {
+  pub data: String,
+}
+
+impl Command for PrintToPdf<'_> {
+  const METHOD: &'static str = "Page.printToPDF";
+  type Response = PrintToPdfResponse;
+}
+
 /// `Page.frameNavigated` event payload.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

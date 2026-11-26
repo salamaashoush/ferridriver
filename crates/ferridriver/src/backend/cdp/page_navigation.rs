@@ -89,17 +89,19 @@ impl CdpPage {
     // `referrer` mirrors the CDP `Page.navigate` param (note the CDP
     // spelling uses two r's — we keep Playwright's single-r public spelling
     // `referer` and translate here).
-    let mut nav_params = serde_json::json!({ "url": url });
-    if let Some(r) = referer {
-      nav_params["referrer"] = serde_json::Value::String(r.to_string());
-    }
     let (pre_loader_id, pre_same_document) = {
       let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       (state.current_loader_id.clone(), state.same_document_seq)
     };
-    let nav_result = self.cmd("Page.navigate", nav_params).await?;
+    let nav_result = self
+      .send_typed(&ferridriver_cdp_proto::page::Navigate {
+        url,
+        referrer: referer,
+        frame_id: None,
+      })
+      .await?;
 
-    if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str())
+    if let Some(error_text) = nav_result.error_text.as_deref()
       && !error_text.is_empty()
     {
       return Err(FerriError::Backend(format!("Navigation failed: {error_text}")));
@@ -112,15 +114,11 @@ impl CdpPage {
     // (the bootstrap previously paid that RTT inside `enable_domains`;
     // dropping it shifted the cost into per-action paths if not seeded
     // here).
-    if let Some(fid) = nav_result.get("frameId").and_then(|v| v.as_str()) {
-      let _ = self.main_frame_id.set(fid.to_string());
+    if !nav_result.frame_id.is_empty() {
+      let _ = self.main_frame_id.set(nav_result.frame_id);
     }
 
-    let nav_loader_id = nav_result
-      .get("loaderId")
-      .and_then(|v| v.as_str())
-      .unwrap_or("")
-      .to_string();
+    let nav_loader_id = nav_result.loader_id.unwrap_or_default();
 
     // Mirrors Playwright's `Frame.gotoImpl`
     // (`/tmp/playwright/packages/playwright-core/src/server/frames.ts:644`):
@@ -247,7 +245,9 @@ impl CdpPage {
   /// Returns an error if Chrome rejects `HeapProfiler.collectGarbage`, the target has closed, or the command
   /// outlives its time budget.
   pub async fn request_gc(&self) -> Result<()> {
-    self.cmd("HeapProfiler.collectGarbage", serde_json::json!({})).await?;
+    self
+      .send_typed(&ferridriver_cdp_proto::heap_profiler::CollectGarbage {})
+      .await?;
     Ok(())
   }
 
@@ -256,7 +256,7 @@ impl CdpPage {
   /// Returns an error if Chrome rejects `Page.bringToFront`, the target has closed, or the command outlives
   /// its time budget.
   pub async fn bring_to_front(&self) -> Result<()> {
-    self.cmd("Page.bringToFront", serde_json::json!({})).await?;
+    self.send_typed(&ferridriver_cdp_proto::page::BringToFront {}).await?;
     Ok(())
   }
 
@@ -273,13 +273,20 @@ impl CdpPage {
   /// Returns an error if Chrome rejects `Page.bringToFront` or `Page.captureScreenshot`, the target has
   /// closed, or the command outlives its time budget.
   pub async fn bring_to_front_drawn(&self) -> Result<()> {
-    let pixel = serde_json::json!({
-      "format": "png",
-      "clip": { "x": 0, "y": 0, "width": 1, "height": 1, "scale": 1 },
-    });
+    let pixel = ferridriver_cdp_proto::page::CaptureScreenshot {
+      format: Some("png"),
+      clip: Some(ferridriver_cdp_proto::page::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+        scale: 1.0,
+      }),
+      ..Default::default()
+    };
     for _ in 0..FRONT_TAB_ATTEMPTS {
       self.bring_to_front().await?;
-      let drawn = self.cmd("Page.captureScreenshot", pixel.clone());
+      let drawn = self.send_typed(&pixel);
       if let Ok(answer) = tokio::time::timeout(FRONT_TAB_DRAWN, drawn).await {
         return answer.map(|_| ());
       }
@@ -306,7 +313,7 @@ impl CdpPage {
       let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       state.current_loader_id.clone()
     };
-    self.cmd("Page.reload", super::super::empty_params()).await?;
+    self.send_typed(&ferridriver_cdp_proto::page::Reload::default()).await?;
     self
       .await_loader_change(&pre_loader_id, target_event, timeout_ms)
       .await?;
@@ -343,28 +350,17 @@ impl CdpPage {
     timeout_ms: u64,
   ) -> Result<Option<Response>> {
     let hist = self
-      .cmd("Page.getNavigationHistory", super::super::empty_params())
+      .send_typed(&ferridriver_cdp_proto::page::GetNavigationHistory {})
       .await?;
-    let current_i64 = hist
-      .get("currentIndex")
-      .and_then(serde_json::Value::as_i64)
-      .unwrap_or(0);
-    let current = i32::try_from(current_i64).unwrap_or(i32::MAX);
+    let current = i32::try_from(hist.current_index).unwrap_or(i32::MAX);
     let target = current + delta;
-    let entries = hist.get("entries").and_then(|v| v.as_array());
-    let Some(entries) = entries else {
-      return Ok(None);
-    };
     let Ok(target_usize) = usize::try_from(target) else {
       return Ok(None);
     };
-    if target_usize >= entries.len() {
+    let Some(entry) = hist.entries.get(target_usize) else {
       return Ok(None);
-    }
-    let entry_id = entries[target_usize]
-      .get("id")
-      .and_then(serde_json::Value::as_i64)
-      .unwrap_or(0);
+    };
+    let entry_id = entry.id;
 
     self.nav_request_slot.clear();
     let target_event = Self::lifecycle_key(lifecycle);
@@ -373,7 +369,7 @@ impl CdpPage {
       (state.current_loader_id.clone(), state.same_document_seq)
     };
     self
-      .cmd("Page.navigateToHistoryEntry", serde_json::json!({"entryId": entry_id}))
+      .send_typed(&ferridriver_cdp_proto::page::NavigateToHistoryEntry { entry_id })
       .await?;
     // Playwright answers a history step that stays in the document with a
     // null response as soon as it commits (`Frame._waitForNavigation`).

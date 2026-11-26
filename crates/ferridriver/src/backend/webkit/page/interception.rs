@@ -155,10 +155,8 @@ impl WebKitPage {
   pub(crate) async fn expose_binding_pre_doc(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     if !self.binding_initialized.swap(true, Ordering::SeqCst) {
       self
-        .target_session()
-        .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
-        .await
-        .map_err(conn_err)?;
+        .send_typed(&ferridriver_webkit_proto::runtime::AddBinding { name: "__fd_binding__" })
+        .await?;
       self
         .add_init_script(crate::backend::common::BINDING_CONTROLLER_JS)
         .await?;
@@ -204,10 +202,8 @@ impl WebKitPage {
       return Ok(());
     }
     self
-      .target_session()
-      .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
-      .await
-      .map_err(conn_err)?;
+      .send_typed(&ferridriver_webkit_proto::runtime::AddBinding { name: "__fd_binding__" })
+      .await?;
     self
       .add_init_script(crate::backend::common::BINDING_CONTROLLER_JS)
       .await?;
@@ -239,10 +235,8 @@ impl WebKitPage {
   pub(crate) async fn expose_callback_pre_doc(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     if !self.binding_initialized.swap(true, Ordering::SeqCst) {
       self
-        .target_session()
-        .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
-        .await
-        .map_err(conn_err)?;
+        .send_typed(&ferridriver_webkit_proto::runtime::AddBinding { name: "__fd_binding__" })
+        .await?;
       self
         .add_init_script(crate::backend::common::BINDING_CONTROLLER_JS)
         .await?;
@@ -312,10 +306,8 @@ impl WebKitPage {
   pub(super) async fn flush_bootstrap_script(&self) -> Result<()> {
     let joined = self.bootstrap_source().await;
     self
-      .target_session()
-      .send("Page.setBootstrapScript", json!({ "source": joined }))
-      .await
-      .map_err(conn_err)?;
+      .send_typed(&ferridriver_webkit_proto::page::SetBootstrapScript { source: Some(&joined) })
+      .await?;
     Ok(())
   }
 

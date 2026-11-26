@@ -22,9 +22,12 @@ pub struct DescribeNode<'a> {
   pub node_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DescribeNodeResponse {
+  #[serde(default)]
+  pub content_frame_id: Option<String>,
+  #[serde(default)]
   pub node: Value,
 }
 
@@ -40,6 +43,10 @@ pub struct ResolveNode<'a> {
   pub node_id: Option<i64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub backend_node_id: Option<i64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub frame_id: Option<&'a str>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub execution_context_id: Option<i64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub object_group: Option<&'a str>,
 }

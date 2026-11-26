@@ -988,6 +988,18 @@ impl CdpPage {
     self.initialize_existing_renderers().await
   }
 
+  /// Send a strongly typed CDP command to this page's session without building
+  /// an intermediate `serde_json::Value` on the fast path.
+  pub(super) async fn send_typed<C: ferridriver_cdp_proto::Command>(&self, command: &C) -> Result<C::Response> {
+    if self.setup.is_paused() {
+      let params = serde_json::to_value(command)?;
+      let raw = Box::pin(self.cmd_while_paused(C::METHOD, params)).await?;
+      return serde_json::from_value(raw)
+        .map_err(|e| FerriError::protocol(C::METHOD, format!("response decode failed: {e}")));
+    }
+    self.transport.send(self.session_id.as_deref(), command).await
+  }
+
   /// Send a CDP command to this page's session.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     if self.setup.is_paused() {

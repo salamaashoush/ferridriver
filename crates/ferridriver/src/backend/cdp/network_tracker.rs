@@ -432,27 +432,23 @@ impl NetworkTracker {
       let request_id = request_id.clone();
       Box::pin(async move {
         let resp = transport
-          .send_command(
+          .send(
             session_id.as_deref(),
-            "Network.getResponseBody",
-            &serde_json::json!({"requestId": request_id}),
+            &ferridriver_cdp_proto::network::GetResponseBody {
+              request_id: &request_id,
+            },
           )
           .await
           .map_err(|e| crate::error::FerriError::Protocol {
             method: "Network.getResponseBody".into(),
             message: e.to_string(),
           })?;
-        let body = resp.get("body").and_then(|v| v.as_str()).unwrap_or("");
-        let base64_encoded = resp
-          .get("base64Encoded")
-          .and_then(serde_json::Value::as_bool)
-          .unwrap_or(false);
-        if base64_encoded {
+        if resp.base64_encoded {
           base64::engine::general_purpose::STANDARD
-            .decode(body)
+            .decode(&resp.body)
             .map_err(|e| crate::error::FerriError::Backend(format!("base64 decode: {e}")))
         } else {
-          Ok(body.as_bytes().to_vec())
+          Ok(resp.body.into_bytes())
         }
       })
     })

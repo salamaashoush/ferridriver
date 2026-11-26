@@ -166,17 +166,14 @@ impl BidiPage {
         .await;
     }
 
-    let wait = Self::lifecycle_to_wait(lifecycle);
+    let wait_state = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout_at(
       crate::backend::deadline_for(timeout_ms),
-      self.cmd(
-        "browsingContext.navigate",
-        json!({
-          "context": &*self.context_id,
-          "url": url,
-          "wait": wait
-        }),
-      ),
+      self.send_typed(&ferridriver_bidi_proto::browsing_context::Navigate {
+        context: &self.context_id,
+        url,
+        wait: Some(wait_state),
+      }),
     )
     .await;
 
@@ -192,8 +189,8 @@ impl BidiPage {
     match result {
       // `navigation` is null for a same-document jump — nothing was
       // requested, so nothing is coming.
-      Ok(Ok(value)) => {
-        let new_document = value.get("navigation").is_some_and(|id| !id.is_null());
+      Ok(Ok(nav)) => {
+        let new_document = nav.navigation.is_some();
         let grace = if new_document {
           crate::network::NAV_REQUEST_GRACE
         } else {
@@ -201,7 +198,7 @@ impl BidiPage {
         };
         // A command that waited for the document answers after the
         // document's request was announced; `none` answers before it.
-        let announced = new_document && wait != "none";
+        let announced = new_document && wait_state != ferridriver_bidi_proto::browsing_context::ReadinessState::None;
         self.await_nav_response(grace, announced, deadline, timeout_ms).await
       },
       Ok(Err(e)) => Err(e),
@@ -306,7 +303,9 @@ impl BidiPage {
   /// Returns an error when the `browsingContext.activate` command fails.
   pub async fn bring_to_front(&self) -> Result<()> {
     self
-      .cmd("browsingContext.activate", json!({"context": &*self.context_id}))
+      .send_typed(&ferridriver_bidi_proto::browsing_context::Activate {
+        context: &self.context_id,
+      })
       .await?;
     Ok(())
   }
@@ -320,23 +319,26 @@ impl BidiPage {
     self.injected_script.reset();
     self.clear_handle_realms();
     self.nav_request_slot.clear();
-    let wait = Self::lifecycle_to_wait(lifecycle);
+    let wait_state = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout_at(
       crate::backend::deadline_for(timeout_ms),
-      self.cmd(
-        "browsingContext.reload",
-        json!({
-          "context": &*self.context_id,
-          "wait": wait
-        }),
-      ),
+      self.send_typed(&ferridriver_bidi_proto::browsing_context::Reload {
+        context: &self.context_id,
+        ignore_cache: None,
+        wait: Some(wait_state),
+      }),
     )
     .await;
 
     match result {
       Ok(Ok(_)) => {
         self
-          .await_nav_response(crate::network::NAV_REQUEST_GRACE, wait != "none", deadline, timeout_ms)
+          .await_nav_response(
+            crate::network::NAV_REQUEST_GRACE,
+            wait_state != ferridriver_bidi_proto::browsing_context::ReadinessState::None,
+            deadline,
+            timeout_ms,
+          )
           .await
       },
       Ok(Err(e)) => Err(e),
@@ -353,13 +355,10 @@ impl BidiPage {
     self.nav_request_slot.clear();
     let result = tokio::time::timeout_at(
       crate::backend::deadline_for(timeout_ms),
-      self.cmd(
-        "browsingContext.traverseHistory",
-        json!({
-          "context": &*self.context_id,
-          "delta": -1
-        }),
-      ),
+      self.send_typed(&ferridriver_bidi_proto::browsing_context::TraverseHistory {
+        context: &self.context_id,
+        delta: -1,
+      }),
     )
     .await;
 
@@ -383,13 +382,10 @@ impl BidiPage {
     self.nav_request_slot.clear();
     let result = tokio::time::timeout_at(
       crate::backend::deadline_for(timeout_ms),
-      self.cmd(
-        "browsingContext.traverseHistory",
-        json!({
-          "context": &*self.context_id,
-          "delta": 1
-        }),
-      ),
+      self.send_typed(&ferridriver_bidi_proto::browsing_context::TraverseHistory {
+        context: &self.context_id,
+        delta: 1,
+      }),
     )
     .await;
 

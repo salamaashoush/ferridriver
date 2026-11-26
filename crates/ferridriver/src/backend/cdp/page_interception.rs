@@ -37,11 +37,17 @@ impl CdpPage {
       return Ok(());
     }
     self
-      .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
+      .send_typed(&ferridriver_cdp_proto::runtime::AddBinding {
+        name: "__fd_binding__",
+        execution_context_name: None,
+      })
       .await?;
     for renderer in &self.renderer_pages() {
       renderer
-        .cmd("Runtime.addBinding", serde_json::json!({"name":"__fd_binding__"}))
+        .send_typed(&ferridriver_cdp_proto::runtime::AddBinding {
+          name: "__fd_binding__",
+          execution_context_name: None,
+        })
         .await?;
     }
     self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
@@ -304,15 +310,16 @@ impl CdpPage {
     if opts.run_before_unload.unwrap_or(false) {
       let _ = self
         .transport
-        .send_command(self.session_id.as_deref(), "Page.close", &super::super::EMPTY_PARAMS)
+        .send(self.session_id.as_deref(), &ferridriver_cdp_proto::page::Close {})
         .await;
     } else {
       let _ = self
         .transport
-        .send_command(
+        .send(
           None,
-          "Target.closeTarget",
-          &serde_json::json!({"targetId": &*self.target_id}),
+          &ferridriver_cdp_proto::target::CloseTarget {
+            target_id: &self.target_id,
+          },
         )
         .await;
     }
@@ -924,11 +931,7 @@ impl CdpPage {
   pub(crate) async fn release_object_in_session(&self, object_id: &str, session_id: Option<&str>) -> Result<()> {
     self
       .transport
-      .send_command(
-        session_id,
-        "Runtime.releaseObject",
-        &serde_json::json!({"objectId":object_id}),
-      )
+      .send(session_id, &ferridriver_cdp_proto::runtime::ReleaseObject { object_id })
       .await
       .map(|_| ())
   }
@@ -939,7 +942,7 @@ impl CdpPage {
   /// outlives its time budget.
   pub async fn release_object(&self, object_id: &str) -> Result<()> {
     self
-      .cmd("Runtime.releaseObject", serde_json::json!({"objectId": object_id}))
+      .send_typed(&ferridriver_cdp_proto::runtime::ReleaseObject { object_id })
       .await
       .map(|_| ())
   }

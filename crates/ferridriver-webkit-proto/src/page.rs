@@ -165,3 +165,11 @@ impl Command for SetInterceptFileChooserDialog {
   const METHOD: &'static str = "Page.setInterceptFileChooserDialog";
   type Response = EmptyResponse;
 }
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct HeapGc {}
+
+impl Command for HeapGc {
+  const METHOD: &'static str = "Heap.gc";
+  type Response = EmptyResponse;
+}

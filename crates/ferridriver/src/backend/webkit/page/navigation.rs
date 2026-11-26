@@ -1,8 +1,8 @@
 //! `WebKitPage` frames and navigation.
 
 use super::{
-  Arc, FerriError, FrameInfo, NavLifecycle, NavigateParams, NavigateResult, Ordering, Response, Result, Value,
-  WebKitPage, collect_frames, conn_err, json, protocol,
+  Arc, FerriError, FrameInfo, NavLifecycle, Ordering, Response, Result, Value, WebKitPage, collect_frames, conn_err,
+  json,
 };
 
 impl WebKitPage {
@@ -13,14 +13,10 @@ impl WebKitPage {
   /// Returns an error when the `Page.getResourceTree` command fails.
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     let resp = self
-      .target_session()
-      .send("Page.getResourceTree", json!({}))
-      .await
-      .map_err(conn_err)?;
+      .send_typed(&ferridriver_webkit_proto::page::GetResourceTree {})
+      .await?;
     let mut frames = Vec::new();
-    if let Some(root) = resp.get("frameTree") {
-      collect_frames(root, None, &mut frames);
-    }
+    collect_frames(&resp.frame_tree, None, &mut frames);
     Ok(frames)
   }
 
@@ -36,17 +32,20 @@ impl WebKitPage {
   /// Returns an error when the `DOM.describeNode` command fails.
   pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
     let resp = self
-      .target_session()
-      .send(protocol::DOM_DESCRIBE_NODE, json!({ "objectId": object_id }))
-      .await
-      .map_err(conn_err)?;
+      .send_typed(&ferridriver_webkit_proto::dom::DescribeNode {
+        object_id: Some(object_id),
+        node_id: None,
+      })
+      .await?;
     // WebKit nests the node under `node`; the frame id is
     // `contentFrameId` (top-level) in the DOM domain reply.
-    let frame_id = resp
-      .get("contentFrameId")
-      .or_else(|| resp.pointer("/node/contentFrameId"))
-      .and_then(Value::as_str)
-      .map(std::string::ToString::to_string);
+    let frame_id = resp.content_frame_id.or_else(|| {
+      resp
+        .node
+        .get("contentFrameId")
+        .and_then(Value::as_str)
+        .map(std::string::ToString::to_string)
+    });
     Ok(frame_id)
   }
 
@@ -69,16 +68,19 @@ impl WebKitPage {
   ) -> Result<()> {
     let ctx_id = self.resolve_frame_context(parent_frame_id).await?;
     let resolved = self
-      .target_session()
-      .send(
-        protocol::DOM_RESOLVE_NODE,
-        json!({ "frameId": child_frame_id, "executionContextId": ctx_id }),
-      )
-      .await
-      .map_err(conn_err)?;
-    let object = resolved
-      .get("object")
-      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "frame owner did not resolve to an object"))?;
+      .send_typed(&ferridriver_webkit_proto::dom::ResolveNode {
+        frame_id: Some(child_frame_id),
+        execution_context_id: Some(ctx_id),
+        ..Default::default()
+      })
+      .await?;
+    let object = &resolved.object;
+    if object.is_null() {
+      return Err(FerriError::protocol(
+        "DOM.resolveNode",
+        "frame owner did not resolve to an object",
+      ));
+    }
     if object.get("subtype").and_then(Value::as_str) == Some("null") {
       return Err(FerriError::protocol("DOM.resolveNode", "frame has been detached"));
     }
@@ -99,8 +101,7 @@ impl WebKitPage {
       .await
       .map_err(conn_err);
     let _ = self
-      .target_session()
-      .send(protocol::RUNTIME_RELEASE_OBJECT, json!({ "objectId": object_id }))
+      .send_typed(&ferridriver_webkit_proto::runtime::ReleaseObject { object_id: &object_id })
       .await;
     call.map(|_| ())
   }
@@ -110,9 +111,10 @@ impl WebKitPage {
   /// Returns an error when the page is closed or the `Target.activate` command fails.
   pub async fn bring_to_front(&self) -> Result<()> {
     self.ensure_open()?;
+    let target_id = self.target_id();
     self
       .proxy
-      .send(protocol::TARGET_ACTIVATE, json!({"targetId": &*self.target_id()}))
+      .send_typed(&ferridriver_webkit_proto::target::Activate { target_id: &target_id })
       .await
       .map_err(conn_err)?;
     Ok(())
@@ -158,22 +160,20 @@ impl WebKitPage {
     // (the listener re-subscribes on `Target.didCommitProvisionalTarget`
     // so events from the new process still feed the latches).
     self.lifecycle.reset();
-    let params = NavigateParams {
-      url: url.to_string(),
-      page_proxy_id: self.proxy_id.to_string(),
-      frame_id: None,
-      referrer: referrer.map(str::to_string),
-    };
-    let nav = tokio::time::timeout_at(
+    let parsed = tokio::time::timeout_at(
       crate::backend::deadline_for(timeout_ms),
       self
         .browser
-        .send(protocol::PLAYWRIGHT_NAVIGATE, serde_json::to_value(&params)?),
+        .send_typed(&ferridriver_webkit_proto::playwright::Navigate {
+          url,
+          page_proxy_id: &self.proxy_id,
+          frame_id: None,
+          referrer,
+        }),
     )
     .await
     .map_err(|_| FerriError::timeout(format!("navigating to {url}"), timeout_ms))?
     .map_err(conn_err)?;
-    let parsed: NavigateResult = serde_json::from_value(nav).unwrap_or_default();
     if let Some(err) = parsed.error_text
       && !err.is_empty()
     {
@@ -262,11 +262,7 @@ impl WebKitPage {
   /// Returns an error when the page is closed or the `Heap.gc` command fails.
   pub async fn request_gc(&self) -> Result<()> {
     self.ensure_open()?;
-    self
-      .target_session()
-      .send("Heap.gc", json!({}))
-      .await
-      .map_err(conn_err)?;
+    self.send_typed(&ferridriver_webkit_proto::page::HeapGc {}).await?;
     Ok(())
   }
 
@@ -281,10 +277,8 @@ impl WebKitPage {
     self.nav_request_slot.clear();
     self.lifecycle.reset();
     self
-      .target_session()
-      .send("Page.reload", json!({}))
-      .await
-      .map_err(conn_err)?;
+      .send_typed(&ferridriver_webkit_proto::page::Reload::default())
+      .await?;
     self.wait_for_lifecycle(lifecycle, timeout_ms, None).await?;
     Ok(self.await_nav_response(crate::network::NAV_REQUEST_GRACE).await)
   }

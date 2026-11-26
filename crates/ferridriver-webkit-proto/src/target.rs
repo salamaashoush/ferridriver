@@ -27,6 +27,17 @@ impl Command for SendMessageToTarget<'_> {
   type Response = EmptyResponse;
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Activate<'a> {
+  pub target_id: &'a str,
+}
+
+impl Command for Activate<'_> {
+  const METHOD: &'static str = "Target.activate";
+  type Response = EmptyResponse;
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetInfo {
