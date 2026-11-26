@@ -62,6 +62,7 @@ support: [BENCHMARKING.md](./BENCHMARKING.md). Reproduce with
 | `ferridriver-bidi-proto`       | Strongly typed WebDriver BiDi commands and events |
 | `ferridriver-webkit-proto`     | Strongly typed Playwright WebKit Inspector commands and events |
 | `ferridriver-webdriver-proto`  | Strongly typed W3C Classic WebDriver HTTP commands and responses |
+| `ferridriver-adb`              | ADB wire protocol client and Android UI Automator driver |
 | `ferridriver-audits`           | Accessibility (axe-core), security, SEO, and link audits |
 | `ferridriver-install`          | Browser binary download, cache, and version management |
 | `ferridriver-codegen`          | Interactive browser recorder, Rust / TypeScript / Gherkin emitters, and script code echo |

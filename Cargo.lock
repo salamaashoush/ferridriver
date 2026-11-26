@@ -1644,6 +1644,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "dirs 7.0.0",
+ "ferridriver-adb",
  "ferridriver-audits",
  "ferridriver-bidi-proto",
  "ferridriver-cdp-proto",
@@ -1684,6 +1685,19 @@ dependencies = [
  "windows-sys 0.61.2",
  "x509-parser",
  "zip",
+]
+
+[[package]]
+name = "ferridriver-adb"
+version = "0.8.1"
+dependencies = [
+ "ferridriver-error",
+ "ferridriver-install",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

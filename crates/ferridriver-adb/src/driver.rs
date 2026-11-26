@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rustc_hash::FxHashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::wire::AdbServer;
-use crate::error::{FerriError, Result};
+use crate::wire::AdbServer;
+use ferridriver_error::{FerriError, Result};
 
 const DRIVER_PACKAGE: &str = "com.microsoft.playwright.androiddriver";
 const DRIVER_SOCKET: &str = "localabstract:playwright_android_driver_socket";
@@ -90,7 +90,9 @@ pub struct AndroidSelector {
 }
 
 impl AndroidSelector {
-  pub(crate) fn to_wire(&self) -> serde_json::Value {
+  /// Encode this selector into the driver's wire JSON format.
+  #[must_use]
+  pub fn to_wire(&self) -> serde_json::Value {
     let mut wire = serde_json::Map::new();
     let mut flag = |name: &str, value: Option<bool>| {
       if let Some(value) = value {
@@ -149,7 +151,9 @@ pub enum AndroidDirection {
 }
 
 impl AndroidDirection {
-  pub(crate) fn as_str(self) -> &'static str {
+  /// Wire name of this direction (`"down"`, `"up"`, `"left"`, `"right"`).
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
     match self {
       Self::Down => "down",
       Self::Up => "up",
@@ -350,7 +354,10 @@ const KEYS: &[(&str, u32)] = &[
 ];
 
 /// The key code of a Playwright `AndroidKey`.
-pub(crate) fn key_code(key: &str) -> Result<u32> {
+///
+/// # Errors
+/// Returns [`FerriError::InvalidArgument`] when `key` is not a known Android key name.
+pub fn key_code(key: &str) -> Result<u32> {
   KEYS
     .iter()
     .find(|(name, _)| *name == key)
@@ -361,7 +368,10 @@ pub(crate) fn key_code(key: &str) -> Result<u32> {
 /// The key codes that type `text`, a character at a time, as
 /// `androidDispatcher.ts::inputType` maps them: by the upper-case key
 /// name.
-pub(crate) fn key_codes(text: &str) -> Result<Vec<u32>> {
+///
+/// # Errors
+/// Returns [`FerriError::InvalidArgument`] when a character in `text` has no key mapping.
+pub fn key_codes(text: &str) -> Result<Vec<u32>> {
   text
     .chars()
     .map(|character| {
@@ -379,7 +389,7 @@ type Pending =
   Arc<std::sync::Mutex<FxHashMap<u64, tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>>>>;
 
 /// A connection to the driver running on a device.
-pub(crate) struct Driver {
+pub struct Driver {
   writer: tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>,
   pending: Pending,
   next_id: AtomicU64,
@@ -394,7 +404,11 @@ impl Driver {
   ///
   /// `apks` is where the two APKs are on this machine. It is not read
   /// when `omit_install` says the device has them already.
-  pub(crate) async fn start(
+  ///
+  /// # Errors
+  /// Returns an error if installing APKs, launching instrumentation, or
+  /// connecting to the driver socket fails or times out.
+  pub async fn start(
     server: &AdbServer,
     serial: &str,
     omit_install: bool,
@@ -412,7 +426,7 @@ impl Driver {
       server
         .shell(serial, &format!("cmd package uninstall {DRIVER_PACKAGE}.test"))
         .await?;
-      for apk in crate::install::ANDROID_DRIVER_APKS {
+      for apk in ferridriver_install::ANDROID_DRIVER_APKS {
         let path = directory.join(apk);
         let content = tokio::fs::read(&path)
           .await
@@ -493,12 +507,11 @@ impl Driver {
   /// One call to the driver. `timeout_ms` is how long the driver itself
   /// waits for a selector to match, sent with the call as upstream does;
   /// the driver reads zero as "look once".
-  pub(crate) async fn send(
-    &self,
-    method: &str,
-    mut params: serde_json::Value,
-    timeout_ms: u64,
-  ) -> Result<serde_json::Value> {
+  ///
+  /// # Errors
+  /// Returns an error if sending the RPC fails, the driver disconnects, or
+  /// the driver returns an error response.
+  pub async fn send(&self, method: &str, mut params: serde_json::Value, timeout_ms: u64) -> Result<serde_json::Value> {
     if let Some(bag) = params.as_object_mut() {
       bag.insert("timeout".to_owned(), timeout_ms.into());
     }

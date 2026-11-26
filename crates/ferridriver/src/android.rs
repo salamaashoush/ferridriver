@@ -13,15 +13,44 @@ pub use ferridriver_install::AndroidOptions;
 
 mod adb;
 mod api;
-mod driver;
 mod network;
-mod wire;
 pub(crate) use adb::AdbEndpoint;
 pub use api::{
   Android, AndroidDevice, AndroidDeviceEvent, AndroidDevicesOptions, AndroidFile, AndroidInput,
   AndroidLaunchBrowserOptions, AndroidSocket, AndroidWebView, AndroidWebViewSelector,
 };
-pub use driver::{AndroidBounds, AndroidDirection, AndroidElementInfo, AndroidSelector, AndroidText};
+pub use ferridriver_adb::driver::{AndroidBounds, AndroidDirection, AndroidElementInfo, AndroidSelector, AndroidText};
+use ferridriver_adb::{driver, wire};
+
+/// A directory on the device for a browser there to download into, and
+/// the way each download comes back to this machine. Chrome writes
+/// under the shared `Download` folder, which the device's shell reads;
+/// a directory of the shell's own it reports as written and leaves
+/// empty. Chrome makes the directory with its first download, and it
+/// is removed again once the last file in it has been fetched.
+pub(crate) fn remote_downloads(server: &wire::AdbServer, serial: &str) -> crate::download::RemoteDownloads {
+  static DIRECTORIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+  let directory = format!(
+    "/sdcard/Download/ferridriver-{}-{}",
+    std::process::id(),
+    DIRECTORIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+  );
+  let (server, device, from) = (server.clone(), serial.to_owned(), directory.clone());
+  crate::download::RemoteDownloads {
+    directory,
+    fetch: std::sync::Arc::new(move |guid, destination| {
+      let (server, device, from) = (server.clone(), device.clone(), from.clone());
+      Box::pin(async move {
+        let path = format!("{from}/{guid}");
+        server.pull(&device, &path, &destination).await?;
+        server
+          .shell(&device, &format!("rm -f {path}; rmdir {from} 2>/dev/null"))
+          .await?;
+        Ok(())
+      })
+    }),
+  }
+}
 
 /// The host's loopback as the emulator sees it: `10.0.2.2` is the emulator's alias for `127.0.0.1` on the
 /// machine running it. A page keeps the URL it was given; only the connection goes to the alias.
@@ -454,7 +483,7 @@ async fn connect_device(
       .map_or_else(|| wire::AdbServer::default().port, |endpoint| endpoint.port),
     ..wire::AdbServer::default()
   };
-  browser.set_remote_downloads(adb.remote_downloads(&serial));
+  browser.set_remote_downloads(remote_downloads(&adb, &serial));
   browser.android = Some(Arc::clone(owner));
   tracing::info!(%serial, pkg = options.pkg, "managed Android browser is ready");
   Ok(crate::backend::AnyBrowser::Cdp(browser))
