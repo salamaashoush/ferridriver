@@ -51,7 +51,9 @@ impl WsTransport {
     }
     let budget = crate::operation_budget::OperationBudget::current(30_000)?;
     let (ws_stream, _) = budget
-      .wait(Box::pin(tokio_tungstenite::connect_async(request)))
+      .wait(Box::pin(tokio_tungstenite::connect_async_with_config(
+        request, None, true,
+      )))
       .await
       .map_err(|error| error.error("connecting CDP WebSocket"))?
       .map_err(|error| FerriError::backend(format!("WebSocket connect failed: {error}")))?;
@@ -59,7 +61,7 @@ impl WsTransport {
     let (write, read) = ws_stream.split();
     let dispatcher = Arc::new(CdpDispatcher::new());
 
-    let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Message>(64);
+    let (write_tx, write_rx) = tokio::sync::mpsc::channel::<Message>(256);
     let (shutdown, stopping) = tokio::sync::watch::channel(false);
     let writer = tokio::spawn(crate::backend::transport_tasks::write_websocket(
       write, write_rx, stopping,

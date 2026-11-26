@@ -212,7 +212,9 @@ async fn connect_socket(
   let request = websocket_request(ws_url, headers)?;
   let budget = crate::operation_budget::OperationBudget::current(30_000)?;
   let (socket, _) = budget
-    .wait(Box::pin(tokio_tungstenite::connect_async(request)))
+    .wait(Box::pin(tokio_tungstenite::connect_async_with_config(
+      request, None, true,
+    )))
     .await
     .map_err(|error| error.error("connecting BiDi WebSocket"))?
     .map_err(|error| FerriError::backend(format!("BiDi WebSocket connection failed: {error}")))?;
@@ -234,7 +236,7 @@ impl BidiTransport {
     let pending: Arc<PendingMap> = Arc::new(DashMap::default());
 
     // Writer task
-    let (write_tx, write_rx) = mpsc::channel::<Message>(128);
+    let (write_tx, write_rx) = mpsc::channel::<Message>(256);
     let (shutdown, stopping) = tokio::sync::watch::channel(false);
     let writer = tokio::spawn(crate::backend::transport_tasks::write_websocket(
       write, write_rx, stopping,
@@ -294,29 +296,7 @@ impl BidiTransport {
         if type_field == b"success" || type_field == b"error" {
           handle_command_response(bytes, type_field, &pending2);
         } else if type_field == b"event" {
-          // Event -- extract method and params, broadcast
-          let method_bytes = json_scan::json_string(json_scan::json_field(bytes, b"method"));
-          if method_bytes.is_empty() {
-            continue;
-          }
-          let method = String::from_utf8_lossy(method_bytes).to_string();
-
-          // Full-parse only for events (we need the params)
-          match serde_json::from_slice::<serde_json::Value>(bytes) {
-            Ok(parsed) => {
-              let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
-              let event = BidiEvent { method, params };
-              trace_event(&event);
-              // Before best-effort broadcast consumers.
-              deliver_losslessly(&observers2, &event_taps2, &event);
-              if let Some(sender) = event_tx2.load().as_ref() {
-                let _ = sender.send(event);
-              }
-            },
-            Err(e) => {
-              warn!("BiDi event parse error: {e}");
-            },
-          }
+          dispatch_bidi_event(bytes, &observers2, &event_taps2, &event_tx2);
         }
         // else: ignore unknown message types
       }
@@ -385,6 +365,8 @@ impl BidiTransport {
   /// its result, or its error code and message. The outer error is the
   /// transport's own, the connection closed or the time up.
   pub(crate) async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
+    use std::io::Write as _;
+
     let budget = crate::operation_budget::OperationBudget::current(60_000)?;
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
@@ -401,9 +383,12 @@ impl BidiTransport {
       )));
     }
 
-    // Build command JSON directly as string (no Value intermediary for envelope)
-    let params_str = serde_json::to_string(&params)?;
-    let cmd = format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#);
+    // Build command JSON directly in a single buffer (no intermediate String or Value envelope).
+    let mut buf = Vec::with_capacity(128 + method.len());
+    let _ = write!(buf, r#"{{"id":{id},"method":"{method}","params":"#);
+    serde_json::to_writer(&mut buf, &params)?;
+    buf.push(b'}');
+    let cmd = String::from_utf8(buf).map_err(|e| FerriError::backend(format!("UTF-8: {e}")))?;
     trace!("BiDi send id={id}: {method}");
 
     budget.send(&self.write_tx, Message::Text(cmd.into())).await?;
@@ -455,6 +440,54 @@ impl BidiTransport {
       taps.push(tx);
     }
     rx
+  }
+}
+
+/// Parse and dispatch one `BiDi` event frame only when at least one observer,
+/// lossless tap, or broadcast subscriber is listening, moving `params` out of
+/// the parsed object without cloning.
+fn dispatch_bidi_event(
+  bytes: &[u8],
+  observers: &std::sync::Mutex<Vec<EventObserver>>,
+  taps: &std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>,
+  event_tx: &arc_swap::ArcSwapOption<broadcast::Sender<BidiEvent>>,
+) {
+  let sender_guard = event_tx.load();
+  let has_broadcast = sender_guard.as_ref().is_some_and(|s| s.receiver_count() > 0);
+  let has_observers = !observers
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .is_empty();
+  let has_taps = !taps
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .is_empty();
+  if !has_broadcast && !has_observers && !has_taps {
+    return;
+  }
+  let method_bytes = json_scan::json_string(json_scan::json_field(bytes, b"method"));
+  if method_bytes.is_empty() {
+    return;
+  }
+  let method = String::from_utf8_lossy(method_bytes).to_string();
+  match serde_json::from_slice::<serde_json::Value>(bytes) {
+    Ok(mut parsed) => {
+      let params = parsed
+        .as_object_mut()
+        .and_then(|obj| obj.remove("params"))
+        .unwrap_or(serde_json::Value::Null);
+      let event = BidiEvent { method, params };
+      trace_event(&event);
+      if has_observers || has_taps {
+        deliver_losslessly(observers, taps, &event);
+      }
+      if has_broadcast && let Some(sender) = sender_guard.as_ref() {
+        let _ = sender.send(event);
+      }
+    },
+    Err(e) => {
+      warn!("BiDi event parse error: {e}");
+    },
   }
 }
 
