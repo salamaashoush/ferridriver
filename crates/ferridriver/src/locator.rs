@@ -285,6 +285,25 @@ pub(crate) fn action_log_line(msg: &str) -> String {
   }
 }
 
+enum PointerPrepVerdict {
+  AlreadyDone,
+  NotFound,
+  Retry(String),
+  Ready {
+    point: (f64, f64),
+    interceptor_installed: bool,
+  },
+}
+
+fn record_retry_log(call_log: &mut Vec<String>, last_log: &mut String, line: &str, op_name: &str) {
+  if line != last_log.as_str() {
+    call_log.push(format!("  {line}"));
+    call_log.push(format!("retrying {op_name} action"));
+    last_log.clear();
+    last_log.push_str(line);
+  }
+}
+
 /// Whether a failed attempt is tried again: never once its input was
 /// sent, otherwise as [`is_retryable_action_error`] says.
 pub(crate) fn retries(error: &crate::error::FerriError) -> bool {
@@ -718,15 +737,11 @@ impl Locator {
 
   pub(crate) async fn click_impl(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
-    // Borrow `opts` across retry iterations — references are `Copy`, so
-    // each `async move` closure captures a fresh ref instead of moving
-    // the owned `ClickOptions` (which contains a non-Copy `Vec<Modifier>`).
+    if !self.is_tracing_active() {
+      return self.click_fast(&opts, "click").await;
+    }
     let opts_ref = &opts;
     retry_resolve!(self, opts_ref.timeout, "click", |el, page| async move {
-      // Playwright `waitForSignalsCreatedBy`: snapshot nav state, click, then
-      // if the click started a navigation wait (bounded, best-effort) for it
-      // to commit so a following read/action sees the new document. Zero cost
-      // when the click navigates nowhere.
       let snap = page.nav_snapshot();
       actions::click_with_opts(&el, page, opts_ref).await?;
       if !opts_ref.is_trial() {
@@ -748,10 +763,10 @@ impl Locator {
   }
 
   pub(crate) async fn dblclick_impl(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
-    // `dblclick` is a click pair with `clickCount` = 1 then 2. The
-    // shared `click_with_opts` honors that when `click_count` is set
-    // to `2`.
     let click_opts = opts.unwrap_or_default().into_click_options();
+    if !self.is_tracing_active() {
+      return self.click_fast(&click_opts, "dblclick").await;
+    }
     let click_opts_ref = &click_opts;
     retry_resolve!(self, click_opts_ref.timeout, "dblclick", |el, page| async move {
       let snap = page.nav_snapshot();
@@ -802,6 +817,9 @@ impl Locator {
 
   pub(crate) async fn fill_impl(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
+    if let Some(res) = self.fill_fast(value, &opts).await {
+      return res;
+    }
     let force = opts.is_force();
     let opts_ref = &opts;
     retry_resolve!(
@@ -809,13 +827,7 @@ impl Locator {
       opts_ref.timeout,
       "fill",
       ::serde_json::json!({ "value": value }),
-      |el, page| async move {
-        // `actions::fill(..., force)` runs `checkElementStates(['visible',
-        // 'enabled','editable'])` internally when `force` is false and
-        // returns the `error:not<state>` marker the retry loop knows to
-        // keep polling on. `force=true` jumps straight to the DOM write.
-        actions::fill(&el, page, value, force).await
-      }
+      |el, page| async move { actions::fill(&el, page, value, force).await }
     )
   }
 
@@ -1047,6 +1059,9 @@ impl Locator {
 
   pub(crate) async fn set_checked_impl(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
+    if !self.is_tracing_active() {
+      return self.set_checked_fast(checked, &opts).await;
+    }
     let trial = opts.is_trial();
     // Lower to ClickOptions for the shared click dispatch path so
     // `force` / `trial` / `position` / `timeout` all flow through.
@@ -1490,11 +1505,13 @@ impl Locator {
     // The frame the element resolves in (frameLocator enter-frame hops
     // resolved here) — root for the recursive child-iframe descent.
     let (root_frame, _sel) = self.resolved().await?;
+    let root_frame_id = (!root_frame.is_main_frame()).then(|| root_frame.id().to_string());
     let mode = options.mode.unwrap_or_default().as_str();
     let depth = options.depth;
     let opts_json = aria_opts_json(mode, depth, options.boxes);
     let root_js = format!("function() {{ return JSON.stringify(window.__fd.ariaSnapshotFrame(this, {opts_json})); }}");
     retry_resolve!(self, options.timeout, "ariaSnapshot", |el, _page| async {
+      selectors::ensure_aria_support(root_frame.page_arc().inner(), root_frame_id.as_deref()).await?;
       let raw_s = el
         .call_js_fn_value(&root_js)
         .await?
@@ -1679,19 +1696,7 @@ impl Locator {
     let (rframe, _) = self.resolved().await?;
     let inner = rframe.page_arc().inner();
     let frame_id = (!rframe.is_main_frame()).then(|| rframe.id().to_string());
-    let eval = async |js: &str| -> Result<Option<serde_json::Value>> {
-      match &frame_id {
-        Some(id) => inner.evaluate_in_frame(js, id).await,
-        None => inner.evaluate(js).await,
-      }
-    };
-    let installed = eval("typeof window.__fdAria !== 'undefined'")
-      .await?
-      .and_then(|v| v.as_bool())
-      .unwrap_or(false);
-    if !installed {
-      eval(crate::selectors::ARIA_SUPPORT_JS).await?;
-    }
+    selectors::ensure_aria_support(inner, frame_id.as_deref()).await?;
     let yaml_json = serde_json::to_string(expected_yaml).unwrap_or_else(|_| "\"\"".to_string());
     let raw = self
       .retry_eval_on_element(&format!(
@@ -1800,20 +1805,14 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
-    let val = retry_resolve!(self, None, "boundingBox", |el, _page| async move {
-      el.call_js_fn_value(crate::screenshotter::MAIN_FRAME_BOX_FN).await
-    })?;
-    Ok(
-      val
-        .as_ref()
-        .and_then(crate::screenshotter::parse_rect)
-        .map(|r| BoundingBox {
-          x: r.x,
-          y: r.y,
-          width: r.width,
-          height: r.height,
-        }),
-    )
+    let body = format!("return ({}).call(el);", crate::screenshotter::MAIN_FRAME_BOX_FN);
+    let val = self.read("boundingBox", &body, None).await?;
+    Ok(crate::screenshotter::parse_rect(&val).map(|r| BoundingBox {
+      x: r.x,
+      y: r.y,
+      width: r.width,
+      height: r.height,
+    }))
   }
 
   // ── Waiting ───────────────────────────────────────────────────────────────
@@ -2805,7 +2804,10 @@ impl Locator {
               )
               .unwrap_or(delay)
             });
-            crate::abort::sleep(std::time::Duration::from_millis(delay.min(left))).await;
+            self
+              .frame
+              .pause_until_change(std::time::Duration::from_millis(delay.min(left)))
+              .await;
           }
           if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             return Err(crate::error::FerriError::timeout(op, timeout).with_call_log(call_log()));
@@ -2838,6 +2840,456 @@ impl Locator {
               | crate::error::FerriError::Aborted { .. }),
             ) => return Err(e),
             // A frame between documents, or one not attached yet.
+            Err(_) => {},
+          }
+        }
+      })
+      .await
+  }
+
+  /// Whether a trace recorder is currently attached to this page's context.
+  fn is_tracing_active(&self) -> bool {
+    self
+      .frame
+      .page_arc()
+      .context()
+      .and_then(|c| crate::trace::recorder_for(&c.composite()))
+      .is_some()
+  }
+
+  /// Evaluate `expr` in `rframe` (main frame or child frame).
+  async fn eval_in_resolved_frame(rframe: &crate::frame::Frame, expr: &str) -> Result<Option<serde_json::Value>> {
+    let page = rframe.page_arc();
+    if rframe.is_main_frame() {
+      page.inner().evaluate(expr).await
+    } else {
+      page.inner().evaluate_in_frame(expr, rframe.id()).await
+    }
+  }
+
+  /// Single-eval `locator.fill()` directly inside `UTILITY_WORLD` on CDP:
+  /// 1 `Runtime.evaluate(contextId = utility)` + 1 `Input.insertText` (2 RTTs),
+  /// skipping main-world `RemoteObjectId`, `DOM.describeNode`, `DOM.resolveNode`,
+  /// and `Runtime.releaseObject`. Returns `None` when tracing is active or the
+  /// backend has no direct utility-world eval (caller falls back to `retry_resolve!`).
+  async fn fill_fast(&self, value: &str, opts: &crate::options::FillOptions) -> Option<Result<()>> {
+    if self.is_tracing_active() {
+      return None;
+    }
+    let page_arc = self.frame.page_arc();
+    if !matches!(
+      page_arc.inner(),
+      crate::backend::AnyPage::CdpPipe(_) | crate::backend::AnyPage::CdpWs(_)
+    ) {
+      return None;
+    }
+    let res = self.fill_fast_inner(value, opts).await;
+    page_arc.slow_mo_pause("Locator", "fill").await;
+    Some(res)
+  }
+
+  /// Sleep for one backoff step (clamped to `deadline`) using `pause_until_change`.
+  async fn backoff_pause(&self, idx: usize, deadline: Option<std::time::Instant>) {
+    let delay_ms = Self::RETRY_BACKOFFS_MS[idx.min(Self::RETRY_BACKOFFS_MS.len() - 1)];
+    if delay_ms > 0 {
+      let sleep_ms = deadline.map_or(delay_ms, |d| {
+        let left =
+          u64::try_from(d.saturating_duration_since(std::time::Instant::now()).as_millis()).unwrap_or(delay_ms);
+        delay_ms.min(left)
+      });
+      if sleep_ms > 0 {
+        self
+          .frame
+          .pause_until_change(std::time::Duration::from_millis(sleep_ms))
+          .await;
+      }
+    }
+  }
+
+  /// Evaluate `resolveAndFill` once in `UTILITY_WORLD`, lazily injecting the
+  /// engine into the utility world on first encounter.
+  async fn eval_fill_once(
+    &self,
+    rframe: &crate::frame::Frame,
+    parts: &str,
+    value_lit: &str,
+    force: bool,
+  ) -> Option<Result<String>> {
+    let frame_id = (!rframe.is_main_frame()).then(|| rframe.id());
+    let frame_id_str = frame_id.map(std::ops::Deref::deref);
+    let inner = rframe.page_arc().inner();
+    let expr = format!(
+      "(() => {{ var fd = window.__fd; if (!(fd instanceof Object)) return '{{\"result\":\"inject\"}}'; return fd.resolveAndFill({parts}, {}, {value_lit}, {force}); }})()",
+      self.strict
+    );
+    let raw = match inner.evaluate_in_utility(frame_id_str, &expr).await? {
+      Ok(v) => v.and_then(|val| val.as_str().map(str::to_owned)).unwrap_or_default(),
+      Err(e) => return Some(Err(e)),
+    };
+    if !raw.contains("\"inject\"") {
+      return Some(Ok(raw));
+    }
+    let inject_and_fill = format!(
+      "(async () => {{ await {}; return window.__fd.resolveAndFill({parts}, {}, {value_lit}, {force}); }})()",
+      crate::selectors::lazy_inject_js(),
+      self.strict
+    );
+    match inner.evaluate_in_utility(frame_id_str, &inject_and_fill).await? {
+      Ok(v) => Some(Ok(
+        v.and_then(|val| val.as_str().map(str::to_owned)).unwrap_or_default(),
+      )),
+      Err(e) => Some(Err(e)),
+    }
+  }
+
+  async fn fill_fast_inner(&self, value: &str, opts: &crate::options::FillOptions) -> Result<()> {
+    let timeout = opts.timeout.unwrap_or_else(|| self.frame.page_arc().default_timeout());
+    let deadline = (timeout != 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+    let value_lit = serde_json::to_string(value)?;
+    let force = opts.is_force();
+    let mut call_log = vec![format!(
+      "waiting for {}",
+      crate::locator_generator::as_locator(&self.selector)
+    )];
+    let mut last_log = String::new();
+    let budget = crate::operation_budget::OperationBudget::operation(timeout)?;
+    budget
+      .scope(async {
+        let signal = crate::abort::current();
+        if let Some(sig) = signal.as_ref()
+          && sig.was_refused()
+        {
+          return Err(sig.error());
+        }
+        let mut idx = 0usize;
+        loop {
+          if let Some(sig) = signal.as_ref()
+            && sig.is_aborted()
+          {
+            let err = sig.error();
+            call_log.push(format!("operation was aborted: {err}"));
+            return Err(err.with_call_log(call_log));
+          }
+          if expired() {
+            return Err(crate::error::FerriError::timeout("fill", timeout).with_call_log(call_log));
+          }
+          crate::locator_handler::perform_checkpoint(self.frame.page_arc()).await;
+          self.backoff_pause(idx, deadline).await;
+          idx = idx.saturating_add(1);
+          let (rframe, rsel) = match self.resolved().await {
+            Ok(resolved) => resolved,
+            Err(e @ crate::error::FerriError::InvalidSelector { .. }) => return Err(e),
+            Err(_) => continue,
+          };
+          let parts = selectors::build_parts_json(&selectors::parse(&rsel)?);
+          let raw = match self.eval_fill_once(&rframe, &parts, &value_lit, force).await {
+            Some(Ok(r)) => r,
+            Some(Err(e)) if !expired() && !retries(&e) => return Err(e),
+            _ => continue,
+          };
+          let answer: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+          if let Some(count) = answer.get("strict").and_then(serde_json::Value::as_u64) {
+            return Err(crate::error::FerriError::strict(
+              self.selector.clone(),
+              usize::try_from(count).unwrap_or(2),
+            ));
+          }
+          if let Some(error) = answer.get("error").and_then(serde_json::Value::as_str) {
+            return Err(crate::error::FerriError::backend(error));
+          }
+          let inner = rframe.page_arc().inner();
+          match answer.get("result").and_then(serde_json::Value::as_str) {
+            Some("done") => return Ok(()),
+            Some("needsinput") if value.is_empty() => return inner.press_key("Delete", 0).await,
+            Some("needsinput") => return inner.insert_text(value).await,
+            Some("error:notfound") | None => {},
+            Some(state) => {
+              let line = action_log_line(state);
+              if line != last_log {
+                call_log.push(format!("  {line}"));
+                call_log.push("retrying fill action".into());
+                last_log = line;
+              }
+            },
+          }
+        }
+      })
+      .await
+  }
+
+  /// Fast single-eval pointer action (`click` / `dblclick` / `setChecked`)
+  /// using `window.__fd.resolveAndClickPrep` or `resolveAndCheckPrep` so no
+  /// `RemoteObjectId` is created.
+  async fn click_fast(&self, opts: &crate::options::ClickOptions, op_name: &'static str) -> Result<()> {
+    let page_arc = self.frame.page_arc();
+    let res = self.pointer_action_fast(opts, op_name, None).await;
+    page_arc.slow_mo_pause("Locator", op_name).await;
+    res
+  }
+
+  async fn set_checked_fast(&self, checked: bool, opts: &crate::options::CheckOptions) -> Result<()> {
+    let page_arc = self.frame.page_arc();
+    let click_opts = opts.clone().into_click_options();
+    let res = self.pointer_action_fast(&click_opts, "check", Some(checked)).await;
+    page_arc.slow_mo_pause("Locator", "check").await;
+    res
+  }
+
+  async fn dispatch_prepared_pointer(
+    rframe: &crate::frame::Frame,
+    opts: &crate::options::ClickOptions,
+    args: &crate::backend::BackendClickArgs,
+    op_name: &'static str,
+    target_checked: Option<bool>,
+    point: (f64, f64),
+    state: (bool, usize),
+  ) -> Result<()> {
+    let (interceptor_installed, tries) = state;
+    let inner = rframe.page_arc().inner();
+    let trial = opts.is_trial();
+    let (x, y) = point;
+    Box::pin(actions::with_pointer_context(
+      tries,
+      (!rframe.is_main_frame()).then(|| rframe.clone()),
+      crate::abort::guard(async {
+        let snap = inner.nav_snapshot();
+        let restore = actions::hold_modifiers(inner, &opts.modifiers).await?;
+        let dispatch = if trial {
+          Ok(())
+        } else {
+          let (dx, dy) = actions::cross_origin_frame_offset().await?;
+          inner.click_at_with(x + dx, y + dy, args).await
+        };
+        let dispatch = dispatch.and(actions::restore_modifiers(inner, restore).await);
+        if let Err(e) = dispatch {
+          if interceptor_installed {
+            let _ = Self::eval_in_resolved_frame(rframe, "JSON.stringify(window.__fd.finalizeHitInterceptor())").await;
+          }
+          if trial {
+            return Err(e);
+          }
+          return Err(crate::error::FerriError::InputSent {
+            action: op_name.into(),
+            message: e.to_string(),
+          });
+        }
+        if let Some(checked) = target_checked {
+          if trial {
+            return Ok(());
+          }
+          let fin_js = format!("window.__fd.finalizeCheck({checked}, {interceptor_installed})");
+          let Ok(fin_val) = Self::eval_in_resolved_frame(rframe, &fin_js).await else {
+            return Ok(());
+          };
+          let fin: serde_json::Value = fin_val
+            .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+            .unwrap_or_default();
+          if let Some(desc) = fin
+            .pointer("/hit/hitTargetDescription")
+            .and_then(serde_json::Value::as_str)
+          {
+            return Err(crate::error::FerriError::Backend(format!(
+              "{desc} intercepts pointer events"
+            )));
+          }
+          if fin.get("changed").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(crate::error::FerriError::backend(
+              "clicking the checkbox did not change its state",
+            ));
+          }
+          return Ok(());
+        }
+        if interceptor_installed
+          && let Ok(fin_val) =
+            Self::eval_in_resolved_frame(rframe, "JSON.stringify(window.__fd.finalizeHitInterceptor())").await
+          && let Some(raw_fin) = fin_val.and_then(|v| v.as_str().map(str::to_owned))
+          && raw_fin != "\"done\""
+          && let Ok(fin) = serde_json::from_str::<serde_json::Value>(&raw_fin)
+          && let Some(desc) = fin.get("hitTargetDescription").and_then(serde_json::Value::as_str)
+        {
+          return Err(crate::error::FerriError::Backend(format!(
+            "{desc} intercepts pointer events"
+          )));
+        }
+        if !trial {
+          inner.settle_navigation(snap, 2_000).await;
+        }
+        Ok(())
+      }),
+    ))
+    .await
+  }
+
+  async fn eval_pointer_prep(
+    &self,
+    rframe: &crate::frame::Frame,
+    rsel: &str,
+    opts: &crate::options::ClickOptions,
+    target_checked: Option<bool>,
+    tries: usize,
+  ) -> Result<PointerPrepVerdict> {
+    rframe.page_arc().inner().ensure_engine_injected().await?;
+    let parts = selectors::build_parts_json(&selectors::parse(rsel)?);
+    let pos_lit = match opts.position {
+      Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
+      None => "null".to_string(),
+    };
+    let stable = actions::stable_check().state();
+    let force = opts.is_force();
+    let trial = opts.is_trial();
+    let hit_lit = if !force && !trial { "'mouse'" } else { "null" };
+    let scroll_lit = if opts.scrolls() {
+      actions::scroll_alignment(tries).unwrap_or("null")
+    } else {
+      "false"
+    };
+    let prep_js = match target_checked {
+      Some(checked) => format!(
+        "window.__fd.resolveAndCheckPrep({parts}, {}, {checked}, {pos_lit}, ['visible','enabled','{stable}'], {scroll_lit}, {hit_lit}, {force}, {trial})",
+        self.strict
+      ),
+      None => format!(
+        "window.__fd.resolveAndClickPrep({parts}, {}, {pos_lit}, ['visible','enabled','{stable}'], {scroll_lit}, {hit_lit}, {force}, {trial})",
+        self.strict
+      ),
+    };
+    let raw = Self::eval_in_resolved_frame(rframe, &prep_js)
+      .await?
+      .and_then(|val| val.as_str().map(str::to_owned))
+      .unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    if let Some(count) = parsed.get("strict").and_then(serde_json::Value::as_u64) {
+      return Err(crate::error::FerriError::strict(
+        self.selector.clone(),
+        usize::try_from(count).unwrap_or(2),
+      ));
+    }
+    if let Some(msg) = parsed.get("invalid").and_then(serde_json::Value::as_str) {
+      return Err(crate::error::FerriError::invalid_argument("element", msg));
+    }
+    if parsed.get("alreadyDone").and_then(serde_json::Value::as_bool) == Some(true) {
+      return Ok(PointerPrepVerdict::AlreadyDone);
+    }
+    if let Some(err) = parsed.get("error").and_then(serde_json::Value::as_str) {
+      return Err(crate::error::FerriError::backend(err));
+    }
+    if parsed.get("actionable").and_then(serde_json::Value::as_bool) != Some(true) {
+      let reason = parsed
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("notfound");
+      return Ok(if reason == "notfound" {
+        PointerPrepVerdict::NotFound
+      } else {
+        PointerPrepVerdict::Retry(action_log_line(&format!("error:not{reason}")))
+      });
+    }
+    let Some(point) = parsed
+      .get("point")
+      .and_then(|p| Some((p.get("x")?.as_f64()?, p.get("y")?.as_f64()?)))
+    else {
+      return Ok(PointerPrepVerdict::NotFound);
+    };
+    let interceptor_installed = if force {
+      false
+    } else {
+      match parsed.get("hit").and_then(serde_json::Value::as_str) {
+        Some("ok") => !trial,
+        Some("error:notconnected") => return Ok(PointerPrepVerdict::Retry(action_log_line("error:notconnected"))),
+        Some(desc) => return Ok(PointerPrepVerdict::Retry(format!("{desc} intercepts pointer events"))),
+        None => false,
+      }
+    };
+    Ok(PointerPrepVerdict::Ready {
+      point,
+      interceptor_installed,
+    })
+  }
+
+  async fn pointer_action_fast(
+    &self,
+    opts: &crate::options::ClickOptions,
+    op_name: &'static str,
+    target_checked: Option<bool>,
+  ) -> Result<()> {
+    let timeout = opts.timeout.unwrap_or_else(|| self.frame.page_arc().default_timeout());
+    let deadline = (timeout != 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(timeout));
+    let expired = || deadline.is_some_and(|d| std::time::Instant::now() >= d);
+    let args = crate::backend::BackendClickArgs::from_options(opts);
+    let mut call_log = vec![format!(
+      "waiting for {}",
+      crate::locator_generator::as_locator(&self.selector)
+    )];
+    let mut last_log = String::new();
+    let budget = crate::operation_budget::OperationBudget::operation(timeout)?;
+    budget
+      .scope(async {
+        let signal = crate::abort::current();
+        if let Some(sig) = signal.as_ref()
+          && sig.was_refused()
+        {
+          return Err(sig.error());
+        }
+        let mut idx = 0usize;
+        let mut tries = 0usize;
+        loop {
+          if let Some(sig) = signal.as_ref()
+            && sig.is_aborted()
+          {
+            let err = sig.error();
+            call_log.push(format!("operation was aborted: {err}"));
+            return Err(err.with_call_log(call_log));
+          }
+          if expired() {
+            return Err(crate::error::FerriError::timeout(op_name, timeout).with_call_log(call_log));
+          }
+          crate::locator_handler::perform_checkpoint(self.frame.page_arc()).await;
+          self.backoff_pause(idx, deadline).await;
+          idx = idx.saturating_add(1);
+          let (rframe, rsel) = match self.resolved().await {
+            Ok(resolved) => resolved,
+            Err(e @ crate::error::FerriError::InvalidSelector { .. }) => return Err(e),
+            Err(_) => continue,
+          };
+          let (point, interceptor_installed) = match self
+            .eval_pointer_prep(&rframe, &rsel, opts, target_checked, tries)
+            .await
+          {
+            Ok(PointerPrepVerdict::AlreadyDone) => return Ok(()),
+            Ok(PointerPrepVerdict::Retry(line)) => {
+              tries = tries.saturating_add(1);
+              record_retry_log(&mut call_log, &mut last_log, &line, op_name);
+              continue;
+            },
+            Ok(PointerPrepVerdict::Ready {
+              point,
+              interceptor_installed,
+            }) => (point, interceptor_installed),
+            Err(e) if !expired() && !retries(&e) => return Err(e),
+            Ok(PointerPrepVerdict::NotFound) | Err(_) => continue,
+          };
+          let outcome = Self::dispatch_prepared_pointer(
+            &rframe,
+            opts,
+            &args,
+            op_name,
+            target_checked,
+            point,
+            (interceptor_installed, tries),
+          )
+          .await;
+          tries = tries.saturating_add(1);
+          match outcome {
+            Ok(()) => return Ok(()),
+            Err(e @ crate::error::FerriError::Aborted { .. }) => {
+              call_log.push(format!("operation was aborted: {e}"));
+              return Err(e.with_call_log(call_log));
+            },
+            Err(e) if retries(&e) => {
+              record_retry_log(&mut call_log, &mut last_log, &action_log_line(&e.to_string()), op_name);
+            },
+            Err(e) if !expired() => return Err(e),
             Err(_) => {},
           }
         }
@@ -3625,6 +4077,8 @@ fn merge_iframe_children(
 /// Render a merged tree as YAML, in `frame`, with the renderer the
 /// injected script ships (`renderAriaSnapshotAsYaml`).
 async fn render_aria_snapshot(frame: &crate::frame::Frame, json: &[serde_json::Value]) -> Result<String> {
+  let frame_id = (!frame.is_main_frame()).then(|| frame.id().to_string());
+  selectors::ensure_aria_support(frame.page_arc().inner(), frame_id.as_deref()).await?;
   let literal =
     serde_json::to_string(&serde_json::to_string(json).map_err(|e| crate::error::FerriError::Json(e.to_string()))?)
       .map_err(|e| crate::error::FerriError::Json(e.to_string()))?;
@@ -3689,6 +4143,8 @@ async fn aria_child_snapshot(
   let n = seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
   let prefix = format!("f{n}");
   let copts = aria_opts_json(mode, child_depth, boxes);
+  let child_frame_id = (!child_frame.is_main_frame()).then(|| child_frame.id().to_string());
+  selectors::ensure_aria_support(child_frame.page_arc().inner(), child_frame_id.as_deref()).await?;
   let body_js = format!(
     "async () => {{
       if (!document.body) {{
