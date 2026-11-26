@@ -232,14 +232,14 @@ fn to_css_pixels(bytes: Vec<u8>, rect: &crate::options::ClipRect, capture: &Scre
 /// Every field `apply_context_options` failed to apply, then every one
 /// this backend cannot honour, as one error.
 fn context_option_errors(
-  applied: [(&str, Option<Result<()>>); 12],
+  applied: Vec<(&'static str, Result<()>)>,
   opts: &crate::options::BrowserContextOptions,
 ) -> Result<()> {
   let errs: Vec<String> = applied
     .into_iter()
     .filter_map(|(label, r)| match r {
-      Some(Err(e)) => Some(format!("{label}: {e}")),
-      _ => None,
+      Err(e) => Some(format!("{label}: {e}")),
+      Ok(()) => None,
     })
     .chain(unsupported_context_options(opts))
     .collect();
@@ -417,6 +417,10 @@ pub struct BidiPage {
   first_navigation: Arc<std::sync::OnceLock<Arc<super::frames::FirstNavigation>>>,
   /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
   pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
+  /// Last viewport applied via `browsingContext.setViewport`, so a repeat call
+  /// with identical dimensions/scale (e.g. `apply_context_options` right after
+  /// `BidiBrowser::new_page`) skips the redundant round trip.
+  emulated_viewport: Arc<std::sync::Mutex<Option<crate::options::ViewportConfig>>>,
   /// Idempotent latch for the frame-event listener.
   pub(crate) frame_listener_started: Arc<AtomicBool>,
   /// Console / page-error retention for `page.consoleMessages()` /
@@ -605,6 +609,7 @@ impl BidiPage {
       frame_cache,
       first_navigation: Arc::default(),
       media_emulation: crate::backend::SharedMediaEmulation::default(),
+      emulated_viewport: Arc::default(),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
       observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       network_idle: Arc::default(),
@@ -2061,10 +2066,11 @@ impl BidiPage {
   ///
   /// Returns an error when the `browser.setDownloadBehavior` command fails.
   pub async fn send_download_behavior(&self) -> Result<()> {
+    let user_context = self.session.user_contexts.then_some(&*self.user_context);
     self
       .cmd(
         "browser.setDownloadBehavior",
-        download_behavior_params(&self.accept_downloads, &self.downloads_subdir),
+        download_behavior_params(&self.accept_downloads, &self.downloads_subdir, user_context),
       )
       .await
       .map(|_| ())
@@ -2078,9 +2084,12 @@ impl BidiPage {
     if &*self.user_context != "default" {
       let mut for_context = params.clone();
       for_context["userContexts"] = json!([&*self.user_context]);
-      if let Err(error) = self.cmd(method, for_context).await {
+      params["contexts"] = json!([&*self.context_id]);
+      let (ctx_res, page_res) = futures::future::join(self.cmd(method, for_context), self.cmd(method, params)).await;
+      if let Err(error) = ctx_res {
         tracing::debug!("{method} for user context {}: {error}", self.user_context);
       }
+      return page_res.map(|_| ());
     }
     params["contexts"] = json!([&*self.context_id]);
     self.cmd(method, params).await.map(|_| ())
@@ -2099,106 +2108,98 @@ impl BidiPage {
   /// and each option this backend cannot honour (`bypassCSP` or `hasTouch` set to true). The
   /// remaining fields are still applied.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
-    use futures::future::OptionFuture;
+    use futures::future::BoxFuture;
 
     self.store_network_options(opts);
 
-    let perms_fut: OptionFuture<_> = (opts.permissions.is_some() || !opts.origin_permissions.is_empty())
-      .then(|| self.apply_context_permissions(opts))
-      .into();
-    let viewport_fut: OptionFuture<_> = opts
-      .resolved_viewport()
-      .map(|vp| async move { self.emulate_viewport(&vp).await })
-      .into();
+    let mut tasks: Vec<(&'static str, BoxFuture<'_, Result<()>>)> = Vec::with_capacity(13);
+    if let Some(vp) = opts.resolved_viewport() {
+      tasks.push(("viewport", Box::pin(async move { self.emulate_viewport(&vp).await })));
+    }
     // Playwright drives the same pair from `doUpdateDefaultViewport`
     // (`bidi/bidiBrowser.ts:457-483`): the screen area is whichever of
     // `screen` / `viewport` is set, and `isMobile` only decides the
     // orientation it reports.
-    let screen_fut: OptionFuture<_> = opts
-      .screen
-      .or_else(|| {
-        opts.resolved_viewport().map(|vp| crate::options::ScreenSize {
-          width: vp.width,
-          height: vp.height,
-        })
+    if let Some(screen) = opts.screen.or_else(|| {
+      opts.resolved_viewport().map(|vp| crate::options::ScreenSize {
+        width: vp.width,
+        height: vp.height,
       })
-      .map(|screen| self.emulate_screen(screen, opts.is_mobile.unwrap_or(false)))
-      .into();
-    let scheme_fut = self.emulate_user_context_color_scheme(&opts.color_scheme);
-    let ua_fut = self.emulate_if(
-      "emulation.setUserAgentOverride",
-      opts.user_agent.as_deref().map(|ua| json!({"userAgent": ua})),
-    );
-    let locale_fut = self.emulate_if(
-      "emulation.setLocaleOverride",
-      opts.locale.as_deref().map(|l| json!({"locale": l})),
-    );
-    let tz_fut = self.emulate_if(
-      "emulation.setTimezoneOverride",
-      opts.timezone_id.as_deref().map(|tz| json!({"timezone": tz})),
-    );
-    let js_fut = self.emulate_if(
-      "emulation.setScriptingEnabled",
-      opts.java_script_enabled.map(|v| json!({"enabled": v})),
-    );
-    let dl_fut: OptionFuture<_> = opts
-      .accept_downloads
-      .map(|accept| self.apply_accept_downloads(accept))
-      .into();
-    let headers_fut: OptionFuture<_> = opts
-      .extra_http_headers
-      .as_ref()
-      .map(|h| self.set_extra_http_headers(h))
-      .into();
-    let geo_fut = self.context_command_if(
-      "emulation.setGeolocationOverride",
-      opts
-        .geolocation
-        .map(|g| json!({"coordinates": {"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}})),
-    );
+    }) {
+      let is_mobile = opts.is_mobile.unwrap_or(false);
+      tasks.push(("screen", Box::pin(self.emulate_screen(screen, is_mobile))));
+    }
+    if let Some(ua) = opts.user_agent.as_deref() {
+      tasks.push((
+        "userAgent",
+        Box::pin(self.emulate("emulation.setUserAgentOverride", json!({"userAgent": ua}))),
+      ));
+    }
+    if let Some(l) = opts.locale.as_deref() {
+      tasks.push((
+        "locale",
+        Box::pin(self.emulate("emulation.setLocaleOverride", json!({"locale": l}))),
+      ));
+    }
+    if let Some(tz) = opts.timezone_id.as_deref() {
+      tasks.push((
+        "timezoneId",
+        Box::pin(self.emulate("emulation.setTimezoneOverride", json!({"timezone": tz}))),
+      ));
+    }
+    if let Some(v) = opts.java_script_enabled {
+      tasks.push((
+        "javaScriptEnabled",
+        Box::pin(self.emulate("emulation.setScriptingEnabled", json!({"enabled": v}))),
+      ));
+    }
+    if let Some(accept) = opts.accept_downloads {
+      tasks.push(("acceptDownloads", Box::pin(self.apply_accept_downloads(accept))));
+    }
+    if let Some(h) = opts.extra_http_headers.as_ref() {
+      tasks.push(("extraHTTPHeaders", Box::pin(self.set_extra_http_headers(h))));
+    }
+    tasks.push((
+      "colorScheme",
+      Box::pin(async move {
+        self.emulate_user_context_color_scheme(&opts.color_scheme).await;
+        Ok(())
+      }),
+    ));
+    if let Some(g) = opts.geolocation {
+      tasks.push((
+        "geolocation",
+        Box::pin(self.context_command(
+          "emulation.setGeolocationOverride",
+          json!({"coordinates": {"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}}),
+        )),
+      ));
+    }
     // Playwright's BiDi backend shape (bidiBrowser.ts:406):
     // `networkConditions: { type: 'offline' } | null`.
-    let offline_fut = self.context_command_if(
-      "emulation.setNetworkConditions",
-      opts
-        .offline
-        .map(|o| json!({"networkConditions": if o { json!({"type": "offline"}) } else { serde_json::Value::Null }})),
-    );
-    let sw_fut: OptionFuture<_> = opts
-      .service_workers
-      .map(|policy| self.apply_service_workers(policy))
-      .into();
+    if let Some(o) = opts.offline {
+      let conditions = if o {
+        json!({"type": "offline"})
+      } else {
+        serde_json::Value::Null
+      };
+      tasks.push((
+        "offline",
+        Box::pin(self.context_command(
+          "emulation.setNetworkConditions",
+          json!({"networkConditions": conditions}),
+        )),
+      ));
+    }
+    if let Some(policy) = opts.service_workers {
+      tasks.push(("serviceWorkers", Box::pin(self.apply_service_workers(policy))));
+    }
+    if opts.permissions.is_some() || !opts.origin_permissions.is_empty() {
+      tasks.push(("permissions", Box::pin(self.apply_context_permissions(opts))));
+    }
 
-    let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, (), r_geo, r_off, r_sw, r_perm) = tokio::join!(
-      viewport_fut,
-      screen_fut,
-      ua_fut,
-      locale_fut,
-      tz_fut,
-      js_fut,
-      dl_fut,
-      headers_fut,
-      scheme_fut,
-      geo_fut,
-      offline_fut,
-      sw_fut,
-      perms_fut,
-    );
-
-    let applied = [
-      ("viewport", r_vp),
-      ("screen", r_scr),
-      ("userAgent", r_ua),
-      ("locale", r_loc),
-      ("timezoneId", r_tz),
-      ("javaScriptEnabled", r_js),
-      ("acceptDownloads", r_dl),
-      ("extraHTTPHeaders", r_hdr),
-      ("geolocation", r_geo),
-      ("offline", r_off),
-      ("serviceWorkers", r_sw),
-      ("permissions", r_perm),
-    ];
+    let applied =
+      futures::future::join_all(tasks.into_iter().map(|(label, fut)| async move { (label, fut.await) })).await;
     context_option_errors(applied, opts)
   }
 
@@ -2220,27 +2221,10 @@ impl BidiPage {
     }
   }
 
-  fn emulate_if(
-    &self,
-    method: &'static str,
-    params: Option<serde_json::Value>,
-  ) -> futures::future::OptionFuture<impl std::future::Future<Output = Result<()>> + '_> {
-    params.map(|params| self.emulate(method, params)).into()
-  }
-
-  /// `method` with `params` scoped to this page's browsing context, when
-  /// there are params to send.
-  fn context_command_if(
-    &self,
-    method: &'static str,
-    params: Option<serde_json::Value>,
-  ) -> futures::future::OptionFuture<impl std::future::Future<Output = Result<()>> + '_> {
-    params
-      .map(|mut params| async move {
-        params["contexts"] = json!([&*self.context_id]);
-        self.cmd(method, params).await.map(|_| ())
-      })
-      .into()
+  /// `method` with `params` scoped to this page's browsing context.
+  async fn context_command(&self, method: &'static str, mut params: serde_json::Value) -> Result<()> {
+    params["contexts"] = json!([&*self.context_id]);
+    self.cmd(method, params).await.map(|_| ())
   }
 
   /// Record and re-assert: `attach_listeners` sends the same command
@@ -2296,25 +2280,21 @@ impl BidiPage {
     } else {
       ("landscape-primary", 0, "landscape")
     };
-    self
-      .cmd(
-        "emulation.setScreenOrientationOverride",
-        json!({
-          "contexts": [&*self.context_id],
-          "screenOrientation": { "natural": natural, "type": kind, "angle": angle },
-        }),
-      )
-      .await?;
-    self
-      .cmd(
-        "emulation.setScreenSettingsOverride",
-        json!({
-          "contexts": [&*self.context_id],
-          "screenArea": { "width": screen.width, "height": screen.height },
-        }),
-      )
-      .await
-      .map(|_| ())
+    let orientation = self.cmd(
+      "emulation.setScreenOrientationOverride",
+      json!({
+        "contexts": [&*self.context_id],
+        "screenOrientation": { "natural": natural, "type": kind, "angle": angle },
+      }),
+    );
+    let settings = self.cmd(
+      "emulation.setScreenSettingsOverride",
+      json!({
+        "contexts": [&*self.context_id],
+        "screenArea": { "width": screen.width, "height": screen.height },
+      }),
+    );
+    futures::future::try_join(orientation, settings).await.map(|_| ())
   }
 
   /// The page's own media, layered over this, is applied by
@@ -2338,7 +2318,11 @@ impl BidiPage {
       "features": { "prefers-color-scheme": value },
       "userContexts": [&*self.user_context],
     });
-    if let Err(error) = self.cmd("emulation.setMediaFeaturesOverride", params).await {
+    if let Err(error) = self
+      .session
+      .try_command("emulation.setMediaFeaturesOverride", params)
+      .await
+    {
       tracing::debug!("colour scheme for user context {}: {error}", self.user_context);
     }
   }
@@ -2375,6 +2359,13 @@ impl BidiPage {
   ///
   /// Returns an error when the `browsingContext.setViewport` command fails.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
+    if self
+      .emulated_viewport
+      .lock()
+      .is_ok_and(|slot| slot.as_ref() == Some(config))
+    {
+      return Ok(());
+    }
     let mut params = json!({
       "context": &*self.context_id,
       "viewport": {
@@ -2386,6 +2377,9 @@ impl BidiPage {
       params["devicePixelRatio"] = json!(config.device_scale_factor);
     }
     self.cmd("browsingContext.setViewport", params).await?;
+    if let Ok(mut slot) = self.emulated_viewport.lock() {
+      *slot = Some(config.clone());
+    }
     Ok(())
   }
 
@@ -2617,12 +2611,13 @@ impl BidiPage {
       let session = Arc::clone(&self.session);
       let downloads_subdir = Arc::clone(&self.downloads_subdir);
       let accept_downloads = Arc::clone(&self.accept_downloads);
+      let user_context = session.user_contexts.then(|| Arc::clone(&self.user_context));
       tokio::spawn(async move {
         let _ = session
           .transport
           .send_command(
             "browser.setDownloadBehavior",
-            download_behavior_params(&accept_downloads, &downloads_subdir),
+            download_behavior_params(&accept_downloads, &downloads_subdir, user_context.as_deref()),
           )
           .await;
       });
@@ -5256,6 +5251,7 @@ fn color_scheme_feature(scheme: &crate::options::MediaOverride) -> Result<Option
 fn download_behavior_params(
   accept_downloads: &std::sync::atomic::AtomicBool,
   downloads_subdir: &std::path::Path,
+  user_context: Option<&str>,
 ) -> serde_json::Value {
   let behavior = if accept_downloads.load(std::sync::atomic::Ordering::Relaxed) {
     serde_json::json!({
@@ -5265,5 +5261,9 @@ fn download_behavior_params(
   } else {
     serde_json::json!({ "type": "denied" })
   };
-  serde_json::json!({ "downloadBehavior": behavior })
+  let mut params = serde_json::json!({ "downloadBehavior": behavior });
+  if let Some(uc) = user_context {
+    params["userContexts"] = serde_json::json!([uc]);
+  }
+  params
 }

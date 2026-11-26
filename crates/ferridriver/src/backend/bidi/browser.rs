@@ -710,10 +710,14 @@ impl BidiBrowser {
       user_context_id,
       Arc::clone(&self.downloads_dir),
     );
-    page.wait_until_ready().await?;
-
     if let Some(viewport) = viewport {
-      page.emulate_viewport(viewport).await?;
+      futures::future::try_join(
+        Box::pin(page.wait_until_ready()),
+        Box::pin(page.emulate_viewport(viewport)),
+      )
+      .await?;
+    } else {
+      page.wait_until_ready().await?;
     }
 
     if !url.is_empty() && url != "about:blank" {
