@@ -252,7 +252,12 @@ test("WebDriver timeout includes BiDi initialization and releases the session", 
   const mock = driver({ hang: true });
   try {
     await expect(firefox().connect(mock.endpoint, { timeout: 100 })).rejects.toThrow(/Timeout 100ms/);
-    expect(mock.commands).toEqual(["session.subscribe"]);
+    expect(mock.commands).toEqual([
+      "session.subscribe",
+      "network.addDataCollector",
+      "network.addIntercept",
+      "browser.getUserContexts",
+    ]);
     expect(mock.requests.map(request => request.method)).toEqual(["POST", "DELETE"]);
   } finally { mock.server.stop(true); }
 });
