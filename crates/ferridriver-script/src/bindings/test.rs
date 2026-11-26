@@ -191,7 +191,9 @@ pub(crate) struct CurrentTest {
   pub(crate) test_info: Persistent<Object<'static>>,
   pub(crate) bridge: Arc<dyn TestHostBridge>,
   pub(crate) pending: Vec<PendingFixture>,
-  pub(crate) annotations: AnnotationsMirror,
+  /// Lazily initialized on first `testInfo.annotations` access so tests that
+  /// never touch `annotations` skip two JS array allocations and teardown fold.
+  pub(crate) annotations: Option<AnnotationsMirror>,
 }
 
 /// `testInfo.annotations` as Playwright has it: one array the test may
@@ -238,7 +240,7 @@ fn fold_pushed_annotations(ctx: &Ctx<'_>) {
   let Ok(Some((mirror, bridge))) = with_test_registry(ctx, |r| {
     r.current
       .as_ref()
-      .map(|c| (c.annotations.clone(), Arc::clone(&c.bridge)))
+      .and_then(|c| c.annotations.as_ref().map(|a| (a.clone(), Arc::clone(&c.bridge))))
   }) else {
     return;
   };
@@ -316,6 +318,12 @@ pub(crate) struct TestRegistry {
   pub(crate) describe_stack: Vec<usize>,
   pub(crate) current: Option<CurrentTest>,
   pub(crate) worker_fixtures: FxHashMap<usize, WorkerFixture>,
+  /// Shared prototype carrying `testInfo` getters and methods, built once per
+  /// VM so each test only populates its own plain data fields.
+  pub(crate) test_info_proto: Option<Persistent<Object<'static>>>,
+  /// Cached `QuickJS` representation of `TestInfoData::config`, reused across
+  /// tests on the same worker while the config value is unchanged.
+  pub(crate) cached_config: Option<(serde_json::Value, Persistent<Value<'static>>)>,
 }
 
 impl TestRegistry {
@@ -1931,82 +1939,116 @@ fn se(e: impl std::fmt::Display) -> ScriptError {
   ScriptError::internal(e.to_string())
 }
 
-fn build_test_info<'js>(
-  ctx: &Ctx<'js>,
-  info: &TestInfoData,
-  bridge: &Arc<dyn TestHostBridge>,
-  annotations: &AnnotationsMirror,
-) -> Result<Object<'js>, ScriptError> {
-  let obj = Object::new(ctx.clone()).map_err(se)?;
-  set_test_info_fields(ctx, &obj, info)?;
+/// Build or reuse the shared `testInfo` prototype carrying all getters and
+/// methods backed by the VM's active test (`current_bridge`), avoiding 12
+/// per-test closure/accessor allocations.
+fn test_info_proto<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>, ScriptError> {
+  if let Some(saved) = with_test_registry(ctx, |r| r.test_info_proto.clone())? {
+    return saved.restore(ctx).map_err(se);
+  }
+  let proto = Object::new(ctx.clone()).map_err(se)?;
 
-  // Live getters backed by the bridge: annotations grows via
-  // `annotate()` and pushes, attachmentCount via `attach()`.
-  install_bridge_getter(ctx, &obj, "annotations", {
-    let bridge = Arc::clone(bridge);
-    let mirror = annotations.clone();
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { Ok(mirror.sync(ctx, bridge.as_ref())?.into_value()) }
-  })
-  .map_err(se)?;
-  install_bridge_getter(ctx, &obj, "attachmentCount", {
-    let bridge = Arc::clone(bridge);
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-      rquickjs::IntoJs::into_js(u32::try_from(bridge.attachment_count()).unwrap_or(u32::MAX), ctx)
-    }
-  })
-  .map_err(se)?;
-  install_bridge_getter(ctx, &obj, "errors", {
-    let bridge = Arc::clone(bridge);
-    move |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> { rquickjs::IntoJs::into_js(bridge.errors(), ctx) }
-  })
-  .map_err(se)?;
-
-  // testInfo.attach(name, contentType, body[, opts]) — positional — or
-  // Playwright's testInfo.attach(name, { body?, contentType?, path? }).
-  obj.set("attach", make_attach_fn(ctx, bridge)?).map_err(se)?;
-
-  let annotate_bridge = Arc::clone(bridge);
-  let annotate = Function::new(
-    ctx.clone(),
-    move |kind: String, description: rquickjs::function::Opt<String>| {
-      annotate_bridge.annotate(kind, description.0);
+  install_bridge_getter(
+    ctx,
+    &proto,
+    "annotations",
+    |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+      let bridge = current_bridge(ctx, "testInfo.annotations")?;
+      let existing = with_test_registry(ctx, |r| r.current.as_ref().and_then(|c| c.annotations.clone()))
+        .map_err(|e| throw_script_error(ctx, &e))?;
+      let mirror = if let Some(m) = existing {
+        m
+      } else {
+        let created = AnnotationsMirror::new(ctx)?;
+        with_test_registry(ctx, |r| {
+          if let Some(c) = r.current.as_mut() {
+            c.annotations = Some(created.clone());
+          }
+        })
+        .map_err(|e| throw_script_error(ctx, &e))?;
+        created
+      };
+      Ok(mirror.sync(ctx, bridge.as_ref())?.into_value())
     },
   )
   .map_err(se)?;
-  obj.set("annotate", annotate).map_err(se)?;
+  install_bridge_getter(
+    ctx,
+    &proto,
+    "attachmentCount",
+    |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+      let bridge = current_bridge(ctx, "testInfo.attachmentCount")?;
+      rquickjs::IntoJs::into_js(u32::try_from(bridge.attachment_count()).unwrap_or(u32::MAX), ctx)
+    },
+  )
+  .map_err(se)?;
+  install_bridge_getter(
+    ctx,
+    &proto,
+    "errors",
+    |ctx: &Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+      let bridge = current_bridge(ctx, "testInfo.errors")?;
+      rquickjs::IntoJs::into_js(bridge.errors(), ctx)
+    },
+  )
+  .map_err(se)?;
+
+  proto.set("attach", make_attach_fn(ctx)?).map_err(se)?;
+
+  let annotate = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, kind: String, description: rquickjs::function::Opt<String>| -> rquickjs::Result<()> {
+      current_bridge(&ctx, "testInfo.annotate()")?.annotate(kind, description.0);
+      Ok(())
+    },
+  )
+  .map_err(se)?;
+  proto.set("annotate", annotate).map_err(se)?;
 
   for kind in ["skip", "fixme", "fail", "slow"] {
     let f = Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
       runtime_modifier(&ctx, kind, &args.0)
     })
     .map_err(se)?;
-    obj.set(kind, f).map_err(se)?;
+    proto.set(kind, f).map_err(se)?;
   }
   let set_timeout = Function::new(ctx.clone(), |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
     current_bridge(&ctx, "testInfo.setTimeout()")?.set_timeout_override(crate::bindings::convert::f64_to_u64(ms));
     Ok(())
   })
   .map_err(se)?;
-  obj.set("setTimeout", set_timeout).map_err(se)?;
+  proto.set("setTimeout", set_timeout).map_err(se)?;
 
-  let output_bridge = Arc::clone(bridge);
-  let output_path = Function::new(ctx.clone(), move |parts: Rest<String>| {
-    output_bridge.output_path(&parts.0)
-  })
+  let output_path = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, parts: Rest<String>| -> rquickjs::Result<String> {
+      Ok(current_bridge(&ctx, "testInfo.outputPath()")?.output_path(&parts.0))
+    },
+  )
   .map_err(se)?;
-  obj.set("outputPath", output_path).map_err(se)?;
-  obj
-    .set("snapshotPath", make_snapshot_path_fn(ctx, bridge)?)
-    .map_err(se)?;
+  proto.set("outputPath", output_path).map_err(se)?;
+  proto.set("snapshotPath", make_snapshot_path_fn(ctx)?).map_err(se)?;
 
+  let saved = Persistent::save(ctx, proto.clone());
+  with_test_registry(ctx, |r| {
+    r.test_info_proto = Some(saved);
+  })?;
+  Ok(proto)
+}
+
+fn build_test_info<'js>(ctx: &Ctx<'js>, info: &TestInfoData) -> Result<Object<'js>, ScriptError> {
+  let proto = test_info_proto(ctx)?;
+  let obj = Object::new(ctx.clone()).map_err(se)?;
+  obj.set_prototype(Some(&proto)).map_err(se)?;
+  set_test_info_fields(ctx, &obj, info)?;
   Ok(obj)
 }
 
 /// The plain data fields of `testInfo`.
 fn set_test_info_fields<'js>(ctx: &Ctx<'js>, obj: &Object<'js>, info: &TestInfoData) -> Result<(), ScriptError> {
-  obj.set("title", info.title.clone()).map_err(se)?;
-  obj.set("titlePath", info.title_path.clone()).map_err(se)?;
-  obj.set("file", info.file.clone()).map_err(se)?;
+  obj.set("title", info.title.as_str()).map_err(se)?;
+  obj.set("titlePath", info.title_path.as_slice()).map_err(se)?;
+  obj.set("file", info.file.as_str()).map_err(se)?;
   obj.set("line", info.line).map_err(se)?;
   obj.set("column", info.column).map_err(se)?;
   obj.set("retry", info.retry).map_err(se)?;
@@ -2014,36 +2056,45 @@ fn set_test_info_fields<'js>(ctx: &Ctx<'js>, obj: &Object<'js>, info: &TestInfoD
   obj.set("parallelIndex", info.parallel_index).map_err(se)?;
   obj.set("repeatEachIndex", info.repeat_each_index).map_err(se)?;
   obj.set("timeout", info.timeout_ms).map_err(se)?;
-  obj.set("expectedStatus", info.expected_status.clone()).map_err(se)?;
-  obj.set("tags", info.tags.clone()).map_err(se)?;
-  obj.set("outputDir", info.output_dir.clone()).map_err(se)?;
-  obj.set("snapshotDir", info.snapshot_dir.clone()).map_err(se)?;
-  obj.set("snapshotSuffix", info.snapshot_suffix.clone()).map_err(se)?;
-  obj
-    .set(
-      "config",
-      crate::bindings::convert::json_to_js(ctx, &info.config).map_err(se)?,
-    )
-    .map_err(se)?;
+  obj.set("expectedStatus", info.expected_status.as_str()).map_err(se)?;
+  obj.set("tags", info.tags.as_slice()).map_err(se)?;
+  obj.set("outputDir", info.output_dir.as_str()).map_err(se)?;
+  obj.set("snapshotDir", info.snapshot_dir.as_str()).map_err(se)?;
+  obj.set("snapshotSuffix", info.snapshot_suffix.as_str()).map_err(se)?;
+  let config_val = if let Some(cached) = with_test_registry(ctx, |r| {
+    r.cached_config
+      .as_ref()
+      .filter(|(raw, _)| *raw == info.config)
+      .map(|(_, val)| val.clone())
+  })? {
+    cached.restore(ctx).map_err(se)?
+  } else {
+    let val = crate::bindings::convert::json_to_js(ctx, &info.config).map_err(se)?;
+    let saved = Persistent::save(ctx, val.clone());
+    with_test_registry(ctx, |r| {
+      r.cached_config = Some((info.config.clone(), saved));
+    })?;
+    val
+  };
+  obj.set("config", config_val).map_err(se)?;
   // A config without projects runs Playwright's one unnamed project, so
   // `testInfo.project` is always there, its name empty.
   let project = Object::new(ctx.clone()).map_err(se)?;
   project
-    .set("name", info.project_name.clone().unwrap_or_default())
+    .set("name", info.project_name.as_deref().unwrap_or(""))
     .map_err(se)?;
   obj.set("project", project).map_err(se)?;
   Ok(())
 }
 
 /// `testInfo.attach`.
-fn make_attach_fn<'js>(ctx: &Ctx<'js>, bridge: &Arc<dyn TestHostBridge>) -> Result<Function<'js>, ScriptError> {
-  let attach_bridge = Arc::clone(bridge);
+fn make_attach_fn<'js>(ctx: &Ctx<'js>) -> Result<Function<'js>, ScriptError> {
   Function::new(
     ctx.clone(),
     Async(
-      move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> Pin<Box<dyn Future<Output = rquickjs::Result<()>> + 'js>> {
-        let bridge = Arc::clone(&attach_bridge);
+      |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> Pin<Box<dyn Future<Output = rquickjs::Result<()>> + 'js>> {
         Box::pin(async move {
+          let bridge = current_bridge(&ctx, "testInfo.attach()")?;
           let (name, content_type, source) = parse_attach_args(&ctx, &args.0)?;
           let bytes = match source {
             AttachSource::Bytes(b) => b,
@@ -2064,14 +2115,14 @@ fn make_attach_fn<'js>(ctx: &Ctx<'js>, bridge: &Arc<dyn TestHostBridge>) -> Resu
 }
 
 /// `testInfo.snapshotPath(...)`.
-fn make_snapshot_path_fn<'js>(ctx: &Ctx<'js>, bridge: &Arc<dyn TestHostBridge>) -> Result<Function<'js>, ScriptError> {
-  let snap_bridge = Arc::clone(bridge);
+fn make_snapshot_path_fn<'js>(ctx: &Ctx<'js>) -> Result<Function<'js>, ScriptError> {
   // Playwright: `snapshotPath(...name: string[])` and
   // `snapshotPath(name, { kind })` (`worker/testInfo.ts:644-662`) — a
   // trailing object is the options bag, everything before it is a path.
   Function::new(
     ctx.clone(),
-    move |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<String> {
+    |ctx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<String> {
+      let snap_bridge = current_bridge(&ctx, "testInfo.snapshotPath()")?;
       let mut parts: Vec<String> = Vec::with_capacity(args.0.len());
       let mut kind = "snapshot".to_string();
       let last = args.0.len().saturating_sub(1);
@@ -2188,11 +2239,11 @@ pub(crate) fn set_current_test(
     crate::bindings::call_site::set_script_id(ctx, &owner);
   }
   let obj = Object::new(ctx.clone()).map_err(se)?;
-  obj.set("browserName", world.browser_name.clone()).map_err(se)?;
+  obj.set("browserName", world.browser_name.as_str()).map_err(se)?;
   obj.set("headless", world.headless).map_err(se)?;
   obj.set("isMobile", world.is_mobile).map_err(se)?;
   obj.set("hasTouch", world.has_touch).map_err(se)?;
-  obj.set("baseURL", world.base_url.clone()).map_err(se)?;
+  obj.set("baseURL", world.base_url.as_deref()).map_err(se)?;
   if let Some(page) = &world.page {
     install_page_on(ctx, &obj, Arc::clone(page), vm.clone()).map_err(se)?;
   }
@@ -2205,8 +2256,7 @@ pub(crate) fn set_current_test(
   if let Some(b) = &world.browser {
     install_browser_on(ctx, &obj, Arc::clone(b)).map_err(se)?;
   }
-  let annotations = AnnotationsMirror::new(ctx).map_err(se)?;
-  let info_obj = build_test_info(ctx, &world.info, &bridge, &annotations)?;
+  let info_obj = build_test_info(ctx, &world.info)?;
   obj.set("testInfo", info_obj.clone()).map_err(se)?;
   // The `expect` block this test's project resolved to — every bare
   // `expect(...)` the body makes starts from its timeout.
@@ -2220,7 +2270,7 @@ pub(crate) fn set_current_test(
       test_info: info_saved,
       bridge,
       pending: Vec::new(),
-      annotations,
+      annotations: None,
     });
   })
 }
@@ -2363,6 +2413,9 @@ pub(crate) async fn resolve_custom_fixtures<'js>(
   source_label: &str,
 ) -> Result<(), ScriptError> {
   let slots = with_test_registry(ctx, |r| fixture_slots(r, fixture_set))?;
+  if slots.is_empty() {
+    return Ok(());
+  }
   // A name the runtime already put on the fixtures object IS the base
   // implementation an override shadows (`page`, `context`, `request`,
   // `browser`, the config scalars). That is the only thing separating a
@@ -2952,31 +3005,49 @@ fn clear_script_globals(ctx: &Ctx<'_>) {
 }
 
 async fn drive_current_test(ctx: &Ctx<'_>, spec: &RunTestSpec, world: &TestWorldData) -> Result<(), ScriptError> {
-  let (world_obj, info_obj, bridge) = with_test_registry(ctx, |r| {
-    r.current
-      .as_ref()
-      .map(|c| (c.world.clone(), c.test_info.clone(), Arc::clone(&c.bridge)))
-      .ok_or_else(|| ScriptError::internal("no current test".to_string()))
-  })??;
+  let (world_obj, info_obj, bridge, fixture_set, each_arg, func, per_function, custom, has_custom_fixtures) =
+    with_test_registry(ctx, |r| {
+      let current = r
+        .current
+        .as_ref()
+        .ok_or_else(|| ScriptError::internal("no current test".to_string()))?;
+      let t = &r.tests[spec.test_idx];
+      let has_custom = r.fixture_sets.get(t.fixture_set).is_some_and(|s| !s.is_empty());
+      let per_fn = requested_per_function(r, spec);
+      let req = if has_custom {
+        requested_names(r, spec)
+      } else {
+        Vec::new()
+      };
+      Ok::<_, ScriptError>((
+        current.world.clone(),
+        current.test_info.clone(),
+        Arc::clone(&current.bridge),
+        t.fixture_set,
+        t.each_arg.clone(),
+        t.func.clone(),
+        per_fn,
+        req,
+        has_custom,
+      ))
+    })??;
   let world_obj = world_obj.restore(ctx).map_err(se)?;
   let info_obj = info_obj.restore(ctx).map_err(se)?;
 
-  let (fixture_set, each_arg, func) = with_test_registry(ctx, |r| {
-    let t = &r.tests[spec.test_idx];
-    (t.fixture_set, t.each_arg.clone(), t.func.clone())
-  })?;
-  let per_function = with_test_registry(ctx, |r| requested_per_function(r, spec))?;
-  validate_requested_names(ctx, &world_obj, fixture_set, &per_function)?;
-  let custom = with_test_registry(ctx, |r| requested_names(r, spec))?;
-  resolve_custom_fixtures(
-    ctx,
-    &world_obj,
-    fixture_set,
-    &custom,
-    &world.use_options,
-    &spec.source_label,
-  )
-  .await?;
+  if !per_function.is_empty() {
+    validate_requested_names(ctx, &world_obj, fixture_set, &per_function)?;
+  }
+  if has_custom_fixtures {
+    resolve_custom_fixtures(
+      ctx,
+      &world_obj,
+      fixture_set,
+      &custom,
+      &world.use_options,
+      &spec.source_label,
+    )
+    .await?;
+  }
 
   let mut first_err: Option<Thrown> = None;
 
