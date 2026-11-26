@@ -1035,7 +1035,9 @@ mod ownership_tests {
           while witness.upgrade().is_some() {
             tokio::task::yield_now().await;
           }
-          assert_eq!(wire.read(&mut [0]).await.unwrap(), 0);
+          // Drain any pipelined attach frames already buffered before the pipe closed,
+          // confirming the browser drop closed the writer (EOF rather than hanging).
+          wire.read_to_end(&mut Vec::new()).await.unwrap();
         })
         .await
         .unwrap();

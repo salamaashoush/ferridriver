@@ -1052,21 +1052,19 @@ impl CdpBrowser {
     injected_script
       .injected
       .store(true, std::sync::atomic::Ordering::Relaxed);
-    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(target_id)));
-    let page = CdpPage {
+    let page = CdpPage(Arc::new(CdpPageInner {
+      shared: super::SharedPageState::new(target_id),
       transport: Arc::clone(transport),
       session_id: Some(Arc::from(session_id)),
       setup: Arc::new(paused::PausedSetup::paused()),
       target_id: Arc::from(target_id),
       browser_context_id: browser_context_id.map(Arc::from),
-      events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
       utility_contexts: Arc::default(),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
-      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1083,26 +1081,17 @@ impl CdpBrowser {
       lifecycle_notify: Arc::new(tokio::sync::Notify::new()),
       injected_script,
       nav_request_slot: crate::network::NavRequestSlot::new(),
-      dialog_manager: crate::dialog::DialogManager::new(),
-      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       screen_recorder: recording::ScreenRecorder::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(downloads_dir),
-      page_backref: crate::backend::PageBackref::new(),
-      frame_cache,
-      media_emulation: crate::backend::SharedMediaEmulation::default(),
-      frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       network_idle: Arc::default(),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
-      keyboard: Arc::default(),
       touch_emulation_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
+    }));
     page.transport.register_lifecycle_tracker(
       page.session_id.as_deref().unwrap_or(""),
       Arc::clone(&page.lifecycle),
@@ -1252,21 +1241,20 @@ impl CdpBrowser {
   fn adopted_page(&self, target_id: String, sid: Option<String>) -> CdpPage {
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
-    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
-    CdpPage {
+    let shared = super::SharedPageState::new(&target_id);
+    CdpPage(Arc::new(CdpPageInner {
+      shared,
       transport: Arc::clone(&self.transport),
       session_id: sid.map(Arc::from),
       setup: Arc::default(),
       target_id: Arc::from(target_id),
       browser_context_id: None,
-      events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
       utility_contexts: Arc::default(),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
-      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1283,26 +1271,17 @@ impl CdpBrowser {
       lifecycle_notify: lc_notify,
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
-      dialog_manager: crate::dialog::DialogManager::new(),
-      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       screen_recorder: recording::ScreenRecorder::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
-      page_backref: crate::backend::PageBackref::new(),
-      frame_cache,
-      media_emulation: crate::backend::SharedMediaEmulation::default(),
-      frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       network_idle: Arc::default(),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
-      keyboard: Arc::default(),
       touch_emulation_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    }
+    }))
   }
 
   /// Create a new browser context (isolated cookies, storage, cache).
@@ -1564,21 +1543,20 @@ impl CdpBrowser {
     injected_script
       .injected
       .store(true, std::sync::atomic::Ordering::Relaxed);
-    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&target_id)));
-    let page = CdpPage {
+    let shared = super::SharedPageState::new(&target_id);
+    let page = CdpPage(Arc::new(CdpPageInner {
+      shared,
       transport: Arc::clone(&self.transport),
       session_id: sid.map(Arc::from),
       setup: Arc::default(),
       target_id: Arc::from(target_id),
       browser_context_id: browser_context_id.map(Arc::from),
-      events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(std::sync::RwLock::new(FxHashMap::default())),
       utility_contexts: Arc::default(),
       frame_contexts_notify: Arc::new(tokio::sync::Notify::new()),
       renderers: Arc::default(),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(tokio::sync::Mutex::new(false)),
-      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch: Arc::default(),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1597,26 +1575,17 @@ impl CdpBrowser {
       lifecycle_notify: Arc::clone(&lc_notify),
       injected_script,
       nav_request_slot: crate::network::NavRequestSlot::new(),
-      dialog_manager: crate::dialog::DialogManager::new(),
-      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
       file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       screen_recorder: recording::ScreenRecorder::default(),
       download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       downloads_dir: Arc::clone(&self.downloads_dir),
-      page_backref: crate::backend::PageBackref::new(),
-      frame_cache,
-      media_emulation: crate::backend::SharedMediaEmulation::default(),
-      frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       network_idle: Arc::default(),
       listener_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
       drag_manager: DragManagerState::new(),
-      keyboard: Arc::default(),
       touch_emulation_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
+    }));
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
     page.transport.register_lifecycle_tracker(
@@ -2480,7 +2449,22 @@ struct Credentials {
   proxy: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
 }
 
-pub struct CdpPage {
+/// Page handle for the CDP backend. Cheaply cloneable (single `Arc` pointer).
+#[derive(Clone)]
+pub struct CdpPage(Arc<CdpPageInner>);
+
+impl std::ops::Deref for CdpPage {
+  type Target = CdpPageInner;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
+}
+
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct CdpPageInner {
+  pub shared: super::SharedPageState,
   transport: Arc<CdpTransport>,
   session_id: Option<Arc<str>>,
   /// The setup of a popup that attached paused; idle on every other page.
@@ -2488,8 +2472,6 @@ pub struct CdpPage {
   pub(crate) target_id: Arc<str>,
   /// Browser context ID for isolated contexts (used for `Target.disposeBrowserContext` on close).
   browser_context_id: Option<Arc<str>>,
-  /// Event emitter for page events (console, dialog, network, frame lifecycle).
-  pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
   frame_contexts: Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
   /// Frame ID -> the execution context of its utility world, once the
@@ -2499,7 +2481,7 @@ pub struct CdpPage {
   utility_contexts: Arc<std::sync::RwLock<FxHashMap<String, i64>>>,
   renderers: Arc<renderer::Renderers>,
   /// Notified by the wire observer after each map insert so
-  /// [`Self::resolve_frame_context`] wakes on the exact event instead
+  /// [`CdpPage::resolve_frame_context`] wakes on the exact event instead
   /// of polling on a 10ms tick.
   frame_contexts_notify: Arc<tokio::sync::Notify>,
   /// Registered exposed binding callbacks (source-aware; plain exposed
@@ -2514,8 +2496,6 @@ pub struct CdpPage {
   /// defined `__fd_bc`, throwing "Uncaught". Holding the lock across the
   /// whole bootstrap makes late callers wait for it to finish.
   binding_initialized: Arc<tokio::sync::Mutex<bool>>,
-  /// Whether this page has been closed.
-  closed: Arc<std::sync::atomic::AtomicBool>,
   /// Registered route handlers for network interception.
   routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
   fetch: Arc<renderer::FetchState>,
@@ -2585,21 +2565,6 @@ pub struct CdpPage {
   /// request) resolve as "no response" — mirrors Playwright's
   /// `Response | null` contract on `page.goto`.
   nav_request_slot: crate::network::NavRequestSlot,
-  /// Per-page dialog handler registry. Backend dialog listener
-  /// constructs a [`crate::dialog::Dialog`] on `Page.javascriptDialogOpening`
-  /// and synchronously calls [`crate::dialog::DialogManager::did_open`].
-  /// If no handler claims the dialog, the manager auto-closes (accept
-  /// for `beforeunload`, dismiss otherwise) — mirrors
-  /// `/tmp/playwright/packages/playwright-core/src/server/dialog.ts::DialogManager`.
-  pub dialog_manager: crate::dialog::DialogManager,
-  /// Per-page file-chooser handler registry. Backend file-chooser
-  /// listener resolves the triggering `<input>` into an
-  /// [`crate::element_handle::ElementHandle`] on
-  /// `Page.fileChooserOpened` and synchronously calls
-  /// [`crate::file_chooser::FileChooserManager::did_open`]. If no
-  /// handler claims, the element handle is disposed — mirrors
-  /// `/tmp/playwright/packages/playwright-core/src/server/page.ts::_onFileChooserOpened`.
-  pub file_chooser_manager: crate::file_chooser::FileChooserManager,
   /// Idempotency latch for `Page.setInterceptFileChooserDialog`.
   /// Mirrors Playwright's `_updateFileChooserInterception` lazy
   /// enabling: the CDP command fires once, the first time a user
@@ -2608,14 +2573,6 @@ pub struct CdpPage {
   /// command is never sent — saves one RTT per page in workloads
   /// that don't use file pickers.
   pub file_chooser_intercept_enabled: Arc<std::sync::atomic::AtomicBool>,
-  /// Per-page download handler registry. Backend download listener
-  /// builds a live [`crate::download::Download`] on
-  /// `Browser.downloadWillBegin` and synchronously calls
-  /// [`crate::download::DownloadManager::did_open`]; progress events
-  /// (`Browser.downloadProgress`) flip the download's terminal state
-  /// watch. Mirrors
-  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::_onDownloadWillBegin`.
-  pub download_manager: crate::download::DownloadManager,
   pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
   /// The page's native recording; see [`recording`].
   pub(crate) screen_recorder: recording::ScreenRecorder,
@@ -2631,7 +2588,7 @@ pub struct CdpPage {
   /// Whether this context accepts downloads at all
   /// (`BrowserContextOptions::accept_downloads`, default `true`).
   ///
-  /// Read by [`Self::enable_download_behavior`] rather than sent from
+  /// Read by [`CdpPage::enable_download_behavior`] rather than sent from
   /// `apply_context_options`, because there is only room for one
   /// `Browser.setDownloadBehavior` answer per context and two senders
   /// would race: the lazy latch used to overwrite an explicit `deny`
@@ -2646,56 +2603,28 @@ pub struct CdpPage {
   /// (matches Playwright's per-context `_downloadsPath` cleanup on
   /// close).
   pub(crate) downloads_dir: Arc<DownloadsDir>,
-  /// Weak back-reference to the outer [`crate::page::Page`] that wraps
-  /// this backend page. Populated by [`crate::page::Page::new`] /
-  /// `Page::with_context` every time a new `Arc<Page>` is constructed;
-  /// the file-chooser listener reads it to turn a CDP `backendNodeId`
-  /// into an [`crate::element_handle::ElementHandle`] (which requires
-  /// an `Arc<Page>` for the inner `JSHandle`). The outer `Mutex`
-  /// allows successive `Page::new` calls on the same backend page to
-  /// overwrite the slot — callers like MCP tool handlers wrap the
-  /// same backend page fresh on every invocation, so a one-shot
-  /// `OnceLock` would lock in a stale weak whose target dies as soon
-  /// as the first tool call returns. Stored as `Weak` so the listener
-  /// task never keeps the outer page alive after the user drops it.
-  pub page_backref: crate::backend::PageBackref,
-  /// Shared frame cache. The cache lives on the backend page so it
-  /// outlives the short-lived `Arc<crate::page::Page>` wrappers that
-  /// MCP tool handlers spin up per call — each wrapper would
-  /// otherwise reset the cache and lose state populated by the
-  /// previous tool call. `page.frame(name)` / `page.frames()` /
-  /// `frame.childFrames()` all read this cache synchronously, so
-  /// every wrapper hands them the same `Arc<Mutex<FrameCache>>`.
-  pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
-  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
-  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
-  /// Idempotent latch for the frame-event listener task. The first
-  /// `Arc<crate::page::Page>` constructed for this backend page
-  /// spawns the listener that subscribes to `FrameAttached` /
-  /// `FrameDetached` / `FrameNavigated` and updates `frame_cache`;
-  /// successive wrappers see the latch set and skip the spawn so we
-  /// don't end up with N listeners writing the same cache.
-  pub(crate) frame_listener_started: Arc<std::sync::atomic::AtomicBool>,
-  /// Console / page-error retention for `page.consoleMessages()` /
-  /// `page.pageErrors()`. Lives on the backend page (like
-  /// [`Self::frame_cache`]) so successive `crate::Page` wrappers share
-  /// one history; filled by the same listener task.
-  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
   pub(crate) network_idle: Arc<crate::network_idle::NetworkIdle>,
   /// Abort handles for every per-page listener task
   /// (`attach_listeners`, the Fetch interceptor). The listeners
   /// subscribe to TRANSPORT event channels, which stay open for the
   /// browser's whole life — without an explicit abort in
-  /// [`Self::close_page`] each closed page leaves ~10 live tasks that
+  /// [`CdpPage::close_page`] each closed page leaves ~10 live tasks that
   /// wake on every subsequent CDP event and pin the page's state
   /// (emitter, managers, logs) until the browser exits.
   listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
   /// Native drag-and-drop interception state. See [`DragManagerState`].
   drag_manager: Arc<DragManagerState>,
-  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
   /// Cached latch for `Emulation.setTouchEmulationEnabled` so repeated `tap()`
   /// calls on the same page skip the redundant enable RTT.
   touch_emulation_enabled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::ops::Deref for CdpPageInner {
+  type Target = super::SharedPageState;
+
+  fn deref(&self) -> &Self::Target {
+    &self.shared
+  }
 }
 
 /// Port of Playwright's `crDragDrop.ts::DragManager` plus the
@@ -2951,61 +2880,6 @@ impl InjectedScriptManager {
     )?;
     self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
-  }
-}
-
-impl Clone for CdpPage {
-  fn clone(&self) -> Self {
-    Self {
-      transport: Arc::clone(&self.transport),
-      session_id: self.session_id.clone(),
-      setup: Arc::clone(&self.setup),
-      target_id: Arc::clone(&self.target_id),
-      browser_context_id: self.browser_context_id.clone(),
-      events: self.events.clone(),
-      frame_contexts: Arc::clone(&self.frame_contexts),
-      utility_contexts: Arc::clone(&self.utility_contexts),
-      frame_contexts_notify: Arc::clone(&self.frame_contexts_notify),
-      renderers: Arc::clone(&self.renderers),
-      exposed_fns: Arc::clone(&self.exposed_fns),
-      binding_initialized: Arc::clone(&self.binding_initialized),
-      closed: Arc::clone(&self.closed),
-      routes: Arc::clone(&self.routes),
-      fetch: Arc::clone(&self.fetch),
-      http_credentials: Arc::clone(&self.http_credentials),
-      proxy_credentials: Arc::clone(&self.proxy_credentials),
-      main_frame_id: Arc::clone(&self.main_frame_id),
-      last_metrics_params: Arc::clone(&self.last_metrics_params),
-      last_media_params: Arc::clone(&self.last_media_params),
-      headful: self.headful,
-      window_id: Arc::clone(&self.window_id),
-      context_screen: Arc::clone(&self.context_screen),
-      seeded_frame_tree: Arc::clone(&self.seeded_frame_tree),
-      last_cursor_pos: Arc::clone(&self.last_cursor_pos),
-      lifecycle: Arc::clone(&self.lifecycle),
-      lifecycle_notify: Arc::clone(&self.lifecycle_notify),
-      injected_script: Arc::clone(&self.injected_script),
-      nav_request_slot: self.nav_request_slot.clone(),
-      dialog_manager: self.dialog_manager.clone(),
-      file_chooser_manager: self.file_chooser_manager.clone(),
-      file_chooser_intercept_enabled: Arc::clone(&self.file_chooser_intercept_enabled),
-      download_manager: self.download_manager.clone(),
-      screencast_hub: self.screencast_hub.clone(),
-      screen_recorder: self.screen_recorder.clone(),
-      download_behavior_enabled: Arc::clone(&self.download_behavior_enabled),
-      accept_downloads: Arc::clone(&self.accept_downloads),
-      downloads_dir: Arc::clone(&self.downloads_dir),
-      page_backref: self.page_backref.clone(),
-      frame_cache: Arc::clone(&self.frame_cache),
-      media_emulation: Arc::clone(&self.media_emulation),
-      frame_listener_started: Arc::clone(&self.frame_listener_started),
-      observed: Arc::clone(&self.observed),
-      network_idle: Arc::clone(&self.network_idle),
-      listener_tasks: Arc::clone(&self.listener_tasks),
-      drag_manager: Arc::clone(&self.drag_manager),
-      keyboard: Arc::clone(&self.keyboard),
-      touch_emulation_enabled: Arc::clone(&self.touch_emulation_enabled),
-    }
   }
 }
 
@@ -5241,10 +5115,6 @@ impl CdpPage {
   /// outlives its time budget.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.click_at_opts(x, y, "left", 1).await
-  }
-
-  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
-    &self.keyboard
   }
 
   /// # Errors

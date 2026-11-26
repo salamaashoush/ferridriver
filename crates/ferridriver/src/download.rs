@@ -134,7 +134,7 @@ pub struct Download {
 pub(crate) struct DownloadState {
   /// Weak back-reference to the owning page. [`Download::page`] upgrades
   /// the weak; returns `None` if the outer page has been dropped.
-  page: std::sync::Weak<Page>,
+  page: crate::backend::ErasedWeakPage,
   /// Opaque download id assigned by the protocol (CDP's `guid`, `BiDi`'s
   /// `navigation` id). Used to correlate `downloadProgress` /
   /// `downloadEnd` events back to this handle.
@@ -183,7 +183,7 @@ impl Download {
     let (tx, _) = watch::channel(DownloadStatus::Pending);
     Self {
       inner: Arc::new(DownloadState {
-        page: Arc::downgrade(page),
+        page: crate::backend::ErasedWeakPage::from_arc(page),
         guid,
         url,
         suggested_filename: std::sync::Mutex::new(suggested_filename),
@@ -631,7 +631,7 @@ mod tests {
 
     // DownloadManager can't build a Download without a real Page —
     // emulate a manager-scoped dispatch by hand.
-    let page = std::sync::Weak::<Page>::new();
+    let page = crate::backend::ErasedWeakPage::default();
     let (tx, _) = watch::channel(DownloadStatus::Pending);
     let d = Download {
       inner: Arc::new(DownloadState {
@@ -656,7 +656,7 @@ mod tests {
 
   #[tokio::test]
   async fn report_finished_resolves_path() {
-    let page = std::sync::Weak::<Page>::new();
+    let page = crate::backend::ErasedWeakPage::default();
     let (tx, _) = watch::channel(DownloadStatus::Pending);
     let d = Download {
       inner: Arc::new(DownloadState {
@@ -680,7 +680,7 @@ mod tests {
 
   #[tokio::test]
   async fn report_finished_with_error_surfaces_failure() {
-    let page = std::sync::Weak::<Page>::new();
+    let page = crate::backend::ErasedWeakPage::default();
     let (tx, _) = watch::channel(DownloadStatus::Pending);
     let d = Download {
       inner: Arc::new(DownloadState {

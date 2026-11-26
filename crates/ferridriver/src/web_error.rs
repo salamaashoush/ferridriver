@@ -72,7 +72,7 @@ struct WebErrorState {
   /// it; returns `None` if the page has been dropped or the backend
   /// emitter pre-dates the outer `Arc<Page>` (matches Playwright's
   /// `createHandle(context, arg)` guard pattern from the console path).
-  page: std::sync::Weak<Page>,
+  page: crate::backend::ErasedWeakPage,
 }
 
 impl WebError {
@@ -85,7 +85,7 @@ impl WebError {
       inner: Arc::new(WebErrorState {
         error,
         location,
-        page: Arc::downgrade(page),
+        page: crate::backend::ErasedWeakPage::from_arc(page),
       }),
     }
   }
@@ -100,7 +100,7 @@ impl WebError {
       inner: Arc::new(WebErrorState {
         error,
         location,
-        page: std::sync::Weak::new(),
+        page: crate::backend::ErasedWeakPage::default(),
       }),
     }
   }

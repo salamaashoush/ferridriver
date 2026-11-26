@@ -35,7 +35,7 @@ fn pressed(page: &WebKitPage) -> (&'static str, u32) {
 
 /// The page keyboard's held modifiers as a `WebKit` mask.
 fn held(page: &WebKitPage) -> u32 {
-  cdp_to_wk_mask(page.keyboard().modifiers())
+  cdp_to_wk_mask(page.keyboard.modifiers())
 }
 
 fn button_mask(button: MouseButton) -> u32 {

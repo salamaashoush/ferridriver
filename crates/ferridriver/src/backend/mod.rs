@@ -17,6 +17,9 @@ pub mod process;
 #[cfg(unix)]
 pub mod reaper;
 pub(crate) mod screencast;
+mod shared_page;
+pub(crate) use shared_page::ErasedWeakPage;
+pub use shared_page::SharedPageState;
 mod transport_tasks;
 pub mod webdriver;
 pub mod webkit;
@@ -69,7 +72,7 @@ use tokio::sync::RwLock;
 /// fallbacks when a temporary `context.pages()` wrapper is dropped.
 #[derive(Clone, Default)]
 pub struct PageBackref {
-  inner: Arc<std::sync::Mutex<Vec<std::sync::Weak<crate::page::Page>>>>,
+  inner: Arc<std::sync::Mutex<Vec<shared_page::ErasedWeakPage>>>,
   /// The page that opened this one, kept here rather than on a wrapper:
   /// every wrapper of a popup has to answer `opener()`, and the opener's
   /// wrapper found when the popup appeared is often a passing one (an
@@ -85,9 +88,10 @@ impl PageBackref {
   }
 
   pub fn set(&self, weak: std::sync::Weak<crate::page::Page>) {
+    let erased = shared_page::ErasedWeakPage::from_weak(weak);
     if let Ok(mut guard) = self.inner.lock() {
-      guard.retain(|existing| existing.strong_count() > 0 && !existing.ptr_eq(&weak));
-      guard.push(weak);
+      guard.retain(|existing| existing.strong_count() > 0 && !existing.ptr_eq(&erased));
+      guard.push(erased);
     }
   }
 
@@ -1160,18 +1164,23 @@ macro_rules! page_dispatch {
 }
 
 impl AnyPage {
+  /// Backend-agnostic per-page state embedded in every backend page handle.
+  #[must_use]
+  pub fn shared(&self) -> &SharedPageState {
+    match self {
+      AnyPage::Cdp(p) => &p.shared,
+      AnyPage::WebKit(p) => &p.shared,
+      AnyPage::Bidi(p) => &p.shared,
+      AnyPage::WebDriver(p) => &p.shared,
+    }
+  }
+
   // ── Events ──
 
   /// Get the event emitter for this page.
   #[must_use]
   pub fn events(&self) -> &EventEmitter {
-    match self {
-      AnyPage::Cdp(p) => &p.events,
-      AnyPage::WebKit(p) => &p.events,
-
-      AnyPage::Bidi(p) => &p.events,
-      AnyPage::WebDriver(p) => &p.events,
-    }
+    &self.shared().events
   }
 
   /// Per-page dialog handler registry. Mirrors Playwright's server-side
@@ -1181,12 +1190,7 @@ impl AnyPage {
   /// `prompt` / `beforeunload` fire.
   #[must_use]
   pub fn dialog_manager(&self) -> &crate::dialog::DialogManager {
-    match self {
-      AnyPage::Cdp(p) => &p.dialog_manager,
-      AnyPage::WebKit(p) => &p.dialog_manager,
-      AnyPage::Bidi(p) => &p.dialog_manager,
-      AnyPage::WebDriver(p) => &p.dialog_manager,
-    }
+    &self.shared().dialog_manager
   }
 
   /// Per-page file-chooser handler registry. Mirrors Playwright's
@@ -1196,12 +1200,7 @@ impl AnyPage {
   /// an `<input type=file>` click (or `showPicker()`) fires.
   #[must_use]
   pub fn file_chooser_manager(&self) -> &crate::file_chooser::FileChooserManager {
-    match self {
-      AnyPage::Cdp(p) => &p.file_chooser_manager,
-      AnyPage::WebKit(p) => &p.file_chooser_manager,
-      AnyPage::Bidi(p) => &p.file_chooser_manager,
-      AnyPage::WebDriver(p) => &p.file_chooser_manager,
-    }
+    &self.shared().file_chooser_manager
   }
 
   /// Per-page download handler registry. Mirrors Playwright's
@@ -1211,12 +1210,7 @@ impl AnyPage {
   /// writing a file download.
   #[must_use]
   pub fn download_manager(&self) -> &crate::download::DownloadManager {
-    match self {
-      AnyPage::Cdp(p) => &p.download_manager,
-      AnyPage::WebKit(p) => &p.download_manager,
-      AnyPage::Bidi(p) => &p.download_manager,
-      AnyPage::WebDriver(p) => &p.download_manager,
-    }
+    &self.shared().download_manager
   }
 
   /// Idempotently fire the backend command that turns on
@@ -1269,13 +1263,7 @@ impl AnyPage {
   /// invocation, so successive calls register their wrapper without
   /// invalidating older wrappers that remain alive.
   pub fn set_page_backref(&self, weak: std::sync::Weak<crate::page::Page>) {
-    let slot = match self {
-      AnyPage::Cdp(p) => &p.page_backref,
-      AnyPage::WebKit(p) => &p.page_backref,
-      AnyPage::Bidi(p) => &p.page_backref,
-      AnyPage::WebDriver(p) => &p.page_backref,
-    };
-    slot.set(weak);
+    self.shared().page_backref.set(weak);
   }
 
   /// Upgrade the page back-reference to the public wrapper `Arc<Page>`,
@@ -1296,12 +1284,7 @@ impl AnyPage {
   /// own subscription can never observe `Closed`.
   #[must_use]
   pub(crate) fn page_backref_handle(&self) -> PageBackref {
-    match self {
-      AnyPage::Cdp(p) => p.page_backref.clone(),
-      AnyPage::WebKit(p) => p.page_backref.clone(),
-      AnyPage::Bidi(p) => p.page_backref.clone(),
-      AnyPage::WebDriver(p) => p.page_backref.clone(),
-    }
+    self.shared().page_backref.clone()
   }
 
   /// Backend-native identity of this page's top-level target: CDP
@@ -1351,12 +1334,7 @@ impl AnyPage {
   /// cache to the backend keeps it alive for the lifetime of the
   /// underlying browser page.
   pub(crate) fn frame_cache(&self) -> &std::sync::Arc<std::sync::Mutex<crate::frame_cache::FrameCache>> {
-    match self {
-      AnyPage::Cdp(p) => &p.frame_cache,
-      AnyPage::WebKit(p) => &p.frame_cache,
-      AnyPage::Bidi(p) => &p.frame_cache,
-      AnyPage::WebDriver(p) => &p.frame_cache,
-    }
+    &self.shared().frame_cache
   }
 
   /// Firefox overrides only `prefers-color-scheme` per page; Classic
@@ -1370,12 +1348,7 @@ impl AnyPage {
   }
 
   fn media_emulation(&self) -> &SharedMediaEmulation {
-    match self {
-      AnyPage::Cdp(p) => &p.media_emulation,
-      AnyPage::WebKit(p) => &p.media_emulation,
-      AnyPage::Bidi(p) => &p.media_emulation,
-      AnyPage::WebDriver(p) => &p.media_emulation,
-    }
+    &self.shared().media_emulation
   }
 
   /// Whether `self` and `other` wrap the SAME underlying browser page
@@ -1394,12 +1367,7 @@ impl AnyPage {
   /// reason as [`Self::frame_cache`]: wrappers are minted per tool
   /// call, but the history must span them.
   pub(crate) fn observed(&self) -> &std::sync::Arc<std::sync::Mutex<crate::observed::ObservedBuffers>> {
-    match self {
-      AnyPage::Cdp(p) => &p.observed,
-      AnyPage::WebKit(p) => &p.observed,
-      AnyPage::Bidi(p) => &p.observed,
-      AnyPage::WebDriver(p) => &p.observed,
-    }
+    &self.shared().observed
   }
 
   /// The page's `networkidle` lifecycle, on every backend that reports
@@ -1428,12 +1396,7 @@ impl AnyPage {
   /// wrapper). Subsequent wrappers see the latch set and skip the
   /// spawn — see `Page::seed_frame_cache`.
   pub(crate) fn frame_listener_started(&self) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
-    match self {
-      AnyPage::Cdp(p) => &p.frame_listener_started,
-      AnyPage::WebKit(p) => &p.frame_listener_started,
-      AnyPage::Bidi(p) => &p.frame_listener_started,
-      AnyPage::WebDriver(p) => &p.frame_listener_started,
-    }
+    &self.shared().frame_listener_started
   }
 
   /// Whether cookies are read and cleared through the document the page
@@ -1884,12 +1847,7 @@ impl AnyPage {
   }
 
   pub(crate) fn keyboard(&self) -> &keyboard::KeyboardState {
-    match self {
-      Self::Cdp(p) => p.keyboard(),
-      Self::WebKit(p) => p.keyboard(),
-      Self::Bidi(p) => p.keyboard(),
-      Self::WebDriver(p) => p.keyboard(),
-    }
+    &self.shared().keyboard
   }
 
   /// Hold exactly the modifiers in `modifiers` (a CDP mask), pressing
@@ -2538,13 +2496,7 @@ impl AnyPage {
 
   #[must_use]
   pub fn is_closed(&self) -> bool {
-    match self {
-      Self::Cdp(p) => p.is_closed(),
-      Self::WebKit(p) => p.is_closed(),
-
-      Self::Bidi(p) => p.is_closed(),
-      Self::WebDriver(p) => p.is_closed(),
-    }
+    self.shared().is_closed()
   }
 
   // ── Exposed Functions ──

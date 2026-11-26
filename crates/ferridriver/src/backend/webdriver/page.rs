@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use serde_json::{Value, json};
 
@@ -10,46 +10,56 @@ use ferridriver_types::keyboard::KeyStroke;
 
 #[derive(Clone)]
 pub struct WebDriverPage {
+  pub(crate) target: Arc<Target>,
+  inner: Arc<WebDriverPageInner>,
+}
+
+impl std::ops::Deref for WebDriverPage {
+  type Target = WebDriverPageInner;
+
+  fn deref(&self) -> &Self::Target {
+    &self.inner
+  }
+}
+
+#[doc(hidden)]
+pub struct WebDriverPageInner {
+  pub shared: crate::backend::SharedPageState,
   pub(crate) session: Arc<WebDriverSession>,
-  pub(crate) target: Target,
   pub(crate) timeout_ms: u64,
-  closed: Arc<AtomicBool>,
-  pub events: crate::events::EventEmitter,
-  pub(crate) page_backref: crate::backend::PageBackref,
-  pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
-  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
-  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
-  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
-  pub(crate) frame_listener_started: Arc<AtomicBool>,
-  pub(crate) dialog_manager: crate::dialog::DialogManager,
-  pub(crate) file_chooser_manager: crate::file_chooser::FileChooserManager,
-  pub(crate) download_manager: crate::download::DownloadManager,
   pub(crate) capabilities: Arc<Value>,
-  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
+}
+
+impl std::ops::Deref for WebDriverPageInner {
+  type Target = crate::backend::SharedPageState;
+
+  fn deref(&self) -> &Self::Target {
+    &self.shared
+  }
 }
 
 impl WebDriverPage {
   #[must_use]
   pub fn new(session: Arc<WebDriverSession>, target: Target, timeout_ms: u64) -> Self {
+    Self::with_capabilities(session, target, timeout_ms, Arc::new(Value::Null))
+  }
+
+  #[must_use]
+  pub(crate) fn with_capabilities(
+    session: Arc<WebDriverSession>,
+    target: Target,
+    timeout_ms: u64,
+    capabilities: Arc<Value>,
+  ) -> Self {
     let main_frame_id = super::api::frame_id_of(&target);
     Self {
-      session,
-      target,
-      timeout_ms,
-      closed: Arc::new(AtomicBool::new(false)),
-      events: crate::events::EventEmitter::new(),
-      page_backref: crate::backend::PageBackref::new(),
-      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(
-        &main_frame_id,
-      ))),
-      media_emulation: crate::backend::SharedMediaEmulation::default(),
-      observed: Arc::default(),
-      frame_listener_started: Arc::default(),
-      dialog_manager: crate::dialog::DialogManager::new(),
-      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
-      download_manager: crate::download::DownloadManager::new(),
-      capabilities: Arc::new(Value::Null),
-      keyboard: Arc::default(),
+      target: Arc::new(target),
+      inner: Arc::new(WebDriverPageInner {
+        shared: crate::backend::SharedPageState::new(&main_frame_id),
+        session,
+        timeout_ms,
+        capabilities,
+      }),
     }
   }
 
@@ -62,7 +72,7 @@ impl WebDriverPage {
     self.ensure_open()?;
     self
       .session
-      .execute(self.target.clone(), command, self.timeout_ms)
+      .execute((*self.target).clone(), command, self.timeout_ms)
       .await
   }
 
@@ -83,13 +93,13 @@ impl WebDriverPage {
     {
       return self
         .session
-        .native_navigate(self.target.clone(), &address_field_text(url.as_str()), timeout_ms)
+        .native_navigate((*self.target).clone(), &address_field_text(url.as_str()), timeout_ms)
         .await;
     }
     self
       .session
       .execute_sequence(
-        self.target.clone(),
+        (*self.target).clone(),
         vec![
           Command::post(
             &["timeouts"],
@@ -114,7 +124,7 @@ impl WebDriverPage {
     self
       .session
       .execute(
-        self.target.clone(),
+        (*self.target).clone(),
         Command::post(
           &["execute", "sync"],
           json!({"script":"location.href='about:blank#';location.href='about:blank';","args":[]}),
@@ -126,7 +136,7 @@ impl WebDriverPage {
       let settled = self
         .session
         .execute(
-          self.target.clone(),
+          (*self.target).clone(),
           Command::post(
             &["execute", "sync"],
             json!({"script":"return location.href==='about:blank'&&document.readyState==='complete';","args":[]}),
@@ -178,7 +188,7 @@ impl WebDriverPage {
     ));
     self
       .session
-      .execute_sequence(self.target.clone(), commands, self.timeout_ms)
+      .execute_sequence((*self.target).clone(), commands, self.timeout_ms)
       .await
   }
 
@@ -215,7 +225,7 @@ impl WebDriverPage {
     let result = self
       .session
       .execute_sequence(
-        self.target.clone(),
+        (*self.target).clone(),
         vec![
           Command::post(&["timeouts"], json!({"script":timeout_ms})),
           Command::post(&["execute", "async"], json!({"script":script,"args":arguments})),
@@ -278,8 +288,7 @@ impl WebDriverPage {
   pub async fn child_frame(&self, selector: &str) -> Result<Self> {
     let element = self.find_element(selector).await?;
     let mut page = self.clone();
-    page
-      .target
+    Arc::make_mut(&mut page.target)
       .frames
       .push(json!({"element-6066-11e4-a52e-4f735466cecf":element.id}));
     page.execute_script("return document.readyState;", vec![]).await?;
@@ -420,7 +429,7 @@ impl WebDriverPage {
       self
         .session
         .native_input_command(
-          self.target.clone(),
+          (*self.target).clone(),
           Command::post(&["actions"], json!({"actions":actions["actions"]})),
           self.timeout_ms,
         )
@@ -461,7 +470,7 @@ impl WebDriverPage {
         let point = self
           .session
           .native_pointer_position(
-            self.target.clone(),
+            (*self.target).clone(),
             coordinate(step, "x")?,
             coordinate(step, "y")?,
             self.timeout_ms,
@@ -527,10 +536,6 @@ impl WebDriverPage {
   /// `POST /session/{id}/actions` command.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
     self.perform_actions(crate::backend::bidi::input::tap("", x, y)).await
-  }
-
-  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
-    &self.keyboard
   }
 
   /// # Errors
