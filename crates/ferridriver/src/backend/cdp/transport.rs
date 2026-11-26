@@ -232,6 +232,16 @@ pub trait CdpTransport: Send + Sync + 'static {
     params: &serde_json::Value,
   ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
 
+  /// Send a CDP command whose `params` object is already valid serialized JSON.
+  /// Avoids intermediate `serde_json::Value` trees, re-escaping large static
+  /// scripts (like `engine.min.js`), and incremental buffer growth.
+  fn send_command_raw(
+    &self,
+    session_id: Option<&str>,
+    method: &str,
+    raw_params_json: &str,
+  ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
+
   fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>>;
 
   fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>>;
@@ -1074,6 +1084,63 @@ impl CdpDispatcher {
     Ok((id, data, rx))
   }
 
+  /// Build a CDP command from an already-serialized JSON `params` string.
+  ///
+  /// Allocates the exact wire frame once and copies `raw_params_json` directly
+  /// without walking or re-escaping a `serde_json::Value` tree.
+  pub(crate) fn build_command_raw(
+    &self,
+    session_id: Option<&str>,
+    method: &str,
+    raw_params_json: &str,
+  ) -> Result<(u64, Vec<u8>, oneshot::Receiver<CdpResult>)> {
+    use std::io::Write as _;
+
+    if self.is_disconnected() {
+      return Err(FerriError::target_closed(Some(format!(
+        "browser connection is closed (sending {method})"
+      ))));
+    }
+    if let Some(sid) = session_id {
+      let pointer = matches!(method, "Input.dispatchTouchEvent" | "Input.dispatchMouseEvent");
+      let network = matches!(
+        method,
+        "Network.setCookie" | "Network.setCookies" | "Storage.setCookies" | "Page.reload" | "Page.navigate"
+      );
+      let session_state = !is_clean_session_command(method);
+      if pointer || network || session_state {
+        let mut map = lock_or_recover(&self.session_dirty);
+        let flags = map.entry(sid.to_string()).or_default();
+        flags.pointer |= pointer;
+        flags.network |= network;
+        flags.session_state |= session_state;
+      }
+    }
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    let mut data = Vec::with_capacity(64 + method.len() + raw_params_json.len() + session_id.map_or(0, str::len));
+    let _ = write!(data, r#"{{"id":{id},"method":"{method}","params":"#);
+    data.extend_from_slice(raw_params_json.as_bytes());
+    if let Some(sid) = session_id {
+      let _ = write!(data, r#","sessionId":"{sid}"}}"#);
+    } else {
+      data.push(b'}');
+    }
+    data.push(0);
+
+    if tracing::enabled!(target: "ferridriver::cdp::send", tracing::Level::DEBUG) {
+      tracing::debug!(
+        target: "ferridriver::cdp::send",
+        id,
+        method,
+        params = truncate_for_log(raw_params_json, 200),
+        "CDP >>",
+      );
+    }
+
+    let rx = self.register_command(id, session_id, method)?;
+    Ok((id, data, rx))
+  }
+
   fn register_command(&self, id: u64, session_id: Option<&str>, method: &str) -> Result<oneshot::Receiver<CdpResult>> {
     let (tx, rx) = oneshot::channel();
     let stats_enabled = rtt_stats_enabled();
@@ -1737,6 +1804,28 @@ mod tests {
     let a = std::ptr::from_ref::<serde_json::Value>(&crate::backend::EMPTY_PARAMS);
     let b = std::ptr::from_ref::<serde_json::Value>(&crate::backend::EMPTY_PARAMS);
     assert_eq!(a, b, "EMPTY_PARAMS must be a single shared static");
+  }
+
+  #[test]
+  fn build_command_raw_matches_build_command_wire_format() {
+    let d1 = CdpDispatcher::new();
+    let d2 = CdpDispatcher::new();
+    let params = serde_json::json!({"enabled": true});
+    let (_id1, v_data, _rx1) = d1
+      .build_command(Some("sess-9"), "Page.setLifecycleEventsEnabled", &params)
+      .expect("value build");
+    let (_id2, raw_data, _rx2) = d2
+      .build_command_raw(Some("sess-9"), "Page.setLifecycleEventsEnabled", r#"{"enabled":true}"#)
+      .expect("raw build");
+    assert_eq!(raw_data, v_data);
+
+    let (_id3, v_no_sess, _rx3) = d1
+      .build_command(None, "Browser.getVersion", &crate::backend::EMPTY_PARAMS)
+      .expect("value build without session");
+    let (_id4, raw_no_sess, _rx4) = d2
+      .build_command_raw(None, "Browser.getVersion", "{}")
+      .expect("raw build without session");
+    assert_eq!(raw_no_sess, v_no_sess);
   }
 
   fn register_test_tracker(

@@ -36,6 +36,15 @@ impl CdpTransport for Wire {
     std::future::ready(Ok(serde_json::Value::Null))
   }
 
+  fn send_command_raw(
+    &self,
+    _session_id: Option<&str>,
+    _method: &str,
+    _raw_params_json: &str,
+  ) -> impl Future<Output = Result<serde_json::Value>> {
+    std::future::ready(Ok(serde_json::Value::Null))
+  }
+
   fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<Arc<serde_json::Value>> {
     self.dispatcher.subscribe_events()
   }

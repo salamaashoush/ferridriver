@@ -400,7 +400,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
           permissions_dirty: false,
         },
         applied_metrics.as_ref(),
-        &applied_media,
       )
       .boxed()
       .await?;
@@ -429,7 +428,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
         .await?;
       self
         .transport
-        .send_command(Some(&page.session), "Page.resetNavigationHistory", &EMPTY_PARAMS)
+        .send_command_raw(
+          Some(&page.session),
+          "Page.resetNavigationHistory",
+          super::EMPTY_PARAMS_RAW,
+        )
         .await?;
       page.engine_source = engine.to_string();
     }
@@ -589,7 +592,6 @@ async fn empty_context_on<T: CdpTransport>(
       permissions_dirty,
     },
     applied_metrics.as_ref(),
-    &applied_media,
   )
   .boxed()
   .await?;
@@ -745,14 +747,14 @@ async fn engine_registered_on<T: CdpTransport>(
       .to_string();
     // A registration only takes effect on a session with `Page` enabled.
     transport
-      .send_command(Some(&session), "Page.enable", &EMPTY_PARAMS)
+      .send_command_raw(Some(&session), "Page.enable", super::EMPTY_PARAMS_RAW)
       .await?;
     session
   };
-  let [main, utility] = super::engine_registrations(engine, false);
+  let [main, utility] = super::engine_registrations_raw(engine, false);
   let (in_main, in_utility) = tokio::try_join!(
-    transport.send_command(Some(&session), "Page.addScriptToEvaluateOnNewDocument", &main),
-    transport.send_command(Some(&session), "Page.addScriptToEvaluateOnNewDocument", &utility),
+    transport.send_command_raw(Some(&session), "Page.addScriptToEvaluateOnNewDocument", &main),
+    transport.send_command_raw(Some(&session), "Page.addScriptToEvaluateOnNewDocument", &utility),
   )?;
   let scripts = [in_main, in_utility]
     .iter()
@@ -826,6 +828,21 @@ fn push_cmd<'a, T: CdpTransport>(
   }));
 }
 
+fn push_raw_cmd<'a, T: CdpTransport>(
+  cmds: &mut Vec<futures::future::BoxFuture<'a, Result<()>>>,
+  transport: &'a T,
+  session: Option<&'a str>,
+  method: &'static str,
+  raw_params: &'static str,
+) {
+  cmds.push(Box::pin(async move {
+    transport
+      .send_command_raw(session, method, raw_params)
+      .await
+      .map(|_| ())
+  }));
+}
+
 fn push_clears<'a, T: CdpTransport>(
   cmds: &mut Vec<futures::future::BoxFuture<'a, Result<()>>>,
   transport: &'a T,
@@ -842,7 +859,13 @@ fn push_clears<'a, T: CdpTransport>(
       "Storage.clearCookies",
       json!({ "browserContextId": browser_context_id }),
     );
-    push_cmd(cmds, transport, on_page, "Network.clearBrowserCache", json!({}));
+    push_raw_cmd(
+      cmds,
+      transport,
+      on_page,
+      "Network.clearBrowserCache",
+      super::EMPTY_PARAMS_RAW,
+    );
   }
   if plan.permissions_dirty {
     push_cmd(
@@ -862,13 +885,19 @@ fn push_clears<'a, T: CdpTransport>(
       json!({ "behavior": "default", "browserContextId": browser_context_id }),
     );
   }
-  push_cmd(cmds, transport, on_page, "Page.resetNavigationHistory", json!({}));
-  push_cmd(
+  push_raw_cmd(
+    cmds,
+    transport,
+    on_page,
+    "Page.resetNavigationHistory",
+    super::EMPTY_PARAMS_RAW,
+  );
+  push_raw_cmd(
     cmds,
     transport,
     on_page,
     "Runtime.evaluate",
-    json!({ "expression": "window.name = ''; undefined" }),
+    r#"{"expression":"window.name = ''; undefined"}"#,
   );
   for origin in plan.origins {
     push_cmd(
@@ -904,41 +933,46 @@ async fn clear_and_prepare_on<T: CdpTransport>(
   session: &str,
   plan: ClearPlan<'_>,
   default_metrics: Option<&serde_json::Value>,
-  default_media: &serde_json::Value,
 ) -> Result<()> {
   let on_page = Some(session);
   let mut cmds = Vec::with_capacity(15 + plan.origins.len());
   // Pre-enable domains on the fresh session in the same batch.
-  push_cmd(&mut cmds, transport, on_page, "Runtime.enable", json!({}));
-  push_cmd(&mut cmds, transport, on_page, "Network.enable", json!({}));
-  push_cmd(
+  push_raw_cmd(&mut cmds, transport, on_page, "Runtime.enable", super::EMPTY_PARAMS_RAW);
+  push_raw_cmd(&mut cmds, transport, on_page, "Network.enable", super::EMPTY_PARAMS_RAW);
+  push_raw_cmd(
     &mut cmds,
     transport,
     on_page,
     "Page.setLifecycleEventsEnabled",
-    json!({"enabled": true}),
+    super::ENABLED_TRUE_RAW,
   );
-  push_cmd(
+  push_raw_cmd(
     &mut cmds,
     transport,
     on_page,
     "Target.setAutoAttach",
-    json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
+    super::AUTOATTACH_PARAMS_RAW,
   );
-  push_cmd(
+  push_raw_cmd(
     &mut cmds,
     transport,
     on_page,
     "Emulation.setFocusEmulationEnabled",
-    json!({"enabled": true}),
+    super::ENABLED_TRUE_RAW,
   );
-  push_cmd(&mut cmds, transport, on_page, "Inspector.enable", json!({}));
-  push_cmd(
+  push_raw_cmd(
+    &mut cmds,
+    transport,
+    on_page,
+    "Inspector.enable",
+    super::EMPTY_PARAMS_RAW,
+  );
+  push_raw_cmd(
     &mut cmds,
     transport,
     on_page,
     "Emulation.setEmulatedMedia",
-    default_media.clone(),
+    super::default_emulated_media_raw(),
   );
   if let Some(metrics) = default_metrics {
     push_cmd(
