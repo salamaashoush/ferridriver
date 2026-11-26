@@ -58,8 +58,9 @@ impl PipeTransport {
 
     let dispatcher = Arc::new(CdpDispatcher::new());
 
-    // Writer task: batches queued messages into single write_all syscall.
-    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    // Writer task: batches queued messages into a single write_all syscall,
+    // writing single uncontended frames directly without an extra memcpy.
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
     let (shutdown, mut stopping) = tokio::sync::watch::channel(false);
     let writer_task = tokio::spawn(async move {
       let mut writer: BoxWriter = writer;
@@ -69,12 +70,17 @@ impl PipeTransport {
         _ = stopping.wait_for(|stopping| *stopping) => {},
         () = async {
           while let Some(first) = write_rx.recv().await {
-            buf.clear();
-            buf.extend_from_slice(&first);
-            while let Ok(more) = write_rx.try_recv() {
-              buf.extend_from_slice(&more);
-            }
-            if writer.write_all(&buf).await.is_err() {
+            if let Ok(second) = write_rx.try_recv() {
+              buf.clear();
+              buf.extend_from_slice(&first);
+              buf.extend_from_slice(&second);
+              while let Ok(more) = write_rx.try_recv() {
+                buf.extend_from_slice(&more);
+              }
+              if writer.write_all(&buf).await.is_err() {
+                break;
+              }
+            } else if writer.write_all(&first).await.is_err() {
               break;
             }
           }

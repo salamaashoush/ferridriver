@@ -81,9 +81,24 @@ pub(crate) async fn write_websocket<S>(
     biased;
     _ = stopping.wait_for(|stopping| *stopping) => {},
     () = async {
-      while let Some(message) = messages.recv().await {
-        if let Err(error) = writer.send(message).await {
-          tracing::debug!(%error, "WebSocket write failed");
+      while let Some(first) = messages.recv().await {
+        if let Err(error) = writer.feed(first).await {
+          tracing::debug!(%error, "WebSocket feed failed");
+          break;
+        }
+        let mut failed = false;
+        while let Ok(more) = messages.try_recv() {
+          if let Err(error) = writer.feed(more).await {
+            tracing::debug!(%error, "WebSocket feed failed");
+            failed = true;
+            break;
+          }
+        }
+        if failed {
+          break;
+        }
+        if let Err(error) = writer.flush().await {
+          tracing::debug!(%error, "WebSocket flush failed");
           break;
         }
       }

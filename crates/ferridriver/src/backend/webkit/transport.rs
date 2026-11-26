@@ -143,12 +143,18 @@ impl Transport {
 async fn drain_writer<W: AsyncWrite + Unpin>(mut write: W, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
   let mut batch = Vec::with_capacity(4096);
   while let Some(frame) = rx.recv().await {
-    batch.clear();
-    batch.extend_from_slice(&frame);
-    while let Ok(more) = rx.try_recv() {
-      batch.extend_from_slice(&more);
-    }
-    if write.write_all(&batch).await.is_err() || write.flush().await.is_err() {
+    let write_res = if let Ok(second) = rx.try_recv() {
+      batch.clear();
+      batch.extend_from_slice(&frame);
+      batch.extend_from_slice(&second);
+      while let Ok(more) = rx.try_recv() {
+        batch.extend_from_slice(&more);
+      }
+      write.write_all(&batch).await
+    } else {
+      write.write_all(&frame).await
+    };
+    if write_res.is_err() || write.flush().await.is_err() {
       // Pipe gone — the reader thread sees EOF and fails pending
       // callbacks; nothing to report from here.
       break;
@@ -161,9 +167,12 @@ async fn drain_reader<R: AsyncRead + Unpin>(mut read: R, tx: &mpsc::UnboundedSen
   use tokio::io::AsyncReadExt as _;
 
   let mut buf = BytesMut::with_capacity(64 * 1024);
+  let mut scan_from = 0usize;
   loop {
-    while let Some(pos) = memchr::memchr(0, &buf) {
+    while let Some(rel) = memchr::memchr(0, &buf[scan_from..]) {
+      let pos = scan_from + rel;
       let frame = buf.split_to(pos + 1);
+      scan_from = 0;
       let slice = &frame[..pos];
       if slice.is_empty() {
         continue;
@@ -173,6 +182,8 @@ async fn drain_reader<R: AsyncRead + Unpin>(mut read: R, tx: &mpsc::UnboundedSen
         return;
       }
     }
+    scan_from = buf.len();
+    buf.reserve(32 * 1024);
     match read.read_buf(&mut buf).await {
       Ok(0) => {
         if !buf.is_empty() {
