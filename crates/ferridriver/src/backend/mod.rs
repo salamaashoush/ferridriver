@@ -1812,6 +1812,30 @@ impl AnyPage {
     page_dispatch!(self, set_content(html))
   }
 
+  /// Set the main frame's HTML and probe `document.readyState` + iframe
+  /// presence in a single round trip where supported (CDP, `BiDi`, `WebKit`).
+  ///
+  /// # Errors
+  ///
+  /// Forwards the error of the active backend's `set_content`.
+  pub async fn set_content_and_check(&self, html: &str, dom_content_loaded: bool) -> Result<Option<serde_json::Value>> {
+    let check_js = if dom_content_loaded {
+      "(() => { const s = document.readyState; return (s === 'interactive' || s === 'complete') ? (document.querySelector('iframe,frame') ? 2 : 1) : 0; })()"
+    } else {
+      "(() => document.readyState === 'complete' ? (document.querySelector('iframe,frame') ? 2 : 1) : 0)()"
+    };
+    match self {
+      Self::CdpPipe(p) => p.set_content_and_check(html, check_js).await,
+      Self::CdpWs(p) => p.set_content_and_check(html, check_js).await,
+      Self::Bidi(p) => p.set_content_and_check(html, dom_content_loaded).await,
+      Self::WebKit(p) => p.set_content_and_check(html, dom_content_loaded).await,
+      Self::WebDriver(p) => {
+        p.set_content(html).await?;
+        Ok(p.evaluate(check_js).await.ok().flatten())
+      },
+    }
+  }
+
   // ── Screenshots ──
 
   /// The engine half of a screenshot (`PageDelegate.takeScreenshot`).
