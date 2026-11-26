@@ -356,6 +356,17 @@ impl BidiTransport {
     self.tasks.close().await
   }
 
+  /// Send a strongly typed `BiDi` command, serializing `cmd` directly onto the
+  /// WebSocket frame without constructing an intermediate `serde_json::Value`,
+  /// and decode the response into `C::Response`.
+  pub(crate) async fn send<C: ferridriver_bidi_proto::Command>(&self, cmd: &C) -> Result<C::Response> {
+    let value = self
+      .send_raw_serializable(C::METHOD, cmd)
+      .await?
+      .map_err(|e| e.into_error(C::METHOD))?;
+    serde_json::from_value(value).map_err(|e| FerriError::protocol(C::METHOD, format!("decode response: {e}")))
+  }
+
   /// Send a `BiDi` command and await the response.
   pub(crate) async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self.send_raw(method, params).await?.map_err(|e| e.into_error(method))
@@ -365,6 +376,10 @@ impl BidiTransport {
   /// its result, or its error code and message. The outer error is the
   /// transport's own, the connection closed or the time up.
   pub(crate) async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
+    self.send_raw_serializable(method, &params).await
+  }
+
+  async fn send_raw_serializable<P: serde::Serialize>(&self, method: &str, params: &P) -> Result<BidiResult> {
     use std::io::Write as _;
 
     let budget = crate::operation_budget::OperationBudget::current(60_000)?;
@@ -386,7 +401,7 @@ impl BidiTransport {
     // Build command JSON directly in a single buffer (no intermediate String or Value envelope).
     let mut buf = Vec::with_capacity(128 + method.len());
     let _ = write!(buf, r#"{{"id":{id},"method":"{method}","params":"#);
-    serde_json::to_writer(&mut buf, &params)?;
+    serde_json::to_writer(&mut buf, params)?;
     buf.push(b'}');
     let cmd = String::from_utf8(buf).map_err(|e| FerriError::backend(format!("UTF-8: {e}")))?;
     trace!("BiDi send id={id}: {method}");

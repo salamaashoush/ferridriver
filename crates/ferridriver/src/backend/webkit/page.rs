@@ -747,7 +747,9 @@ impl WebKitPage {
         } else {
           let _ = page
             .proxy
-            .send("Target.resume", json!({ "targetId": &*page.target_id() }))
+            .send_typed(&ferridriver_webkit_proto::target::Resume {
+              target_id: &page.target_id(),
+            })
             .await;
         }
       }
@@ -762,7 +764,9 @@ impl WebKitPage {
       let mut events = self.events.subscribe();
       self
         .proxy
-        .send("Target.resume", json!({ "targetId": &*self.target_id() }))
+        .send_typed(&ferridriver_webkit_proto::target::Resume {
+          target_id: &self.target_id(),
+        })
         .await
         .map_err(|e| crate::error::FerriError::backend(format!("webkit Target.resume: {e}")))?;
       self.first_document_committed(&mut events).await;

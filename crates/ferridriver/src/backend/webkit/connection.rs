@@ -490,6 +490,21 @@ impl Session {
     }
   }
 
+  /// Send a strongly typed `WebKit` Inspector command and decode its reply into `C::Response`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards [`Self::send`] errors or returns `ConnectionError::Json` if the
+  /// response cannot be decoded into `C::Response`.
+  pub async fn send_typed<C: ferridriver_webkit_proto::Command>(
+    &self,
+    cmd: &C,
+  ) -> Result<C::Response, ConnectionError> {
+    let params = serde_json::to_value(cmd)?;
+    let value = self.send(C::METHOD, params).await?;
+    serde_json::from_value(value).map_err(ConnectionError::Json)
+  }
+
   /// Send `method` and await its reply.
   ///
   /// # Errors
