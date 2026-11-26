@@ -1779,7 +1779,7 @@ impl LaunchSpec {
         ));
       },
       BackendKind::CdpPipe => {
-        use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
+        use crate::backend::cdp::CdpBrowser;
         let mut args = eff.args.clone();
         args.extend(proxy_flags);
         let flags = chrome_flags_with(
@@ -1790,20 +1790,15 @@ impl LaunchSpec {
         );
         let browser = match &eff.user_data_dir {
           Some(dir) => {
-            CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
-              &eff.chromium_path,
-              &flags,
-              std::path::Path::new(dir),
-              &eff.env,
-            )
-            .await?
+            CdpBrowser::launch_pipe_with_flags_in_dir(&eff.chromium_path, &flags, std::path::Path::new(dir), &eff.env)
+              .await?
           },
-          None => CdpBrowser::<PipeTransport>::launch_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
+          None => CdpBrowser::launch_pipe_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
         };
-        AnyBrowser::CdpPipe(browser)
+        AnyBrowser::Cdp(browser)
       },
       BackendKind::CdpWs => {
-        use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+        use crate::backend::cdp::CdpBrowser;
         let mut args = eff.args.clone();
         args.extend(proxy_flags);
         let flags = chrome_flags_with(
@@ -1814,7 +1809,7 @@ impl LaunchSpec {
         );
         let browser = match &eff.user_data_dir {
           Some(dir) => {
-            Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
+            Box::pin(CdpBrowser::launch_ws_with_flags_in_dir(
               &eff.chromium_path,
               &flags,
               std::path::Path::new(dir),
@@ -1822,9 +1817,9 @@ impl LaunchSpec {
             ))
             .await?
           },
-          None => CdpBrowser::<WsTransport>::launch_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
+          None => CdpBrowser::launch_ws_with_flags(&eff.chromium_path, &flags, &eff.env).await?,
         };
-        AnyBrowser::CdpWs(browser)
+        AnyBrowser::Cdp(browser)
       },
       BackendKind::WebKit => {
         use crate::backend::webkit::{LaunchConfig, WebKitBrowser};
@@ -1957,7 +1952,7 @@ async fn launch_lightpanda(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
   } else {
     eff.chromium_path.clone()
   };
-  let browser = crate::backend::cdp::CdpBrowser::<crate::backend::cdp::ws::WsTransport>::launch_lightpanda(
+  let browser = crate::backend::cdp::CdpBrowser::launch_lightpanda(
     std::path::Path::new(&binary),
     crate::backend::cdp::lightpanda::ServeOptions {
       proxy: eff.proxy.as_ref(),
@@ -1968,7 +1963,7 @@ async fn launch_lightpanda(eff: &EffectiveLaunch) -> Result<AnyBrowser> {
     },
   )
   .await?;
-  Ok(AnyBrowser::CdpWs(browser))
+  Ok(AnyBrowser::Cdp(browser))
 }
 
 fn browser_executable(kind: crate::options::BrowserKind, headless: bool) -> String {
@@ -2043,7 +2038,7 @@ async fn connect_browser(
   headers: Option<&rustc_hash::FxHashMap<String, String>>,
   args: &[String],
 ) -> Result<AnyBrowser> {
-  use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+  use crate::backend::cdp::CdpBrowser;
 
   // An endpoint's own `connectOptions.headers` win over the state-wide ones.
   let merged;
@@ -2123,8 +2118,8 @@ async fn connect_browser(
     },
     ConnectMode::Launch => return Err(FerriError::backend("connect_browser called with Launch mode")),
   };
-  Ok(AnyBrowser::CdpWs(
-    Box::pin(CdpBrowser::<WsTransport>::connect_with_headers(
+  Ok(AnyBrowser::Cdp(
+    Box::pin(CdpBrowser::connect_with_headers(
       &ws_url,
       &headers
         .into_iter()
@@ -2199,7 +2194,7 @@ impl BrowserState {
   ///
   /// Returns an error if the WebSocket connection or page discovery fails.
   pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize> {
-    use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+    use crate::backend::cdp::CdpBrowser;
     self.ensure_not_disposed()?;
 
     // Drop existing instance if any. A bare `remove` would orphan a browser this
@@ -2212,7 +2207,7 @@ impl BrowserState {
       discover_ws_from_http(url).await?
     };
 
-    let browser = AnyBrowser::CdpWs(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?);
+    let browser = AnyBrowser::Cdp(Box::pin(CdpBrowser::connect(&ws_url)).await?);
     // Skip viewport override for existing pages — connect_to_url attaches to a
     // user-managed browser whose window size should not be touched.
     Box::pin(self.install_instance(instance_name, browser, true, true)).await?;

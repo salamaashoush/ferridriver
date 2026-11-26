@@ -146,7 +146,7 @@ async fn attach(
     created.session,
   ))
   .await?;
-  Ok(AnyBrowser::CdpWs(browser))
+  Ok(AnyBrowser::Cdp(browser))
 }
 
 fn discovery_url(capabilities: &Value) -> Result<Option<reqwest::Url>> {

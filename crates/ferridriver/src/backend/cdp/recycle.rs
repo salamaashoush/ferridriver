@@ -42,7 +42,7 @@ use rustc_hash::FxHashMap;
 use serde_json::json;
 
 use super::super::EMPTY_PARAMS;
-use super::{AttachedTargets, CdpBrowser, CdpTransport, CdpWrap};
+use super::{AttachedTargets, CdpBrowser, CdpTransport};
 use crate::error::{FerriError, Result};
 
 /// How long emptying a context may take before it is disposed instead.
@@ -288,7 +288,7 @@ impl Spares {
   }
 }
 
-impl<T: CdpWrap> CdpBrowser<T> {
+impl CdpBrowser {
   /// Close a context its user is done with, keeping it for the next
   /// `new_context` when it can be emptied and disposing it otherwise.
   /// `origins` are the origins it visited.
@@ -452,8 +452,8 @@ struct KeepSessionInput<'a> {
 /// Attempt the keep-session fast path on an active single-page context.
 /// Returns `Ok(Ok(kept))` when the session stays attached, or `Ok(Err(net_dirty))`
 /// when the slow path is required.
-async fn try_keep_session_on<T: CdpTransport>(
-  transport: &Arc<T>,
+async fn try_keep_session_on(
+  transport: &Arc<CdpTransport>,
   spares: &Spares,
   input: KeepSessionInput<'_>,
 ) -> Result<std::result::Result<KeptPage, Option<bool>>> {
@@ -526,8 +526,8 @@ async fn try_keep_session_on<T: CdpTransport>(
 /// Leave `browser_context_id` as a new context would be, with one blank
 /// pre-enabled page. Clean single-page sessions stay attached (3 CDP commands);
 /// dirty or multi-page contexts detach and rebuild a fresh session.
-async fn empty_context_on<T: CdpTransport>(
-  transport: &Arc<T>,
+async fn empty_context_on(
+  transport: &Arc<CdpTransport>,
   spares: &Spares,
   attached_targets: &AttachedTargets,
   browser_context_id: &str,
@@ -612,7 +612,7 @@ async fn empty_context_on<T: CdpTransport>(
 
 /// Reset the pointer off-screen asynchronously when the previous user
 /// actually dispatched mouse or touch input on this page.
-fn spawn_pointer_reset<T: CdpTransport>(transport: &Arc<T>, session: &str) {
+fn spawn_pointer_reset(transport: &Arc<CdpTransport>, session: &str) {
   let transport = Arc::clone(transport);
   let pointer_session = session.to_string();
   tokio::spawn(async move {
@@ -624,8 +624,8 @@ fn spawn_pointer_reset<T: CdpTransport>(transport: &Arc<T>, session: &str) {
 }
 
 /// Close every page of the context but one, and name the one kept.
-async fn keep_one_page_on<T: CdpTransport>(
-  transport: &T,
+async fn keep_one_page_on(
+  transport: &CdpTransport,
   spares: &Spares,
   browser_context_id: &str,
 ) -> Result<Option<String>> {
@@ -667,8 +667,8 @@ async fn keep_one_page_on<T: CdpTransport>(
 /// Detach the previous user's session from `target` and attach a new
 /// one in a single pipelined round trip (CDP executes browser-level commands
 /// in FIFO order). Returns `(new_session, pointer_dirty)`.
-async fn replace_session_on<T: CdpTransport>(
-  transport: &T,
+async fn replace_session_on(
+  transport: &CdpTransport,
   spares: &Spares,
   attached_targets: &AttachedTargets,
   target: &str,
@@ -705,8 +705,8 @@ async fn replace_session_on<T: CdpTransport>(
 /// engine session, attaching that session the first time. Answers
 /// whether the registration changed: documents already loaded keep the
 /// engine they were given.
-async fn engine_registered_on<T: CdpTransport>(
-  transport: &T,
+async fn engine_registered_on(
+  transport: &CdpTransport,
   spares: &Spares,
   browser_context_id: &str,
   target: &str,
@@ -775,7 +775,7 @@ async fn engine_registered_on<T: CdpTransport>(
 
 /// Send the page of `session` to a blank document, enabling `Page` first when
 /// `enable_page` is true (so `beforeunload` dialogs reach this session).
-async fn go_blank_on<T: CdpTransport>(transport: &T, session: &str, enable_page: bool) -> Result<()> {
+async fn go_blank_on(transport: &CdpTransport, session: &str, enable_page: bool) -> Result<()> {
   let on_page = Some(session);
   // A document with a `beforeunload` handler asks before it lets the
   // page go, and the navigation waits on the answer. The question only
@@ -816,9 +816,9 @@ struct ClearPlan<'a> {
   permissions_dirty: bool,
 }
 
-fn push_cmd<'a, T: CdpTransport>(
+fn push_cmd<'a>(
   cmds: &mut Vec<futures::future::BoxFuture<'a, Result<()>>>,
-  transport: &'a T,
+  transport: &'a CdpTransport,
   session: Option<&'a str>,
   method: &'static str,
   params: serde_json::Value,
@@ -828,9 +828,9 @@ fn push_cmd<'a, T: CdpTransport>(
   }));
 }
 
-fn push_raw_cmd<'a, T: CdpTransport>(
+fn push_raw_cmd<'a>(
   cmds: &mut Vec<futures::future::BoxFuture<'a, Result<()>>>,
-  transport: &'a T,
+  transport: &'a CdpTransport,
   session: Option<&'a str>,
   method: &'static str,
   raw_params: &'static str,
@@ -843,9 +843,9 @@ fn push_raw_cmd<'a, T: CdpTransport>(
   }));
 }
 
-fn push_clears<'a, T: CdpTransport>(
+fn push_clears<'a>(
   cmds: &mut Vec<futures::future::BoxFuture<'a, Result<()>>>,
-  transport: &'a T,
+  transport: &'a CdpTransport,
   browser_context_id: &str,
   session: &'a str,
   plan: &ClearPlan<'a>,
@@ -912,8 +912,8 @@ fn push_clears<'a, T: CdpTransport>(
 
 /// Minimal pipelined clear batch for a clean kept session whose domains and
 /// emulation are already active: skips domain setup and any untouched clears.
-async fn clear_kept_session_on<T: CdpTransport>(
-  transport: &T,
+async fn clear_kept_session_on(
+  transport: &CdpTransport,
   browser_context_id: &str,
   session: &str,
   plan: ClearPlan<'_>,
@@ -927,8 +927,8 @@ async fn clear_kept_session_on<T: CdpTransport>(
 /// Clear what outlives a session AND pre-enable the fresh session's domains
 /// and default emulation in a single pipelined batch so the next `new_page`
 /// starts with zero protocol round trips.
-async fn clear_and_prepare_on<T: CdpTransport>(
-  transport: &T,
+async fn clear_and_prepare_on(
+  transport: &CdpTransport,
   browser_context_id: &str,
   session: &str,
   plan: ClearPlan<'_>,

@@ -2880,10 +2880,7 @@ impl Locator {
       return None;
     }
     let page_arc = self.frame.page_arc();
-    if !matches!(
-      page_arc.inner(),
-      crate::backend::AnyPage::CdpPipe(_) | crate::backend::AnyPage::CdpWs(_)
-    ) {
+    if !matches!(page_arc.inner(), crate::backend::AnyPage::Cdp(_)) {
       return None;
     }
     let res = Box::pin(self.fill_fast_inner(value, opts)).await;

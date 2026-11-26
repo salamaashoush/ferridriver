@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use ferridriver::backend::cdp::{CdpBrowser, ws::WsTransport};
 use serde_json::{Value, json};
 
-async fn pages(browser: &CdpBrowser<WsTransport>) -> Result<Vec<Value>> {
+async fn pages(browser: &CdpBrowser) -> Result<Vec<Value>> {
   let mut observations = Vec::new();
   for page in Box::pin(browser.pages()).await? {
     let url = tokio::time::timeout(Duration::from_secs(3), page.url()).await??;
@@ -33,14 +33,14 @@ pub(crate) async fn run(root: &Path, urls: Vec<String>) -> Result<Value> {
     let port = lines.next().context("DevTools port missing")?;
     let path = lines.next().context("DevTools browser path missing")?;
     let endpoint = format!("ws://127.0.0.1:{port}{path}");
-    let browser = CdpBrowser::<WsTransport>::connect(&endpoint).await?;
+    let browser = CdpBrowser::connect(&endpoint).await?;
     for url in urls {
       Box::pin(browser.new_page(&url, None, None)).await?;
     }
     let before = pages(&browser).await?;
     drop(browser);
     let running_after_disconnect = child.is_running();
-    let browser = CdpBrowser::<WsTransport>::connect(&endpoint).await?;
+    let browser = CdpBrowser::connect(&endpoint).await?;
     let after = pages(&browser).await?;
     drop(browser);
     Ok(json!({ "before": before, "after": after, "runningAfterDisconnect": running_after_disconnect }))

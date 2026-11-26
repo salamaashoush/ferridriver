@@ -488,7 +488,7 @@ async fn connect_device(
   browser.set_remote_downloads(adb.remote_downloads(&serial));
   browser.android = Some(Arc::clone(owner));
   tracing::info!(%serial, pkg = options.pkg, "managed Android browser is ready");
-  Ok(crate::backend::AnyBrowser::CdpWs(browser))
+  Ok(crate::backend::AnyBrowser::Cdp(browser))
 }
 
 /// Whether `cmd overlay list` offers `overlay`, and if so whether it is on. A line is a state marker and a
@@ -610,7 +610,7 @@ async fn start_chrome(
   serial: &str,
   pkg: &str,
   flags: &str,
-) -> Result<crate::backend::cdp::CdpBrowser<crate::backend::cdp::ws::WsTransport>> {
+) -> Result<crate::backend::cdp::CdpBrowser> {
   if !sdk
     .adb(serial, &["shell", "pm", "path", pkg])
     .await?

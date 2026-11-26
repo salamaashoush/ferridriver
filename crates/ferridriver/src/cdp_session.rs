@@ -19,40 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 
-use crate::backend::cdp::pipe::PipeTransport;
 use crate::backend::cdp::transport::CdpTransport;
-use crate::backend::cdp::ws::WsTransport;
 use crate::error::{FerriError, Result};
-
-/// Type-erased sender over the two concrete CDP transports.
-/// `CdpTransport::send_command` is RPITIT (not dyn-compatible), so the
-/// erasure is a two-variant enum — the same idiom as `AnyPage`.
-#[derive(Clone)]
-enum SessionTransport {
-  Pipe(Arc<PipeTransport>),
-  Ws(Arc<WsTransport>),
-}
-
-impl SessionTransport {
-  async fn send(
-    &self,
-    session_id: Option<&str>,
-    method: &str,
-    params: &serde_json::Value,
-  ) -> Result<serde_json::Value> {
-    match self {
-      Self::Pipe(t) => t.send_command(session_id, method, params).await,
-      Self::Ws(t) => t.send_command(session_id, method, params).await,
-    }
-  }
-
-  fn tap_all(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
-    match self {
-      Self::Pipe(t) => t.tap_all_events(session_id),
-      Self::Ws(t) => t.tap_all_events(session_id),
-    }
-  }
-}
 
 /// Callback invoked with a protocol event's `params` object.
 pub type CdpEventCallback = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
@@ -76,7 +44,7 @@ struct ListenerRegistry {
 }
 
 struct SessionInner {
-  transport: SessionTransport,
+  transport: Arc<CdpTransport>,
   session_id: Arc<str>,
   detached: AtomicBool,
   listeners: std::sync::Mutex<ListenerRegistry>,
@@ -98,10 +66,9 @@ pub struct CdpSession {
 }
 
 impl CdpSession {
-  pub(crate) async fn attach_to_target(transport: SessionTransportSource, target_id: &str) -> Result<Self> {
-    let transport = transport.erase();
+  pub(crate) async fn attach_to_target(transport: Arc<CdpTransport>, target_id: &str) -> Result<Self> {
     let result = transport
-      .send(
+      .send_command(
         None,
         "Target.attachToTarget",
         &serde_json::json!({ "targetId": target_id, "flatten": true }),
@@ -110,15 +77,14 @@ impl CdpSession {
     Self::from_attach_result(transport, &result)
   }
 
-  pub(crate) async fn attach_to_browser_target(transport: SessionTransportSource) -> Result<Self> {
-    let transport = transport.erase();
+  pub(crate) async fn attach_to_browser_target(transport: Arc<CdpTransport>) -> Result<Self> {
     let result = transport
-      .send(None, "Target.attachToBrowserTarget", &serde_json::json!({}))
+      .send_command(None, "Target.attachToBrowserTarget", &serde_json::json!({}))
       .await?;
     Self::from_attach_result(transport, &result)
   }
 
-  fn from_attach_result(transport: SessionTransport, result: &serde_json::Value) -> Result<Self> {
+  fn from_attach_result(transport: Arc<CdpTransport>, result: &serde_json::Value) -> Result<Self> {
     let session_id = result
       .get("sessionId")
       .and_then(serde_json::Value::as_str)
@@ -152,7 +118,7 @@ impl CdpSession {
     self
       .inner
       .transport
-      .send(Some(&self.inner.session_id), method, &params)
+      .send_command(Some(&self.inner.session_id), method, &params)
       .await
   }
 
@@ -173,7 +139,7 @@ impl CdpSession {
     let _ = self
       .inner
       .transport
-      .send(
+      .send_command(
         Some(&self.inner.session_id),
         "Runtime.runIfWaitingForDebugger",
         &serde_json::json!({}),
@@ -182,7 +148,7 @@ impl CdpSession {
     self
       .inner
       .transport
-      .send(
+      .send_command(
         None,
         "Target.detachFromTarget",
         &serde_json::json!({ "sessionId": &*self.inner.session_id }),
@@ -265,7 +231,7 @@ impl CdpSession {
     if self.inner.pump_started.swap(true, Ordering::SeqCst) {
       return;
     }
-    let mut rx = self.inner.transport.tap_all(&self.inner.session_id);
+    let mut rx = self.inner.transport.tap_all_events(&self.inner.session_id);
     let (flush_tx, mut flushes) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
     let _ = self.inner.flushes.set(flush_tx);
     let inner = Arc::downgrade(&self.inner);
@@ -321,21 +287,5 @@ fn dispatch(inner: &SessionInner, event: &serde_json::Value) {
   }
   for cb in wildcard_cbs {
     cb(serde_json::json!({ "method": method, "params": params.clone() }));
-  }
-}
-
-/// Source for building the type-erased transport — constructed by the
-/// CDP backend variants that own a concrete transport.
-pub(crate) enum SessionTransportSource {
-  Pipe(Arc<PipeTransport>),
-  Ws(Arc<WsTransport>),
-}
-
-impl SessionTransportSource {
-  fn erase(self) -> SessionTransport {
-    match self {
-      Self::Pipe(t) => SessionTransport::Pipe(t),
-      Self::Ws(t) => SessionTransport::Ws(t),
-    }
   }
 }

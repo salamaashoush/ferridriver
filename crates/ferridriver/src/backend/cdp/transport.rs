@@ -215,38 +215,193 @@ pub fn dump_global_rtt_stats() {
   }
 }
 
-/// Trait abstracting CDP transport medium (pipes vs WebSocket).
-pub trait CdpTransport: Send + Sync + 'static {
-  fn close(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+/// Outbound wire sink for [`CdpTransport`].
+pub(crate) enum WireSender {
+  Pipe(tokio::sync::mpsc::Sender<Vec<u8>>),
+  Ws(tokio::sync::mpsc::Sender<tokio_tungstenite::tungstenite::Message>),
+  #[cfg(test)]
+  Null,
+}
+
+/// Concrete CDP transport over either Unix pipes (`--remote-debugging-pipe`)
+/// or WebSocket (`--remote-debugging-port` / `connectOverCDP`).
+///
+/// Both transports share [`CdpDispatcher`] for response correlation, lifecycle
+/// tracking, and event taps; only the outbound wire framing differs.
+pub struct CdpTransport {
+  dispatcher: Arc<CdpDispatcher>,
+  sender: WireSender,
+  tasks: Option<crate::backend::transport_tasks::TransportTasks>,
+  endpoint: Option<Arc<str>>,
+}
+
+impl CdpTransport {
+  pub(crate) fn from_pipe(
+    write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    dispatcher: Arc<CdpDispatcher>,
+    tasks: crate::backend::transport_tasks::TransportTasks,
+  ) -> Self {
+    Self {
+      dispatcher,
+      sender: WireSender::Pipe(write_tx),
+      tasks: Some(tasks),
+      endpoint: None,
+    }
+  }
+
+  pub(crate) fn from_ws(
+    write_tx: tokio::sync::mpsc::Sender<tokio_tungstenite::tungstenite::Message>,
+    dispatcher: Arc<CdpDispatcher>,
+    tasks: crate::backend::transport_tasks::TransportTasks,
+    endpoint: Arc<str>,
+  ) -> Self {
+    Self {
+      dispatcher,
+      sender: WireSender::Ws(write_tx),
+      tasks: Some(tasks),
+      endpoint: Some(endpoint),
+    }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn from_test_dispatcher(dispatcher: Arc<CdpDispatcher>) -> Self {
+    Self {
+      dispatcher,
+      sender: WireSender::Null,
+      tasks: None,
+      endpoint: None,
+    }
+  }
+
+  /// Whether this transport runs over Unix pipes (`CdpPipe`) or WebSocket (`CdpWs`).
+  #[must_use]
+  pub fn kind(&self) -> crate::backend::BackendKind {
+    match self.sender {
+      WireSender::Pipe(_) => crate::backend::BackendKind::CdpPipe,
+      WireSender::Ws(_) => crate::backend::BackendKind::CdpWs,
+      #[cfg(test)]
+      WireSender::Null => crate::backend::BackendKind::CdpPipe,
+    }
+  }
+
+  /// The browser's `DevTools` WebSocket endpoint when connected over WebSocket.
+  #[must_use]
+  pub fn endpoint(&self) -> Option<&str> {
+    self.endpoint.as_deref()
+  }
+
+  /// # Errors
+  ///
+  /// Returns an error if stopping the transport tasks fails.
+  pub async fn close(&self) -> Result<()> {
+    self.dispatcher.fail_all_pending("CDP transport closed");
+    if let Some(tasks) = &self.tasks {
+      tasks.close().await?;
+    }
+    Ok(())
+  }
 
   /// Whether the browser connection has ended (EOF on the pipe/socket).
-  fn is_disconnected(&self) -> bool;
+  #[must_use]
+  pub fn is_disconnected(&self) -> bool {
+    self.dispatcher.is_disconnected()
+  }
 
   /// Resolves once the browser connection has ended.
-  fn closed(&self) -> futures::future::BoxFuture<'static, ()>;
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+    match &self.tasks {
+      Some(tasks) => tasks.closed(),
+      None => Box::pin(std::future::pending()),
+    }
+  }
 
-  fn send_command(
+  async fn dispatch_command(
+    &self,
+    id: u64,
+    method: &str,
+    mut data: Vec<u8>,
+    rx: oneshot::Receiver<CdpResult>,
+    budget: crate::operation_budget::OperationBudget,
+  ) -> Result<serde_json::Value> {
+    let mut pending = self.dispatcher.pending_command(id);
+    match &self.sender {
+      WireSender::Pipe(tx) => {
+        budget.send(tx, data).await?;
+      },
+      WireSender::Ws(tx) => {
+        if data.last() == Some(&0) {
+          data.pop();
+        }
+        let text = String::from_utf8(data).map_err(|error| FerriError::backend(format!("UTF-8: {error}")))?;
+        budget
+          .send(tx, tokio_tungstenite::tungstenite::Message::Text(text.into()))
+          .await?;
+      },
+      #[cfg(test)]
+      WireSender::Null => {
+        pending.completed();
+        return Ok(serde_json::Value::Null);
+      },
+    }
+    let result = budget
+      .wait(rx)
+      .await
+      .map_err(|error| error.error(format!("waiting for {method} response")))?
+      .map_err(|_| FerriError::backend(format!("Response channel dropped for {method}")))?;
+    pending.completed();
+    result
+  }
+
+  /// # Errors
+  ///
+  /// Returns an error if the transport is disconnected, serialization fails, the command
+  /// outlives its operation budget, or Chrome rejects the command.
+  #[tracing::instrument(skip(self, session_id, params), fields(method))]
+  pub async fn send_command(
     &self,
     session_id: Option<&str>,
     method: &str,
     params: &serde_json::Value,
-  ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
+  ) -> Result<serde_json::Value> {
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+    let (id, data, rx) = self.dispatcher.build_command(session_id, method, params)?;
+    self.dispatch_command(id, method, data, rx, budget).await
+  }
 
   /// Send a CDP command whose `params` object is already valid serialized JSON.
   /// Avoids intermediate `serde_json::Value` trees, re-escaping large static
   /// scripts (like `engine.min.js`), and incremental buffer growth.
-  fn send_command_raw(
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the transport is disconnected, the command outlives its operation
+  /// budget, or Chrome rejects the command.
+  #[tracing::instrument(skip(self, session_id, raw_params_json), fields(method))]
+  pub async fn send_command_raw(
     &self,
     session_id: Option<&str>,
     method: &str,
     raw_params_json: &str,
-  ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
+  ) -> Result<serde_json::Value> {
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+    let (id, data, rx) = self.dispatcher.build_command_raw(session_id, method, raw_params_json)?;
+    self.dispatch_command(id, method, data, rx, budget).await
+  }
 
-  fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>>;
+  #[must_use]
+  pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
+    self.dispatcher.subscribe_events()
+  }
 
-  fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>>;
+  #[must_use]
+  pub fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
+    self.dispatcher.subscribe_event_method(method)
+  }
 
-  fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>>;
+  #[must_use]
+  pub fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
+    self.dispatcher.subscribe_event_domain(domain)
+  }
 
   /// Lossless, wire-ordered event tap for the given exact CDP methods,
   /// optionally filtered to one session. Unlike the broadcast
@@ -254,71 +409,92 @@ pub trait CdpTransport: Send + Sync + 'static {
   /// consumers (frame/context maps, network correlation, dialog /
   /// download / file-chooser registries, Fetch interception) MUST use
   /// taps; a dropped event there corrupts the map or hangs the page.
-  fn tap_event_methods(
+  #[must_use]
+  pub fn tap_event_methods(
     &self,
     methods: &'static [&'static str],
     session_id: Option<&str>,
-  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+    self.dispatcher.tap_event_methods(methods, session_id)
+  }
 
   /// Lossless, wire-ordered event tap for whole CDP domains
   /// (`Network`, `Runtime`, ...). Registering several domains on one
   /// tap yields a single stream ordered across those domains exactly
   /// as the events arrived on the wire.
-  fn tap_event_domains(
+  #[must_use]
+  pub fn tap_event_domains(
     &self,
     domains: &'static [&'static str],
     session_id: Option<&str>,
-  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
+  ) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+    self.dispatcher.tap_event_domains(domains, session_id)
+  }
 
   /// Lossless, wire-ordered tap of EVERY event carried by exactly one
   /// session. Strict session match: browser-scoped events do not leak
   /// into a page-session stream. Backs the public `CDPSession` events.
-  fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>>;
+  #[must_use]
+  pub fn tap_all_events(&self, session_id: &str) -> tokio::sync::mpsc::UnboundedReceiver<Arc<serde_json::Value>> {
+    self.dispatcher.tap_all_events(session_id)
+  }
 
-  fn tap_iframe_targets(&self) -> IframeTargetSubscription;
+  #[must_use]
+  pub fn tap_iframe_targets(&self) -> IframeTargetSubscription {
+    self.dispatcher.tap_iframe_targets()
+  }
 
-  fn register_lifecycle_tracker(
+  pub fn register_lifecycle_tracker(
     &self,
     session_id: &str,
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
-    frame_observer: super::transport::FrameStateObserver,
-  );
+    frame_observer: FrameStateObserver,
+  ) {
+    self
+      .dispatcher
+      .register_lifecycle_tracker(session_id, state, notify, frame_observer);
+  }
 
   /// Release everything the dispatcher holds for a page session that is
   /// going away. Taps are otherwise only pruned when an event of that
   /// exact method arrives, and the lifecycle tracker was never removed
   /// at all — both grew by an entry per page for the life of the
   /// browser.
-  fn unregister_session(&self, session_id: &str);
+  pub fn unregister_session(&self, session_id: &str) {
+    self.dispatcher.unregister_session(session_id);
+  }
 
   /// Per-session dirty flags tracked by the transport so context recycling
   /// knows whether the session can be kept alive and which clears can be skipped.
-  fn take_session_dirty(&self, _session_id: &str) -> SessionDirty {
-    SessionDirty {
-      pointer: true,
-      session_state: true,
-      network: true,
-    }
+  #[must_use]
+  pub fn take_session_dirty(&self, session_id: &str) -> SessionDirty {
+    self.dispatcher.take_session_dirty(session_id)
   }
 
   /// Clear all dirty flags for `session_id` after bootstrap or recycle setup.
-  fn reset_session_dirty(&self, _session_id: &str) {}
+  pub fn reset_session_dirty(&self, session_id: &str) {
+    self.dispatcher.reset_session_dirty(session_id);
+  }
 
   /// Mark `session_id`'s pointer state dirty (used when a keep-session check
   /// consumed the flags before falling back to session replacement).
-  fn mark_pointer_dirty(&self, _session_id: &str) {}
+  pub fn mark_pointer_dirty(&self, session_id: &str) {
+    self.dispatcher.mark_pointer_dirty(session_id);
+  }
 
   /// Whether `Browser.grantPermissions` was called for `browser_context_id`,
   /// clearing the flag.
-  fn take_permissions_dirty(&self, _browser_context_id: &str) -> bool {
-    true
+  #[must_use]
+  pub fn take_permissions_dirty(&self, browser_context_id: &str) -> bool {
+    self.dispatcher.take_permissions_dirty(browser_context_id)
   }
 
   /// Whether browser-scoped `Storage.setCookies` was called for
   /// `browser_context_id`, clearing the flag.
-  fn take_cookies_dirty(&self, _browser_context_id: &str) -> bool {
-    true
+  #[must_use]
+  pub fn take_cookies_dirty(&self, browser_context_id: &str) -> bool {
+    self.dispatcher.take_cookies_dirty(browser_context_id)
   }
 }
 
@@ -1504,8 +1680,8 @@ impl Drop for CdpDispatcher {
 }
 
 #[cfg(test)]
-pub(crate) async fn verify_operation_budgets<T: CdpTransport, M>(
-  transport: T,
+pub(crate) async fn verify_operation_budgets<M>(
+  transport: CdpTransport,
   dispatcher: Arc<CdpDispatcher>,
   writer: tokio::sync::mpsc::Sender<M>,
   mut queued: tokio::sync::mpsc::Receiver<M>,

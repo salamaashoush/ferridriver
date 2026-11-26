@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rustc_hash::FxHashMap;
 
 use super::CdpBrowser;
-use super::ws::WsTransport;
 use crate::error::Result;
 
 /// The futures these methods return. [`CdpBrowser`]'s own methods await
@@ -25,7 +24,7 @@ pub(crate) type Erased<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output
 
 #[derive(Clone)]
 pub(crate) struct Routed {
-  pub(crate) browser: CdpBrowser<WsTransport>,
+  pub(crate) browser: CdpBrowser,
   /// The context's id on its own connection.
   pub(crate) raw: String,
 }
@@ -64,7 +63,7 @@ impl ContextConnections {
     taps: &'a crate::backend::PopupTaps,
   ) -> Erased<'a, String> {
     Box::pin(async move {
-      let browser = CdpBrowser::<WsTransport>::connect_opening(&self.server, &FxHashMap::default(), false).await?;
+      let browser = CdpBrowser::connect_opening(&self.server, &FxHashMap::default(), false).await?;
       let raw = match browser.new_context(proxy).await {
         Ok(raw) => raw,
         Err(error) => {
@@ -131,7 +130,7 @@ impl ContextConnections {
 
 /// Hand the popups a connection announces to the browser's own taps, with
 /// the context id the state layer knows its context by.
-fn forward_popups(browser: &CdpBrowser<WsTransport>, raw: &str, id: &str, taps: crate::backend::PopupTaps) {
+fn forward_popups(browser: &CdpBrowser, raw: &str, id: &str, taps: crate::backend::PopupTaps) {
   let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
   browser
     .popup_taps()
