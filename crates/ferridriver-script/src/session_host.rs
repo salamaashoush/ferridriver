@@ -187,7 +187,7 @@ impl ScriptHost for SessionScriptHost {
     let code = request
       .code_language
       .as_deref()
-      .map(ferridriver::codegen::OutputLanguage::parse_cli);
+      .map(ferridriver_codegen::OutputLanguage::parse_cli);
     let _actions = (request.trace || code.is_some()).then(|| {
       ferridriver::trace::observe_session_actions(
         &composite,
@@ -303,7 +303,7 @@ fn result_to_json(result: &ScriptResult) -> serde_json::Value {
 struct ActionForwarder {
   events: EventSink,
   trace: bool,
-  code: Option<ferridriver::codegen::OutputLanguage>,
+  code: Option<ferridriver_codegen::OutputLanguage>,
   /// Applied to the echoed source, so a `fill` with a declared credential
   /// generates an environment read rather than the literal.
   secrets: ferridriver::response::Secrets,
@@ -328,7 +328,7 @@ impl ferridriver::trace::ActionObserver for ActionForwarder {
 
   fn action_end(&self, action: &ferridriver::trace::ActionInfo, elapsed: std::time::Duration, error: Option<&str>) {
     if let Some(language) = self.code
-      && let Some(line) = ferridriver::codegen::echo::line_for_with_secrets(action, language, &self.secrets)
+      && let Some(line) = ferridriver_codegen::echo::line_for_with_secrets(action, language, &self.secrets)
     {
       self.events.code(line);
     }

@@ -176,7 +176,7 @@ fn rust_click_options(options: &ClickOptions, double: bool) -> String {
 fn secret_value(name: &str, language: super::OutputLanguage) -> String {
   match language {
     super::OutputLanguage::TypeScript => format!("process.env.{name}"),
-    other => crate::response::Secrets::env_expression(name, other),
+    other => ferridriver::response::Secrets::env_expression(name, other),
   }
 }
 
@@ -786,7 +786,7 @@ mod tests {
       "await page.goto('https://example.com/');\n"
     );
     assert_eq!(
-      super::super::Scaffold::parse("plain").map(|s| super::super::OutputLanguage::TypeScript.emitter_for(s).footer()),
+      crate::Scaffold::parse("plain").map(|s| crate::emitter_for(crate::OutputLanguage::TypeScript, s).footer()),
       Ok(String::new())
     );
   }

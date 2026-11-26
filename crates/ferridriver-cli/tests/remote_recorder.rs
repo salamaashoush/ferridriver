@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, bail, ensure};
-use ferridriver::codegen::{Action, RecordedAction};
 use ferridriver::options::LaunchOptions;
+use ferridriver_codegen::{Action, RecordedAction};
 use ferridriver_session::{
   BindOptions, Command, EventPayload, INPUT_VERB, PAGE_SELECT_VERB, PageEntry, RECORDER_ASSERT_VERB,
   RECORDER_MODE_VERB, RECORDER_START_VERB, RECORDER_STOP_VERB, RUN_VERB, RecordingResult, Registry, Response,
@@ -673,7 +673,7 @@ async fn a_popup_keeps_its_opener_past_the_handle_that_opened_it(browser: ferrid
   let opener = page_for(&browser, "default").await?;
   opener.goto(OPENER).await?;
   let context = opener.context().context("a page with a context")?.clone();
-  let recorder = ferridriver::codegen::recorder::Recorder::attach(&opener, |_| {}).await?;
+  let recorder = ferridriver_codegen::recorder::Recorder::attach(&opener, |_| {}).await?;
 
   let passing = context.pages();
   let through = passing
@@ -1074,7 +1074,7 @@ async fn a_typed_secret_reaches_only_the_host_and_the_code_reads_it_from_the_env
 /// free to be recorded; one context still takes one recorder.
 #[tokio::test(flavor = "multi_thread")]
 async fn each_browser_in_a_process_records_its_own_default_context() -> anyhow::Result<()> {
-  use ferridriver::codegen::recorder::Recorder;
+  use ferridriver_codegen::recorder::Recorder;
   let (first, second) = tokio::try_join!(launch(ferridriver::chromium()), launch(ferridriver::chromium()))?;
   let (first_page, second_page) = tokio::try_join!(first.new_page(), second.new_page())?;
   let (sink, _events) = mpsc::unbounded_channel();

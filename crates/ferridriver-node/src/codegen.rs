@@ -42,17 +42,17 @@ impl Codegen {
       _ => None,
     };
 
-    let scaffold = ferridriver::codegen::Scaffold::parse(config.target.as_deref().unwrap_or("script"))
+    let scaffold = ferridriver_codegen::Scaffold::parse(config.target.as_deref().unwrap_or("script"))
       .map_err(napi::Error::from_reason)?;
-    let options = ferridriver::codegen::recorder::RecorderOptions {
+    let options = ferridriver_codegen::recorder::RecorderOptions {
       url: config.url,
-      language: ferridriver::codegen::OutputLanguage::parse_cli(config.language.as_deref().unwrap_or("rust")),
+      language: ferridriver_codegen::OutputLanguage::parse_cli(config.language.as_deref().unwrap_or("rust")),
       scaffold,
       output_file: config.output_file,
       viewport,
     };
 
-    ferridriver::codegen::recorder::HeadedRecorder::new(options)
+    ferridriver_codegen::recorder::HeadedRecorder::new(options)
       .start()
       .await
       .into_napi()

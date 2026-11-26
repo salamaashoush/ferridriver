@@ -83,7 +83,7 @@ const MAX_PARAM_WIDTH: usize = 100;
 #[derive(Debug)]
 pub(crate) struct RunObserver {
   pub trace: bool,
-  pub code: Option<ferridriver::codegen::OutputLanguage>,
+  pub code: Option<ferridriver_codegen::OutputLanguage>,
   /// Print each generated line as it happens. Off when the destination is a
   /// file, so the lines are not written twice in two shapes.
   pub echo_code: bool,
@@ -106,7 +106,7 @@ impl ActionObserver for RunObserver {
 
   fn action_end(&self, action: &ActionInfo, elapsed: std::time::Duration, error: Option<&str>) {
     if let Some(language) = self.code
-      && let Some(line) = ferridriver::codegen::echo::line_for_with_secrets(action, language, &self.secrets)
+      && let Some(line) = ferridriver_codegen::echo::line_for_with_secrets(action, language, &self.secrets)
     {
       if self.echo_code {
         let _ = writeln!(std::io::stderr(), "{line}");

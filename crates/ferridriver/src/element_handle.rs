@@ -187,7 +187,9 @@ impl ElementHandle {
   /// delegate to the per-backend element implementations; phase F's
   /// materialisation helpers use it to round-trip through locator /
   /// frame APIs.
-  pub(crate) fn any_element(&self) -> &AnyElement {
+  #[doc(hidden)]
+  #[must_use]
+  pub fn any_element(&self) -> &AnyElement {
     &self.element
   }
 

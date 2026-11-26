@@ -1,0 +1,23 @@
+[package]
+name = "ferridriver-codegen"
+description = "Interactive browser action recorder, code emitters (Rust, TypeScript, Gherkin), and script code echo for ferridriver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver = { workspace = true }
+ferridriver-types = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = "2"
+tracing = { workspace = true }

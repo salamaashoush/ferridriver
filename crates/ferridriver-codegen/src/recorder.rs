@@ -16,14 +16,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::chromium;
-use crate::context::ContextRef;
-use crate::disposable::Disposable;
-use crate::error::{FerriError, Result};
-use crate::events::{BindingSource, ContextEvent, ExposedBinding, ListenerId};
-use crate::frame::Frame;
-use crate::options::{BrowserContextOptions, InitScriptSource, LaunchOptions, ViewportOption};
-use crate::page::Page;
+use ferridriver::chromium;
+use ferridriver::context::ContextRef;
+use ferridriver::disposable::Disposable;
+use ferridriver::error::{FerriError, Result};
+use ferridriver::events::{BindingSource, ContextEvent, ExposedBinding, ListenerId};
+use ferridriver::frame::Frame;
+use ferridriver::options::{BrowserContextOptions, InitScriptSource, LaunchOptions, ViewportOption};
+use ferridriver::page::Page;
 
 use super::{Action, FIRST_PAGE, OutputLanguage, RecordedAction, Scaffold};
 
@@ -227,9 +227,9 @@ struct AttachedContext {
 }
 
 impl AttachedContext {
-  fn of(context: &crate::context::ContextRef) -> Self {
+  fn of(context: &ferridriver::context::ContextRef) -> Self {
     Self {
-      state: Arc::as_ptr(&context.state) as usize,
+      state: Arc::as_ptr(context.state()) as usize,
       key: context.composite(),
     }
   }
@@ -693,7 +693,7 @@ async fn enter_frames(action: &mut serde_json::Value, main: &Frame, frame: &Fram
   let mut full = through_frames(path, selector);
   let shortest = async {
     for candidate in any_frame_candidates(path, selector) {
-      if crate::locator::any_frame_resolves_to(main, &candidate, frame).await {
+      if ferridriver::locator::any_frame_resolves_to(main, &candidate, frame).await {
         return Some(candidate);
       }
     }
@@ -702,7 +702,7 @@ async fn enter_frames(action: &mut serde_json::Value, main: &Frame, frame: &Fram
   if let Ok(Some(shorter)) = tokio::time::timeout(FRAME_SEARCH, shortest).await {
     full = shorter;
   }
-  action["locator"] = crate::locator_generator::as_locator(&full).into();
+  action["locator"] = ferridriver::locator_generator::as_locator(&full).into();
   action["selector"] = full.into();
 }
 
@@ -730,7 +730,7 @@ fn any_frame_candidates(path: &[String], selector: &str) -> Vec<String> {
     .map(|skipped| {
       format!(
         "{} >> {}",
-        crate::locator::ANY_FRAME,
+        ferridriver::locator::ANY_FRAME,
         through_frames(&path[skipped..], selector)
       )
     })
@@ -921,10 +921,10 @@ impl Recorder {
     self.binding = Some(self.context.expose_binding(BINDING, binding).await?);
 
     let test_id = self.context.test_id_attribute();
-    let recorder_support = crate::selectors::RECORDER_SUPPORT_JS;
+    let recorder_support = ferridriver::selectors::RECORDER_SUPPORT_JS;
     let source = format!(
       "(async () => {{\nawait {};\n{recorder_support}\n{RECORDER_JS}\n}})()",
-      crate::selectors::build_lazy_inject_js_with(&test_id)
+      ferridriver::selectors::build_lazy_inject_js_with(&test_id)
     );
     self.init_script = Some(
       self
@@ -1144,7 +1144,7 @@ impl HeadedRecorder {
     Self { options }
   }
 
-  async fn open_page(&self) -> Result<(crate::Browser, Arc<Page>)> {
+  async fn open_page(&self) -> Result<(ferridriver::Browser, Arc<Page>)> {
     let browser = chromium()
       .launch(LaunchOptions {
         headless: Some(false),
@@ -1160,7 +1160,7 @@ impl HeadedRecorder {
       },
       ..Default::default()
     });
-    let ctx = browser.new_context_impl(ctx_opts, true);
+    let ctx = browser.new_context().maybe_options(ctx_opts).await?;
     let page = Box::pin(ctx.new_page()).await?;
     page.goto(&self.options.url).await?;
     Ok((browser, page))
@@ -1199,7 +1199,7 @@ impl HeadedRecorder {
   ///
   /// Returns an error if browser launch or navigation fails.
   pub async fn start(&self) -> Result<()> {
-    let emitter = self.options.language.emitter_for(self.options.scaffold);
+    let emitter = super::emitter_for(self.options.language, self.options.scaffold);
     let mut stdout = std::io::stdout();
     let live = self.options.output_file.is_none();
     if live {
@@ -1251,7 +1251,10 @@ impl HeadedRecorder {
       let _ = stdout.write_all(emitter.footer().as_bytes());
       let _ = stdout.flush();
     } else if let Some(path) = &self.options.output_file {
-      let source = super::emitter::render(&*self.options.language.emitter_for(self.options.scaffold), &actions);
+      let source = super::emitter::render(
+        &*super::emitter_for(self.options.language, self.options.scaffold),
+        &actions,
+      );
       std::fs::write(path, source).map_err(|e| format!("cannot write output file {path}: {e}"))?;
     }
     let _ = browser.close().await;
@@ -1451,7 +1454,7 @@ mod tests {
        internal:role=textbox[name=\"Code\"i]"
     );
     assert_eq!(
-      crate::locator_generator::as_locator(&full),
+      ferridriver::locator_generator::as_locator(&full),
       "locator('iframe[title=\"Coupon\"]').contentFrame().locator('#inner').contentFrame().getByRole('textbox', { name: 'Code' })"
     );
     assert_eq!(through_frames(&[], selector), selector);
@@ -1473,11 +1476,11 @@ mod tests {
       ]
     );
     assert_eq!(
-      crate::locator_generator::as_locator(&candidates[0]),
+      ferridriver::locator_generator::as_locator(&candidates[0]),
       "frameLocator().getByRole('button', { name: 'Deep' })"
     );
     assert_eq!(
-      crate::locator_generator::as_locator(&candidates[1]),
+      ferridriver::locator_generator::as_locator(&candidates[1]),
       "frameLocator().locator('#c').contentFrame().getByRole('button', { name: 'Deep' })"
     );
   }

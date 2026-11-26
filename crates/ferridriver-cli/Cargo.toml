@@ -33,6 +33,7 @@ ferridriver-testjs = { workspace = true }
 ferridriver-session = { workspace = true }
 ferridriver-viewer = { workspace = true }
 ferridriver-types = { workspace = true }
+ferridriver-codegen = { workspace = true }
 ferridriver = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

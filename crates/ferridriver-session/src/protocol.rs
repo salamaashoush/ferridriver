@@ -303,10 +303,10 @@ pub struct RecorderAssertRequest {
 pub struct RecordingResult {
   /// The whole file in the requested language and target.
   pub source: String,
-  pub actions: Vec<ferridriver::codegen::RecordedAction>,
+  pub actions: Vec<ferridriver_codegen::RecordedAction>,
   /// Under `"secrets": "env"`, each secret the actions read and its value.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
-  pub secrets: Vec<ferridriver::codegen::recorder::RecordedSecret>,
+  pub secrets: Vec<ferridriver_codegen::recorder::RecordedSecret>,
 }
 
 /// How the host should treat [`ScriptRequest::code`].
@@ -458,7 +458,7 @@ pub enum EventPayload {
   /// popup however far back. `replaces_previous` is also set when that
   /// entry is the last one.
   Recorded {
-    action: ferridriver::codegen::RecordedAction,
+    action: ferridriver_codegen::RecordedAction,
     code: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     replaces_previous: bool,
@@ -783,12 +783,12 @@ mod tests {
     let wire = serde_json::to_value(ServerFrame::Event(Event {
       id: 3,
       payload: EventPayload::Recorded {
-        action: ferridriver::codegen::RecordedAction {
+        action: ferridriver_codegen::RecordedAction {
           page: "page".into(),
-          action: ferridriver::codegen::Action::Click {
+          action: ferridriver_codegen::Action::Click {
             selector: "#go".into(),
             locator: "locator('#go')".into(),
-            options: ferridriver::codegen::ClickOptions::default(),
+            options: ferridriver_codegen::ClickOptions::default(),
           },
           popup: Some("page1".into()),
         },
@@ -816,9 +816,9 @@ mod tests {
       panic!("a recorded event decoded as another frame");
     };
     assert_eq!(action.popup.as_deref(), Some("page1"));
-    assert!(matches!(action.action, ferridriver::codegen::Action::Click { .. }));
+    assert!(matches!(action.action, ferridriver_codegen::Action::Click { .. }));
     // A recording from before pages had names was all on the first page.
-    let older: ferridriver::codegen::RecordedAction =
+    let older: ferridriver_codegen::RecordedAction =
       serde_json::from_value(serde_json::json!({"type": "navigate", "url": "https://example.com/"})).unwrap();
     assert_eq!(older.page, "page");
     let mode = serde_json::to_value(EventPayload::RecorderMode {

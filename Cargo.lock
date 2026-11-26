@@ -1764,6 +1764,7 @@ dependencies = [
  "dirs 7.0.0",
  "ferridriver",
  "ferridriver-bdd",
+ "ferridriver-codegen",
  "ferridriver-config",
  "ferridriver-mcp",
  "ferridriver-script",
@@ -1796,6 +1797,19 @@ dependencies = [
  "which",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "ferridriver-codegen"
+version = "0.8.1"
+dependencies = [
+ "ferridriver",
+ "ferridriver-types",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1953,6 +1967,7 @@ dependencies = [
  "dirs 7.0.0",
  "ferridriver",
  "ferridriver-bdd",
+ "ferridriver-codegen",
  "ferridriver-config",
  "ferridriver-perf",
  "ferridriver-script",
@@ -1978,6 +1993,7 @@ version = "0.8.1"
 dependencies = [
  "base64 0.23.1",
  "ferridriver",
+ "ferridriver-codegen",
  "ferridriver-session",
  "mimalloc",
  "napi",
@@ -2030,6 +2046,7 @@ dependencies = [
  "dashmap",
  "either",
  "ferridriver",
+ "ferridriver-codegen",
  "ferridriver-config",
  "ferridriver-expect",
  "ferridriver-session",
@@ -2079,6 +2096,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs 7.0.0",
  "ferridriver",
+ "ferridriver-codegen",
  "ferridriver-types",
  "getrandom 0.4.3",
  "rustc-hash",

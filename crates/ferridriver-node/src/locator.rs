@@ -632,8 +632,8 @@ impl Locator {
   /// selector `normalize()` returns.
   #[napi(ts_args_type = "language?: 'typescript' | 'rust' | 'gherkin'")]
   pub async fn generate_locator(&self, language: Option<String>) -> Result<String> {
-    let language = language.map_or(ferridriver::codegen::OutputLanguage::TypeScript, |l| {
-      ferridriver::codegen::OutputLanguage::parse_cli(&l)
+    let language = language.map_or(ferridriver_codegen::OutputLanguage::TypeScript, |l| {
+      ferridriver_codegen::OutputLanguage::parse_cli(&l)
     });
     self
       .inner

@@ -10,6 +10,27 @@ pub mod echo;
 pub mod emitter;
 pub mod recorder;
 
+pub use ferridriver_types::{OutputLanguage, Scaffold};
+
+/// The emitter that writes `language`'s script scaffolding around a body of
+/// recorded or echoed action lines.
+#[must_use]
+pub fn emitter_for_language(language: OutputLanguage) -> std::sync::Arc<dyn emitter::CodeEmitter> {
+  emitter_for(language, Scaffold::Script)
+}
+
+/// The emitter for an explicit [`OutputLanguage`] and [`Scaffold`].
+#[must_use]
+pub fn emitter_for(language: OutputLanguage, scaffold: Scaffold) -> std::sync::Arc<dyn emitter::CodeEmitter> {
+  match (language, scaffold) {
+    (OutputLanguage::Rust, _) => std::sync::Arc::new(emitter::RustEmitter),
+    (OutputLanguage::TypeScript, Scaffold::Script) => std::sync::Arc::new(emitter::TypeScriptEmitter),
+    (OutputLanguage::TypeScript, Scaffold::Test) => std::sync::Arc::new(emitter::TypeScriptTestEmitter::default()),
+    (OutputLanguage::TypeScript, Scaffold::Plain) => std::sync::Arc::new(emitter::TypeScriptPlainEmitter),
+    (OutputLanguage::Gherkin, _) => std::sync::Arc::new(emitter::GherkinEmitter::new()),
+  }
+}
+
 /// A recorded user action.
 ///
 /// The wire shape is the one the page-side recorder sends and the session
@@ -291,94 +312,5 @@ impl Action {
         | Self::AssertUrl { .. }
         | Self::AssertTitle { .. }
     )
-  }
-}
-
-/// Output language for code generation.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum OutputLanguage {
-  #[default]
-  Rust,
-  TypeScript,
-  Gherkin,
-}
-
-/// What the generated code is wrapped in.
-///
-/// Only TypeScript has a choice: Rust is always a `#[ferritest]` and Gherkin
-/// always a feature, both of which are already tests.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Scaffold {
-  /// A script `ferridriver run` executes, standalone or against a session.
-  #[default]
-  Script,
-  /// An `@ferridriver/test` spec `ferridriver test` runs.
-  Test,
-  /// A plain script `ferridriver test` runs as one test (`[test]
-  /// scriptMatch`): the recorded steps alone, against its `page`.
-  Plain,
-}
-
-impl Scaffold {
-  /// Parse `script`, `test` or `plain`.
-  ///
-  /// # Errors
-  ///
-  /// Names the accepted values when `s` is neither.
-  pub fn parse(s: &str) -> Result<Self, String> {
-    match s {
-      "script" => Ok(Self::Script),
-      "test" => Ok(Self::Test),
-      "plain" => Ok(Self::Plain),
-      other => Err(format!(
-        "unknown codegen target '{other}': expected 'script', 'test' or 'plain'"
-      )),
-    }
-  }
-}
-
-impl OutputLanguage {
-  /// The name the injected `asLocator` knows this language by.
-  ///
-  /// It generates locator EXPRESSIONS and so only speaks the languages
-  /// Playwright ships clients for. Rust and Gherkin have no expression
-  /// form there, and JavaScript is the closest readable stand-in: a
-  /// Rust caller wants `getByRole('button')` to render from, not a raw
-  /// selector.
-  #[must_use]
-  pub fn as_injected_language(self) -> &'static str {
-    match self {
-      Self::TypeScript | Self::Rust | Self::Gherkin => "javascript",
-    }
-  }
-
-  /// Parse from a CLI string (e.g. `"typescript"`, `"ts"`, `"gherkin"`).
-  /// Unrecognised values default to Rust.
-  #[must_use]
-  pub fn parse_cli(s: &str) -> Self {
-    match s {
-      "typescript" | "ts" => Self::TypeScript,
-      "gherkin" | "feature" | "bdd" => Self::Gherkin,
-      _ => Self::Rust,
-    }
-  }
-
-  /// The emitter that writes this language's script scaffolding around a
-  /// body of recorded or echoed action lines.
-  #[must_use]
-  pub fn emitter(self) -> std::sync::Arc<dyn emitter::CodeEmitter> {
-    self.emitter_for(Scaffold::Script)
-  }
-
-  /// [`Self::emitter`] for an explicit [`Scaffold`].
-  #[must_use]
-  pub fn emitter_for(self, scaffold: Scaffold) -> std::sync::Arc<dyn emitter::CodeEmitter> {
-    match (self, scaffold) {
-      (Self::Rust, _) => std::sync::Arc::new(emitter::RustEmitter),
-      (Self::TypeScript, Scaffold::Script) => std::sync::Arc::new(emitter::TypeScriptEmitter),
-      (Self::TypeScript, Scaffold::Test) => std::sync::Arc::new(emitter::TypeScriptTestEmitter::default()),
-      (Self::TypeScript, Scaffold::Plain) => std::sync::Arc::new(emitter::TypeScriptPlainEmitter),
-      (Self::Gherkin, _) => std::sync::Arc::new(emitter::GherkinEmitter::new()),
-    }
   }
 }

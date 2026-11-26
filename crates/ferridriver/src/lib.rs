@@ -116,7 +116,6 @@ pub mod ios;
 
 // ── Implementation modules (used by MCP server, will be internalized) ──
 pub mod actions;
-pub mod codegen;
 pub mod ffmpeg;
 pub mod http_client;
 pub mod selectors;

@@ -10,6 +10,9 @@
 
 pub mod devices;
 pub mod keyboard;
+pub mod language;
+
+pub use language::{OutputLanguage, Scaffold};
 
 /// Single HTTP header entry preserving original case and duplicate keys.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

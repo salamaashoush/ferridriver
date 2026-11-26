@@ -10,12 +10,12 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
-use ferridriver::codegen::emitter::{CodeEmitter, TypeScriptTestEmitter};
-use ferridriver::codegen::recorder::{Recorder, RecorderEvent, RecorderMode, Secrets};
-use ferridriver::codegen::{OutputLanguage, Scaffold};
 use ferridriver::options::MouseButton;
 use ferridriver::page::{MouseDownOptions, MouseUpOptions};
 use ferridriver::{Browser, Page};
+use ferridriver_codegen::emitter::{CodeEmitter, TypeScriptTestEmitter};
+use ferridriver_codegen::recorder::{Recorder, RecorderEvent, RecorderMode, Secrets};
+use ferridriver_codegen::{OutputLanguage, Scaffold};
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
 
@@ -465,7 +465,7 @@ impl Recording {
   fn emitter(&self) -> Arc<dyn CodeEmitter> {
     match (&self.title, self.language, self.scaffold) {
       (Some(title), OutputLanguage::TypeScript, Scaffold::Test) => Arc::new(TypeScriptTestEmitter::new(title.clone())),
-      _ => self.language.emitter_for(self.scaffold),
+      _ => ferridriver_codegen::emitter_for(self.language, self.scaffold),
     }
   }
 }
@@ -606,10 +606,10 @@ impl Recordings {
     let recorder = recording.recorder.lock().await.take();
     let finished = match recorder {
       Some(recorder) => recorder.finish().await,
-      None => ferridriver::codegen::recorder::Recorded::default(),
+      None => ferridriver_codegen::recorder::Recorded::default(),
     };
     let result = Arc::new(RecordingResult {
-      source: ferridriver::codegen::emitter::render(&*recording.emitter(), &finished.actions),
+      source: ferridriver_codegen::emitter::render(&*recording.emitter(), &finished.actions),
       actions: finished.actions,
       secrets: finished.secrets,
     });
@@ -649,7 +649,7 @@ impl Recordings {
     browser: &Browser,
     context: &str,
     args: serde_json::Value,
-  ) -> Outcome<ferridriver::codegen::RecordedAction> {
+  ) -> Outcome<ferridriver_codegen::RecordedAction> {
     let request: RecorderAssertRequest = parse("recorder.assert", args)?;
     let recording = self.get(browser, context)?;
     let recorder = recording.recorder.lock().await;
