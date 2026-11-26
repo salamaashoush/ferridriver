@@ -21,8 +21,6 @@ mod types;
 pub mod w3c_input;
 pub mod webdriver;
 pub mod webkit;
-#[cfg(windows)]
-pub mod windows_spawn;
 
 pub use ferridriver_driver::common;
 pub(crate) use ferridriver_driver::json_scan;
@@ -33,6 +31,8 @@ pub(crate) use ferridriver_process::async_tempdir;
 pub use ferridriver_process::process;
 #[cfg(unix)]
 pub use ferridriver_process::reaper;
+#[cfg(windows)]
+pub use ferridriver_process::windows_spawn;
 
 pub use common::js_escape;
 pub(crate) use shared_page::ErasedWeakPage;

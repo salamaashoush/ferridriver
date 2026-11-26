@@ -1,5 +1,6 @@
 //! Shared backend-agnostic driver primitives for ferridriver.
 
+pub mod allocation_resource;
 pub mod common;
 pub mod disposable;
 pub mod event_sink;

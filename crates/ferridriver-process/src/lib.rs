@@ -4,3 +4,5 @@ pub mod async_tempdir;
 pub mod process;
 #[cfg(unix)]
 pub mod reaper;
+#[cfg(windows)]
+pub mod windows_spawn;

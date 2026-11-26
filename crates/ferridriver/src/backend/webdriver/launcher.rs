@@ -3,6 +3,26 @@ use crate::error::{FerriError, Result};
 
 type DriverGroup = std::sync::Arc<tokio::sync::Mutex<Option<ChildGroup>>>;
 
+/// Retained `WebDriver` child-process group for cancellable startup cleanup.
+pub(crate) struct DriverResource(pub DriverGroup);
+
+impl ferridriver_driver::allocation_resource::AllocationResource for DriverResource {
+  fn cleanup_complete(&self) -> bool {
+    self.0.try_lock().is_ok_and(|driver| driver.is_none())
+  }
+
+  fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(async move {
+      let mut driver = self.0.lock().await;
+      if let Some(group) = driver.as_mut() {
+        group.shutdown().await?;
+      }
+      *driver = None;
+      Ok(())
+    })
+  }
+}
+
 pub(crate) async fn launch_safari<T, F, Fut>(
   env: &rustc_hash::FxHashMap<String, String>,
   timeout_ms: u64,
@@ -148,7 +168,7 @@ where
     None => ChildGroup::new(child),
   };
   let group = std::sync::Arc::new(tokio::sync::Mutex::new(Some(group)));
-  crate::state::allocation::retain_driver(&group);
+  crate::state::allocation::retain_resource(&std::sync::Arc::new(DriverResource(std::sync::Arc::clone(&group))));
   let launch = async {
     let client = reqwest::Client::builder()
       .no_proxy()
