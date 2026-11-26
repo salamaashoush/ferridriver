@@ -23,3 +23,14 @@ impl Command for SendMessageToWorker<'_> {
   const METHOD: &'static str = "Worker.sendMessageToWorker";
   type Response = EmptyResponse;
 }
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Initialized<'a> {
+  pub worker_id: &'a str,
+}
+
+impl Command for Initialized<'_> {
+  const METHOD: &'static str = "Worker.initialized";
+  type Response = EmptyResponse;
+}

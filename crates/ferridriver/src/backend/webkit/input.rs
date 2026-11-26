@@ -284,7 +284,7 @@ pub async fn move_mouse_smooth(
 pub async fn mouse_wheel(page: &WebKitPage, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
   page
     .target_session()
-    .send("Page.updateScrollingState", json!({}))
+    .send_typed(&ferridriver_webkit_proto::page::UpdateScrollingState {})
     .await
     .map_err(err)?;
   // Wheel events hit the compositor first — wait one frame for it to
@@ -362,7 +362,7 @@ pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str, click_cou
 pub async fn type_text(page: &WebKitPage, text: &str) -> Result<()> {
   page
     .target_session()
-    .send("Page.insertText", json!({ "text": text }))
+    .send_typed(&ferridriver_webkit_proto::page::InsertText { text })
     .await
     .map_err(err)?;
   Ok(())

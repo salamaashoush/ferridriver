@@ -174,6 +174,49 @@ impl Command for HeapGc {
   type Response = EmptyResponse;
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct UpdateScrollingState {}
+
+impl Command for UpdateScrollingState {
+  const METHOD: &'static str = "Page.updateScrollingState";
+  type Response = EmptyResponse;
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTouchEmulationEnabled {
+  pub enabled: bool,
+}
+
+impl Command for SetTouchEmulationEnabled {
+  const METHOD: &'static str = "Page.setTouchEmulationEnabled";
+  type Response = EmptyResponse;
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverrideSetting<'a> {
+  pub setting: &'a str,
+  pub value: bool,
+}
+
+impl Command for OverrideSetting<'_> {
+  const METHOD: &'static str = "Page.overrideSetting";
+  type Response = EmptyResponse;
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetScreenSizeOverride {
+  pub width: i64,
+  pub height: i64,
+}
+
+impl Command for SetScreenSizeOverride {
+  const METHOD: &'static str = "Page.setScreenSizeOverride";
+  type Response = EmptyResponse;
+}
+
 /// `Dialog.javascriptDialogOpening` event payload.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

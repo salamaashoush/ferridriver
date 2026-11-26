@@ -7,6 +7,7 @@
 //! intermediate `serde_json::Value` trees.
 
 pub mod console;
+pub mod dialog;
 pub mod dom;
 pub mod emulation;
 pub mod events;

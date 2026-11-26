@@ -1151,11 +1151,14 @@ async fn initialize_target_session(
     ));
   }
   setup.push(Box::pin(async move {
-    proxy.send("Dialog.enable", json!({})).await.map(|_| ())
+    proxy
+      .send_typed(&ferridriver_webkit_proto::dialog::Enable {})
+      .await
+      .map(|_| ())
   }));
   setup.push(Box::pin(async move {
     proxy
-      .send("Emulation.setActiveAndFocused", json!({ "active": true }))
+      .send_typed(&ferridriver_webkit_proto::emulation::SetActiveAndFocused { active: true })
       .await
       .map(|_| ())
   }));
@@ -1217,17 +1220,17 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
   if let Some(o) = opts.offline {
     cmds.push(Box::pin(async move {
       let _ = target
-        .send("Network.setEmulateOfflineState", json!({ "offline": o }))
+        .send_typed(&ferridriver_webkit_proto::network::SetEmulateOfflineState { offline: o })
         .await;
     }));
   }
   if let Some(screen) = opts.screen {
     cmds.push(Box::pin(async move {
       let _ = target
-        .send(
-          "Page.setScreenSizeOverride",
-          json!({ "width": screen.width, "height": screen.height }),
-        )
+        .send_typed(&ferridriver_webkit_proto::page::SetScreenSizeOverride {
+          width: screen.width,
+          height: screen.height,
+        })
         .await;
     }));
   }
@@ -1236,16 +1239,17 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
       .iter()
       .map(|(k, v)| (k.clone(), Value::String(v.clone())))
       .collect();
+    let headers_val = Value::Object(map);
     cmds.push(Box::pin(async move {
       let _ = target
-        .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
+        .send_typed(&ferridriver_webkit_proto::network::SetExtraHttpHeaders { headers: &headers_val })
         .await;
     }));
   }
   if matches!(opts.java_script_enabled, Some(false)) {
     cmds.push(Box::pin(async move {
       let _ = proxy
-        .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
+        .send_typed(&ferridriver_webkit_proto::emulation::SetJavaScriptEnabled { enabled: false })
         .await;
     }));
   }

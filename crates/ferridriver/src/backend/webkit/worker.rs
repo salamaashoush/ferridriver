@@ -182,7 +182,7 @@ pub(crate) fn created(params: &Value, session: &Session, workers: &Workers, emit
   let worker_id = worker_id.to_string();
   tokio::spawn(async move {
     let _ = session
-      .send("Worker.initialized", json!({ "workerId": worker_id }))
+      .send_typed(&ferridriver_webkit_proto::worker::Initialized { worker_id: &worker_id })
       .await;
   });
 }

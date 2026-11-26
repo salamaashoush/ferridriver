@@ -413,7 +413,10 @@ impl WebKitPage {
   /// Never fails; a failed `Screencast.stopScreencast` is ignored and the `Result` matches the
   /// other backends' signature.
   pub async fn stop_screencast(&self) -> Result<()> {
-    let _ = self.proxy.send("Screencast.stopScreencast", json!({})).await;
+    let _ = self
+      .proxy
+      .send_typed(&ferridriver_webkit_proto::screencast::StopScreencast {})
+      .await;
     Ok(())
   }
 }

@@ -157,13 +157,13 @@ impl ContextScopes {
     }
     let result = session
       .transport
-      .send_command("network.addIntercept", json!({"phases": ["beforeRequestSent"]}))
+      .send(&ferridriver_bidi_proto::network::AddIntercept {
+        phases: &[ferridriver_bidi_proto::network::InterceptPhase::BeforeRequestSent],
+        contexts: None,
+        url_patterns: None,
+      })
       .await?;
-    let intercept = result
-      .get("intercept")
-      .and_then(|v| v.as_str())
-      .ok_or_else(|| FerriError::protocol("network.addIntercept", "missing intercept id"))?;
-    self.lock().intercept = Some(intercept.to_string());
+    self.lock().intercept = Some(result.intercept);
     Ok(())
   }
 
@@ -193,7 +193,7 @@ impl ContextScopes {
     if let Some(intercept) = unused {
       let _ = session
         .transport
-        .send_command("network.removeIntercept", json!({"intercept": intercept}))
+        .send(&ferridriver_bidi_proto::network::RemoveIntercept { intercept: &intercept })
         .await;
     }
   }

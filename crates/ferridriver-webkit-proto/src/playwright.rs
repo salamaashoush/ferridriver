@@ -178,6 +178,17 @@ impl Command for DeleteAllCookies<'_> {
   type Response = EmptyResponse;
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelDownload<'a> {
+  pub uuid: &'a str,
+}
+
+impl Command for CancelDownload<'_> {
+  const METHOD: &'static str = "Playwright.cancelDownload";
+  type Response = EmptyResponse;
+}
+
 #[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct Close {}
 
