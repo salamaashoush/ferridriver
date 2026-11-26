@@ -14,24 +14,17 @@
  * limitations under the License.
  */
 
-import { parseAriaSnapshot } from '@isomorphic/ariaSnapshot';
-import { renderAriaSnapshotAsYaml } from '@isomorphic/ariaSnapshotRenderer';
-import { asLocator } from '@isomorphic/locatorGenerators';
 import { splitTestIdAttributeNames } from '@isomorphic/locatorUtils';
 import { parseAttributeSelector, parseSelector, stringifySelector, visitAllSelectorParts } from '@isomorphic/selectorParser';
 import { cacheNormalizedWhitespaces, normalizeWhiteSpace, trimStringWithEllipsis } from '@isomorphic/stringUtils';
 
-import { generateAriaTree, getAllElementsMatchingExpectAriaTemplate, matchesExpectAriaTemplate, renderAriaTreeAsJSON, findNewElement } from './ariaSnapshot';
 import { beginDOMCaches, enclosingShadowRootOrDocument, endDOMCaches, isElementVisible, isInsideScope, parentElementOrShadowHost, setGlobalOptions } from './domUtils';
-import { Highlight } from './highlight';
 import { kLayoutSelectorNames, layoutSelectorScore } from './layoutSelectorUtils';
 import { createRoleEngine } from './roleSelectorEngine';
 import { beginAriaCaches, endAriaCaches, getAriaDisabled, getAriaRole, getCheckedAllowMixed, getCheckedWithoutMixed, getElementAccessibleDescription, getElementAccessibleErrorMessage, getElementAccessibleNameText, getReadonly, isElementInert } from './roleUtils';
 import { SelectorEvaluatorImpl, sortInDOMOrder } from './selectorEvaluator';
-import { generateSelector } from './selectorGenerator';
 import { elementMatchesText, elementText, getElementLabels } from './selectorUtils';
 import { XPathEngine } from './xpathSelectorEngine';
-import { ConsoleAPI } from './consoleApi';
 import { UtilityScript } from './utilityScript';
 
 import type { AriaSnapshotJSON, AriaTemplateNode } from '@isomorphic/ariaSnapshot';
@@ -39,12 +32,22 @@ import type { CSSComplexSelectorList } from '@isomorphic/cssParser';
 import type { Language } from '@isomorphic/locatorGenerators';
 import type { AttributeSelectorPart, NestedSelectorBody, ParsedSelector, ParsedSelectorPart } from '@isomorphic/selectorParser';
 import type { AriaSnapshot, AriaTreeOptions } from './ariaSnapshot';
+import type { Highlight } from './highlight';
 import type { LayoutSelectorName } from './layoutSelectorUtils';
 import type { SelectorEngine, SelectorRoot } from './selectorEngine';
 import type { GenerateSelectorOptions } from './selectorGenerator';
 import type { ElementText, TextMatcher } from './selectorUtils';
 import type { Builtins } from './utilityScript';
-import type { ExpectedTextValue, Point, Rect } from '@protocol/structs';
+import type { ExpectedTextValue } from '@protocol/structs';
+
+const kAutoClosingTags = new Set(['AREA', 'BASE', 'BR', 'COL', 'COMMAND', 'EMBED', 'HR', 'IMG', 'INPUT', 'KEYGEN', 'LINK', 'MENUITEM', 'META', 'PARAM', 'SOURCE', 'TRACK', 'WBR']);
+const kBooleanAttributes = new Set(['checked', 'selected', 'disabled', 'readonly', 'multiple']);
+const kHoverHitTargetInterceptorEvents = new Set(['mousemove']);
+const kTapHitTargetInterceptorEvents = new Set(['pointerdown', 'pointerup', 'touchstart', 'touchend', 'touchcancel']);
+const kMouseHitTargetInterceptorEvents = new Set(['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'auxclick', 'dblclick', 'contextmenu']);
+const kAllHitTargetInterceptorEvents = new Set([...kHoverHitTargetInterceptorEvents, ...kTapHitTargetInterceptorEvents, ...kMouseHitTargetInterceptorEvents]);
+const kInputTypesToSetValue = new Set(['color', 'date', 'time', 'datetime-local', 'month', 'range', 'week']);
+const kInputTypesToTypeInto = new Set(['', 'email', 'number', 'password', 'search', 'tel', 'text', 'url']);
 
 
 export type FrameExpectParams = {
@@ -67,14 +70,6 @@ export type ExpectReceived = { value?: any, ariaSnapshot?: string };
 export type HitTargetInterceptionResult = {
   stop: () => 'done' | { hitTargetDescription: string };
 };
-
-interface WebKitLegacyDeviceOrientationEvent extends DeviceOrientationEvent {
-  readonly initDeviceOrientationEvent: (type: string, bubbles: boolean, cancelable: boolean, alpha: number, beta: number, gamma: number, absolute: boolean) => void;
-}
-
-interface WebKitLegacyDeviceMotionEvent extends DeviceMotionEvent {
-  readonly initDeviceMotionEvent: (type: string, bubbles: boolean, cancelable: boolean, acceleration: DeviceMotionEventAcceleration, accelerationIncludingGravity: DeviceMotionEventAcceleration, rotationRate: DeviceMotionEventRotationRate, interval: number) => void;
-}
 
 export type InjectedScriptOptions = {
   isUnderTest: boolean;
@@ -100,6 +95,7 @@ export class InjectedScript {
   private _isUtilityWorld: boolean;
   readonly onGlobalListenersRemoved: Set<() => void>;
   private _hitTargetInterceptor: undefined | ((event: MouseEvent | PointerEvent | TouchEvent) => void);
+  private _hitTargetListenersInstalled = false;
   private _highlight: Highlight | undefined;
   readonly isUnderTest: boolean;
   private _sdkLanguage: Language;
@@ -107,14 +103,16 @@ export class InjectedScript {
   private _testIdAttributeNameForStrictErrorAndConsoleCodegen: string = 'data-testid';
   readonly window: Window & typeof globalThis;
   readonly document: Document;
-  readonly consoleApi: ConsoleAPI;
   private _lastAriaSnapshotForQuery: AriaSnapshot | undefined;
 
   // Recorder must use any external dependencies through InjectedScript.
   // Otherwise it will end up with a copy of all modules it uses, and any
   // module-level globals will be duplicated, which leads to subtle bugs.
   readonly utils = {
-    asLocator,
+    asLocator: (language: Language, selector: string): string => {
+      const dt = (this.window as any).__fdDevtools;
+      return dt ? dt.asLocator(language, selector) : selector;
+    },
     cacheNormalizedWhitespaces,
     elementText,
     getAriaRole,
@@ -123,20 +121,12 @@ export class InjectedScript {
     isElementVisible,
     isInsideScope,
     normalizeWhiteSpace,
-    parseAriaSnapshot,
-    generateAriaTree,
-    findNewElement,
+    parseAriaSnapshot: (...args: any[]) => this._aria().parseAriaSnapshot(...args),
+    generateAriaTree: (...args: any[]) => this._aria().generateAriaTree(...args),
+    findNewElement: (...args: any[]) => this._aria().findNewElement(...args),
     // Builtins protect injected code from clock emulation.
     builtins: null as unknown as Builtins,
   };
-
-  private _autoClosingTags: Set<string>;
-  private _booleanAttributes: Set<string>;
-  private _eventTypes: Map<string, 'mouse' | 'keyboard' | 'touch' | 'pointer' | 'focus' | 'drag' | 'wheel' | 'deviceorientation' | 'devicemotion'>;
-  private _hoverHitTargetInterceptorEvents: Set<string>;
-  private _tapHitTargetInterceptorEvents: Set<string>;
-  private _mouseHitTargetInterceptorEvents: Set<string>;
-  private _allHitTargetInterceptorEvents: Set<string>;
 
   constructor(window: Window & typeof globalThis, options: InjectedScriptOptions) {
     this.window = window;
@@ -149,69 +139,8 @@ export class InjectedScript {
     this._frameSeq = options.frameSeq;
     this._testIdAttributeNameForStrictErrorAndConsoleCodegen = options.testIdAttributeName;
     this._evaluator = new SelectorEvaluatorImpl();
-    this.consoleApi = new ConsoleAPI(this);
 
     this.onGlobalListenersRemoved = new Set();
-    this._autoClosingTags = new Set(['AREA', 'BASE', 'BR', 'COL', 'COMMAND', 'EMBED', 'HR', 'IMG', 'INPUT', 'KEYGEN', 'LINK', 'MENUITEM', 'META', 'PARAM', 'SOURCE', 'TRACK', 'WBR']);
-    this._booleanAttributes = new Set(['checked', 'selected', 'disabled', 'readonly', 'multiple']);
-    this._eventTypes = new Map([
-      ['auxclick', 'mouse'],
-      ['click', 'mouse'],
-      ['dblclick', 'mouse'],
-      ['mousedown', 'mouse'],
-      ['mouseeenter', 'mouse'],
-      ['mouseleave', 'mouse'],
-      ['mousemove', 'mouse'],
-      ['mouseout', 'mouse'],
-      ['mouseover', 'mouse'],
-      ['mouseup', 'mouse'],
-      ['mouseleave', 'mouse'],
-      ['mousewheel', 'mouse'],
-
-      ['keydown', 'keyboard'],
-      ['keyup', 'keyboard'],
-      ['keypress', 'keyboard'],
-      ['textInput', 'keyboard'],
-
-      ['touchstart', 'touch'],
-      ['touchmove', 'touch'],
-      ['touchend', 'touch'],
-      ['touchcancel', 'touch'],
-
-      ['pointerover', 'pointer'],
-      ['pointerout', 'pointer'],
-      ['pointerenter', 'pointer'],
-      ['pointerleave', 'pointer'],
-      ['pointerdown', 'pointer'],
-      ['pointerup', 'pointer'],
-      ['pointermove', 'pointer'],
-      ['pointercancel', 'pointer'],
-      ['gotpointercapture', 'pointer'],
-      ['lostpointercapture', 'pointer'],
-
-      ['focus', 'focus'],
-      ['blur', 'focus'],
-
-      ['drag', 'drag'],
-      ['dragstart', 'drag'],
-      ['dragend', 'drag'],
-      ['dragover', 'drag'],
-      ['dragenter', 'drag'],
-      ['dragleave', 'drag'],
-      ['dragexit', 'drag'],
-      ['drop', 'drag'],
-
-      ['wheel', 'wheel'],
-
-      ['deviceorientation', 'deviceorientation'],
-      ['deviceorientationabsolute', 'deviceorientation'],
-
-      ['devicemotion', 'devicemotion'],
-    ]);
-    this._hoverHitTargetInterceptorEvents = new Set(['mousemove']);
-    this._tapHitTargetInterceptorEvents = new Set(['pointerdown', 'pointerup', 'touchstart', 'touchend', 'touchcancel']);
-    this._mouseHitTargetInterceptorEvents = new Set(['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'click', 'auxclick', 'dblclick', 'contextmenu']);
-    this._allHitTargetInterceptorEvents = new Set([...this._hoverHitTargetInterceptorEvents, ...this._tapHitTargetInterceptorEvents, ...this._mouseHitTargetInterceptorEvents]);
 
     this._engines = new Map();
     this._engines.set('xpath', XPathEngine);
@@ -260,11 +189,22 @@ export class InjectedScript {
       skipDialogCheck: options.skipDialogCheck,
     });
 
-    this._setupGlobalListenersRemovalDetection();
-    this._setupHitTargetInterceptors();
-
     if (this.isUnderTest)
       (this.window as any).__injectedScript = this;
+  }
+
+  private _devtools(): any {
+    const dt = (this.window as any).__fdDevtools;
+    if (!dt)
+      throw this.createStacklessError('Devtools support bundle is not loaded');
+    return dt;
+  }
+
+  private _aria(): any {
+    const aria = (this.window as any).__fdAria;
+    if (!aria)
+      throw this.createStacklessError('ARIA support bundle is not loaded');
+    return aria;
   }
 
   eval(expression: string): any {
@@ -285,11 +225,11 @@ export class InjectedScript {
   }
 
   generateSelector(targetElement: Element, options: GenerateSelectorOptions) {
-    return generateSelector(this, targetElement, options);
+    return this._devtools().generateSelector(this, targetElement, options);
   }
 
   generateSelectorSimple(targetElement: Element, options?: GenerateSelectorOptions): string {
-    return generateSelector(this, targetElement, { ...options, testIdAttributeName: this._testIdAttributeNameForStrictErrorAndConsoleCodegen }).selector;
+    return this._devtools().generateSelector(this, targetElement, { ...options, testIdAttributeName: this._testIdAttributeNameForStrictErrorAndConsoleCodegen }).selector;
   }
 
   querySelector(selector: ParsedSelector, root: Node, strict: boolean): Element | undefined {
@@ -324,30 +264,33 @@ export class InjectedScript {
 
   ariaSnapshot(node: Node, options: AriaTreeOptions): string {
     const { json } = this.ariaSnapshotJSON(node, options);
-    return renderAriaSnapshotAsYaml(json, { convertStringsToRegex: options.mode === 'codegen' });
+    return this._aria().renderAriaSnapshotAsYaml(json, { convertStringsToRegex: options.mode === 'codegen' });
   }
 
   ariaSnapshotJSON(node: Node, options: AriaTreeOptions & { depth?: number }): { json: AriaSnapshotJSON, iframeRefs: string[], iframeDepths: Record<string, number> } {
     if (node.nodeType !== Node.ELEMENT_NODE)
       throw this.createStacklessError('Can only capture aria snapshot of Element nodes.');
+    const aria = this._aria();
     options = { ...options, refPrefix: this._frameSeq && options.mode === 'ai' ? 'f' + this._frameSeq : '' };
-    const ariaSnapshot = generateAriaTree(node as Element, options);
-    const rendered = renderAriaTreeAsJSON(ariaSnapshot, options);
+    const ariaSnapshot = aria.generateAriaTree(node as Element, options);
+    const rendered = aria.renderAriaTreeAsJSON(ariaSnapshot, options);
     this._lastAriaSnapshotForQuery = ariaSnapshot;
     return { json: rendered.json, iframeRefs: ariaSnapshot.iframeRefs, iframeDepths: rendered.iframeDepths };
   }
 
   ariaSnapshotForRecorder(): { ariaSnapshot: string, refs: Map<Element, string> } {
-    const tree = generateAriaTree(this.document.body, { mode: 'ai' });
-    const { json } = renderAriaTreeAsJSON(tree, { mode: 'ai' });
-    return { ariaSnapshot: renderAriaSnapshotAsYaml(json), refs: tree.refs };
+    const aria = this._aria();
+    const tree = aria.generateAriaTree(this.document.body, { mode: 'ai' });
+    const { json } = aria.renderAriaTreeAsJSON(tree, { mode: 'ai' });
+    return { ariaSnapshot: aria.renderAriaSnapshotAsYaml(json), refs: tree.refs };
   }
 
   ariaSnapshotForExpectFailure(element: Element, options: AriaTreeOptions): string {
     // Bypass _lastAriaSnapshotForQuery — that cache is reserved for explicit
     // ariaSnapshot() calls used by the aria-ref selector engine.
-    const { json } = renderAriaTreeAsJSON(generateAriaTree(element, options), options);
-    return renderAriaSnapshotAsYaml(json);
+    const aria = this._aria();
+    const { json } = aria.renderAriaTreeAsJSON(aria.generateAriaTree(element, options), options);
+    return aria.renderAriaSnapshotAsYaml(json);
   }
 
   documentContent(includeShadow: boolean): string {
@@ -376,7 +319,7 @@ export class InjectedScript {
   }
 
   getAllElementsMatchingExpectAriaTemplate(document: Document, template: AriaTemplateNode): Element[] {
-    return getAllElementsMatchingExpectAriaTemplate(document.documentElement, template);
+    return this._aria().getAllElementsMatchingExpectAriaTemplate(document.documentElement, template);
   }
 
   querySelectorAll(selector: ParsedSelector, root: Node): Element[] {
@@ -627,16 +570,6 @@ export class InjectedScript {
     return { queryAll };
   }
 
-  extend(source: string, params: any): any {
-    const constrFunction = this.window.eval(`
-    (() => {
-      const module = {};
-      ${source}
-      return module.exports.default();
-    })()`);
-    return new constrFunction(this, params);
-  }
-
   async viewportRatio(element: Element): Promise<number> {
     return await new Promise(resolve => {
       const observer = new IntersectionObserver(entries => {
@@ -648,28 +581,6 @@ export class InjectedScript {
       // there are rafs.
       this.utils.builtins.requestAnimationFrame(() => {});
     });
-  }
-
-  getElementBorderWidth(node: Node): { left: number; top: number; } {
-    if (node.nodeType !== Node.ELEMENT_NODE || !node.ownerDocument || !node.ownerDocument.defaultView)
-      return { left: 0, top: 0 };
-    const style = node.ownerDocument.defaultView.getComputedStyle(node as Element);
-    return { left: parseInt(style.borderLeftWidth || '', 10), top: parseInt(style.borderTopWidth || '', 10) };
-  }
-
-  describeIFrameStyle(iframe: Element): 'error:notconnected' | 'transformed' | { left: number, top: number } {
-    if (!iframe.ownerDocument || !iframe.ownerDocument.defaultView)
-      return 'error:notconnected';
-    const defaultView = iframe.ownerDocument.defaultView;
-    for (let e: Element | undefined = iframe; e; e = parentElementOrShadowHost(e)) {
-      if (defaultView.getComputedStyle(e).transform !== 'none')
-        return 'transformed';
-    }
-    const iframeStyle = defaultView.getComputedStyle(iframe);
-    return {
-      left: parseInt(iframeStyle.borderLeftWidth || '', 10) + parseInt(iframeStyle.paddingLeft || '', 10),
-      top: parseInt(iframeStyle.borderTopWidth || '', 10) + parseInt(iframeStyle.paddingTop || '', 10),
-    };
   }
 
   retarget(node: Node, behavior: 'none' | 'follow-label' | 'no-follow-label' | 'button-link'): Element | null {
@@ -779,7 +690,7 @@ export class InjectedScript {
       const rootElement = root.nodeType === 9 /* Node.DOCUMENT_NODE */ ? (root as Document).documentElement : root as Element;
       if (!rootElement)
         return [];
-      return getAllElementsMatchingExpectAriaTemplate(rootElement, template);
+      return this._aria().getAllElementsMatchingExpectAriaTemplate(rootElement, template);
     };
     return { queryAll };
   }
@@ -910,8 +821,6 @@ export class InjectedScript {
     if (element.nodeName.toLowerCase() === 'input') {
       const input = element as HTMLInputElement;
       const type = input.type.toLowerCase();
-      const kInputTypesToSetValue = new Set(['color', 'date', 'time', 'datetime-local', 'month', 'range', 'week']);
-      const kInputTypesToTypeInto = new Set(['', 'email', 'number', 'password', 'search', 'tel', 'text', 'url']);
       if (!kInputTypesToTypeInto.has(type) && !kInputTypesToSetValue.has(type))
         throw this.createStacklessError(`Input of type "${type}" cannot be filled`);
       if (type === 'number') {
@@ -1170,10 +1079,16 @@ export class InjectedScript {
     if (action === 'drag')
       return { stop: () => 'done' };
 
+    if (!this._hitTargetListenersInstalled) {
+      this._hitTargetListenersInstalled = true;
+      this._setupGlobalListenersRemovalDetection();
+      this._setupHitTargetInterceptors();
+    }
+
     const events = {
-      'hover': this._hoverHitTargetInterceptorEvents,
-      'tap': this._tapHitTargetInterceptorEvents,
-      'mouse': this._mouseHitTargetInterceptorEvents,
+      'hover': kHoverHitTargetInterceptorEvents,
+      'tap': kTapHitTargetInterceptorEvents,
+      'mouse': kMouseHitTargetInterceptorEvents,
     }[action];
     let result: 'done' | { hitTargetDescription: string } | undefined;
 
@@ -1220,73 +1135,6 @@ export class InjectedScript {
     return { stop };
   }
 
-  dispatchEvent(node: Node, type: string, eventInitObj: Object) {
-    let event;
-    const eventInit: any = { bubbles: true, cancelable: true, composed: true, ...eventInitObj };
-    switch (this._eventTypes.get(type)) {
-      case 'mouse': event = new MouseEvent(type, eventInit); break;
-      case 'keyboard': event = new KeyboardEvent(type, eventInit); break;
-      case 'touch': {
-        // WebKit does not support Touch constructor, but has deprecated createTouch and createTouchList methods.
-        if (this._browserName === 'webkit') {
-          const createTouch = (t: any) => {
-            if (t instanceof Touch)
-              return t;
-            // createTouch does not accept clientX/clientY, so we have to use pageX/pageY.
-            let pageX = t.pageX;
-            if (pageX === undefined && t.clientX !== undefined)
-              pageX = t.clientX + (this.document.scrollingElement?.scrollLeft || 0);
-            let pageY = t.pageY;
-            if (pageY === undefined && t.clientY !== undefined)
-              pageY = t.clientY + (this.document.scrollingElement?.scrollTop || 0);
-            return (this.document as any).createTouch(this.window, t.target ?? node, t.identifier, pageX, pageY, t.screenX, t.screenY, t.radiusX, t.radiusY, t.rotationAngle, t.force);
-          };
-          const createTouchList = (touches: any) => {
-            if (touches instanceof TouchList || !touches)
-              return touches;
-            return (this.document as any).createTouchList(...touches.map(createTouch));
-          };
-          eventInit.target ??= node;
-          eventInit.touches = createTouchList(eventInit.touches);
-          eventInit.targetTouches = createTouchList(eventInit.targetTouches);
-          eventInit.changedTouches = createTouchList(eventInit.changedTouches);
-          event = new TouchEvent(type, eventInit);
-        } else {
-          eventInit.target ??= node;
-          eventInit.touches = eventInit.touches?.map((t: any) => t instanceof Touch ? t : new Touch({ ...t, target: t.target ?? node }));
-          eventInit.targetTouches = eventInit.targetTouches?.map((t: any) => t instanceof Touch ? t : new Touch({ ...t, target: t.target ?? node }));
-          eventInit.changedTouches = eventInit.changedTouches?.map((t: any) => t instanceof Touch ? t : new Touch({ ...t, target: t.target ?? node }));
-          event = new TouchEvent(type, eventInit);
-        }
-        break;
-      }
-      case 'pointer': event = new PointerEvent(type, eventInit); break;
-      case 'focus': event = new FocusEvent(type, eventInit); break;
-      case 'drag': event = new DragEvent(type, eventInit); break;
-      case 'wheel': event = new WheelEvent(type, eventInit); break;
-      case 'deviceorientation':
-        try {
-          event = new DeviceOrientationEvent(type, eventInit);
-        } catch {
-          const { bubbles, cancelable, alpha, beta, gamma, absolute } = eventInit as {bubbles: boolean, cancelable: boolean, alpha: number, beta: number, gamma: number, absolute: boolean};
-          event = this.document.createEvent('DeviceOrientationEvent') as WebKitLegacyDeviceOrientationEvent;
-          event.initDeviceOrientationEvent(type, bubbles, cancelable, alpha, beta, gamma, absolute);
-        }
-        break;
-      case 'devicemotion':
-        try {
-          event = new DeviceMotionEvent(type, eventInit);
-        } catch {
-          const { bubbles, cancelable, acceleration, accelerationIncludingGravity, rotationRate, interval } = eventInit as {bubbles: boolean, cancelable: boolean, acceleration: DeviceMotionEventAcceleration, accelerationIncludingGravity: DeviceMotionEventAcceleration, rotationRate: DeviceMotionEventRotationRate, interval: number};
-          event = this.document.createEvent('DeviceMotionEvent') as WebKitLegacyDeviceMotionEvent;
-          event.initDeviceMotionEvent(type, bubbles, cancelable, acceleration, accelerationIncludingGravity, rotationRate, interval);
-        }
-        break;
-      default: event = new Event(type, eventInit); break;
-    }
-    node.dispatchEvent(event);
-  }
-
   previewNode(node: Node): string {
     if (node.nodeType === Node.TEXT_NODE)
       return oneLine(`#text=${node.nodeValue || ''}`);
@@ -1299,14 +1147,14 @@ export class InjectedScript {
       const { name, value } = element.attributes[i];
       if (name === 'style')
         continue;
-      if (!value && this._booleanAttributes.has(name))
+      if (!value && kBooleanAttributes.has(name))
         attrs.push(` ${name}`);
       else
         attrs.push(` ${name}="${value}"`);
     }
     attrs.sort((a, b) => a.length - b.length);
     const attrText = trimStringWithEllipsis(attrs.join(''), 500);
-    if (this._autoClosingTags.has(element.nodeName))
+    if (kAutoClosingTags.has(element.nodeName))
       return oneLine(`<${element.nodeName.toLowerCase()}${attrText}/>`);
 
     const children = element.childNodes;
@@ -1327,11 +1175,14 @@ export class InjectedScript {
     try {
       // Firefox is slow to access DOM bindings in the utility world, making it very expensive to generate a lot of selectors.
       const maxElements = this._isUtilityWorld && this._browserName === 'firefox' ? 2 : 10;
-      const infos = elements.slice(0, maxElements).map(m => ({
-        preview: this.previewNode(m),
-        selector: this.generateSelectorSimple(m),
-      }));
-      return infos.map((info, i) => `${i + 1}) ${info.preview} aka ${asLocator(this._sdkLanguage, info.selector)}`);
+      const dt = (this.window as any).__fdDevtools;
+      return elements.slice(0, maxElements).map((m, i) => {
+        const preview = this.previewNode(m);
+        if (!dt)
+          return `${i + 1}) ${preview}`;
+        const selector = dt.generateSelector(this, m, { testIdAttributeName: this._testIdAttributeNameForStrictErrorAndConsoleCodegen }).selector;
+        return `${i + 1}) ${preview} aka ${dt.asLocator(this._sdkLanguage, selector)}`;
+      });
     } finally {
       endDOMCaches();
       endAriaCaches();
@@ -1343,7 +1194,7 @@ export class InjectedScript {
     const lines = this._generateSelectors(matches).map(line => `\n    ` + line);
     if (lines.length < matches.length)
       lines.push('\n    ...');
-    return this.createStacklessError(`strict mode violation: ${asLocator(this._sdkLanguage, stringifySelector(selector))} resolved to ${matches.length} elements:${lines.join('')}\n`);
+    return this.createStacklessError(`strict mode violation: ${this.utils.asLocator(this._sdkLanguage, stringifySelector(selector))} resolved to ${matches.length} elements:${lines.join('')}\n`);
   }
 
   checkDeprecatedSelectorUsage(selector: ParsedSelector, matches: Element[]) {
@@ -1357,7 +1208,7 @@ export class InjectedScript {
     const lines = this._generateSelectors(matches).map(line => `\n    ` + line);
     if (lines.length < matches.length)
       lines.push('\n    ...');
-    throw this.createStacklessError(`"${deperecated.name}" selector is not supported: ${asLocator(this._sdkLanguage, stringifySelector(selector))} resolved to ${matches.length} element${matches.length === 1 ? '' : 's'}:${lines.join('')}\n`);
+    throw this.createStacklessError(`"${deperecated.name}" selector is not supported: ${this.utils.asLocator(this._sdkLanguage, stringifySelector(selector))} resolved to ${matches.length} element${matches.length === 1 ? '' : 's'}:${lines.join('')}\n`);
   }
 
   createStacklessError(message: string): Error {
@@ -1373,7 +1224,8 @@ export class InjectedScript {
   }
 
   createHighlight() {
-    return new Highlight(this);
+    const HighlightCtor = this._devtools().Highlight;
+    return new HighlightCtor(this);
   }
 
   addMaskedElements(elements: Element[], color: string) {
@@ -1382,8 +1234,10 @@ export class InjectedScript {
   }
 
   private _ensureHighlight() {
-    if (!this._highlight)
-      this._highlight = new Highlight(this);
+    if (!this._highlight) {
+      const HighlightCtor = this._devtools().Highlight;
+      this._highlight = new HighlightCtor(this);
+    }
 
     this._highlight.install();
     return this._highlight;
@@ -1396,82 +1250,11 @@ export class InjectedScript {
     highlight.setElementHighlights(highlights);
   }
 
-  setScreencastAnnotation(annotation: { point?: Point, box?: Rect, actionTitle?: string, duration?: number, position?: string, cursor?: 'none' | 'pointer', style?: { point?: string, highlight?: string, title?: string }, lastCursorPoint?: Point } | null) {
-    const highlight = this._ensureHighlight();
-    highlight.hideScreencastDecorations();
-    // The cursor outlives the annotation, it stays at the last action point.
-    if (!annotation) {
-      highlight.hideActionTitle();
-      return;
-    }
-    const fadeDuration = annotation.duration ?? 500;
-
-    if (annotation.box && annotation.style?.highlight)
-      highlight.showScreencastHighlight(annotation.box, annotation.style.highlight, fadeDuration);
-    if (annotation.point) {
-      if (annotation.cursor !== 'none') {
-        // After navigation, animate from where the cursor was in the previous document.
-        if (annotation.lastCursorPoint)
-          highlight.restoreActionCursor(annotation.lastCursorPoint.x, annotation.lastCursorPoint.y);
-        highlight.moveActionCursor(annotation.point.x, annotation.point.y, fadeDuration);
-      }
-      if (annotation.style?.point)
-        highlight.showScreencastPoint(annotation.point.x, annotation.point.y, annotation.style.point, fadeDuration);
-    }
-    if (annotation.actionTitle)
-      highlight.showActionTitle(annotation.actionTitle, fadeDuration, annotation.position, annotation.style?.title);
-  }
-
-  restoreScreencastCursor(point: Point) {
-    this._ensureHighlight().restoreActionCursor(point.x, point.y);
-  }
-
-  hideScreencastCursor() {
-    this._highlight?.hideActionCursor();
-  }
-
-  addUserOverlay(id: string, html: string) {
-    const highlight = this._ensureHighlight();
-    highlight.addUserOverlay(id, html);
-  }
-
-  getUserOverlay(id: string): HTMLElement | undefined {
-    const highlight = this._ensureHighlight();
-    return highlight.getUserOverlay(id);
-  }
-
-  removeUserOverlay(id: string) {
-    const highlight = this._ensureHighlight();
-    highlight.removeUserOverlay(id);
-  }
-
-  setUserOverlaysVisible(visible: boolean) {
-    const highlight = this._ensureHighlight();
-    highlight.setUserOverlaysVisible(visible);
-  }
-
   hideHighlight() {
     if (this._highlight) {
       this._highlight.uninstall();
       delete this._highlight;
     }
-  }
-
-  markTargetElements(markedElements: Set<Element>) {
-    const resetEvent = new CustomEvent('__playwright_reset_targets__', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    });
-    this.document.dispatchEvent(resetEvent);
-
-    const markEvent = new CustomEvent('__playwright_mark_target__', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    });
-    for (const element of markedElements)
-      element.dispatchEvent(markEvent);
   }
 
   private _setupGlobalListenersRemovalDetection() {
@@ -1502,7 +1285,7 @@ export class InjectedScript {
   private _setupHitTargetInterceptors() {
     const listener = (event: PointerEvent | MouseEvent | TouchEvent) => this._hitTargetInterceptor?.(event);
     const addHitTargetInterceptorListeners = () => {
-      for (const event of this._allHitTargetInterceptorEvents)
+      for (const event of kAllHitTargetInterceptorEvents)
         this.window.addEventListener(event as any, listener, { capture: true, passive: false });
     };
     addHitTargetInterceptorListeners();
@@ -1512,17 +1295,18 @@ export class InjectedScript {
   async expect(element: Element, options: FrameExpectParams, elements: Element[], frameVisible: boolean): Promise<{ matches: boolean, received?: ExpectReceived }> {
     const isArray = options.expression === 'to.have.count' || options.expression.endsWith('.array');
     const core = isArray ? this.expectArray(elements, options) : await this.expectSingleElement(element, options, frameVisible);
-    const ariaSnapshot = core.matches !== options.isNot ? undefined : this._ariaSnapshotForExpect(element, options, frameVisible);
-    if (core.received === undefined && ariaSnapshot === undefined)
+    if (core.received === undefined)
       return { matches: core.matches };
-    return { matches: core.matches, received: { value: core.received, ariaSnapshot } };
+    return { matches: core.matches, received: { value: core.received } };
   }
 
-  private _ariaSnapshotForExpect(element: Element, options: FrameExpectParams, frameVisible: boolean): string | undefined {
+  ariaSnapshotForExpect(element: Element | undefined, options: FrameExpectParams, frameVisible: boolean): string | undefined {
     const expression = options.expression;
     if (expression === 'to.have.count' || expression.endsWith('.array') || expression === 'to.match.aria')
       return undefined;
-    if (frameVisible && isElementVisible(element) && expression !== 'to.have.title' && expression !== 'to.have.url') {
+    if (!(this.window as any).__fdAria)
+      return undefined;
+    if (element && frameVisible && isElementVisible(element) && expression !== 'to.have.title' && expression !== 'to.have.url') {
       // Element-scoped snapshot. Containment matchers want the full subtree;
       // property matchers only need the element's own line.
       const isContainment = expression === 'to.have.text';
@@ -1651,7 +1435,7 @@ export class InjectedScript {
 
     {
       if (expression === 'to.match.aria') {
-        const result = matchesExpectAriaTemplate(element, options.expectedValue);
+        const result = this._aria().matchesExpectAriaTemplate(element, options.expectedValue);
         return {
           received: result.received,
           matches: !!result.matches.length,

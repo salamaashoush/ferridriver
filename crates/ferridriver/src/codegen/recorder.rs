@@ -28,7 +28,6 @@ use crate::page::Page;
 use super::{Action, FIRST_PAGE, OutputLanguage, RecordedAction, Scaffold};
 
 const RECORDER_JS: &str = include_str!("recorder.js");
-const RECORDER_SUPPORT_JS: &str = include_str!("../injected/dist/recorder-support.min.js");
 const BINDING: &str = "__fdRecorderBinding";
 const ENTER_FRAME: &str = " >> internal:control=enter-frame >> ";
 
@@ -922,8 +921,9 @@ impl Recorder {
     self.binding = Some(self.context.expose_binding(BINDING, binding).await?);
 
     let test_id = self.context.test_id_attribute();
+    let recorder_support = crate::selectors::RECORDER_SUPPORT_JS;
     let source = format!(
-      "(async () => {{\nawait {};\n{RECORDER_SUPPORT_JS}\n{RECORDER_JS}\n}})()",
+      "(async () => {{\nawait {};\n{recorder_support}\n{RECORDER_JS}\n}})()",
       crate::selectors::build_lazy_inject_js_with(&test_id)
     );
     self.init_script = Some(

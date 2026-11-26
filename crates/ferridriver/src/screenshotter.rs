@@ -405,6 +405,7 @@ async fn mask_elements(page: &Page, request: &Request<'_>) -> Result<bool> {
     return Ok(false);
   }
   page.evaluate_in_all_frames(HIDE_HIGHLIGHTS_JS).await;
+  page.evaluate_in_all_frames(crate::selectors::RECORDER_SUPPORT_JS).await;
   let color = request.mask_color.unwrap_or("#F0F");
   let arg = crate::protocol::argument_from_serde(&color)?;
   for locator in request.mask {

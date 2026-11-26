@@ -116,7 +116,33 @@ impl Frame {
     params: &ExpectParams,
   ) -> Result<ExpectOutcome> {
     let frame_id = (!self.is_main_frame()).then(|| self.id().to_string());
-    judge(self.page(), frame_id.as_deref(), selector, strict, params).await
+    judge(self.page(), frame_id.as_deref(), selector, strict, params, None).await
+  }
+
+  /// Like [`Self::expect_once`], but waits inside the page with a
+  /// `MutationObserver` for up to `budget_ms` until the assertion settles,
+  /// collapsing multi-RTT polling loops into a single eval round trip.
+  ///
+  /// # Errors
+  ///
+  /// Same as [`Self::expect_once`].
+  pub async fn expect_wait(
+    &self,
+    selector: Option<&str>,
+    strict: bool,
+    params: &ExpectParams,
+    budget_ms: u64,
+  ) -> Result<ExpectOutcome> {
+    let frame_id = (!self.is_main_frame()).then(|| self.id().to_string());
+    judge(
+      self.page(),
+      frame_id.as_deref(),
+      selector,
+      strict,
+      params,
+      Some(budget_ms),
+    )
+    .await
   }
 }
 
@@ -126,21 +152,23 @@ async fn judge(
   selector: Option<&str>,
   strict: bool,
   params: &ExpectParams,
+  wait_budget_ms: Option<u64>,
 ) -> Result<ExpectOutcome> {
   let effective = selector.unwrap_or(if params.expression == "to.match.aria" {
     "body"
   } else {
     ":root"
   });
+  if params.expression == "to.match.aria" || effective.contains("aria-template=") {
+    crate::selectors::ensure_aria_support(page.inner(), frame_id).await?;
+  }
   let parts = crate::selectors::build_parts_json(&crate::selectors::parse(effective)?);
   let params_json = serde_json::to_string(params).map_err(|e| FerriError::Json(e.to_string()))?;
-  let raw = evaluate_engine(
-    page,
-    frame_id,
-    &format!("window.__fd.expect({parts}, {params_json}, {strict})"),
-    "expect",
-  )
-  .await?;
+  let call = match wait_budget_ms {
+    Some(ms) if ms > 0 => format!("window.__fd.expectWait({parts}, {params_json}, {strict}, {ms})"),
+    _ => format!("window.__fd.expect({parts}, {params_json}, {strict})"),
+  };
+  let raw = evaluate_engine(page, frame_id, &call, "expect").await?;
   let text = raw
     .as_ref()
     .and_then(Value::as_str)
@@ -153,7 +181,7 @@ async fn judge(
     return Err(FerriError::Evaluation(message));
   }
   let mut outcome = if envelope.missing == Some(true) {
-    expect_nothing_matched(page, frame_id, params).await?
+    expect_nothing_matched(params)
   } else {
     let received = envelope.received;
     ExpectOutcome {
@@ -176,11 +204,7 @@ async fn judge(
 /// The verdicts `_expectInternal` gives when the selector matched
 /// nothing: a count of zero, an empty list, and the states absence
 /// satisfies or refutes.
-async fn expect_nothing_matched(
-  page: &crate::page::Page,
-  frame_id: Option<&str>,
-  params: &ExpectParams,
-) -> Result<ExpectOutcome> {
+fn expect_nothing_matched(params: &ExpectParams) -> ExpectOutcome {
   let is_not = params.is_not;
   let expression = params.expression.as_str();
   let mut outcome = ExpectOutcome::default();
@@ -200,17 +224,32 @@ async fn expect_nothing_matched(
     outcome.matches = is_not;
     outcome.missing = true;
   }
-  if outcome.matches == is_not && !params.is_array() {
-    outcome.aria_snapshot = evaluate_engine(
-      page,
-      frame_id,
-      "window.__fd.ariaSnapshotForExpectFailure()",
-      "ariaSnapshot",
-    )
-    .await?
-    .and_then(|v| v.as_str().map(str::to_owned));
+  outcome
+}
+
+/// Capture an element- or body-scoped ARIA snapshot for a timed-out assertion's
+/// error context. Loads the on-demand `aria-support` bundle only when called.
+async fn capture_failure_aria_snapshot(
+  page: &crate::page::Page,
+  frame_id: Option<&str>,
+  selector: Option<&str>,
+  params: &ExpectParams,
+) -> Option<String> {
+  if params.is_array() || params.expression == "to.match.aria" {
+    return None;
   }
-  Ok(outcome)
+  let effective = selector.unwrap_or(":root");
+  let parts = crate::selectors::build_parts_json(&crate::selectors::parse(effective).ok()?);
+  let params_json = serde_json::to_string(params).ok()?;
+  crate::selectors::ensure_aria_support(page.inner(), frame_id)
+    .await
+    .ok()?;
+  let call = format!("window.__fd.ariaSnapshotForExpectFailure({parts}, {params_json})");
+  evaluate_engine(page, frame_id, &call, "ariaSnapshot")
+    .await
+    .ok()
+    .flatten()
+    .and_then(|v| v.as_str().map(str::to_owned))
 }
 
 /// Evaluate an engine call, or report that the engine is not in the
@@ -315,6 +354,26 @@ impl crate::locator::Locator {
     let (frame, selector) = self.resolved().await?;
     frame.expect_once(Some(&selector), self.is_strict(), params).await
   }
+
+  /// [`Frame::expect_wait`] on this locator, through any frame hops and
+  /// under its strictness.
+  ///
+  /// # Errors
+  ///
+  /// As [`Frame::expect_wait`], plus a frame hop that cannot be entered.
+  pub async fn expect_wait(&self, params: &ExpectParams, budget_ms: u64) -> Result<ExpectOutcome> {
+    let (frame, selector) = self.resolved().await?;
+    frame
+      .expect_wait(Some(&selector), self.is_strict(), params, budget_ms)
+      .await
+  }
+
+  /// Capture an ARIA snapshot for a timed-out assertion's error context.
+  pub async fn expect_failure_aria_snapshot(&self, params: &ExpectParams) -> Option<String> {
+    let (frame, selector) = self.resolved().await.ok()?;
+    let frame_id = (!frame.is_main_frame()).then(|| frame.id().to_string());
+    capture_failure_aria_snapshot(frame.page(), frame_id.as_deref(), Some(&selector), params).await
+  }
 }
 
 impl crate::page::Page {
@@ -324,7 +383,21 @@ impl crate::page::Page {
   ///
   /// As [`Frame::expect_once`].
   pub async fn expect_once(&self, params: &ExpectParams) -> Result<ExpectOutcome> {
-    judge(self, None, None, true, params).await
+    judge(self, None, None, true, params, None).await
+  }
+
+  /// [`Frame::expect_wait`] on the main frame's document.
+  ///
+  /// # Errors
+  ///
+  /// As [`Frame::expect_wait`].
+  pub async fn expect_wait(&self, params: &ExpectParams, budget_ms: u64) -> Result<ExpectOutcome> {
+    judge(self, None, None, true, params, Some(budget_ms)).await
+  }
+
+  /// Capture an ARIA snapshot for a timed-out page assertion's error context.
+  pub async fn expect_failure_aria_snapshot(&self, params: &ExpectParams) -> Option<String> {
+    capture_failure_aria_snapshot(self, None, None, params).await
   }
 }
 

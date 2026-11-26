@@ -1,29 +1,52 @@
 /**
- * On-demand bundle: the aria-snapshot TEMPLATE PARSER.
+ * On-demand bundle: ARIA snapshot generation, YAML rendering, and
+ * template parsing/matching (`window.__fdAria`).
  *
- * `expect(locator).toMatchAriaSnapshot(yaml)` compares a YAML template
- * against the live aria tree. Playwright splits that in two — the
- * server parses the YAML into an `AriaTemplateNode`
- * (`isomorphic/ariaSnapshot.ts::parseAriaSnapshotUnsafe`) and the
- * injected script matches the parsed template against the tree — so the
- * `yaml` library never ships to the page.
- *
- * ferridriver has no in-page Node, so the parse happens here instead,
- * in a bundle that is evaluated ONLY when an aria-snapshot assertion
- * runs. The always-injected engine keeps just the matcher
- * (`__fd.matchAriaTemplate`).
+ * Evaluated ONLY when an ARIA snapshot or `toMatchAriaSnapshot` API
+ * runs, or once on a timed-out `expect()` failure to attach error
+ * context. Keeping the YAML parser, ARIA tree distiller/renderer, and
+ * template matcher out of the always-injected engine removes ~20 KB
+ * (plus the `yaml` package) from every document injection.
  */
 
-import { parseAriaSnapshotUnsafe } from '@isomorphic/ariaSnapshot';
+import { parseAriaSnapshot, parseAriaSnapshotUnsafe } from '@isomorphic/ariaSnapshot';
+import { renderAriaSnapshotAsYaml } from '@isomorphic/ariaSnapshotRenderer';
+import {
+  findNewElement,
+  generateAriaTree,
+  getAllElementsMatchingExpectAriaTemplate,
+  matchesExpectAriaTemplate,
+  renderAriaTreeAsJSON,
+} from './ariaSnapshot';
 import * as yaml from 'yaml';
 
 declare global {
   interface Window {
     __fd: any;
-    __fdAria: { parse: (text: string) => unknown };
+    __fdAria: {
+      parse: (text: string) => unknown;
+      parseAriaSnapshot: typeof parseAriaSnapshot;
+      generateAriaTree: typeof generateAriaTree;
+      renderAriaTreeAsJSON: typeof renderAriaTreeAsJSON;
+      renderAriaSnapshotAsYaml: typeof renderAriaSnapshotAsYaml;
+      matchesExpectAriaTemplate: typeof matchesExpectAriaTemplate;
+      getAllElementsMatchingExpectAriaTemplate: typeof getAllElementsMatchingExpectAriaTemplate;
+      findNewElement: typeof findNewElement;
+    };
   }
 }
 
-window.__fdAria = {
-  parse: (text: string) => parseAriaSnapshotUnsafe(yaml as any, text),
-};
+(() => {
+  if (window.__fdAria instanceof Object)
+    return;
+  window.__fdAria = {
+    parse: (text: string) => parseAriaSnapshotUnsafe(yaml as any, text),
+    parseAriaSnapshot,
+    generateAriaTree,
+    renderAriaTreeAsJSON,
+    renderAriaSnapshotAsYaml,
+    matchesExpectAriaTemplate,
+    getAllElementsMatchingExpectAriaTemplate,
+    findNewElement,
+  };
+})();
