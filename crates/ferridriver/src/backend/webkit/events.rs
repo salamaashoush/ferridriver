@@ -299,75 +299,57 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
   let proxy_id = page.page_proxy_id().to_string();
   let conn = proxy.connection_handle();
   let new_target = conn.target_session(proxy_id, target_id.clone());
-  // *.enable, mirroring `WKPage._initializeSessionMayThrow`.
-  let _ = new_target.send("Page.enable", json!({})).await;
-  let _ = new_target.send("Runtime.enable", json!({})).await;
-  let _ = new_target.send("Network.enable", json!({})).await;
-  let _ = new_target.send("Console.enable", json!({})).await;
   // The workers belonged to the document the old target held.
   super::worker::terminated(None, &page.workers);
-  let _ = new_target.send("Worker.enable", json!({})).await;
-  // Re-apply extra HTTP headers on the new target — WebKit drops them on
-  // the session swap, so a `setExtraHTTPHeaders` issued before this
-  // navigation would otherwise not reach the request (mirrors
-  // Playwright's `_updateState` re-application).
+  // Pipeline every domain enable and state replay command in exact FIFO
+  // wire order before resuming the provisional target.
+  let mut setup_cmds: Vec<(&'static str, Value)> = vec![
+    ("Page.enable", json!({})),
+    ("Runtime.enable", json!({})),
+    ("Network.enable", json!({})),
+    ("Console.enable", json!({})),
+    ("Worker.enable", json!({})),
+  ];
   let extra_headers = page
     .extra_http_headers
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone();
   if let Some(headers) = extra_headers {
-    let _ = new_target
-      .send("Network.setExtraHTTPHeaders", json!({ "headers": headers }))
-      .await;
+    setup_cmds.push(("Network.setExtraHTTPHeaders", json!({ "headers": headers })));
   }
-  // Re-apply media / user-preference emulation the same way — the new
-  // target session starts with no overrides, so a prior `emulateMedia`
-  // would otherwise stop holding after the first navigation.
   let emulated = page
     .emulated_media
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone();
   if let Some(opts) = emulated {
-    for (method, params) in super::page::WebKitPage::emulate_media_commands(&opts) {
-      let _ = new_target.send(method, params).await;
-    }
+    setup_cmds.extend(super::page::WebKitPage::emulate_media_commands(&opts));
   }
-  // Re-apply request interception — the provisional target carries the
-  // navigation request itself, so without this a routed cross-document
-  // navigation sails past every registered handler (the very goto that
-  // spawned this provisional target goes straight to the network), and
-  // the committed target would start clean too. Mirrors Playwright's
-  // `_updateState('Network.setInterceptionEnabled')` replay.
   if page.interception_enabled() {
-    let _ = new_target
-      .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
-      .await;
-    let _ = new_target
-      .send("Network.setResourceCachingDisabled", json!({ "disabled": true }))
-      .await;
-    let _ = new_target
-      .send(
-        "Network.addInterception",
-        json!({ "url": ".*", "stage": "request", "isRegex": true }),
-      )
-      .await;
+    setup_cmds.push(("Network.setInterceptionEnabled", json!({ "enabled": true })));
+    setup_cmds.push(("Network.setResourceCachingDisabled", json!({ "disabled": true })));
+    setup_cmds.push((
+      "Network.addInterception",
+      json!({ "url": ".*", "stage": "request", "isRegex": true }),
+    ));
   }
-  let _ = new_target
-    .send(
-      "Page.createUserWorld",
-      json!({ "name": super::page::UTILITY_WORLD_NAME }),
-    )
-    .await;
-  // Replay page-side bootstrap + the exposed-function binding channel on the
-  // new process. WebKit gives the committed target a clean protocol surface,
-  // so without this every registered init script (the WebSocket mock, user
-  // addInitScripts) and every exposed function / `routeWebSocket` would go
-  // silent after a cross-process navigation. Mirrors Playwright's
-  // `WKProvisionalPage` re-applying bootstrap + bindings.
-  page.replay_bootstrap_script(&new_target).await;
-  page.replay_binding_channel(&new_target).await;
+  setup_cmds.push((
+    "Page.createUserWorld",
+    json!({ "name": super::page::UTILITY_WORLD_NAME }),
+  ));
+  let bootstrap = page.bootstrap_source().await;
+  setup_cmds.push(("Page.setBootstrapScript", json!({ "source": bootstrap })));
+  if page.binding_channel_active() {
+    setup_cmds.push(("Runtime.addBinding", json!({ "name": "__fd_binding__" })));
+  }
+  futures::future::join_all(setup_cmds.into_iter().map(|(method, params)| {
+    let session = new_target.clone();
+    async move {
+      let _ = session.send(method, params).await;
+    }
+  }))
+  .await;
   // Drain the provisional session's events NOW instead of waiting for
   // commit. The provisional target carries the navigation request; when
   // that request is intercepted, `Network.requestIntercepted` arrives on

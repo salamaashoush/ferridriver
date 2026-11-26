@@ -35,35 +35,38 @@ async fn read_as_served(
   document_type: &'static str,
   sheet_type: &'static str,
 ) -> anyhow::Result<()> {
-  tokio::time::timeout(HUNG, async {
-    let browser = browser
-      .launch(LaunchOptions {
-        headless: Some(true),
-        ..Default::default()
-      })
-      .await?;
-    let context = browser.new_context().await?;
-    let page = context.new_page().await?;
-    page
-      .route(
-        UrlMatcher::glob(format!("{ORIGIN}/**"))?,
-        serving(document_type, sheet_type),
-        None,
-      )
-      .await?;
-    page.goto(&format!("{ORIGIN}/")).await?;
-    let read = page
-      .evaluate(READING, SerializedArgument::default(), Some(true))
-      .await?
-      .to_json_like()
-      .context("the reading is JSON")?;
-    browser.close().await?;
-    ensure!(
-      read == serde_json::json!(["text/html", "Fulfilled.", "rgb(1, 2, 3)"]),
-      "a document fulfilled as {document_type} with a sheet fulfilled as {sheet_type} read {read}"
-    );
-    Ok(())
-  })
+  tokio::time::timeout(
+    HUNG,
+    Box::pin(async {
+      let browser = browser
+        .launch(LaunchOptions {
+          headless: Some(true),
+          ..Default::default()
+        })
+        .await?;
+      let context = browser.new_context().await?;
+      let page = context.new_page().await?;
+      page
+        .route(
+          UrlMatcher::glob(format!("{ORIGIN}/**"))?,
+          serving(document_type, sheet_type),
+          None,
+        )
+        .await?;
+      page.goto(&format!("{ORIGIN}/")).await?;
+      let read = page
+        .evaluate(READING, SerializedArgument::default(), Some(true))
+        .await?
+        .to_json_like()
+        .context("the reading is JSON")?;
+      browser.close().await?;
+      ensure!(
+        read == serde_json::json!(["text/html", "Fulfilled.", "rgb(1, 2, 3)"]),
+        "a document fulfilled as {document_type} with a sheet fulfilled as {sheet_type} read {read}"
+      );
+      Ok(())
+    }),
+  )
   .await
   .context("the fulfilled page hung past the hung-test limit")?
 }

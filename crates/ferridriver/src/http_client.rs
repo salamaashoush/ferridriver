@@ -788,7 +788,7 @@ impl HttpClient {
   /// The bound context's state cannot be read.
   pub async fn storage_state(&self) -> crate::error::Result<crate::options::StorageState> {
     if let Some(context) = &self.context {
-      return context.storage_state_impl(None).await;
+      return Box::pin(context.storage_state_impl(None)).await;
     }
     Ok(crate::options::StorageState {
       cookies: self.pool.jar().map(|jar| jar.all()).unwrap_or_default(),

@@ -1021,7 +1021,7 @@ impl ContextRef {
     &self,
   ) -> crate::action::Action<'static, crate::options::StorageStateOptions, crate::options::StorageState> {
     let this = self.clone();
-    crate::action::Action::new(move |opts| Box::pin(async move { this.storage_state_impl(Some(opts)).await }))
+    crate::action::Action::new(move |opts| Box::pin(async move { Box::pin(this.storage_state_impl(Some(opts))).await }))
   }
 
   pub(crate) async fn storage_state_impl(

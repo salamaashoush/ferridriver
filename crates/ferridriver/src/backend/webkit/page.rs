@@ -207,6 +207,12 @@ impl ContextWatch {
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct ViewportState {
+  config: Option<crate::options::ViewportConfig>,
+  bootstrap_mobile: bool,
+}
+
+#[derive(Debug, Default)]
 struct AuthCredentials {
   site: Vec<crate::options::HttpCredentials>,
   proxy: Option<crate::options::HttpCredentials>,
@@ -293,10 +299,10 @@ pub struct WebKitPage {
   /// must stay one — [`Self::apply_context_options`] re-sends the whole
   /// bag on every context-level mutation.
   pub(crate) applied_timezone: Arc<std::sync::Mutex<Option<String>>>,
-  /// Viewport emulation currently in force, stashed for the same reason as
-  /// [`Self::emulated_media`] (the target session is swapped on cross-document
-  /// navigation) and because the bootstrap shim depends on `is_mobile`.
-  pub(crate) emulated_viewport: Arc<std::sync::Mutex<Option<crate::options::ViewportConfig>>>,
+  /// Viewport emulation currently in force and whether the installed
+  /// `Page.setBootstrapScript` omitted [`DESKTOP_ORIENTATION_SHIM`], stashed
+  /// for provisional-target replay and unchanged-viewport skipping.
+  pub(crate) emulated_viewport: Arc<std::sync::Mutex<ViewportState>>,
   /// Live request table, keyed by PW `WebKit` `requestId`. The network
   /// listener inserts on `Network.requestWillBeSent`, links responses
   /// on `Network.responseReceived`, and removes on terminal
@@ -656,40 +662,16 @@ impl WebKitPage {
       frames.track_target(&target);
       frames.track_proxy(&proxy);
 
-      enable_page_domains(&target, &proxy).await?;
-      // Apply per-page context overrides BEFORE the about:blank document
-      // becomes scriptable. Mirrors `WKPage._initializeSessionMayThrow` —
-      // userAgent / timezone / bypassCSP / offline / permissions live on
-      // the target session and must be set before any JS runs in the
-      // initial document. Without this, `navigator.userAgent`,
-      // `Intl.DateTimeFormat().resolvedOptions().timeZone`, etc. stay at
-      // their default values for the lifetime of about:blank.
-      // The timezone applied here is the one this page HAS; the stash
-      // below records it so a later `apply_context_options` re-asserting
-      // the same value is recognised as a no-op rather than a change the
-      // engine can no longer make.
-      let mut pre_timezone = None;
-      if let Some(opts) = context_id.as_deref().and_then(options) {
-        pre_timezone.clone_from(&opts.timezone_id);
-        apply_pre_page_overrides(&target, &proxy, &opts).await;
-      }
-      // File-chooser interception is enabled lazily through
-      // [`Self::enable_file_chooser_intercept`] when a listener attaches,
-      // matching CDP's `_updateFileChooserInterception`. Setting it at
-      // attach time unconditionally caused matrix runs to wedge because
-      // every page in the session held an intercept lease, and the
-      // shared MCP browser couldn't drain pending events fast enough.
-      let _ = target
-        .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
-        .await;
-      // Install the context-menu suppressor at document start. No user
-      // init scripts exist yet, so the bootstrap is just the suppressor;
-      // `flush_bootstrap_script` re-prepends it whenever the user adds or
-      // removes their own init scripts.
-      let _ = target
-        .send("Page.setBootstrapScript", json!({ "source": CONTEXT_MENU_SUPPRESSOR }))
-        .await;
-      let resource_tree = target.send("Page.getResourceTree", json!({})).await?;
+      let opts = context_id.as_deref().and_then(options);
+      let pre_timezone = opts.as_ref().and_then(|o| o.timezone_id.clone());
+      let initial_mobile = opts.as_ref().and_then(|o| o.is_mobile).unwrap_or(false);
+      let resource_tree = Box::pin(initialize_target_session(
+        &target,
+        &proxy,
+        opts.as_ref(),
+        initial_mobile,
+      ))
+      .await?;
       let main_frame_id_cache = Arc::new(std::sync::Mutex::new(main_frame_id(Some(&resource_tree))));
       if let Some(root) = resource_tree.get("frameTree") {
         let mut frames = Vec::new();
@@ -719,7 +701,10 @@ impl WebKitPage {
         extra_http_headers: Arc::new(std::sync::Mutex::new(None)),
         auth_credentials: Arc::default(),
         emulated_media: Arc::new(std::sync::Mutex::new(None)),
-        emulated_viewport: Arc::new(std::sync::Mutex::new(None)),
+        emulated_viewport: Arc::new(std::sync::Mutex::new(ViewportState {
+          config: None,
+          bootstrap_mobile: initial_mobile,
+        })),
         requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
         nav_request_slot: crate::network::NavRequestSlot::new(),
         routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -2230,18 +2215,27 @@ impl WebKitPage {
       ));
     }
     // Per-page document-time overrides (userAgent, timezone, locale,
-    // JS-disabled, bypassCSP, offline, permissions) are now sent inside
+    // JS-disabled, bypassCSP, offline, permissions) are sent inside
     // [`Self::attach`] from the browser's stashed context options, so
-    // they're live BEFORE about:blank becomes scriptable. This call
-    // re-asserts the runtime-mutable subset (viewport, extra headers)
-    // plus the geolocation/screen overrides that don't care about
-    // document timing; media is layered with the page's own overrides by
-    // `AnyPage::apply_context_options`. No reload needed.
-    self.apply_runtime_overrides(opts).await?;
-    self.apply_proxy_session_overrides(opts).await;
-    grant_permissions(&self.proxy, opts).await?;
-    self.apply_browser_session_overrides(opts).await?;
-    self.apply_target_session_overrides(opts).await;
+    // they're live BEFORE about:blank becomes scriptable. Pipeline the
+    // remaining overrides concurrently in FIFO order (`runtime` first so
+    // `opts.screen` in `target_session` still wins over viewport screen).
+    let futs: Vec<futures::future::BoxFuture<'_, Result<()>>> = vec![
+      Box::pin(self.apply_runtime_overrides(opts)),
+      Box::pin(async {
+        self.apply_proxy_session_overrides(opts).await;
+        Ok(())
+      }),
+      Box::pin(grant_permissions(&self.proxy, opts)),
+      Box::pin(self.apply_browser_session_overrides(opts)),
+      Box::pin(async {
+        self.apply_target_session_overrides(opts).await;
+        Ok(())
+      }),
+    ];
+    for res in futures::future::join_all(futs).await {
+      res?;
+    }
     Ok(())
   }
 
@@ -2306,76 +2300,85 @@ impl WebKitPage {
   }
 
   async fn apply_runtime_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
-    if let Some(vp) = opts.resolved_viewport() {
-      self.emulate_viewport(&vp).await?;
-    }
-    if let Some(h) = opts.extra_http_headers.as_ref() {
-      self.set_extra_http_headers(h).await?;
-    }
+    let vp_fut = async {
+      if let Some(vp) = opts.resolved_viewport() {
+        self.emulate_viewport(&vp).await
+      } else {
+        Ok(())
+      }
+    };
+    let hdr_fut = async {
+      if let Some(h) = opts.extra_http_headers.as_ref() {
+        self.set_extra_http_headers(h).await
+      } else {
+        Ok(())
+      }
+    };
+    let (r_vp, r_hdr) = tokio::join!(vp_fut, hdr_fut);
+    r_vp?;
+    r_hdr?;
     Ok(())
   }
 
   async fn apply_target_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
+    let target = self.target_session();
+    let mut cmds: Vec<(&'static str, Value)> = Vec::new();
     if let Some(ua) = opts.user_agent.as_deref() {
-      let _ = self
-        .target_session()
-        .send("Page.overrideUserAgent", json!({ "value": ua }))
-        .await;
+      cmds.push(("Page.overrideUserAgent", json!({ "value": ua })));
       // A UA claiming an iPhone with `navigator.platform` still reading
       // "MacIntel" is a contradiction every device-sniffing script sees.
       if let Some(platform) = navigator_platform_for(ua) {
-        let _ = self
-          .target_session()
-          .send("Page.overridePlatform", json!({ "value": platform }))
-          .await;
+        cmds.push(("Page.overridePlatform", json!({ "value": platform })));
       }
     }
     if let Some(tz) = opts.timezone_id.as_deref() {
-      let _ = self
-        .target_session()
-        .send("Page.setTimeZone", json!({ "timeZone": tz }))
-        .await;
+      cmds.push(("Page.setTimeZone", json!({ "timeZone": tz })));
       *self
         .applied_timezone
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tz.to_string());
     }
     if let Some(screen) = opts.screen {
-      let _ = self
-        .target_session()
-        .send(
-          "Page.setScreenSizeOverride",
-          json!({ "width": screen.width, "height": screen.height }),
-        )
-        .await;
+      cmds.push((
+        "Page.setScreenSizeOverride",
+        json!({ "width": screen.width, "height": screen.height }),
+      ));
     }
     if let Some(o) = opts.offline {
-      let _ = self
-        .target_session()
-        .send("Network.setEmulateOfflineState", json!({ "offline": o }))
-        .await;
+      cmds.push(("Network.setEmulateOfflineState", json!({ "offline": o })));
     }
     if let Some(true) = opts.bypass_csp {
-      let _ = self
-        .target_session()
-        .send("Page.setBypassCSP", json!({ "enabled": true }))
-        .await;
+      cmds.push(("Page.setBypassCSP", json!({ "enabled": true })));
     }
+    if cmds.is_empty() {
+      return;
+    }
+    let futs = cmds.into_iter().map(|(method, params)| {
+      let target = target.clone();
+      async move {
+        let _ = target.send(method, params).await;
+      }
+    });
+    futures::future::join_all(futs).await;
   }
 
   async fn apply_proxy_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
-    if let Some(true) = opts.java_script_enabled.map(|v| !v) {
-      let _ = self
-        .proxy
-        .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
-        .await;
-    }
-
+    let js_fut = async {
+      if let Some(true) = opts.java_script_enabled.map(|v| !v) {
+        let _ = self
+          .proxy
+          .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
+          .await;
+      }
+    };
     // Sent for every page, as `wkPage.updateHttpCredentials` does: with no
     // list at all WebKit leaves a challenge to the embedder, and headless
     // Linux builds then wait on it forever. An empty list lets automation
     // answer, so the 401 surfaces.
-    let _ = self.set_http_credentials(opts.http_credentials.clone()).await;
+    let auth_fut = async {
+      let _ = self.set_http_credentials(opts.http_credentials.clone()).await;
+    };
+    tokio::join!(js_fut, auth_fut);
   }
 
   async fn apply_browser_session_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
@@ -2389,39 +2392,45 @@ impl WebKitPage {
     let Some(ctx) = &self.context_id else {
       return Ok(());
     };
-    if let Some(locale) = opts.locale.as_deref() {
-      self
-        .browser
-        .send(
-          "Playwright.setLanguages",
-          json!({ "browserContextId": ctx.to_string(), "languages": [locale] }),
-        )
-        .await
-        .map_err(conn_err)?;
-    }
-    if let Some(g) = opts.geolocation {
-      let ts: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| u64::try_from(d.as_millis()).ok())
-        .unwrap_or(0);
-      let _ = self
-        .browser
-        .send(
-          "Playwright.setGeolocationOverride",
-          json!({
-            "browserContextId": ctx.to_string(),
-            "geolocation": {
-              "latitude": g.latitude,
-              "longitude": g.longitude,
-              "accuracy": g.accuracy,
-              "timestamp": ts,
-            },
-          }),
-        )
-        .await;
-    }
-    Ok(())
+    let locale_fut = async {
+      if let Some(locale) = opts.locale.as_deref() {
+        self
+          .browser
+          .send(
+            "Playwright.setLanguages",
+            json!({ "browserContextId": ctx.to_string(), "languages": [locale] }),
+          )
+          .await
+          .map_err(conn_err)?;
+      }
+      Ok::<(), FerriError>(())
+    };
+    let geo_fut = async {
+      if let Some(g) = opts.geolocation {
+        let ts: u64 = std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .ok()
+          .and_then(|d| u64::try_from(d.as_millis()).ok())
+          .unwrap_or(0);
+        let _ = self
+          .browser
+          .send(
+            "Playwright.setGeolocationOverride",
+            json!({
+              "browserContextId": ctx.to_string(),
+              "geolocation": {
+                "latitude": g.latitude,
+                "longitude": g.longitude,
+                "accuracy": g.accuracy,
+                "timestamp": ts,
+              },
+            }),
+          )
+          .await;
+      }
+    };
+    let (r_locale, ()) = tokio::join!(locale_fut, geo_fut);
+    r_locale
   }
 
   /// # Errors
@@ -2430,67 +2439,90 @@ impl WebKitPage {
   /// command fails. Failures of the screen-size, orientation, touch and setting overrides are
   /// ignored.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
-    // Per `wkPage.ts::_updateViewport`: device metrics override goes
-    // on the page-proxy session, screen-size override on the inner
-    // target session.
-    self
-      .proxy
-      .send(
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-          "width": config.width,
-          "height": config.height,
-          // `fixedLayout` is what makes the page lay out against the emulated
-          // viewport instead of the window: without it a 390px mobile viewport
-          // still laid out at the desktop fallback width of 980px.
-          "fixedLayout": config.is_mobile,
-          "deviceScaleFactor": if config.device_scale_factor > 0.0 { config.device_scale_factor } else { 1.0 },
-        }),
-      )
-      .await
-      .map_err(conn_err)?;
-    let _ = self
-      .target_session()
-      .send(
-        "Page.setScreenSizeOverride",
-        json!({ "width": config.width, "height": config.height }),
-      )
-      .await;
-
+    let mobile_changed = {
+      let mut slot = self
+        .emulated_viewport
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if slot.config.as_ref() == Some(config) {
+        return Ok(());
+      }
+      slot.config = Some(config.clone());
+      let changed = slot.bootstrap_mobile != config.is_mobile;
+      slot.bootstrap_mobile = config.is_mobile;
+      changed
+    };
+    let target = self.target_session();
+    let mut cmds: Vec<futures::future::BoxFuture<'_, Result<()>>> = Vec::with_capacity(12);
+    cmds.push(Box::pin(async {
+      self
+        .proxy
+        .send(
+          "Emulation.setDeviceMetricsOverride",
+          json!({
+            "width": config.width,
+            "height": config.height,
+            // `fixedLayout` is what makes the page lay out against the emulated
+            // viewport instead of the window: without it a 390px mobile viewport
+            // still laid out at the desktop fallback width of 980px.
+            "fixedLayout": config.is_mobile,
+            "deviceScaleFactor": if config.device_scale_factor > 0.0 { config.device_scale_factor } else { 1.0 },
+          }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(conn_err)
+    }));
+    cmds.push(Box::pin({
+      let target = target.clone();
+      async move {
+        let _ = target
+          .send(
+            "Page.setScreenSizeOverride",
+            json!({ "width": config.width, "height": config.height }),
+          )
+          .await;
+        Ok(())
+      }
+    }));
     if config.is_mobile {
       let angle = if config.is_landscape || config.width > config.height {
         90
       } else {
         0
       };
-      let _ = self
-        .proxy
-        .send("Emulation.setOrientationOverride", json!({ "angle": angle }))
-        .await;
+      cmds.push(Box::pin(async move {
+        let _ = self
+          .proxy
+          .send("Emulation.setOrientationOverride", json!({ "angle": angle }))
+          .await;
+        Ok(())
+      }));
     }
-
-    let _ = self
-      .target_session()
-      .send("Page.setTouchEmulationEnabled", json!({ "enabled": config.has_touch }))
-      .await;
-
+    cmds.push(Box::pin({
+      let target = target.clone();
+      async move {
+        let _ = target
+          .send("Page.setTouchEmulationEnabled", json!({ "enabled": config.has_touch }))
+          .await;
+        Ok(())
+      }
+    }));
     for (setting, value) in Self::mobile_settings(config.is_mobile) {
-      let _ = self
-        .target_session()
-        .send("Page.overrideSetting", json!({ "setting": setting, "value": value }))
-        .await;
+      let target = target.clone();
+      cmds.push(Box::pin(async move {
+        let _ = target
+          .send("Page.overrideSetting", json!({ "setting": setting, "value": value }))
+          .await;
+        Ok(())
+      }));
     }
-
-    {
-      *self
-        .emulated_viewport
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config.clone());
+    if mobile_changed {
+      cmds.push(Box::pin(self.flush_bootstrap_script()));
     }
-    // The bootstrap shim differs between mobile and desktop, so the script
-    // already installed for the previous mode has to be replaced.
-    self.flush_bootstrap_script().await?;
-
+    for res in futures::future::join_all(cmds).await {
+      res?;
+    }
     Ok(())
   }
 
@@ -2514,6 +2546,7 @@ impl WebKitPage {
       .emulated_viewport
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .config
       .as_ref()
       .is_some_and(|vp| vp.is_mobile)
   }
@@ -2593,13 +2626,22 @@ impl WebKitPage {
     // Persist the merged state (the core `Page` merges before
     // delegating) so the per-target re-apply on the next navigation's
     // provisional session keeps the overrides alive across the swap.
-    *self
-      .emulated_media
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(opts.clone());
-    for (method, params) in Self::emulate_media_commands(opts) {
-      self.target_session().send(method, params).await.map_err(conn_err)?;
+    {
+      let mut slot = self
+        .emulated_media
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if slot.as_ref() == Some(opts) {
+        return Ok(());
+      }
+      *slot = Some(opts.clone());
     }
+    let target = self.target_session();
+    let futs = Self::emulate_media_commands(opts).into_iter().map(|(method, params)| {
+      let target = target.clone();
+      async move { target.send(method, params).await.map_err(conn_err) }
+    });
+    futures::future::try_join_all(futs).await?;
     Ok(())
   }
 
@@ -2846,26 +2888,20 @@ impl WebKitPage {
     if self.intercept_enabled.swap(true, Ordering::SeqCst) {
       return Ok(());
     }
-    self
-      .target_session()
-      .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
-      .await
-      .map_err(conn_err)?;
+    let target = self.target_session();
     // A resource served from the page's memory cache is never requested,
-    // so no route would see it.
-    self
-      .target_session()
-      .send("Network.setResourceCachingDisabled", json!({ "disabled": true }))
-      .await
-      .map_err(conn_err)?;
-    self
-      .target_session()
-      .send(
+    // so no route would see it. Pipeline all three setup calls in order.
+    let (r1, r2, r3) = tokio::join!(
+      target.send("Network.setInterceptionEnabled", json!({ "enabled": true })),
+      target.send("Network.setResourceCachingDisabled", json!({ "disabled": true })),
+      target.send(
         "Network.addInterception",
         json!({ "url": ".*", "stage": "request", "isRegex": true }),
-      )
-      .await
-      .map_err(conn_err)?;
+      ),
+    );
+    r1.map_err(conn_err)?;
+    r2.map_err(conn_err)?;
+    r3.map_err(conn_err)?;
     Ok(())
   }
 
@@ -3081,37 +3117,9 @@ impl WebKitPage {
     self.binding_initialized.load(Ordering::SeqCst)
   }
 
-  /// Re-issue `Runtime.addBinding('__fd_binding__')` on `target` (a freshly
-  /// created provisional target). `WebKit` gives the new process a clean
-  /// protocol surface, so without this the page-side binding shim would have
-  /// no native binding to call and every exposed function (and
-  /// `routeWebSocket`) would silently no-op after a cross-process
-  /// navigation. The `__fd_bc` controller itself is re-installed via the
-  /// replayed bootstrap script, which runs at document start.
-  pub(crate) async fn replay_binding_channel(&self, target: &super::connection::Session) {
-    if !self.binding_channel_active() {
-      return;
-    }
-    let _ = target
-      .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
-      .await;
-  }
-
-  /// Re-send `Page.setBootstrapScript` (the joined init scripts) to
-  /// `target`. `WebKit` drops bootstrap scripts on a cross-process target
-  /// swap, so without replaying them the document in the new process would
-  /// load without any registered init script (the WebSocket mock, user
-  /// `addInitScript`s, etc.).
-  pub(crate) async fn replay_bootstrap_script(&self, target: &super::connection::Session) {
-    let joined = self.bootstrap_source().await;
-    let _ = target
-      .send("Page.setBootstrapScript", json!({ "source": joined }))
-      .await;
-  }
-
   /// The single bootstrap source: the built-in shims followed by every
   /// registered init script, in registration order.
-  async fn bootstrap_source(&self) -> String {
+  pub(crate) async fn bootstrap_source(&self) -> String {
     let mut fragments = vec![CONTEXT_MENU_SUPPRESSOR, SAFARI_SURFACE_SHIM];
     if !self.is_mobile_emulation() {
       fragments.push(DESKTOP_ORIENTATION_SHIM);
@@ -3362,81 +3370,130 @@ impl WebKitPage {
   }
 }
 
-/// Apply per-page context overrides via the page's target + proxy
-/// sessions BEFORE the about:blank document becomes scriptable.
-///
-/// Mirrors `wkPage.ts::_initializeSessionMayThrow`: userAgent /
-/// timezone / bypassCSP / offline / screen / permissions live on the
-/// target session; JS-disabled lives on the page-proxy. Anything that
-/// hits the browser-root session (locale, geolocation) is sent from
-/// `WebKitBrowser::new_context_with_options` instead — that runs
-/// once per context, not once per page.
-async fn enable_page_domains(
+fn initial_bootstrap_source(is_mobile: bool) -> String {
+  if is_mobile {
+    format!("{CONTEXT_MENU_SUPPRESSOR};\n{SAFARI_SURFACE_SHIM}")
+  } else {
+    format!("{CONTEXT_MENU_SUPPRESSOR};\n{SAFARI_SURFACE_SHIM};\n{DESKTOP_ORIENTATION_SHIM}")
+  }
+}
+
+/// Pipeline domain enables, pre-page overrides, utility world creation,
+/// initial bootstrap script, and resource tree fetch in exact FIFO wire order.
+async fn initialize_target_session(
   target: &Session,
   proxy: &Session,
-) -> std::result::Result<(), super::connection::ConnectionError> {
-  // Page agent before Runtime so executionContextCreated ordering holds.
-  target.send("Page.enable", json!({})).await?;
-  target.send("Runtime.enable", json!({})).await?;
-  target.send("Network.enable", json!({})).await?;
-  target.send("Console.enable", json!({})).await?;
-  target.send("Worker.enable", json!({})).await?;
-  // Dialog domain lives on the page-proxy session (per wkPage.ts);
-  // without `Dialog.enable` the `javascriptDialogOpening` event
-  // never fires and `window.alert` would wedge the page.
-  proxy.send("Dialog.enable", json!({})).await?;
-  // Mark the page active + focused (page-proxy session), mirroring
-  // `wkPage.ts::_initializePageProxySession`. Without it WebKit treats
-  // the page as a background/inactive window: a right-button click
-  // opens context-menu tracking that never resolves (no active window
-  // to dismiss it), and every subsequent synthetic mouse event is
-  // swallowed by that pending menu instead of reaching the document.
-  proxy
-    .send("Emulation.setActiveAndFocused", json!({ "active": true }))
-    .await?;
-  Ok(())
+  opts: Option<&crate::options::BrowserContextOptions>,
+  initial_mobile: bool,
+) -> std::result::Result<Value, super::connection::ConnectionError> {
+  let initial_bootstrap = initial_bootstrap_source(initial_mobile);
+  let mut setup: Vec<futures::future::BoxFuture<'_, std::result::Result<(), super::connection::ConnectionError>>> =
+    Vec::with_capacity(10);
+  // Page before Runtime so executionContextCreated ordering holds.
+  for method in [
+    "Page.enable",
+    "Runtime.enable",
+    "Network.enable",
+    "Console.enable",
+    "Worker.enable",
+  ] {
+    setup.push(Box::pin(
+      async move { target.send(method, json!({})).await.map(|_| ()) },
+    ));
+  }
+  setup.push(Box::pin(async move {
+    proxy.send("Dialog.enable", json!({})).await.map(|_| ())
+  }));
+  setup.push(Box::pin(async move {
+    proxy
+      .send("Emulation.setActiveAndFocused", json!({ "active": true }))
+      .await
+      .map(|_| ())
+  }));
+  if let Some(opts) = opts {
+    setup.push(Box::pin(async move {
+      apply_pre_page_overrides(target, proxy, opts).await;
+      Ok(())
+    }));
+  }
+  setup.push(Box::pin(async move {
+    let _ = target
+      .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
+      .await;
+    Ok(())
+  }));
+  setup.push(Box::pin(async move {
+    let _ = target
+      .send("Page.setBootstrapScript", json!({ "source": initial_bootstrap }))
+      .await;
+    Ok(())
+  }));
+  let (results, r_tree) = tokio::join!(
+    futures::future::join_all(setup),
+    target.send("Page.getResourceTree", json!({})),
+  );
+  for res in results {
+    res?;
+  }
+  r_tree
 }
 
 async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crate::options::BrowserContextOptions) {
+  let mut cmds: Vec<futures::future::BoxFuture<'_, ()>> = Vec::new();
   if let Some(ua) = opts.user_agent.as_deref() {
-    let _ = target.send("Page.overrideUserAgent", json!({ "value": ua })).await;
+    cmds.push(Box::pin(async move {
+      let _ = target.send("Page.overrideUserAgent", json!({ "value": ua })).await;
+    }));
   }
   if let Some(tz) = opts.timezone_id.as_deref() {
-    let _ = target.send("Page.setTimeZone", json!({ "timeZone": tz })).await;
+    cmds.push(Box::pin(async move {
+      let _ = target.send("Page.setTimeZone", json!({ "timeZone": tz })).await;
+    }));
   }
   if let Some(true) = opts.bypass_csp {
-    let _ = target.send("Page.setBypassCSP", json!({ "enabled": true })).await;
+    cmds.push(Box::pin(async move {
+      let _ = target.send("Page.setBypassCSP", json!({ "enabled": true })).await;
+    }));
   }
   if let Some(o) = opts.offline {
-    let _ = target
-      .send("Network.setEmulateOfflineState", json!({ "offline": o }))
-      .await;
+    cmds.push(Box::pin(async move {
+      let _ = target
+        .send("Network.setEmulateOfflineState", json!({ "offline": o }))
+        .await;
+    }));
   }
   if let Some(screen) = opts.screen {
-    let _ = target
-      .send(
-        "Page.setScreenSizeOverride",
-        json!({ "width": screen.width, "height": screen.height }),
-      )
-      .await;
+    cmds.push(Box::pin(async move {
+      let _ = target
+        .send(
+          "Page.setScreenSizeOverride",
+          json!({ "width": screen.width, "height": screen.height }),
+        )
+        .await;
+    }));
   }
   if let Some(headers) = opts.extra_http_headers.as_ref() {
     let map: serde_json::Map<String, Value> = headers
       .iter()
       .map(|(k, v)| (k.clone(), Value::String(v.clone())))
       .collect();
-    let _ = target
-      .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
-      .await;
+    cmds.push(Box::pin(async move {
+      let _ = target
+        .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
+        .await;
+    }));
   }
   if matches!(opts.java_script_enabled, Some(false)) {
-    let _ = proxy
-      .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
-      .await;
+    cmds.push(Box::pin(async move {
+      let _ = proxy
+        .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
+        .await;
+    }));
   }
-  // A permission the engine does not know is reported by
-  // `apply_context_options`; a page being set up keeps going.
-  let _ = grant_permissions(proxy, opts).await;
+  cmds.push(Box::pin(async move {
+    let _ = grant_permissions(proxy, opts).await;
+  }));
+  futures::future::join_all(cmds).await;
 }
 
 /// `Emulation.grantPermissions` for every origin with grants, `*` for
