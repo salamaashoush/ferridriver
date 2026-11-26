@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 
 use super::page::WebDriverPage;
-use super::session::Command;
 use crate::error::{FerriError, Result};
 
 pub struct WebDriverElement {
@@ -15,15 +14,21 @@ impl WebDriverElement {
   /// Returns an error when the `WebDriver` `POST /session/{id}/element/{element id}/value` command
   /// (or `/clear` when `paths` is empty) fails, for example when the element reference is stale.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
-    let (command, body) = if paths.is_empty() {
-      ("clear", json!({}))
+    if paths.is_empty() {
+      self
+        .page
+        .send_typed(&ferridriver_webdriver_proto::element::Clear { element_id: &self.id })
+        .await?;
     } else {
-      ("value", json!({"text":paths.join("\n")}))
-    };
-    self
-      .page
-      .command(Command::post(&["element", &self.id, command], body))
-      .await?;
+      let joined = paths.join("\n");
+      self
+        .page
+        .send_typed(&ferridriver_webdriver_proto::element::SendKeys {
+          element_id: &self.id,
+          text: &joined,
+        })
+        .await?;
+    }
     Ok(())
   }
 
@@ -45,7 +50,7 @@ impl WebDriverElement {
     }
     self
       .page
-      .command(Command::post(&["element", &self.id, "click"], json!({})))
+      .send_typed(&ferridriver_webdriver_proto::element::Click { element_id: &self.id })
       .await?;
     Ok(())
   }
@@ -79,7 +84,10 @@ impl WebDriverElement {
   pub async fn type_str(&self, text: &str) -> Result<()> {
     self
       .page
-      .command(Command::post(&["element", &self.id, "value"], json!({"text":text})))
+      .send_typed(&ferridriver_webdriver_proto::element::SendKeys {
+        element_id: &self.id,
+        text,
+      })
       .await?;
     Ok(())
   }

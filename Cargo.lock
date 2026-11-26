@@ -1654,6 +1654,7 @@ dependencies = [
  "ferridriver-process",
  "ferridriver-trace",
  "ferridriver-types",
+ "ferridriver-webdriver-proto",
  "ferridriver-webkit-proto",
  "ferrijs-fetch",
  "ferrijs-permissions",
@@ -2226,6 +2227,14 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "zip",
+]
+
+[[package]]
+name = "ferridriver-webdriver-proto"
+version = "0.8.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

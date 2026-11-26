@@ -1,0 +1,18 @@
+[package]
+name = "ferridriver-webdriver-proto"
+description = "Strongly typed W3C Classic WebDriver HTTP protocol commands and responses"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
