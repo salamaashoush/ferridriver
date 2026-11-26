@@ -61,6 +61,28 @@ pub(crate) fn empty_params() -> serde_json::Value {
   serde_json::Value::Object(serde_json::Map::new())
 }
 
+/// Escape a string for safe embedding in JS single-quoted string literals.
+#[must_use]
+pub fn js_escape(s: &str) -> String {
+  let mut out = String::with_capacity(s.len() + 8);
+  for c in s.chars() {
+    match c {
+      '\\' => out.push_str("\\\\"),
+      '\'' => out.push_str("\\'"),
+      '"' => out.push_str("\\\""),
+      '`' => out.push_str("\\`"),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      '\0' => out.push_str("\\0"),
+      '\u{2028}' => out.push_str("\\u2028"),
+      '\u{2029}' => out.push_str("\\u2029"),
+      _ => out.push(c),
+    }
+  }
+  out
+}
+
 use crate::console_message::ConsoleMessage;
 use crate::error::{FerriError, Result};
 use crate::events::EventEmitter;

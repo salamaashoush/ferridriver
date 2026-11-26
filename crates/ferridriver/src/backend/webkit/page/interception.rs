@@ -124,7 +124,7 @@ impl WebKitPage {
   pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
-    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
+    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::backend::js_escape(name));
     self.add_init_script(&register_js).await?;
     self.runtime_evaluate(&register_js, true).await?;
     self.evaluate_in_frame_contexts(&register_js).await;
@@ -164,7 +164,7 @@ impl WebKitPage {
         .await?;
     }
     self.exposed_fns.write().await.insert(name.to_string(), binding);
-    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
+    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::backend::js_escape(name));
     self.add_init_script(&register_js).await?;
     // Best-effort live-document install, spawned so the paused target
     // cannot stall the pump — completes right after `Target.resume`
@@ -185,7 +185,7 @@ impl WebKitPage {
     self.exposed_fns.write().await.remove(name);
     let js = format!(
       "if(globalThis.__fd_bc)globalThis.__fd_bc.del('{}')",
-      crate::steps::js_escape(name)
+      crate::backend::js_escape(name)
     );
     let _ = self.runtime_evaluate(&js, true).await;
     self.evaluate_in_frame_contexts(&js).await;

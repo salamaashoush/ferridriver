@@ -187,7 +187,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   pub async fn expose_binding(&self, name: &str, binding: crate::backend::PageBinding) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), binding);
-    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
+    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::backend::js_escape(name));
     self.add_init_script(&register_js).await?;
     self.evaluate_in_renderer_frames(&register_js).await?;
     Ok(())
@@ -216,7 +216,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
     }
     self.exposed_fns.write().await.insert(name.to_string(), binding);
-    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
+    let register_js = format!("globalThis.__fd_bc.add('{}')", crate::backend::js_escape(name));
     self.add_init_script(&register_js).await?;
     // Best-effort live-document install, spawned so a still-paused
     // target cannot stall the pump: on the pause-held path the eval
@@ -272,7 +272,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     self.exposed_fns.write().await.remove(name);
     let js = format!(
       "if(globalThis.__fd_bc)globalThis.__fd_bc.del('{}')",
-      crate::steps::js_escape(name)
+      crate::backend::js_escape(name)
     );
     self.evaluate_in_renderer_frames(&js).await?;
     Ok(())

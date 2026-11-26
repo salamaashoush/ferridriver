@@ -122,8 +122,6 @@ pub mod http_client;
 pub mod selectors;
 pub mod video;
 
-// ── BDD steps (use crate-internal APIs) ──
-#[macro_use]
-pub mod steps;
+// ── Backend sessions & workers ──
 pub mod webkit_session;
 pub mod worker;
