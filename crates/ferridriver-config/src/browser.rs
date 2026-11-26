@@ -174,8 +174,12 @@ pub struct InstanceConfig {
   pub executable_path: Option<String>,
   /// Headless override for this instance.
   pub headless: Option<bool>,
-  /// Backend override for this instance.
+  /// Backend protocol override for this instance (`cdp`, `bidi`, `webkit`, `webdriver`,
+  /// or legacy `cdp-pipe` / `cdp-ws`).
+  #[serde(alias = "protocol")]
   pub backend: Option<BackendChoice>,
+  /// CDP wire transport override (`pipe` or `ws`) for this instance.
+  pub transport: Option<ferridriver::options::ChromiumTransport>,
   /// Extra environment variables for the browser process.
   pub env: BTreeMap<String, String>,
   /// Proxy for this instance, lowered into launch flags.
@@ -200,12 +204,13 @@ pub fn instance_overrides_from(
   instance: &str,
   section_backend: BackendKind,
 ) -> Result<InstanceOverrides, String> {
-  let selection = ferridriver::options::BrowserSelection::resolve(
+  let selection = ferridriver::options::BrowserSelection::resolve_with_transport(
     cfg.browser,
     cfg
       .backend
       .map(BackendChoice::kind)
       .or_else(|| cfg.browser.is_none().then_some(section_backend)),
+    cfg.transport,
   )
   .map_err(|error| error.to_string())?;
   let backend = selection.backend;
@@ -221,10 +226,7 @@ pub fn instance_overrides_from(
     headless: cfg
       .headless
       .or_else(|| (cfg.browser == Some(ferridriver::options::BrowserKind::Safari)).then_some(false)),
-    backend: cfg
-      .backend
-      .map(BackendChoice::kind)
-      .or_else(|| cfg.browser.map(ferridriver::options::BrowserKind::default_backend)),
+    backend: (cfg.backend.is_some() || cfg.transport.is_some() || cfg.browser.is_some()).then_some(backend),
     env: cfg.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
     ignore_default_args: cfg
       .ignore_default_args
@@ -331,8 +333,11 @@ where
 #[serde(default, rename_all = "camelCase")]
 pub struct BrowserSectionConfig {
   pub browser: Option<ferridriver::options::BrowserKind>,
-  /// Transport every host launches over unless its section says otherwise.
+  /// Protocol/backend every host launches over unless its section says otherwise.
+  #[serde(alias = "protocol")]
   pub backend: Option<BackendChoice>,
+  /// CDP wire transport (`pipe` or `ws`) every host uses unless its section says otherwise.
+  pub transport: Option<ferridriver::options::ChromiumTransport>,
   /// Headed/headless default every host inherits unless its section says
   /// otherwise.
   pub headless: Option<bool>,

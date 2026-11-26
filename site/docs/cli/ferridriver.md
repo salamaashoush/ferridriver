@@ -70,7 +70,8 @@ sessions](/scripting/named-sessions#watching-driving-and-recording-remotely).
 ## `ferridriver mcp`
 
 ```
---backend BACKEND       cdp-pipe (default) | cdp-raw | webkit | bidi
+--backend BACKEND       cdp (default) | bidi | webkit | webdriver (aliases: cdp-pipe, cdp-ws, cdp-raw)
+--cdp-transport TYPE    pipe (default) | ws (applies to CDP backends)
 --headless              Run the browser without a visible window
 --executable-path PATH  Path to a Chrome / Chromium binary
 --connect URL           WebSocket URL of an already-running browser

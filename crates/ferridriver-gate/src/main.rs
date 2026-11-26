@@ -249,7 +249,7 @@ fn ready_jobs() -> Vec<Job> {
 /// The e2e projects the gate holds green. `ladybird` and `lightpanda` are
 /// projects too, run with `--project`; they fail the part of the suite
 /// their engines have not implemented yet.
-const GATED_PROJECTS: [&str; 4] = ["cdp-pipe", "cdp-raw", "bidi", "webkit"];
+const GATED_PROJECTS: [&str; 4] = ["chromium", "chromium-ws", "firefox", "webkit"];
 
 fn suite_jobs(workers: usize, exclusive: bool, projects: &[String]) -> Vec<Job> {
   let mut jobs = Vec::new();

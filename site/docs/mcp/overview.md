@@ -35,7 +35,8 @@ ferridriver mcp --transport http --port 8080
 # Backend choice
 ferridriver mcp --backend webkit          # Playwright WebKit
 ferridriver mcp --backend bidi            # Firefox via WebDriver BiDi
-ferridriver mcp --backend cdp-pipe --headless
+ferridriver mcp --backend cdp --headless
+ferridriver mcp --backend cdp --cdp-transport ws --headless
 
 # Attach to a running Chrome
 ferridriver mcp --auto-connect chrome

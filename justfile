@@ -52,14 +52,25 @@ test-integration-gated:
   cargo gate test --only integration --only types
 
 # Run one backend: the native e2e project and MCP tests.
-# Accepts either naming (cdp-pipe/cdp_pipe, cdp-raw/cdp_raw, bidi, webkit).
+# Accepts either project or backend naming (chromium, chromium-ws, firefox, webkit).
 test-backend backend:
   #!/usr/bin/env bash
   set -euo pipefail
   cargo build --locked --workspace --bins --lib
   project="$(echo "{{backend}}" | tr '_' '-')"
+  case "$project" in
+    cdp-pipe) project="chromium" ;;
+    cdp-raw|cdp-ws) project="chromium-ws" ;;
+    bidi) project="firefox" ;;
+  esac
   ./target/debug/ferridriver test --headless --project "$project"
-  ./target/debug/ferridriver test 'tests/integration/mcp-*.test.mjs' --no-inherit --headless --config tests/integration/ferridriver.toml --grep "${project}:"
+  grep_tag="$project"
+  case "$project" in
+    chromium) grep_tag="cdp-pipe" ;;
+    chromium-ws) grep_tag="cdp-raw" ;;
+    firefox) grep_tag="bidi" ;;
+  esac
+  ./target/debug/ferridriver test 'tests/integration/mcp-*.test.mjs' --no-inherit --headless --config tests/integration/ferridriver.toml --grep "${grep_tag}:"
 
 # Run a script/test target with the QuickJS leak dump on.
 #

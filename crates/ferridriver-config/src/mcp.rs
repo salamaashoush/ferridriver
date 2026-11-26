@@ -83,8 +83,11 @@ pub struct ServerConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct BrowserConfig {
   pub browser: Option<ferridriver::options::BrowserKind>,
-  /// Browser backend (default `cdp-pipe`).
+  /// Browser backend protocol (`cdp`, `bidi`, `webkit`, `webdriver`, or `cdp-pipe` / `cdp-ws`).
+  #[serde(alias = "protocol")]
   pub backend: Option<BackendChoice>,
+  /// CDP wire transport (`pipe` or `ws`). Ignored when unset; rejected on non-CDP backends.
+  pub transport: Option<ferridriver::options::ChromiumTransport>,
   /// Run browsers in headless mode.
   pub headless: Option<bool>,
   /// Path to the browser executable.
@@ -242,21 +245,35 @@ impl McpConfig {
     (browser, backend)
   }
 
+  #[must_use]
+  pub fn transport(&self) -> Option<ferridriver::options::ChromiumTransport> {
+    let global = self.browser.global_browser.as_ref();
+    self.browser.transport.or_else(|| {
+      self
+        .browser
+        .browser
+        .is_none()
+        .then(|| global.and_then(|g| g.transport))
+        .flatten()
+    })
+  }
+
   /// # Errors
   /// Rejects a browser and protocol combination that cannot run together.
   pub fn browser_selection(&self) -> ferridriver::error::Result<ferridriver::options::BrowserSelection> {
     let (browser, backend) = self.browser_choices();
-    ferridriver::options::BrowserSelection::resolve(browser, backend)
+    ferridriver::options::BrowserSelection::resolve_with_transport(browser, backend, self.transport())
   }
 
   #[must_use]
   pub fn backend_kind(&self) -> BackendKind {
     let (browser, backend) = self.browser_choices();
-    backend.unwrap_or_else(|| {
+    let base = backend.unwrap_or_else(|| {
       browser
         .unwrap_or(ferridriver::options::BrowserKind::Chromium)
         .default_backend()
-    })
+    });
+    base.with_transport(self.transport()).unwrap_or(base)
   }
 
   /// Whether headless mode is enabled (defaults to true).
@@ -624,6 +641,22 @@ mod tests {
     let backend: BackendChoice = serde_json::from_str("\"cdp-raw\"").unwrap();
     assert_eq!(backend, BackendChoice::CdpWs);
     assert_eq!(serde_json::to_string(&backend).unwrap(), "\"cdp-ws\"");
+  }
+
+  #[test]
+  fn protocol_and_transport_config_keys_resolve_cleanly() {
+    let config: McpConfig = serde_json::from_value(serde_json::json!({
+      "browser": { "protocol": "cdp", "transport": "ws" }
+    }))
+    .unwrap();
+    assert_eq!(config.backend_kind(), BackendKind::CdpWs);
+    assert_eq!(config.browser_selection().unwrap().backend, BackendKind::CdpWs);
+
+    let bad: McpConfig = serde_json::from_value(serde_json::json!({
+      "browser": { "browser": "firefox", "protocol": "bidi", "transport": "ws" }
+    }))
+    .unwrap();
+    assert!(bad.browser_selection().is_err());
   }
 
   #[test]

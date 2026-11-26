@@ -24,8 +24,9 @@ pub(crate) async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> an
   // config set those keys at all.
   let effective = cli::effective_browser(&args.browser, &config.mcp)?;
   config.mcp.browser.browser = Some(effective.browser);
-  if args.browser.backend.is_some() || args.browser.browser.is_some() {
+  if args.browser.backend.is_some() || args.browser.browser.is_some() || args.browser.cdp_transport.is_some() {
     config.mcp.browser.backend = Some(ferridriver_config::mcp::BackendChoice::parse(effective.backend.name())?);
+    config.mcp.browser.transport = effective.backend.transport();
   }
   let (backend, headless) = (effective.backend, effective.headless);
   let connect_mode = args.browser.connect_mode();

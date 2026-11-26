@@ -170,9 +170,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
-          - { os: ubuntu-latest, id: e2e-cdp-raw, gate: --only e2e --project cdp-raw }
-          - { os: ubuntu-latest, id: e2e-bidi, gate: --only e2e --project bidi }
+          - { os: ubuntu-latest, id: e2e-chromium, gate: --only e2e --project chromium }
+          - { os: ubuntu-latest, id: e2e-chromium-ws, gate: --only e2e --project chromium-ws }
+          - { os: ubuntu-latest, id: e2e-firefox, gate: --only e2e --project firefox }
           - { os: ubuntu-latest, id: e2e-webkit, gate: --only e2e --project webkit }
           - { os: ubuntu-latest, id: integration, gate: --only integration }
           - { os: ubuntu-latest, id: bdd, gate: --only bdd }
@@ -180,12 +180,12 @@ jobs:
           - { os: ubuntu-latest, id: napi, gate: --only napi }
           - { os: ubuntu-latest, id: rust, gate: --only rust-build --only doc-tests }
           - { os: macos-latest, id: e2e-webkit, gate: --only e2e --project webkit }
-          - { os: macos-latest, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
+          - { os: macos-latest, id: e2e-chromium, gate: --only e2e --project chromium }
           - { os: macos-latest, id: napi, gate: --only napi }
           - { os: macos-latest, id: rust, gate: --only rust-build --only doc-tests }
-          - { os: windows-latest, id: e2e-cdp-pipe, gate: --only e2e --project cdp-pipe }
+          - { os: windows-latest, id: e2e-chromium, gate: --only e2e --project chromium }
           - { os: windows-latest, id: e2e-webkit, gate: --only e2e --project webkit }
-          - { os: windows-latest, id: e2e-bidi, gate: --only e2e --project bidi }
+          - { os: windows-latest, id: e2e-firefox, gate: --only e2e --project firefox }
           - { os: windows-latest, id: napi, gate: --only napi }
           - { os: windows-latest, id: rust, gate: --only rust-build --only doc-tests }
           - { os: windows-11-arm, id: rust, gate: --only rust-build --only doc-tests }

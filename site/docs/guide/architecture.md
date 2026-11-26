@@ -24,10 +24,10 @@ flowchart TB
 
   subgraph Backends
     direction LR
-    B1["CdpPipe (default)"]
-    B2["CdpRaw"]
-    B3["WebKit (Playwright)"]
-    B4["Bidi (Firefox)"]
+    B1["CDP (pipe / ws)"]
+    B2["WebKit (Playwright)"]
+    B3["BiDi (Firefox / Ladybird)"]
+    B4["WebDriver (Classic)"]
   end
 
   N --> Core
@@ -60,12 +60,12 @@ A Gherkin step, a Rust `#[ferritest]`, an MCP tool call, and a Node.js
 
 ## Backends at a glance
 
-| Backend     | Browser            | Transport                                       | Default? |
+| Protocol    | Browser            | Transport                                       | Default? |
 |-------------|--------------------|--------------------------------------------------|----------|
-| `cdp-pipe`  | Chromium / Chrome  | CDP over Unix pipes (fd 3/4)                     | yes      |
-| `cdp-raw`   | Chromium / Chrome  | CDP over WebSocket (also supports `chromium().connect`) |     |
+| `cdp`       | Chromium / Chrome / Lightpanda | Unix pipes (`pipe`, default) or WebSocket (`ws`) | yes |
 | `webkit`    | Playwright WebKit  | Playwright Inspector protocol over `pw_run.sh` (NUL-delimited JSON) | |
-| `bidi`      | Firefox            | WebDriver BiDi over WebSocket                    |          |
+| `bidi`      | Firefox / Ladybird | WebDriver BiDi over WebSocket                    |          |
+| `webdriver` | Safari / Ladybird  | W3C Classic WebDriver over HTTP                  |          |
 
 Backends dispatch through a Rust `enum` (`BackendKind`), not a trait
 object. Calls monomorphize to a single backend path — no vtable lookup,

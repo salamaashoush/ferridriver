@@ -1,30 +1,33 @@
 # Backends
 
-ferridriver has five backends, one per protocol, behind one API. Every
-browser runs through one of them; none has a backend of its own. They all
-speak the same `Browser` / `Page` / `Locator` surface, so a test moves
-between browsers by changing its project.
+ferridriver has four wire protocols behind one API. Every browser runs through
+one of them; none has a backend of its own. They all speak the same
+`Browser` / `Page` / `Locator` surface, so a test moves between browsers by
+changing its project.
 
 ## At a glance
 
-| Backend     | Protocol                    | Browsers                            | When to use |
-|-------------|-----------------------------|-------------------------------------|-------------|
-| `cdp-pipe` (default) | CDP over pipes     | Chromium                            | Most things. Fastest. |
-| `cdp-raw`   | CDP over WebSocket          | Chromium, Lightpanda                | Attach to a running Chrome; Lightpanda |
-| `webkit`    | Playwright WebKit Inspector | Playwright WebKit                   | Safari-family rendering coverage |
-| `bidi`      | WebDriver BiDi              | Firefox, Safari, Ladybird, Chromium | Firefox, Ladybird, BiDi interop |
-| `webdriver` | Classic WebDriver           | Safari, Ladybird, any W3C driver    | Real Safari, Selenium grids, Appium |
+| Protocol    | Transport             | Browsers                            | When to use |
+|-------------|-----------------------|-------------------------------------|-------------|
+| `cdp` (default) | `pipe` (default) or `ws` | Chromium, Lightpanda (`ws`)    | Most things. `pipe` is lowest latency; `ws` attaches to a running Chrome or drives Lightpanda. |
+| `webkit`    | Inspector pipe        | Playwright WebKit                   | Safari-family rendering coverage |
+| `bidi`      | WebSocket             | Firefox, Safari, Ladybird, Chromium | Firefox, Ladybird, BiDi interop |
+| `webdriver` | HTTP                  | Safari, Ladybird, any W3C driver    | Real Safari, Selenium grids, Appium |
+
+Legacy combined spellings (`cdp-pipe`, `cdp-ws`, and `cdp-raw`) remain accepted
+everywhere `backend` is configured, and `protocol` is accepted as an alias for
+`backend`.
 
 ## Browsers
 
-| Browser           | Default backend | Others                  | Platforms             |
-|-------------------|-----------------|-------------------------|-----------------------|
-| `chromium`        | `cdp-pipe`      | `cdp-raw`, `bidi`, `webdriver` (connect) | Linux, macOS, Windows |
-| `firefox`         | `bidi`          | `webdriver` (connect)   | Linux, macOS, Windows |
-| `webkit`          | `webkit`        |                         | Linux, macOS, Windows |
-| `safari`          | `webdriver`     | `bidi`                  | macOS |
-| `ladybird`        | `bidi`          | `webdriver`             | Linux, macOS |
-| `lightpanda`      | `cdp-raw`       |                         | Linux, macOS |
+| Browser           | Default protocol / transport | Others                                 | Platforms             |
+|-------------------|------------------------------|----------------------------------------|-----------------------|
+| `chromium`        | `cdp` (`pipe`)               | `cdp` (`ws`), `bidi`, `webdriver` (connect) | Linux, macOS, Windows |
+| `firefox`         | `bidi`                       | `webdriver` (connect)                  | Linux, macOS, Windows |
+| `webkit`          | `webkit`                     |                                        | Linux, macOS, Windows |
+| `safari`          | `webdriver`                  | `bidi`                                 | macOS |
+| `ladybird`        | `bidi`                       | `webdriver`                            | Linux, macOS |
+| `lightpanda`      | `cdp` (`ws`)                 |                                        | Linux, macOS |
 
 A backend a browser lacks a protocol command for answers with a typed
 `Unsupported` error. Where the same session serves another protocol that
@@ -36,7 +39,7 @@ test runner reuses it across tests, starting a fresh browser after a test
 fails in it. A test that times out gets the worker a fresh browser on every
 backend, since it may still be acting on the one it had.
 
-## `cdp-pipe` — the default
+## `cdp` (`transport = "pipe"`) — the default
 
 Chromium via CDP over Unix pipes (file descriptors 3 and 4). ferridriver
 launches Chrome itself and wires stdin/stdout-like pipes for the
@@ -59,10 +62,12 @@ protocol.
 
 Pick this unless you have a specific reason not to.
 
-## `cdp-raw` — attach to a running Chrome
+## `cdp` (`transport = "ws"`) — attach to a running Chrome
 
-Same CDP protocol over a WebSocket. ferridriver can launch Chrome and
-dial its `ws://...` endpoint, or you can point it at an existing browser.
+Same CDP protocol over a WebSocket (`--backend cdp --cdp-transport ws`, or
+`backend = "cdp"` with `transport = "ws"` in config). ferridriver can launch
+Chrome and dial its `ws://...` endpoint, or you can point it at an existing
+browser.
 
 ```rust
 use ferridriver::browser_type::{chromium, BrowserType};
@@ -88,7 +93,7 @@ let browser = chromium()
   container setups, some CI runners).
 - You want to share one browser across several runners or languages.
 
-Slightly slower than `cdp-pipe` — WebSocket framing plus a loopback hop
+Slightly slower than `pipe` — WebSocket framing plus a loopback hop
 — but the difference is in the low single-digit ms per CDP call and is
 usually irrelevant.
 
@@ -178,7 +183,7 @@ the official build, or point `LADYBIRD_PATH` / `executablePath` at the
 
 Lightpanda is a headless browser built for automation that serves CDP
 itself. ferridriver runs `lightpanda serve` on a free loopback port and
-drives it through the `cdp-raw` backend. Launch arguments are passed to
+drives it through CDP over WebSocket (`backend = "cdp"`, `transport = "ws"`). Launch arguments are passed to
 `lightpanda serve` (`--obey-robots`, `--log-level`, ...); `proxy` maps to
 `--http-proxy`, and a `userDataDir` keeps cookies across launches (the only
 state Lightpanda persists). Lightpanda's usage telemetry is switched off
@@ -209,8 +214,8 @@ Each browser has a default backend, chosen by the factory you call
 `lightpanda()`) or by `[[test.projects]]` config; the table under
 [Browsers](#browsers) lists them.
 
-Chromium also supports `cdp-raw` (`chromium({ transport: 'ws' })` in JS,
-`BrowserType::chromium_with` in Rust). Pairings like Firefox-on-webkit or
+Chromium also supports WebSocket transport (`chromium({ transport: 'ws' })` in JS,
+`BrowserType::chromium_with` in Rust, or `transport = "ws"` in config). Pairings like Firefox-on-webkit or
 WebKit-on-bidi are not valid.
 
 ## Cross-backend matrix
@@ -242,12 +247,12 @@ three in parallel shards.
 
 Rough CDP round-trip budget per action on a warm machine:
 
-| Backend     | Per-action RTT (p50) | Notes |
-|-------------|----------------------|-------|
-| `cdp-pipe`  | ~0.7 ms              | fd reads, no framing |
-| `cdp-raw`   | ~1.2 ms              | WebSocket over loopback |
-| `webkit`    | ~1.0 ms              | NUL-delimited JSON over pipe |
-| `bidi`      | ~1.5 ms              | BiDi event loop is slightly chattier |
+| Backend             | Per-action RTT (p50) | Notes |
+|---------------------|----------------------|-------|
+| `cdp` (`pipe`)      | ~0.7 ms              | fd reads, no framing |
+| `cdp` (`ws`)        | ~1.2 ms              | WebSocket over loopback |
+| `webkit`            | ~1.0 ms              | NUL-delimited JSON over pipe |
+| `bidi`              | ~1.5 ms              | BiDi event loop is slightly chattier |
 
 These are transport costs, not test costs. An assertion polling at
 100/250/500/1000 ms intervals is dominated by the interval, not the
@@ -255,11 +260,11 @@ transport.
 
 ## Picking in practice
 
-- **Writing a new suite today**: start on `cdp-pipe`. Add `webkit` and
+- **Writing a new suite today**: start on `cdp` (default `pipe` transport). Add `webkit` and
   `bidi` projects when you need cross-browser coverage.
-- **Debugging a single test**: `--backend cdp-pipe` with `--workers 1` —
+- **Debugging a single test**: `--backend cdp` with `--workers 1` —
   one browser, linear output; add `--headed` to watch it.
-- **Attaching to a logged-in profile**: `cdp-raw` with
+- **Attaching to a logged-in profile**: `cdp` over `ws` with
   `chromium().connect(...)`.
 - **Safari-family regression**: `webkit`.
 - **Firefox regression**: `bidi`.

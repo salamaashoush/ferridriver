@@ -400,9 +400,15 @@ fn apply_browser_overrides(config: &mut TestConfig, overrides: &CliOverrides) {
     if overrides.backend.is_none() {
       config.browser.backend = "auto".into();
     }
+    if overrides.transport.is_none() {
+      config.browser.transport = None;
+    }
   }
   if let Some(ref b) = overrides.backend {
     config.browser.backend.clone_from(b);
+  }
+  if let Some(t) = overrides.transport {
+    config.browser.transport = Some(t);
   }
   if let Some(ref ch) = overrides.channel {
     config.browser.channel = Some(ch.clone());

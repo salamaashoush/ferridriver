@@ -237,14 +237,14 @@ test project.
 
 | Playwright                               | ferridriver equivalent |
 |------------------------------------------|------------------------|
-| `--project=chromium`                     | `chromium()` (default `cdp-pipe`), or a `[[test.projects]]` entry |
+| `--project=chromium`                     | `chromium()` (default `cdp` over `pipe`), or a `[[test.projects]]` entry |
 | `--project=firefox`                      | `firefox()` (default `bidi`) |
 | `--project=webkit`                       | `webkit()` (default `webkit`) |
 | `chromium.launch({ channel: 'chrome' })` | `LaunchOptions { executable_path: Some("..."), .. }` |
-| attach to a running browser              | `--backend cdp-raw` + `chromium().connect("ws://...", Default::default())` |
+| attach to a running browser              | `--backend cdp --cdp-transport ws` + `chromium().connect("ws://...", Default::default())` |
 
-Default is `cdp-pipe` (Chromium over fd 3/4 pipes). On a protocol-level
-issue, try `--backend cdp-raw` (CDP over WebSocket). The WebKit backend
+Default is `cdp` over `pipe` (Chromium over fd 3/4 pipes). On a protocol-level
+issue, try `--backend cdp --cdp-transport ws` (CDP over WebSocket). The WebKit backend
 uses Playwright's WebKit binary (`ferridriver install webkit`, or an
 existing `npx playwright install webkit`, or `FERRIDRIVER_WEBKIT`) and
 runs on Linux and macOS. Firefox uses WebDriver BiDi and must already be
