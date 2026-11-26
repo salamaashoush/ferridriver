@@ -24,11 +24,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
 pub type Headers = FxHashMap<String, String>;
 
 /// Single header entry preserving original case and duplicate keys.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct HeaderEntry {
-  pub name: String,
-  pub value: String,
-}
+pub use ferridriver_types::HeaderEntry;
 
 /// Resource timing in milliseconds since `startTime`. Sentinel values:
 /// `start_time` is wall-clock ms (Unix epoch), every other field is `-1.0`

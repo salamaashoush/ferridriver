@@ -9,13 +9,13 @@
 //!
 //! Uses enum dispatch (not trait objects) for zero-cost abstraction and Clone support.
 
-pub(crate) mod async_tempdir;
+pub(crate) use ferridriver_process::async_tempdir;
 pub mod cdp;
 pub(crate) mod json_scan;
 pub(crate) mod keyboard;
-pub mod process;
+pub use ferridriver_process::process;
 #[cfg(unix)]
-pub mod reaper;
+pub use ferridriver_process::reaper;
 pub(crate) mod screencast;
 mod shared_page;
 pub(crate) use shared_page::ErasedWeakPage;

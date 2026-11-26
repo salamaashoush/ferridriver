@@ -229,7 +229,7 @@ mod tests {
   async fn a_failed_launch_kills_what_the_exited_launcher_forked() {
     use crate::backend::process::test_support::{test_forking_launcher, test_process_ends, test_read_pid};
     let dir = tempfile::tempdir().expect("fixture dir");
-    let (launcher, forked) = test_forking_launcher(dir.path());
+    let (launcher, forked) = test_forking_launcher(dir.path()).expect("forking launcher");
     let profile = dir.path().join("profile");
     std::fs::create_dir(&profile).expect("profile dir");
     let outcome = super::WsTransport::spawn(
@@ -241,7 +241,7 @@ mod tests {
     )
     .await;
     assert!(outcome.is_err(), "a launcher that exits must fail the launch");
-    let forked = test_read_pid(&forked);
+    let forked = test_read_pid(&forked).expect("forked pid");
     assert!(
       test_process_ends(forked),
       "pid {forked}, forked by the launcher, outlived the failed launch"

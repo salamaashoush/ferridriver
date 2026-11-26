@@ -1641,24 +1641,25 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bytes",
- "bzip2",
  "criterion",
  "dashmap",
  "dirs 7.0.0",
+ "ferridriver-audits",
  "ferridriver-bidi-proto",
  "ferridriver-cdp-proto",
+ "ferridriver-error",
  "ferridriver-heap",
+ "ferridriver-install",
+ "ferridriver-process",
  "ferridriver-trace",
  "ferridriver-types",
  "ferridriver-webkit-proto",
  "ferrijs-fetch",
  "ferrijs-permissions",
- "flate2",
  "futures",
  "httpdate",
  "image",
  "libc",
- "liblzma",
  "memchr",
  "pin-project-lite",
  "regex",
@@ -1669,11 +1670,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sevenz-rust2",
  "sha1 0.11.0",
  "sha2",
- "sysinfo",
- "tar",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1684,6 +1682,18 @@ dependencies = [
  "windows-sys 0.61.2",
  "x509-parser",
  "zip",
+]
+
+[[package]]
+name = "ferridriver-audits"
+version = "0.8.1"
+dependencies = [
+ "ferridriver-error",
+ "ferridriver-types",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -1809,6 +1819,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferridriver-error"
+version = "0.8.1"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ferridriver-expect"
 version = "0.8.1"
 dependencies = [
@@ -1878,6 +1896,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferridriver-install"
+version = "0.8.1"
+dependencies = [
+ "bzip2",
+ "dirs 7.0.0",
+ "ferridriver-error",
+ "ferridriver-process",
+ "flate2",
+ "futures",
+ "liblzma",
+ "reqwest",
+ "rustc-hash",
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zip",
+]
+
+[[package]]
 name = "ferridriver-mcp"
 version = "0.8.1"
 dependencies = [
@@ -1937,6 +1980,24 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "ferridriver-process"
+version = "0.8.1"
+dependencies = [
+ "dirs 7.0.0",
+ "ferridriver-error",
+ "futures",
+ "libc",
+ "rustix 1.1.6",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

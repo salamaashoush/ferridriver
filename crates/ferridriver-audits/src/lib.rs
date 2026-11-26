@@ -2,7 +2,7 @@
 //!
 //! Lighthouse's non-performance audits fall into three groups. Sixty-
 //! seven are axe-core wrappers and are covered by running the engine
-//! instead ([`crate::accessibility`]). The performance ones wrap the
+//! instead (`accessibility`). The performance ones wrap the
 //! `DevTools` trace insights, which `ferridriver-perf` has ported. What is
 //! left needs artifacts gathered from a live DOM, and ten of those are
 //! here.
@@ -39,7 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 pub mod robots;
 
@@ -181,7 +181,7 @@ pub struct MainDocument {
   /// same position). It changes how many items `is-crawlable` reports
   /// and not what it concludes, because a comma already separates
   /// directives within one value.
-  pub response_headers: Vec<crate::network::HeaderEntry>,
+  pub response_headers: Vec<ferridriver_types::HeaderEntry>,
 }
 
 /// What `/robots.txt` answered, in the shape Lighthouse's `RobotsTxt`
@@ -641,7 +641,7 @@ pub fn canonical(artifacts: &Artifacts) -> AuditResult {
       // is relative, and parseable alone is the one it keeps.
       if resolve(&link.href_raw, "https://example.com").is_none() {
         invalid = Some(&link.href_raw);
-      } else if reqwest::Url::parse(&link.href_raw).is_err() {
+      } else if url::Url::parse(&link.href_raw).is_err() {
         relative = Some(&link.href_raw);
       } else if !unique.contains(&link.href) {
         unique.push(link.href.clone());
@@ -672,10 +672,7 @@ pub fn canonical(artifacts: &Artifacts) -> AuditResult {
     );
   }
 
-  let (Some(canonical), Some(base)) = (
-    reqwest::Url::parse(&unique[0]).ok(),
-    reqwest::Url::parse(&artifacts.url).ok(),
-  ) else {
+  let (Some(canonical), Some(base)) = (url::Url::parse(&unique[0]).ok(), url::Url::parse(&artifacts.url).ok()) else {
     return passed(ID, category, PASS);
   };
   // Two pages that name each other as alternates cannot also name one
@@ -784,11 +781,11 @@ fn is_javascript_void(raw_href: &str) -> bool {
 }
 
 /// `new URL(href, base)`: absolute, or relative to the document.
-fn resolve(href: &str, base: &str) -> Option<reqwest::Url> {
-  if let Ok(absolute) = reqwest::Url::parse(href) {
+fn resolve(href: &str, base: &str) -> Option<url::Url> {
+  if let Ok(absolute) = url::Url::parse(href) {
     return Some(absolute);
   }
-  reqwest::Url::parse(base).ok()?.join(href).ok()
+  url::Url::parse(base).ok()?.join(href).ok()
 }
 
 /// Link text that says nothing about where the link goes, by language.
@@ -983,7 +980,7 @@ fn link_text_is_non_descriptive(anchor: &Anchor, document_url: &str) -> bool {
 }
 
 fn equal_ignoring_fragment(a: &str, b: &str) -> bool {
-  let (Ok(mut a), Ok(mut b)) = (reqwest::Url::parse(a), reqwest::Url::parse(b)) else {
+  let (Ok(mut a), Ok(mut b)) = (url::Url::parse(a), url::Url::parse(b)) else {
     return false;
   };
   a.set_fragment(None);
@@ -994,7 +991,7 @@ fn equal_ignoring_fragment(a: &str, b: &str) -> bool {
 /// Lighthouse's `URL.guessMimeType`, which both image audits use to skip
 /// vector images.
 fn guess_mime_type(src: &str) -> Option<&'static str> {
-  let url = reqwest::Url::parse(src).ok()?;
+  let url = url::Url::parse(src).ok()?;
   if url.scheme() == "data" {
     let path = url.path();
     let (mime, _) = path.split_once([';', ','])?;
@@ -1602,7 +1599,7 @@ fn header_directive_user_agent(value: &str) -> Option<String> {
 /// neither can a page opened from disk.
 #[must_use]
 pub fn robots_txt_url(document_url: &str) -> Option<String> {
-  let base = reqwest::Url::parse(document_url).ok()?;
+  let base = url::Url::parse(document_url).ok()?;
   if !matches!(base.scheme(), "http" | "https") {
     return None;
   }
@@ -1638,8 +1635,8 @@ mod tests {
     }
   }
 
-  fn header(name: &str, value: &str) -> crate::network::HeaderEntry {
-    crate::network::HeaderEntry {
+  fn header(name: &str, value: &str) -> ferridriver_types::HeaderEntry {
+    ferridriver_types::HeaderEntry {
       name: name.into(),
       value: value.into(),
     }
@@ -1647,7 +1644,7 @@ mod tests {
 
   /// Artifacts for a page that arrived over HTTP with `status` and
   /// `headers`, and nothing else worth auditing.
-  fn served(status: i64, headers: Vec<crate::network::HeaderEntry>) -> Artifacts {
+  fn served(status: i64, headers: Vec<ferridriver_types::HeaderEntry>) -> Artifacts {
     Artifacts {
       url: "https://example.com/page".into(),
       main_document: Some(MainDocument {
@@ -2099,7 +2096,7 @@ mod tests {
     // Googlebot is blocked, the other four are not, so the page passes.
     let one_bot = crawlable(&served(200, vec![header("X-Robots-Tag", "Googlebot: noindex")]));
     assert!(one_bot.passed);
-    assert_eq!(one_bot.items, [] as [crate::audits::AuditItem; 0]);
+    assert_eq!(one_bot.items, [] as [crate::AuditItem; 0]);
   }
 
   #[test]

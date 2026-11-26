@@ -1,0 +1,40 @@
+[package]
+name = "ferridriver-install"
+description = "Browser binary, driver, and runtime downloader and cache manager for ferridriver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bzip2 = "0.6"
+dirs = { workspace = true }
+ferridriver-error = { workspace = true }
+ferridriver-process = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+liblzma = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "gzip", "brotli", "deflate", "zstd"] }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = "0.4"
+tempfile = "3"
+tokio = { workspace = true }
+tracing = { workspace = true }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process", "system"] }
+
+[target.'cfg(windows)'.dependencies]
+sevenz-rust2 = { version = "0.25", default-features = false }

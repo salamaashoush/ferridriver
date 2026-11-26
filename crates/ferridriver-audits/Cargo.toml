@@ -1,0 +1,23 @@
+[package]
+name = "ferridriver-audits"
+description = "Lighthouse-compatible SEO and best-practices page quality audits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver-error = { workspace = true }
+ferridriver-types = { workspace = true }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = "2"

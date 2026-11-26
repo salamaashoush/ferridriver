@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub(crate) struct AsyncTempDir {
+pub struct AsyncTempDir {
   state: Arc<RemovalState>,
 }
 
@@ -22,11 +22,13 @@ struct RemovalState {
 }
 
 impl AsyncTempDir {
-  pub(crate) fn cleanup_complete(&self) -> bool {
+  #[must_use]
+  pub fn cleanup_complete(&self) -> bool {
     self.state.path.try_lock().is_ok_and(|path| path.is_none())
   }
 
-  pub(crate) fn new(inner: tempfile::TempDir) -> Self {
+  #[must_use]
+  pub fn new(inner: tempfile::TempDir) -> Self {
     // `keep` consumes the `TempDir` and disables its auto-removal,
     // handing back the raw `PathBuf` so we own the scheduling.
     Self {
@@ -43,11 +45,14 @@ impl AsyncTempDir {
   ///
   /// # Errors
   /// Failed filesystem removal or a failed cleanup task leaves the path retained for another attempt.
-  pub(crate) async fn remove_now(&self) -> crate::Result<()> {
+  pub async fn remove_now(&self) -> ferridriver_error::Result<()> {
     self.remove_with(remove_dir_all_retrying).await
   }
 
-  async fn remove_with(&self, remove: impl FnOnce(&Path) -> std::io::Result<()> + Send + 'static) -> crate::Result<()> {
+  async fn remove_with(
+    &self,
+    remove: impl FnOnce(&Path) -> std::io::Result<()> + Send + 'static,
+  ) -> ferridriver_error::Result<()> {
     let state = Arc::clone(&self.state);
     // The blocking job keeps ownership and serialization even when its caller is cancelled.
     tokio::task::spawn_blocking(move || {
@@ -68,7 +73,9 @@ impl AsyncTempDir {
       Err(error)
     })
     .await
-    .map_err(|error| crate::FerriError::backend(format!("Temporary directory cleanup task failed: {error}")))??;
+    .map_err(|error| {
+      ferridriver_error::FerriError::backend(format!("Temporary directory cleanup task failed: {error}"))
+    })??;
     Ok(())
   }
 }
@@ -79,7 +86,11 @@ impl AsyncTempDir {
 /// deletion for a moment (Windows' sharing violation), so a busy, denied
 /// or not-yet-empty removal is tried again, waiting 100 ms longer each
 /// time.
-pub(crate) fn remove_dir_all_retrying(path: &Path) -> std::io::Result<()> {
+///
+/// # Errors
+///
+/// Returns the last filesystem error once retries are exhausted or on a non-transient failure.
+pub fn remove_dir_all_retrying(path: &Path) -> std::io::Result<()> {
   const RETRIES: u64 = 10;
   let mut attempt = 0;
   loop {
@@ -119,7 +130,12 @@ fn transient(error: &std::io::Error) -> bool {
   )
 }
 
-pub(crate) fn removal_result(path: &Path, result: std::io::Result<()>) -> std::io::Result<()> {
+/// Normalize a `remove_dir_all` result, treating an already-absent root path as success.
+///
+/// # Errors
+///
+/// Propagates filesystem errors when the root still exists or cannot be inspected.
+pub fn removal_result(path: &Path, result: std::io::Result<()>) -> std::io::Result<()> {
   match result {
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => match std::fs::symlink_metadata(path) {
       Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Ok(()),

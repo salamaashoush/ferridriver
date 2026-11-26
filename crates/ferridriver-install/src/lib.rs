@@ -26,7 +26,11 @@ mod lightpanda;
 mod linux;
 mod playwright_cache;
 
-pub use playwright_cache::{CachedBrowser, find_playwright_browser, installed_build, playwright_cache_dir};
+pub use android::{AndroidOptions, PreparedAndroidSdk};
+pub use playwright_cache::{
+  CachedBrowser, INSTALLATION_COMPLETE, build_dir, find_playwright_browser, installed_build, newest_build_in,
+  playwright_cache_dir,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +39,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 fn backend_err(context: impl std::fmt::Display) -> FerriError {
   FerriError::backend(context.to_string())
@@ -2187,7 +2191,7 @@ fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<()> {
 
 /// What Playwright's Android driver archive holds: the driver and the
 /// instrumentation target it runs in.
-pub(crate) const ANDROID_DRIVER_APKS: [&str; 2] = ["android-driver.apk", "android-driver-target.apk"];
+pub const ANDROID_DRIVER_APKS: [&str; 2] = ["android-driver.apk", "android-driver-target.apk"];
 
 /// Whether a symlink at `link` (relative to the archive root) pointing at
 /// `target` resolves inside the archive.

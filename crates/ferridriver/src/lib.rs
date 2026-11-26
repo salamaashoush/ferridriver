@@ -28,7 +28,7 @@
 pub mod abort;
 pub mod accessibility;
 pub mod action;
-pub mod audits;
+pub use ferridriver_audits as audits;
 pub mod browser;
 pub mod browser_resources;
 pub mod browser_server;
@@ -44,7 +44,7 @@ pub mod dialog;
 pub mod disposable;
 pub mod download;
 pub mod element_handle;
-pub mod error;
+pub use ferridriver_error as error;
 pub mod events;
 pub mod expect;
 pub mod file_chooser;
@@ -111,7 +111,7 @@ pub mod web_socket_route;
 // ── Browser installation ──
 pub mod android;
 pub mod device;
-pub mod install;
+pub use ferridriver_install as install;
 pub mod ios;
 
 // ── Implementation modules (used by MCP server, will be internalized) ──

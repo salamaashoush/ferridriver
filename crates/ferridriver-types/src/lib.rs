@@ -11,6 +11,13 @@
 pub mod devices;
 pub mod keyboard;
 
+/// Single HTTP header entry preserving original case and duplicate keys.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HeaderEntry {
+  pub name: String,
+  pub value: String,
+}
+
 /// The version the declarations describe.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -134,7 +134,7 @@ mod tests {
       let mut cmd = Command::new("sleep");
       cmd.arg("30").stdout(Stdio::null()).stderr(Stdio::null());
       // Mirrors how browsers are spawned.
-      crate::backend::process::spawn_in_own_session(&mut cmd);
+      crate::process::spawn_in_own_session(&mut cmd);
       cmd.spawn().expect("spawn sleep")
     };
 
@@ -198,7 +198,7 @@ mod tests {
       .arg("sh -c 'sleep 30; wait' >/dev/null 2>&1 & echo $!; exit 0")
       .stdout(Stdio::piped())
       .stderr(Stdio::null());
-    crate::backend::process::spawn_in_own_session(&mut leader);
+    crate::process::spawn_in_own_session(&mut leader);
     let mut leader = leader.spawn().expect("spawn leader");
     let mut line = String::new();
     std::io::BufReader::new(leader.stdout.take().expect("stdout piped"))
@@ -224,9 +224,9 @@ mod tests {
       "reaper exited cleanly"
     );
 
-    let ended = crate::backend::process::test_support::test_process_ends(member);
+    let ended = crate::process::test_support::test_process_ends(member);
     if !ended {
-      crate::backend::process::kill_process_group(leader_pid);
+      crate::process::kill_process_group(leader_pid);
     }
     assert!(ended, "the member a reaped leader left in its group must be killed");
   }
