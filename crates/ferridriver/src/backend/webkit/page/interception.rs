@@ -100,7 +100,7 @@ impl WebKitPage {
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     let _ = self
       .target_session()
-      .send("Page.setInterceptFileChooserDialog", json!({ "enabled": true }))
+      .send_typed(&ferridriver_webkit_proto::page::SetInterceptFileChooserDialog { enabled: true })
       .await;
     Ok(())
   }

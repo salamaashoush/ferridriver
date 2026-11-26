@@ -107,3 +107,25 @@ impl Command for Disown<'_> {
   const METHOD: &'static str = "script.disown";
   type Response = EmptyResponse;
 }
+
+/// Source context/realm inside `script.message`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSource {
+  #[serde(default)]
+  pub realm: String,
+  #[serde(default)]
+  pub context: Option<String>,
+}
+
+/// `script.message` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageEvent {
+  #[serde(default)]
+  pub channel: String,
+  #[serde(default)]
+  pub data: Value,
+  #[serde(default)]
+  pub source: MessageSource,
+}

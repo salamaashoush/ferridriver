@@ -242,10 +242,13 @@ impl CdpElement {
       .await;
     let transport = Arc::clone(&self.transport);
     let session = self.session_id.clone();
-    let release_params = serde_json::json!({ "objectId": adopted });
+    let adopted_id = adopted.to_string();
     tokio::spawn(async move {
       let _ = transport
-        .send_command(session.as_deref(), "Runtime.releaseObject", &release_params)
+        .send(
+          session.as_deref(),
+          &ferridriver_cdp_proto::runtime::ReleaseObject { object_id: &adopted_id },
+        )
         .await;
     });
     let result = result?;

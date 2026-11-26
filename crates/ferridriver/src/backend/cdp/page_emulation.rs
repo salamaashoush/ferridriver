@@ -489,16 +489,17 @@ impl CdpPage {
   /// older local-network names.
   async fn grant_permissions(&self, origin: Option<&str>, permissions: &[String]) -> Result<()> {
     let send = |legacy: bool| async move {
-      let mut params = serde_json::json!({ "permissions": crate::permissions::chromium(permissions, legacy)? });
-      if let Some(origin) = origin {
-        params["origin"] = serde_json::json!(origin);
-      }
-      if let Some(ref ctx_id) = self.browser_context_id {
-        params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
-      }
+      let names = crate::permissions::chromium(permissions, legacy)?;
       self
         .transport
-        .send_command(None, "Browser.grantPermissions", &params)
+        .send(
+          None,
+          &ferridriver_cdp_proto::browser::GrantPermissions {
+            permissions: &names,
+            origin,
+            browser_context_id: self.browser_context_id.as_deref(),
+          },
+        )
         .await
         .map(|_| ())
     };
@@ -518,16 +519,14 @@ impl CdpPage {
   /// Returns an error if Chrome rejects `Browser.resetPermissions`, the target has closed, or the command
   /// outlives its time budget.
   pub async fn reset_permissions(&self) -> Result<()> {
-    // Scope to this page's CDP browser context (see `apply_context_options`
-    // for why grant must ship `browserContextId`). `Browser.resetPermissions`
-    // is browser-level too.
-    let mut params = serde_json::json!({});
-    if let Some(ref ctx_id) = self.browser_context_id {
-      params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
-    }
     self
       .transport
-      .send_command(None, "Browser.resetPermissions", &params)
+      .send(
+        None,
+        &ferridriver_cdp_proto::browser::ResetPermissions {
+          browser_context_id: self.browser_context_id.as_deref(),
+        },
+      )
       .await?;
     Ok(())
   }

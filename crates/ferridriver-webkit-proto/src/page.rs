@@ -173,3 +173,27 @@ impl Command for HeapGc {
   const METHOD: &'static str = "Heap.gc";
   type Response = EmptyResponse;
 }
+
+/// `Dialog.javascriptDialogOpening` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JavascriptDialogOpeningEvent {
+  #[serde(default)]
+  pub message: String,
+  #[serde(default, rename = "type")]
+  pub dialog_type: String,
+  #[serde(default)]
+  pub default_prompt: String,
+}
+
+/// `Page.fileChooserOpened` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChooserOpenedEvent {
+  #[serde(default)]
+  pub frame_id: String,
+  #[serde(default)]
+  pub element: Value,
+  #[serde(default)]
+  pub multiple: bool,
+}

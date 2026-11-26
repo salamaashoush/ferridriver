@@ -629,18 +629,14 @@ async fn keep_one_page_on(
   spares: &Spares,
   browser_context_id: &str,
 ) -> Result<Option<String>> {
-  let targets = transport.send_command(None, "Target.getTargets", &EMPTY_PARAMS).await?;
+  let targets = transport
+    .send(None, &ferridriver_cdp_proto::target::GetTargets {})
+    .await?;
   let mut pages: Vec<String> = targets
-    .get("targetInfos")
-    .and_then(serde_json::Value::as_array)
+    .target_infos
     .into_iter()
-    .flatten()
-    .filter(|info| {
-      info.get("browserContextId").and_then(serde_json::Value::as_str) == Some(browser_context_id)
-        && info.get("type").and_then(serde_json::Value::as_str) == Some("page")
-    })
-    .filter_map(|info| info.get("targetId").and_then(serde_json::Value::as_str))
-    .map(str::to_string)
+    .filter(|info| info.browser_context_id.as_deref() == Some(browser_context_id) && info.target_type == "page")
+    .map(|info| info.target_id)
     .collect();
   if pages.is_empty() {
     return Ok(None);
@@ -655,7 +651,7 @@ async fn keep_one_page_on(
   if !pages.is_empty() {
     futures::future::try_join_all(pages.into_iter().map(|extra| async move {
       transport
-        .send_command(None, "Target.closeTarget", &json!({ "targetId": extra }))
+        .send(None, &ferridriver_cdp_proto::target::CloseTarget { target_id: &extra })
         .await
         .map(|_| ())
     }))
@@ -679,26 +675,22 @@ async fn replace_session_on(
   let pointer_dirty = previous
     .as_deref()
     .is_none_or(|session| transport.take_session_dirty(session).pointer);
-  let attach_params = json!({ "targetId": target, "flatten": true });
+  let attach_cmd = ferridriver_cdp_proto::target::AttachToTarget {
+    target_id: target,
+    flatten: Some(true),
+  };
   let attached = if let Some(session) = previous {
-    let detach_params = json!({ "sessionId": session });
-    let (_, attached) = tokio::try_join!(
-      transport.send_command(None, "Target.detachFromTarget", &detach_params),
-      transport.send_command(None, "Target.attachToTarget", &attach_params),
-    )?;
+    let detach_cmd = ferridriver_cdp_proto::target::DetachFromTarget {
+      session_id: Some(&session),
+      target_id: None,
+    };
+    let (_, attached) = tokio::try_join!(transport.send(None, &detach_cmd), transport.send(None, &attach_cmd),)?;
     transport.unregister_session(&session);
     attached
   } else {
-    transport
-      .send_command(None, "Target.attachToTarget", &attach_params)
-      .await?
+    transport.send(None, &attach_cmd).await?
   };
-  let new_session = attached
-    .get("sessionId")
-    .and_then(serde_json::Value::as_str)
-    .map(str::to_string)
-    .ok_or_else(|| FerriError::protocol("Target.attachToTarget", "missing sessionId"))?;
-  Ok((new_session, pointer_dirty))
+  Ok((attached.session_id, pointer_dirty))
 }
 
 /// Have `engine` registered for `target`'s documents on the page's

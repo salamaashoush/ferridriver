@@ -460,3 +460,29 @@ pub struct FileChooserOpenedEvent {
   #[serde(default)]
   pub backend_node_id: Option<i64>,
 }
+
+/// `Page.javascriptDialogClosed` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JavascriptDialogClosedEvent {
+  #[serde(default)]
+  pub result: bool,
+  #[serde(default)]
+  pub user_input: String,
+}
+
+/// `Page.loadEventFired` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadEventFiredEvent {
+  #[serde(default)]
+  pub timestamp: f64,
+}
+
+/// `Page.domContentEventFired` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomContentEventFiredEvent {
+  #[serde(default)]
+  pub timestamp: f64,
+}

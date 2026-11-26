@@ -123,6 +123,11 @@ impl CdpPage {
         let Some(params) = event.get("params") else {
           continue;
         };
+        let Ok(payload) =
+          serde_json::from_value::<ferridriver_cdp_proto::runtime::ConsoleApiCalledEvent>(params.clone())
+        else {
+          continue;
+        };
         // Without an owning page we cannot build live `JSHandle`s —
         // drop the event silently (matches Playwright's
         // `createHandle(context, arg)` guard which returns early if the
@@ -131,14 +136,13 @@ impl CdpPage {
           continue;
         };
 
-        let type_str = params.get("type").and_then(|v| v.as_str()).unwrap_or("log").to_string();
-        let args_json = params
-          .get("args")
-          .and_then(|v| v.as_array())
-          .cloned()
-          .unwrap_or_default();
-        let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
-        for arg in &args_json {
+        let type_str = if payload.kind.is_empty() {
+          "log".to_string()
+        } else {
+          payload.kind
+        };
+        let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(payload.args.len());
+        for arg in &payload.args {
           let backing = cdp_remote_object_to_backing(arg, session_id.clone());
           let is_node = arg.get("subtype").and_then(|v| v.as_str()) == Some("node");
           args.push(crate::js_handle::JSHandle::from_backing(
@@ -147,11 +151,8 @@ impl CdpPage {
             is_node,
           ));
         }
-        let location = cdp_stack_trace_to_location(params.get("stackTrace"));
-        let timestamp = params
-          .get("timestamp")
-          .and_then(serde_json::Value::as_f64)
-          .map_or(0, f64_to_u64_saturating);
+        let location = cdp_stack_trace_to_location(payload.stack_trace.as_ref());
+        let timestamp = f64_to_u64_saturating(payload.timestamp);
 
         let msg = crate::console_message::ConsoleMessage::new(&page, type_str, None, args, location, timestamp);
         crate::state::push_capped(
@@ -243,29 +244,30 @@ impl CdpPage {
     tokio::spawn(async move {
       let mut workers: rustc_hash::FxHashMap<String, crate::worker::Worker> = rustc_hash::FxHashMap::default();
       while let Some(event) = rx.recv().await {
-        let params = &event["params"];
-        let Some(session) = params["sessionId"].as_str() else {
+        let Some(params) = event.get("params") else {
           continue;
         };
-        if event["method"] == "Target.detachedFromTarget" {
-          if let Some(worker) = workers.remove(session) {
-            worker.did_close();
-          }
-          continue;
+        let method = event.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        match ferridriver_cdp_proto::CdpEvent::parse(method, params) {
+          Some(ferridriver_cdp_proto::CdpEvent::DetachedFromTarget(ev)) => {
+            if let Some(worker) = workers.remove(&ev.session_id) {
+              worker.did_close();
+            }
+          },
+          Some(ferridriver_cdp_proto::CdpEvent::AttachedToTarget(ev)) if ev.target_info.target_type == "worker" => {
+            let worker = crate::worker::Worker::new(
+              ev.session_id.clone(),
+              ev.target_info.url,
+              Arc::new(CdpWorker {
+                transport: Arc::clone(&transport),
+                session_id: Arc::from(ev.session_id.as_str()),
+              }),
+            );
+            workers.insert(ev.session_id, worker.clone());
+            emitter.emit(crate::events::PageEvent::Worker(worker));
+          },
+          _ => {},
         }
-        if params["targetInfo"]["type"] != "worker" {
-          continue;
-        }
-        let worker = crate::worker::Worker::new(
-          session.to_string(),
-          params["targetInfo"]["url"].as_str().unwrap_or_default().to_string(),
-          Arc::new(CdpWorker {
-            transport: Arc::clone(&transport),
-            session_id: Arc::from(session),
-          }),
-        );
-        workers.insert(session.to_string(), worker.clone());
-        emitter.emit(crate::events::PageEvent::Worker(worker));
       }
       for worker in workers.into_values() {
         worker.did_close();
@@ -296,14 +298,18 @@ impl CdpPage {
       .tap_event_methods(&["Target.targetDestroyed", "Target.detachedFromTarget"], None);
     tokio::spawn(async move {
       while let Some(event) = rx.recv().await {
-        let destroyed =
-          event["method"] == "Target.targetDestroyed" && event["params"]["targetId"].as_str() == Some(&*page.target_id);
-        let detached = event["method"] == "Target.detachedFromTarget"
-          && page
-            .session_id
-            .as_deref()
-            .is_some_and(|session| event["params"]["sessionId"] == session);
-        if destroyed || detached {
+        let Some(params) = event.get("params") else {
+          continue;
+        };
+        let method = event.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        let gone = match ferridriver_cdp_proto::CdpEvent::parse(method, params) {
+          Some(ferridriver_cdp_proto::CdpEvent::TargetDestroyed(ev)) => ev.target_id == *page.target_id,
+          Some(ferridriver_cdp_proto::CdpEvent::DetachedFromTarget(ev)) => {
+            page.session_id.as_deref() == Some(ev.session_id.as_str())
+          },
+          _ => false,
+        };
+        if gone {
           page.dispose_local();
           return;
         }
@@ -374,36 +380,35 @@ impl CdpPage {
         tokio::spawn(async move {
           let session = session_id.as_deref();
           let Ok(owner) = transport
-            .send_command(
+            .send(
               session,
-              "DOM.getFrameOwner",
-              &serde_json::json!({ "frameId": frame_id }),
+              &ferridriver_cdp_proto::dom::GetFrameOwner { frame_id: &frame_id },
             )
             .await
           else {
             return;
           };
-          let Some(node) = owner.get("backendNodeId").cloned() else {
-            return;
-          };
           let Ok(described) = transport
-            .send_command(
+            .send(
               session,
-              "DOM.describeNode",
-              &serde_json::json!({ "backendNodeId": node }),
+              &ferridriver_cdp_proto::dom::DescribeNode {
+                backend_node_id: Some(owner.backend_node_id),
+                ..Default::default()
+              },
             )
             .await
           else {
             return;
           };
           let name = described
-            .pointer("/node/attributes")
-            .and_then(serde_json::Value::as_array)
+            .node
+            .attributes
+            .as_deref()
             .and_then(|attributes| {
               attributes
                 .chunks(2)
-                .find(|pair| pair.first().and_then(serde_json::Value::as_str) == Some("name"))
-                .and_then(|pair| pair.get(1)?.as_str())
+                .find(|pair| pair.first().map(String::as_str) == Some("name"))
+                .and_then(|pair| pair.get(1).map(String::as_str))
             })
             .filter(|name| !name.is_empty());
           if let Some(name) = name {
@@ -554,17 +559,18 @@ impl CdpPage {
         let Some(params) = event.get("params") else {
           continue;
         };
-        let dialog_type_str = params
-          .get("type")
-          .and_then(|v| v.as_str())
-          .unwrap_or("alert")
-          .to_string();
-        let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let default_value = params
-          .get("defaultPrompt")
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string();
+        let Ok(payload) =
+          serde_json::from_value::<ferridriver_cdp_proto::page::JavascriptDialogOpeningEvent>(params.clone())
+        else {
+          continue;
+        };
+        let dialog_type_str = if payload.dialog_type.is_empty() {
+          "alert".to_string()
+        } else {
+          payload.dialog_type
+        };
+        let message = payload.message;
+        let default_value = payload.default_prompt;
         let dialog_type = crate::dialog::DialogType::parse(&dialog_type_str);
 
         // Build the responder: a closure that translates the user's
@@ -577,17 +583,18 @@ impl CdpPage {
           let transport = Arc::clone(&responder_transport);
           let session = responder_session.clone();
           Box::pin(async move {
-            let mut cmd_params = serde_json::json!({
-              "accept": matches!(response, crate::dialog::DialogResponse::Accept { .. }),
-            });
-            if let crate::dialog::DialogResponse::Accept {
-              prompt_text: Some(text),
-            } = response
-            {
-              cmd_params["promptText"] = serde_json::Value::String(text);
-            }
+            let (accept, prompt_text) = match response {
+              crate::dialog::DialogResponse::Accept { prompt_text } => (true, prompt_text),
+              crate::dialog::DialogResponse::Dismiss => (false, None),
+            };
             transport
-              .send_command(session.as_deref(), "Page.handleJavaScriptDialog", &cmd_params)
+              .send(
+                session.as_deref(),
+                &ferridriver_cdp_proto::page::HandleJavaScriptDialog {
+                  accept,
+                  prompt_text: prompt_text.as_deref(),
+                },
+              )
               .await
               .map(|_| ())
           })
@@ -676,13 +683,14 @@ impl CdpPage {
         let Some(params) = event.get("params") else {
           continue;
         };
-        let Some(backend_node_id) = params.get("backendNodeId").and_then(serde_json::Value::as_i64) else {
+        let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::page::FileChooserOpenedEvent>(params.clone())
+        else {
           continue;
         };
-        let is_multiple = params
-          .get("mode")
-          .and_then(|v| v.as_str())
-          .is_some_and(|m| m == "selectMultiple");
+        let Some(backend_node_id) = payload.backend_node_id else {
+          continue;
+        };
+        let is_multiple = payload.mode == "selectMultiple";
 
         // Upgrade the Weak back-reference; the outer Page may not
         // exist yet (listener spawned before `Page::new` populated
@@ -813,16 +821,16 @@ impl CdpPage {
     downloads_dir: &DownloadsDir,
     page_backref: &crate::backend::PageBackref,
   ) {
-    let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if guid.is_empty() {
+    let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::browser::DownloadWillBeginEvent>(params.clone())
+    else {
+      return;
+    };
+    if payload.guid.is_empty() {
       return;
     }
-    let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let suggested = params
-      .get("suggestedFilename")
-      .and_then(|v| v.as_str())
-      .unwrap_or("")
-      .to_string();
+    let guid = payload.guid;
+    let url = payload.url;
+    let suggested = payload.suggested_filename;
 
     let Some(page) = page_backref.upgrade() else {
       return;
@@ -839,12 +847,14 @@ impl CdpPage {
       let ctx = ctx_c.clone();
       let guid = guid_for_cancel.clone();
       Box::pin(async move {
-        let mut params = serde_json::json!({ "guid": guid });
-        if let Some(c) = ctx.as_deref() {
-          params["browserContextId"] = serde_json::Value::String(c.to_string());
-        }
         transport
-          .send_command(session.as_deref(), "Browser.cancelDownload", &params)
+          .send(
+            session.as_deref(),
+            &ferridriver_cdp_proto::browser::CancelDownload {
+              guid: &guid,
+              browser_context_id: ctx.as_deref(),
+            },
+          )
           .await
           .map(|_| ())
           .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e.to_string()))
@@ -867,12 +877,15 @@ impl CdpPage {
     download_manager: &crate::download::DownloadManager,
     downloads_dir: &DownloadsDir,
   ) {
-    let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if guid.is_empty() {
+    let Ok(payload) = serde_json::from_value::<ferridriver_cdp_proto::browser::DownloadProgressEvent>(params.clone())
+    else {
+      return;
+    };
+    if payload.guid.is_empty() {
       return;
     }
-    let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("inProgress");
-    match state {
+    let guid = payload.guid;
+    match payload.state.as_str() {
       "completed" => {
         if let Some(d) = download_manager.take_for_guid(&guid) {
           match downloads_dir.remote.get() {
@@ -944,49 +957,42 @@ impl CdpPage {
     binding_tx: &tokio::sync::mpsc::UnboundedSender<BindingCall>,
   ) {
     let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
-    match method {
-      "Runtime.executionContextCreated" => {
-        if let Some(ctx) = event.get("params").and_then(|p| p.get("context")) {
-          let ctx_id = ctx.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0);
-          if let Some(aux) = ctx.get("auxData") {
-            let frame_id = aux.get("frameId").and_then(|v| v.as_str()).unwrap_or("");
-            let is_default = aux
-              .get("isDefault")
-              .and_then(serde_json::Value::as_bool)
-              .unwrap_or(false);
-            if is_default && !frame_id.is_empty() {
-              frame_contexts
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(frame_id.to_string(), ctx_id);
-              contexts_notify.notify_waiters();
-            } else if !frame_id.is_empty() && ctx.get("name").and_then(|v| v.as_str()) == Some(UTILITY_WORLD) {
-              utility_contexts
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(frame_id.to_string(), ctx_id);
-            }
+    let Some(params) = event.get("params") else {
+      return;
+    };
+    match ferridriver_cdp_proto::CdpEvent::parse(method, params) {
+      Some(ferridriver_cdp_proto::CdpEvent::ExecutionContextCreated(ev)) => {
+        let ctx_id = ev.context.id;
+        if let Some(aux) = ev.context.aux_data {
+          let frame_id = aux.frame_id.as_deref().unwrap_or("");
+          let is_default = aux.is_default.unwrap_or(false);
+          if is_default && !frame_id.is_empty() {
+            frame_contexts
+              .write()
+              .unwrap_or_else(std::sync::PoisonError::into_inner)
+              .insert(frame_id.to_string(), ctx_id);
+            contexts_notify.notify_waiters();
+          } else if !frame_id.is_empty() && ev.context.name == UTILITY_WORLD {
+            utility_contexts
+              .write()
+              .unwrap_or_else(std::sync::PoisonError::into_inner)
+              .insert(frame_id.to_string(), ctx_id);
           }
         }
       },
-      "Runtime.executionContextDestroyed" => {
-        if let Some(ctx_id) = event
-          .get("params")
-          .and_then(|p| p.get("executionContextId"))
-          .and_then(serde_json::Value::as_i64)
-        {
-          let mut contexts = frame_contexts
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-          contexts.retain(|_, &mut v| v != ctx_id);
-          drop(contexts);
-          utility_contexts
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, &mut v| v != ctx_id);
-        }
+      Some(ferridriver_cdp_proto::CdpEvent::ExecutionContextDestroyed(ev)) => {
+        let ctx_id = ev.execution_context_id;
+        let mut contexts = frame_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner);
+        contexts.retain(|_, &mut v| v != ctx_id);
+        drop(contexts);
+        utility_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .retain(|_, &mut v| v != ctx_id);
       },
-      "Runtime.executionContextsCleared" => {
+      Some(ferridriver_cdp_proto::CdpEvent::ExecutionContextsCleared) => {
         frame_contexts
           .write()
           .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -995,35 +1001,22 @@ impl CdpPage {
           .write()
           .unwrap_or_else(std::sync::PoisonError::into_inner)
           .clear();
-        // Init scripts registered via `Page.addScriptToEvaluateOnNewDocument`
-        // are page-session-scoped, not context-scoped — they
-        // survive context clears (which happen on every navigation
-        // in Chrome). Resetting here forced a redundant
-        // re-registration RTT on every page navigation.
       },
-      "Runtime.bindingCalled" => {
-        if let Some(params) = event.get("params") {
-          let contexts = frame_contexts.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-          if let Some(call) = Self::parse_binding_called(params, &contexts, target_id) {
-            let _ = binding_tx.send(call);
-          }
+      Some(ferridriver_cdp_proto::CdpEvent::BindingCalled(_)) => {
+        let contexts = frame_contexts.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(call) = Self::parse_binding_called(params, &contexts, target_id) {
+          let _ = binding_tx.send(call);
         }
       },
-      "Page.frameDetached" => {
-        if let Some(fid) = event
-          .get("params")
-          .and_then(|p| p.get("frameId"))
-          .and_then(|v| v.as_str())
-        {
-          frame_contexts
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(fid);
-          utility_contexts
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(fid);
-        }
+      Some(ferridriver_cdp_proto::CdpEvent::FrameDetached(ev)) => {
+        frame_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(&ev.frame_id);
+        utility_contexts
+          .write()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(&ev.frame_id);
       },
       _ => {},
     }
