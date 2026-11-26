@@ -2,7 +2,7 @@
 //! (`crBrowser.ts::doGrantPermissions`, `wkPage.ts::_grantPermissions`,
 //! `bidiBrowser.ts::doGrantPermissions`).
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 fn unknown(permission: &str) -> FerriError {
   FerriError::invalid_argument("permissions", format!("Unknown permission: {permission}"))
@@ -11,7 +11,10 @@ fn unknown(permission: &str) -> FerriError {
 /// `Browser.PermissionType`s for `permissions`. `legacy` is the fallback
 /// Playwright retries with for browsers that predate the newer
 /// local-network names.
-pub(crate) fn chromium(permissions: &[String], legacy: bool) -> Result<Vec<&'static str>> {
+/// # Errors
+///
+/// Returns an error if any permission name is unknown or invalid for Chromium.
+pub fn chromium(permissions: &[String], legacy: bool) -> Result<Vec<&'static str>> {
   let mut out = Vec::with_capacity(permissions.len());
   for permission in permissions {
     let mapped: &[&'static str] = match permission.as_str() {
@@ -39,7 +42,10 @@ pub(crate) fn chromium(permissions: &[String], legacy: bool) -> Result<Vec<&'sta
 }
 
 /// `Emulation.grantPermissions` names for Playwright's `WebKit` build.
-pub(crate) fn webkit(permissions: &[String]) -> Result<Vec<&'static str>> {
+/// # Errors
+///
+/// Returns an error if any permission name is unknown or invalid for `WebKit`.
+pub fn webkit(permissions: &[String]) -> Result<Vec<&'static str>> {
   permissions
     .iter()
     .map(|permission| match permission.as_str() {
@@ -56,7 +62,8 @@ pub(crate) fn webkit(permissions: &[String]) -> Result<Vec<&'static str>> {
 
 /// W3C permission names for `permissions.setPermission`: Playwright's,
 /// except the one that names two descriptors.
-pub(crate) fn bidi(permissions: &[String]) -> Vec<String> {
+#[must_use]
+pub fn bidi(permissions: &[String]) -> Vec<String> {
   permissions
     .iter()
     .flat_map(|permission| match permission.as_str() {
@@ -71,8 +78,8 @@ pub(crate) fn bidi(permissions: &[String]) -> Vec<String> {
 /// # Errors
 ///
 /// An unparseable URL.
-pub(crate) fn origin_of(url: &str) -> Result<String> {
-  reqwest::Url::parse(url)
+pub fn origin_of(url: &str) -> Result<String> {
+  url::Url::parse(url)
     .map(|url| url.origin().ascii_serialization())
     .map_err(|error| FerriError::invalid_argument("origin", format!("{url}: {error}")))
 }

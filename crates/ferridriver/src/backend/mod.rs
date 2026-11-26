@@ -11,17 +11,17 @@
 
 pub(crate) use ferridriver_process::async_tempdir;
 pub mod cdp;
-pub mod common;
-pub(crate) mod json_scan;
-pub(crate) mod keyboard;
+pub use ferridriver_driver::common;
+pub(crate) use ferridriver_driver::json_scan;
+pub(crate) use ferridriver_driver::keyboard;
+pub(crate) use ferridriver_driver::screencast;
 pub use ferridriver_process::process;
 #[cfg(unix)]
 pub use ferridriver_process::reaper;
-pub(crate) mod screencast;
 mod shared_page;
+pub(crate) use ferridriver_driver::transport_tasks;
 pub(crate) use shared_page::ErasedWeakPage;
 pub use shared_page::SharedPageState;
-mod transport_tasks;
 pub mod w3c_input;
 pub mod webdriver;
 pub mod webkit;
@@ -137,13 +137,7 @@ impl PageBackref {
 // ─── Backend-agnostic types ─────────────────────────────────────────────────
 
 /// Frame metadata (backend-agnostic).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct FrameInfo {
-  pub frame_id: String,
-  pub parent_frame_id: Option<String>,
-  pub name: String,
-  pub url: String,
-}
+pub use ferridriver_driver::FrameInfo;
 
 /// Accessibility tree node (backend-agnostic).
 #[derive(Debug, Clone)]

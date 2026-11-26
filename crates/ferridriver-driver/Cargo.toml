@@ -1,0 +1,34 @@
+[package]
+name = "ferridriver-driver"
+description = "Backend-agnostic driver foundation: URL matching, deadlines, budgets, permissions, frame cache, screencast, keyboard state, and shared protocol helpers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver-error = { workspace = true }
+ferridriver-types = { workspace = true }
+futures = { workspace = true }
+memchr = "2"
+pin-project-lite = "0.2"
+regex = { workspace = true }
+ring = { workspace = true }
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = "0.30"
+tracing = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

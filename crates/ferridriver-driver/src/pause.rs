@@ -13,7 +13,7 @@
 //! on while chasing something else. Playwright suspends the same way
 //! (`testInfo._setIgnoreTimeouts` around a paused context).
 //!
-//! [`ActionGate`]: crate::trace::ActionGate
+//! `ActionGate`
 
 use std::borrow::Borrow;
 use std::future::Future;
@@ -111,11 +111,11 @@ pub fn pause_clock() -> &'static PauseClock {
 tokio::task_local! { static TEST_CLOCK: &'static PauseClock; }
 
 #[cfg(test)]
-pub(crate) fn with_test_clock<F: Future>(future: F) -> impl Future<Output = F::Output> {
+pub fn with_test_clock<F: Future>(future: F) -> impl Future<Output = F::Output> {
   TEST_CLOCK.scope(Box::leak(Box::new(PauseClock::new())), future)
 }
 
-pub(crate) fn adjusted_deadline(
+pub fn adjusted_deadline(
   clock: &PauseClock,
   deadline: tokio::time::Instant,
   parked_before: Duration,
@@ -153,18 +153,15 @@ pub async fn run_within<F: Future>(limit: Duration, fut: F) -> Result<F::Output,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Deadline {
+pub struct Deadline {
   clock: Option<&'static PauseClock>,
   at: Option<tokio::time::Instant>,
   parked_before: Duration,
 }
 
 impl Deadline {
-  pub(crate) fn new(
-    clock: Option<&'static PauseClock>,
-    at: Option<tokio::time::Instant>,
-    parked_before: Duration,
-  ) -> Self {
+  #[must_use]
+  pub fn new(clock: Option<&'static PauseClock>, at: Option<tokio::time::Instant>, parked_before: Duration) -> Self {
     Self {
       clock,
       at,
@@ -172,7 +169,8 @@ impl Deadline {
     }
   }
 
-  pub(crate) fn effective(&self) -> Option<tokio::time::Instant> {
+  #[must_use]
+  pub fn effective(&self) -> Option<tokio::time::Instant> {
     self.at.map(|deadline| {
       self
         .clock
@@ -182,7 +180,7 @@ impl Deadline {
 }
 
 pin_project_lite::pin_project! {
-  pub(crate) struct DeadlineFuture<F, D> {
+  pub struct DeadlineFuture<F, D> {
     #[pin]
     future: F,
     timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
@@ -190,7 +188,7 @@ pin_project_lite::pin_project! {
   }
 }
 
-pub(crate) fn with_deadline<F: Future, D: Borrow<Deadline>>(deadline: D, future: F) -> DeadlineFuture<F, D> {
+pub fn with_deadline<F: Future, D: Borrow<Deadline>>(deadline: D, future: F) -> DeadlineFuture<F, D> {
   DeadlineFuture {
     future,
     timer: None,
@@ -198,7 +196,7 @@ pub(crate) fn with_deadline<F: Future, D: Borrow<Deadline>>(deadline: D, future:
   }
 }
 
-pub(crate) fn run_until<F: Future>(
+pub fn run_until<F: Future>(
   clock: &'static PauseClock,
   deadline: tokio::time::Instant,
   parked_before: Duration,

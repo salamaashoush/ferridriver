@@ -3,35 +3,41 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 tokio::task_local! {
   static CURRENT: Option<OperationBudget>;
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct OperationBudget {
+pub struct OperationBudget {
   deadline: crate::pause::Deadline,
   timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Expired {
-  pub(crate) timeout_ms: u64,
+pub struct Expired {
+  pub timeout_ms: u64,
 }
 
 impl Expired {
-  pub(crate) fn error(self, operation: impl Into<String>) -> FerriError {
+  pub fn error(self, operation: impl Into<String>) -> FerriError {
     FerriError::timeout(operation, self.timeout_ms)
   }
 }
 
 impl OperationBudget {
-  pub(crate) fn new(timeout_ms: u64) -> Result<Self> {
+  /// # Errors
+  ///
+  /// Returns an error if the budget cannot be constructed.
+  pub fn new(timeout_ms: u64) -> Result<Self> {
     Self::create(timeout_ms, Some(crate::pause::pause_clock()))
   }
 
-  pub(crate) fn wall_clock(timeout_ms: u64) -> Result<Self> {
+  /// # Errors
+  ///
+  /// Returns an error if the wall-clock budget cannot be constructed.
+  pub fn wall_clock(timeout_ms: u64) -> Result<Self> {
     Self::create(timeout_ms, None)
   }
 
@@ -55,7 +61,10 @@ impl OperationBudget {
     })
   }
 
-  pub(crate) fn operation(timeout_ms: u64) -> Result<Self> {
+  /// # Errors
+  ///
+  /// Returns an error if the operation budget cannot be constructed.
+  pub fn operation(timeout_ms: u64) -> Result<Self> {
     let requested = Self::new(timeout_ms)?;
     Ok(match (Self::capture(), requested.effective_deadline()) {
       (Some(parent), Some(deadline)) if parent.effective_deadline().is_some_and(|limit| limit <= deadline) => parent,
@@ -64,19 +73,24 @@ impl OperationBudget {
     })
   }
 
-  pub(crate) fn capture() -> Option<Self> {
+  #[must_use]
+  pub fn capture() -> Option<Self> {
     CURRENT.try_with(|budget| *budget).ok().flatten()
   }
 
-  pub(crate) fn current(default_ms: u64) -> Result<Self> {
+  /// # Errors
+  ///
+  /// Returns an error if no active budget exists and a fallback cannot be created.
+  pub fn current(default_ms: u64) -> Result<Self> {
     Self::capture().map_or_else(|| Self::new(default_ms), Ok)
   }
 
-  pub(crate) fn scope<F: Future>(self, future: F) -> impl Future<Output = F::Output> {
+  pub fn scope<F: Future>(self, future: F) -> impl Future<Output = F::Output> {
     CURRENT.scope(Some(self), future)
   }
 
-  pub(crate) fn timeout_ms(self) -> u64 {
+  #[must_use]
+  pub fn timeout_ms(self) -> u64 {
     self.timeout_ms
   }
 
@@ -84,7 +98,10 @@ impl OperationBudget {
     self.deadline.effective()
   }
 
-  pub(crate) fn remaining_ms(self) -> std::result::Result<Option<u64>, Expired> {
+  /// # Errors
+  ///
+  /// Returns `Expired` if the budget has already elapsed.
+  pub fn remaining_ms(self) -> std::result::Result<Option<u64>, Expired> {
     self
       .effective_deadline()
       .map(|deadline| {
@@ -99,13 +116,16 @@ impl OperationBudget {
       .transpose()
   }
 
-  pub(crate) fn wait<F: Future>(&self, future: F) -> impl Future<Output = std::result::Result<F::Output, Expired>> {
+  pub fn wait<F: Future>(&self, future: F) -> impl Future<Output = std::result::Result<F::Output, Expired>> {
     use futures::TryFutureExt as _;
     let timeout_ms = self.timeout_ms;
     crate::pause::with_deadline(&self.deadline, future).map_err(move |_| Expired { timeout_ms })
   }
 
-  pub(crate) async fn send<T>(&self, sender: &tokio::sync::mpsc::Sender<T>, value: T) -> Result<()> {
+  /// # Errors
+  ///
+  /// Returns an error if the channel is closed or the budget expires before sending.
+  pub async fn send<T>(&self, sender: &tokio::sync::mpsc::Sender<T>, value: T) -> Result<()> {
     use tokio::sync::mpsc::error::TrySendError;
     self
       .remaining_ms()
@@ -131,7 +151,8 @@ impl OperationBudget {
 
 /// Milliseconds the current operation has left: `None` outside one or
 /// for one without a timeout, `Some(0)` once its deadline has passed.
-pub(crate) fn operation_remaining_ms() -> Option<u64> {
+#[must_use]
+pub fn operation_remaining_ms() -> Option<u64> {
   OperationBudget::capture().and_then(|budget| match budget.remaining_ms() {
     Ok(left) => left,
     Err(_) => Some(0),
@@ -148,7 +169,10 @@ pub(crate) fn operation_remaining_ms() -> Option<u64> {
 /// A command cut off by the deadline fails as the command it was, so once
 /// the deadline has passed a timeout is reported as `operation` timing out,
 /// unless it already carries the operation's own `Call log:`.
-pub(crate) async fn scoped<T>(
+/// # Errors
+///
+/// Returns an error if the budget expires or the scoped future returns an error.
+pub async fn scoped<T>(
   timeout_ms: u64,
   operation: impl FnOnce() -> String,
   future: impl Future<Output = Result<T>>,

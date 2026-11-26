@@ -53,7 +53,8 @@ fn scan_value(data: &[u8], vstart: usize) -> &[u8] {
 /// Find the value for a top-level key in a JSON object. Matches at depth 1
 /// only (inside the outermost {}), so nested keys with the same name don't
 /// confuse it. Returns the raw value bytes (no quotes stripped for strings).
-pub(crate) fn json_field<'a>(data: &'a [u8], key: &[u8]) -> &'a [u8] {
+#[must_use]
+pub fn json_field<'a>(data: &'a [u8], key: &[u8]) -> &'a [u8] {
   let klen = key.len();
   let mut depth: i32 = 0;
   let mut in_str = false;
@@ -99,7 +100,8 @@ pub(crate) fn json_field<'a>(data: &'a [u8], key: &[u8]) -> &'a [u8] {
 }
 
 /// Extract numeric "id" field from CDP JSON. Returns 0 if not found.
-pub(crate) fn json_id(data: &[u8]) -> u64 {
+#[must_use]
+pub fn json_id(data: &[u8]) -> u64 {
   let slice = json_field(data, b"id");
   if slice.is_empty() {
     return 0;
@@ -116,7 +118,8 @@ pub(crate) fn json_id(data: &[u8]) -> u64 {
 
 /// Strip surrounding quotes from a JSON string value. Returns empty if not
 /// a quoted string.
-pub(crate) fn json_string(field: &[u8]) -> &[u8] {
+#[must_use]
+pub fn json_string(field: &[u8]) -> &[u8] {
   let f = field
     .iter()
     .position(|&b| b != b' ' && b != b'\t')
@@ -130,13 +133,14 @@ pub(crate) fn json_string(field: &[u8]) -> &[u8] {
 }
 
 /// Extract the "message" string from an error object.
-pub(crate) fn error_message(error_field: &[u8]) -> &[u8] {
+#[must_use]
+pub fn error_message(error_field: &[u8]) -> &[u8] {
   json_string(json_field(error_field, b"message"))
 }
 
 /// Top-level fields of a CDP JSON message extracted in a single pass.
 #[derive(Default)]
-pub(crate) struct CdpEnvelope<'a> {
+pub struct CdpEnvelope<'a> {
   pub id: u64,
   pub method: &'a [u8],
   pub session_id: &'a [u8],
@@ -148,7 +152,8 @@ pub(crate) struct CdpEnvelope<'a> {
 /// Scan a CDP message once at depth 1 and extract its top-level envelope
 /// fields (`id`, `method`, `sessionId`, `result`, `error`, `params`),
 /// skipping over each field's value in one linear sweep.
-pub(crate) fn scan_cdp_envelope(data: &[u8]) -> CdpEnvelope<'_> {
+#[must_use]
+pub fn scan_cdp_envelope(data: &[u8]) -> CdpEnvelope<'_> {
   let mut env = CdpEnvelope::default();
   let mut depth: i32 = 0;
   let mut in_str = false;

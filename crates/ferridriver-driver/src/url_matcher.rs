@@ -32,7 +32,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 /// Arbitrary URL predicate. Takes the full URL string and returns whether the
 /// matcher accepts it. Must be `Send + Sync` because matchers cross task

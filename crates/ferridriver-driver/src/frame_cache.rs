@@ -1,4 +1,4 @@
-//! Frame tree cache owned by [`crate::Page`].
+//! Frame tree cache owned by `Page`.
 //!
 //! Playwright's `Frame` accessors (`name`, `url`, `parentFrame`,
 //! `childFrames`, `isDetached`, `mainFrame`, `frames`, `frame`) are
@@ -8,7 +8,7 @@
 //! the client keeps an up-to-date in-memory tree. The user never waits.
 //!
 //! `FrameCache` is that tree for ferridriver. It is seeded via a one-shot
-//! call to [`crate::backend::AnyPage::get_frame_tree`] when the Page is
+//! call to `AnyPage::get_frame_tree` when the Page is
 //! constructed, and kept fresh by a listener task that subscribes to the
 //! emitter's `FrameAttached`/`FrameDetached`/`FrameNavigated` events.
 //! Sync accessors on `Page` / `Frame` read from the cache directly.
@@ -16,13 +16,13 @@
 //! Ordering follows Playwright: `frames()` returns the main frame first
 //! (insertion order), then child frames in discovery order.
 
-use crate::backend::FrameInfo;
+use crate::FrameInfo;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 /// One cached frame record.
 #[derive(Debug, Clone)]
-pub(crate) struct FrameRecord {
+pub struct FrameRecord {
   /// Backend-reported frame metadata.
   pub info: FrameInfo,
   /// `true` once `FrameDetached` fires. Detached frames stay in the cache
@@ -34,20 +34,21 @@ pub(crate) struct FrameRecord {
 /// Page-scoped cache of the frame tree. A page always has a main frame,
 /// so the cache is built around one.
 #[derive(Debug)]
-pub(crate) struct FrameCache {
+pub struct FrameCache {
   /// Ordered list of frame ids (Playwright preserves insertion order
   /// when iterating `_frames`).
-  pub(crate) order: Vec<Arc<str>>,
+  pub order: Vec<Arc<str>>,
   /// `frame_id -> record`.
-  pub(crate) by_id: FxHashMap<Arc<str>, FrameRecord>,
+  pub by_id: FxHashMap<Arc<str>, FrameRecord>,
   /// The main frame's current id: the latest top-level frame reported.
-  pub(crate) main_id: Arc<str>,
+  pub main_id: Arc<str>,
 }
 
 impl FrameCache {
   /// A cache holding only the main frame, under the id the backend knows
   /// it by when the page is created.
-  pub(crate) fn new(main_frame_id: &str) -> Self {
+  #[must_use]
+  pub fn new(main_frame_id: &str) -> Self {
     let main_id: Arc<str> = Arc::from(main_frame_id);
     let record = FrameRecord {
       info: FrameInfo {
@@ -70,7 +71,7 @@ impl FrameCache {
   /// The page moved to a new process: every frame but the main one is
   /// gone, and the main frame keeps its record until the new process
   /// reports it under its new id.
-  pub(crate) fn new_process(&mut self) {
+  pub fn new_process(&mut self) {
     let main = Arc::clone(&self.main_id);
     self.by_id.retain(|id, _| *id == main);
     self.order.retain(|id| *id == main);
@@ -84,7 +85,7 @@ impl FrameCache {
   /// in-flight `FrameAttached` event the seeding caller's underlying
   /// `getTree` round-trip raced. Detach is a separate explicit step
   /// via [`Self::detach`].
-  pub(crate) fn seed(&mut self, infos: Vec<FrameInfo>) {
+  pub fn seed(&mut self, infos: Vec<FrameInfo>) {
     for info in infos {
       self.attach(info);
     }
@@ -126,7 +127,7 @@ impl FrameCache {
   /// the cache with a populated `name`, we must NOT clobber it with the
   /// empty one from the attach event. Same applies to a clobbered `url`:
   /// keep the prior value when the new one is empty.
-  pub(crate) fn attach(&mut self, info: FrameInfo) {
+  pub fn attach(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
     if info.parent_frame_id.is_none() {
       self.adopt_main(&id);
@@ -162,7 +163,7 @@ impl FrameCache {
 
   /// Apply a `Page.frameDetached` event — flip the `detached` flag. Keep
   /// the record so stale Frame handles still resolve a name/url.
-  pub(crate) fn detach(&mut self, id: &str) {
+  pub fn detach(&mut self, id: &str) {
     let key: Arc<str> = Arc::from(id);
     if let Some(rec) = self.by_id.get_mut(&key) {
       rec.detached = true;
@@ -177,7 +178,7 @@ impl FrameCache {
   /// (`PERF_AUDIT` §L.3.4 / §M.4): the user's first `page.goto` emits
   /// this event for the main frame, populating the cache without an
   /// extra RTT.
-  pub(crate) fn navigated(&mut self, info: FrameInfo) {
+  pub fn navigated(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
     if info.parent_frame_id.is_none() {
       self.adopt_main(&id);
@@ -224,14 +225,14 @@ impl FrameCache {
   /// the URL changes — name, parentage, and the child-frame subtree all
   /// survive, unlike [`Self::navigated`], which models a cross-document
   /// swap.
-  pub(crate) fn navigated_within(&mut self, frame_id: &str, url: &str) {
+  pub fn navigated_within(&mut self, frame_id: &str, url: &str) {
     let key: Arc<str> = Arc::from(frame_id);
     if let Some(rec) = self.by_id.get_mut(&key) {
       rec.info.url = url.to_string();
     }
   }
 
-  pub(crate) fn detach_descendants(&mut self, parent: &str) {
+  pub fn detach_descendants(&mut self, parent: &str) {
     let children: Vec<Arc<str>> = self
       .by_id
       .iter()
@@ -246,31 +247,34 @@ impl FrameCache {
     }
   }
 
-  pub(crate) fn main_frame_id(&self) -> Arc<str> {
+  #[must_use]
+  pub fn main_frame_id(&self) -> Arc<str> {
     Arc::clone(&self.main_id)
   }
 
   /// Cached record for `id`, if any (includes detached frames).
   /// Record the name a frame was found to have after it was cached.
-  pub(crate) fn rename(&mut self, id: &str, name: &str) {
+  pub fn rename(&mut self, id: &str, name: &str) {
     if let Some(record) = self.by_id.get_mut(id) {
       name.clone_into(&mut record.info.name);
     }
   }
 
-  pub(crate) fn record(&self, id: &str) -> Option<&FrameRecord> {
+  #[must_use]
+  pub fn record(&self, id: &str) -> Option<&FrameRecord> {
     self.by_id.get(id)
   }
 
   /// Snapshot every cached frame id — includes detached records so
-  /// [`crate::element_handle::ElementHandle::content_frame`] can still
+  /// `ElementHandle::content_frame` can still
   /// attribute an iframe whose frame has just detached.
-  pub(crate) fn all_frame_ids(&self) -> Vec<Arc<str>> {
+  #[must_use]
+  pub fn all_frame_ids(&self) -> Vec<Arc<str>> {
     self.order.clone()
   }
 
   /// Iterate non-detached frame ids in insertion order.
-  pub(crate) fn live_ids(&self) -> impl Iterator<Item = Arc<str>> + '_ {
+  pub fn live_ids(&self) -> impl Iterator<Item = Arc<str>> + '_ {
     self.order.iter().filter_map(|id| {
       let rec = self.by_id.get(id)?;
       if rec.detached { None } else { Some(Arc::clone(id)) }
@@ -278,7 +282,8 @@ impl FrameCache {
   }
 
   /// Iterate ids of the children of `parent_id` (non-detached only).
-  pub(crate) fn child_ids(&self, parent_id: &str) -> Vec<Arc<str>> {
+  #[must_use]
+  pub fn child_ids(&self, parent_id: &str) -> Vec<Arc<str>> {
     self
       .order
       .iter()
@@ -297,7 +302,7 @@ impl FrameCache {
   }
 
   /// Parent id of `child_id`, if any.
-  pub(crate) fn parent_id(&self, child_id: &str) -> Option<Arc<str>> {
+  pub fn parent_id(&self, child_id: &str) -> Option<Arc<str>> {
     self.by_id.get(child_id)?.info.parent_frame_id.as_deref().map(Arc::from)
   }
 }

@@ -28,6 +28,7 @@ ferridriver-trace = { workspace = true }
 ferridriver-types = { workspace = true }
 ferridriver-error = { workspace = true }
 ferridriver-process = { workspace = true }
+ferridriver-driver = { workspace = true }
 ferridriver-audits = { workspace = true }
 ferridriver-install = { workspace = true }
 ferridriver-cdp-proto = { workspace = true }
