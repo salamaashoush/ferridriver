@@ -198,6 +198,30 @@ impl super::transport::CdpTransport for WsTransport {
     result
   }
 
+  #[tracing::instrument(skip(self, session_id, raw_params_json), fields(method))]
+  async fn send_command_raw(
+    &self,
+    session_id: Option<&str>,
+    method: &str,
+    raw_params_json: &str,
+  ) -> Result<serde_json::Value> {
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+    let (id, mut data, rx) = self.dispatcher.build_command_raw(session_id, method, raw_params_json)?;
+    let mut pending = self.dispatcher.pending_command(id);
+    if data.last() == Some(&0) {
+      data.pop();
+    }
+    let text = String::from_utf8(data).map_err(|error| FerriError::backend(format!("UTF-8: {error}")))?;
+    budget.send(&self.write_tx, Message::Text(text.into())).await?;
+    let result = budget
+      .wait(rx)
+      .await
+      .map_err(|error| error.error(format!("waiting for {method} response")))?
+      .map_err(|_| FerriError::backend(format!("Response channel dropped for {method}")))?;
+    pending.completed();
+    result
+  }
+
   fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
     self.dispatcher.subscribe_events()
   }

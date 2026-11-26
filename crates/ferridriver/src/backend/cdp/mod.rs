@@ -444,6 +444,10 @@ fn glob_to_cdp_url_pattern(pattern: &str) -> Option<String> {
   Some(out)
 }
 
+pub(super) const EMPTY_PARAMS_RAW: &str = "{}";
+pub(super) const ENABLED_TRUE_RAW: &str = r#"{"enabled":true}"#;
+pub(super) const AUTOATTACH_PARAMS_RAW: &str = r#"{"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true}"#;
+
 /// Default `Emulation.setEmulatedMedia` params matching [`crate::backend::MediaEmulation::effective`]
 /// when neither context nor page specifies custom media overrides. Shipped in the
 /// initial `enable_domains` / recycle batch so `apply_context_options` skips the
@@ -458,6 +462,13 @@ pub(super) fn default_emulated_media_params() -> serde_json::Value {
     ],
     "media": "",
   })
+}
+
+/// Pre-serialized wire JSON for [`default_emulated_media_params`], computed once
+/// per process for zero-allocation dispatch in page bootstrap and recycling.
+pub(super) fn default_emulated_media_raw() -> &'static str {
+  static RAW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+  RAW.get_or_init(|| serde_json::to_string(&default_emulated_media_params()).unwrap_or_else(|_| "{}".to_string()))
 }
 
 /// How much bigger than its viewport a browser window has to be for the
@@ -576,8 +587,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
     unpause: bool,
     init_script: Option<&str>,
   ) -> Result<Option<Vec<super::FrameInfo>>> {
-    let ep = &super::EMPTY_PARAMS;
-
     // Page bootstrap has no context options yet; a `screen` in the bag
     // is applied by `apply_context_options`, which re-sends this
     // override with it.
@@ -602,7 +611,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let unpause_fut = async {
       if unpause {
         transport
-          .send_command(session_id, "Runtime.runIfWaitingForDebugger", &super::EMPTY_PARAMS)
+          .send_command_raw(session_id, "Runtime.runIfWaitingForDebugger", EMPTY_PARAMS_RAW)
           .await
           .map(|_| ())
       } else {
@@ -617,10 +626,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // the lazy `ensure_engine_injected` RTT.
     let inject_fut = async {
       if let Some(src) = init_script {
-        let [main, utility] = engine_registrations(src, true);
+        let [main, utility] = engine_registrations_raw(src, true);
         tokio::try_join!(
-          transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", &main),
-          transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", &utility),
+          transport.send_command_raw(session_id, "Page.addScriptToEvaluateOnNewDocument", &main),
+          transport.send_command_raw(session_id, "Page.addScriptToEvaluateOnNewDocument", &utility),
         )
         .map(|_| ())
       } else {
@@ -650,29 +659,28 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // bootstrap batch is dominated by a fixed ~67ms wait for the new
     // target's renderer, after which all eleven responses land inside
     // 15ms — so command count is not what this costs.
-    let lifecycle_params = serde_json::json!({"enabled": true});
-    let autoattach_params = serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true});
+    //
     // Focus emulation keeps the page believing it is focused for its
     // whole life (Playwright's crPage._initialize sends the same).
     // Without it a failed main-frame navigation (aborted route, DNS
     // error) leaves the headless target unfocused, and Chromium then
     // suppresses `Page.screencastFrame` delivery entirely — a
     // screencast started afterwards records zero frames.
-    let focus_params = serde_json::json!({"enabled": true});
+    //
     // `Inspector.enable` is what makes Chromium report a renderer crash
     // (`Inspector.targetCrashed`, `page.on('crash')`).
     // `DOM.enable` is omitted — `DOM.getDocument` enables it implicitly
     // when needed, and Playwright never sends it during page bootstrap.
-    let default_media = default_emulated_media_params();
+    let default_media = default_emulated_media_raw();
     let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11) = tokio::join!(
-      transport.send_command(session_id, "Page.enable", ep),
-      transport.send_command(session_id, "Runtime.enable", ep),
-      transport.send_command(session_id, "Network.enable", ep),
-      transport.send_command(session_id, "Page.setLifecycleEventsEnabled", &lifecycle_params),
-      transport.send_command(session_id, "Target.setAutoAttach", &autoattach_params),
-      transport.send_command(session_id, "Emulation.setFocusEmulationEnabled", &focus_params),
-      transport.send_command(session_id, "Inspector.enable", ep),
-      transport.send_command(session_id, "Emulation.setEmulatedMedia", &default_media),
+      transport.send_command_raw(session_id, "Page.enable", EMPTY_PARAMS_RAW),
+      transport.send_command_raw(session_id, "Runtime.enable", EMPTY_PARAMS_RAW),
+      transport.send_command_raw(session_id, "Network.enable", EMPTY_PARAMS_RAW),
+      transport.send_command_raw(session_id, "Page.setLifecycleEventsEnabled", ENABLED_TRUE_RAW),
+      transport.send_command_raw(session_id, "Target.setAutoAttach", AUTOATTACH_PARAMS_RAW),
+      transport.send_command_raw(session_id, "Emulation.setFocusEmulationEnabled", ENABLED_TRUE_RAW),
+      transport.send_command_raw(session_id, "Inspector.enable", EMPTY_PARAMS_RAW),
+      transport.send_command_raw(session_id, "Emulation.setEmulatedMedia", default_media),
       vp_fut,
       inject_fut,
       unpause_fut,
@@ -2885,11 +2893,35 @@ const DRAG_CLEANUP_JS: &str = "window.__cleanupDrag ? window.__cleanupDrag() : f
 /// `run_immediately` is for a page whose current document is to be used
 /// as it is. A caller about to navigate leaves it off and lets the new
 /// document take the engine through the cached path.
-fn engine_registrations(source: &str, run_immediately: bool) -> [serde_json::Value; 2] {
+fn serialize_engine_registrations(source: &str, run_immediately: bool) -> [String; 2] {
+  let escaped = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".to_string());
   [
-    serde_json::json!({ "source": source, "runImmediately": run_immediately }),
-    serde_json::json!({ "source": source, "worldName": UTILITY_WORLD }),
+    format!(r#"{{"source":{escaped},"runImmediately":{run_immediately}}}"#),
+    format!(r#"{{"source":{escaped},"worldName":"{UTILITY_WORLD}"}}"#),
   ]
+}
+
+/// Pre-serialized `Page.addScriptToEvaluateOnNewDocument` JSON payloads for the
+/// main and utility worlds.
+///
+/// When `source` points to the default static bundle (`lazy_inject_js()`), returns
+/// cached process-wide JSON strings without cloning or re-escaping the 113 KB
+/// engine script on every page creation.
+pub(super) fn engine_registrations_raw(source: &str, run_immediately: bool) -> [std::borrow::Cow<'static, str>; 2] {
+  use std::borrow::Cow;
+  use std::sync::OnceLock;
+
+  if let Cow::Borrowed(static_src) = crate::selectors::lazy_inject_js()
+    && std::ptr::eq(source, static_src)
+  {
+    static IMMEDIATE: OnceLock<[String; 2]> = OnceLock::new();
+    static DEFERRED: OnceLock<[String; 2]> = OnceLock::new();
+    let cache = if run_immediately { &IMMEDIATE } else { &DEFERRED };
+    let pair = cache.get_or_init(|| serialize_engine_registrations(static_src, run_immediately));
+    return [Cow::Borrowed(pair[0].as_str()), Cow::Borrowed(pair[1].as_str())];
+  }
+  let [main, utility] = serialize_engine_registrations(source, run_immediately);
+  [Cow::Owned(main), Cow::Owned(utility)]
 }
 
 pub struct InjectedScriptManager {
@@ -2923,10 +2955,11 @@ impl InjectedScriptManager {
     // fail to resolve. Mirrors Playwright's
     // `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts`
     // injection pattern.
-    let [main, utility] = engine_registrations(&crate::selectors::build_lazy_inject_js(), true);
+    let src = crate::selectors::lazy_inject_js();
+    let [main, utility] = engine_registrations_raw(&src, true);
     tokio::try_join!(
-      Box::pin(page.cmd("Page.addScriptToEvaluateOnNewDocument", main)),
-      Box::pin(page.cmd("Page.addScriptToEvaluateOnNewDocument", utility)),
+      Box::pin(page.cmd_raw("Page.addScriptToEvaluateOnNewDocument", &main)),
+      Box::pin(page.cmd_raw("Page.addScriptToEvaluateOnNewDocument", &utility)),
     )?;
     self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
@@ -3036,6 +3069,18 @@ impl<T: CdpWrap> CdpPage<T> {
     self
       .transport
       .send_command(self.session_id.as_deref(), method, &params)
+      .await
+  }
+
+  async fn cmd_raw(&self, method: &str, raw_params_json: &str) -> Result<serde_json::Value> {
+    if self.setup.is_paused() {
+      let params: serde_json::Value =
+        serde_json::from_str(raw_params_json).map_err(|e| FerriError::Backend(format!("Parse: {e}")))?;
+      return Box::pin(self.cmd_while_paused(method, params)).await;
+    }
+    self
+      .transport
+      .send_command_raw(self.session_id.as_deref(), method, raw_params_json)
       .await
   }
 
