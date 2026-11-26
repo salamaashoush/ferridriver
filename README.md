@@ -50,7 +50,7 @@ support: [BENCHMARKING.md](./BENCHMARKING.md). Reproduce with
 
 ## Project layout
 
-29 workspace crates plus two example crates.
+30 workspace crates plus two example crates.
 
 | Crate                          | Purpose |
 |--------------------------------|---------|
@@ -61,6 +61,7 @@ support: [BENCHMARKING.md](./BENCHMARKING.md). Reproduce with
 | `ferridriver-cdp-proto`        | Strongly typed Chrome DevTools Protocol commands and events |
 | `ferridriver-bidi-proto`       | Strongly typed WebDriver BiDi commands and events |
 | `ferridriver-webkit-proto`     | Strongly typed Playwright WebKit Inspector commands and events |
+| `ferridriver-webdriver-proto`  | Strongly typed W3C Classic WebDriver HTTP commands and responses |
 | `ferridriver-audits`           | Accessibility (axe-core), security, SEO, and link audits |
 | `ferridriver-install`          | Browser binary download, cache, and version management |
 | `ferridriver-codegen`          | Interactive browser recorder, Rust / TypeScript / Gherkin emitters, and script code echo |

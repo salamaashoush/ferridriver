@@ -85,7 +85,9 @@ impl WebDriverPage {
         .activate_native_page((*self.target).clone(), self.timeout_ms)
         .await;
     }
-    self.command(Command::get(&["window"])).await?;
+    self
+      .send_typed(&ferridriver_webdriver_proto::window::GetWindowHandle)
+      .await?;
     Ok(())
   }
 

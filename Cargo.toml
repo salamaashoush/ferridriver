@@ -28,6 +28,7 @@ default-members = [
   "crates/ferridriver-cdp-proto",
   "crates/ferridriver-bidi-proto",
   "crates/ferridriver-webkit-proto",
+  "crates/ferridriver-webdriver-proto",
   "crates/ferridriver-codegen",
   "examples/bdd-example",
 ]
@@ -150,6 +151,7 @@ ferridriver-install = { path = "crates/ferridriver-install", version = "0.8.1" }
 ferridriver-cdp-proto = { path = "crates/ferridriver-cdp-proto", version = "0.8.1" }
 ferridriver-bidi-proto = { path = "crates/ferridriver-bidi-proto", version = "0.8.1" }
 ferridriver-webkit-proto = { path = "crates/ferridriver-webkit-proto", version = "0.8.1" }
+ferridriver-webdriver-proto = { path = "crates/ferridriver-webdriver-proto", version = "0.8.1" }
 ferridriver-codegen = { path = "crates/ferridriver-codegen", version = "0.8.1" }
 # The JavaScript runtime this project's scripting is built on. To develop
 # the two together, point these back at `../ferrijs/crates/*` with a

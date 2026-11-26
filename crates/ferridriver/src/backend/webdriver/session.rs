@@ -132,6 +132,27 @@ impl Command {
       body: Some(body),
     }
   }
+
+  /// Lower a strongly typed [`ferridriver_webdriver_proto::Command`] into a wire command.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the command body fails to serialize to JSON.
+  pub fn from_typed<C: ferridriver_webdriver_proto::Command>(cmd: &C) -> Result<Self> {
+    let method = match C::HTTP_METHOD {
+      ferridriver_webdriver_proto::HttpMethod::Get => Method::GET,
+      ferridriver_webdriver_proto::HttpMethod::Post => Method::POST,
+      ferridriver_webdriver_proto::HttpMethod::Delete => Method::DELETE,
+    };
+    let body = cmd
+      .body()
+      .map_err(|error| FerriError::protocol("WebDriver serialize", error.to_string()))?;
+    Ok(Self {
+      method,
+      path: cmd.path(),
+      body,
+    })
+  }
 }
 
 impl WebDriverSession {
@@ -383,24 +404,36 @@ impl WebDriverSession {
   async fn select(&self, target: &Target, timeout_ms: u64) -> Result<()> {
     if let Some(context) = &target.appium_context {
       self
-        .request(Command::post(&["context"], json!({"name": context})), timeout_ms)
+        .request(
+          Command::from_typed(&ferridriver_webdriver_proto::session::SwitchContext { name: context })?,
+          timeout_ms,
+        )
         .await?;
     }
     if let Some(window) = &target.window {
       self
-        .request(Command::post(&["window"], json!({"handle": window})), timeout_ms)
+        .request(
+          Command::from_typed(&ferridriver_webdriver_proto::window::SwitchToWindow { handle: window })?,
+          timeout_ms,
+        )
         .await?;
       *self
         .selected_window
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(window.clone());
       self
-        .request(Command::post(&["frame"], json!({"id": null})), timeout_ms)
+        .request(
+          Command::from_typed(&ferridriver_webdriver_proto::window::SwitchToFrame { id: Value::Null })?,
+          timeout_ms,
+        )
         .await?;
     }
     for frame in &target.frames {
       self
-        .request(Command::post(&["frame"], json!({"id": frame})), timeout_ms)
+        .request(
+          Command::from_typed(&ferridriver_webdriver_proto::window::SwitchToFrame { id: frame.clone() })?,
+          timeout_ms,
+        )
         .await?;
     }
     Ok(())

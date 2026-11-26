@@ -295,16 +295,25 @@ impl WebDriverPage {
     Ok(page)
   }
 
+  pub(super) async fn send_typed<C: ferridriver_webdriver_proto::Command>(&self, cmd: &C) -> Result<C::Response> {
+    let raw = self.command(Command::from_typed(cmd)?).await?;
+    serde_json::from_value(raw).map_err(|error| {
+      FerriError::protocol(
+        format!("WebDriver {} /{}", C::HTTP_METHOD.as_str(), cmd.path().join("/")),
+        error.to_string(),
+      )
+    })
+  }
+
   /// # Errors
   ///
   /// Returns an error when the `WebDriver` `GET /session/{id}/screenshot` command fails or the window
   /// is closed, and `FerriError::Protocol` when the response is not base64 PNG data.
   pub async fn screenshot_png(&self) -> Result<Vec<u8>> {
     use base64::Engine;
-    let value = self.command(Command::get(&["screenshot"])).await?;
-    let encoded = value
-      .as_str()
-      .ok_or_else(|| FerriError::protocol("WebDriver screenshot", "expected base64 PNG"))?;
+    let encoded = self
+      .send_typed(&ferridriver_webdriver_proto::document::TakeScreenshot)
+      .await?;
     base64::engine::general_purpose::STANDARD
       .decode(encoded)
       .map_err(|error| FerriError::protocol("WebDriver screenshot", error.to_string()))
@@ -318,12 +327,8 @@ impl WebDriverPage {
     if self.is_closed() {
       return Ok(());
     }
-    self
-      .command(Command {
-        method: reqwest::Method::DELETE,
-        path: vec!["window".into()],
-        body: None,
-      })
+    let _ = self
+      .send_typed(&ferridriver_webdriver_proto::window::CloseWindow)
       .await?;
     self.dispose_local();
     Ok(())
@@ -352,11 +357,10 @@ impl WebDriverPage {
   /// Returns an error when the `WebDriver` `GET /session/{id}/title` command fails or the window is
   /// closed, and `FerriError::Protocol` when the title is not a string.
   pub async fn title(&self) -> Result<Option<String>> {
-    let value = self.command(Command::get(&["title"])).await?;
-    value
-      .as_str()
-      .map(|s| Some(s.to_owned()))
-      .ok_or_else(|| FerriError::protocol("WebDriver title", "expected a string"))
+    self
+      .send_typed(&ferridriver_webdriver_proto::navigation::GetTitle)
+      .await
+      .map(Some)
   }
 
   /// # Errors
@@ -364,11 +368,10 @@ impl WebDriverPage {
   /// Returns an error when the `WebDriver` `GET /session/{id}/url` command fails or the window is
   /// closed, and `FerriError::Protocol` when the URL is not a string.
   pub async fn url(&self) -> Result<Option<String>> {
-    let value = self.command(Command::get(&["url"])).await?;
-    value
-      .as_str()
-      .map(|s| Some(s.to_owned()))
-      .ok_or_else(|| FerriError::protocol("WebDriver url", "expected a string"))
+    self
+      .send_typed(&ferridriver_webdriver_proto::navigation::GetCurrentUrl)
+      .await
+      .map(Some)
   }
 
   /// # Errors
@@ -376,11 +379,9 @@ impl WebDriverPage {
   /// Returns an error when the `WebDriver` `GET /session/{id}/source` command fails or the window is
   /// closed, and `FerriError::Protocol` when the source is not a string.
   pub async fn content(&self) -> Result<String> {
-    let value = self.command(Command::get(&["source"])).await?;
-    value
-      .as_str()
-      .map(str::to_owned)
-      .ok_or_else(|| FerriError::protocol("WebDriver source", "expected a string"))
+    self
+      .send_typed(&ferridriver_webdriver_proto::document::GetPageSource)
+      .await
   }
 
   /// # Errors

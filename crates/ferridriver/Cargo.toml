@@ -34,6 +34,7 @@ ferridriver-install = { workspace = true }
 ferridriver-cdp-proto = { workspace = true }
 ferridriver-bidi-proto = { workspace = true }
 ferridriver-webkit-proto = { workspace = true }
+ferridriver-webdriver-proto = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
 tokio-tungstenite = "0.30"
