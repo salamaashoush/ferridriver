@@ -118,4 +118,43 @@ mod tests {
     );
     assert!(matches!(dl, Some(CdpEvent::DownloadProgress(e)) if e.guid == "g1" && e.state == "completed"));
   }
+
+  #[test]
+  fn parses_frame_lifecycle_target_and_rejects_unknown_or_malformed() {
+    let nav = CdpEvent::parse(
+      "Page.frameNavigated",
+      &serde_json::json!({
+        "frame": { "id": "F1", "url": "https://example.test/", "name": "main" }
+      }),
+    );
+    assert!(matches!(nav, Some(CdpEvent::FrameNavigated(e)) if e.frame.id == "F1"));
+
+    let life = CdpEvent::parse(
+      "Page.lifecycleEvent",
+      &serde_json::json!({
+        "frameId": "F1",
+        "loaderId": "L1",
+        "name": "load",
+        "timestamp": 1.0
+      }),
+    );
+    assert!(matches!(life, Some(CdpEvent::LifecycleEvent(e)) if e.name == "load" && e.loader_id == "L1"));
+
+    let attached = CdpEvent::parse(
+      "Target.attachedToTarget",
+      &serde_json::json!({
+        "sessionId": "S1",
+        "targetInfo": { "targetId": "T1", "type": "page", "url": "about:blank" },
+        "waitingForDebugger": true
+      }),
+    );
+    assert!(matches!(attached, Some(CdpEvent::AttachedToTarget(e)) if e.session_id == "S1" && e.waiting_for_debugger));
+
+    assert!(matches!(
+      CdpEvent::parse("Inspector.targetCrashed", &serde_json::json!({})),
+      Some(CdpEvent::TargetCrashed)
+    ));
+    assert!(CdpEvent::parse("Unknown.method", &serde_json::json!({})).is_none());
+    assert!(CdpEvent::parse("Page.frameNavigated", &serde_json::json!({ "bad": true })).is_none());
+  }
 }

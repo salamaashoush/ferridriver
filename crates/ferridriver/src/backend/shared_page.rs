@@ -275,6 +275,11 @@ pub(crate) fn dispatch_download_started(
 
 #[cfg(test)]
 mod tests {
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicBool, Ordering};
+
+  use super::*;
+
   #[test]
   fn any_page_stays_pointer_sized() {
     assert!(
@@ -282,5 +287,164 @@ mod tests {
       "AnyPage grew to {} bytes; backend pages must stay Arc-wrapped",
       std::mem::size_of::<super::super::AnyPage>(),
     );
+  }
+
+  #[tokio::test]
+  async fn page_event_sink_dispatches_all_lifecycle_and_frame_signals() {
+    let state = SharedPageState::new("main-1");
+    let sink: &dyn PageEventSink = &state;
+    let mut rx = state.events.subscribe();
+
+    sink.on_lifecycle(PageLifecycleSignal::DomContentLoaded);
+    sink.on_lifecycle(PageLifecycleSignal::Load);
+    sink.on_lifecycle(PageLifecycleSignal::Crash);
+    sink.on_lifecycle(PageLifecycleSignal::Close);
+
+    let frame = ferridriver_driver::FrameInfo {
+      frame_id: "sub-1".into(),
+      parent_frame_id: Some("main-1".into()),
+      name: "child".into(),
+      url: "https://example.test/sub".into(),
+    };
+    sink.on_frame(FrameSignal::Attached(frame.clone()));
+    sink.on_frame(FrameSignal::Navigated(frame.clone()));
+    sink.on_frame(FrameSignal::NavigatedWithinDocument(frame));
+    sink.on_frame(FrameSignal::Detached {
+      frame_id: "sub-1".into(),
+    });
+
+    assert!(matches!(rx.recv().await.unwrap(), PageEvent::DomContentLoaded));
+    assert!(matches!(rx.recv().await.unwrap(), PageEvent::Load));
+    assert!(matches!(rx.recv().await.unwrap(), PageEvent::Crash));
+    assert!(matches!(rx.recv().await.unwrap(), PageEvent::Close));
+    assert!(matches!(
+      rx.recv().await.unwrap(),
+      PageEvent::FrameAttached(info) if info.frame_id == "sub-1"
+    ));
+    assert!(matches!(
+      rx.recv().await.unwrap(),
+      PageEvent::FrameNavigated(info) if info.frame_id == "sub-1"
+    ));
+    assert!(matches!(
+      rx.recv().await.unwrap(),
+      PageEvent::FrameNavigatedWithinDocument(info) if info.frame_id == "sub-1"
+    ));
+    assert!(matches!(
+      rx.recv().await.unwrap(),
+      PageEvent::FrameDetached { frame_id } if frame_id == "sub-1"
+    ));
+  }
+
+  #[tokio::test]
+  async fn dispatch_dialog_auto_dismisses_unclaimed_and_delivers_when_claimed() {
+    use crate::dialog::DialogResponse;
+
+    let state = SharedPageState::new("main-1");
+    let dialog_log = Arc::new(RwLock::new(Vec::new()));
+
+    // Unclaimed dialog must auto-dismiss synchronously through the responder.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+    let responder: DialogResponder = Arc::new(move |response| {
+      let tx = Arc::clone(&tx);
+      Box::pin(async move {
+        let sender = tx.lock().unwrap().take();
+        if let Some(sender) = sender {
+          let _ = sender.send(response);
+        }
+        Ok(())
+      })
+    });
+    dispatch_dialog_event(
+      &state.page_backref,
+      &state.dialog_manager,
+      &dialog_log,
+      "confirm".into(),
+      "Are you sure?".into(),
+      String::new(),
+      responder,
+    )
+    .await;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+      .await
+      .expect("unclaimed dialog must respond")
+      .expect("channel open");
+    assert!(
+      matches!(response, DialogResponse::Dismiss),
+      "unclaimed confirm must be dismissed"
+    );
+    assert_eq!(dialog_log.read().await.len(), 1);
+
+    // Claimed dialog via emitter bridge delivers to the page event listener.
+    state.register_emitter_bridges();
+    let seen = Arc::new(AtomicBool::new(false));
+    let seen_cb = Arc::clone(&seen);
+    let _id = state.events.on(
+      "dialog",
+      Arc::new(move |ev| {
+        if let PageEvent::Dialog(dialog) = ev {
+          seen_cb.store(true, Ordering::SeqCst);
+          tokio::spawn(async move {
+            let _ = dialog.accept(Some("alice".to_string())).await;
+          });
+        }
+      }),
+    );
+
+    let (tx2, rx2) = tokio::sync::oneshot::channel();
+    let tx2 = Arc::new(std::sync::Mutex::new(Some(tx2)));
+    let responder2: DialogResponder = Arc::new(move |response| {
+      let tx2 = Arc::clone(&tx2);
+      Box::pin(async move {
+        let sender = tx2.lock().unwrap().take();
+        if let Some(sender) = sender {
+          let _ = sender.send(response);
+        }
+        Ok(())
+      })
+    });
+    dispatch_dialog_event(
+      &state.page_backref,
+      &state.dialog_manager,
+      &dialog_log,
+      "prompt".into(),
+      "Name?".into(),
+      "default".into(),
+      responder2,
+    )
+    .await;
+    let response2 = tokio::time::timeout(std::time::Duration::from_secs(2), rx2)
+      .await
+      .expect("claimed dialog must respond")
+      .expect("channel open");
+    assert!(seen.load(Ordering::SeqCst));
+    assert!(matches!(
+      response2,
+      DialogResponse::Accept { prompt_text } if prompt_text.as_deref() == Some("alice")
+    ));
+    assert_eq!(dialog_log.read().await.len(), 2);
+  }
+
+  #[tokio::test]
+  async fn dispatch_page_error_emits_detached_error_without_live_page() {
+    let state = SharedPageState::new("main-1");
+    let mut rx = state.events.subscribe();
+    let details = ErrorDetails::new("TypeError", "boom", "TypeError: boom\n  at app.js:12:4");
+    let location = ConsoleMessageLocation {
+      url: "https://example.test/app.js".into(),
+      line_number: 12,
+      column_number: 4,
+    };
+    dispatch_page_error_event(&state.page_backref, &state.events, details, location);
+
+    match rx.recv().await.unwrap() {
+      PageEvent::PageError(err) => {
+        assert_eq!(err.error().name, "TypeError");
+        assert_eq!(err.error().message, "boom");
+        assert_eq!(err.location().url, "https://example.test/app.js");
+        assert_eq!(err.location().line_number, 12);
+      },
+      other => panic!("expected PageEvent::PageError, got {other:?}"),
+    }
   }
 }

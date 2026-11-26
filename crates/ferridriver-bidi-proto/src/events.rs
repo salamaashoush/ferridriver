@@ -80,4 +80,49 @@ mod tests {
       matches!(file, Some(BidiEvent::FileDialogOpened(e)) if e.multiple && e.element.as_ref().and_then(|el| el.shared_id.as_deref()) == Some("el-42"))
     );
   }
+
+  #[test]
+  fn parses_navigation_log_script_and_rejects_unknown_or_malformed() {
+    let nav = BidiEvent::parse(
+      "browsingContext.load",
+      &serde_json::json!({
+        "context": "ctx-1",
+        "url": "https://example.test/page"
+      }),
+    );
+    assert!(matches!(nav, Some(BidiEvent::Load(e)) if e.context == "ctx-1" && e.url == "https://example.test/page"));
+
+    let log = BidiEvent::parse(
+      "log.entryAdded",
+      &serde_json::json!({
+        "type": "console",
+        "level": "info",
+        "method": "log",
+        "text": "hello",
+        "timestamp": 42,
+        "source": { "context": "ctx-1" },
+        "args": [{ "type": "string", "value": "hello" }]
+      }),
+    );
+    assert!(matches!(log, Some(BidiEvent::LogEntryAdded(e)) if e.text.as_deref() == Some("hello")));
+
+    let msg = BidiEvent::parse(
+      "script.message",
+      &serde_json::json!({
+        "channel": "__fd_bind",
+        "data": { "type": "string", "value": "{}" },
+        "source": { "context": "ctx-1", "realm": "r-1" }
+      }),
+    );
+    assert!(matches!(msg, Some(BidiEvent::ScriptMessage(e)) if e.channel == "__fd_bind"));
+
+    assert!(BidiEvent::parse("unknown.event", &serde_json::json!({})).is_none());
+    assert!(
+      BidiEvent::parse(
+        "browsingContext.userPromptOpened",
+        &serde_json::json!({ "context": 123 })
+      )
+      .is_none()
+    );
+  }
 }

@@ -76,4 +76,49 @@ mod tests {
     );
     assert!(matches!(dl, Some(WebKitEvent::DownloadCreated(e)) if e.uuid == "u-1"));
   }
+
+  #[test]
+  fn parses_dialog_target_file_chooser_and_rejects_unknown_or_malformed() {
+    let dialog = WebKitEvent::parse(
+      "Dialog.javascriptDialogOpening",
+      &serde_json::json!({
+        "type": "alert",
+        "message": "Saved!",
+        "defaultPrompt": ""
+      }),
+    );
+    assert!(matches!(dialog, Some(WebKitEvent::JavascriptDialogOpening(e)) if e.message == "Saved!"));
+    assert!(matches!(
+      WebKitEvent::parse("Dialog.javascriptDialogClosed", &serde_json::json!({})),
+      Some(WebKitEvent::JavascriptDialogClosed)
+    ));
+
+    let swap = WebKitEvent::parse(
+      "Target.didCommitProvisionalTarget",
+      &serde_json::json!({
+        "oldTargetId": "page-1",
+        "newTargetId": "page-2"
+      }),
+    );
+    assert!(
+      matches!(swap, Some(WebKitEvent::DidCommitProvisionalTarget(e)) if e.old_target_id == "page-1" && e.new_target_id == "page-2")
+    );
+
+    let proxy = WebKitEvent::parse(
+      "Playwright.pageProxyCreated",
+      &serde_json::json!({
+        "pageProxyInfo": {
+          "pageProxyId": "pp-1",
+          "browserContextId": "bc-1",
+          "openerId": "pp-0"
+        }
+      }),
+    );
+    assert!(
+      matches!(proxy, Some(WebKitEvent::PageProxyCreated(e)) if e.page_proxy_info.page_proxy == "pp-1" && e.page_proxy_info.opener.as_deref() == Some("pp-0"))
+    );
+
+    assert!(WebKitEvent::parse("Unknown.event", &serde_json::json!({})).is_none());
+    assert!(WebKitEvent::parse("Playwright.downloadCreated", &serde_json::json!({ "uuid": 123 })).is_none());
+  }
 }
