@@ -160,7 +160,7 @@ impl WebKitPage {
         .await
         .map_err(conn_err)?;
       self
-        .add_init_script(crate::backend::cdp::CdpPage::BINDING_CONTROLLER_JS)
+        .add_init_script(crate::backend::common::BINDING_CONTROLLER_JS)
         .await?;
     }
     self.exposed_fns.write().await.insert(name.to_string(), binding);
@@ -170,7 +170,7 @@ impl WebKitPage {
     // cannot stall the pump — completes right after `Target.resume`
     // (the controller init script guards double-install).
     let this = self.clone();
-    let controller_and_register = format!("{};{register_js}", crate::backend::cdp::CdpPage::BINDING_CONTROLLER_JS);
+    let controller_and_register = format!("{};{register_js}", crate::backend::common::BINDING_CONTROLLER_JS);
     tokio::spawn(async move {
       let _ = this.runtime_evaluate(&controller_and_register, true).await;
     });
@@ -209,13 +209,13 @@ impl WebKitPage {
       .await
       .map_err(conn_err)?;
     self
-      .add_init_script(crate::backend::cdp::CdpPage::BINDING_CONTROLLER_JS)
+      .add_init_script(crate::backend::common::BINDING_CONTROLLER_JS)
       .await?;
     self
-      .runtime_evaluate(crate::backend::cdp::CdpPage::BINDING_CONTROLLER_JS, true)
+      .runtime_evaluate(crate::backend::common::BINDING_CONTROLLER_JS, true)
       .await?;
     self
-      .evaluate_in_frame_contexts(crate::backend::cdp::CdpPage::BINDING_CONTROLLER_JS)
+      .evaluate_in_frame_contexts(crate::backend::common::BINDING_CONTROLLER_JS)
       .await;
     Ok(())
   }
@@ -244,7 +244,7 @@ impl WebKitPage {
         .await
         .map_err(conn_err)?;
       self
-        .add_init_script(crate::backend::cdp::CdpPage::BINDING_CONTROLLER_JS)
+        .add_init_script(crate::backend::common::BINDING_CONTROLLER_JS)
         .await?;
     }
     self.exposed_fns.write().await.insert(name.to_string(), binding);

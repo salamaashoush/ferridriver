@@ -314,7 +314,7 @@ impl BidiPage {
     is_function: Option<bool>,
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
-    use crate::backend::cdp::{ENGINE_ATTEMPTS, ENGINE_MISSING};
+    use crate::backend::common::{ENGINE_ATTEMPTS, ENGINE_MISSING};
     let mut attempt = 1;
     loop {
       let result =
@@ -488,7 +488,7 @@ impl BidiPage {
     }
 
     let params = json!({
-      "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
+      "functionDeclaration": crate::backend::common::UTILITY_EVAL_WRAPPER,
       "target": target,
       "arguments": arguments,
       "awaitPromise": true,

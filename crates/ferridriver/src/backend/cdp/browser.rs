@@ -1714,7 +1714,7 @@ impl CdpBrowser {
   pub(crate) async fn connect_owned_webdriver(
     ws_url: &str,
     headers: &FxHashMap<String, String>,
-    session: Arc<super::super::webdriver::session::WebDriverSession>,
+    session: Arc<dyn super::super::common::OwnedResource>,
   ) -> Result<Self> {
     let mut browser = Self::connect_with_headers(ws_url, headers).await?;
     browser.webdriver = Some(session);

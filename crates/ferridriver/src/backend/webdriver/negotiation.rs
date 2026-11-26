@@ -76,7 +76,7 @@ pub(crate) async fn connect(
   let request_bidi = protocol == WebDriverProtocol::Bidi
     || (protocol == WebDriverProtocol::Auto && !effective_name.eq_ignore_ascii_case("safari"));
   let requested = if request_bidi {
-    super::session::CapabilityRequest::preferring_insecure_certs(crate::backend::bidi::browser::webdriver_capabilities(
+    super::session::CapabilityRequest::preferring_insecure_certs(crate::backend::common::webdriver_capabilities(
       browser_name,
       capabilities,
     ))
