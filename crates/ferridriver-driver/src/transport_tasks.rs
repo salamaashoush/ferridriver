@@ -3,35 +3,39 @@ use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
-pub(crate) struct TransportTasks {
+pub struct TransportTasks {
   shutdown: watch::Sender<bool>,
   tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl TransportTasks {
-  pub(crate) fn new(shutdown: watch::Sender<bool>, tasks: Vec<JoinHandle<()>>) -> Self {
+  #[must_use]
+  pub fn new(shutdown: watch::Sender<bool>, tasks: Vec<JoinHandle<()>>) -> Self {
     Self {
       shutdown,
       tasks: Mutex::new(tasks),
     }
   }
 
-  pub(crate) fn start_close(&self) {
+  pub fn start_close(&self) {
     self.shutdown.send_replace(true);
   }
 
   /// Resolves once the connection has ended: closed by us, or the
   /// browser went away and the reader saw the end of the stream.
-  pub(crate) fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
     let mut ended = self.shutdown.subscribe();
     Box::pin(async move {
       let _ = ended.wait_for(|ended| *ended).await;
     })
   }
 
-  pub(crate) async fn close(&self) -> Result<()> {
+  /// # Errors
+  ///
+  /// Returns an error if closing the transport tasks fails or times out.
+  pub async fn close(&self) -> Result<()> {
     self.start_close();
     let mut tasks = self.tasks.lock().await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -69,7 +73,7 @@ impl TransportTasks {
   }
 }
 
-pub(crate) async fn write_websocket<S>(
+pub async fn write_websocket<S>(
   mut writer: S,
   mut messages: mpsc::Receiver<Message>,
   mut stopping: watch::Receiver<bool>,

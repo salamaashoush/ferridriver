@@ -7,7 +7,7 @@
 
 use futures::future::BoxFuture;
 
-use crate::error::Result;
+use ferridriver_error::Result;
 
 /// An owned session or device handle whose lifecycle is tied to a browser
 /// instance and must be closed asynchronously when the browser closes.
@@ -15,7 +15,7 @@ use crate::error::Result;
 /// Used by `CdpBrowser` (for owned `WebDriver` / Android sessions) and
 /// `WebDriverBrowser` (for managed iOS sessions) so backend structs do not
 /// import each other or device modules directly.
-pub(crate) trait OwnedResource: Send + Sync {
+pub trait OwnedResource: Send + Sync {
   fn close(&self) -> BoxFuture<'_, Result<()>>;
 }
 
@@ -70,11 +70,11 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 /// Sentinel thrown by [`UTILITY_EVAL_WRAPPER`] when a document has not had the
 /// injected selector engine installed yet. A backend that injects on demand
 /// re-injects and retries when it sees this message.
-pub(crate) const ENGINE_MISSING: &str = "ferridriver: selector engine missing";
+pub const ENGINE_MISSING: &str = "ferridriver: selector engine missing";
 
 /// Maximum consecutive navigation-race retries before giving up on injecting
 /// the utility script into a document.
-pub(crate) const ENGINE_ATTEMPTS: usize = 5;
+pub const ENGINE_ATTEMPTS: usize = 5;
 
 /// Wrapper function declaration shared by CDP (`Runtime.callFunctionOn`),
 /// `BiDi` (`script.callFunction`), `WebKit` (`Runtime.callFunctionOn`), and
@@ -84,7 +84,7 @@ pub(crate) const ENGINE_ATTEMPTS: usize = 5;
 /// the serialized-args array, forwards each element as an individual arg into
 /// `utilityScript.evaluate`, and `JSON.stringify`s the result back so every
 /// backend only has to ship a flat string.
-pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, count, serializedArgs, ...handles) {\
+pub const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, count, serializedArgs, ...handles) {\
     const fd = window.__fd;\
     if (!fd) throw new Error('ferridriver: selector engine missing');\
     const parsed = count > 0 ? JSON.parse(serializedArgs) : [];\
@@ -109,7 +109,7 @@ pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, coun
 /// Clamp a JSON-typed `u64` (line/column offsets) down to `u32` without
 /// truncating silently.
 #[must_use]
-pub(crate) fn u64_to_u32_saturating(n: u64) -> u32 {
+pub fn u64_to_u32_saturating(n: u64) -> u32 {
   u32::try_from(n).unwrap_or(u32::MAX)
 }
 
@@ -121,7 +121,7 @@ pub(crate) fn u64_to_u32_saturating(n: u64) -> u32 {
   reason = "float-to-u64 `as` truncates toward zero, saturates at both bounds, and maps NaN to 0"
 )]
 #[must_use]
-pub(crate) fn f64_to_u64_saturating(n: f64) -> u64 {
+pub fn f64_to_u64_saturating(n: f64) -> u64 {
   if n.is_finite() { n as u64 } else { 0 }
 }
 
@@ -129,7 +129,7 @@ pub(crate) fn f64_to_u64_saturating(n: f64) -> u64 {
 /// separator (Playwright's `splitErrorMessage` convention). If absent, `name`
 /// is empty and `message` is the full input.
 #[must_use]
-pub(crate) fn split_error_message(message: &str) -> (String, String) {
+pub fn split_error_message(message: &str) -> (String, String) {
   match message.split_once(": ") {
     Some((name, msg)) => (name.to_string(), msg.to_string()),
     None => (String::new(), message.to_string()),
@@ -141,7 +141,7 @@ pub(crate) fn split_error_message(message: &str) -> (String, String) {
 /// preserving `webSocketUrl: true` (and `safari:experimentalWebSocketUrl` for
 /// Safari).
 #[must_use]
-pub(crate) fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
+pub fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
   let mut always_match = serde_json::json!({
     "browserName": browser_name,
     "webSocketUrl": true,

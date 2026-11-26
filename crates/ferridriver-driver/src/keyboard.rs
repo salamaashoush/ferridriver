@@ -8,31 +8,37 @@
 
 use ferridriver_types::keyboard::{KeyStroke, Keyboard};
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 /// Whether `ControlOrMeta` means Meta and Chromium needs the macOS
 /// editing commands: the platform ferridriver runs on.
-pub(crate) const MAC: bool = cfg!(target_os = "macos");
+pub const MAC: bool = cfg!(target_os = "macos");
 
 #[derive(Debug, Default)]
-pub(crate) struct KeyboardState(std::sync::Mutex<Keyboard>);
+pub struct KeyboardState(std::sync::Mutex<Keyboard>);
 
 impl KeyboardState {
   fn keyboard(&self) -> std::sync::MutexGuard<'_, Keyboard> {
     self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
   }
 
-  pub(crate) fn down(&self, key: &str) -> Result<KeyStroke> {
+  /// # Errors
+  ///
+  /// Returns an error if the key name is unrecognized.
+  pub fn down(&self, key: &str) -> Result<KeyStroke> {
     self.keyboard().down(key, MAC).map_err(|e| unknown_key(&e))
   }
 
-  pub(crate) fn up(&self, key: &str) -> Result<KeyStroke> {
+  /// # Errors
+  ///
+  /// Returns an error if the key name is unrecognized.
+  pub fn up(&self, key: &str) -> Result<KeyStroke> {
     self.keyboard().up(key, MAC).map_err(|e| unknown_key(&e))
   }
 
   /// The CDP mask (Alt=1, Control=2, Meta=4, Shift=8) of the held
   /// modifiers.
-  pub(crate) fn modifiers(&self) -> u32 {
+  pub fn modifiers(&self) -> u32 {
     self.keyboard().modifiers()
   }
 }

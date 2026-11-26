@@ -8,7 +8,7 @@
 //! core; the `NAPI` and `QuickJS` layers wrap it as a JS object exposing
 //! `dispose()` (and the `remove()` alias).
 
-use crate::error::Result;
+use ferridriver_error::Result;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Mutex;
@@ -123,7 +123,7 @@ mod tests {
 
   #[tokio::test]
   async fn dispose_propagates_error() {
-    let d = Disposable::new(|| async { Err(crate::error::FerriError::invalid_argument("x", "boom")) });
+    let d = Disposable::new(|| async { Err(ferridriver_error::FerriError::invalid_argument("x", "boom")) });
     assert!(d.dispose().await.is_err());
   }
 }

@@ -1647,6 +1647,7 @@ dependencies = [
  "ferridriver-audits",
  "ferridriver-bidi-proto",
  "ferridriver-cdp-proto",
+ "ferridriver-driver",
  "ferridriver-error",
  "ferridriver-heap",
  "ferridriver-install",
@@ -1816,6 +1817,26 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "ferridriver-driver"
+version = "0.8.1"
+dependencies = [
+ "ferridriver-error",
+ "ferridriver-types",
+ "futures",
+ "memchr",
+ "pin-project-lite",
+ "regex",
+ "ring",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "url",
 ]
 
 [[package]]

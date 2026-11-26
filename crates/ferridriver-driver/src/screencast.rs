@@ -17,17 +17,18 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::error::Result;
+use ferridriver_error::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ScreencastParams {
+pub struct ScreencastParams {
   pub quality: u8,
   pub max_width: u32,
   pub max_height: u32,
 }
 
 impl ScreencastParams {
-  pub(crate) fn new(quality: u8, max_width: u32, max_height: u32) -> Self {
+  #[must_use]
+  pub fn new(quality: u8, max_width: u32, max_height: u32) -> Self {
     Self {
       quality,
       max_width,
@@ -49,7 +50,7 @@ impl ScreencastParams {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ScreencastFrame {
+pub struct ScreencastFrame {
   pub data: Vec<u8>,
   /// The backend's own frame timestamp, in seconds. Its clock differs per
   /// backend, so wall-time consumers use `received_at` instead.
@@ -59,9 +60,9 @@ pub(crate) struct ScreencastFrame {
 
 /// A backend frame stream plus the signal that ends it. After the signal
 /// the backend forwards the frames it already has, then closes the stream.
-pub(crate) type RawScreencast = (mpsc::UnboundedReceiver<(Vec<u8>, f64)>, oneshot::Sender<()>);
+pub type RawScreencast = (mpsc::UnboundedReceiver<(Vec<u8>, f64)>, oneshot::Sender<()>);
 
-pub(crate) trait ScreencastSource: Clone + Send + Sync + 'static {
+pub trait ScreencastSource: Clone + Send + Sync + 'static {
   fn start_stream(&self, params: ScreencastParams) -> impl Future<Output = Result<RawScreencast>> + Send;
   fn stop_stream(&self) -> impl Future<Output = Result<()>> + Send;
   fn is_closed(&self) -> bool;
@@ -72,7 +73,7 @@ pub(crate) trait ScreencastSource: Clone + Send + Sync + 'static {
 /// not carry the backend page's type; a trace recorder holds subscriptions,
 /// and with the page's type inside it every `Send` proof that reaches a
 /// recorder walks the whole page graph again, past the solver's depth.
-pub(crate) trait StreamStop: Send + Sync {
+pub trait StreamStop: Send + Sync {
   fn stop_stream(&self) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
   fn is_closed(&self) -> bool;
 }
@@ -103,7 +104,7 @@ fn plan(running: Option<ScreencastParams>, wanted: ScreencastParams) -> Plan {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct ScreencastHub {
+pub struct ScreencastHub {
   control: Arc<tokio::sync::Mutex<Control>>,
   fanout: Arc<StdMutex<Fanout>>,
 }
@@ -163,7 +164,10 @@ impl ScreencastHub {
   /// stream as needed. Frames arrive on the returned receiver until the
   /// subscription stops; [`ScreencastSubscription::stop`] delivers the
   /// frames the backend emitted before it stopped.
-  pub(crate) async fn subscribe<S: ScreencastSource>(
+  /// # Errors
+  ///
+  /// Returns an error if starting the underlying screencast source fails.
+  pub async fn subscribe<S: ScreencastSource>(
     &self,
     source: &S,
     params: ScreencastParams,
@@ -299,7 +303,10 @@ impl ScreencastHub {
 
   /// Back the user-facing `page.startScreencast`: one subscription per
   /// page, replaced by a later call and ended by [`Self::stop_user`].
-  pub(crate) async fn start_user<S: ScreencastSource>(
+  /// # Errors
+  ///
+  /// Returns an error if starting the underlying screencast source fails.
+  pub async fn start_user<S: ScreencastSource>(
     &self,
     source: &S,
     params: ScreencastParams,
@@ -311,7 +318,7 @@ impl ScreencastHub {
     Ok(rx)
   }
 
-  pub(crate) async fn stop_user<S: ScreencastSource>(&self, source: &S) {
+  pub async fn stop_user<S: ScreencastSource>(&self, source: &S) {
     let user = self.control.lock().await.user.take();
     if let Some(id) = user {
       self.unsubscribe(source, id).await;
@@ -321,7 +328,7 @@ impl ScreencastHub {
 
 /// One consumer's hold on a page's screencast. Dropping it without
 /// [`Self::stop`] unsubscribes in the background.
-pub(crate) struct ScreencastSubscription {
+pub struct ScreencastSubscription {
   hub: ScreencastHub,
   source: Arc<dyn StreamStop>,
   id: u64,
@@ -331,7 +338,7 @@ pub(crate) struct ScreencastSubscription {
 impl ScreencastSubscription {
   /// Leave the screencast. Returns once this subscriber's receiver has
   /// every frame it will get; the receiver then reports end-of-stream.
-  pub(crate) async fn stop(mut self) {
+  pub async fn stop(mut self) {
     self.active = false;
     self.hub.unsubscribe(&*self.source, self.id).await;
   }
@@ -397,7 +404,7 @@ mod tests {
       let mut state = self.state();
       state.starts.push(params);
       if state.fail_starts_above.is_some_and(|max| params.max_width > max) {
-        return std::future::ready(Err(crate::error::FerriError::unsupported("restart refused")));
+        return std::future::ready(Err(ferridriver_error::FerriError::unsupported("restart refused")));
       }
       assert!(
         state.live.is_none(),
