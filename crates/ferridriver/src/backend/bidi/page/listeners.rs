@@ -474,13 +474,18 @@ impl PageEventLoop {
   }
 
   async fn on_user_prompt_opened(&self, params: &serde_json::Value) {
-    let prompt_type_str = params
-      .get("type")
-      .and_then(|v| v.as_str())
-      .unwrap_or("alert")
-      .to_string();
-    let message = param_str(params, "message").to_string();
-    let default_value = param_str(params, "defaultValue").to_string();
+    let Ok(payload) =
+      serde_json::from_value::<ferridriver_bidi_proto::browsing_context::UserPromptOpenedEvent>(params.clone())
+    else {
+      return;
+    };
+    let prompt_type_str = if payload.prompt_type.is_empty() {
+      "alert".to_string()
+    } else {
+      payload.prompt_type
+    };
+    let message = payload.message;
+    let default_value = payload.default_value;
     let dialog_type = crate::dialog::DialogType::parse(&prompt_type_str);
 
     // Build the responder: translates the user's accept/dismiss
@@ -492,17 +497,17 @@ impl PageEventLoop {
       let session = Arc::clone(&responder_session);
       let ctx = Arc::clone(&responder_ctx);
       Box::pin(async move {
-        let accept = matches!(response, crate::dialog::DialogResponse::Accept { .. });
-        let mut handle_params = json!({
-          "context": &*ctx,
-          "accept": accept,
-        });
-        if let crate::dialog::DialogResponse::Accept { prompt_text: Some(t) } = response {
-          handle_params["userText"] = json!(t);
-        }
+        let (accept, user_text) = match response {
+          crate::dialog::DialogResponse::Accept { prompt_text } => (true, prompt_text),
+          crate::dialog::DialogResponse::Dismiss => (false, None),
+        };
         session
           .transport
-          .send_command("browsingContext.handleUserPrompt", handle_params)
+          .send(&ferridriver_bidi_proto::browsing_context::HandleUserPrompt {
+            context: &ctx,
+            accept: Some(accept),
+            user_text: user_text.as_deref(),
+          })
           .await
           .map(|_| ())
       })
@@ -537,18 +542,14 @@ impl PageEventLoop {
   /// { "context": "<frameId>", "element": { "sharedId": "..." }, "multiple": bool }
   /// Per `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts::_onFileDialogOpened`.
   fn on_file_dialog_opened(&self, params: &serde_json::Value) {
-    let Some(shared_id) = params
-      .get("element")
-      .and_then(|e| e.get("sharedId"))
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string)
+    let Ok(payload) = serde_json::from_value::<ferridriver_bidi_proto::input::FileDialogOpenedEvent>(params.clone())
     else {
       return;
     };
-    let is_multiple = params
-      .get("multiple")
-      .and_then(serde_json::Value::as_bool)
-      .unwrap_or(false);
+    let Some(shared_id) = payload.element.and_then(|e| e.shared_id) else {
+      return;
+    };
+    let is_multiple = payload.multiple;
     // Resolve the element -> ElementHandle off the hot
     // subscription loop. Same rationale as the CDP listener:
     // we don't want rapid file-picker triggers queued
@@ -577,15 +578,16 @@ impl PageEventLoop {
   /// doesn't attribute it to a navigation, Playwright skips
   /// (see `bidiPage.ts::_onDownloadWillBegin`) — so do we.
   fn on_download_will_begin(&self, params: &serde_json::Value) {
-    let Some(navigation) = params
-      .get("navigation")
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string)
+    let Ok(payload) =
+      serde_json::from_value::<ferridriver_bidi_proto::browsing_context::DownloadWillBeginEvent>(params.clone())
     else {
       return;
     };
-    let url = param_str(params, "url").to_string();
-    let suggested = param_str(params, "suggestedFilename").to_string();
+    let Some(navigation) = payload.navigation else {
+      return;
+    };
+    let url = payload.url;
+    let suggested = payload.suggested_filename;
 
     let Some(page) = self.page.page_backref.upgrade() else {
       return;
@@ -614,10 +616,19 @@ impl PageEventLoop {
   }
 
   fn on_download_end(&self, params: &serde_json::Value) {
-    let Some(navigation) = params.get("navigation").and_then(|v| v.as_str()) else {
+    let Ok(payload) =
+      serde_json::from_value::<ferridriver_bidi_proto::browsing_context::DownloadEndEvent>(params.clone())
+    else {
       return;
     };
-    let status = params.get("status").and_then(|v| v.as_str()).unwrap_or("complete");
+    let Some(navigation) = payload.navigation.as_deref() else {
+      return;
+    };
+    let status = if payload.status.is_empty() {
+      "complete"
+    } else {
+      payload.status.as_str()
+    };
     let download_manager = &self.page.download_manager;
     if let Some(d) = download_manager.take_for_guid(navigation) {
       if status == "canceled" {
@@ -626,10 +637,7 @@ impl PageEventLoop {
         // `complete` carries the absolute `filepath` Firefox
         // wrote to — override the default
         // `<downloads_dir>/<guid>` path with the real one.
-        let filepath = params
-          .get("filepath")
-          .and_then(|v| v.as_str())
-          .map(std::path::PathBuf::from);
+        let filepath = payload.filepath.map(std::path::PathBuf::from);
         d.report_finished(filepath, None);
       }
     }

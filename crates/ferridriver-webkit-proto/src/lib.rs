@@ -9,6 +9,7 @@
 pub mod console;
 pub mod dom;
 pub mod emulation;
+pub mod events;
 pub mod input;
 pub mod network;
 pub mod page;
@@ -18,6 +19,7 @@ pub mod screencast;
 pub mod target;
 pub mod worker;
 
+pub use events::WebKitEvent;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

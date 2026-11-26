@@ -1167,13 +1167,17 @@ async fn initialize_target_session(
   }
   setup.push(Box::pin(async move {
     let _ = target
-      .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
+      .send_typed(&ferridriver_webkit_proto::page::CreateUserWorld {
+        name: UTILITY_WORLD_NAME,
+      })
       .await;
     Ok(())
   }));
   setup.push(Box::pin(async move {
     let _ = target
-      .send("Page.setBootstrapScript", json!({ "source": initial_bootstrap }))
+      .send_typed(&ferridriver_webkit_proto::page::SetBootstrapScript {
+        source: Some(&initial_bootstrap),
+      })
       .await;
     Ok(())
   }));
@@ -1191,17 +1195,23 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
   let mut cmds: Vec<futures::future::BoxFuture<'_, ()>> = Vec::new();
   if let Some(ua) = opts.user_agent.as_deref() {
     cmds.push(Box::pin(async move {
-      let _ = target.send("Page.overrideUserAgent", json!({ "value": ua })).await;
+      let _ = target
+        .send_typed(&ferridriver_webkit_proto::page::OverrideUserAgent { value: Some(ua) })
+        .await;
     }));
   }
   if let Some(tz) = opts.timezone_id.as_deref() {
     cmds.push(Box::pin(async move {
-      let _ = target.send("Page.setTimeZone", json!({ "timeZone": tz })).await;
+      let _ = target
+        .send_typed(&ferridriver_webkit_proto::page::SetTimeZone { time_zone: tz })
+        .await;
     }));
   }
   if let Some(true) = opts.bypass_csp {
     cmds.push(Box::pin(async move {
-      let _ = target.send("Page.setBypassCSP", json!({ "enabled": true })).await;
+      let _ = target
+        .send_typed(&ferridriver_webkit_proto::page::SetBypassCsp { enabled: true })
+        .await;
     }));
   }
   if let Some(o) = opts.offline {

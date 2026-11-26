@@ -10,6 +10,7 @@ pub mod accessibility;
 pub mod browser;
 pub mod dom;
 pub mod emulation;
+pub mod events;
 pub mod fetch;
 pub mod heap_profiler;
 pub mod input;
@@ -22,6 +23,7 @@ pub mod storage;
 pub mod target;
 pub mod tracing;
 
+pub use events::CdpEvent;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

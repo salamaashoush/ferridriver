@@ -237,3 +237,74 @@ impl Command for LocateNodes<'_> {
   const METHOD: &'static str = "browsingContext.locateNodes";
   type Response = LocateNodesResponse;
 }
+
+/// `browsingContext.navigationStarted` / `navigationCommitted` / `domContentLoaded` /
+/// `load` / `historyUpdated` / `fragmentNavigated` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationInfoEvent {
+  #[serde(default)]
+  pub context: String,
+  #[serde(default)]
+  pub navigation: Option<String>,
+  #[serde(default)]
+  pub timestamp: u64,
+  #[serde(default)]
+  pub url: String,
+}
+
+/// `browsingContext.userPromptOpened` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPromptOpenedEvent {
+  #[serde(default)]
+  pub context: String,
+  #[serde(default)]
+  pub handler: Option<String>,
+  #[serde(default)]
+  pub message: String,
+  #[serde(default, rename = "type")]
+  pub prompt_type: String,
+  #[serde(default)]
+  pub default_value: String,
+}
+
+/// `browsingContext.userPromptClosed` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPromptClosedEvent {
+  #[serde(default)]
+  pub context: String,
+  #[serde(default)]
+  pub accepted: bool,
+  #[serde(default)]
+  pub user_text: Option<String>,
+}
+
+/// `browsingContext.downloadWillBegin` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadWillBeginEvent {
+  #[serde(default)]
+  pub context: String,
+  #[serde(default)]
+  pub navigation: Option<String>,
+  #[serde(default)]
+  pub url: String,
+  #[serde(default)]
+  pub suggested_filename: String,
+}
+
+/// `browsingContext.downloadEnd` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadEndEvent {
+  #[serde(default)]
+  pub context: String,
+  #[serde(default)]
+  pub navigation: Option<String>,
+  #[serde(default)]
+  pub status: String,
+  #[serde(default)]
+  pub filepath: Option<String>,
+}

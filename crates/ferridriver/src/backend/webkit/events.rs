@@ -385,7 +385,9 @@ async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, pr
     *slot = Some((new_target, Arc::<str>::from(target_id.clone()), fwd_rx));
   }
   if info.get("isPaused").and_then(Value::as_bool).unwrap_or(false) {
-    let _ = proxy.send("Target.resume", json!({ "targetId": target_id })).await;
+    let _ = proxy
+      .send_typed(&ferridriver_webkit_proto::target::Resume { target_id: &target_id })
+      .await;
   }
 }
 
@@ -401,7 +403,9 @@ async fn handle_committed_provisional_target(
   page: &WebKitPage,
   provisional: ProvisionalSlot,
 ) -> Option<tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>> {
-  let new_target_id = params.get("newTargetId").and_then(Value::as_str)?.to_string();
+  let ev =
+    serde_json::from_value::<ferridriver_webkit_proto::target::DidCommitProvisionalTargetEvent>(params.clone()).ok()?;
+  let new_target_id = ev.new_target_id;
   let (new_session, stashed_id, fwd_rx) = provisional.lock().await.take()?;
   if &*stashed_id != new_target_id.as_str() {
     // Defensive: if WebKit committed a target other than the one we

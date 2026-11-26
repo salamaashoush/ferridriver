@@ -134,7 +134,7 @@ impl WebKitElement {
     self.call_fn("function(){this.focus();}", true).await?;
     self
       .target
-      .send("Page.insertText", json!({ "text": text }))
+      .send_typed(&ferridriver_webkit_proto::page::InsertText { text })
       .await
       .map_err(map_err)?;
     Ok(())
@@ -241,7 +241,9 @@ impl WebKitElement {
   pub async fn release(&self) -> Result<()> {
     let _ = self
       .target
-      .send(protocol::RUNTIME_RELEASE_OBJECT, json!({ "objectId": self.object_id }))
+      .send_typed(&ferridriver_webkit_proto::runtime::ReleaseObject {
+        object_id: &self.object_id,
+      })
       .await;
     Ok(())
   }

@@ -239,3 +239,29 @@ pub struct BindingCalledEvent {
   pub payload: String,
   pub execution_context_id: i64,
 }
+
+/// `Runtime.consoleAPICalled` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleApiCalledEvent {
+  #[serde(default, rename = "type")]
+  pub kind: String,
+  #[serde(default)]
+  pub args: Vec<Value>,
+  #[serde(default)]
+  pub execution_context_id: i64,
+  #[serde(default)]
+  pub timestamp: f64,
+  #[serde(default)]
+  pub stack_trace: Option<Value>,
+}
+
+/// `Runtime.exceptionThrown` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExceptionThrownEvent {
+  #[serde(default)]
+  pub timestamp: f64,
+  #[serde(default)]
+  pub exception_details: Value,
+}

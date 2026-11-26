@@ -1,6 +1,6 @@
 //! `BiDi` `input` module.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{Command, EmptyResponse};
@@ -39,4 +39,24 @@ pub struct SetFiles<'a> {
 impl Command for SetFiles<'_> {
   const METHOD: &'static str = "input.setFiles";
   type Response = EmptyResponse;
+}
+
+/// Element reference inside `input.fileDialogOpened`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDialogElement {
+  #[serde(default)]
+  pub shared_id: Option<String>,
+}
+
+/// `input.fileDialogOpened` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDialogOpenedEvent {
+  #[serde(default)]
+  pub context: String,
+  #[serde(default)]
+  pub element: Option<FileDialogElement>,
+  #[serde(default)]
+  pub multiple: bool,
 }

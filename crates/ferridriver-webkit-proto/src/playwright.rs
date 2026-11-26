@@ -185,3 +185,64 @@ impl Command for Close {
   const METHOD: &'static str = "Playwright.close";
   type Response = EmptyResponse;
 }
+
+/// `Playwright.downloadCreated` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadCreatedEvent {
+  #[serde(default)]
+  pub uuid: String,
+  #[serde(default)]
+  pub page_proxy_id: String,
+  #[serde(default)]
+  pub frame_id: String,
+  #[serde(default)]
+  pub url: String,
+}
+
+/// `Playwright.downloadFilenameSuggested` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadFilenameSuggestedEvent {
+  #[serde(default)]
+  pub uuid: String,
+  #[serde(default)]
+  pub suggested_filename: String,
+}
+
+/// `Playwright.downloadFinished` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadFinishedEvent {
+  #[serde(default)]
+  pub uuid: String,
+  #[serde(default)]
+  pub error: Option<String>,
+}
+
+/// `Playwright.pageProxyCreated` / `pageProxyDestroyed` info payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct PageProxyInfo {
+  #[serde(default, rename = "pageProxyId")]
+  pub page_proxy: String,
+  #[serde(default, rename = "browserContextId")]
+  pub browser_context: Option<String>,
+  #[serde(default, rename = "openerId")]
+  pub opener: Option<String>,
+}
+
+/// `Playwright.pageProxyCreated` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageProxyCreatedEvent {
+  #[serde(default)]
+  pub page_proxy_info: PageProxyInfo,
+}
+
+/// `Playwright.pageProxyDestroyed` event payload.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageProxyDestroyedEvent {
+  #[serde(default)]
+  pub page_proxy_id: String,
+}
