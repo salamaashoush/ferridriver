@@ -49,8 +49,8 @@ impl WebKitPage {
     // A resource served from the page's memory cache is never requested,
     // so no route would see it. Pipeline all three setup calls in order.
     let (r1, r2, r3) = tokio::join!(
-      target.send("Network.setInterceptionEnabled", json!({ "enabled": true })),
-      target.send("Network.setResourceCachingDisabled", json!({ "disabled": true })),
+      target.send_typed(&ferridriver_webkit_proto::network::SetInterceptionEnabled { enabled: true }),
+      target.send_typed(&ferridriver_webkit_proto::network::SetResourceCachingDisabled { disabled: true }),
       target.send(
         "Network.addInterception",
         json!({ "url": ".*", "stage": "request", "isRegex": true }),

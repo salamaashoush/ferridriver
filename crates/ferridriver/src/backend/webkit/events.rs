@@ -943,17 +943,17 @@ fn build_body_fn(target: super::connection::Session, request_id: String) -> Body
     let request_id = request_id.clone();
     Box::pin(async move {
       let resp = target
-        .send("Network.getResponseBody", json!({ "requestId": request_id }))
+        .send_typed(&ferridriver_webkit_proto::network::GetResponseBody {
+          request_id: &request_id,
+        })
         .await
         .map_err(|e| crate::error::FerriError::backend(format!("getResponseBody: {e}")))?;
-      let body = resp.get("body").and_then(Value::as_str).unwrap_or("");
-      let base64 = resp.get("base64Encoded").and_then(Value::as_bool).unwrap_or(false);
-      if base64 {
+      if resp.base64_encoded {
         base64::engine::general_purpose::STANDARD
-          .decode(body)
+          .decode(&resp.body)
           .map_err(|e| crate::error::FerriError::backend(format!("getResponseBody base64: {e}")))
       } else {
-        Ok(body.as_bytes().to_vec())
+        Ok(resp.body.into_bytes())
       }
     })
   })
@@ -1728,17 +1728,15 @@ async fn dispatch_dialog(
   let responder: crate::dialog::DialogResponder = Arc::new(move |response| {
     let proxy = proxy_for_responder.clone();
     Box::pin(async move {
-      let mut cmd_params = json!({
-        "accept": matches!(response, crate::dialog::DialogResponse::Accept { .. }),
-      });
-      if let crate::dialog::DialogResponse::Accept {
-        prompt_text: Some(text),
-      } = response
-      {
-        cmd_params["promptText"] = Value::String(text);
-      }
+      let (accept, prompt_text) = match response {
+        crate::dialog::DialogResponse::Accept { prompt_text } => (true, prompt_text),
+        crate::dialog::DialogResponse::Dismiss => (false, None),
+      };
       proxy
-        .send("Dialog.handleJavaScriptDialog", cmd_params)
+        .send_typed(&ferridriver_webkit_proto::dialog::HandleJavaScriptDialog {
+          accept,
+          prompt_text: prompt_text.as_deref(),
+        })
         .await
         .map(|_| ())
         .map_err(|e| crate::error::FerriError::backend(format!("webkit dialog: {e}")))

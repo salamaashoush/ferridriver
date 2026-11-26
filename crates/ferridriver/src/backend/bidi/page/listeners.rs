@@ -1193,34 +1193,43 @@ pub(super) async fn execute_bidi_route_action(
         )
         .await;
       } else {
-        let mut params = json!({"request": request_id});
-        if let Some(method) = &overrides.method {
-          params["method"] = serde_json::Value::String(method.clone());
-        }
-        if let Some(headers) = &overrides.headers {
-          let hdrs: Vec<serde_json::Value> = headers
+        let hdrs: Option<Vec<serde_json::Value>> = overrides.headers.as_ref().map(|headers| {
+          headers
             .iter()
             .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
-            .collect();
-          params["headers"] = serde_json::Value::Array(hdrs);
-        }
-        if let Some(post_data) = &overrides.post_data {
+            .collect()
+        });
+        let body = overrides.post_data.as_ref().map(|post_data| {
           let encoded = base64::engine::general_purpose::STANDARD.encode(post_data);
-          params["body"] = json!({"type": "base64", "value": encoded});
-        }
-        let _ = transport.send_command("network.continueRequest", params).await;
+          json!({"type": "base64", "value": encoded})
+        });
+        let _ = transport
+          .send(&ferridriver_bidi_proto::network::ContinueRequest {
+            request: request_id,
+            body,
+            headers: hdrs.as_deref(),
+            method: overrides.method.as_deref(),
+            url: None,
+          })
+          .await;
       }
     },
     crate::route::RouteAction::Abort(_reason) => {
       let _ = transport
-        .send_command("network.failRequest", json!({"request": request_id}))
+        .send(&ferridriver_bidi_proto::network::FailRequest { request: request_id })
         .await;
     },
     // Chain-internal marker; never emitted as a terminal action. Fail
     // open like an unhandled route if it ever leaks.
     crate::route::RouteAction::PredicateRejected => {
       let _ = transport
-        .send_command("network.continueRequest", json!({"request": request_id}))
+        .send(&ferridriver_bidi_proto::network::ContinueRequest {
+          request: request_id,
+          body: None,
+          headers: None,
+          method: None,
+          url: None,
+        })
         .await;
     },
   }
@@ -1254,22 +1263,25 @@ async fn bidi_continue_via_fetch(
         .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
         .collect();
       let _ = transport
-        .send_command(
-          "network.provideResponse",
-          json!({
-            "request": request_id,
-            "statusCode": status,
-            "reasonPhrase": crate::route::status_text(i32::from(status)),
-            "headers": hdrs,
-            "body": {"type": "base64", "value": body_b64},
-          }),
-        )
+        .send(&ferridriver_bidi_proto::network::ProvideResponse {
+          request: request_id,
+          status_code: Some(status),
+          reason_phrase: Some(crate::route::status_text(i32::from(status))),
+          headers: Some(&hdrs),
+          body: Some(json!({"type": "base64", "value": body_b64})),
+        })
         .await;
     },
     Err(e) => {
       tracing::warn!("bidi route url-override fetch failed ({e}); continuing request unmodified");
       let _ = transport
-        .send_command("network.continueRequest", json!({"request": request_id}))
+        .send(&ferridriver_bidi_proto::network::ContinueRequest {
+          request: request_id,
+          body: None,
+          headers: None,
+          method: None,
+          url: None,
+        })
         .await;
     },
   }

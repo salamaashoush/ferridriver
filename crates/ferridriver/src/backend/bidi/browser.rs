@@ -144,18 +144,18 @@ impl BidiBrowser {
     let result = self
       .session
       .transport
-      .send_command("browsingContext.getTree", json!({}))
+      .send(&ferridriver_bidi_proto::browsing_context::GetTree {
+        max_depth: None,
+        root: None,
+      })
       .await?;
-    let contexts = result
-      .get("contexts")
-      .and_then(|v| v.as_array())
-      .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "missing contexts array"))?;
 
     Ok(
-      contexts
-        .iter()
-        .filter(|ctx| ctx.get("userContext").and_then(|v| v.as_str()) == Some(user_context_id))
-        .filter_map(|ctx| ctx.get("context").and_then(|v| v.as_str()).map(ToOwned::to_owned))
+      result
+        .contexts
+        .into_iter()
+        .filter(|ctx| ctx.user_context.as_deref() == Some(user_context_id))
+        .map(|ctx| ctx.context)
         .collect(),
     )
   }
@@ -402,7 +402,11 @@ impl BidiBrowser {
   /// the reply to a command comes after the creation event of any context
   /// the browser made before answering it.
   pub(crate) async fn popups_settled(&self) -> Result<()> {
-    self.session.transport.send_command("session.status", json!({})).await?;
+    self
+      .session
+      .transport
+      .send(&ferridriver_bidi_proto::session::Status {})
+      .await?;
     self.popups.settled().await;
     Ok(())
   }
@@ -547,7 +551,13 @@ impl BidiBrowser {
     tokio::spawn(async move {
       let _ = session
         .transport
-        .send_command("network.continueRequest", json!({"request": request}))
+        .send(&ferridriver_bidi_proto::network::ContinueRequest {
+          request: &request,
+          body: None,
+          headers: None,
+          method: None,
+          url: None,
+        })
         .await;
     });
   }
@@ -572,20 +582,15 @@ impl BidiBrowser {
     proxy: Option<&crate::options::ProxyConfig>,
     accept_insecure_certs: bool,
   ) -> Result<String> {
-    let mut params = json!({ "acceptInsecureCerts": accept_insecure_certs });
-    if let Some(p) = proxy {
-      params["proxy"] = bidi_proxy_capability(p);
-    }
     let result = self
       .session
       .transport
-      .send_command("browser.createUserContext", params)
+      .send(&ferridriver_bidi_proto::browser::CreateUserContext {
+        accept_insecure_certs: Some(accept_insecure_certs),
+        proxy: proxy.map(bidi_proxy_capability),
+      })
       .await?;
-    result
-      .get("userContext")
-      .and_then(|v| v.as_str())
-      .map(ToOwned::to_owned)
-      .ok_or_else(|| FerriError::protocol("browser.createUserContext", "missing userContext id"))
+    Ok(result.user_context)
   }
 
   /// Dispose an isolated user context.
@@ -611,7 +616,9 @@ impl BidiBrowser {
     self
       .session
       .transport
-      .send_command("browser.removeUserContext", json!({"userContext": user_context_id}))
+      .send(&ferridriver_bidi_proto::browser::RemoveUserContext {
+        user_context: user_context_id,
+      })
       .await?;
     let _ = futures::future::join_all(waiters).await;
     Ok(())
@@ -629,26 +636,21 @@ impl BidiBrowser {
     let result = self
       .session
       .transport
-      .send_command("browsingContext.getTree", json!({}))
+      .send(&ferridriver_bidi_proto::browsing_context::GetTree {
+        max_depth: None,
+        root: None,
+      })
       .await?;
-    let contexts = result
-      .get("contexts")
-      .and_then(|v| v.as_array())
-      .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "missing contexts array"))?;
 
-    let mut pages = Vec::with_capacity(contexts.len());
-    for ctx in contexts {
-      let context_id = ctx
-        .get("context")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "context missing 'context' field"))?;
-      let user_context = ctx.get("userContext").and_then(|v| v.as_str());
+    let mut pages = Vec::with_capacity(result.contexts.len());
+    for ctx in result.contexts {
+      let user_context = ctx.user_context.as_deref();
       if user_context.is_some_and(|id| id != "default") {
         continue;
       }
       pages.push(AnyPage::Bidi(BidiPage::create(
         Arc::clone(&self.session),
-        context_id.to_string(),
+        ctx.context,
         user_context,
         Arc::clone(&self.downloads_dir),
       )));
@@ -669,24 +671,19 @@ impl BidiBrowser {
     user_context_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
-    let mut params = json!({"type": "window"});
-    if let Some(user_context_id) = user_context_id {
-      params["userContext"] = json!(user_context_id);
-    }
     let mut rx = self.session.transport.tap_events();
     self.create_ledger.begin_create();
     let created = self
       .session
       .transport
-      .send_command("browsingContext.create", params)
+      .send(&ferridriver_bidi_proto::browsing_context::Create {
+        kind: ferridriver_bidi_proto::browsing_context::CreateType::Window,
+        reference_context: None,
+        background: None,
+        user_context: user_context_id,
+      })
       .await
-      .and_then(|result| {
-        result
-          .get("context")
-          .and_then(|v| v.as_str())
-          .map(str::to_string)
-          .ok_or_else(|| FerriError::protocol("browsingContext.create", "missing context id"))
-      });
+      .map(|result| result.context);
     self.create_ledger.end_create(created.as_deref().ok());
     let context_id = created?;
 
@@ -748,7 +745,11 @@ impl BidiBrowser {
       let mut flushed = Ok(());
       if self.profile_dir.is_none() && self.webdriver.is_none() {
         let timeout = crate::backend::process::PROFILE_FLUSH_TIMEOUT;
-        let _ = tokio::time::timeout(timeout, self.session.transport.send_command("browser.close", json!({}))).await;
+        let _ = tokio::time::timeout(
+          timeout,
+          self.session.transport.send(&ferridriver_bidi_proto::browser::Close {}),
+        )
+        .await;
         flushed = group.wait_for_exit(timeout).await;
       }
       // Flag the transport first: the SIGKILLed Firefox never sends a

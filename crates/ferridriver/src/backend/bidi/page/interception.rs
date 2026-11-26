@@ -178,7 +178,13 @@ impl BidiPage {
       tokio::spawn(async move {
         let _ = session2
           .transport
-          .send_command("network.continueRequest", json!({"request": request_id_owned}))
+          .send(&ferridriver_bidi_proto::network::ContinueRequest {
+            request: &request_id_owned,
+            body: None,
+            headers: None,
+            method: None,
+            url: None,
+          })
           .await;
       });
     }

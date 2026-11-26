@@ -316,7 +316,7 @@ impl WebKitPage {
       if let Some(true) = opts.java_script_enabled.map(|v| !v) {
         let _ = self
           .proxy
-          .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
+          .send_typed(&ferridriver_webkit_proto::emulation::SetJavaScriptEnabled { enabled: false })
           .await;
       }
     };
@@ -443,7 +443,7 @@ impl WebKitPage {
       cmds.push(Box::pin(async move {
         let _ = self
           .proxy
-          .send("Emulation.setOrientationOverride", json!({ "angle": angle }))
+          .send_typed(&ferridriver_webkit_proto::emulation::SetOrientationOverride { angle })
           .await;
         Ok(())
       }));
@@ -452,7 +452,9 @@ impl WebKitPage {
       let target = target.clone();
       async move {
         let _ = target
-          .send("Page.setTouchEmulationEnabled", json!({ "enabled": config.has_touch }))
+          .send_typed(&ferridriver_webkit_proto::page::SetTouchEmulationEnabled {
+            enabled: config.has_touch,
+          })
           .await;
         Ok(())
       }
@@ -461,7 +463,7 @@ impl WebKitPage {
       let target = target.clone();
       cmds.push(Box::pin(async move {
         let _ = target
-          .send("Page.overrideSetting", json!({ "setting": setting, "value": value }))
+          .send_typed(&ferridriver_webkit_proto::page::OverrideSetting { setting, value })
           .await;
         Ok(())
       }));
@@ -609,9 +611,10 @@ impl WebKitPage {
       .extra_http_headers
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(map.clone());
+    let headers_val = Value::Object(map);
     self
       .target_session()
-      .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
+      .send_typed(&ferridriver_webkit_proto::network::SetExtraHttpHeaders { headers: &headers_val })
       .await
       .map_err(conn_err)?;
     Ok(())
@@ -626,7 +629,7 @@ impl WebKitPage {
   pub async fn reset_permissions(&self) -> Result<()> {
     self
       .proxy
-      .send("Emulation.resetPermissions", json!({}))
+      .send_typed(&ferridriver_webkit_proto::emulation::ResetPermissions {})
       .await
       .map_err(conn_err)?;
     Ok(())

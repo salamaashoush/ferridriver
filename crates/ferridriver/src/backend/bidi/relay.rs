@@ -497,7 +497,10 @@ impl Relay {
     if let Err(failed) = self
       .session
       .transport
-      .send_command("session.unsubscribe", json!({ "subscriptions": ids }))
+      .send(&ferridriver_bidi_proto::session::Unsubscribe {
+        events: None,
+        subscriptions: Some(&ids),
+      })
       .await
     {
       tracing::debug!(target: "ferridriver::browser_server", %failed, "a client's subscriptions outlived it");

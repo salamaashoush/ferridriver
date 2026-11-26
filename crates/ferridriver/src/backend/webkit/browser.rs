@@ -242,7 +242,7 @@ impl WebKitBrowser {
     self
       .inner
       .root
-      .send("Playwright.getInfo", serde_json::json!({}))
+      .send_typed(&ferridriver_webkit_proto::playwright::GetInfo {})
       .await
       .map_err(|error| crate::error::FerriError::backend(error.to_string()))?;
     self.inner.popups.settled().await;
@@ -859,7 +859,7 @@ fn handle_download_event(
         let uuid = cancel_uuid.clone();
         Box::pin(async move {
           session
-            .send("Playwright.cancelDownload", json!({ "uuid": uuid }))
+            .send_typed(&ferridriver_webkit_proto::playwright::CancelDownload { uuid: &uuid })
             .await
             .map(|_| ())
             .map_err(|e| crate::error::FerriError::Backend(format!("Playwright.cancelDownload: {e}")))
