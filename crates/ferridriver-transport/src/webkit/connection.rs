@@ -19,7 +19,9 @@
 
 use super::protocol::{Envelope, ErrorPayload};
 use super::transport::{ReaderHandle, Transport, TransportError, WriterHandle};
-use crate::operation_budget::OperationBudget;
+use ferridriver_driver::operation_budget::OperationBudget;
+use ferridriver_driver::transport_tasks::TransportTasks;
+use ferridriver_error::{FerriError, Result as FerriResult};
 use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
 use std::collections::hash_map::Entry;
@@ -46,13 +48,11 @@ pub enum ConnectionError {
   Json(#[from] serde_json::Error),
 }
 
-impl From<ConnectionError> for crate::error::FerriError {
+impl From<ConnectionError> for FerriError {
   fn from(e: ConnectionError) -> Self {
     match e {
-      ConnectionError::Timeout { method, ms } => {
-        crate::error::FerriError::timeout(format!("webkit: waiting for {method} reply"), ms)
-      },
-      other => crate::error::FerriError::backend(format!("webkit: {other}")),
+      ConnectionError::Timeout { method, ms } => FerriError::timeout(format!("webkit: waiting for {method} reply"), ms),
+      other => FerriError::backend(format!("webkit: {other}")),
     }
   }
 }
@@ -65,7 +65,7 @@ type ResponseSlot = oneshot::Sender<Result<Value, ErrorPayload>>;
 /// `history.pushState` the caller just evaluated): a listener task
 /// draining the queue can lag the reply that follows the event. Must not
 /// block.
-pub(crate) type RouteObserver = Arc<dyn Fn(&Envelope) + Send + Sync>;
+pub type RouteObserver = Arc<dyn Fn(&Envelope) + Send + Sync>;
 
 /// Routing key for inbound events. Responses do not need this — they
 /// route by global id — but a pending callback is tagged with it so
@@ -111,7 +111,7 @@ pub struct Connection {
   routes: Mutex<FxHashMap<RouteKey, Route>>,
   observers: Mutex<FxHashMap<RouteKey, Vec<RouteObserver>>>,
   closed: AtomicBool,
-  tasks: crate::backend::transport_tasks::TransportTasks,
+  tasks: TransportTasks,
 }
 
 impl Connection {
@@ -137,23 +137,28 @@ impl Connection {
       routes: Mutex::new(FxHashMap::default()),
       observers: Mutex::new(FxHashMap::default()),
       closed: AtomicBool::new(false),
-      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, tasks),
+      tasks: TransportTasks::new(shutdown, tasks),
     });
     let _ = ready.send(Arc::downgrade(&conn));
     conn
   }
 
   /// Resolves once the inspector pipe has ended.
-  pub(crate) fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
     self.tasks.closed()
   }
 
-  pub(crate) fn start_close(&self) {
+  /// Begin closing the inspector pipe and fail all pending callbacks.
+  pub fn start_close(&self) {
     self.drain_all();
     self.tasks.start_close();
   }
 
-  pub(crate) fn request_browser_close(&self) -> Result<(), ConnectionError> {
+  /// Send the fire-and-forget `Playwright.close` request and drain pending callbacks.
+  ///
+  /// # Errors
+  /// Returns an error if the outbound inspector pipe is already closed.
+  pub fn request_browser_close(&self) -> Result<(), ConnectionError> {
     let result = self.send_raw(&json!({
       "id": BROWSER_CLOSE_ID, "method": super::protocol::PLAYWRIGHT_CLOSE, "params": {},
     }));
@@ -165,7 +170,7 @@ impl Connection {
   ///
   /// Returns an error when one of the inspector pipe's I/O tasks ends with a failure other than
   /// cancellation during cleanup.
-  pub async fn close(&self) -> crate::Result<()> {
+  pub async fn close(&self) -> FerriResult<()> {
     self.start_close();
     self.tasks.close().await
   }
@@ -606,7 +611,7 @@ impl Session {
 
   /// Run `observer` on each of this session's events in wire order, from
   /// the reader, until the route closes. See [`RouteObserver`].
-  pub(crate) fn observe(&self, observer: RouteObserver) {
+  pub fn observe(&self, observer: RouteObserver) {
     self
       .conn
       .observers
@@ -709,7 +714,7 @@ mod tests {
         routes: Mutex::new(FxHashMap::default()),
         observers: Mutex::new(FxHashMap::default()),
         closed: AtomicBool::new(false),
-        tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+        tasks: TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
       }),
       queued,
     )

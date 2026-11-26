@@ -5,15 +5,15 @@
 //! envelope on every platform.
 
 pub mod browser;
-pub mod connection;
+pub use ferridriver_transport::webkit::connection;
 pub mod element;
 pub mod events;
 pub mod input;
 pub mod launcher;
 pub(crate) mod owner;
 pub mod page;
-pub mod protocol;
-pub mod transport;
+pub use ferridriver_transport::webkit::protocol;
+pub use ferridriver_transport::webkit::transport;
 pub(crate) mod worker;
 
 pub use browser::{BrowserError, WebKitBrowser};
