@@ -22,7 +22,7 @@ mod scope;
 pub(crate) mod session;
 #[cfg(test)]
 mod session_tests;
-pub(crate) mod transport;
+pub(crate) use ferridriver_transport::bidi as transport;
 pub mod types;
 mod webdriver;
 pub(crate) mod worker;

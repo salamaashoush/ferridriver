@@ -1,0 +1,36 @@
+[package]
+name = "ferridriver-transport"
+description = "Protocol wire transports for ferridriver: WebDriver BiDi WebSocket and Playwright WebKit NUL-delimited JSON pipe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arc-swap = { workspace = true }
+bytes = "1"
+dashmap = { workspace = true }
+ferridriver-bidi-proto = { workspace = true }
+ferridriver-driver = { workspace = true }
+ferridriver-error = { workspace = true }
+ferridriver-webkit-proto = { workspace = true }
+futures = { workspace = true }
+memchr = "2"
+rustc-hash = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = "0.30"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

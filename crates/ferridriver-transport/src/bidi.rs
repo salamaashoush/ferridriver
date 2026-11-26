@@ -11,14 +11,16 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, trace, warn};
 
-use crate::backend::json_scan;
-use crate::error::{FerriError, Result};
+use ferridriver_driver::json_scan;
+use ferridriver_driver::operation_budget::OperationBudget;
+use ferridriver_driver::transport_tasks::{self, TransportTasks};
+use ferridriver_error::{FerriError, Result};
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /// Error from a `BiDi` command.
 #[derive(Debug, Clone)]
-pub(crate) struct BidiError {
+pub struct BidiError {
   pub error: String,
   pub message: String,
 }
@@ -30,7 +32,9 @@ impl std::fmt::Display for BidiError {
 }
 
 impl BidiError {
-  pub(crate) fn into_error(self, method: &str) -> FerriError {
+  /// Convert this protocol error into a typed [`FerriError`] for `method`.
+  #[must_use]
+  pub fn into_error(self, method: &str) -> FerriError {
     if matches!(self.error.as_str(), "no such frame" | "target closed") {
       FerriError::target_closed(Some(self.to_string()))
     } else if matches!(self.error.as_str(), "unknown command" | "unsupported operation") {
@@ -41,11 +45,11 @@ impl BidiError {
   }
 }
 
-pub(crate) type BidiResult = std::result::Result<serde_json::Value, BidiError>;
+pub type BidiResult = std::result::Result<serde_json::Value, BidiError>;
 
 /// A `BiDi` event received from the browser.
 #[derive(Debug, Clone)]
-pub(crate) struct BidiEvent {
+pub struct BidiEvent {
   /// Event method name, e.g. "browsingContext.load"
   pub method: String,
   /// Raw event params
@@ -57,7 +61,7 @@ pub(crate) struct BidiEvent {
 /// already reflect (the frame tree after a `history.pushState` the caller
 /// just evaluated): a listener draining a tap can lag the reply that
 /// follows the event. Must not block. Returning `false` removes it.
-pub(crate) type EventObserver = Arc<dyn Fn(&BidiEvent) -> bool + Send + Sync>;
+pub type EventObserver = Arc<dyn Fn(&BidiEvent) -> bool + Send + Sync>;
 
 enum TapMessage {
   Event(BidiEvent),
@@ -65,12 +69,16 @@ enum TapMessage {
 }
 
 #[derive(Clone)]
-pub(crate) struct EventBarrier {
+pub struct EventBarrier {
   sender: mpsc::WeakUnboundedSender<TapMessage>,
 }
 
 impl EventBarrier {
-  pub(crate) async fn wait(&self) -> Result<()> {
+  /// Wait until all events queued before this barrier have been consumed.
+  ///
+  /// # Errors
+  /// Returns an error if the event consumer has already closed.
+  pub async fn wait(&self) -> Result<()> {
     let (tx, rx) = oneshot::channel();
     self
       .sender
@@ -82,7 +90,7 @@ impl EventBarrier {
   }
 }
 
-pub(crate) struct EventTap {
+pub struct EventTap {
   receiver: mpsc::UnboundedReceiver<TapMessage>,
   barrier: EventBarrier,
 }
@@ -96,11 +104,14 @@ impl EventTap {
     (sender, Self { receiver, barrier })
   }
 
-  pub(crate) fn barrier(&self) -> EventBarrier {
+  /// Return a barrier handle that synchronizes with this tap's reader.
+  #[must_use]
+  pub fn barrier(&self) -> EventBarrier {
     self.barrier.clone()
   }
 
-  pub(crate) async fn recv(&mut self) -> Option<BidiEvent> {
+  /// Receive the next event in wire order, or `None` once the transport closes.
+  pub async fn recv(&mut self) -> Option<BidiEvent> {
     while let Some(message) = self.receiver.recv().await {
       match message {
         TapMessage::Event(event) => return Some(event),
@@ -149,7 +160,7 @@ fn fail_pending(pending: &PendingMap) {
 /// - Direct string command building: skip `serde_json::Value` intermediary for envelope
 /// - Single WebSocket for all contexts (`BiDi` multiplexes natively)
 /// - Broadcast channel for events with method-based filtering at receive site
-pub(crate) struct BidiTransport {
+pub struct BidiTransport {
   next_id: AtomicU64,
   pending: Arc<PendingMap>,
   write_tx: mpsc::Sender<Message>,
@@ -166,7 +177,7 @@ pub(crate) struct BidiTransport {
   /// an intentional shutdown that's expected teardown, not an error
   /// worth a WARN.
   closing: Arc<AtomicBool>,
-  tasks: crate::backend::transport_tasks::TransportTasks,
+  tasks: TransportTasks,
 }
 
 impl Drop for BidiTransport {
@@ -194,10 +205,11 @@ fn websocket_request(
     .into_client_request()
     .map_err(|e| FerriError::backend(format!("BiDi WebSocket request failed: {e}")))?;
   if let Some(headers) = headers {
+    use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
     for (name, value) in headers {
-      let name = reqwest::header::HeaderName::try_from(name)
+      let name = HeaderName::try_from(name.as_str())
         .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header name: {e}")))?;
-      let value = reqwest::header::HeaderValue::try_from(value)
+      let value = HeaderValue::try_from(value.as_str())
         .map_err(|e| FerriError::invalid_argument("headers", format!("invalid header value: {e}")))?;
       request.headers_mut().insert(name, value);
     }
@@ -210,7 +222,7 @@ async fn connect_socket(
   headers: Option<&rustc_hash::FxHashMap<String, String>>,
 ) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
   let request = websocket_request(ws_url, headers)?;
-  let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+  let budget = OperationBudget::current(30_000)?;
   let (socket, _) = budget
     .wait(Box::pin(tokio_tungstenite::connect_async_with_config(
       request, None, true,
@@ -223,11 +235,18 @@ async fn connect_socket(
 
 impl BidiTransport {
   /// Connect to a `BiDi` WebSocket endpoint.
-  pub(crate) async fn connect(ws_url: &str) -> Result<Self> {
+  ///
+  /// # Errors
+  /// Returns an error if the WebSocket handshake fails or times out.
+  pub async fn connect(ws_url: &str) -> Result<Self> {
     Self::connect_with_headers(ws_url, None).await
   }
 
-  pub(crate) async fn connect_with_headers(
+  /// Connect to a `BiDi` WebSocket endpoint with optional handshake headers.
+  ///
+  /// # Errors
+  /// Returns an error if any header is invalid or the WebSocket handshake fails.
+  pub async fn connect_with_headers(
     ws_url: &str,
     headers: Option<&rustc_hash::FxHashMap<String, String>>,
   ) -> Result<Self> {
@@ -238,9 +257,7 @@ impl BidiTransport {
     // Writer task
     let (write_tx, write_rx) = mpsc::channel::<Message>(256);
     let (shutdown, stopping) = tokio::sync::watch::channel(false);
-    let writer = tokio::spawn(crate::backend::transport_tasks::write_websocket(
-      write, write_rx, stopping,
-    ));
+    let writer = tokio::spawn(transport_tasks::write_websocket(write, write_rx, stopping));
 
     // Event broadcast channel — sized to absorb a worst-case page
     // load fan-out so slow subscribers don't get `RecvError::Lagged`
@@ -328,13 +345,13 @@ impl BidiTransport {
       event_taps,
       observers,
       closing,
-      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![reader, writer]),
+      tasks: TransportTasks::new(shutdown, vec![reader, writer]),
     })
   }
 
   /// Reject commands and request a close handshake independently of queue capacity.
   /// This also marks expected process termination for the reader's diagnostics.
-  pub(crate) fn start_close(&self) {
+  pub fn start_close(&self) {
     self.closing.store(true, Ordering::Release);
     self.event_tx.store(None);
     self
@@ -351,7 +368,11 @@ impl BidiTransport {
     self.tasks.start_close();
   }
 
-  pub(crate) async fn close(&self) -> Result<()> {
+  /// Close the WebSocket transport and wait for its reader/writer tasks to exit.
+  ///
+  /// # Errors
+  /// Returns an error if a background transport task failed unexpectedly.
+  pub async fn close(&self) -> Result<()> {
     self.start_close();
     self.tasks.close().await
   }
@@ -359,7 +380,11 @@ impl BidiTransport {
   /// Send a strongly typed `BiDi` command, serializing `cmd` directly onto the
   /// WebSocket frame without constructing an intermediate `serde_json::Value`,
   /// and decode the response into `C::Response`.
-  pub(crate) async fn send<C: ferridriver_bidi_proto::Command>(&self, cmd: &C) -> Result<C::Response> {
+  ///
+  /// # Errors
+  /// Returns an error if the transport is closed, the command times out, the
+  /// browser replies with a `BiDi` error, or response decoding fails.
+  pub async fn send<C: ferridriver_bidi_proto::Command>(&self, cmd: &C) -> Result<C::Response> {
     let value = self
       .send_raw_serializable(C::METHOD, cmd)
       .await?
@@ -368,21 +393,28 @@ impl BidiTransport {
   }
 
   /// Send a `BiDi` command and await the response.
-  pub(crate) async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+  ///
+  /// # Errors
+  /// Returns an error if the transport fails, times out, or the browser replies
+  /// with a `BiDi` protocol error.
+  pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self.send_raw(method, params).await?.map_err(|e| e.into_error(method))
   }
 
   /// Send a `BiDi` command and await the browser's answer as it gave it:
   /// its result, or its error code and message. The outer error is the
   /// transport's own, the connection closed or the time up.
-  pub(crate) async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
+  ///
+  /// # Errors
+  /// Returns an error if the transport fails or times out.
+  pub async fn send_raw(&self, method: &str, params: serde_json::Value) -> Result<BidiResult> {
     self.send_raw_serializable(method, &params).await
   }
 
   async fn send_raw_serializable<P: serde::Serialize>(&self, method: &str, params: &P) -> Result<BidiResult> {
     use std::io::Write as _;
 
-    let budget = crate::operation_budget::OperationBudget::current(60_000)?;
+    let budget = OperationBudget::current(60_000)?;
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
 
@@ -415,13 +447,14 @@ impl BidiTransport {
   }
 
   /// Resolves once the connection to the browser has ended.
-  pub(crate) fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
+  pub fn closed(&self) -> futures::future::BoxFuture<'static, ()> {
     self.tasks.closed()
   }
 
   /// Subscribe to `BiDi` events. Returns a broadcast receiver.
   /// Receivers filter by event method at the receive site.
-  pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
+  #[must_use]
+  pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
     self
       .event_tx
       .load()
@@ -431,7 +464,7 @@ impl BidiTransport {
 
   /// Run `observer` on every event from the reader, in wire order, until
   /// it returns `false` or the transport closes. See [`EventObserver`].
-  pub(crate) fn observe_events(&self, observer: EventObserver) {
+  pub fn observe_events(&self, observer: EventObserver) {
     if self.closing.load(Ordering::Acquire) {
       return;
     }
@@ -445,7 +478,8 @@ impl BidiTransport {
   /// Lossless, wire-ordered event tap. Never drops; consumers filter by
   /// method at the receive site. State-mutating consumers MUST use this
   /// instead of [`Self::subscribe_events`].
-  pub(crate) fn tap_events(&self) -> EventTap {
+  #[must_use]
+  pub fn tap_events(&self) -> EventTap {
     let (tx, rx) = EventTap::new();
     let mut taps = self
       .event_taps
@@ -594,12 +628,12 @@ mod tests {
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       observers: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
-      tasks: crate::backend::transport_tasks::TransportTasks::new(shutdown, vec![worker]),
+      tasks: TransportTasks::new(shutdown, vec![worker]),
     };
     let mut events = transport.subscribe_events();
     let mut tap = transport.tap_events();
     let mut pending = Box::pin(
-      crate::operation_budget::OperationBudget::new(0)
+      OperationBudget::new(0)
         .unwrap()
         .scope(transport.send_command("session.status", serde_json::json!({}))),
     );
@@ -643,7 +677,7 @@ mod tests {
     });
     let transport = BidiTransport::connect(&endpoint).await.unwrap();
     let mut pending = Box::pin(
-      crate::operation_budget::OperationBudget::new(0)
+      OperationBudget::new(0)
         .unwrap()
         .scope(transport.send_command("session.status", serde_json::json!({}))),
     );
@@ -664,7 +698,7 @@ mod tests {
 
   #[tokio::test(start_paused = true)]
   async fn operation_budgets_cover_long_replies_and_queued_commands() {
-    use crate::operation_budget::OperationBudget;
+    use ferridriver_driver::operation_budget::OperationBudget;
     let (write_tx, mut queued) = mpsc::channel(1);
     let transport = BidiTransport {
       next_id: AtomicU64::new(0),
@@ -674,7 +708,7 @@ mod tests {
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       observers: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
-      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+      tasks: TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     };
     for timeout in [0, 90_000] {
       let mut command = Box::pin(
@@ -721,7 +755,7 @@ mod tests {
       event_taps: Arc::new(std::sync::Mutex::new(Vec::new())),
       observers: Arc::new(std::sync::Mutex::new(Vec::new())),
       closing: Arc::new(AtomicBool::new(false)),
-      tasks: crate::backend::transport_tasks::TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
+      tasks: TransportTasks::new(tokio::sync::watch::channel(false).0, Vec::new()),
     };
     let mut command = Box::pin(transport.send_command("session.status", serde_json::json!({})));
     assert!(futures::poll!(&mut command).is_pending());

@@ -29,6 +29,7 @@ default-members = [
   "crates/ferridriver-bidi-proto",
   "crates/ferridriver-webkit-proto",
   "crates/ferridriver-webdriver-proto",
+  "crates/ferridriver-transport",
   "crates/ferridriver-adb",
   "crates/ferridriver-codegen",
   "examples/bdd-example",
@@ -153,6 +154,7 @@ ferridriver-cdp-proto = { path = "crates/ferridriver-cdp-proto", version = "0.8.
 ferridriver-bidi-proto = { path = "crates/ferridriver-bidi-proto", version = "0.8.1" }
 ferridriver-webkit-proto = { path = "crates/ferridriver-webkit-proto", version = "0.8.1" }
 ferridriver-webdriver-proto = { path = "crates/ferridriver-webdriver-proto", version = "0.8.1" }
+ferridriver-transport = { path = "crates/ferridriver-transport", version = "0.8.1" }
 ferridriver-adb = { path = "crates/ferridriver-adb", version = "0.8.1" }
 ferridriver-codegen = { path = "crates/ferridriver-codegen", version = "0.8.1" }
 # The JavaScript runtime this project's scripting is built on. To develop

@@ -1654,6 +1654,7 @@ dependencies = [
  "ferridriver-install",
  "ferridriver-process",
  "ferridriver-trace",
+ "ferridriver-transport",
  "ferridriver-types",
  "ferridriver-webdriver-proto",
  "ferridriver-webkit-proto",
@@ -2213,6 +2214,28 @@ dependencies = [
  "serde_json",
  "tempfile",
  "zip",
+]
+
+[[package]]
+name = "ferridriver-transport"
+version = "0.8.1"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "dashmap",
+ "ferridriver-bidi-proto",
+ "ferridriver-driver",
+ "ferridriver-error",
+ "ferridriver-webkit-proto",
+ "futures",
+ "memchr",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
 ]
 
 [[package]]
