@@ -8,14 +8,13 @@
  */
 
 import { InjectedScript } from './injectedScript';
-import { matchesExpectAriaTemplate } from './ariaSnapshot';
-import { renderAriaSnapshotAsYaml } from '@isomorphic/ariaSnapshotRenderer';
-import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
+import { isElementVisible } from './domUtils';
 import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleNameText, getReadonly } from './roleUtils';
 import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
 import { UtilityScript } from './utilityScript';
 import { parseEvaluationResultValue, serializeAsCallArgument } from '@isomorphic/utilityScriptSerializers';
-import { asLocator, type Language } from '@isomorphic/locatorGenerators';
+import type { Language } from '@isomorphic/locatorGenerators';
+import type { ParsedSelector } from '@isomorphic/selectorParser';
 
 // ── Types ──
 
@@ -34,30 +33,43 @@ type FdOptions = {
   customEngines?: { name: string, source: string }[];
 };
 const fdOptions: FdOptions = (window as any).__fdOptions ?? {};
-
-const injected = new InjectedScript(window, {
-  isUnderTest: false,
-  sdkLanguage: 'javascript',
-  // Playwright builds the injected options per FRAME and puts the
-  // frame's sequence number in every `ai` ref (`f2e7`), so refs are
-  // unique page-wide. ferridriver injects one script per PAGE (an
-  // `addScriptToEvaluateOnNewDocument` source shared by every
-  // document), so there is no per-frame number to put here: the host
-  // renders each frame with its own ref namespace and prefixes the
-  // child frame's refs while stitching (`locator.rs::aria_stitch_frame`).
-  frameSeq: 0,
-  // Cosmetic here: a `getByTestId` selector carries its attribute name
-  // in the selector body, so this only feeds strict-mode error text and
-  // codegen. Registered engines, however, exist only if listed here.
-  testIdAttributeName: fdOptions.testIdAttributeName ?? 'data-testid',
-  // Matches Playwright's `rafCountForStablePosition()` — 1 for Chromium,
-  // Firefox, and WebKit on Linux/macOS (only WebKit-Windows uses 5, which
-  // ferridriver does not target). 2 made the `stable` gate wait an extra
-  // animation frame per pointer action vs Playwright.
-  stableRafCount: 1,
-  browserName: 'chromium',
-  customEngines: fdOptions.customEngines ?? [],
-});
+// Capture timer/rAF builtins eagerly before page script runs (5us) so clock
+// emulation and monkey-patched globals cannot affect later waits, while
+// deferring the heavy `new InjectedScript(...)` construction (30 selector
+// engines, Maps/Sets, 16 window capture listeners) until the first actual
+// `window.__fd` call. Avoids constructing InjectedScript twice on every
+// discarded `about:blank` and in unused utility worlds.
+const initialBuiltins = new UtilityScript(window as any, false).builtins;
+let _injected: InjectedScript | null = null;
+function getInjected(): InjectedScript {
+  if (!_injected) {
+    _injected = new InjectedScript(window, {
+      isUnderTest: false,
+      sdkLanguage: 'javascript',
+      // Playwright builds the injected options per FRAME and puts the
+      // frame's sequence number in every `ai` ref (`f2e7`), so refs are
+      // unique page-wide. ferridriver injects one script per PAGE (an
+      // `addScriptToEvaluateOnNewDocument` source shared by every
+      // document), so there is no per-frame number to put here: the host
+      // renders each frame with its own ref namespace and prefixes the
+      // child frame's refs while stitching (`locator.rs::aria_stitch_frame`).
+      frameSeq: 0,
+      // Cosmetic here: a `getByTestId` selector carries its attribute name
+      // in the selector body, so this only feeds strict-mode error text and
+      // codegen. Registered engines, however, exist only if listed here.
+      testIdAttributeName: fdOptions.testIdAttributeName ?? 'data-testid',
+      // Matches Playwright's `rafCountForStablePosition()` — 1 for Chromium,
+      // Firefox, and WebKit on Linux/macOS (only WebKit-Windows uses 5, which
+      // ferridriver does not target). 2 made the `stable` gate wait an extra
+      // animation frame per pointer action vs Playwright.
+      stableRafCount: 1,
+      browserName: 'chromium',
+      customEngines: fdOptions.customEngines ?? [],
+    });
+    _injected.utils.builtins = (window as any).__pwClock?.builtins ?? initialBuiltins;
+  }
+  return _injected;
+}
 
 // ── Selector Execution (compatibility with ferridriver's parts-based API) ──
 
@@ -66,6 +78,10 @@ const injected = new InjectedScript(window, {
 // role spec for role, CSS for css, etc.
 // exact flag: body enclosed in double quotes = exact match, otherwise substring/case-insensitive.
 function partsToSelectorString(parts: SelectorPart[]): string {
+  if (parts.length === 1) {
+    const p = parts[0];
+    return (p.capture ? '*' : '') + partToSelectorString(p);
+  }
   return parts.map(p => {
     // Playwright `*` capture modifier: re-emitted onto the converted
     // part so the ported parseSelector records the capture index.
@@ -153,11 +169,25 @@ function normalizeHasBody(body: string): string {
   return JSON.stringify(body);
 }
 
+const _parsedSelectorCache = new Map<string, ParsedSelector>();
+
+function parseSelectorCached(inj: InjectedScript, selectorStr: string): ParsedSelector {
+  let parsed = _parsedSelectorCache.get(selectorStr);
+  if (parsed === undefined) {
+    parsed = inj.parseSelector(selectorStr);
+    if (_parsedSelectorCache.size >= 256)
+      _parsedSelectorCache.clear();
+    _parsedSelectorCache.set(selectorStr, parsed);
+  }
+  return parsed;
+}
+
 function executeSelector(parts: SelectorPart[], root: Node): Element[] {
   const selectorStr = partsToSelectorString(parts);
   try {
-    const parsed = injected.parseSelector(selectorStr);
-    return injected.querySelectorAll(parsed, root);
+    const inj = getInjected();
+    const parsed = parseSelectorCached(inj, selectorStr);
+    return inj.querySelectorAll(parsed, root);
   } catch {
     // Fallback: try each part as CSS
     let current: Element[] = root === document ? [document.documentElement] : [root as Element];
@@ -224,7 +254,7 @@ function isVisible(el: Element): boolean {
 }
 
 function elementState(el: Element, state: ElementState): boolean | 'error:notconnected' {
-  const result = injected.elementState(el, state as any, frameVisible(el));
+  const result = getInjected().elementState(el, state as any, frameVisible(el));
   if (typeof result === 'object' && result !== null && 'matches' in result) {
     return (result as any).matches;
   }
@@ -273,7 +303,7 @@ function topViewportPointToLocal(el: Element, p: { x: number; y: number }): { x:
 }
 
 function expectHitTarget(hitPoint: { x: number; y: number }, targetElement: Element): 'done' | { hitTargetDescription: string } {
-  return injected.expectHitTarget(topViewportPointToLocal(targetElement, hitPoint), targetElement);
+  return getInjected().expectHitTarget(topViewportPointToLocal(targetElement, hitPoint), targetElement);
 }
 
 /**
@@ -307,7 +337,7 @@ function installHitInterceptor(
     } catch {}
     w.__fd._hitInterceptor = null;
   }
-  const r = injected.setupHitTargetInterceptor(el, action, topViewportPointToLocal(el, hitPoint), false);
+  const r = getInjected().setupHitTargetInterceptor(el, action, topViewportPointToLocal(el, hitPoint), false);
   if (typeof r === 'string') return r;
   if (r === 'error:notconnected') return r;
   w.__fd._hitInterceptor = r;
@@ -349,15 +379,33 @@ function clickGuard(el: Element): string {
 async function awaitStates(el: Element, states: ElementState[]): Promise<string | undefined> {
   // Non-stable states (visible / enabled / editable) are synchronous — no
   // rAF — so check them directly.
-  const nonStable = states.filter((s) => s !== 'stable' && s !== 'stable-frame');
-  const result = await injected.checkElementStates(el, nonStable as any, frameVisible(el));
-  if (result === 'error:notconnected') return 'connected';
-  if (result !== undefined) return (result as any).missingState;
+  const inj = getInjected();
+  let wantStable = false;
+  let inOneFrame = false;
+  let nonStable: ElementState[] | null = null;
+  for (let i = 0; i < states.length; i++) {
+    const s = states[i];
+    if (s === 'stable') {
+      wantStable = true;
+    } else if (s === 'stable-frame') {
+      inOneFrame = true;
+    } else if (nonStable) {
+      nonStable.push(s);
+    }
+    if ((s === 'stable' || s === 'stable-frame') && !nonStable) {
+      nonStable = states.slice(0, i);
+    }
+  }
+  const toCheck = nonStable ?? states;
+  if (toCheck.length > 0) {
+    const result = await inj.checkElementStates(el, toCheck as any, frameVisible(el));
+    if (result === 'error:notconnected') return 'connected';
+    if (result !== undefined) return (result as any).missingState;
+  }
 
-  const inOneFrame = states.includes('stable-frame');
-  if (inOneFrame || states.includes('stable')) {
+  if (inOneFrame || wantStable) {
     const playwright = () =>
-      injected.checkElementStates(el, ['stable'] as any, frameVisible(el)).then((r: any) => r === undefined);
+      inj.checkElementStates(el, ['stable'] as any, frameVisible(el)).then((r: any) => r === undefined);
     const stable = await Promise.race([
       inOneFrame ? stableInOneFrame(el, playwright) : playwright(),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 1000)),
@@ -390,9 +438,10 @@ async function awaitStates(el: Element, states: ElementState[]): Promise<string 
 const STABLE_WATCH_MS = 12;
 
 function stableInOneFrame(el: Element, playwright: () => Promise<boolean>): Promise<boolean> {
-  const builtins = injected.utils.builtins;
+  const inj = getInjected();
+  const builtins = inj.utils.builtins;
   const box = () => {
-    const target = injected.retarget(el, 'no-follow-label');
+    const target = inj.retarget(el, 'no-follow-label');
     if (!target) return null;
     const rect = target.getBoundingClientRect();
     return [rect.top, rect.left, rect.width, rect.height];
@@ -485,7 +534,9 @@ async function clickPrep(
     const vh = window.innerHeight;
     let best: DOMRect | null = null;
     let bestArea = -1;
-    for (const rc of Array.from(el.getClientRects())) {
+    const rects = el.getClientRects();
+    for (let i = 0; i < rects.length; i++) {
+      const rc = rects[i];
       const iw = Math.max(0, Math.min(rc.right, vw) - Math.max(rc.left, 0));
       const ih = Math.max(0, Math.min(rc.bottom, vh) - Math.max(rc.top, 0));
       const area = iw * ih;
@@ -531,11 +582,11 @@ function dispatchInputEvents(el: Element) {
 }
 
 function fillElement(el: Element, value: string): 'done' | 'needsinput' | 'error:notconnected' {
-  return injected.fill(el, value);
+  return getInjected().fill(el, value);
 }
 
 function selectOptions(el: Element, ...options: { value?: string; label?: string; index?: number; valueOrLabel?: string }[]): string[] | string {
-  return injected.selectOptions(el, options);
+  return getInjected().selectOptions(el, options);
 }
 
 function getOptions(el: HTMLSelectElement): { options: { index: number; text: string; value: string; selected: boolean }[] } {
@@ -561,19 +612,19 @@ function selectOption(el: HTMLSelectElement, target: string): { selected: boolea
 }
 
 function focusNode(el: Element) {
-  injected.focusNode(el, false);
+  getInjected().focusNode(el, false);
 }
 
 function blurNode(el: Element) {
-  injected.blurNode(el);
+  getInjected().blurNode(el);
 }
 
 function selectText(el: Element) {
-  injected.selectText(el);
+  getInjected().selectText(el);
 }
 
 function setInputFiles(el: Element, payloads: { name: string; mimeType: string; buffer: string }[]) {
-  return injected.setInputFiles(el, payloads);
+  return getInjected().setInputFiles(el, payloads);
 }
 
 function normalizeWS(s: string): string {
@@ -619,7 +670,7 @@ function waitForState(
   state: 'attached' | 'detached' | 'visible' | 'hidden',
   budgetMs: number,
 ): Promise<string> {
-  const builtins = injected.utils.builtins;
+  const builtins = getInjected().utils.builtins;
   return new Promise(resolve => {
     let settled = false;
     // A selector that is expensive to run is judged once a frame rather
@@ -682,7 +733,7 @@ function waitForState(
 const CHANGE_EVENTS = ['input', 'change', 'focusin', 'focusout', 'transitionend', 'animationend', 'load', 'error'];
 
 function waitForChange(budgetMs: number): Promise<boolean> {
-  const builtins = injected.utils.builtins;
+  const builtins = (window as any).__pwClock?.builtins ?? initialBuiltins;
   return new Promise(resolve => {
     let settled = false;
     const finish = (changed: boolean) => {
@@ -761,12 +812,160 @@ declare global {
   interface Window { __fd: any; }
 }
 
+let lastCheckedEl: Element | null = null;
+
+function checkedOf(node: Node): boolean | 'error' {
+  const el = getInjected().retarget(node, 'follow-label');
+  return el ? getCheckedWithoutMixed(el) : 'error';
+}
+
+async function prepElementForPointer(
+  el: Element,
+  position: { x: number; y: number } | null,
+  states: ElementState[],
+  scrollAlign: ScrollIntoViewOptions | null | false | undefined,
+  hitAction: 'hover' | 'tap' | 'mouse' | 'drag' | null | undefined,
+  force: boolean,
+  trial: boolean,
+): Promise<{
+  actionable: boolean;
+  reason?: string;
+  point: { x: number; y: number } | null;
+  hit?: string;
+}> {
+  if (force) {
+    if (scrollAlign === false) {
+      // Leave the page where it is.
+    } else if (scrollAlign) {
+      el.scrollIntoView(scrollAlign);
+    } else if (typeof (el as any).scrollIntoViewIfNeeded === 'function') {
+      (el as any).scrollIntoViewIfNeeded();
+    } else {
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+    }
+    const r = el.getBoundingClientRect();
+    let x = position ? r.x + position.x : r.x + r.width / 2;
+    let y = position ? r.y + position.y : r.y + r.height / 2;
+    if (!position && r.width * r.height > 0) {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const left = Math.max(r.left, 0);
+      const right = Math.min(r.right, vw);
+      const top = Math.max(r.top, 0);
+      const bottom = Math.min(r.bottom, vh);
+      if ((right - left) * (bottom - top) <= 0.99 || right <= left || bottom <= top) {
+        return { actionable: false, reason: 'inviewport', point: null };
+      }
+      x = (left + right) / 2;
+      y = (top + bottom) / 2;
+    }
+    let win: any = (el.ownerDocument as Document).defaultView;
+    while (win && win !== win.parent && win.frameElement) {
+      const fr = (win.frameElement as Element).getBoundingClientRect();
+      x += fr.x;
+      y += fr.y;
+      win = win.parent;
+    }
+    return { actionable: true, point: { x, y } };
+  }
+  const res = await clickPrep(el, position, states, scrollAlign, trial ? null : (hitAction as any));
+  if (!res.actionable || !trial || !res.point) return res;
+  const h = expectHitTarget(res.point, el);
+  return { ...res, hit: h === 'done' ? 'ok' : h.hitTargetDescription };
+}
+
+async function evalExpectOnce(parts: SelectorPart[], params: any, strict: boolean): Promise<{ settled: boolean; json: string }> {
+  try {
+    const isArray = params.expression === 'to.have.count' || params.expression.endsWith('.array');
+    const elements = executeSelector(parts, document);
+    if (strict && !isArray && elements.length > 1)
+      return { settled: true, json: JSON.stringify({ strict: elements.length }) };
+    if (!elements.length) {
+      const expr = params.expression;
+      const isNot = Boolean(params.isNot);
+      let matches = isNot;
+      if (expr === 'to.have.count') matches = params.expectedNumber === 0;
+      else if (isArray) matches = !params.expectedText || params.expectedText.length === 0;
+      else if (!isNot && (expr === 'to.be.hidden' || expr === 'to.be.detached')) matches = true;
+      else if (isNot && (expr === 'to.be.visible' || expr === 'to.be.attached' || expr === 'to.be.in.viewport')) matches = false;
+      return { settled: matches !== isNot, json: JSON.stringify({ missing: true }) };
+    }
+    const inj = getInjected();
+    const log = isArray
+      ? `  locator resolved to ${elements.length} element${elements.length === 1 ? '' : 's'}`
+      : `  locator resolved to ${inj.previewNode(elements[0])}`;
+    const result = await inj.expect(elements[0], params, elements, frameVisible(elements[0]));
+    const passed = Boolean(result.matches) !== Boolean(params.isNot);
+    return { settled: passed, json: JSON.stringify({ ...result, log }) };
+  } catch (e: any) {
+    return { settled: true, json: JSON.stringify({ error: e.message }) };
+  }
+}
+
+function expectWait(parts: SelectorPart[], params: any, strict: boolean, budgetMs: number): Promise<string> {
+  const builtins = (window as any).__pwClock?.builtins ?? initialBuiltins;
+  return new Promise(async resolve => {
+    let last = await evalExpectOnce(parts, params, strict);
+    if (last.settled || budgetMs <= 0) {
+      resolve(last.json);
+      return;
+    }
+    let done = false;
+    let running = false;
+    let rerun = false;
+    let costly = false;
+    const finish = (json: string) => {
+      if (done) return;
+      done = true;
+      observer.disconnect();
+      for (const type of CHANGE_EVENTS) document.removeEventListener(type, trigger, true);
+      resolve(json);
+    };
+    const judge = async () => {
+      if (done) return;
+      if (running) {
+        rerun = true;
+        return;
+      }
+      running = true;
+      const started = builtins.performance.now();
+      try {
+        last = await evalExpectOnce(parts, params, strict);
+        if (last.settled) {
+          finish(last.json);
+          return;
+        }
+      } finally {
+        running = false;
+        costly = builtins.performance.now() - started > 2;
+      }
+      if (rerun && !done) {
+        rerun = false;
+        void judge();
+      }
+    };
+    const trigger = () => {
+      if (!costly) void judge();
+    };
+    const observer = new MutationObserver(trigger);
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    for (const type of CHANGE_EVENTS) document.addEventListener(type, trigger, true);
+    const frame = () => {
+      if (done) return;
+      void judge();
+      builtins.requestAnimationFrame(frame);
+    };
+    builtins.requestAnimationFrame(frame);
+    builtins.setTimeout(() => finish(last.json), budgetMs);
+  });
+}
+
 // A `window.__fd` from another realm (an injection that ran in the
 // outgoing document) is replaced: its promises can never settle.
 if (!(window.__fd instanceof Object)) {
   window.__fd = {
-    // Playwright InjectedScript instance (for advanced/direct use)
-    _injected: injected,
+    // Playwright InjectedScript instance (constructed lazily on first access)
+    get _injected() { return getInjected(); },
 
     // Selector API (backward compatible)
     _exec: executeSelector,
@@ -810,24 +1009,120 @@ if (!(window.__fd instanceof Object)) {
      * backend as data rather than as a thrown, backend-mangled message.
      */
     async expect(parts: SelectorPart[], params: any, strict: boolean) {
+      return (await evalExpectOnce(parts, params, strict)).json;
+    },
+    expectWait,
+    ariaSnapshotForExpectFailure(parts?: SelectorPart[], params?: any) {
+      if (!((window as any).__fdAria instanceof Object))
+        return null;
+      const inj = getInjected();
+      if (parts && params) {
+        const els = executeSelector(parts, document);
+        const el = els.length > 0 ? els[0] : undefined;
+        return inj.ariaSnapshotForExpect(el, params, el ? frameVisible(el) : false) ?? null;
+      }
+      return document.body ? inj.ariaSnapshotForExpectFailure(document.body, { mode: 'default' }) : null;
+    },
+
+    /**
+     * Resolve `parts` and run `fill` in a single round-trip (designed to execute
+     * directly inside `UTILITY_WORLD`, avoiding RemoteObjectId + DOM.describeNode
+     * + DOM.resolveNode + Runtime.releaseObject).
+     */
+    resolveAndFill(parts: SelectorPart[], strict: boolean, value: string, force: boolean): string {
       try {
-        const isArray = params.expression === 'to.have.count' || params.expression.endsWith('.array');
-        const elements = executeSelector(parts, document);
-        if (strict && !isArray && elements.length > 1)
-          return JSON.stringify({ strict: elements.length });
-        if (!elements.length)
-          return JSON.stringify({ missing: true });
-        const log = isArray
-          ? `  locator resolved to ${elements.length} element${elements.length === 1 ? '' : 's'}`
-          : `  locator resolved to ${injected.previewNode(elements[0])}`;
-        const result = await injected.expect(elements[0], params, elements, frameVisible(elements[0]));
-        return JSON.stringify({ ...result, log });
+        const r = executeSelector(parts, document);
+        if (strict && r.length > 1) return JSON.stringify({ strict: r.length });
+        if (!r.length) return JSON.stringify({ result: 'error:notfound' });
+        const el = r[0];
+        if (!force) {
+          const state = checkElementStates(el, ['visible', 'enabled', 'editable']);
+          if (state !== 'done') return JSON.stringify({ result: state });
+        }
+        return JSON.stringify({ result: fillElement(el, value) });
       } catch (e: any) {
-        return JSON.stringify({ error: e.message });
+        return JSON.stringify({ error: String(e && e.message || e) });
       }
     },
-    ariaSnapshotForExpectFailure() {
-      return document.body ? injected.ariaSnapshotForExpectFailure(document.body, { mode: 'default' }) : null;
+
+    /**
+     * Resolve `parts` + run pointer actionability, scroll, point calculation,
+     * and hit-target interceptor setup in a single `Runtime.evaluate`.
+     */
+    async resolveAndClickPrep(
+      parts: SelectorPart[],
+      strict: boolean,
+      position: { x: number; y: number } | null,
+      states: ElementState[],
+      scrollAlign?: ScrollIntoViewOptions | null | false,
+      hitAction?: 'hover' | 'tap' | 'mouse' | 'drag' | null,
+      force?: boolean,
+      trial?: boolean,
+    ): Promise<string> {
+      try {
+        const r = executeSelector(parts, document);
+        if (strict && r.length > 1) return JSON.stringify({ strict: r.length });
+        if (!r.length) return JSON.stringify({ actionable: false, reason: 'notfound', point: null });
+        const res = await prepElementForPointer(r[0], position, states, scrollAlign, hitAction, !!force, !!trial);
+        return JSON.stringify(res);
+      } catch (e: any) {
+        return JSON.stringify({ error: String(e && e.message || e) });
+      }
+    },
+
+    /**
+     * Resolve `parts` + check current checked/radio state + run pointer prep
+     * in a single `Runtime.evaluate`. Stashes the matched element for
+     * [`finalizeCheck`] to verify the post-click state alongside hit teardown.
+     */
+    async resolveAndCheckPrep(
+      parts: SelectorPart[],
+      strict: boolean,
+      targetChecked: boolean,
+      position: { x: number; y: number } | null,
+      states: ElementState[],
+      scrollAlign?: ScrollIntoViewOptions | null | false,
+      hitAction?: 'hover' | 'tap' | 'mouse' | 'drag' | null,
+      force?: boolean,
+      trial?: boolean,
+    ): Promise<string> {
+      try {
+        const r = executeSelector(parts, document);
+        if (strict && r.length > 1) return JSON.stringify({ strict: r.length });
+        if (!r.length) return JSON.stringify({ actionable: false, reason: 'notfound', point: null });
+        const el = r[0];
+        const current = checkedOf(el);
+        const isRadio = el.nodeName === 'INPUT' && (el as HTMLInputElement).type === 'radio';
+        if (typeof current !== 'boolean') {
+          return JSON.stringify({ invalid: 'not a checkbox, radio button, or ARIA-checkable element' });
+        }
+        if (current === targetChecked) {
+          return JSON.stringify({ alreadyDone: true });
+        }
+        if (!targetChecked && isRadio) {
+          return JSON.stringify({
+            invalid: 'Cannot uncheck radio button. Radio buttons can only be unchecked by selecting another radio button in the same group.',
+          });
+        }
+        lastCheckedEl = el;
+        const res = await prepElementForPointer(el, position, states, scrollAlign, hitAction, !!force, !!trial);
+        return JSON.stringify(res);
+      } catch (e: any) {
+        return JSON.stringify({ error: String(e && e.message || e) });
+      }
+    },
+
+    finalizeCheck(targetChecked: boolean, finalizeHit: boolean): string {
+      const el = lastCheckedEl;
+      lastCheckedEl = null;
+      if (finalizeHit) {
+        const hit = finalizeHitInterceptor();
+        if (hit !== 'done') {
+          return JSON.stringify({ hit });
+        }
+      }
+      const cur = el ? checkedOf(el) : 'error';
+      return JSON.stringify({ hit: 'done', changed: cur === targetChecked });
     },
 
     /**
@@ -846,7 +1141,8 @@ if (!(window.__fd instanceof Object)) {
     addMaskedElements(selector: string, color: string, tag: string) {
       let elements: Element[] = [];
       try {
-        elements = injected.querySelectorAll(injected.parseSelector(selector), document);
+        const inj = getInjected();
+        elements = inj.querySelectorAll(inj.parseSelector(selector), document);
       } catch {
         try { elements = [...document.querySelectorAll(selector)]; } catch { return; }
       }
@@ -873,7 +1169,7 @@ if (!(window.__fd instanceof Object)) {
      * 0 matches so the Rust host can surface a typed error.
      */
     normalizeSelector(parts: SelectorPart[]): string {
-      return JSON.stringify(resolveOne(parts, el => injected.generateSelectorSimple(el)));
+      return JSON.stringify(resolveOne(parts, el => getInjected().generateSelectorSimple(el)));
     },
 
     /**
@@ -888,14 +1184,17 @@ if (!(window.__fd instanceof Object)) {
      */
     generateLocator(parts: SelectorPart[], language?: Language): string {
       return JSON.stringify(
-        resolveOne(parts, el => asLocator(language || 'javascript', injected.generateSelectorSimple(el))),
+        resolveOne(parts, el => {
+          const inj = getInjected();
+          return inj.utils.asLocator(language || 'javascript', inj.generateSelectorSimple(el));
+        }),
       );
     },
 
     // Playwright selector API (direct access)
-    parseSelector: (s: string) => injected.parseSelector(s),
-    querySelector: (selector: any, root: Node, strict: boolean) => injected.querySelector(selector, root, strict),
-    querySelectorAll: (selector: any, root: Node) => injected.querySelectorAll(selector, root),
+    parseSelector: (s: string) => getInjected().parseSelector(s),
+    querySelector: (selector: any, root: Node, strict: boolean) => getInjected().querySelector(selector, root, strict),
+    querySelectorAll: (selector: any, root: Node) => getInjected().querySelectorAll(selector, root),
 
     // The element highlights this frame shows: the whole set, every time
     // (`injected.setHighlights`, driven by the host's highlight controller
@@ -904,13 +1203,14 @@ if (!(window.__fd instanceof Object)) {
     // the overlay re-resolves it as the DOM changes; `cssStyle` is already
     // a CSS string.
     setHighlights(entries: { parts: SelectorPart[]; cssStyle?: string }[]) {
-      injected.setHighlights(entries.map(e => ({
-        selector: injected.parseSelector(partsToSelectorString(e.parts)),
+      const inj = getInjected();
+      inj.setHighlights(entries.map(e => ({
+        selector: inj.parseSelector(partsToSelectorString(e.parts)),
         cssStyle: e.cssStyle,
       })));
     },
     hideHighlight() {
-      injected.hideHighlight();
+      if (_injected) _injected.hideHighlight();
     },
 
     // Actionability
@@ -949,14 +1249,11 @@ if (!(window.__fd instanceof Object)) {
     // state of the control the label owns. Returns `'error'` for
     // anything that is neither an input checkbox/radio nor an
     // `aria-checked` role, exactly like `getCheckedWithoutMixed`.
-    getChecked: (node: Node) => {
-      const el = injected.retarget(node, 'follow-label');
-      return el ? getCheckedWithoutMixed(el) : 'error';
-    },
+    getChecked: (node: Node) => checkedOf(node),
     // Playwright's `frames.ts::inputValue`: a label reads the control it
     // owns, and anything else is an error rather than `undefined`.
     inputValue: (node: Node) => {
-      const el = injected.retarget(node, 'follow-label');
+      const el = getInjected().retarget(node, 'follow-label');
       if (!el || (el.nodeName !== 'INPUT' && el.nodeName !== 'TEXTAREA' && el.nodeName !== 'SELECT'))
         throw new Error('Node is not an <input>, <textarea> or <select> element');
       return (el as HTMLInputElement).value;
@@ -974,11 +1271,11 @@ if (!(window.__fd instanceof Object)) {
     // on-demand `aria-support` bundle exactly like Playwright keeps it
     // out of the injected script.
     matchAriaTemplate: (node: Element, template: any) => {
-      const result = matchesExpectAriaTemplate(node, template);
+      const result = (window as any).__fdAria.matchesExpectAriaTemplate(node, template);
       return { matches: result.matches.length > 0, received: result.received.raw, regex: result.received.regex };
     },
     ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
-      injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
+      getInjected().ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
     // One frame's tree plus the `iframeRefs` / `iframeDepths` the Rust
     // core needs to merge child-iframe trees into it (server
     // `ariaSnapshotJSONForFrame`). The merged tree renders once, through
@@ -987,14 +1284,14 @@ if (!(window.__fd instanceof Object)) {
       node: Node,
       options?: { mode?: 'ai' | 'default'; depth?: number; boxes?: boolean },
     ) => {
-      const { json, iframeRefs, iframeDepths } = injected.ariaSnapshotJSON(node, {
+      const { json, iframeRefs, iframeDepths } = getInjected().ariaSnapshotJSON(node, {
         mode: options?.mode || 'default',
         depth: options?.depth,
         boxes: options?.boxes,
       });
       return { json, iframeRefs, iframeDepths };
     },
-    renderAriaSnapshot: (json: any) => renderAriaSnapshotAsYaml(json),
+    renderAriaSnapshot: (json: any) => (window as any).__fdAria.renderAriaSnapshotAsYaml(json),
     // Tag the iframe/frame element that the renderer assigned `ref` to
     // with `attr=ref`, so the host can re-resolve it through the normal
     // selector + content-frame path (BiDi-safe — passing a utility-eval

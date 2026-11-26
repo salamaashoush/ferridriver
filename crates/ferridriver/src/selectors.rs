@@ -271,6 +271,24 @@ pub fn reset_selector_registry() {
   HAS_TEST_ID_OVERRIDE.store(false, std::sync::atomic::Ordering::Release);
 }
 
+/// Cached default lazy-inject IIFE when no custom selector engines and no
+/// `testIdAttribute` override are registered (~180 KB saved per `new_page` /
+/// `retire_context`).
+static DEFAULT_LAZY_INJECT_JS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Borrowed when no custom engines or test-id overrides are active, owned
+/// otherwise.
+#[must_use]
+pub(crate) fn lazy_inject_js() -> std::borrow::Cow<'static, str> {
+  if !HAS_ENGINES.load(std::sync::atomic::Ordering::Acquire)
+    && !HAS_TEST_ID_OVERRIDE.load(std::sync::atomic::Ordering::Acquire)
+  {
+    let cached = DEFAULT_LAZY_INJECT_JS.get_or_init(|| build_lazy_inject_js_with(DEFAULT_TEST_ID_ATTRIBUTE));
+    return std::borrow::Cow::Borrowed(cached.as_str());
+  }
+  std::borrow::Cow::Owned(build_lazy_inject_js_with(&default_test_id_attribute()))
+}
+
 /// Unified lazy-injection IIFE.
 /// 1. Checks if already ready.
 /// 2. Checks if currently injecting.
@@ -279,7 +297,7 @@ pub fn reset_selector_registry() {
 /// Returns the `InjectedScript` instance.
 #[must_use]
 pub fn build_lazy_inject_js() -> String {
-  build_lazy_inject_js_with(&default_test_id_attribute())
+  lazy_inject_js().into_owned()
 }
 
 /// [`build_lazy_inject_js`] for a context whose `testIdAttribute` differs
@@ -747,10 +765,51 @@ pub(crate) fn storage_script_call(browser: crate::backend::BackendKind, expressi
   )
 }
 
-/// On-demand aria-template parser (`window.__fdAria`). Evaluated only by
-/// [`crate::Locator::match_aria_snapshot`] — it carries the `yaml`
-/// library, which has no business in the always-injected engine.
+/// On-demand devtools bundle (`window.__fdDevtools`): `Highlight`,
+/// `generateSelector`, and `asLocator`. Evaluated only by highlight,
+/// screenshot-mask, picker, recorder, `normalize_selector`, and
+/// `generate_locator` paths — keeping ~43 KB out of the always-injected engine.
+pub(crate) const RECORDER_SUPPORT_JS: &str = include_str!("injected/dist/recorder-support.min.js");
+
+/// On-demand ARIA snapshot & template bundle (`window.__fdAria`). Evaluated
+/// only by `ariaSnapshot*`, `toMatchAriaSnapshot`, and timed-out assertion
+/// error context — keeping ~20 KB plus the `yaml` parser out of the
+/// always-injected engine.
 pub(crate) const ARIA_SUPPORT_JS: &str = include_str!("injected/dist/aria-support.min.js");
+
+/// Ensure the on-demand devtools bundle (`window.__fdDevtools`) is loaded in
+/// `frame_id` (or the main frame when `None`).
+pub(crate) async fn ensure_devtools_support(page: &AnyPage, frame_id: Option<&str>) -> Result<()> {
+  let installed = match frame_id {
+    Some(fid) => {
+      page
+        .evaluate_in_frame("window.__fdDevtools instanceof Object", fid)
+        .await?
+    },
+    None => page.evaluate("window.__fdDevtools instanceof Object").await?,
+  }
+  .and_then(|v| v.as_bool())
+  .unwrap_or(false);
+  if !installed {
+    run_void(page, RECORDER_SUPPORT_JS, frame_id).await?;
+  }
+  Ok(())
+}
+
+/// Ensure the on-demand ARIA bundle (`window.__fdAria`) is loaded in
+/// `frame_id` (or the main frame when `None`).
+pub(crate) async fn ensure_aria_support(page: &AnyPage, frame_id: Option<&str>) -> Result<()> {
+  let installed = match frame_id {
+    Some(fid) => page.evaluate_in_frame("window.__fdAria instanceof Object", fid).await?,
+    None => page.evaluate("window.__fdAria instanceof Object").await?,
+  }
+  .and_then(|v| v.as_bool())
+  .unwrap_or(false);
+  if !installed {
+    run_void(page, ARIA_SUPPORT_JS, frame_id).await?;
+  }
+  Ok(())
+}
 
 // ─── Query functions ────────────────────────────────────────────────────────
 
@@ -932,6 +991,7 @@ pub async fn normalize_selector(page: &AnyPage, selector: &str, frame_id: Option
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
   page.ensure_engine_injected().await?;
+  ensure_devtools_support(page, frame_id).await?;
   let js = format!("window.__fd.normalizeSelector({parts_json})");
   let result = match frame_id {
     Some(fid) => page.evaluate_in_frame(&js, fid).await,
@@ -961,6 +1021,7 @@ pub async fn generate_locator(
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
   page.ensure_engine_injected().await?;
+  ensure_devtools_support(page, frame_id).await?;
   let js = format!(
     "window.__fd.generateLocator({parts_json},{})",
     serde_json::json!(language.as_injected_language())
@@ -1013,6 +1074,7 @@ pub async fn set_highlights(
   }
   if !list.is_empty() {
     page.ensure_engine_injected().await?;
+    ensure_devtools_support(page, frame_id).await?;
   }
   let js = format!(
     "window.__fd && window.__fd.setHighlights({})",

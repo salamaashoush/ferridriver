@@ -1,25 +1,23 @@
 import { Highlight } from './highlight';
+import { generateSelector } from './selectorGenerator';
+import { asLocator } from '@isomorphic/locatorGenerators';
+
+declare global {
+  interface Window {
+    __fdDevtools?: {
+      Highlight: typeof Highlight;
+      generateSelector: typeof generateSelector;
+      asLocator: typeof asLocator;
+    };
+  }
+}
 
 (() => {
-  const fd = (window as any).__fd;
-  const injected = fd?._injected;
-  if (!fd || !injected || fd.__recorderSupport)
+  if (window.__fdDevtools instanceof Object)
     return;
-  fd.__recorderSupport = true;
-
-  let highlight: Highlight | undefined;
-  injected.createHighlight = () => new Highlight(injected);
-  injected.hideHighlight = () => {
-    if (highlight) {
-      highlight.uninstall();
-      highlight = undefined;
-    }
-  };
-  injected.setHighlights = (highlights: { selector: any, cssStyle?: string }[]) => {
-    if (!highlights.length && !highlight)
-      return;
-    highlight ??= new Highlight(injected);
-    highlight.install();
-    highlight.setElementHighlights(highlights);
+  window.__fdDevtools = {
+    Highlight,
+    generateSelector,
+    asLocator,
   };
 })();

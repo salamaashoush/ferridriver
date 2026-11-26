@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-import { customCSSNames } from '@isomorphic/selectorParser';
 import { normalizeWhiteSpace } from '@isomorphic/stringUtils';
 
 import { isElementVisible, parentElementOrShadowHost } from './domUtils';
@@ -87,13 +86,6 @@ export class SelectorEvaluatorImpl implements SelectorEvaluator {
     this._engines.set('below', createLayoutEngine('below'));
     this._engines.set('near', createLayoutEngine('near'));
     this._engines.set('nth-match', nthMatchEngine);
-
-    const allNames = [...this._engines.keys()];
-    allNames.sort();
-    const parserNames = [...customCSSNames];
-    parserNames.sort();
-    if (allNames.join('|') !== parserNames.join('|'))
-      throw new Error(`Please keep customCSSNames in sync with evaluator engines: ${allNames.join('|')} vs ${parserNames.join('|')}`);
   }
 
   begin() {
@@ -103,15 +95,15 @@ export class SelectorEvaluatorImpl implements SelectorEvaluator {
   end() {
     --this._retainCacheCounter;
     if (!this._retainCacheCounter) {
-      this._cacheQueryCSS.clear();
-      this._cacheMatches.clear();
-      this._cacheQuery.clear();
-      this._cacheMatchesSimple.clear();
-      this._cacheMatchesParents.clear();
-      this._cacheCallMatches.clear();
-      this._cacheCallQuery.clear();
-      this._cacheQuerySimple.clear();
-      this._cacheText.clear();
+      if (this._cacheQueryCSS.size) this._cacheQueryCSS.clear();
+      if (this._cacheMatches.size) this._cacheMatches.clear();
+      if (this._cacheQuery.size) this._cacheQuery.clear();
+      if (this._cacheMatchesSimple.size) this._cacheMatchesSimple.clear();
+      if (this._cacheMatchesParents.size) this._cacheMatchesParents.clear();
+      if (this._cacheCallMatches.size) this._cacheCallMatches.clear();
+      if (this._cacheCallQuery.size) this._cacheCallQuery.clear();
+      if (this._cacheQuerySimple.size) this._cacheQuerySimple.clear();
+      if (this._cacheText.size) this._cacheText.clear();
     }
   }
 
@@ -356,16 +348,40 @@ export class SelectorEvaluatorImpl implements SelectorEvaluator {
 
   _queryCSS(context: QueryContext, css: string): Element[] {
     return this._cached<Element[]>(this._cacheQueryCSS, css, [context.scope, context.pierceShadow, context.originalScope], () => {
-      let result: Element[] = [];
+      const result: Element[] = [];
+      const isWildcard = css === '*';
       function query(root: Element | ShadowRoot | Document) {
-        result = result.concat([...root.querySelectorAll(css)]);
+        if (isWildcard) {
+          const all = typeof (root as Document | Element).getElementsByTagName === 'function'
+            ? (root as Document | Element).getElementsByTagName('*')
+            : root.querySelectorAll('*');
+          for (let i = 0, n = all.length; i < n; i++)
+            result.push(all[i]);
+          if (!context.pierceShadow)
+            return;
+          if ((root as Element).shadowRoot)
+            query((root as Element).shadowRoot!);
+          for (let i = 0, n = all.length; i < n; i++) {
+            const sr = all[i].shadowRoot;
+            if (sr)
+              query(sr);
+          }
+          return;
+        }
+        const matched = root.querySelectorAll(css);
+        for (let i = 0, n = matched.length; i < n; i++)
+          result.push(matched[i]);
         if (!context.pierceShadow)
           return;
         if ((root as Element).shadowRoot)
           query((root as Element).shadowRoot!);
-        for (const element of root.querySelectorAll('*')) {
-          if (element.shadowRoot)
-            query(element.shadowRoot);
+        const all = typeof (root as Document | Element).getElementsByTagName === 'function'
+          ? (root as Document | Element).getElementsByTagName('*')
+          : root.querySelectorAll('*');
+        for (let i = 0, n = all.length; i < n; i++) {
+          const sr = all[i].shadowRoot;
+          if (sr)
+            query(sr);
         }
       }
       query(context.scope);

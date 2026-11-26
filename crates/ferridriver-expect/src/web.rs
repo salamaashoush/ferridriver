@@ -54,10 +54,17 @@ impl Receiver<'_> {
     }
   }
 
-  async fn judge(&self, params: &ExpectParams) -> ferridriver::Result<ExpectOutcome> {
+  async fn judge_wait(&self, params: &ExpectParams, budget_ms: u64) -> ferridriver::Result<ExpectOutcome> {
     match self {
-      Self::Locator(locator) => locator.expect_once(params).await,
-      Self::Page(page) => page.expect_once(params).await,
+      Self::Locator(locator) => locator.expect_wait(params, budget_ms).await,
+      Self::Page(page) => page.expect_wait(params, budget_ms).await,
+    }
+  }
+
+  async fn failure_aria_snapshot(&self, params: &ExpectParams) -> Option<String> {
+    match self {
+      Self::Locator(locator) => locator.expect_failure_aria_snapshot(params).await,
+      Self::Page(page) => page.expect_failure_aria_snapshot(params).await,
     }
   }
 }
@@ -185,6 +192,7 @@ impl<'a> WebAssert<'a> {
   }
 
   async fn poll(&self) -> Result<(), AssertionFailure> {
+    const MAX_SLICE_MS: u64 = 500;
     let is_not = self.params.is_not;
     // Playwright's `timeout: 0` is no timeout at all.
     let limit = (!self.timeout.is_zero()).then_some(self.timeout);
@@ -192,51 +200,51 @@ impl<'a> WebAssert<'a> {
     let mut log = CallLog::new(self);
     let mut last: Option<ExpectOutcome> = None;
 
-    // The first look always finishes, so an already-true assertion
-    // passes even under a 1ms timeout.
-    match self.receiver.judge(&self.params).await {
-      Ok(outcome) if outcome.matches != is_not => return Ok(()),
-      Ok(outcome) => {
-        log.attempt(&outcome.log);
-        last = Some(outcome);
-      },
-      Err(error) if settled(&error) => return Err(self.failure(&Verdict::settled(&error), &log)),
-      Err(_) => {},
-    }
-
     // Playwright fails an assertion whose `signal` fires the way it fails
     // one that runs out of time: with the matcher's own message.
     let signal = ferridriver::abort::current();
     let aborted = || signal.as_ref().is_some_and(ferridriver::abort::AbortSignal::is_aborted);
+
+    // Slice duration for in-page `MutationObserver` waiting: an already-true
+    // assertion settles in 0ms on the first eval, and an async DOM change
+    // resolves immediately inside the same RTT instead of bouncing between
+    // `expect_once` and `waitForChange`. Slices stay capped at 500ms so
+    // frame-hop re-resolution, navigations, and aborts react promptly.
     let steps = backoff(limit);
-    for step in 0.. {
-      let pause = Duration::from_millis(steps[step.min(steps.len() - 1)]);
+    let mut err_step = 0usize;
+    let mut first = true;
+    loop {
       let remaining = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-      if remaining.is_some_and(|r| r.is_zero()) || aborted() {
+      if !first && (remaining.is_some_and(|r| r.is_zero()) || aborted()) {
         break;
       }
-      if !pause.is_zero() {
-        self.receiver.pause(remaining.map_or(pause, |r| pause.min(r))).await;
-      }
-      let remaining = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-      if remaining.is_some_and(|r| r.is_zero()) || aborted() {
-        break;
-      }
+      let slice_ms = if first && remaining.is_some_and(|r| r.is_zero()) {
+        0
+      } else {
+        remaining.map_or(MAX_SLICE_MS, |r| {
+          u64::try_from(r.as_millis()).unwrap_or(MAX_SLICE_MS).min(MAX_SLICE_MS)
+        })
+      };
+      let first_look = first;
+      first = false;
+
       let attempt = async {
         match signal.as_ref() {
           Some(signal) => tokio::select! {
-            judged = self.receiver.judge(&self.params) => Some(judged),
+            judged = self.receiver.judge_wait(&self.params, slice_ms) => Some(judged),
             () = signal.aborted() => None,
           },
-          None => Some(self.receiver.judge(&self.params).await),
+          None => Some(self.receiver.judge_wait(&self.params, slice_ms).await),
         }
       };
+      // The first look always finishes so an already-true assertion passes
+      // even under a 1ms timeout.
       let judged = match remaining {
-        Some(r) => match tokio::time::timeout(r, attempt).await {
+        Some(r) if !first_look => match tokio::time::timeout(r, attempt).await {
           Ok(Some(judged)) => judged,
           Ok(None) | Err(_) => break,
         },
-        None => match attempt.await {
+        _ => match attempt.await {
           Some(judged) => judged,
           None => break,
         },
@@ -244,20 +252,37 @@ impl<'a> WebAssert<'a> {
       match judged {
         Ok(outcome) if outcome.matches != is_not => return Ok(()),
         Ok(outcome) => {
+          err_step = 0;
           log.attempt(&outcome.log);
           last = Some(outcome);
         },
         Err(error) if settled(&error) => return Err(self.failure(&Verdict::settled(&error), &log)),
-        Err(_) => {},
+        Err(_) => {
+          // Transient error (frame navigating / not attached yet): brief
+          // backoff before retrying.
+          let pause = Duration::from_millis(steps[err_step.min(steps.len() - 1)].max(20));
+          err_step = err_step.saturating_add(1);
+          let left = deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
+          if left.is_some_and(|r| r.is_zero()) || aborted() {
+            break;
+          }
+          self.receiver.pause(left.map_or(pause, |r| pause.min(r))).await;
+        },
       }
     }
     let verdict = match last {
-      Some(outcome) => Verdict {
-        matches: outcome.matches,
-        error_message: outcome.missing.then(|| "Error: element(s) not found".to_owned()),
-        received: outcome.received,
-        aria_snapshot: outcome.aria_snapshot,
-        timed_out: true,
+      Some(outcome) => {
+        let aria_snapshot = match outcome.aria_snapshot {
+          Some(snap) => Some(snap),
+          None => self.receiver.failure_aria_snapshot(&self.params).await,
+        };
+        Verdict {
+          matches: outcome.matches,
+          error_message: outcome.missing.then(|| "Error: element(s) not found".to_owned()),
+          received: outcome.received,
+          aria_snapshot,
+          timed_out: true,
+        }
       },
       None => Verdict {
         matches: is_not,
