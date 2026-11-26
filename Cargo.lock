@@ -1645,9 +1645,12 @@ dependencies = [
  "criterion",
  "dashmap",
  "dirs 7.0.0",
+ "ferridriver-bidi-proto",
+ "ferridriver-cdp-proto",
  "ferridriver-heap",
  "ferridriver-trace",
  "ferridriver-types",
+ "ferridriver-webkit-proto",
  "ferrijs-fetch",
  "ferrijs-permissions",
  "flate2",
@@ -1718,6 +1721,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "ferridriver-bidi-proto"
+version = "0.8.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ferridriver-cdp-proto"
+version = "0.8.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2107,6 +2126,14 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "zip",
+]
+
+[[package]]
+name = "ferridriver-webkit-proto"
+version = "0.8.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

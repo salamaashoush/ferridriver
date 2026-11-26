@@ -618,7 +618,11 @@ impl BidiPage {
     if navigation.is_settled() {
       return Ok(());
     }
-    self.session.transport.send_command("session.status", json!({})).await?;
+    self
+      .session
+      .transport
+      .send(&ferridriver_bidi_proto::session::Status {})
+      .await?;
     navigation.settled_if_started().await;
     Ok(())
   }

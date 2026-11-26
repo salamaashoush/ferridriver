@@ -1,0 +1,16 @@
+[package]
+name = "ferridriver-webkit-proto"
+description = "Strongly typed Playwright WebKit Inspector Protocol command, response, and event definitions for ferridriver."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -456,10 +456,10 @@ fn is_chromium(name: &str) -> bool {
 
 async fn cdp_version(transport: &CdpTransport) -> Result<String> {
   let metadata = transport
-    .send_command(None, "Browser.getVersion", &serde_json::json!({}))
+    .send(None, &ferridriver_cdp_proto::browser::GetVersion {})
     .await?;
-  metadata["product"]
-    .as_str()
-    .map(str::to_owned)
-    .ok_or_else(|| FerriError::protocol("Browser.getVersion", "missing product"))
+  if metadata.product.is_empty() {
+    return Err(FerriError::protocol("Browser.getVersion", "missing product"));
+  }
+  Ok(metadata.product)
 }

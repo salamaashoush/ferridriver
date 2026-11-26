@@ -68,28 +68,26 @@ pub struct CdpSession {
 impl CdpSession {
   pub(crate) async fn attach_to_target(transport: Arc<CdpTransport>, target_id: &str) -> Result<Self> {
     let result = transport
-      .send_command(
+      .send(
         None,
-        "Target.attachToTarget",
-        &serde_json::json!({ "targetId": target_id, "flatten": true }),
+        &ferridriver_cdp_proto::target::AttachToTarget {
+          target_id,
+          flatten: Some(true),
+        },
       )
       .await?;
-    Self::from_attach_result(transport, &result)
+    Ok(Self::from_session_id(transport, result.session_id))
   }
 
   pub(crate) async fn attach_to_browser_target(transport: Arc<CdpTransport>) -> Result<Self> {
     let result = transport
-      .send_command(None, "Target.attachToBrowserTarget", &serde_json::json!({}))
+      .send(None, &ferridriver_cdp_proto::target::AttachToBrowserTarget {})
       .await?;
-    Self::from_attach_result(transport, &result)
+    Ok(Self::from_session_id(transport, result.session_id))
   }
 
-  fn from_attach_result(transport: Arc<CdpTransport>, result: &serde_json::Value) -> Result<Self> {
-    let session_id = result
-      .get("sessionId")
-      .and_then(serde_json::Value::as_str)
-      .ok_or_else(|| FerriError::protocol("Target.attachToTarget", "missing sessionId"))?;
-    Ok(Self {
+  fn from_session_id(transport: Arc<CdpTransport>, session_id: String) -> Self {
+    Self {
       inner: Arc::new(SessionInner {
         transport,
         session_id: Arc::from(session_id),
@@ -100,7 +98,7 @@ impl CdpSession {
         flushes: std::sync::OnceLock::new(),
         runtime: tokio::runtime::Handle::current(),
       }),
-    })
+    }
   }
 
   /// Send a raw protocol command on this session. Playwright:
@@ -139,19 +137,20 @@ impl CdpSession {
     let _ = self
       .inner
       .transport
-      .send_command(
+      .send(
         Some(&self.inner.session_id),
-        "Runtime.runIfWaitingForDebugger",
-        &serde_json::json!({}),
+        &ferridriver_cdp_proto::runtime::RunIfWaitingForDebugger {},
       )
       .await;
     self
       .inner
       .transport
-      .send_command(
+      .send(
         None,
-        "Target.detachFromTarget",
-        &serde_json::json!({ "sessionId": &*self.inner.session_id }),
+        &ferridriver_cdp_proto::target::DetachFromTarget {
+          session_id: Some(&self.inner.session_id),
+          target_id: None,
+        },
       )
       .await?;
     Ok(())

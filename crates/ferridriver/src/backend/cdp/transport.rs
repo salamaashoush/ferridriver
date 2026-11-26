@@ -352,6 +352,27 @@ impl CdpTransport {
     result
   }
 
+  /// Send a strongly typed CDP command, serializing `cmd` directly onto the
+  /// wire without constructing an intermediate `serde_json::Value`, and decode
+  /// the response into `C::Response`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the transport is disconnected, serialization or
+  /// response decoding fails, the command outlives its operation budget, or
+  /// Chrome rejects the command.
+  #[tracing::instrument(skip(self, session_id, cmd), fields(method = C::METHOD))]
+  pub async fn send<C: ferridriver_cdp_proto::Command>(
+    &self,
+    session_id: Option<&str>,
+    cmd: &C,
+  ) -> Result<C::Response> {
+    let budget = crate::operation_budget::OperationBudget::current(30_000)?;
+    let (id, data, rx) = self.dispatcher.build_typed_command(session_id, C::METHOD, cmd)?;
+    let value = self.dispatch_command(id, C::METHOD, data, rx, budget).await?;
+    serde_json::from_value(value).map_err(|e| FerriError::protocol(C::METHOD, format!("decode response: {e}")))
+  }
+
   /// # Errors
   ///
   /// Returns an error if the transport is disconnected, serialization fails, the command
@@ -1175,6 +1196,95 @@ impl CdpDispatcher {
         let _ = entry
           .tx
           .send(Err(FerriError::target_closed(Some("CDP session detached".into()))));
+      }
+    }
+  }
+
+  /// Build a strongly typed CDP command directly into the wire buffer without
+  /// constructing an intermediate `serde_json::Value` tree.
+  pub(crate) fn build_typed_command<P: serde::Serialize>(
+    &self,
+    session_id: Option<&str>,
+    method: &str,
+    params: &P,
+  ) -> Result<(u64, Vec<u8>, oneshot::Receiver<CdpResult>)> {
+    use std::io::Write as _;
+
+    if self.is_disconnected() {
+      return Err(FerriError::target_closed(Some(format!(
+        "browser connection is closed (sending {method})"
+      ))));
+    }
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    let mut data = Vec::with_capacity(128 + method.len() + session_id.map_or(0, str::len));
+    let _ = write!(data, r#"{{"id":{id},"method":"{method}","params":"#);
+    let params_start = data.len();
+    serde_json::to_writer(&mut data, params).map_err(|e| FerriError::Backend(format!("Serialize: {e}")))?;
+    let params_end = data.len();
+    let params_bytes = &data[params_start..params_end];
+
+    self.record_dirty_from_raw(session_id, method, params_bytes);
+
+    if let Some(sid) = session_id {
+      let _ = write!(data, r#","sessionId":"{sid}"}}"#);
+    } else {
+      data.push(b'}');
+    }
+    data.push(0);
+
+    if tracing::enabled!(target: "ferridriver::cdp::send", tracing::Level::DEBUG) {
+      let params_str = std::str::from_utf8(&data[params_start..params_end]).unwrap_or("");
+      tracing::debug!(
+        target: "ferridriver::cdp::send",
+        id,
+        method,
+        params = truncate_for_log(params_str, 200),
+        "CDP >>",
+      );
+    }
+
+    let rx = self.register_command(id, session_id, method)?;
+    Ok((id, data, rx))
+  }
+
+  fn record_dirty_from_raw(&self, session_id: Option<&str>, method: &str, params_bytes: &[u8]) {
+    if method == "Browser.grantPermissions" {
+      let ctx = json_scan::json_string(json_scan::json_field(params_bytes, b"browserContextId"));
+      if let Ok(ctx_id) = std::str::from_utf8(ctx)
+        && !ctx_id.is_empty()
+      {
+        lock_or_recover(&self.permissions_dirty_contexts).insert(ctx_id.to_string());
+      } else {
+        self.permissions_dirty_global.store(true, Ordering::Release);
+      }
+    } else if method == "Storage.setCookies" {
+      let ctx = json_scan::json_string(json_scan::json_field(params_bytes, b"browserContextId"));
+      if let Ok(ctx_id) = std::str::from_utf8(ctx)
+        && !ctx_id.is_empty()
+      {
+        lock_or_recover(&self.cookies_dirty_contexts).insert(ctx_id.to_string());
+      } else {
+        self.cookies_dirty_global.store(true, Ordering::Release);
+      }
+    }
+    if let Some(sid) = session_id {
+      let pointer = method == "Input.dispatchTouchEvent"
+        || (method == "Input.dispatchMouseEvent"
+          && !(json_scan::json_string(json_scan::json_field(params_bytes, b"type")) == b"mouseMoved"
+            && json_scan::json_field(params_bytes, b"x") == b"-1"
+            && json_scan::json_field(params_bytes, b"y") == b"-1"));
+      let network = matches!(
+        method,
+        "Network.setCookie" | "Network.setCookies" | "Storage.setCookies" | "Page.reload"
+      ) || (method == "Page.navigate"
+        && json_scan::json_string(json_scan::json_field(params_bytes, b"url")) != b"about:blank");
+      let session_state = !is_clean_session_command(method);
+      if pointer || network || session_state {
+        let mut map = lock_or_recover(&self.session_dirty);
+        let flags = map.entry(sid.to_string()).or_default();
+        flags.pointer |= pointer;
+        flags.network |= network;
+        flags.session_state |= session_state;
       }
     }
   }
@@ -2261,5 +2371,27 @@ mod tests {
     dispatcher.dispatch_message(br#"{"method":"Network.requestWillBeSent","sessionId":"s1","params":{}}"#);
     let empty = dispatcher.domain_taps.get("Network").is_none_or(|taps| taps.is_empty());
     assert!(empty, "dead tap must be pruned on next dispatch");
+  }
+
+  #[test]
+  fn build_typed_command_matches_wire_format_and_dirty_bits() {
+    use ferridriver_cdp_proto::Command as _;
+    let dispatcher = CdpDispatcher::new();
+    let cmd = ferridriver_cdp_proto::page::Navigate {
+      url: "https://example.com/",
+      referrer: None,
+      frame_id: None,
+    };
+    let (id, bytes, _rx) = dispatcher
+      .build_typed_command(Some("s1"), ferridriver_cdp_proto::page::Navigate::METHOD, &cmd)
+      .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(bytes.strip_suffix(&[0]).unwrap()).unwrap();
+    assert_eq!(parsed["id"], id);
+    assert_eq!(parsed["method"], "Page.navigate");
+    assert_eq!(parsed["sessionId"], "s1");
+    assert_eq!(parsed["params"], serde_json::json!({ "url": "https://example.com/" }));
+
+    let dirty = dispatcher.take_session_dirty("s1");
+    assert!(dirty.network, "non-blank Page.navigate must set network dirty bit");
   }
 }
