@@ -778,22 +778,11 @@ impl CdpPage {
     match action {
       Some(crate::route::RouteAction::Fulfill(resp)) => {
         let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
-        let mut hdrs: Vec<HeaderEntry> = resp
-          .headers
-          .iter()
-          .map(|(k, v)| HeaderEntry {
-            name: k.clone(),
-            value: v.clone(),
-          })
+        let hdrs: Vec<HeaderEntry> = resp
+          .effective_headers()
+          .into_iter()
+          .map(|(name, value)| HeaderEntry { name, value })
           .collect();
-        if let Some(ct) = &resp.content_type
-          && !hdrs.iter().any(|h| h.name == "content-type")
-        {
-          hdrs.push(HeaderEntry {
-            name: "content-type".to_string(),
-            value: ct.clone(),
-          });
-        }
         let _ = transport
           .send(
             session_id,

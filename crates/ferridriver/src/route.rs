@@ -87,6 +87,21 @@ impl Default for FulfillResponse {
   }
 }
 
+impl FulfillResponse {
+  /// Effective response headers, appending `content-type` when `content_type`
+  /// is set and no `content-type` header (case-insensitive) is already present.
+  #[must_use]
+  pub fn effective_headers(&self) -> Vec<(String, String)> {
+    let mut out = self.headers.clone();
+    if let Some(ct) = &self.content_type
+      && !out.iter().any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+      out.push(("content-type".to_string(), ct.clone()));
+    }
+    out
+  }
+}
+
 #[derive(Default)]
 pub struct FulfillOptions {
   pub status: Option<i32>,
