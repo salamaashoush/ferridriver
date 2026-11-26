@@ -50,7 +50,7 @@ fn pointer_retry() -> usize {
 /// content box, measured in the parent frame, as Playwright's
 /// `crPage._framePosition` does. Same-origin boundaries add nothing here,
 /// the walk having counted them already.
-async fn cross_origin_frame_offset() -> Result<(f64, f64)> {
+pub(crate) async fn cross_origin_frame_offset() -> Result<(f64, f64)> {
   /// Run on the owner `<iframe>`: `null` across a same-origin boundary,
   /// otherwise its content box's position in the top-most document its
   /// own same-origin ancestors reach.
@@ -84,7 +84,7 @@ async fn cross_origin_frame_offset() -> Result<(f64, f64)> {
 /// The scroll alignment of a pointer action's `retry`-th try, in
 /// Playwright's order: the precise reveal first (`None`), then the
 /// element's end, center and start.
-fn scroll_alignment(retry: usize) -> Option<&'static str> {
+pub(crate) fn scroll_alignment(retry: usize) -> Option<&'static str> {
   match retry % 4 {
     0 => None,
     1 => Some("{block:'end',inline:'end'}"),
@@ -364,22 +364,52 @@ pub async fn click_prep(
   scroll_align: Option<&str>,
   hit_action: Option<&str>,
 ) -> Result<ClickPrep> {
+  click_prep_with_states(
+    element,
+    page,
+    position,
+    &["visible", "enabled"],
+    scroll_align,
+    hit_action,
+  )
+  .await
+}
+
+/// Like [`click_prep`], parameterized by the non-stable states to gate on
+/// (e.g. `["visible"]` for `hover` and `drag`, `["visible", "enabled"]` for
+/// `click` and `tap`). Collapses actionability + scroll + point + hit-target
+/// interceptor arming into one round trip across all pointer actions.
+///
+/// # Errors
+///
+/// Returns an error if the JS bridge call fails or returns an unparseable payload.
+pub async fn click_prep_with_states(
+  element: &AnyElement,
+  page: &AnyPage,
+  position: Option<crate::options::Point>,
+  base_states: &[&str],
+  scroll_align: Option<&str>,
+  hit_action: Option<&str>,
+) -> Result<ClickPrep> {
   let _ = page.ensure_engine_injected().await;
   let position_lit = match position {
     Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
     None => "null".to_string(),
   };
-  // Scroll alignment for this attempt (`null` => precise
-  // `scrollIntoViewIfNeeded`; an object => cycled retry alignment).
   let scroll_lit = scroll_align.unwrap_or("null");
-  // Pointer-action actionability (Playwright `_performPointerAction`):
-  // visible + enabled + stable. `clickPrep` is async (the `stable` gate
-  // does rAF box-stability sampling page-side); `call_js_fn_value` awaits
-  // the returned promise, so this stays ONE round-trip.
   let stable = stable_check().state();
+  let mut states_js = String::from("[");
+  for s in base_states {
+    states_js.push('\'');
+    states_js.push_str(s);
+    states_js.push_str("',");
+  }
+  states_js.push('\'');
+  states_js.push_str(stable);
+  states_js.push_str("']");
   let hit_lit = hit_action.map_or_else(|| "null".to_string(), |action| format!("'{action}'"));
   let js = format!(
-    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, ['visible','enabled','{stable}'], {scroll_lit}, {hit_lit})); }}"
+    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, {states_js}, {scroll_lit}, {hit_lit})); }}"
   );
   let raw = element
     .call_js_fn_value(&js)
@@ -442,7 +472,7 @@ pub enum StableCheck {
 
 impl StableCheck {
   /// The state name the injected `awaitStates` runs this check under.
-  fn state(self) -> &'static str {
+  pub(crate) fn state(self) -> &'static str {
     match self {
       Self::Playwright => "stable",
       Self::Frame => "stable-frame",
@@ -988,7 +1018,7 @@ pub async fn resolve_click_point(
 /// Hold exactly an action's `modifiers` option for the action, returning
 /// the modifiers to restore after it. An action without the option
 /// keeps whatever the keyboard holds.
-async fn hold_modifiers(page: &AnyPage, modifiers: &[crate::options::Modifier]) -> Result<Option<u32>> {
+pub(crate) async fn hold_modifiers(page: &AnyPage, modifiers: &[crate::options::Modifier]) -> Result<Option<u32>> {
   if modifiers.is_empty() {
     return Ok(None);
   }
@@ -998,7 +1028,7 @@ async fn hold_modifiers(page: &AnyPage, modifiers: &[crate::options::Modifier]) 
   Ok(Some(held))
 }
 
-async fn restore_modifiers(page: &AnyPage, restore: Option<u32>) -> Result<()> {
+pub(crate) async fn restore_modifiers(page: &AnyPage, restore: Option<u32>) -> Result<()> {
   match restore {
     Some(modifiers) => page.ensure_modifiers(modifiers).await.map(|_| ()),
     None => Ok(()),
@@ -1218,28 +1248,6 @@ pub enum InstallOutcome {
   Miss(String),
 }
 
-/// Install Playwright's `setupHitTargetInterceptor` for the pointer
-/// action about to be dispatched (`action` is Playwright's event-set
-/// key: `'mouse'` / `'hover'` / `'tap'`).
-///
-/// # Errors
-///
-/// `Err(_)` on protocol failure (JS bridge unavailable, target gone) —
-/// callers dispatch uninstrumented in that case, mirroring Playwright's
-/// "no events received counts as done" stance.
-async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64, action: &str) -> Result<InstallOutcome> {
-  let js = format!("function() {{ return window.__fd.installHitInterceptor(this, {{x: {x}, y: {y}}}, '{action}'); }}");
-  let val = element.call_js_fn_value(&js).await?;
-  let s = val.and_then(|v| v.as_str().map(std::string::ToString::to_string));
-  match s.as_deref() {
-    // `None` (no string came back) is treated as armed — dispatching
-    // uninstrumented beats failing the action on a JS-bridge quirk.
-    Some("ok") | None => Ok(InstallOutcome::Armed),
-    Some("error:notconnected") => Err(FerriError::Backend("error:notconnected".to_string())),
-    Some(desc) => Ok(InstallOutcome::Miss(desc.to_string())),
-  }
-}
-
 /// Trial-mode preliminary hit-target check: `expectHitTarget` only, no
 /// interceptor armed and no events dispatched. Playwright's trial run
 /// performs the same check inside `setupHitTargetInterceptor`.
@@ -1299,24 +1307,31 @@ async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult> {
 /// Returns an error from actionability, point resolution, or the
 /// per-backend mouse-move dispatch.
 pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::HoverOptions) -> Result<()> {
-  if !opts.is_force() {
-    // Playwright hover: visible + stable (no enabled gate).
-    wait_for_states(element, page, &["visible", "stable"]).await.ok();
-  }
-  let (x, y) = resolve_click_point(
-    element,
-    opts.position,
-    opts.scroll != Some(crate::options::ActionScroll::None),
-    scroll_alignment(pointer_retry()),
-  )
-  .await?;
+  let scroll_align = if opts.scroll == Some(crate::options::ActionScroll::None) {
+    Some("false")
+  } else {
+    scroll_alignment(pointer_retry())
+  };
+  let (x, y, armed) = if opts.is_force() {
+    let (x, y) = resolve_click_point(
+      element,
+      opts.position,
+      opts.scroll != Some(crate::options::ActionScroll::None),
+      scroll_alignment(pointer_retry()),
+    )
+    .await?;
+    (x, y, None)
+  } else {
+    let hit_action = (!opts.is_trial()).then_some("hover");
+    match click_prep_with_states(element, page, opts.position, &["visible"], scroll_align, hit_action).await? {
+      ClickPrep::Ready { x, y, armed } => (x, y, armed),
+      ClickPrep::NotActionable { reason } => return Err(FerriError::Backend(reason)),
+    }
+  };
 
   // Hit-target check (Playwright's `'hover'` interceptor set:
   // `mousemove`): trial runs only the preliminary `expectHitTarget`;
-  // the real dispatch arms the interceptor around the pointer move. A
-  // miss surfaces the retryable "intercepts pointer events" error so
-  // the Locator loop re-resolves and runs locator handlers until its
-  // deadline.
+  // the real dispatch armed the interceptor inside `click_prep_with_states`.
   let interceptor_installed = if opts.is_force() {
     false
   } else if opts.is_trial() {
@@ -1325,12 +1340,12 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
     }
     false
   } else {
-    match install_hit_interceptor(element, x, y, "hover").await {
-      Ok(InstallOutcome::Armed) => true,
-      Ok(InstallOutcome::Miss(description)) => {
+    match armed {
+      Some(InstallOutcome::Armed) => true,
+      Some(InstallOutcome::Miss(description)) => {
         return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
       },
-      Err(_) => false,
+      None => false,
     }
   };
 
@@ -1389,16 +1404,27 @@ pub(crate) async fn drag_step(
     DragStep::Press => (opts.source_position, "mouse"),
     DragStep::Release { .. } => (opts.target_position, "drag"),
   };
-  if !force {
-    wait_for_states(element, page, &["visible", "stable"]).await.ok();
-  }
-  let (x, y) = resolve_click_point(
-    element,
-    position,
-    opts.scroll != Some(crate::options::ActionScroll::None),
-    scroll_alignment(pointer_retry()),
-  )
-  .await?;
+  let scroll_align = if opts.scroll == Some(crate::options::ActionScroll::None) {
+    Some("false")
+  } else {
+    scroll_alignment(pointer_retry())
+  };
+  let (x, y, armed_outcome) = if force {
+    let (x, y) = resolve_click_point(
+      element,
+      position,
+      opts.scroll != Some(crate::options::ActionScroll::None),
+      scroll_alignment(pointer_retry()),
+    )
+    .await?;
+    (x, y, None)
+  } else {
+    let hit_action = (!trial).then_some(interceptor);
+    match click_prep_with_states(element, page, position, &["visible"], scroll_align, hit_action).await? {
+      ClickPrep::Ready { x, y, armed } => (x, y, armed),
+      ClickPrep::NotActionable { reason } => return Err(FerriError::Backend(reason)),
+    }
+  };
   let armed = if force {
     false
   } else if trial {
@@ -1407,12 +1433,12 @@ pub(crate) async fn drag_step(
     }
     false
   } else {
-    match install_hit_interceptor(element, x, y, interceptor).await {
-      Ok(InstallOutcome::Armed) => true,
-      Ok(InstallOutcome::Miss(description)) => {
+    match armed_outcome {
+      Some(InstallOutcome::Armed) => true,
+      Some(InstallOutcome::Miss(description)) => {
         return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
       },
-      Err(_) => false,
+      None => false,
     }
   };
   if trial {
@@ -1463,19 +1489,36 @@ pub(crate) async fn drag_step(
 /// Returns an error from actionability, point resolution, or the
 /// backend's native `tap_at_with` dispatch.
 pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::TapOptions) -> Result<()> {
-  if !opts.is_force() {
-    // Playwright tap: visible + enabled + stable.
-    wait_for_states(element, page, &["visible", "enabled", "stable"])
-      .await
-      .ok();
-  }
-  let (x, y) = resolve_click_point(
-    element,
-    opts.position,
-    opts.scroll != Some(crate::options::ActionScroll::None),
-    scroll_alignment(pointer_retry()),
-  )
-  .await?;
+  let scroll_align = if opts.scroll == Some(crate::options::ActionScroll::None) {
+    Some("false")
+  } else {
+    scroll_alignment(pointer_retry())
+  };
+  let (x, y, armed) = if opts.is_force() {
+    let (x, y) = resolve_click_point(
+      element,
+      opts.position,
+      opts.scroll != Some(crate::options::ActionScroll::None),
+      scroll_alignment(pointer_retry()),
+    )
+    .await?;
+    (x, y, None)
+  } else {
+    let hit_action = (!opts.is_trial()).then_some("tap");
+    match click_prep_with_states(
+      element,
+      page,
+      opts.position,
+      &["visible", "enabled"],
+      scroll_align,
+      hit_action,
+    )
+    .await?
+    {
+      ClickPrep::Ready { x, y, armed } => (x, y, armed),
+      ClickPrep::NotActionable { reason } => return Err(FerriError::Backend(reason)),
+    }
+  };
 
   // Hit-target check (Playwright's `'tap'` interceptor set:
   // pointerdown/up + touchstart/end/cancel) — same lifecycle as hover.
@@ -1487,12 +1530,12 @@ pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::o
     }
     false
   } else {
-    match install_hit_interceptor(element, x, y, "tap").await {
-      Ok(InstallOutcome::Armed) => true,
-      Ok(InstallOutcome::Miss(description)) => {
+    match armed {
+      Some(InstallOutcome::Armed) => true,
+      Some(InstallOutcome::Miss(description)) => {
         return Err(FerriError::Backend(format!("{description} intercepts pointer events")));
       },
-      Err(_) => false,
+      None => false,
     }
   };
 

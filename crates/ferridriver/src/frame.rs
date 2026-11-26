@@ -1213,13 +1213,42 @@ impl Frame {
     let timed_out = || crate::error::FerriError::timeout("setting frame content", timeout_ms);
     let wait_until = opts.wait_until.unwrap_or_default();
     crate::operation_budget::scoped(timeout_ms, || "setting frame content".into(), async move {
+      let mut need_frame_tree = self.page.frames().len() > 1;
       let state = if self.is_main_frame() {
         self.page.inner.set_content(html).await?;
         match wait_until {
-          crate::options::LoadState::Commit => None,
-          state => Some(state.as_str()),
+          crate::options::LoadState::Commit => {
+            need_frame_tree |= Self::html_may_create_subframes(html);
+            None
+          },
+          crate::options::LoadState::Load | crate::options::LoadState::DomContentLoaded => {
+            // Fast path: check `document.readyState` AND whether any iframe/frame
+            // exists in a single eval, eliminating the unconditional `Page.getFrameTree`
+            // RTT on every subframe-free `setContent`.
+            let check_js = if wait_until == crate::options::LoadState::DomContentLoaded {
+              "(() => { const s = document.readyState; return (s === 'interactive' || s === 'complete') ? (document.querySelector('iframe,frame') ? 2 : 1) : 0; })()"
+            } else {
+              "(() => document.readyState === 'complete' ? (document.querySelector('iframe,frame') ? 2 : 1) : 0)()"
+            };
+            match self.page.inner.evaluate(check_js).await {
+              Ok(Some(v)) if v.as_i64() == Some(1) => None,
+              Ok(Some(v)) if v.as_i64() == Some(2) => {
+                need_frame_tree = true;
+                None
+              },
+              _ => {
+                need_frame_tree = true;
+                Some(wait_until.as_str())
+              },
+            }
+          },
+          state @ crate::options::LoadState::NetworkIdle => {
+            need_frame_tree = true;
+            Some(state.as_str())
+          },
         }
       } else {
+        need_frame_tree = true;
         // Chromium reports `complete` for a document rewritten this way while
         // its images are still loading, though its `load` event still waits
         // for them. A listener added before `document.open()` is removed by
@@ -1274,10 +1303,10 @@ impl Frame {
           )
           .await?;
       }
-      // The new document's subframes are attached by now. The listener
-      // can miss the ones of a page that never navigated, whose main frame
-      // no event has introduced, so the tree is read back.
-      if let Ok(infos) = self.page.inner.get_frame_tree().await {
+      // Only re-fetch the frame tree when subframes exist (or existed before
+      // this setContent) — avoids a sequential `Page.getFrameTree` RTT on the
+      // common subframe-free `setContent` path.
+      if need_frame_tree && let Ok(infos) = self.page.inner.get_frame_tree().await {
         self.page.reseed_frames(infos);
       }
       Ok(())
@@ -1285,7 +1314,16 @@ impl Frame {
     .await
   }
 
-  /// Playwright: `frame.addScriptTag(options?: { content?, path?, type?,
+  /// Quick case-insensitive scan for `<iframe`, `<frame`, or `<script` tags
+  /// when `setContent` uses `waitUntil: "commit"` and skips the DOM check.
+  fn html_may_create_subframes(html: &str) -> bool {
+    let bytes = html.as_bytes();
+    bytes.windows(6).any(|w| {
+      w.eq_ignore_ascii_case(b"<frame") || w.eq_ignore_ascii_case(b"iframe") || w.eq_ignore_ascii_case(b"script")
+    })
+  }
+
+  /// Playwright's `frame.addScriptTag(options?: { content?, path?, type?,
   /// url? }): Promise<ElementHandle>`. Adds a `<script>` to this frame's
   /// `<head>` and returns it once the script has loaded or run.
   ///
