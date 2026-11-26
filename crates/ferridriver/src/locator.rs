@@ -296,6 +296,9 @@ enum PointerPrepVerdict {
 }
 
 fn record_retry_log(call_log: &mut Vec<String>, last_log: &mut String, line: &str, op_name: &str) {
+  if call_log.len() == 1 {
+    call_log.push(format!("attempting {op_name} action"));
+  }
   if line != last_log.as_str() {
     call_log.push(format!("  {line}"));
     call_log.push(format!("retrying {op_name} action"));
@@ -2883,7 +2886,7 @@ impl Locator {
     ) {
       return None;
     }
-    let res = self.fill_fast_inner(value, opts).await;
+    let res = Box::pin(self.fill_fast_inner(value, opts)).await;
     page_arc.slow_mo_pause("Locator", "fill").await;
     Some(res)
   }
@@ -2956,63 +2959,61 @@ impl Locator {
     let budget = crate::operation_budget::OperationBudget::operation(timeout)?;
     budget
       .scope(async {
-        let signal = crate::abort::current();
-        if let Some(sig) = signal.as_ref()
+        if let Some(sig) = crate::abort::current()
           && sig.was_refused()
         {
           return Err(sig.error());
         }
-        let mut idx = 0usize;
-        loop {
-          if let Some(sig) = signal.as_ref()
-            && sig.is_aborted()
-          {
-            let err = sig.error();
-            call_log.push(format!("operation was aborted: {err}"));
-            return Err(err.with_call_log(call_log));
+        let outcome = Box::pin(crate::abort::guard(async {
+          let mut idx = 0usize;
+          loop {
+            if expired() {
+              return Err(crate::error::FerriError::timeout("fill", timeout));
+            }
+            crate::locator_handler::perform_checkpoint(self.frame.page_arc()).await;
+            self.backoff_pause(idx, deadline).await;
+            idx = idx.saturating_add(1);
+            let (rframe, rsel) = match self.resolved().await {
+              Ok(resolved) => resolved,
+              Err(e @ crate::error::FerriError::InvalidSelector { .. }) => return Err(e),
+              Err(_) => continue,
+            };
+            let parts = selectors::build_parts_json(&selectors::parse(&rsel)?);
+            let raw = match self.eval_fill_once(&rframe, &parts, &value_lit, force).await {
+              Some(Ok(r)) => r,
+              Some(Err(e)) if !expired() && !retries(&e) => return Err(e),
+              _ => continue,
+            };
+            let answer: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+            if let Some(count) = answer.get("strict").and_then(serde_json::Value::as_u64) {
+              return Err(crate::error::FerriError::strict(
+                self.selector.clone(),
+                usize::try_from(count).unwrap_or(2),
+              ));
+            }
+            if let Some(error) = answer.get("error").and_then(serde_json::Value::as_str) {
+              return Err(crate::error::FerriError::backend(error));
+            }
+            let inner = rframe.page_arc().inner();
+            match answer.get("result").and_then(serde_json::Value::as_str) {
+              Some("done") => return Ok(()),
+              Some("needsinput") if value.is_empty() => return inner.press_key("Delete", 0).await,
+              Some("needsinput") => return inner.insert_text(value).await,
+              Some("error:notfound") | None => {},
+              Some(state) => {
+                record_retry_log(&mut call_log, &mut last_log, &action_log_line(state), "fill");
+              },
+            }
           }
-          if expired() {
-            return Err(crate::error::FerriError::timeout("fill", timeout).with_call_log(call_log));
-          }
-          crate::locator_handler::perform_checkpoint(self.frame.page_arc()).await;
-          self.backoff_pause(idx, deadline).await;
-          idx = idx.saturating_add(1);
-          let (rframe, rsel) = match self.resolved().await {
-            Ok(resolved) => resolved,
-            Err(e @ crate::error::FerriError::InvalidSelector { .. }) => return Err(e),
-            Err(_) => continue,
-          };
-          let parts = selectors::build_parts_json(&selectors::parse(&rsel)?);
-          let raw = match self.eval_fill_once(&rframe, &parts, &value_lit, force).await {
-            Some(Ok(r)) => r,
-            Some(Err(e)) if !expired() && !retries(&e) => return Err(e),
-            _ => continue,
-          };
-          let answer: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-          if let Some(count) = answer.get("strict").and_then(serde_json::Value::as_u64) {
-            return Err(crate::error::FerriError::strict(
-              self.selector.clone(),
-              usize::try_from(count).unwrap_or(2),
-            ));
-          }
-          if let Some(error) = answer.get("error").and_then(serde_json::Value::as_str) {
-            return Err(crate::error::FerriError::backend(error));
-          }
-          let inner = rframe.page_arc().inner();
-          match answer.get("result").and_then(serde_json::Value::as_str) {
-            Some("done") => return Ok(()),
-            Some("needsinput") if value.is_empty() => return inner.press_key("Delete", 0).await,
-            Some("needsinput") => return inner.insert_text(value).await,
-            Some("error:notfound") | None => {},
-            Some(state) => {
-              let line = action_log_line(state);
-              if line != last_log {
-                call_log.push(format!("  {line}"));
-                call_log.push("retrying fill action".into());
-                last_log = line;
-              }
-            },
-          }
+        }))
+        .await;
+        match outcome {
+          Err(e @ crate::error::FerriError::Aborted { .. }) => {
+            call_log.push(format!("operation was aborted: {e}"));
+            Err(e.with_call_log(call_log))
+          },
+          Err(e @ crate::error::FerriError::Timeout { .. }) => Err(e.with_call_log(call_log)),
+          other => other,
         }
       })
       .await
@@ -3023,7 +3024,7 @@ impl Locator {
   /// `RemoteObjectId` is created.
   async fn click_fast(&self, opts: &crate::options::ClickOptions, op_name: &'static str) -> Result<()> {
     let page_arc = self.frame.page_arc();
-    let res = self.pointer_action_fast(opts, op_name, None).await;
+    let res = Box::pin(self.pointer_action_fast(opts, op_name, None)).await;
     page_arc.slow_mo_pause("Locator", op_name).await;
     res
   }
@@ -3031,7 +3032,7 @@ impl Locator {
   async fn set_checked_fast(&self, checked: bool, opts: &crate::options::CheckOptions) -> Result<()> {
     let page_arc = self.frame.page_arc();
     let click_opts = opts.clone().into_click_options();
-    let res = self.pointer_action_fast(&click_opts, "check", Some(checked)).await;
+    let res = Box::pin(self.pointer_action_fast(&click_opts, "check", Some(checked))).await;
     page_arc.slow_mo_pause("Locator", "check").await;
     res
   }
@@ -3052,7 +3053,7 @@ impl Locator {
     Box::pin(actions::with_pointer_context(
       tries,
       (!rframe.is_main_frame()).then(|| rframe.clone()),
-      crate::abort::guard(async {
+      async {
         let snap = inner.nav_snapshot();
         let restore = actions::hold_modifiers(inner, &opts.modifiers).await?;
         let dispatch = if trial {
@@ -3116,7 +3117,7 @@ impl Locator {
           inner.settle_navigation(snap, 2_000).await;
         }
         Ok(())
-      }),
+      },
     ))
     .await
   }
@@ -3225,73 +3226,72 @@ impl Locator {
     let budget = crate::operation_budget::OperationBudget::operation(timeout)?;
     budget
       .scope(async {
-        let signal = crate::abort::current();
-        if let Some(sig) = signal.as_ref()
+        if let Some(sig) = crate::abort::current()
           && sig.was_refused()
         {
           return Err(sig.error());
         }
-        let mut idx = 0usize;
-        let mut tries = 0usize;
-        loop {
-          if let Some(sig) = signal.as_ref()
-            && sig.is_aborted()
-          {
-            let err = sig.error();
-            call_log.push(format!("operation was aborted: {err}"));
-            return Err(err.with_call_log(call_log));
-          }
-          if expired() {
-            return Err(crate::error::FerriError::timeout(op_name, timeout).with_call_log(call_log));
-          }
-          crate::locator_handler::perform_checkpoint(self.frame.page_arc()).await;
-          self.backoff_pause(idx, deadline).await;
-          idx = idx.saturating_add(1);
-          let (rframe, rsel) = match self.resolved().await {
-            Ok(resolved) => resolved,
-            Err(e @ crate::error::FerriError::InvalidSelector { .. }) => return Err(e),
-            Err(_) => continue,
-          };
-          let (point, interceptor_installed) = match self
-            .eval_pointer_prep(&rframe, &rsel, opts, target_checked, tries)
-            .await
-          {
-            Ok(PointerPrepVerdict::AlreadyDone) => return Ok(()),
-            Ok(PointerPrepVerdict::Retry(line)) => {
-              tries = tries.saturating_add(1);
-              record_retry_log(&mut call_log, &mut last_log, &line, op_name);
-              continue;
-            },
-            Ok(PointerPrepVerdict::Ready {
+        let outcome = Box::pin(crate::abort::guard(async {
+          let mut idx = 0usize;
+          let mut tries = 0usize;
+          loop {
+            if expired() {
+              return Err(crate::error::FerriError::timeout(op_name, timeout));
+            }
+            crate::locator_handler::perform_checkpoint(self.frame.page_arc()).await;
+            self.backoff_pause(idx, deadline).await;
+            idx = idx.saturating_add(1);
+            let (rframe, rsel) = match self.resolved().await {
+              Ok(resolved) => resolved,
+              Err(e @ crate::error::FerriError::InvalidSelector { .. }) => return Err(e),
+              Err(_) => continue,
+            };
+            let (point, interceptor_installed) = match self
+              .eval_pointer_prep(&rframe, &rsel, opts, target_checked, tries)
+              .await
+            {
+              Ok(PointerPrepVerdict::AlreadyDone) => return Ok(()),
+              Ok(PointerPrepVerdict::Retry(line)) => {
+                tries = tries.saturating_add(1);
+                record_retry_log(&mut call_log, &mut last_log, &line, op_name);
+                continue;
+              },
+              Ok(PointerPrepVerdict::Ready {
+                point,
+                interceptor_installed,
+              }) => (point, interceptor_installed),
+              Err(e) if !expired() && !retries(&e) => return Err(e),
+              Ok(PointerPrepVerdict::NotFound) | Err(_) => continue,
+            };
+            let outcome = Self::dispatch_prepared_pointer(
+              &rframe,
+              opts,
+              &args,
+              op_name,
+              target_checked,
               point,
-              interceptor_installed,
-            }) => (point, interceptor_installed),
-            Err(e) if !expired() && !retries(&e) => return Err(e),
-            Ok(PointerPrepVerdict::NotFound) | Err(_) => continue,
-          };
-          let outcome = Self::dispatch_prepared_pointer(
-            &rframe,
-            opts,
-            &args,
-            op_name,
-            target_checked,
-            point,
-            (interceptor_installed, tries),
-          )
-          .await;
-          tries = tries.saturating_add(1);
-          match outcome {
-            Ok(()) => return Ok(()),
-            Err(e @ crate::error::FerriError::Aborted { .. }) => {
-              call_log.push(format!("operation was aborted: {e}"));
-              return Err(e.with_call_log(call_log));
-            },
-            Err(e) if retries(&e) => {
-              record_retry_log(&mut call_log, &mut last_log, &action_log_line(&e.to_string()), op_name);
-            },
-            Err(e) if !expired() => return Err(e),
-            Err(_) => {},
+              (interceptor_installed, tries),
+            )
+            .await;
+            tries = tries.saturating_add(1);
+            match outcome {
+              Ok(()) => return Ok(()),
+              Err(e) if retries(&e) => {
+                record_retry_log(&mut call_log, &mut last_log, &action_log_line(&e.to_string()), op_name);
+              },
+              Err(e) if !expired() => return Err(e),
+              Err(_) => {},
+            }
           }
+        }))
+        .await;
+        match outcome {
+          Err(e @ crate::error::FerriError::Aborted { .. }) => {
+            call_log.push(format!("operation was aborted: {e}"));
+            Err(e.with_call_log(call_log))
+          },
+          Err(e @ crate::error::FerriError::Timeout { .. }) => Err(e.with_call_log(call_log)),
+          other => other,
         }
       })
       .await
