@@ -131,9 +131,32 @@ impl<'js> LiveValue for JsLive<'js> {
   }
 
   fn same_value(&self, other: &Self) -> rquickjs::Result<bool> {
-    let object: Object<'js> = self.ctx().globals().get("Object")?;
-    let is: Function<'js> = object.get("is")?;
-    is.call((self.0.clone(), other.0.clone()))
+    use rquickjs::Type;
+    match (self.0.type_of(), other.0.type_of()) {
+      (Type::Undefined | Type::Uninitialized, Type::Undefined | Type::Uninitialized) | (Type::Null, Type::Null) => {
+        Ok(true)
+      },
+      (Type::Bool, Type::Bool) => Ok(self.0.as_bool() == other.0.as_bool()),
+      (Type::Int, Type::Int) => Ok(self.0.as_int() == other.0.as_int()),
+      (Type::Int | Type::Float, Type::Int | Type::Float) => {
+        let (Some(a), Some(b)) = (self.0.as_number(), other.0.as_number()) else {
+          return Ok(false);
+        };
+        Ok((a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits())
+      },
+      (Type::String, Type::String) => {
+        let (Some(a), Some(b)) = (self.0.as_string(), other.0.as_string()) else {
+          return Ok(false);
+        };
+        Ok(a.to_string()? == b.to_string()?)
+      },
+      (a, b) if a != b => Ok(false),
+      _ => {
+        let object: Object<'js> = self.ctx().globals().get("Object")?;
+        let is: Function<'js> = object.get("is")?;
+        is.call((self.0.clone(), other.0.clone()))
+      },
+    }
   }
 
   fn structurally_equal(&self, other: &Self) -> bool {
@@ -473,6 +496,9 @@ impl ExpectJs {
     out.message.clone_from(&self.message);
     out.matcher_table = self.matcher_table;
     out.matcher_names.clone_from(&self.matcher_names);
+    if out.stack.is_none() {
+      out.stack.clone_from(&self.stack);
+    }
     out
   }
 
@@ -2942,16 +2968,23 @@ async fn call_generator_live<'js>(
 /// only decides which web-first matchers apply. No snapshot is taken
 /// here — `expect(x)` itself never fails, exactly as upstream.
 fn build_expect<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> ExpectJs {
-  let kind = if let Ok(class) = Class::<LocatorJs>::from_value(&value) {
-    let loc = class.borrow().inner_ref().clone();
-    SubjectKind::Locator(loc)
-  } else if let Ok(class) = Class::<PageJs>::from_value(&value) {
-    SubjectKind::Page(class.borrow().page_arc())
-  } else if let Ok(class) = Class::<HttpResponseJs>::from_value(&value) {
-    SubjectKind::ApiResponse(class.borrow().inner_clone())
+  let is_obj = value.is_object();
+  let is_fn = is_obj && value.is_function();
+  let kind = if is_obj {
+    if let Ok(class) = Class::<LocatorJs>::from_value(&value) {
+      let loc = class.borrow().inner_ref().clone();
+      SubjectKind::Locator(loc)
+    } else if let Ok(class) = Class::<PageJs>::from_value(&value) {
+      SubjectKind::Page(class.borrow().page_arc())
+    } else if let Ok(class) = Class::<HttpResponseJs>::from_value(&value) {
+      SubjectKind::ApiResponse(class.borrow().inner_clone())
+    } else {
+      SubjectKind::Value
+    }
   } else {
     SubjectKind::Value
   };
+  let needs_stack = is_fn || !matches!(kind, SubjectKind::Value);
   let mut expect = ExpectJs::new(
     ExpectSubject {
       live: Persistent::save(ctx, value),
@@ -2959,7 +2992,9 @@ fn build_expect<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> ExpectJs {
     },
     default_timeout(ctx),
   );
-  expect.stack = capture_stack(ctx);
+  if needs_stack {
+    expect.stack = capture_stack(ctx);
+  }
   expect
 }
 
@@ -3000,6 +3035,22 @@ fn make_asymmetric<'js>(ctx: &Ctx<'js>, tag: &str, payload: Object<'js>) -> rqui
   Ok(payload)
 }
 
+/// Per-realm latch flipped once `expect.extend` populates any custom matcher.
+/// Avoids JS prototype/table lookups on every `expect(x)` call in suites that
+/// never register custom matchers.
+#[derive(Default, rquickjs::JsLifetime)]
+struct CustomMatchersActive(std::cell::Cell<bool>);
+
+fn has_custom_matchers(ctx: &Ctx<'_>) -> bool {
+  ctx.userdata::<CustomMatchersActive>().is_none_or(|flag| flag.0.get())
+}
+
+fn mark_custom_matchers_active(ctx: &Ctx<'_>) {
+  if let Some(flag) = ctx.userdata::<CustomMatchersActive>() {
+    flag.0.set(true);
+  }
+}
+
 /// Install the `expect` global. Exposes:
 /// - `expect(value | locator | page | apiResponse | fn) -> Expect`
 /// - `expect.poll(fn, opts?) -> ExpectPoll`
@@ -3017,7 +3068,15 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   // `ExpectJs` instances JS can call methods on.
   Class::<ExpectJs>::define(&ctx.globals())?;
   Class::<ExpectPollJs>::define(&ctx.globals())?;
+  let _ = ctx.store_userdata(CustomMatchersActive::default());
   install_matcher_steps(ctx)?;
+  if let Some(proto) = Class::<ExpectJs>::prototype(ctx)?
+    && !proto.contains_key("not")?
+  {
+    let proto_val = proto.into_value();
+    install_not_getter(ctx, &proto_val)?;
+    install_settled_getters(ctx, &proto_val)?;
+  }
 
   let root = create_expect(ctx, &ferridriver_expect::ExpectMeta::default(), 0)?;
   ctx.globals().set("expect", root)?;
@@ -3063,17 +3122,15 @@ fn create_expect<'js>(
       // `expect.extend({...})` whose result was discarded publishes its
       // new names by mutating the table this expect already points at
       // (Playwright's legacy behavior).
-      inst.matcher_names = table_names(&ctx, table)?;
-      let class = Class::instance(ctx.clone(), inst)?;
-      // Wrap in the JS proxy that translates `.not` (a getter) to
-      // `_notInner()` (the method-bound clone).
-      {
-        let val = class.into_value();
-        install_not_getter(&ctx, &val)?;
-        install_settled_getters(&ctx, &val)?;
-        install_user_matchers(&ctx, &val)?;
-        Ok(val)
+      if table != 0 || has_custom_matchers(&ctx) {
+        inst.matcher_names = table_names(&ctx, table)?;
       }
+      let has_user_matchers = !inst.matcher_names.is_empty();
+      let val = Class::instance(ctx.clone(), inst)?.into_value();
+      if has_user_matchers {
+        install_user_matchers(&ctx, &val)?;
+      }
+      Ok(val)
     },
   )?;
   expect_fn.set_name("expect")?;
@@ -3358,6 +3415,7 @@ fn extend_expect<'js>(
   for (name, value) in &names {
     if !ferridriver_expect::is_builtin_matcher(name) {
       current.set(name.as_str(), value.clone())?;
+      mark_custom_matchers_active(ctx);
     }
   }
 
@@ -3549,10 +3607,11 @@ fn install_not_getter<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquickjs::R
     move |ctx: Ctx<'js>, this: rquickjs::function::This<Value<'js>>| -> rquickjs::Result<Value<'js>> {
       let class = Class::<ExpectJs>::from_value(&this.0)?;
       let inverted = class.borrow().not_inner();
-      let new_class = Class::instance(ctx.clone(), inverted)?;
-      let new_val = new_class.into_value();
-      install_not_getter(&ctx, &new_val)?;
-      install_user_matchers(&ctx, &new_val)?;
+      let has_user_matchers = !inverted.matcher_names.is_empty();
+      let new_val = Class::instance(ctx.clone(), inverted)?.into_value();
+      if has_user_matchers {
+        install_user_matchers(&ctx, &new_val)?;
+      }
       Ok(new_val)
     },
   )?;
@@ -3858,6 +3917,12 @@ fn install_settled_getters<'js>(ctx: &Ctx<'js>, instance: &Value<'js>) -> rquick
     let getter = Function::new(
       ctx.clone(),
       move |ctx: Ctx<'js>, this: rquickjs::function::This<Value<'js>>| -> rquickjs::Result<Object<'js>> {
+        if let Ok(class) = Class::<ExpectJs>::from_value(&this.0) {
+          let mut borrowed = class.borrow_mut();
+          if borrowed.stack.is_none() {
+            borrowed.stack = capture_stack(&ctx);
+          }
+        }
         build_settled(&ctx, &this.0, mode, true)
       },
     )?;
@@ -4009,9 +4074,11 @@ async fn settled_call<'js>(
     return settled_expect.check_thrown(&ctx, thrown, Opt(args.into_iter().next()));
   }
 
+  let has_user_matchers = !settled_expect.matcher_names.is_empty();
   let instance = Class::instance(ctx.clone(), settled_expect)?.into_value();
-  install_not_getter(&ctx, &instance)?;
-  install_user_matchers(&ctx, &instance)?;
+  if has_user_matchers {
+    install_user_matchers(&ctx, &instance)?;
+  }
   let matcher: Function<'js> = instance
     .as_object()
     .and_then(|o| o.get(name.as_str()).ok())
@@ -4281,6 +4348,34 @@ fn matcher_step_wrapper<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Function<'js>> 
   proto.get(MATCHER_STEP)
 }
 
+/// Fast-path `JSON.parse(JSON.stringify(value))` for primitives in Rust before
+/// falling back to `QuickJS` `JSON.stringify` for objects/arrays/RegExp.
+fn quick_expected_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Option<JsonValue> {
+  use rquickjs::Type;
+  match value.type_of() {
+    Type::Undefined | Type::Uninitialized | Type::Function | Type::Symbol => None,
+    Type::Null => Some(JsonValue::Null),
+    Type::Bool => value.as_bool().map(JsonValue::Bool),
+    Type::Int => value.as_int().map(|n| JsonValue::Number(serde_json::Number::from(n))),
+    Type::Float => value
+      .as_float()
+      .map(|n| serde_json::Number::from_f64(n).map_or(JsonValue::Null, JsonValue::Number)),
+    Type::String => value
+      .as_string()
+      .and_then(|s| s.to_string().ok())
+      .map(JsonValue::String),
+    _ => ctx
+      .json_stringify(value)
+      .unwrap_or_else(|_| {
+        // A cyclic value throws; the assertion itself is not affected.
+        let _ = ctx.catch();
+        None
+      })
+      .and_then(|json| json.to_string().ok())
+      .and_then(|json| serde_json::from_str(&json).ok()),
+  }
+}
+
 /// Open the step for a matcher call on `this`. `None` outside a test, so
 /// a script's assertions cost one call and report nothing.
 fn begin_matcher_step<'js>(
@@ -4291,18 +4386,7 @@ fn begin_matcher_step<'js>(
   expected: Option<Value<'js>>,
 ) -> Option<String> {
   let bridge = crate::bindings::test::optional_bridge(ctx)?;
-  // Playwright reports `JSON.parse(JSON.stringify(args[0]))`: a RegExp
-  // reads as `{}`, a value JSON cannot hold as nothing at all.
-  let expected = expected
-    .and_then(|value| {
-      ctx.json_stringify(value).unwrap_or_else(|_| {
-        // A cyclic value throws; the assertion itself is not affected.
-        let _ = ctx.catch();
-        None
-      })
-    })
-    .and_then(|json| json.to_string().ok())
-    .and_then(|json| serde_json::from_str(&json).ok());
+  let expected = expected.and_then(|value| quick_expected_json(ctx, value));
   let mut step = ferridriver_test::expect::ExpectStep {
     matcher,
     expected,
@@ -4325,11 +4409,11 @@ fn begin_matcher_step<'js>(
     return None;
   }
   let mut spec = step.spec();
-  spec.frames = crate::bindings::call_site::capture_frames(ctx)
-    .into_iter()
-    .take(1)
-    .map(|(_, line, column)| ferridriver_test::step::StepFrame::Host { line, column })
-    .collect();
+  if let Some((_, line, column)) = crate::bindings::call_site::capture_frame(ctx) {
+    spec
+      .frames
+      .push(ferridriver_test::step::StepFrame::Host { line, column });
+  }
   let step_id = bridge.open_step_now(spec, nests)?;
   if step.is_soft
     && let Some(baselines) = ctx.userdata::<SoftBaselines>()
