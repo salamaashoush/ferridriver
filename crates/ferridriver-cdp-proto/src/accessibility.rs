@@ -46,6 +46,8 @@ pub struct AxNode {
   #[serde(default)]
   pub node_id: String,
   #[serde(default)]
+  pub parent_id: Option<String>,
+  #[serde(default)]
   pub ignored: bool,
   #[serde(default)]
   pub role: Option<AxValue>,

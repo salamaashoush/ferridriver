@@ -714,6 +714,12 @@ impl BidiPage {
     }
   }
 
+  /// Helper: send a strongly typed `BiDi` command without building an
+  /// intermediate `serde_json::Value`.
+  pub(super) async fn send_typed<C: ferridriver_bidi_proto::Command>(&self, command: &C) -> Result<C::Response> {
+    self.session.transport.send(command).await
+  }
+
   /// Helper: send a `BiDi` command.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self.session.send_command(method, params).await
@@ -756,11 +762,12 @@ impl BidiPage {
   }
 
   /// Map `NavLifecycle` to `BiDi` readiness state.
-  fn lifecycle_to_wait(lifecycle: NavLifecycle) -> &'static str {
+  fn lifecycle_to_wait(lifecycle: NavLifecycle) -> ferridriver_bidi_proto::browsing_context::ReadinessState {
+    use ferridriver_bidi_proto::browsing_context::ReadinessState;
     match lifecycle {
-      NavLifecycle::Commit => "none",
-      NavLifecycle::DomContentLoaded => "interactive",
-      NavLifecycle::Load => "complete",
+      NavLifecycle::Commit => ReadinessState::None,
+      NavLifecycle::DomContentLoaded => ReadinessState::Interactive,
+      NavLifecycle::Load => ReadinessState::Complete,
     }
   }
 

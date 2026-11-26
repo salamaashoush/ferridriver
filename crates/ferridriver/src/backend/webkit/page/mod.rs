@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::browser::{BrowserError, WebKitBrowser};
 use super::connection::Session;
 use super::element::WebKitElement;
-use super::protocol::{self, Envelope, NavigateParams, NavigateResult};
+use super::protocol::{self, Envelope};
 use crate::backend::{
   AnyElement, AxNodeData, BackgroundColor, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle,
   ScreenshotCapture, ScreenshotScale,
@@ -821,6 +821,11 @@ impl WebKitPage {
   #[must_use]
   pub(crate) fn target_session(&self) -> Session {
     Session::clone(&self.target.load())
+  }
+
+  /// Send a strongly typed `WebKit` protocol command on the live target session.
+  pub(super) async fn send_typed<C: ferridriver_webkit_proto::Command>(&self, command: &C) -> Result<C::Response> {
+    self.target_session().send_typed(command).await.map_err(conn_err)
   }
 
   /// Handle to the swappable target slot — used by the page-proxy

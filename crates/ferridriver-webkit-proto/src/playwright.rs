@@ -83,6 +83,8 @@ pub struct Navigate<'a> {
 pub struct NavigateResponse {
   #[serde(default)]
   pub loader_id: Option<String>,
+  #[serde(default)]
+  pub error_text: Option<String>,
 }
 
 impl Command for Navigate<'_> {
