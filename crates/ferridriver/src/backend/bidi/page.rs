@@ -1471,6 +1471,33 @@ impl BidiPage {
     Ok(())
   }
 
+  /// Write `html` into the document and evaluate the `readyState`/iframe check
+  /// inside the same `script.callFunction` round trip.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `script.callFunction` fails.
+  pub async fn set_content_and_check(&self, html: &str, dom_content_loaded: bool) -> Result<Option<serde_json::Value>> {
+    let decl = if dom_content_loaded {
+      "(html) => { document.open(); document.write(html); document.close(); const s = document.readyState; return (s === 'interactive' || s === 'complete') ? (document.querySelector('iframe,frame') ? 2 : 1) : 0; }"
+    } else {
+      "(html) => { document.open(); document.write(html); document.close(); return document.readyState === 'complete' ? (document.querySelector('iframe,frame') ? 2 : 1) : 0; }"
+    };
+    let result = self
+      .cmd(
+        "script.callFunction",
+        json!({
+          "functionDeclaration": decl,
+          "target": {"context": &*self.context_id},
+          "arguments": [{"type": "string", "value": html}],
+          "awaitPromise": false,
+          "resultOwnership": "none"
+        }),
+      )
+      .await?;
+    Ok(result.pointer("/result/value").cloned())
+  }
+
   // ── Screenshots ─────────────────────────────────────────────────────────
 
   /// `bidiPage.ts::setBackgroundColor`: no `BiDi` command overrides the

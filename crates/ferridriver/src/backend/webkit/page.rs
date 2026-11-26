@@ -1804,6 +1804,28 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Write `html` into the document and return the `readyState`/iframe probe
+  /// in the same `Runtime.evaluate` round trip.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error when `Runtime.evaluate` fails or throws.
+  pub async fn set_content_and_check(&self, html: &str, dom_content_loaded: bool) -> Result<Option<serde_json::Value>> {
+    let escaped = serde_json::to_string(html).unwrap_or_else(|_| "\"\"".into());
+    let tail = if dom_content_loaded {
+      "const s=document.readyState;return (s==='interactive'||s==='complete')?(document.querySelector('iframe,frame')?2:1):0;"
+    } else {
+      "return document.readyState==='complete'?(document.querySelector('iframe,frame')?2:1):0;"
+    };
+    self
+      .runtime_evaluate(
+        &format!("(()=>{{document.open();document.write({escaped});document.close();{tail}}})()"),
+        true,
+      )
+      .await
+      .map(Some)
+  }
+
   // ── Screenshots ───────────────────────────────────────────────────────
 
   /// `wkPage.ts::setBackgroundColor`.

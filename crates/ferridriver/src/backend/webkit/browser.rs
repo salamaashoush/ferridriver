@@ -428,11 +428,7 @@ impl WebKitBrowser {
   /// options bag stripped to just the proxy field — kept for state.rs's
   /// legacy `new_context(None)` callsite.
   ///
-  /// # Errors
-  ///
-  /// Returns an error when the `Playwright.createContext` or `Playwright.setDownloadBehavior`
-  /// command fails, or when the `Playwright.createContext` reply carries no context id.
-  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
+  async fn create_raw_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = CreateContextParams::default();
     if let Some(p) = proxy {
       // Windows WebKit's curl resolves names locally for `socks5://`;
@@ -453,6 +449,15 @@ impl WebKitBrowser {
       .map_err(BrowserError::from)?;
     let parsed: CreateContextResult =
       serde_json::from_value(resp).map_err(|e| FerriError::protocol("Playwright.createContext", e.to_string()))?;
+    Ok(parsed.browser_context_id)
+  }
+
+  /// # Errors
+  ///
+  /// Returns an error when the `Playwright.createContext` or `Playwright.setDownloadBehavior`
+  /// command fails, or when the `Playwright.createContext` reply carries no context id.
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
+    let ctx_id = self.create_raw_context(proxy).await?;
     // Download behavior is per-context on the WebKit protocol
     // (Playwright's WKBrowserContext.initialize sends it for every
     // context) — without it, downloads in a fresh context are denied
@@ -465,12 +470,12 @@ impl WebKitBrowser {
         json!({
           "behavior": "allow",
           "downloadPath": self.inner.downloads_dir.to_string_lossy(),
-          "browserContextId": parsed.browser_context_id.clone(),
+          "browserContextId": ctx_id.clone(),
         }),
       )
       .await
       .map_err(BrowserError::from)?;
-    Ok(parsed.browser_context_id)
+    Ok(ctx_id)
   }
 
   /// Create a context with the full `BrowserContextOptions` bag.
@@ -494,29 +499,22 @@ impl WebKitBrowser {
     options: Option<&crate::options::BrowserContextOptions>,
   ) -> Result<String> {
     let proxy = options.and_then(|o| o.proxy.as_ref());
-    let ctx_id = self.new_context(proxy).await?;
-    if let Some(opts) = options {
-      // `new_context` opened this one with `allow`, which is the
-      // default; a context that refuses downloads re-sends the
-      // per-context command. WebKit then reports a refused download as
-      // a cancelled one, and the download listener turns that into
-      // Playwright's wording.
-      if opts.accept_downloads == Some(false) {
-        self
-          .inner
-          .root
-          .send(
-            "Playwright.setDownloadBehavior",
-            json!({
-              "behavior": "deny",
-              "downloadPath": self.inner.downloads_dir.to_string_lossy(),
-              "browserContextId": ctx_id.clone(),
-            }),
-          )
-          .await
-          .map_err(BrowserError::from)?;
-      }
-      if opts.ignore_https_errors == Some(true) {
+    let ctx_id = self.create_raw_context(proxy).await?;
+    let behavior = if options.and_then(|o| o.accept_downloads) == Some(false) {
+      "deny"
+    } else {
+      "allow"
+    };
+    let download_fut = self.inner.root.send(
+      "Playwright.setDownloadBehavior",
+      json!({
+        "behavior": behavior,
+        "downloadPath": self.inner.downloads_dir.to_string_lossy(),
+        "browserContextId": ctx_id.clone(),
+      }),
+    );
+    let certs_fut = async {
+      if options.and_then(|o| o.ignore_https_errors) == Some(true) {
         self
           .inner
           .root
@@ -525,9 +523,13 @@ impl WebKitBrowser {
             json!({ "browserContextId": ctx_id.clone(), "ignore": true }),
           )
           .await
-          .map_err(BrowserError::from)?;
+          .map(|_| ())
+      } else {
+        Ok(())
       }
-      if let Some(locale) = opts.locale.as_deref() {
+    };
+    let langs_fut = async {
+      if let Some(locale) = options.and_then(|o| o.locale.as_deref()) {
         let _ = self
           .inner
           .root
@@ -537,6 +539,11 @@ impl WebKitBrowser {
           )
           .await;
       }
+    };
+    let (dl_res, cert_res, ()) = tokio::join!(download_fut, certs_fut, langs_fut);
+    dl_res.map_err(BrowserError::from)?;
+    cert_res.map_err(BrowserError::from)?;
+    if let Some(opts) = options {
       self
         .inner
         .context_options
@@ -569,6 +576,12 @@ impl WebKitBrowser {
   ///
   /// Returns an error when the `Playwright.deleteContext` command fails.
   pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
+    self
+      .inner
+      .context_options
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(browser_context_id);
     self
       .inner
       .root

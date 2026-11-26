@@ -4735,6 +4735,52 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// Set the main frame's HTML and immediately evaluate `check_js` in a single
+  /// pipelined CDP batch (strict FIFO ordering on the page session), saving a
+  /// sequential round trip on every `page.setContent()`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if resolving the main frame id or `Page.setDocumentContent`
+  /// fails; an evaluation error in `check_js` is surfaced as `Ok(None)` so the
+  /// caller falls back to lifecycle waiting.
+  pub async fn set_content_and_check(&self, html: &str, check_js: &str) -> Result<Option<serde_json::Value>> {
+    let frame_id = self
+      .main_frame_id
+      .get_or_try_init(|| async {
+        let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
+        tree
+          .get("frameTree")
+          .and_then(|f| f.get("frame"))
+          .and_then(|f| f.get("id"))
+          .and_then(|v| v.as_str())
+          .map(std::string::ToString::to_string)
+          .ok_or_else(|| FerriError::protocol("Page.getFrameTree", "no main frame"))
+      })
+      .await?;
+
+    let set_fut = self.cmd(
+      "Page.setDocumentContent",
+      serde_json::json!({"frameId": frame_id, "html": html}),
+    );
+    let check_fut = self.cmd(
+      "Runtime.evaluate",
+      serde_json::json!({
+        "expression": check_js,
+        "returnByValue": true,
+        "awaitPromise": false,
+      }),
+    );
+    let (set_res, check_res) = tokio::join!(set_fut, check_fut);
+    set_res?;
+    Ok(check_res.ok().and_then(|res| {
+      if res.get("exceptionDetails").is_some() {
+        return None;
+      }
+      res.get("result").and_then(|r| r.get("value")).cloned()
+    }))
+  }
+
   // ---- Screenshots ----
 
   /// `crPage.ts::setBackgroundColor`.

@@ -613,9 +613,7 @@ impl BidiBrowser {
       .transport
       .send_command("browser.removeUserContext", json!({"userContext": user_context_id}))
       .await?;
-    for waiter in waiters {
-      let _ = waiter.await;
-    }
+    let _ = futures::future::join_all(waiters).await;
     Ok(())
   }
 

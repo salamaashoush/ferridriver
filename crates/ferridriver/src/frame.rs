@@ -1215,24 +1215,21 @@ impl Frame {
     crate::operation_budget::scoped(timeout_ms, || "setting frame content".into(), async move {
       let mut need_frame_tree = self.page.frames().len() > 1;
       let state = if self.is_main_frame() {
-        self.page.inner.set_content(html).await?;
         match wait_until {
           crate::options::LoadState::Commit => {
+            self.page.inner.set_content(html).await?;
             need_frame_tree |= Self::html_may_create_subframes(html);
             None
           },
           crate::options::LoadState::Load | crate::options::LoadState::DomContentLoaded => {
-            // Fast path: check `document.readyState` AND whether any iframe/frame
-            // exists in a single eval, eliminating the unconditional `Page.getFrameTree`
-            // RTT on every subframe-free `setContent`.
-            let check_js = if wait_until == crate::options::LoadState::DomContentLoaded {
-              "(() => { const s = document.readyState; return (s === 'interactive' || s === 'complete') ? (document.querySelector('iframe,frame') ? 2 : 1) : 0; })()"
-            } else {
-              "(() => document.readyState === 'complete' ? (document.querySelector('iframe,frame') ? 2 : 1) : 0)()"
-            };
-            match self.page.inner.evaluate(check_js).await {
-              Ok(Some(v)) if v.as_i64() == Some(1) => None,
-              Ok(Some(v)) if v.as_i64() == Some(2) => {
+            // Single-RTT path: set document content AND check `document.readyState`
+            // plus iframe presence in one pipelined batch (CDP) or single eval
+            // (BiDi/WebKit), skipping both a second eval RTT and `Page.getFrameTree`
+            // on subframe-free documents.
+            let dcl = wait_until == crate::options::LoadState::DomContentLoaded;
+            match self.page.inner.set_content_and_check(html, dcl).await? {
+              Some(v) if v.as_i64() == Some(1) => None,
+              Some(v) if v.as_i64() == Some(2) => {
                 need_frame_tree = true;
                 None
               },
@@ -1243,6 +1240,7 @@ impl Frame {
             }
           },
           state @ crate::options::LoadState::NetworkIdle => {
+            self.page.inner.set_content(html).await?;
             need_frame_tree = true;
             Some(state.as_str())
           },
