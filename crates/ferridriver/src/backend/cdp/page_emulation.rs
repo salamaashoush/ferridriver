@@ -22,18 +22,23 @@ impl CdpPage {
     // everything set on a page in an isolated `Target.createBrowserContext`).
     // Send on the root session with explicit `browserContextId` so
     // test-fixture contexts see their own cookies.
-    let (sid, params) = if let Some(ref ctx_id) = self.browser_context_id {
-      (None, serde_json::json!({"browserContextId": ctx_id.as_ref()}))
+    let (sid, cmd) = if let Some(ref ctx_id) = self.browser_context_id {
+      (
+        None,
+        ferridriver_cdp_proto::storage::GetCookies {
+          browser_context_id: Some(ctx_id.as_ref()),
+        },
+      )
     } else {
-      (self.session_id.as_deref(), super::super::empty_params())
+      (
+        self.session_id.as_deref(),
+        ferridriver_cdp_proto::storage::GetCookies {
+          browser_context_id: None,
+        },
+      )
     };
-    let result = self.transport.send_command(sid, "Storage.getCookies", &params).await?;
-    let cookies = result
-      .get("cookies")
-      .and_then(|c| c.as_array())
-      .cloned()
-      .unwrap_or_default();
-    Ok(cookies.iter().map(cookie_from_cdp).collect())
+    let result = self.transport.send(sid, &cmd).await?;
+    Ok(result.cookies.iter().map(cookie_from_cdp).collect())
   }
 
   /// # Errors

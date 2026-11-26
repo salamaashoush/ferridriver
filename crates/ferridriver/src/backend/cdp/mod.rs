@@ -202,7 +202,7 @@ use browser::{
   FRONT_TAB_DRAWN, default_emulated_media_params, default_emulated_media_raw, glob_to_cdp_url_pattern,
   metrics_params_for, window_insets,
 };
-use network_tracker::{NetworkTracker, PendingWebMcpInvocation, context_params, cookie_from_cdp, cookie_to_cdp};
+use network_tracker::{NetworkTracker, PendingWebMcpInvocation, cookie_from_cdp, cookie_to_cdp};
 
 // ---- CdpPage ------------------------------------------------------------
 
@@ -1091,10 +1091,12 @@ impl CdpPage {
     if let Some(session) = self.session_id.as_deref() {
       self
         .transport
-        .send_command(
+        .send(
           None,
-          "Target.detachFromTarget",
-          &serde_json::json!({ "sessionId": session }),
+          &ferridriver_cdp_proto::target::DetachFromTarget {
+            session_id: Some(session),
+            target_id: None,
+          },
         )
         .await?;
     }
@@ -1105,10 +1107,9 @@ impl CdpPage {
   /// Let a paused popup run, and collect the answers its setup left owed.
   async fn release_popup(&self) -> Result<()> {
     let owed = self.setup.resume();
-    let resume = self.transport.send_command(
+    let resume = self.transport.send(
       self.session_id.as_deref(),
-      "Runtime.runIfWaitingForDebugger",
-      &super::EMPTY_PARAMS,
+      &ferridriver_cdp_proto::runtime::RunIfWaitingForDebugger {},
     );
     let (answers, resumed) = tokio::join!(futures::future::join_all(owed), resume);
     for error in answers.into_iter().filter_map(Result::err) {

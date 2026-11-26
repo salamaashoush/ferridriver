@@ -486,3 +486,33 @@ pub struct DomContentEventFiredEvent {
   #[serde(default)]
   pub timestamp: f64,
 }
+
+/// `Page.startScreenRecording` (Chrome M153+).
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartScreenRecording {
+  pub max_width: u32,
+  pub max_height: u32,
+  pub frame_rate: u32,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartScreenRecordingResponse {
+  #[serde(default)]
+  pub stream: Option<String>,
+}
+
+impl Command for StartScreenRecording {
+  const METHOD: &'static str = "Page.startScreenRecording";
+  type Response = StartScreenRecordingResponse;
+}
+
+/// `Page.stopScreenRecording` (Chrome M153+).
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct StopScreenRecording {}
+
+impl Command for StopScreenRecording {
+  const METHOD: &'static str = "Page.stopScreenRecording";
+  type Response = EmptyResponse;
+}

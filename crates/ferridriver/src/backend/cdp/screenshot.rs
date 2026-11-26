@@ -1,5 +1,5 @@
 use base64::Engine as _;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::transport::CdpTransport;
 use crate::error::{FerriError, Result};
@@ -12,24 +12,26 @@ pub(super) async fn capture(transport: &CdpTransport, session_id: Option<&str>, 
   // and goes away with it. Waiting every time costs each screenshot a
   // whole frame on top of the one `Page.captureScreenshot` draws itself.
   let rendered = transport
-    .send_command(
+    .send(
       session_id,
-      "Runtime.evaluate",
-      &json!({
-        "expression": "(() => { const k = Symbol.for('ferridriver.painted'); if (globalThis[k]) return undefined; \
-                       return new Promise(resolve => requestAnimationFrame(() => { globalThis[k] = true; resolve(undefined); })); })()",
-        "awaitPromise": true,
-        "returnByValue": true,
-      }),
+      &ferridriver_cdp_proto::runtime::Evaluate {
+        expression: "(() => { const k = Symbol.for('ferridriver.painted'); if (globalThis[k]) return undefined; \
+                     return new Promise(resolve => requestAnimationFrame(() => { globalThis[k] = true; resolve(undefined); })); })()",
+        context_id: None,
+        return_by_value: Some(true),
+        await_promise: Some(true),
+        user_gesture: None,
+        silent: None,
+      },
     )
     .await?;
-  if let Some(exception) = rendered.get("exceptionDetails") {
-    return Err(FerriError::backend(
-      exception
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("Screenshot rendering failed"),
-    ));
+  if let Some(exception) = rendered.exception_details {
+    let msg = if exception.text.is_empty() {
+      "Screenshot rendering failed"
+    } else {
+      exception.text.as_str()
+    };
+    return Err(FerriError::backend(msg));
   }
   let result = transport
     .send_command(session_id, "Page.captureScreenshot", &params)

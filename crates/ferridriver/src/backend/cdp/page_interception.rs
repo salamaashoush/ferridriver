@@ -2,6 +2,22 @@
 
 use super::*;
 
+fn cdp_abort_reason(reason: &str) -> &'static str {
+  match reason.to_lowercase().as_str() {
+    "aborted" => "Aborted",
+    "accessdenied" => "AccessDenied",
+    "addressunreachable" => "AddressUnreachable",
+    "blockedbyclient" => "BlockedByClient",
+    "connectionfailed" => "ConnectionFailed",
+    "connectionrefused" => "ConnectionRefused",
+    "connectionreset" => "ConnectionReset",
+    "internetdisconnected" => "InternetDisconnected",
+    "namenotresolved" => "NameNotResolved",
+    "timedout" => "TimedOut",
+    _ => "Failed",
+  }
+}
+
 impl CdpPage {
   // ---- Init Scripts ----
 
@@ -736,10 +752,15 @@ impl CdpPage {
       // a request burst.
       tokio::spawn(async move {
         let _ = transport2
-          .send_command(
+          .send(
             sid2.as_deref(),
-            "Fetch.continueRequest",
-            &serde_json::json!({"requestId": request_id_owned}),
+            &ferridriver_cdp_proto::fetch::ContinueRequest {
+              request_id: &request_id_owned,
+              url: None,
+              method: None,
+              post_data: None,
+              headers: None,
+            },
           )
           .await;
       });
@@ -752,81 +773,78 @@ impl CdpPage {
     request_id: &str,
     action: Option<crate::route::RouteAction>,
   ) {
+    use ferridriver_cdp_proto::fetch::{ContinueRequest, FailRequest, FulfillRequest, HeaderEntry};
+
     match action {
       Some(crate::route::RouteAction::Fulfill(resp)) => {
         let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
-        let mut hdrs: Vec<serde_json::Value> = resp
+        let mut hdrs: Vec<HeaderEntry> = resp
           .headers
           .iter()
-          .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
+          .map(|(k, v)| HeaderEntry {
+            name: k.clone(),
+            value: v.clone(),
+          })
           .collect();
         if let Some(ct) = &resp.content_type
-          && !hdrs
-            .iter()
-            .any(|h| h.get("name").and_then(|n| n.as_str()) == Some("content-type"))
+          && !hdrs.iter().any(|h| h.name == "content-type")
         {
-          hdrs.push(serde_json::json!({"name": "content-type", "value": ct}));
+          hdrs.push(HeaderEntry {
+            name: "content-type".to_string(),
+            value: ct.clone(),
+          });
         }
         let _ = transport
-          .send_command(
+          .send(
             session_id,
-            "Fetch.fulfillRequest",
-            &serde_json::json!({
-                "requestId": request_id,
-                "responseCode": resp.status,
-                "responsePhrase": crate::route::status_text(resp.status),
-                "responseHeaders": hdrs,
-                "body": body_b64,
-            }),
+            &FulfillRequest {
+              request_id,
+              response_code: u16::try_from(resp.status).unwrap_or(200),
+              response_phrase: Some(crate::route::status_text(resp.status)),
+              response_headers: Some(&hdrs),
+              body: Some(&body_b64),
+            },
           )
           .await;
       },
       // `Fallback` is consumed inside `run_route_chain`; if one leaks
       // here (chain bypassed), treat it as a continue with its overrides.
       Some(crate::route::RouteAction::Continue(overrides) | crate::route::RouteAction::Fallback(overrides)) => {
-        let mut params = serde_json::json!({"requestId": request_id});
-        if let Some(url) = &overrides.url {
-          params["url"] = serde_json::Value::String(url.clone());
-        }
-        if let Some(method) = &overrides.method {
-          params["method"] = serde_json::Value::String(method.clone());
-        }
-        if let Some(headers) = &overrides.headers {
-          let hdrs: Vec<serde_json::Value> = headers
+        let hdrs: Option<Vec<HeaderEntry>> = overrides.headers.as_ref().map(|headers| {
+          headers
             .iter()
-            .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
-            .collect();
-          params["headers"] = serde_json::Value::Array(hdrs);
-        }
-        if let Some(post_data) = &overrides.post_data {
-          params["postData"] = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(post_data));
-        }
+            .map(|(k, v)| HeaderEntry {
+              name: k.clone(),
+              value: v.clone(),
+            })
+            .collect()
+        });
+        let post_data_b64 = overrides
+          .post_data
+          .as_ref()
+          .map(|post_data| base64::engine::general_purpose::STANDARD.encode(post_data));
         let _ = transport
-          .send_command(session_id, "Fetch.continueRequest", &params)
+          .send(
+            session_id,
+            &ContinueRequest {
+              request_id,
+              url: overrides.url.as_deref(),
+              method: overrides.method.as_deref(),
+              headers: hdrs.as_deref(),
+              post_data: post_data_b64.as_deref(),
+            },
+          )
           .await;
       },
       Some(crate::route::RouteAction::Abort(reason)) => {
-        let error_reason = match reason.to_lowercase().as_str() {
-          "aborted" => "Aborted",
-          "accessdenied" => "AccessDenied",
-          "addressunreachable" => "AddressUnreachable",
-          "blockedbyclient" => "BlockedByClient",
-          "connectionfailed" => "ConnectionFailed",
-          "connectionrefused" => "ConnectionRefused",
-          "connectionreset" => "ConnectionReset",
-          "internetdisconnected" => "InternetDisconnected",
-          "namenotresolved" => "NameNotResolved",
-          "timedout" => "TimedOut",
-          _ => "Failed",
-        };
+        let error_reason = cdp_abort_reason(&reason);
         let _ = transport
-          .send_command(
+          .send(
             session_id,
-            "Fetch.failRequest",
-            &serde_json::json!({
-                "requestId": request_id,
-                "errorReason": error_reason,
-            }),
+            &FailRequest {
+              request_id,
+              error_reason,
+            },
           )
           .await;
       },
@@ -835,10 +853,15 @@ impl CdpPage {
       // here; if it ever leaks, fail open like an unhandled route.
       Some(crate::route::RouteAction::PredicateRejected) | None => {
         let _ = transport
-          .send_command(
+          .send(
             session_id,
-            "Fetch.continueRequest",
-            &serde_json::json!({"requestId": request_id}),
+            &ContinueRequest {
+              request_id,
+              url: None,
+              method: None,
+              post_data: None,
+              headers: None,
+            },
           )
           .await;
       },

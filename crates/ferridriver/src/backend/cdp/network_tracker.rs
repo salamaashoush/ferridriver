@@ -551,10 +551,9 @@ impl Drop for PendingWebMcpInvocation {
     let session_id = self.session_id.clone();
     runtime.spawn(async move {
       if let Err(error) = transport
-        .send_command(
+        .send(
           session_id.as_deref(),
-          "WebMCP.cancelInvocation",
-          &serde_json::json!({"invocationId": id}),
+          &ferridriver_cdp_proto::web_mcp::CancelInvocation { invocation_id: &id },
         )
         .await
       {
@@ -609,13 +608,4 @@ pub(super) fn cookie_to_cdp(cookie: &CookieData) -> serde_json::Value {
     params["sameSite"] = serde_json::json!(ss.as_str());
   }
   params
-}
-
-/// `{ browserContextId }` for a context's browser-session command; the
-/// default context is named by leaving it out.
-pub(super) fn context_params(browser_context_id: Option<&str>) -> serde_json::Value {
-  match browser_context_id {
-    Some(id) => serde_json::json!({ "browserContextId": id }),
-    None => serde_json::json!({}),
-  }
 }
