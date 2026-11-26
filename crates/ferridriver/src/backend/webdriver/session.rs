@@ -22,8 +22,21 @@ pub(crate) async fn with_command_admission<F: std::future::Future>(
   }
 }
 
+/// Type-erases `reqwest::Client` so proving `WebDriverSession: Send + Sync`
+/// stops here instead of walking ~80 layers of `hyper`/`tower`/`rustls` types
+/// on every downstream future that holds `AnyPage` or `BrowserState`.
+trait DynHttpClient: Send + Sync {
+  fn as_client(&self) -> &reqwest::Client;
+}
+
+impl DynHttpClient for reqwest::Client {
+  fn as_client(&self) -> &reqwest::Client {
+    self
+  }
+}
+
 pub struct WebDriverSession {
-  client: reqwest::Client,
+  client: Box<dyn DynHttpClient>,
   url: Url,
   secrets: crate::response::Secrets,
   closed: tokio::sync::Mutex<bool>,
@@ -208,7 +221,7 @@ impl WebDriverSession {
       .map_err(|()| FerriError::invalid_argument("endpoint", "WebDriver endpoint cannot hold path segments"))?
       .push(session_id);
     Ok(Self {
-      client,
+      client: Box::new(client),
       url,
       secrets: crate::response::Secrets::default(),
       closed: tokio::sync::Mutex::new(false),
@@ -406,7 +419,7 @@ impl WebDriverSession {
         .as_ref()
         .and_then(Value::as_object)
         .is_some_and(|body| body.len() == 1);
-    let mut request = self.client.request(command.method, url);
+    let mut request = self.client.as_client().request(command.method, url);
     if let Some(body) = command.body {
       tracing::trace!(target: "ferridriver::webdriver::wire", "> {method} {}", self.wire_excerpt(&body));
       request = request.json(&body);
@@ -462,7 +475,7 @@ impl WebDriverSession {
     self.shutdown.send_replace(true);
     let mut closed = self.closed.lock().await;
     if !*closed {
-      delete_session(&self.client, self.url.clone(), &self.secrets).await?;
+      delete_session(self.client.as_client(), self.url.clone(), &self.secrets).await?;
       *closed = true;
     }
     Ok(())
@@ -475,7 +488,7 @@ impl Drop for WebDriverSession {
       return;
     }
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-      let client = self.client.clone();
+      let client = self.client.as_client().clone();
       let url = self.url.clone();
       let secrets = self.secrets.clone();
       runtime.spawn(async move {
@@ -974,8 +987,12 @@ pub(crate) mod tests {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = Url::parse(&format!("http://{}/session", listener.local_addr().unwrap())).unwrap();
     let session = Arc::new(WebDriverSession::new(reqwest::Client::new(), url, "unstarted").unwrap());
-    let mut page = WebDriverPage::new(Arc::clone(&session), Target::default(), 30_000);
-    page.capabilities = Arc::new(json!({"platformName":"iOS", "appium:automationName":"XCUITest"}));
+    let page = WebDriverPage::with_capabilities(
+      Arc::clone(&session),
+      Target::default(),
+      30_000,
+      Arc::new(json!({"platformName":"iOS", "appium:automationName":"XCUITest"})),
+    );
     for timeout in [0, 121_000] {
       let error = OperationBudget::new(timeout)
         .unwrap()

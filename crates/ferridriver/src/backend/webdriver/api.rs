@@ -50,7 +50,7 @@ impl WebDriverPage {
       if window != self.target.window {
         return Err(FerriError::invalid_argument("frame", "frame belongs to another window"));
       }
-      page.target.frames = frames;
+      std::sync::Arc::make_mut(&mut page.target).frames = frames;
     }
     Ok(page)
   }
@@ -82,7 +82,7 @@ impl WebDriverPage {
     if super::capabilities::uses_xcuitest(&self.capabilities) {
       return self
         .session
-        .activate_native_page(self.target.clone(), self.timeout_ms)
+        .activate_native_page((*self.target).clone(), self.timeout_ms)
         .await;
     }
     self.command(Command::get(&["window"])).await?;
@@ -118,7 +118,7 @@ impl WebDriverPage {
         .ok_or_else(|| FerriError::protocol("frame tree", "missing child frames"))?;
       for element in children.iter().rev() {
         let mut child = page.clone();
-        child.target.frames.push(element.clone());
+        std::sync::Arc::make_mut(&mut child.target).frames.push(element.clone());
         pending.push((child, Some(frame_id.clone())));
       }
     }
@@ -142,7 +142,7 @@ impl WebDriverPage {
       return Ok(None);
     }
     let mut child = self.clone();
-    child.target.frames.push(element);
+    std::sync::Arc::make_mut(&mut child.target).frames.push(element);
     Ok(Some(child.frame_id()))
   }
 
@@ -295,7 +295,7 @@ impl WebDriverPage {
     self
       .session
       .execute_sequence(
-        self.target.clone(),
+        (*self.target).clone(),
         vec![
           Command::post(
             &["timeouts"],
@@ -490,8 +490,12 @@ mod tests {
     });
     let session =
       Arc::new(super::super::session::WebDriverSession::new(reqwest::Client::new(), endpoint, "callback").unwrap());
-    let mut page = WebDriverPage::new(session, super::super::session::Target::default(), 1000);
-    page.capabilities = Arc::new(json!({"platformName":"iOS","automationName":"XCUITest"}));
+    let page = WebDriverPage::with_capabilities(
+      session,
+      super::super::session::Target::default(),
+      1000,
+      Arc::new(json!({"platformName":"iOS","automationName":"XCUITest"})),
+    );
     (page, server)
   }
 

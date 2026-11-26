@@ -125,7 +125,7 @@ pub(crate) struct DialogState {
   /// `client/dialog.ts`: `Page.fromNullable(initializer.page)`); the
   /// Rust `Weak` upgrade returns `None` for that case as well as for a
   /// dropped page.
-  page: std::sync::Weak<Page>,
+  page: crate::backend::ErasedWeakPage,
 }
 
 impl Dialog {
@@ -171,7 +171,7 @@ impl Dialog {
         closed: AtomicBool::new(false),
         responder,
         manager,
-        page,
+        page: crate::backend::ErasedWeakPage::from_weak(page),
       }),
     }
   }

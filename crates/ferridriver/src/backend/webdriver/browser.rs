@@ -238,7 +238,7 @@ impl WebDriverBrowser {
       .pages()
       .await?
       .first()
-      .map(|page| page.target.clone())
+      .map(|page| (*page.target).clone())
       .ok_or_else(|| FerriError::target_closed(Some("WebDriver session has no open windows".into())))?;
     let mut windows = self.windows.lock().await;
     let result = self
@@ -308,7 +308,7 @@ impl WebDriverBrowser {
 }
 
 fn window_page(session: &Arc<WebDriverSession>, capabilities: &Value, timeout_ms: u64, handle: &str) -> WebDriverPage {
-  let mut page = WebDriverPage::new(
+  WebDriverPage::with_capabilities(
     Arc::clone(session),
     Target {
       appium_context: super::capabilities::uses_xcuitest(capabilities)
@@ -317,9 +317,8 @@ fn window_page(session: &Arc<WebDriverSession>, capabilities: &Value, timeout_ms
       ..Default::default()
     },
     timeout_ms,
-  );
-  page.capabilities = Arc::new(capabilities.clone());
-  page
+    Arc::new(capabilities.clone()),
+  )
 }
 
 /// The session's windows, less the ones a popup listener was handed. While
@@ -672,7 +671,7 @@ mod tests {
     assert_eq!(browser.version(), "26.2");
     assert!(browser.capabilities.get("browserVersion").is_none());
     let mut page = window_page(&browser.session, &browser.capabilities, browser.timeout_ms, "device");
-    page.target = Target::default();
+    page.target = Arc::new(Target::default());
     assert!(!page.supports_window_resize());
     assert_eq!(
       page

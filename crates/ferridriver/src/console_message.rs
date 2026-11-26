@@ -78,7 +78,7 @@ struct ConsoleMessageState {
   timestamp: u64,
   /// Weak back-reference to the owning page. `ConsoleMessage::page`
   /// upgrades it; returns `None` if the page has been dropped.
-  page: std::sync::Weak<Page>,
+  page: crate::backend::ErasedWeakPage,
 }
 
 impl ConsoleMessage {
@@ -102,7 +102,7 @@ impl ConsoleMessage {
         args,
         location,
         timestamp,
-        page: Arc::downgrade(page),
+        page: crate::backend::ErasedWeakPage::from_arc(page),
       }),
     }
   }
@@ -126,7 +126,7 @@ impl ConsoleMessage {
         args,
         location,
         timestamp,
-        page: std::sync::Weak::new(),
+        page: crate::backend::ErasedWeakPage::default(),
       }),
     }
   }

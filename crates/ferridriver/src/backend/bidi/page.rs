@@ -344,9 +344,21 @@ const INSERT_TEXT: &str = r"(text) => {
   return undefined;
 }";
 
-/// Page handle for the `BiDi` backend. Cheaply cloneable (Arc-based).
+/// Page handle for the `BiDi` backend. Cheaply cloneable (single `Arc` pointer).
 #[derive(Clone)]
-pub struct BidiPage {
+pub struct BidiPage(Arc<BidiPageInner>);
+
+impl std::ops::Deref for BidiPage {
+  type Target = BidiPageInner;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
+}
+
+#[doc(hidden)]
+pub struct BidiPageInner {
+  pub shared: crate::backend::SharedPageState,
   pub(crate) session: Arc<BidiSession>,
   pub(crate) context_id: Arc<str>,
   /// Owning user context (`"default"` for the default context). Cookie
@@ -356,10 +368,8 @@ pub struct BidiPage {
   /// every entry in `storage.getCookies` (and Playwright's own `BiDi`
   /// backend partitions on the user context for the same reason).
   pub(crate) user_context: Arc<str>,
-  pub events: EventEmitter,
   routes: Arc<RwLock<Vec<crate::route::RegisteredRoute>>>,
   intercept_ids: Arc<RwLock<Vec<String>>>,
-  closed: Arc<AtomicBool>,
   preload_scripts: Arc<RwLock<FxHashMap<String, String>>>,
   exposed_fns: Arc<RwLock<FxHashMap<String, crate::backend::PageBinding>>>,
   /// Whether `__playwright__binding__controller__` is installed, the way
@@ -373,19 +383,6 @@ pub struct BidiPage {
   /// traversals to resolve the final main-document `Response`.
   nav_request_slot: crate::network::NavRequestSlot,
   event_barrier: Arc<std::sync::Mutex<Option<super::transport::EventBarrier>>>,
-  /// Per-page dialog handler registry. See
-  /// `crates/ferridriver/src/dialog.rs::DialogManager`.
-  pub dialog_manager: crate::dialog::DialogManager,
-  /// Per-page file-chooser handler registry. See
-  /// `crates/ferridriver/src/file_chooser.rs::FileChooserManager`.
-  /// Backend listener dispatches on `input.fileDialogOpened` (the
-  /// `BiDi` equivalent of CDP's `Page.fileChooserOpened`).
-  pub file_chooser_manager: crate::file_chooser::FileChooserManager,
-  /// Per-page download handler registry. See
-  /// `crates/ferridriver/src/download.rs::DownloadManager`. Dispatches
-  /// on `browsingContext.downloadWillBegin` and flips terminal state
-  /// on `browsingContext.downloadEnd` — Firefox's native `BiDi` events.
-  pub download_manager: crate::download::DownloadManager,
   pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
   /// Per-page temp directory Firefox is configured to write downloads
   /// into (via `browser.setDownloadBehavior({ downloadBehavior: { type:
@@ -404,28 +401,12 @@ pub struct BidiPage {
   /// detached task, so an explicit `denied` was overwritten by whichever
   /// finished last.
   pub accept_downloads: Arc<std::sync::atomic::AtomicBool>,
-  /// Weak back-reference to the outer [`crate::page::Page`]. Same
-  /// purpose as the CDP page's field — the file-chooser listener
-  /// upgrades it to build the `ElementHandle`.
-  pub page_backref: crate::backend::PageBackref,
-  /// Shared frame cache (see `CdpPage::frame_cache` for the rationale —
-  /// MCP tool handlers wrap the same backend page in successive
-  /// `Arc<crate::page::Page>` instances, so the cache lives on the
-  /// backend to outlive them).
-  pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   /// A popup's first navigation, set when the popup listener adopts it.
   first_navigation: Arc<std::sync::OnceLock<Arc<super::frames::FirstNavigation>>>,
-  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
-  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
   /// Last viewport applied via `browsingContext.setViewport`, so a repeat call
   /// with identical dimensions/scale (e.g. `apply_context_options` right after
   /// `BidiBrowser::new_page`) skips the redundant round trip.
   emulated_viewport: Arc<std::sync::Mutex<Option<crate::options::ViewportConfig>>>,
-  /// Idempotent latch for the frame-event listener.
-  pub(crate) frame_listener_started: Arc<AtomicBool>,
-  /// Console / page-error retention for `page.consoleMessages()` /
-  /// `page.pageErrors()` (see `CdpPage::observed`).
-  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
   pub(crate) network_idle: Arc<crate::network_idle::NetworkIdle>,
   /// Idempotent latch for the route (`network.beforeRequestSent`) listener.
   /// Spawned once per page: it reads the shared `routes` map live, so a
@@ -441,7 +422,7 @@ pub struct BidiPage {
   /// main event listener, the route listener, the screencast
   /// navigation tap). They subscribe to the SESSION-wide event
   /// channel, which stays open for the browser's whole life — without
-  /// an abort in [`Self::close_page`] every closed page keeps waking
+  /// an abort in [`BidiPage::close_page`] every closed page keeps waking
   /// on all future `BiDi` events and pins its managers/emitter until
   /// the browser exits.
   listener_tasks: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
@@ -477,7 +458,14 @@ pub struct BidiPage {
   /// `HandleRemote::Bidi` wire shape carries no context, so we recover
   /// it here, inside the backend, keyed on the reference string.
   pub(crate) handle_realms: Arc<std::sync::Mutex<FxHashMap<String, Arc<str>>>>,
-  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
+}
+
+impl std::ops::Deref for BidiPageInner {
+  type Target = crate::backend::SharedPageState;
+
+  fn deref(&self) -> &Self::Target {
+    &self.shared
+  }
 }
 
 /// Permission-grant bookkeeping for one page's context. `global` is
@@ -583,35 +571,26 @@ impl BidiPage {
     // folder turn a second `greeting.txt` into `greeting(1).txt`.
     let downloads_subdir = downloads_dir.path().join(&context_id);
     let _ = std::fs::create_dir_all(&downloads_subdir);
-    let frame_cache = Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::new(&context_id)));
-    Self {
+    let shared = crate::backend::SharedPageState::new(&context_id);
+    Self(Arc::new(BidiPageInner {
+      shared,
       downloads_subdir: Arc::from(downloads_subdir),
       accept_downloads: Arc::new(std::sync::atomic::AtomicBool::new(true)),
       session,
       context_id: Arc::from(context_id),
       user_context: Arc::from(user_context.unwrap_or("default")),
-      events: EventEmitter::new(),
       routes: Arc::new(RwLock::new(Vec::new())),
       intercept_ids: Arc::new(RwLock::new(Vec::new())),
-      closed: Arc::new(AtomicBool::new(false)),
       preload_scripts: Arc::new(RwLock::new(FxHashMap::default())),
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
       binding_controller: Arc::new(tokio::sync::Mutex::new(false)),
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       event_barrier: Arc::new(std::sync::Mutex::new(None)),
-      dialog_manager: crate::dialog::DialogManager::new(),
-      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
-      download_manager: crate::download::DownloadManager::new(),
       screencast_hub: crate::backend::screencast::ScreencastHub::default(),
       downloads_dir,
-      page_backref: crate::backend::PageBackref::new(),
-      frame_cache,
       first_navigation: Arc::default(),
-      media_emulation: crate::backend::SharedMediaEmulation::default(),
       emulated_viewport: Arc::default(),
-      frame_listener_started: Arc::new(AtomicBool::new(false)),
-      observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
       network_idle: Arc::default(),
       route_listener_started: Arc::new(AtomicBool::new(false)),
       forwarded_requests: Arc::new(std::sync::Mutex::new(None)),
@@ -620,8 +599,7 @@ impl BidiPage {
       network: Arc::default(),
       permissions: Arc::new(std::sync::Mutex::new(BidiPermissions::default())),
       handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
-      keyboard: Arc::default(),
-    }
+    }))
   }
 
   /// Take up a page the browser opened by itself: it starts with its
@@ -1798,10 +1776,6 @@ impl BidiPage {
       .cmd("input.performActions", input::tap(&self.context_id, x, y))
       .await?;
     Ok(())
-  }
-
-  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
-    &self.keyboard
   }
 
   /// # Errors

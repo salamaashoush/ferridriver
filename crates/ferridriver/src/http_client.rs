@@ -69,10 +69,36 @@ pub type LiveHttpCredentials = Arc<dyn Fn() -> futures::future::BoxFuture<'stati
 /// context's proxy is fixed when the context is made.
 pub type LiveProxy = Arc<dyn Fn() -> futures::future::BoxFuture<'static, Option<ProxyConfig>> + Send + Sync>;
 
+/// Type-erases `fetch::ClientPool` so proving `HttpClient: Send + Sync` stops
+/// here instead of walking ~80 layers of `reqwest`/`tower`/`hyper`/`rustls`
+/// types across every downstream future that holds `Page` or `RegisteredRoute`.
+trait DynClientPool: Send + Sync {
+  fn as_pool(&self) -> &fetch::ClientPool;
+}
+
+impl DynClientPool for fetch::ClientPool {
+  fn as_pool(&self) -> &fetch::ClientPool {
+    self
+  }
+}
+
+#[derive(Clone)]
+struct ErasedClientPool(Arc<dyn DynClientPool>);
+
+impl ErasedClientPool {
+  fn new(pool: fetch::ClientPool) -> Self {
+    Self(Arc::new(pool))
+  }
+
+  fn as_pool(&self) -> &fetch::ClientPool {
+    self.0.as_pool()
+  }
+}
+
 #[derive(Clone)]
 struct ContextProxy {
   resolve: LiveProxy,
-  pool: Arc<tokio::sync::OnceCell<fetch::ClientPool>>,
+  pool: Arc<tokio::sync::OnceCell<ErasedClientPool>>,
 }
 
 #[derive(Clone)]
@@ -616,7 +642,7 @@ impl HttpStreamResponse {
 /// one stack `fetch` and `request` share.
 #[derive(Clone)]
 pub struct HttpClient {
-  pool: fetch::ClientPool,
+  pool: ErasedClientPool,
   base_url: Option<String>,
   extra_headers: Vec<(String, String)>,
   default_timeout: Duration,
@@ -743,8 +769,10 @@ impl HttpClient {
   #[must_use]
   pub fn new(options: HttpClientOptions) -> Self {
     Self {
-      pool: fetch::ClientPool::standalone(options.ignore_https_errors)
-        .with_proxy(options.proxy.as_ref().map(ProxyConfig::transport)),
+      pool: ErasedClientPool::new(
+        fetch::ClientPool::standalone(options.ignore_https_errors)
+          .with_proxy(options.proxy.as_ref().map(ProxyConfig::transport)),
+      ),
       base_url: options.base_url,
       extra_headers: options.extra_http_headers,
       default_timeout: options.timeout.unwrap_or(Duration::from_secs(30)),
@@ -767,7 +795,7 @@ impl HttpClient {
   ///
   /// A cookie with neither a `url` nor a `domain`/`path` pair.
   pub fn with_storage_state(mut self, state: crate::options::StorageState) -> crate::error::Result<Self> {
-    if let Some(jar) = self.pool.jar() {
+    if let Some(jar) = self.pool.as_pool().jar() {
       let cookies = state
         .cookies
         .into_iter()
@@ -791,7 +819,7 @@ impl HttpClient {
       return Box::pin(context.storage_state_impl(None)).await;
     }
     Ok(crate::options::StorageState {
-      cookies: self.pool.jar().map(|jar| jar.all()).unwrap_or_default(),
+      cookies: self.pool.as_pool().jar().map(|jar| jar.all()).unwrap_or_default(),
       origins: self.origins.clone(),
       credentials: None,
     })
@@ -805,7 +833,7 @@ impl HttpClient {
   #[must_use]
   pub fn context_bound(bridge: Arc<dyn ContextBridge>) -> Self {
     Self {
-      pool: fetch::ClientPool::bridged(),
+      pool: ErasedClientPool::new(fetch::ClientPool::bridged()),
       base_url: None,
       extra_headers: Vec::new(),
       default_timeout: Duration::from_secs(30),
@@ -839,7 +867,7 @@ impl HttpClient {
   /// Returns an error for a URL that does not parse, or if the context's
   /// cookies cannot be read.
   pub async fn cookies(&self, urls: &[String]) -> crate::error::Result<Vec<crate::backend::CookieData>> {
-    let all = match (&self.context, self.pool.jar()) {
+    let all = match (&self.context, self.pool.as_pool().jar()) {
       (Some(context), _) => match context.cookies().await {
         Ok(cookies) => cookies,
         // A context has no jar in the browser before its first page.
@@ -859,7 +887,7 @@ impl HttpClient {
   /// Returns an error for a cookie with neither a `url` nor a
   /// `domain`/`path` pair, or if the context refuses it.
   pub async fn add_cookies(&self, cookies: Vec<crate::backend::CookieData>) -> crate::error::Result<()> {
-    match (&self.context, self.pool.jar()) {
+    match (&self.context, self.pool.as_pool().jar()) {
       (Some(context), _) => context.add_cookies(cookies).await,
       (None, Some(jar)) => {
         let cookies = cookies
@@ -886,7 +914,7 @@ impl HttpClient {
   }
 
   async fn clear_cookies_impl(&self, options: &crate::backend::ClearCookieOptions) -> crate::error::Result<()> {
-    match (&self.context, self.pool.jar()) {
+    match (&self.context, self.pool.as_pool().jar()) {
       (Some(context), _) => context.clear_cookies_impl(options).await,
       (None, Some(jar)) => {
         let filter = options.compile()?;
@@ -917,15 +945,22 @@ impl HttpClient {
 
   async fn transport_pool(&self) -> fetch::ClientPool {
     let Some(live) = &self.context_proxy else {
-      return self.pool.clone();
+      return self.pool.as_pool().clone();
     };
     live
       .pool
       .get_or_init(|| async {
         let proxy = (live.resolve)().await;
-        self.pool.clone().with_proxy(proxy.as_ref().map(ProxyConfig::transport))
+        ErasedClientPool::new(
+          self
+            .pool
+            .as_pool()
+            .clone()
+            .with_proxy(proxy.as_ref().map(ProxyConfig::transport)),
+        )
       })
       .await
+      .as_pool()
       .clone()
   }
 

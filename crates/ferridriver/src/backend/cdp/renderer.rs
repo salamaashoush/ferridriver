@@ -408,16 +408,16 @@ impl CdpPage {
   }
 
   fn renderer_page(&self, renderer: &Renderer) -> Self {
-    let mut page = self.clone();
-    page.session_id = Some(Arc::clone(&renderer.session));
-    page.main_frame_id = Arc::clone(&renderer.main_frame);
-    page.frame_contexts = Arc::clone(&renderer.contexts);
-    page.utility_contexts = Arc::default();
-    page.frame_contexts_notify = Arc::clone(&renderer.contexts_notify);
-    page.injected_script = Arc::clone(&renderer.injected);
-    page.fetch = Arc::clone(&renderer.fetch);
-    page.listener_tasks = Arc::clone(&renderer.tasks);
-    page
+    let mut inner = (**self).clone();
+    inner.session_id = Some(Arc::clone(&renderer.session));
+    inner.main_frame_id = Arc::clone(&renderer.main_frame);
+    inner.frame_contexts = Arc::clone(&renderer.contexts);
+    inner.utility_contexts = Arc::default();
+    inner.frame_contexts_notify = Arc::clone(&renderer.contexts_notify);
+    inner.injected_script = Arc::clone(&renderer.injected);
+    inner.fetch = Arc::clone(&renderer.fetch);
+    inner.listener_tasks = Arc::clone(&renderer.tasks);
+    Self(Arc::new(inner))
   }
 
   pub(super) async fn page_for_frame(&self, frame: &str) -> Result<Option<Box<Self>>> {

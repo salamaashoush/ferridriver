@@ -23,7 +23,6 @@ use crate::backend::{
 };
 use crate::console_message::ConsoleMessage;
 use crate::error::{FerriError, Result};
-use crate::events::EventEmitter;
 use crate::network::{Request as NetworkRequest, Response};
 use crate::state::DialogEvent;
 use ferridriver_types::keyboard::KeyStroke;
@@ -226,10 +225,21 @@ fn main_frame_id(resource_tree: Option<&Value>) -> Option<String> {
     .map(str::to_string)
 }
 
-/// Playwright `WebKit` page. Cheaply cloneable; clones share the
-/// underlying sessions + managers.
+/// Playwright `WebKit` page. Cheaply cloneable (single `Arc` pointer).
 #[derive(Clone)]
-pub struct WebKitPage {
+pub struct WebKitPage(Arc<WebKitPageInner>);
+
+impl std::ops::Deref for WebKitPage {
+  type Target = WebKitPageInner;
+
+  fn deref(&self) -> &Self::Target {
+    &self.0
+  }
+}
+
+#[doc(hidden)]
+pub struct WebKitPageInner {
+  pub shared: crate::backend::SharedPageState,
   proxy: Session,
   /// Live target session. Swapped on cross-process navigation when
   /// `WebKit` creates a provisional target and commits it via
@@ -242,9 +252,8 @@ pub struct WebKitPage {
   /// Live target id. Swapped alongside [`Self::target`] on commit.
   target_id: Arc<ArcSwap<Arc<str>>>,
   context_id: Option<Arc<str>>,
-  closed: Arc<AtomicBool>,
   /// Set when `attach(defer_resume: true)` observed a paused popup
-  /// target; cleared (and `Target.resume` sent) by `Self::resume_popup`.
+  /// target; cleared (and `Target.resume` sent) by `WebKitPage::resume_popup`.
   popup_paused: Arc<AtomicBool>,
   /// Latch: the `window.__fd` selector engine has been injected.
   engine_injected: Arc<EngineLatch>,
@@ -287,7 +296,7 @@ pub struct WebKitPage {
   /// `setExtraHTTPHeaders` before a `goto` would be lost on the swap.
   pub(crate) extra_http_headers: Arc<std::sync::Mutex<Option<serde_json::Map<String, Value>>>>,
   /// Merged media / user-preference emulation state, stashed by
-  /// [`Self::emulate_media`] for the same reason as
+  /// [`WebKitPage::emulate_media`] for the same reason as
   /// [`Self::extra_http_headers`]: the backend swaps the target session
   /// on every cross-document navigation and drops active overrides, so
   /// the provisional-target handler replays them.
@@ -296,7 +305,7 @@ pub struct WebKitPage {
   /// have: `WebKit` honours `Page.setTimeZone` before a session's first
   /// document and ignores it after, so a later CHANGE is refused rather
   /// than silently dropped. Re-asserting the same value is a no-op and
-  /// must stay one — [`Self::apply_context_options`] re-sends the whole
+  /// must stay one — [`WebKitPage::apply_context_options`] re-sends the whole
   /// bag on every context-level mutation.
   pub(crate) applied_timezone: Arc<std::sync::Mutex<Option<String>>>,
   /// Viewport emulation currently in force and whether the installed
@@ -309,7 +318,7 @@ pub struct WebKitPage {
   /// finished/failed events.
   pub(crate) requests: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::network::Request>>>,
   /// Slot holding the most-recent main-document `Request` so
-  /// [`Self::goto`] / [`Self::reload`] / history traversals can resolve
+  /// [`WebKitPage::goto`] / [`WebKitPage::reload`] / history traversals can resolve
   /// the navigation `Response` without polling.
   pub(crate) nav_request_slot: crate::network::NavRequestSlot,
   /// Registered network-interception routes. Listener consults this
@@ -321,7 +330,7 @@ pub struct WebKitPage {
   pub(crate) intercept_enabled: Arc<AtomicBool>,
   /// `frameId` → `executionContextId` mapping populated by
   /// `Runtime.executionContextCreated` events. Used by
-  /// [`Self::evaluate_in_frame`] to evaluate inside an iframe's realm.
+  /// [`WebKitPage::evaluate_in_frame`] to evaluate inside an iframe's realm.
   pub(crate) frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
   /// `frameId` → `executionContextId` of the frame's utility world
   /// ([`UTILITY_WORLD_NAME`]), where the page's changes to DOM objects do
@@ -339,7 +348,6 @@ pub struct WebKitPage {
   /// realm throws forever (`__fd` is undefined there) and the wait
   /// times out. Cleared on navigation.
   frame_engine_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<i64, FrameEngineContext>>>,
-  keyboard: Arc<crate::backend::keyboard::KeyboardState>,
   /// Main-frame id captured from the initial `Page.getResourceTree`
   /// response. PW `WebKit`'s `frame_id` is distinct from `target_id`
   /// (the page proxy's id), so event routing keys off this rather than
@@ -352,19 +360,7 @@ pub struct WebKitPage {
   pub(crate) websockets: Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, crate::network::WebSocket>>>,
   /// Dedicated workers of the current target, by `workerId`.
   pub(crate) workers: super::worker::Workers,
-  pub events: EventEmitter,
-  pub dialog_manager: crate::dialog::DialogManager,
-  pub file_chooser_manager: crate::file_chooser::FileChooserManager,
-  pub download_manager: crate::download::DownloadManager,
   pub(crate) screencast_hub: crate::backend::screencast::ScreencastHub,
-  pub page_backref: crate::backend::PageBackref,
-  pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
-  /// Media emulation shared by every clone; see [`crate::backend::MediaEmulation`].
-  pub(crate) media_emulation: crate::backend::SharedMediaEmulation,
-  pub(crate) frame_listener_started: Arc<AtomicBool>,
-  /// Console / page-error retention for `page.consoleMessages()` /
-  /// `page.pageErrors()` (see `CdpPage::observed`).
-  pub(crate) observed: Arc<std::sync::Mutex<crate::observed::ObservedBuffers>>,
   pub(crate) network_idle: Arc<crate::network_idle::NetworkIdle>,
   /// The buttons held down, which every mouse event reports, so a move
   /// after a press drags (Playwright's `Mouse._lastButton` / `_buttons`).
@@ -376,14 +372,22 @@ pub struct WebKitPage {
   /// target on commit, so events continue arriving here).
   pub(crate) lifecycle: Arc<LifecycleSignals>,
   /// Where the listener writes console/network/dialog events. Swapped
-  /// in by [`Self::attach_listeners`] so the always-on listener (spawned
-  /// from [`Self::attach`]) writes to the caller's logs once they're
+  /// in by [`WebKitPage::attach_listeners`] so the always-on listener (spawned
+  /// from [`WebKitPage::attach`]) writes to the caller's logs once they're
   /// provided. Default-empty sinks let the raw API (no `attach_listeners`
   /// call) use page methods without `wait_for_lifecycle` wedging on the
   /// missing-listener path.
   pub(crate) console_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<ConsoleMessage>>>>,
   pub(crate) network_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<NetworkRequest>>>>,
   pub(crate) dialog_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<DialogEvent>>>>,
+}
+
+impl std::ops::Deref for WebKitPageInner {
+  type Target = crate::backend::SharedPageState;
+
+  fn deref(&self) -> &Self::Target {
+    &self.shared
+  }
 }
 
 /// Per-child-frame execution-context bookkeeping for the `window.__fd`
@@ -682,14 +686,14 @@ impl WebKitPage {
           .seed(frames);
       }
 
-      let page = WebKitPage {
+      let page = WebKitPage(Arc::new(WebKitPageInner {
+        shared: crate::backend::SharedPageState::with_frame_cache(frame_cache),
         proxy,
         target: Arc::new(ArcSwap::from_pointee(target)),
         browser: root,
         proxy_id: Arc::from(proxy_id),
         target_id: Arc::new(ArcSwap::from_pointee(Arc::<str>::from(target_id))),
         context_id: context_id.map(Arc::from),
-        closed: Arc::new(AtomicBool::new(false)),
         popup_paused: Arc::new(AtomicBool::new(false)),
         engine_injected: Arc::default(),
         global_object_id: Arc::new(std::sync::Mutex::new(None)),
@@ -713,27 +717,17 @@ impl WebKitPage {
         frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         utility_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-        keyboard: Arc::default(),
         main_frame_id_cache,
         websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
         workers: Arc::default(),
-        events: EventEmitter::new(),
-        dialog_manager: crate::dialog::DialogManager::new(),
-        file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
-        download_manager: crate::download::DownloadManager::new(),
         screencast_hub: crate::backend::screencast::ScreencastHub::default(),
-        page_backref: crate::backend::PageBackref::new(),
-        frame_cache,
-        media_emulation: crate::backend::SharedMediaEmulation::default(),
-        frame_listener_started: Arc::new(AtomicBool::new(false)),
-        observed: Arc::new(std::sync::Mutex::new(crate::observed::ObservedBuffers::default())),
         network_idle: Arc::default(),
         mouse: Arc::default(),
         lifecycle: Arc::new(LifecycleSignals::default()),
         console_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
         network_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
         dialog_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
-      };
+      }));
       // Spawn the always-on listener: lifecycle signals, frame events,
       // network log, console log, dialog log, route interception, and
       // cross-process target swap. Without this, raw users of the page
@@ -2005,10 +1999,6 @@ impl WebKitPage {
     let component = |i: usize, default: f64| viewport.get(i).and_then(Value::as_f64).unwrap_or(default);
     let (scale, left, top) = (component(0, 1.0), component(1, 0.0), component(2, 0.0));
     Ok(((x - left) * scale, (y - top) * scale))
-  }
-
-  pub(crate) fn keyboard(&self) -> &crate::backend::keyboard::KeyboardState {
-    &self.keyboard
   }
 
   /// # Errors
