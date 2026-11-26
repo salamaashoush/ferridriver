@@ -238,7 +238,7 @@ async fn drive(
   origin: &str,
   served: &Served,
   registry: &Registry,
-) -> anyhow::Result<(String, Vec<ferridriver::codegen::RecordedAction>)> {
+) -> anyhow::Result<(String, Vec<ferridriver_codegen::RecordedAction>)> {
   let endpoint = registry.get("served")?.context("the session's descriptor")?.endpoint;
   let mut targets = watch_pages(&served.endpoint).await?;
 

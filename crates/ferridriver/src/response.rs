@@ -84,13 +84,8 @@ impl Response {
   }
 
   /// The source reproducing what ran, fenced in the language it is written in.
-  pub fn code(&mut self, lines: Vec<String>, language: crate::codegen::OutputLanguage) {
-    let fence = match language {
-      crate::codegen::OutputLanguage::TypeScript => "ts",
-      crate::codegen::OutputLanguage::Rust => "rust",
-      crate::codegen::OutputLanguage::Gherkin => "gherkin",
-    };
-    self.push(section::CODE, lines, Some(fence));
+  pub fn code(&mut self, lines: Vec<String>, language: ferridriver_types::OutputLanguage) {
+    self.push(section::CODE, lines, Some(language.code_fence()));
   }
 
   pub fn page(&mut self, state: &PageState) {
@@ -313,12 +308,12 @@ impl Secrets {
   /// in the language the echoed code is written in. This is what a generated
   /// test must contain instead of the literal.
   #[must_use]
-  pub fn env_expression(name: &str, language: crate::codegen::OutputLanguage) -> String {
+  pub fn env_expression(name: &str, language: ferridriver_types::OutputLanguage) -> String {
     match language {
-      crate::codegen::OutputLanguage::TypeScript => format!("process.env['{name}']"),
-      crate::codegen::OutputLanguage::Rust => format!("&std::env::var(\"{name}\").unwrap_or_default()"),
+      ferridriver_types::OutputLanguage::TypeScript => format!("process.env['{name}']"),
+      ferridriver_types::OutputLanguage::Rust => format!("&std::env::var(\"{name}\").unwrap_or_default()"),
       // Gherkin has no expression language; the step text names the secret.
-      crate::codegen::OutputLanguage::Gherkin => format!("<{name}>"),
+      ferridriver_types::OutputLanguage::Gherkin => format!("<{name}>"),
     }
   }
 }
@@ -424,7 +419,7 @@ mod tests {
     response.result(vec!["done".into()]);
     response.code(
       vec!["await page.goto('https://example.com');".into()],
-      crate::codegen::OutputLanguage::TypeScript,
+      ferridriver_types::OutputLanguage::TypeScript,
     );
     response.page(&PageState {
       url: "https://example.com/".into(),
@@ -492,7 +487,7 @@ No open tabs. Navigate to a URL to create one.
   fn json_keys_are_the_lowercased_titles() {
     let mut response = Response::new();
     response.result(vec!["v".into()]);
-    response.code(vec!["line".into()], crate::codegen::OutputLanguage::Rust);
+    response.code(vec!["line".into()], ferridriver_types::OutputLanguage::Rust);
     assert_eq!(
       response.to_json(),
       serde_json::json!({ "result": "v", "ran_ferridriver_code": "line" })
@@ -547,7 +542,7 @@ No open tabs. Navigate to a URL to create one.
 
   #[test]
   fn env_expressions_match_each_target_language() {
-    use crate::codegen::OutputLanguage as L;
+    use ferridriver_types::OutputLanguage as L;
     assert_eq!(Secrets::env_expression("PW", L::TypeScript), "process.env['PW']");
     assert_eq!(
       Secrets::env_expression("PW", L::Rust),

@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 ferridriver = { workspace = true }
+ferridriver-codegen = { workspace = true }
 ferridriver-types = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

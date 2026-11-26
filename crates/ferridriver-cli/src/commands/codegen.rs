@@ -4,9 +4,9 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use ferridriver::codegen::emitter::{CodeEmitter, LiveSource, TypeScriptTestEmitter};
-use ferridriver::codegen::recorder::{HeadedRecorder, RecorderOptions};
-use ferridriver::codegen::{OutputLanguage, Scaffold};
+use ferridriver_codegen::emitter::{CodeEmitter, LiveSource, TypeScriptTestEmitter};
+use ferridriver_codegen::recorder::{HeadedRecorder, RecorderOptions};
+use ferridriver_codegen::{OutputLanguage, Scaffold};
 use ferridriver_session::{
   Command, EventPayload, PageAssertion, RECORDER_ASSERT_VERB, RECORDER_MODE_VERB, RECORDER_START_VERB,
   RECORDER_STOP_VERB, RecorderAssertRequest, RecorderModeRequest, RecorderStartRequest, RecordingResult, Registry,
@@ -75,7 +75,7 @@ fn wrote(path: &std::path::Path, target: &str) {
 fn emitter(language: OutputLanguage, scaffold: Scaffold, title: Option<&str>) -> Arc<dyn CodeEmitter> {
   match (language, scaffold, title) {
     (OutputLanguage::TypeScript, Scaffold::Test, Some(title)) => Arc::new(TypeScriptTestEmitter::new(title)),
-    _ => language.emitter_for(scaffold),
+    _ => ferridriver_codegen::emitter_for(language, scaffold),
   }
 }
 
@@ -259,7 +259,7 @@ async fn attach(args: &cli::CodegenArgs, session: &str, scaffold: Scaffold) -> a
   Ok(())
 }
 
-fn action_name(action: &ferridriver::codegen::Action) -> String {
+fn action_name(action: &ferridriver_codegen::Action) -> String {
   serde_json::to_value(action)
     .ok()
     .and_then(|value| {

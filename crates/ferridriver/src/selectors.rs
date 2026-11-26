@@ -769,7 +769,8 @@ pub(crate) fn storage_script_call(browser: crate::backend::BackendKind, expressi
 /// `generateSelector`, and `asLocator`. Evaluated only by highlight,
 /// screenshot-mask, picker, recorder, `normalize_selector`, and
 /// `generate_locator` paths — keeping ~43 KB out of the always-injected engine.
-pub(crate) const RECORDER_SUPPORT_JS: &str = include_str!("injected/dist/recorder-support.min.js");
+#[doc(hidden)]
+pub const RECORDER_SUPPORT_JS: &str = include_str!("injected/dist/recorder-support.min.js");
 
 /// On-demand ARIA snapshot & template bundle (`window.__fdAria`). Evaluated
 /// only by `ariaSnapshot*`, `toMatchAriaSnapshot`, and timed-out assertion
@@ -1016,7 +1017,7 @@ pub async fn generate_locator(
   page: &AnyPage,
   selector: &str,
   frame_id: Option<&str>,
-  language: crate::codegen::OutputLanguage,
+  language: ferridriver_types::OutputLanguage,
 ) -> Result<String> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);

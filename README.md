@@ -50,11 +50,20 @@ support: [BENCHMARKING.md](./BENCHMARKING.md). Reproduce with
 
 ## Project layout
 
-20 workspace crates plus two example crates.
+29 workspace crates plus two example crates.
 
 | Crate                          | Purpose |
 |--------------------------------|---------|
 | `ferridriver`                  | Core: `Browser`, `BrowserContext`, `Page`, `Frame`, `Locator`, `ElementHandle`, network routing, selectors, backends |
+| `ferridriver-error`            | Typed `FerriError` / `Result` error hierarchy shared across core and protocol crates |
+| `ferridriver-process`          | Cross-platform browser process-group lifecycle and pipe helpers |
+| `ferridriver-driver`           | Backend-agnostic primitives: `PageEventSink`, `FrameCache`, `UrlMatcher`, `OperationBudget`, `Disposable`, TOTP |
+| `ferridriver-cdp-proto`        | Strongly typed Chrome DevTools Protocol commands and events |
+| `ferridriver-bidi-proto`       | Strongly typed WebDriver BiDi commands and events |
+| `ferridriver-webkit-proto`     | Strongly typed Playwright WebKit Inspector commands and events |
+| `ferridriver-audits`           | Accessibility (axe-core), security, SEO, and link audits |
+| `ferridriver-install`          | Browser binary download, cache, and version management |
+| `ferridriver-codegen`          | Interactive browser recorder, Rust / TypeScript / Gherkin emitters, and script code echo |
 | `ferridriver-config`           | Unified config schema (`ferridriver.{toml,yaml,json}` — `[mcp]`, `[test]`, `[scripting]`, `[extensions]`) |
 | `ferridriver-mcp`              | MCP server library (rmcp-based; stdio + HTTP transports; 13 tools) |
 | `ferridriver-cli`              | CLI binary: `init`, `mcp`, `test`, `bdd`, `run`, `codegen`, `session`, `trace`, `install`, `upgrade` and more |
@@ -71,7 +80,7 @@ support: [BENCHMARKING.md](./BENCHMARKING.md). Reproduce with
 | `ferridriver-viewer`           | Embedded trace viewer, UI mode, recorder and HTML report |
 | `ferridriver-perf`             | Chrome trace analysis — Core Web Vitals, the 19 DevTools insights, and the Lantern load simulator |
 | `ferridriver-heap`             | V8 heap snapshot analysis: retained sizes, dominators, retaining paths |
-| `ferridriver-types`            | The TypeScript declarations and device registry of this build, embedded for editors |
+| `ferridriver-types`            | TypeScript declarations, device registry, keyboard layout, and output language types |
 | `ferridriver-fixtures`         | Local fixture web server for ferridriver's own test suites (not published) |
 | `ferridriver-gate`             | Build and test gate orchestrator behind `just ready` (not published) |
 | `examples/bdd-example`         | Reference Rust BDD suite (feature files + Rust step bodies) |

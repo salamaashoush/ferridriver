@@ -1341,11 +1341,9 @@ impl LocatorJs {
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'_>,
   ) -> rquickjs::Result<String> {
-    let language = language
-      .0
-      .map_or(ferridriver::codegen::OutputLanguage::TypeScript, |l| {
-        ferridriver::codegen::OutputLanguage::parse_cli(&l)
-      });
+    let language = language.0.map_or(ferridriver_codegen::OutputLanguage::TypeScript, |l| {
+      ferridriver_codegen::OutputLanguage::parse_cli(&l)
+    });
     call_site
       .scope(async move { self.inner.generate_locator(language).await.into_js_with(&ctx) })
       .await

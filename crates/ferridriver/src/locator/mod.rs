@@ -1615,7 +1615,8 @@ impl std::fmt::Debug for Locator {
 
 /// `frameLocator()` without a selector: the rest of the selector may
 /// match in any frame below the one it starts from.
-pub(crate) const ANY_FRAME: &str = "internal:control=any-frame";
+#[doc(hidden)]
+pub const ANY_FRAME: &str = "internal:control=any-frame";
 
 /// What an any-frame locator runs when no frame matches yet: a selector
 /// that cannot match, so actions keep waiting and counts read zero.
@@ -1699,11 +1700,8 @@ async fn resolve_in_any_frame(root: &crate::frame::Frame, selector: &str) -> Res
 
 /// Whether `selector`, starting with [`ANY_FRAME`], matches from `root` in
 /// `frame` and in no other frame.
-pub(crate) async fn any_frame_resolves_to(
-  root: &crate::frame::Frame,
-  selector: &str,
-  frame: &crate::frame::Frame,
-) -> bool {
+#[doc(hidden)]
+pub async fn any_frame_resolves_to(root: &crate::frame::Frame, selector: &str, frame: &crate::frame::Frame) -> bool {
   let Ok(Some(rest)) = any_frame_rest(selector) else {
     return false;
   };

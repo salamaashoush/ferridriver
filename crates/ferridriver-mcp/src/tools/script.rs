@@ -190,7 +190,7 @@ impl McpServer {
       },
     }
     if let Some(language) = code_language {
-      response.code(code.to_vec(), ferridriver::codegen::OutputLanguage::parse_cli(language));
+      response.code(code.to_vec(), ferridriver_codegen::OutputLanguage::parse_cli(language));
     }
     response.tabs(tabs);
     if let Some(page) = page {
@@ -326,12 +326,12 @@ impl McpServer {
     let echo_guard = match p.code_language.as_deref() {
       None => None,
       Some(language) => {
-        let language = ferridriver::codegen::OutputLanguage::parse_cli(language);
+        let language = ferridriver_codegen::OutputLanguage::parse_cli(language);
         let sink = std::sync::Arc::clone(&collected_code);
         Some(ferridriver::trace::observe_session_actions(
           &self.state.session_key(&session).await.to_composite(),
           std::sync::Arc::new(
-            ferridriver::codegen::echo::CodeEcho::new(language, move |line| {
+            ferridriver_codegen::echo::CodeEcho::new(language, move |line| {
               if let Ok(mut lines) = sink.lock() {
                 lines.push(line);
               }

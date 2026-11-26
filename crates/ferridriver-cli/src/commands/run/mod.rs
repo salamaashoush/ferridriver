@@ -113,7 +113,7 @@ pub(crate) async fn run(file_config: FerridriverConfig, args: cli::RunArgs) -> a
     .map(serde_json::Value::String)
     .collect();
 
-  let code_language = requested_code_language(&args).map(ferridriver::codegen::OutputLanguage::parse_cli);
+  let code_language = requested_code_language(&args).map(ferridriver_codegen::OutputLanguage::parse_cli);
   let collected_code = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
 
   // Against a live session the browser, the extensions and the sandboxes all
@@ -281,11 +281,11 @@ fn requested_code_language(args: &cli::RunArgs) -> Option<&str> {
     .or_else(|| (args.code_out.is_some() || args.as_test).then_some("ts"))
 }
 
-fn scaffold(as_test: bool) -> ferridriver::codegen::Scaffold {
+fn scaffold(as_test: bool) -> ferridriver_codegen::Scaffold {
   if as_test {
-    ferridriver::codegen::Scaffold::Test
+    ferridriver_codegen::Scaffold::Test
   } else {
-    ferridriver::codegen::Scaffold::Script
+    ferridriver_codegen::Scaffold::Script
   }
 }
 
@@ -296,8 +296,8 @@ fn scaffold(as_test: bool) -> ferridriver::codegen::Scaffold {
 /// `goto` among the lines. The file is exactly the actions that happened, in
 /// the order they happened, and a run that started on the session's current
 /// page correctly begins there.
-fn wrap_code(lines: &[String], language: ferridriver::codegen::OutputLanguage, as_test: bool) -> String {
-  let emitter = language.emitter_for(scaffold(as_test));
+fn wrap_code(lines: &[String], language: ferridriver_codegen::OutputLanguage, as_test: bool) -> String {
+  let emitter = ferridriver_codegen::emitter_for(language, scaffold(as_test));
   let mut file = emitter.header("");
   for line in lines {
     file.push_str(&emitter.line(line));
@@ -308,7 +308,7 @@ fn wrap_code(lines: &[String], language: ferridriver::codegen::OutputLanguage, a
 
 fn finish_code(
   collected: &Arc<std::sync::Mutex<Vec<String>>>,
-  language: Option<ferridriver::codegen::OutputLanguage>,
+  language: Option<ferridriver_codegen::OutputLanguage>,
   args: &cli::RunArgs,
 ) -> anyhow::Result<()> {
   let (Some(language), Some(path)) = (language, args.code_out.as_deref()) else {
@@ -333,7 +333,7 @@ async fn run_against_session(
   source: &str,
   cwd: &std::path::Path,
   script_args: Vec<serde_json::Value>,
-  code_language: Option<ferridriver::codegen::OutputLanguage>,
+  code_language: Option<ferridriver_codegen::OutputLanguage>,
   collected_code: &Arc<std::sync::Mutex<Vec<String>>>,
 ) -> anyhow::Result<()> {
   if !args.extensions.is_empty() {
@@ -399,7 +399,7 @@ async fn sweep_artifacts(
 struct RunReport {
   /// The language the echoed lines are written in; `None` when `--code` was
   /// not asked for, in which case there is no code section.
-  language: Option<ferridriver::codegen::OutputLanguage>,
+  language: Option<ferridriver_codegen::OutputLanguage>,
   code: Vec<String>,
   /// The page the run finished on. Reported by a session host; a local run's
   /// script owns its own browser, so this process has no handle to read.
@@ -409,7 +409,7 @@ struct RunReport {
 
 impl RunReport {
   fn collect(
-    language: Option<ferridriver::codegen::OutputLanguage>,
+    language: Option<ferridriver_codegen::OutputLanguage>,
     collected: &Arc<std::sync::Mutex<Vec<String>>>,
     page: Option<ferridriver::response::PageState>,
     secrets: ferridriver::response::Secrets,

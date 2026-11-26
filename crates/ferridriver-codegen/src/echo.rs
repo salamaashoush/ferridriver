@@ -1,6 +1,6 @@
 //! Code echo: turning the actions a script actually performed into source.
 //!
-//! [`crate::codegen::recorder`] generates code from what a *user* does in a
+//! [`crate::recorder`] generates code from what a *user* does in a
 //! headed browser. This module generates it from what an *API caller* does —
 //! every `page.*` / `locator.*` / `expect.*` call already opens a trace action
 //! carrying its class, method and parameters, so the same run that drives the
@@ -13,8 +13,8 @@
 //! showing `await page.setViewportSize({...})` verbatim is honest, whereas
 //! dropping it would silently misrepresent what ran.
 
-use crate::response::Secrets;
-use crate::trace::{ActionInfo, ActionObserver};
+use ferridriver::response::Secrets;
+use ferridriver::trace::{ActionInfo, ActionObserver};
 
 use super::OutputLanguage;
 
