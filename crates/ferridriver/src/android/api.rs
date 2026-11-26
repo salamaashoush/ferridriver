@@ -865,7 +865,8 @@ impl AndroidDevice {
         // The device has a screen of its own; Playwright connects with `noDefaultViewport`.
         context.viewport = crate::options::ViewportOption::Null;
       }
-      crate::BrowserType::connect_persistent_over_cdp(&endpoint, context, Some(server.remote_downloads(serial))).await
+      crate::BrowserType::connect_persistent_over_cdp(&endpoint, context, Some(super::remote_downloads(server, serial)))
+        .await
     }
     .await;
     let removed = server.shell(serial, &format!("rm -f {COMMAND_LINE_FILE}")).await;

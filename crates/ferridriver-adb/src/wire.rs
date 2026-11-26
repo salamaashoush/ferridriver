@@ -11,14 +11,14 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 /// The largest `DATA` chunk the `sync:` service accepts.
 const SYNC_CHUNK: usize = 65_535;
 
 /// Where an ADB server listens. Playwright's `android.devices({ host, port })`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AdbServer {
+pub struct AdbServer {
   pub host: String,
   pub port: u16,
 }
@@ -34,7 +34,7 @@ impl Default for AdbServer {
 
 /// One line of `host:devices`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeviceEntry {
+pub struct DeviceEntry {
   pub serial: String,
   /// `device` when it is usable; `offline`, `unauthorized` and the rest
   /// when it is not.
@@ -91,7 +91,11 @@ impl AdbServer {
   }
 
   /// A connection handed to `service` on the device `serial`.
-  pub(super) async fn open(&self, serial: &str, service: &str) -> Result<TcpStream> {
+  ///
+  /// # Errors
+  /// Returns an error if the ADB server cannot be reached or refuses the
+  /// transport or service request.
+  pub async fn open(&self, serial: &str, service: &str) -> Result<TcpStream> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, &format!("host:transport:{serial}")).await?;
     Self::request(&mut stream, service).await?;
@@ -99,7 +103,10 @@ impl AdbServer {
   }
 
   /// The devices the server knows, usable or not.
-  pub(super) async fn devices(&self) -> Result<Vec<DeviceEntry>> {
+  ///
+  /// # Errors
+  /// Returns an error if the ADB server cannot be reached or refuses the query.
+  pub async fn devices(&self) -> Result<Vec<DeviceEntry>> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, "host:devices").await?;
     let listing = Self::read_block(&mut stream).await?;
@@ -119,7 +126,10 @@ impl AdbServer {
 
   /// Forward a local TCP port the server picks to `remote` on the device,
   /// `localabstract:<socket>` for example, and return the port.
-  pub(super) async fn forward(&self, serial: &str, remote: &str) -> Result<u16> {
+  ///
+  /// # Errors
+  /// Returns an error if the server refuses the forward or omits the port.
+  pub async fn forward(&self, serial: &str, remote: &str) -> Result<u16> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, &format!("host-serial:{serial}:forward:tcp:0;{remote}")).await?;
     // The first status says the request was understood, the second that
@@ -138,14 +148,20 @@ impl AdbServer {
   }
 
   /// Remove a forward [`Self::forward`] made.
-  pub(super) async fn kill_forward(&self, serial: &str, port: u16) -> Result<()> {
+  ///
+  /// # Errors
+  /// Returns an error if the server refuses the request.
+  pub async fn kill_forward(&self, serial: &str, port: u16) -> Result<()> {
     let mut stream = self.dial().await?;
     Self::request(&mut stream, &format!("host-serial:{serial}:killforward:tcp:{port}")).await
   }
 
   /// Run `command` in the device's shell and return everything it wrote,
   /// byte for byte: a screenshot comes back through here.
-  pub(super) async fn shell(&self, serial: &str, command: &str) -> Result<Vec<u8>> {
+  ///
+  /// # Errors
+  /// Returns an error if opening the shell stream or reading its output fails.
+  pub async fn shell(&self, serial: &str, command: &str) -> Result<Vec<u8>> {
     let mut stream = self.open(serial, &format!("shell:{command}")).await?;
     let mut output = Vec::new();
     stream.read_to_end(&mut output).await?;
@@ -154,7 +170,10 @@ impl AdbServer {
 
   /// Write `content` to `path` on the device with `mode`, through the
   /// `sync:` service.
-  pub(super) async fn push(&self, serial: &str, content: &[u8], path: &str, mode: u32) -> Result<()> {
+  ///
+  /// # Errors
+  /// Returns an error if the `sync:` transfer is refused or fails.
+  pub async fn push(&self, serial: &str, content: &[u8], path: &str, mode: u32) -> Result<()> {
     async fn send(stream: &mut TcpStream, id: &[u8; 4], data: &[u8]) -> Result<()> {
       let length = u32::try_from(data.len()).map_err(|_| failure("push", "chunk longer than 4 GiB"))?;
       stream.write_all(id).await?;
@@ -187,7 +206,11 @@ impl AdbServer {
 
   /// Copy the device's file at `path` to `destination` on this machine,
   /// through the `sync:` service.
-  pub(super) async fn pull(&self, serial: &str, path: &str, destination: &std::path::Path) -> Result<()> {
+  ///
+  /// # Errors
+  /// Returns an error if the `sync:` transfer fails or the destination file
+  /// cannot be written.
+  pub async fn pull(&self, serial: &str, path: &str, destination: &std::path::Path) -> Result<()> {
     let refused = |reason: &dyn std::fmt::Display| failure(&format!("pull of {path}"), reason);
     let length = u32::try_from(path.len()).map_err(|_| refused(&"path longer than 4 GiB"))?;
     let mut stream = self.open(serial, "sync:").await?;
@@ -226,39 +249,13 @@ impl AdbServer {
     Ok(())
   }
 
-  /// A directory on the device for a browser there to download into, and
-  /// the way each download comes back to this machine. Chrome writes
-  /// under the shared `Download` folder, which the device's shell reads;
-  /// a directory of the shell's own it reports as written and leaves
-  /// empty. Chrome makes the directory with its first download, and it
-  /// is removed again once the last file in it has been fetched.
-  pub(super) fn remote_downloads(&self, serial: &str) -> crate::download::RemoteDownloads {
-    static DIRECTORIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let directory = format!(
-      "/sdcard/Download/ferridriver-{}-{}",
-      std::process::id(),
-      DIRECTORIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let (server, device, from) = (self.clone(), serial.to_owned(), directory.clone());
-    crate::download::RemoteDownloads {
-      directory,
-      fetch: std::sync::Arc::new(move |guid, destination| {
-        let (server, device, from) = (server.clone(), device.clone(), from.clone());
-        Box::pin(async move {
-          let path = format!("{from}/{guid}");
-          server.pull(&device, &path, &destination).await?;
-          server
-            .shell(&device, &format!("rm -f {path}; rmdir {from} 2>/dev/null"))
-            .await?;
-          Ok(())
-        })
-      }),
-    }
-  }
-
   /// Install an APK by streaming it to the package manager, with the
   /// arguments Playwright's `installApk` passes when given none.
-  pub(super) async fn install(&self, serial: &str, apk: &[u8], args: &[String]) -> Result<()> {
+  ///
+  /// # Errors
+  /// Returns an error if streaming the APK fails or the package manager
+  /// reports a failure.
+  pub async fn install(&self, serial: &str, apk: &[u8], args: &[String]) -> Result<()> {
     let args = if args.is_empty() {
       "-r -t -S".to_owned()
     } else {
