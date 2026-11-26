@@ -1585,11 +1585,14 @@ impl TestRunner {
     let (result_tx, result_rx) = mpsc::channel::<WorkerTestResult>(256);
     let shared_browser = self.matching_shared_browser(&launch_plan, &connection);
     let launch_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // When multiple workers launch Chromium locally without an already-shared
-    // session browser, share one lazy Chromium process across all workers in
-    // this run (each worker gets a scoped Browser view with isolated contexts).
-    // Cuts cold-start contention and memory by N× while remaining 100% lazy for
-    // fixtureless suites. Set FERRIDRIVER_SHARE_BROWSER=0 to disable.
+    // When multiple workers launch Chromium or WebKit locally without an
+    // already-shared session browser, share one lazy browser process across all
+    // workers in this run (each worker gets a scoped Browser view with isolated
+    // contexts). Cuts cold-start contention and memory by N× while remaining
+    // 100% lazy for fixtureless suites. BiDi/Firefox is intentionally excluded
+    // because Firefox launches with `dom.ipc.processCount = 1`, which would
+    // serialize all workers onto a single content thread. Set
+    // FERRIDRIVER_SHARE_BROWSER=0 to disable.
     let share_enabled = !matches!(std::env::var("FERRIDRIVER_SHARE_BROWSER").as_deref(), Ok("0" | "false"));
     let run_shared_handle = if share_enabled
       && shared_browser.is_none()
@@ -1597,7 +1600,9 @@ impl TestRunner {
       && connection == ConnectMode::Launch
       && matches!(
         launch_plan.backend,
-        ferridriver::backend::BackendKind::CdpPipe | ferridriver::backend::BackendKind::CdpWs
+        ferridriver::backend::BackendKind::CdpPipe
+          | ferridriver::backend::BackendKind::CdpWs
+          | ferridriver::backend::BackendKind::WebKit
       ) {
       Some(Arc::new(
         BrowserHandle::with_connection(launch_plan.clone(), connection.clone())
