@@ -482,6 +482,12 @@ impl WebDriverSession {
   }
 }
 
+impl crate::backend::common::OwnedResource for WebDriverSession {
+  fn close(&self) -> futures::future::BoxFuture<'_, Result<()>> {
+    Box::pin(self.close())
+  }
+}
+
 impl Drop for WebDriverSession {
   fn drop(&mut self) {
     if *self.closed.get_mut() {

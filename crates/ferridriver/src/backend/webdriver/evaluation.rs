@@ -81,7 +81,7 @@ return Promise.resolve(result).then(value=>{{
   return {{kind:'value',value:encoded===undefined?null:encoded}};
 }});
 ",
-      crate::backend::cdp::UTILITY_EVAL_WRAPPER
+      crate::backend::common::UTILITY_EVAL_WRAPPER
     );
     let result = page
       .execute_script(

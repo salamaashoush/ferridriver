@@ -32,7 +32,7 @@ impl WebKitPage {
       match Box::pin(self.inject_engine()).await {
         Ok(()) if self.engine_injected.injected(document) => break,
         Ok(()) => {},
-        Err(error) if gone < crate::backend::cdp::ENGINE_ATTEMPTS && error.to_string().contains(STALE_ANCHOR) => {
+        Err(error) if gone < crate::backend::common::ENGINE_ATTEMPTS && error.to_string().contains(STALE_ANCHOR) => {
           gone += 1;
         },
         Err(error) => return Err(error),
@@ -352,7 +352,7 @@ impl WebKitPage {
     is_function: Option<bool>,
     return_by_value: bool,
   ) -> Result<crate::js_handle::EvaluateResult> {
-    use crate::backend::cdp::{ENGINE_ATTEMPTS, ENGINE_MISSING};
+    use crate::backend::common::{ENGINE_ATTEMPTS, ENGINE_MISSING};
     let mut attempt = 1;
     loop {
       let result =
@@ -443,7 +443,7 @@ impl WebKitPage {
       },
     };
     let params = json!({
-      "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
+      "functionDeclaration": crate::backend::common::UTILITY_EVAL_WRAPPER,
       "arguments": arguments,
       "returnByValue": return_by_value,
       "awaitPromise": true,

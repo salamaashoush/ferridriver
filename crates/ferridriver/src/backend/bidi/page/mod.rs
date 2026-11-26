@@ -136,21 +136,7 @@ fn bidi_stack_trace_to_location(
   }
 }
 
-fn u64_to_u32_saturating(n: u64) -> u32 {
-  u32::try_from(n).unwrap_or(u32::MAX)
-}
-
-/// Split a `BiDi` `log.entryAdded.text` (for `type: 'javascript'`)
-/// into `{ name, message }`. Mirrors the `params.text?.includes(': ')`
-/// branch in `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts:271-277`.
-/// If no `': '` separator is present, `name` is empty and `message` is
-/// the full `text`.
-fn split_error_text(text: &str) -> (String, String) {
-  match text.split_once(": ") {
-    Some((name, message)) => (name.to_string(), message.to_string()),
-    None => (String::new(), text.to_string()),
-  }
-}
+use crate::backend::common::{f64_to_u64_saturating, split_error_message as split_error_text, u64_to_u32_saturating};
 
 /// Build the `error.stack` string for a `BiDi` JS error. Mirrors
 /// `bidiPage.ts:280-283` byte-for-byte: the first line is the original
@@ -283,15 +269,6 @@ fn unsupported_context_options(opts: &crate::options::BrowserContextOptions) -> 
   .into_iter()
   .filter(|(_, asked)| *asked)
   .map(|(label, _)| format!("{label}: BiDi/Firefox backend does not yet support this context option"))
-}
-
-#[expect(
-  clippy::cast_possible_truncation,
-  clippy::cast_sign_loss,
-  reason = "`as` saturates a finite float, which is the intent: negatives give 0, values past `u64::MAX` give `u64::MAX`, fractions truncate"
-)]
-fn f64_to_u64_saturating(n: f64) -> u64 {
-  if n.is_finite() { n as u64 } else { 0 }
 }
 
 /// Insert text where the document's focus is, or answer the window of the

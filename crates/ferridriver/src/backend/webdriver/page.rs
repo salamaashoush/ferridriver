@@ -489,7 +489,7 @@ impl WebDriverPage {
   /// Forwards the error from `perform_actions`, which sends the `WebDriver`
   /// `POST /session/{id}/actions` command.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
-    self.perform_actions(crate::backend::bidi::input::click("", x, y)).await
+    self.perform_actions(crate::backend::w3c_input::click("", x, y)).await
   }
 
   /// # Errors
@@ -499,11 +499,11 @@ impl WebDriverPage {
   /// `FerriError::Unsupported`.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::click_button(
+      .perform_actions(crate::backend::w3c_input::click_button(
         "",
         x,
         y,
-        crate::backend::bidi::input::button_name_to_id(button),
+        crate::backend::w3c_input::button_name_to_id(button),
         click_count,
       ))
       .await
@@ -516,7 +516,7 @@ impl WebDriverPage {
   /// `FerriError::Unsupported`.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendClickArgs) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::click_with_args("", x, y, args))
+      .perform_actions(crate::backend::w3c_input::click_with_args("", x, y, args))
       .await
   }
 
@@ -526,7 +526,7 @@ impl WebDriverPage {
   /// `POST /session/{id}/actions` command.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &crate::backend::BackendHoverArgs) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::hover_with_args("", x, y, *args))
+      .perform_actions(crate::backend::w3c_input::hover_with_args("", x, y, *args))
       .await
   }
 
@@ -535,7 +535,7 @@ impl WebDriverPage {
   /// Forwards the error from `perform_actions`, which sends the `WebDriver`
   /// `POST /session/{id}/actions` command.
   pub async fn tap_at_with(&self, x: f64, y: f64) -> Result<()> {
-    self.perform_actions(crate::backend::bidi::input::tap("", x, y)).await
+    self.perform_actions(crate::backend::w3c_input::tap("", x, y)).await
   }
 
   /// # Errors
@@ -544,7 +544,7 @@ impl WebDriverPage {
   /// `POST /session/{id}/actions` command.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::pointer_move("", x, y))
+      .perform_actions(crate::backend::w3c_input::pointer_move("", x, y))
       .await
   }
 
@@ -554,7 +554,7 @@ impl WebDriverPage {
   /// `POST /session/{id}/actions` command.
   pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::pointer_move_smooth(
+      .perform_actions(crate::backend::w3c_input::pointer_move_smooth(
         "", from_x, from_y, to_x, to_y, steps,
       ))
       .await
@@ -567,7 +567,7 @@ impl WebDriverPage {
   /// `FerriError::Unsupported`.
   pub async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::wheel_scroll("", x, y, delta_x, delta_y))
+      .perform_actions(crate::backend::w3c_input::wheel_scroll("", x, y, delta_x, delta_y))
       .await
   }
 
@@ -581,11 +581,11 @@ impl WebDriverPage {
   /// `FerriError::Unsupported`.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::mouse_down(
+      .perform_actions(crate::backend::w3c_input::mouse_down(
         "",
         x,
         y,
-        crate::backend::bidi::input::button_name_to_id(button),
+        crate::backend::w3c_input::button_name_to_id(button),
       ))
       .await
   }
@@ -597,11 +597,11 @@ impl WebDriverPage {
   /// `FerriError::Unsupported`.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str, _click_count: u32) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::mouse_up(
+      .perform_actions(crate::backend::w3c_input::mouse_up(
         "",
         x,
         y,
-        crate::backend::bidi::input::button_name_to_id(button),
+        crate::backend::w3c_input::button_name_to_id(button),
       ))
       .await
   }
@@ -610,14 +610,12 @@ impl WebDriverPage {
   /// which applies them to later key and pointer actions.
   pub(crate) async fn dispatch_key_down(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {
     self
-      .perform_actions(crate::backend::bidi::input::key_down("", name))
+      .perform_actions(crate::backend::w3c_input::key_down("", name))
       .await
   }
 
   pub(crate) async fn dispatch_key_up(&self, name: &str, _stroke: &KeyStroke) -> Result<()> {
-    self
-      .perform_actions(crate::backend::bidi::input::key_up("", name))
-      .await
+    self.perform_actions(crate::backend::w3c_input::key_up("", name)).await
   }
 
   /// # Errors

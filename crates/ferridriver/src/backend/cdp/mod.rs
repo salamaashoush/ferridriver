@@ -174,7 +174,7 @@ pub struct CdpBrowser {
   /// to cut that cycle, or the transport, its reader/writer tasks and its
   /// connection fd survive every closed browser.
   attach_tasks: Arc<AttachTasks>,
-  webdriver: Option<Arc<super::webdriver::session::WebDriverSession>>,
+  webdriver: Option<Arc<dyn super::common::OwnedResource>>,
   pub(crate) android: Option<Arc<crate::android::AndroidOwner>>,
 }
 
@@ -261,12 +261,7 @@ fn cdp_stack_trace_to_location(stack: Option<&serde_json::Value>) -> crate::cons
   }
 }
 
-/// Clamp a JSON-typed `u64` (line / column offsets always well within
-/// `u32::MAX` in practice) down to `u32` without the clippy warning
-/// for unguarded casts.
-fn u64_to_u32_saturating(n: u64) -> u32 {
-  u32::try_from(n).unwrap_or(u32::MAX)
-}
+use super::common::{UTILITY_EVAL_WRAPPER, f64_to_u64_saturating, split_error_message, u64_to_u32_saturating};
 
 /// A `Runtime.callFunctionOn` whose function threw answers without a
 /// protocol error: the throw is in `exceptionDetails`, and a caller that
@@ -409,37 +404,8 @@ fn value_to_plain_string(value: &serde_json::Value) -> String {
   }
 }
 
-/// Split a combined error message into `{ name, message }`. Mirrors
-/// Playwright's `packages/isomorphic/stackTrace.ts::splitErrorMessage`:
-/// the separator is the first `': '` occurrence; if absent, `name` is
-/// empty and `message` is the full input.
-fn split_error_message(message: &str) -> (String, String) {
-  // Playwright requires the separator to be `': '` — stripping the
-  // space mirrors `separationIdx + 2` in `splitErrorMessage`. When the
-  // char after ':' is not a space, fall back to the full message (keeps
-  // parity with the TS `separationIdx + 2 <= message.length` guard).
-  if let Some((name, rest)) = message.split_once(':')
-    && let Some(msg) = rest.strip_prefix(' ')
-  {
-    return (name.to_string(), msg.to_string());
-  }
-  (String::new(), message.to_string())
-}
-
 /// One context option's label and the command that applies it.
 type ContextOptionCommand<'a> = (&'static str, futures::future::BoxFuture<'a, Result<()>>);
-
-/// CDP `timestamp` is fractional milliseconds. Non-finite / negative
-/// values collapse to `0`; representable positives saturate at
-/// `u64::MAX`.
-#[expect(
-  clippy::cast_possible_truncation,
-  clippy::cast_sign_loss,
-  reason = "a float-to-int `as` truncates toward zero, saturates at both bounds and maps NaN to 0, exactly the conversion wanted"
-)]
-fn f64_to_u64_saturating(n: f64) -> u64 {
-  n as u64
-}
 
 fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
   if let Some(frame) = node.get("frame") {
@@ -538,58 +504,6 @@ impl LifecycleState {
     }
   }
 }
-
-/// Wrapper function declaration sent to `Runtime.callFunctionOn` /
-/// `script.callFunction` by [`CdpPage::call_utility_evaluate`] /
-/// [`super::bidi::page::BidiPage::call_utility_evaluate`]. Shared
-/// because the flow is identical on both backends: memoise the
-/// `UtilityScript` instance on `window.__fd.__us`, `JSON.parse` the
-/// serialized-args array, forward each element as an individual arg
-/// into `utilityScript.evaluate`, and `JSON.stringify` the result
-/// back so the backend's own serializer only has to ship a flat
-/// string.
-///
-/// `serializedArgs` is a JSON-encoded array of `count` wire values
-/// (a single JSON string keeps the protocol path trivial). `count`
-/// mirrors Playwright's `argCount` to the utility script — the
-/// utility script slices `...argsAndHandles` into the first `count`
-/// as arguments and the remainder as handles.
-/// What [`UTILITY_EVAL_WRAPPER`] throws, before it runs anything of the
-/// caller's, in a document that does not have the engine. A backend that
-/// injects on demand can have checked a document that a navigation then
-/// replaced; it injects again and repeats the call.
-pub(crate) const ENGINE_MISSING: &str = "ferridriver: selector engine missing";
-
-/// How many documents in a row may replace the one the engine went into
-/// before a call gives up on catching one.
-pub(crate) const ENGINE_ATTEMPTS: usize = 5;
-
-pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, count, serializedArgs, ...handles) {\
-    const fd = window.__fd;\
-    if (!fd) throw new Error('ferridriver: selector engine missing');\
-    const parsed = count > 0 ? JSON.parse(serializedArgs) : [];\
-    const us = fd.__us || (fd.__us = fd.newUtilityScript());\
-    const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);\
-    /* Hybrid sync/async path: if the user's expression returns a\
-       Promise, chain a .then so CDP's awaitPromise:true picks up the\
-       resolved value; otherwise return the value directly. The async\
-       wrapper imposed Promise + microtask overhead on every call,\
-       which dominates the bench's tight evaluate loop. */\
-    if (result && typeof result.then === 'function') {\
-      return result.then(r => {\
-        if (retVal) {\
-          const encoded = JSON.stringify(r);\
-          return encoded === undefined ? null : encoded;\
-        }\
-        return r;\
-      });\
-    }\
-    if (retVal) {\
-      const encoded = JSON.stringify(result);\
-      return encoded === undefined ? null : encoded;\
-    }\
-    return result;\
-  }";
 
 /// What the Fetch listener answers authentication challenges with: the
 /// site's credentials for a server's challenge, the proxy's for the

@@ -22,27 +22,7 @@ impl CdpPage {
   // ---- Exposed Functions ----
 
   /// The JS source for the binding controller injected as an init script.
-  pub const BINDING_CONTROLLER_JS: &'static str = r"(function(){
-if(globalThis.__fd_bc)return;
-var bc={seq:0,cbs:{},fns:{}};
-globalThis.__fd_bc=bc;
-bc.call=function(name,args){
-  var s=++bc.seq;
-  var p=new Promise(function(r,j){bc.cbs[s]={r:r,j:j}});
-  globalThis.__fd_binding__(JSON.stringify({name:name,seq:s,args:args}));
-  return p;
-};
-bc.add=function(name){
-  bc.fns[name]=true;
-  globalThis[name]=function(){return bc.call(name,Array.prototype.slice.call(arguments))};
-};
-Object.defineProperty(globalThis,'__playwright__binding__controller__',{configurable:true,value:{
-  callBinding:function(name){return bc.call(name,Array.prototype.slice.call(arguments,1))}
-}});
-bc.del=function(name){delete bc.fns[name];delete globalThis[name]};
-bc.resolve=function(seq,val){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.r(val)}};
-bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new Error(err))}};
-})()";
+  pub const BINDING_CONTROLLER_JS: &'static str = crate::backend::common::BINDING_CONTROLLER_JS;
 
   /// Arm the page-side binding channel (`Runtime.addBinding` + the
   /// `__fd_bc` controller). The synchronous context observer associates

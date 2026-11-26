@@ -785,32 +785,7 @@ impl BidiBrowser {
 
 pub(crate) use crate::backend::webdriver::session_url as webdriver_session_url;
 
-pub(crate) fn webdriver_capabilities(browser_name: &str, extra: Option<&serde_json::Value>) -> serde_json::Value {
-  let mut always_match = serde_json::json!({
-    "browserName": browser_name,
-    "webSocketUrl": true,
-    "unhandledPromptBehavior": "ignore"
-  });
-  if let Some(extra) = extra.and_then(serde_json::Value::as_object)
-    && let Some(target) = always_match.as_object_mut()
-  {
-    target.extend(extra.iter().map(|(key, value)| (key.clone(), value.clone())));
-    // Ferridriver drives the returned BiDi socket; a caller cannot disable
-    // the capability without making the negotiated session unusable.
-    target.insert("webSocketUrl".into(), serde_json::Value::Bool(true));
-  }
-  if always_match
-    .get("browserName")
-    .and_then(serde_json::Value::as_str)
-    .is_some_and(|name| name.eq_ignore_ascii_case("safari"))
-    && let Some(target) = always_match.as_object_mut()
-  {
-    target
-      .entry("safari:experimentalWebSocketUrl")
-      .or_insert(serde_json::Value::Bool(true));
-  }
-  always_match
-}
+pub(crate) use crate::backend::common::webdriver_capabilities;
 
 /// A Playwright-shaped proxy as the `BiDi`/`WebDriver` `proxy` capability.
 ///

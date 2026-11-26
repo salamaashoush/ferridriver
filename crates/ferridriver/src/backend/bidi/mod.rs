@@ -14,7 +14,7 @@
 pub mod browser;
 pub mod element;
 mod frames;
-pub mod input;
+pub use crate::backend::w3c_input as input;
 pub mod page;
 mod profile;
 pub(crate) mod relay;
