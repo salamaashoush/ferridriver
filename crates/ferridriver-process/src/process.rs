@@ -37,16 +37,21 @@ pub fn spawn_exclusive<T>(spawn: impl FnOnce() -> T) -> T {
   spawn()
 }
 
-pub(crate) async fn output(
+/// Run a subprocess to completion, optionally piping `input` to stdin and enforcing `timeout`.
+///
+/// # Errors
+///
+/// Returns an error if spawning fails, I/O fails, the timeout expires, or the process exits non-zero.
+pub async fn output(
   mut command: tokio::process::Command,
   input: Option<&[u8]>,
   timeout: Option<std::time::Duration>,
-) -> crate::error::Result<String> {
+) -> ferridriver_error::Result<String> {
   use std::process::Stdio;
 
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-  use crate::error::FerriError;
+  use ferridriver_error::FerriError;
   let program = command.as_std().get_program().to_string_lossy().into_owned();
   command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
   command.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -173,7 +178,7 @@ pub fn drain_child_stderr(child: &mut tokio::process::Child) -> StderrTail {
   tail
 }
 
-pub(crate) fn drain_child_output(child: &mut tokio::process::Child) -> StderrTail {
+pub fn drain_child_output(child: &mut tokio::process::Child) -> StderrTail {
   let tail = drain_child_stderr(child);
   if let Some(stdout) = child.stdout.take() {
     drain_stream(stdout, tail.clone(), "stdout");
@@ -223,7 +228,7 @@ impl StderrTail {
   /// Append one line, evicting the oldest once the window is full. A
   /// poisoned lock drops the line rather than propagating: losing a
   /// diagnostic must never take down a browser launch.
-  pub(crate) fn record(&self, line: String) {
+  pub fn record(&self, line: String) {
     if let Ok(mut buf) = self.0.lock() {
       if buf.len() == STDERR_TAIL_LINES {
         buf.pop_front();
@@ -479,6 +484,13 @@ impl ChildGroup {
   /// Whether the browser process is still running. `false` once it has
   /// exited, so a dead-browser check never has to depend on a
   /// backend-specific transport signal.
+  #[cfg_attr(
+    unix,
+    expect(
+      clippy::needless_pass_by_ref_mut,
+      reason = "non-Unix path calls Child::try_wait(&mut self)"
+    )
+  )]
   pub fn is_running(&mut self) -> bool {
     #[cfg(unix)]
     {
@@ -607,7 +619,11 @@ impl ChildGroup {
   /// non-zero status is logged rather than failed, as Playwright does.
   /// Chromium on Apple Silicon CI runners exits with 2, its hang code, at
   /// the end of every persistent-profile close.
-  pub(crate) async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+  ///
+  /// # Errors
+  ///
+  /// Returns an error message if waiting fails or the child is still running past `timeout`.
+  pub async fn wait_for_exit(&mut self, timeout: std::time::Duration) -> Result<(), String> {
     match tokio::time::timeout(timeout, self.wait()).await {
       Ok(Ok(status)) => {
         if !status.success() {
@@ -832,7 +848,7 @@ mod job {
   use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
   /// A job's handle, held as its address so the type is `Send`.
-  pub(crate) struct ProcessJob(usize);
+  pub struct ProcessJob(usize);
 
   impl ProcessJob {
     fn handle(&self) -> HANDLE {
@@ -901,7 +917,7 @@ mod job {
       unsafe_code,
       reason = "Job Objects are reachable only through the Win32 FFI in windows-sys"
     )]
-    pub(crate) fn terminate(&self) -> std::io::Result<()> {
+    pub fn terminate(&self) -> std::io::Result<()> {
       // SAFETY: the handle is a live job this value owns.
       if unsafe { TerminateJobObject(self.handle(), 1) } == 0 {
         return Err(std::io::Error::last_os_error());
@@ -941,7 +957,7 @@ mod job {
     /// only starts the kills, and a process it ended keeps its files open
     /// until it is gone: a Firefox content process still holding the
     /// profile makes deleting it fail with a sharing violation.
-    pub(crate) async fn until_empty(&self, limit: std::time::Duration) -> std::io::Result<()> {
+    pub async fn until_empty(&self, limit: std::time::Duration) -> std::io::Result<()> {
       let deadline = std::time::Instant::now() + limit;
       while self.active_processes()? > 0 {
         if std::time::Instant::now() >= deadline {
@@ -990,7 +1006,7 @@ mod job {
   }
 
   /// Put `pid` in a job the instant it is spawned.
-  pub(crate) fn track(pid: u32) {
+  pub fn track(pid: u32) {
     let mut pending = pending().lock().unwrap_or_else(PoisonError::into_inner);
     if !pending.contains_key(&pid)
       && let Some(job) = ProcessJob::holding(pid)
@@ -1000,7 +1016,7 @@ mod job {
   }
 
   /// The job `track` made for `pid`, or a new one.
-  pub(crate) fn claim(pid: u32) -> Option<ProcessJob> {
+  pub fn claim(pid: u32) -> Option<ProcessJob> {
     if pid == 0 {
       return None;
     }
@@ -1101,7 +1117,8 @@ impl ProcRecord {
 /// Whether `pid` names a live process. A recycled pid reads as live,
 /// which keeps the sweep conservative: it never kills on a maybe.
 #[cfg(unix)]
-pub(crate) fn process_is_live(pid: u32) -> bool {
+#[must_use]
+pub fn process_is_live(pid: u32) -> bool {
   let Ok(pid) = i32::try_from(pid) else {
     return false;
   };
@@ -1116,7 +1133,8 @@ pub(crate) fn process_is_live(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn process_is_live(pid: u32) -> bool {
+#[must_use]
+pub fn process_is_live(pid: u32) -> bool {
   // Unreadable reads as live, as a recycled pid does on Unix: the sweep
   // never kills on a maybe.
   windows_process(pid, |process| process.is_some()).unwrap_or(true)
@@ -1184,7 +1202,7 @@ fn proc_bsdinfo_including_exited(pid: u32, include_exited: bool) -> Option<libc:
 /// How long a browser holding a caller-owned profile gets to flush it and
 /// exit after a graceful close. Playwright allows its launch timeout, 30s;
 /// 5s ran out on a 3-vCPU macOS runner while Chromium was still closing.
-pub(crate) const PROFILE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub const PROFILE_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// XNU's `killpg` answers EPERM when no member can be signalled, which is
 /// what a group whose leader is mid-exit looks like. That leader is visible
@@ -1418,8 +1436,9 @@ fn process_command(pid: u32) -> Option<String> {
 /// A child that sleeps `seconds` and prints nothing, as a stand-in for a
 /// browser in tests: in its own process group on Unix, so a group kill
 /// cannot reach the test runner.
-#[cfg(test)]
-pub(crate) fn test_sleeper(seconds: u32) -> std::process::Command {
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_sleeper(seconds: u32) -> std::process::Command {
   #[cfg(unix)]
   {
     use std::os::unix::process::CommandExt as _;
@@ -1435,15 +1454,18 @@ pub(crate) fn test_sleeper(seconds: u32) -> std::process::Command {
   }
 }
 
-#[cfg(test)]
-#[cfg(unix)]
-pub(crate) mod test_support {
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub mod test_support {
   use super::process_is_live;
 
   /// A stand-in for a browser binary that forks the real browser and exits,
   /// leaving it in the launcher's process group. Returns the launcher and the
   /// file it writes the forked pid to.
-  pub(crate) fn test_forking_launcher(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+  ///
+  /// # Errors
+  ///
+  /// Returns any filesystem error encountered while writing or marking the launcher script executable.
+  pub fn test_forking_launcher(dir: &std::path::Path) -> std::io::Result<(std::path::PathBuf, std::path::PathBuf)> {
     use std::os::unix::fs::PermissionsExt as _;
     let launcher = dir.join("forking-launcher");
     let forked = dir.join("forked.pid");
@@ -1454,15 +1476,15 @@ pub(crate) mod test_support {
         "#!/bin/sh\nsh -c 'sleep 60; wait' &\necho $! > '{}'\nexit 0\n",
         forked.display()
       ),
-    )
-    .expect("write launcher");
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).expect("make launcher executable");
-    (launcher, forked)
+    )?;
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
+    Ok((launcher, forked))
   }
 
   /// Whether `pid` is gone within a few seconds. A process whose parent
   /// exited is reaped by init, so it reads as live only until then.
-  pub(crate) fn test_process_ends(pid: u32) -> bool {
+  #[must_use]
+  pub fn test_process_ends(pid: u32) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
       if !process_is_live(pid) {
@@ -1473,12 +1495,16 @@ pub(crate) mod test_support {
     false
   }
 
-  pub(crate) fn test_read_pid(file: &std::path::Path) -> u32 {
-    std::fs::read_to_string(file)
-      .expect("read pid file")
+  /// Read a decimal pid written by a test launcher script.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the pid file cannot be read or parsed as a `u32`.
+  pub fn test_read_pid(file: &std::path::Path) -> std::io::Result<u32> {
+    std::fs::read_to_string(file)?
       .trim()
       .parse()
-      .expect("pid")
+      .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
   }
 }
 

@@ -412,7 +412,7 @@ mod tests {
   async fn a_failed_startup_kills_what_the_exited_launcher_forked() {
     use crate::backend::process::test_support::{test_forking_launcher, test_process_ends, test_read_pid};
     let dir = tempfile::tempdir().unwrap();
-    let (launcher, forked) = test_forking_launcher(dir.path());
+    let (launcher, forked) = test_forking_launcher(dir.path()).unwrap();
     let outcome = super::super::session::BidiSession::launch_firefox(
       &launcher.to_string_lossy(),
       &[],
@@ -424,7 +424,7 @@ mod tests {
     )
     .await;
     assert!(outcome.is_err(), "a launcher that exits must fail the startup");
-    let forked = test_read_pid(&forked);
+    let forked = test_read_pid(&forked).unwrap();
     assert!(
       test_process_ends(forked),
       "pid {forked}, forked by the launcher, outlived the failed startup"

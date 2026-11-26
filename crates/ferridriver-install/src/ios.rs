@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::backend::process::output;
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
+use ferridriver_process::process::output;
 
 use super::{BrowserInstaller, InstallProgress, backend_err, install_lock, sha256_hex};
 

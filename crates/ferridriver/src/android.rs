@@ -3,13 +3,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
 use crate::backend::process::{ChildGroup, drain_child_stderr, output};
 use crate::error::{FerriError, Result};
 
 pub use crate::device::DeviceTarget;
+pub use ferridriver_install::AndroidOptions;
 
 mod adb;
 mod api;
@@ -22,53 +22,6 @@ pub use api::{
   AndroidLaunchBrowserOptions, AndroidSocket, AndroidWebView, AndroidWebViewSelector,
 };
 pub use driver::{AndroidBounds, AndroidDirection, AndroidElementInfo, AndroidSelector, AndroidText};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-pub struct AndroidOptions {
-  pub api_level: u32,
-  pub model: String,
-  pub sdk_path: Option<PathBuf>,
-  pub pkg: String,
-  pub apk_path: Option<PathBuf>,
-  pub timeout: u64,
-  pub accept_licenses: bool,
-}
-
-impl Default for AndroidOptions {
-  fn default() -> Self {
-    Self {
-      api_level: 35,
-      model: "pixel_7".into(),
-      sdk_path: None,
-      pkg: "com.android.chrome".into(),
-      apk_path: None,
-      timeout: 180_000,
-      accept_licenses: false,
-    }
-  }
-}
-
-impl AndroidOptions {
-  pub(crate) fn image_package(&self) -> Result<String> {
-    let abi = match (std::env::consts::OS, std::env::consts::ARCH) {
-      ("linux" | "macos", "x86_64") => "x86_64",
-      ("macos", "aarch64") => "arm64-v8a",
-      (os, arch) => {
-        return Err(FerriError::unsupported(format!(
-          "Android emulator host {os}/{arch} is not supported"
-        )));
-      },
-    };
-    if !(26..=100).contains(&self.api_level) || self.model.is_empty() || self.model.starts_with('-') {
-      return Err(FerriError::invalid_argument(
-        "device",
-        "invalid Android API level or model",
-      ));
-    }
-    Ok(format!("system-images;android-{};google_apis;{abi}", self.api_level))
-  }
-}
 
 /// The host's loopback as the emulator sees it: `10.0.2.2` is the emulator's alias for `127.0.0.1` on the
 /// machine running it. A page keeps the URL it was given; only the connection goes to the alias.
@@ -296,9 +249,15 @@ pub(crate) fn launch<'a>(
             return Err(FerriError::invalid_argument("apkPath", "expected an APK file"));
           }
         }
-        let sdk = crate::install::BrowserInstaller::new()
+        let prepared = crate::install::BrowserInstaller::new()
           .prepare_android(options, |_| {})
           .await?;
+        let sdk = AndroidSdk {
+          root: prepared.root,
+          tools: prepared.tools,
+          java_home: prepared.java_home,
+          adb: None,
+        };
         Box::pin(launch_prepared(options, headless, &flags, sdk, &mut owner)).await
       });
       if options.timeout == 0 {

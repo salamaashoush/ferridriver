@@ -340,12 +340,12 @@ fn url_encode_to_upper(value: &str) -> String {
 /// answers: two relative URLs land on one origin and compare equal.
 const RELATIVE_BASE: &str = "http://robots-relative.samclarke.com/";
 
-fn parse_url(url: &str) -> Option<reqwest::Url> {
-  let base = reqwest::Url::parse(RELATIVE_BASE).ok()?;
-  reqwest::Url::options().base_url(Some(&base)).parse(url).ok()
+fn parse_url(url: &str) -> Option<url::Url> {
+  let base = url::Url::parse(RELATIVE_BASE).ok()?;
+  url::Url::options().base_url(Some(&base)).parse(url).ok()
 }
 
-fn origin_of(url: &reqwest::Url) -> Origin {
+fn origin_of(url: &url::Url) -> Origin {
   Origin {
     scheme: url.scheme().to_string(),
     host: url.host_str().map(std::string::ToString::to_string),

@@ -20,6 +20,10 @@ default-members = [
   "crates/ferridriver-viewer",
   "crates/ferridriver-trace",
   "crates/ferridriver-types",
+  "crates/ferridriver-error",
+  "crates/ferridriver-process",
+  "crates/ferridriver-audits",
+  "crates/ferridriver-install",
   "crates/ferridriver-cdp-proto",
   "crates/ferridriver-bidi-proto",
   "crates/ferridriver-webkit-proto",
@@ -136,6 +140,10 @@ ferridriver-session = { path = "crates/ferridriver-session", version = "0.8.1" }
 ferridriver-viewer = { path = "crates/ferridriver-viewer", version = "0.8.1" }
 ferridriver-trace = { path = "crates/ferridriver-trace", version = "0.8.1" }
 ferridriver-types = { path = "crates/ferridriver-types", version = "0.8.1" }
+ferridriver-error = { path = "crates/ferridriver-error", version = "0.8.1" }
+ferridriver-process = { path = "crates/ferridriver-process", version = "0.8.1" }
+ferridriver-audits = { path = "crates/ferridriver-audits", version = "0.8.1" }
+ferridriver-install = { path = "crates/ferridriver-install", version = "0.8.1" }
 ferridriver-cdp-proto = { path = "crates/ferridriver-cdp-proto", version = "0.8.1" }
 ferridriver-bidi-proto = { path = "crates/ferridriver-bidi-proto", version = "0.8.1" }
 ferridriver-webkit-proto = { path = "crates/ferridriver-webkit-proto", version = "0.8.1" }

@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{BrowserInstaller, InstallProgress, backend_err};
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 const LADYBIRD_RELEASES_URL: &str = "https://download.ladybird.org/releases.json";
 

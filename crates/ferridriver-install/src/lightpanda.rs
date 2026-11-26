@@ -2,7 +2,7 @@
 //! GitHub releases, each asset carrying the SHA-256 GitHub computed.
 
 use super::{BrowserInstaller, InstallProgress, backend_err};
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 const LIGHTPANDA_LATEST_URL: &str = "https://api.github.com/repos/lightpanda-io/browser/releases/latest";
 

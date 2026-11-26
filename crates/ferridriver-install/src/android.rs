@@ -1,11 +1,84 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::android::{AndroidOptions, AndroidSdk};
-use crate::backend::process::output;
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
+use ferridriver_process::process::output;
+use serde::{Deserialize, Serialize};
 
 use super::{BrowserInstaller, InstallProgress, backend_err, extract_zip, install_lock, sha256_hex};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct AndroidOptions {
+  pub api_level: u32,
+  pub model: String,
+  pub sdk_path: Option<PathBuf>,
+  pub pkg: String,
+  pub apk_path: Option<PathBuf>,
+  pub timeout: u64,
+  pub accept_licenses: bool,
+}
+
+impl Default for AndroidOptions {
+  fn default() -> Self {
+    Self {
+      api_level: 35,
+      model: "pixel_7".into(),
+      sdk_path: None,
+      pkg: "com.android.chrome".into(),
+      apk_path: None,
+      timeout: 180_000,
+      accept_licenses: false,
+    }
+  }
+}
+
+impl AndroidOptions {
+  /// Resolve the Android emulator system image package identifier for the
+  /// configured API level on the current host platform.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error on unsupported hosts or invalid API level / model values.
+  pub fn image_package(&self) -> Result<String> {
+    let abi = match (std::env::consts::OS, std::env::consts::ARCH) {
+      ("linux" | "macos", "x86_64") => "x86_64",
+      ("macos", "aarch64") => "arm64-v8a",
+      (os, arch) => {
+        return Err(FerriError::unsupported(format!(
+          "Android emulator host {os}/{arch} is not supported"
+        )));
+      },
+    };
+    if !(26..=100).contains(&self.api_level) || self.model.is_empty() || self.model.starts_with('-') {
+      return Err(FerriError::invalid_argument(
+        "device",
+        "invalid Android API level or model",
+      ));
+    }
+    Ok(format!("system-images;android-{};google_apis;{abi}", self.api_level))
+  }
+}
+
+/// Prepared Android SDK paths produced by [`BrowserInstaller::prepare_android`].
+#[derive(Debug, Clone)]
+pub struct PreparedAndroidSdk {
+  pub root: PathBuf,
+  pub tools: PathBuf,
+  pub java_home: PathBuf,
+}
+
+impl PreparedAndroidSdk {
+  fn command(&self, program: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    command
+      .env("ANDROID_HOME", &self.root)
+      .env("ANDROID_SDK_ROOT", &self.root)
+      .env("JAVA_HOME", &self.java_home)
+      .kill_on_drop(true);
+    command
+  }
+}
 
 impl BrowserInstaller {
   /// # Errors
@@ -22,7 +95,11 @@ impl BrowserInstaller {
       .map(|sdk| sdk.root.display().to_string())
   }
 
-  pub(crate) async fn prepare_android<F>(&self, options: &AndroidOptions, progress: F) -> Result<AndroidSdk>
+  /// # Errors
+  ///
+  /// Reports unsupported hosts, failed downloads or SDK commands, and licenses
+  /// that require explicit acceptance before the requested packages can install.
+  pub async fn prepare_android<F>(&self, options: &AndroidOptions, progress: F) -> Result<PreparedAndroidSdk>
   where
     F: Fn(InstallProgress),
   {
@@ -59,12 +136,7 @@ impl BrowserInstaller {
       Some(path) => path,
       None => self.install_android_java(&progress).await?,
     };
-    let sdk = AndroidSdk {
-      root,
-      tools,
-      java_home,
-      adb: None,
-    };
+    let sdk = PreparedAndroidSdk { root, tools, java_home };
     install_packages(&sdk, options, &image).await?;
     progress(InstallProgress::Complete {
       version: image,
@@ -182,7 +254,7 @@ impl BrowserInstaller {
   }
 }
 
-async fn install_packages(sdk: &AndroidSdk, options: &AndroidOptions, image: &str) -> Result<()> {
+async fn install_packages(sdk: &PreparedAndroidSdk, options: &AndroidOptions, image: &str) -> Result<()> {
   let image_path = sdk.root.join(image.replace(';', "/"));
   let packages = [
     ("platform-tools", sdk.root.join("platform-tools/adb")),
@@ -291,19 +363,18 @@ mod tests {
     assert_eq!(std::fs::read_to_string(sdk.root.join("calls")).unwrap(), "call\n");
   }
 
-  fn fake_sdk(root: &Path) -> Result<AndroidSdk> {
+  fn fake_sdk(root: &Path) -> Result<PreparedAndroidSdk> {
     let tools = root.join("cmdline-tools/test");
     std::fs::create_dir_all(tools.join("bin"))?;
     let script = tools.join("bin/sdkmanager");
     std::os::unix::fs::symlink(
-      Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/android/sdkmanager.sh"),
+      Path::new(env!("CARGO_MANIFEST_DIR")).join("../ferridriver/tests/fixtures/android/sdkmanager.sh"),
       &script,
     )?;
-    Ok(AndroidSdk {
+    Ok(PreparedAndroidSdk {
       root: root.to_owned(),
       tools,
       java_home: root.join("java"),
-      adb: None,
     })
   }
 }

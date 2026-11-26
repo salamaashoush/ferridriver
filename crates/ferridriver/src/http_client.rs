@@ -138,7 +138,7 @@ pub fn check_proxy(proxy: &ProxyConfig, guard: &NetGuard) -> crate::error::Resul
   });
   let probe = reqwest::Url::parse(&format!("http://{host}:{port}/"))
     .map_err(|e| crate::error::FerriError::invalid_argument("proxy", format!("{server:?}: {e}")))?;
-  fetch::check_url(&probe, guard).map_err(|e| fetch::FetchError::from(e).into())
+  fetch::check_url(&probe, guard).map_err(|e| crate::error::FerriError::backend(fetch::FetchError::from(e).to_string()))
 }
 
 /// Per-request options (overrides context defaults). This is the
@@ -336,7 +336,10 @@ impl HttpResponse {
       timing,
       peer_certificate,
     } = response;
-    let body_bytes = body.collect().await?;
+    let body_bytes = body
+      .collect()
+      .await
+      .map_err(|e| crate::error::FerriError::backend(e.to_string()))?;
     Ok(Self {
       status_code: status,
       status_text,
@@ -633,7 +636,12 @@ impl HttpStreamResponse {
   ///
   /// Returns an error if reading the body fails (connection reset, etc).
   pub async fn chunk(&mut self) -> crate::error::Result<Option<bytes::Bytes>> {
-    self.stream.next().await.transpose().map_err(Into::into)
+    self
+      .stream
+      .next()
+      .await
+      .transpose()
+      .map_err(|e| crate::error::FerriError::backend(e.to_string()))
   }
 }
 
@@ -984,7 +992,9 @@ impl HttpClient {
       }));
     }
     let pool = self.transport_pool().await;
-    Ok(fetch::send(&pool, self.bridge.as_ref(), request).await?)
+    fetch::send(&pool, self.bridge.as_ref(), request)
+      .await
+      .map_err(|e| crate::error::FerriError::backend(e.to_string()))
   }
 
   /// Effective per-request defaults. Bridged: read live from the browser
@@ -997,7 +1007,10 @@ impl HttpClient {
   /// identically — only body/content-type handling differs between them.
   async fn resolved_defaults(&self) -> crate::error::Result<ResolvedDefaults> {
     let (base_url, mut extra_headers, user_agent, ignore_https_errors, ctx_style) = if let Some(bridge) = &self.bridge {
-      let d = bridge.defaults().await?;
+      let d = bridge
+        .defaults()
+        .await
+        .map_err(|e| crate::error::FerriError::backend(e.to_string()))?;
       (
         d.base_url,
         d.extra_http_headers,
@@ -1055,7 +1068,12 @@ impl HttpClient {
   /// Returns an error if the URL cannot be resolved, the method is
   /// invalid, or the request fails.
   pub async fn fetch_whatwg(&self, request: WhatwgRequest) -> crate::error::Result<HttpStreamResponse> {
-    Ok(HttpStreamResponse::from_response(self.send_whatwg(request).await?))
+    Ok(HttpStreamResponse::from_response(
+      self
+        .send_whatwg(request)
+        .await
+        .map_err(|e| crate::error::FerriError::backend(e.to_string()))?,
+    ))
   }
 
   /// [`Self::fetch_whatwg`] answering the engine's own

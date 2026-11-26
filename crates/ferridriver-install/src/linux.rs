@@ -11,7 +11,7 @@
 //! table. Arch is not something Playwright supports; its lists are ours.
 
 use super::DependencyGroup;
-use crate::error::{FerriError, Result};
+use ferridriver_error::{FerriError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PackageManager {

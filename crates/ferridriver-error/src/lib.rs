@@ -84,7 +84,7 @@ pub enum FerriError {
   #[error("{message}{}", format_call_log(.call_log))]
   Aborted {
     message: String,
-    /// The [`crate::abort::AbortSignal::id`] that fired.
+    /// The `AbortSignal::id` that fired.
     signal: u64,
     call_log: Vec<String>,
   },
@@ -355,13 +355,6 @@ impl From<&str> for FerriError {
       return Self::Unsupported(reason.trim().to_string());
     }
     Self::Backend(s.to_string())
-  }
-}
-
-/// Every engine failure maps to `Backend`, preserving the message text.
-impl From<ferrijs_fetch::FetchError> for FerriError {
-  fn from(e: ferrijs_fetch::FetchError) -> Self {
-    FerriError::Backend(e.to_string())
   }
 }
 

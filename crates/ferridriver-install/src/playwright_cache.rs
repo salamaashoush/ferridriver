@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The file Playwright's installer writes into a build's directory once
 /// the build is completely extracted.
-pub(crate) const INSTALLATION_COMPLETE: &str = "INSTALLATION_COMPLETE";
+pub const INSTALLATION_COMPLETE: &str = "INSTALLATION_COMPLETE";
 
 /// A browser family as Playwright's cache names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +123,8 @@ pub fn playwright_cache_dir() -> Option<PathBuf> {
 }
 
 /// The directory build `revision` of `browser` has under `cache`.
-pub(crate) fn build_dir(cache: &Path, browser: CachedBrowser, revision: &str) -> PathBuf {
+#[must_use]
+pub fn build_dir(cache: &Path, browser: CachedBrowser, revision: &str) -> PathBuf {
   cache.join(format!("{}{revision}", browser.directory_prefix()))
 }
 
@@ -151,7 +152,7 @@ pub fn find_playwright_browser(browser: CachedBrowser) -> Option<PathBuf> {
 /// The newest build of `browser` under `cache`. A build counts once its
 /// installer has written `INSTALLATION_COMPLETE`; a directory without it is
 /// a download that was interrupted or is still running.
-pub(crate) fn newest_build_in(cache: &Path, browser: CachedBrowser) -> Option<PathBuf> {
+pub fn newest_build_in(cache: &Path, browser: CachedBrowser) -> Option<PathBuf> {
   let prefix = browser.directory_prefix();
   let mut builds: Vec<(u64, PathBuf)> = std::fs::read_dir(cache)
     .ok()?
