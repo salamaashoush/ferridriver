@@ -75,6 +75,11 @@ pub struct Browser {
   /// test's `use` options, so tests sharing one browser cannot see each
   /// other's.
   inherited_context_options: Option<Arc<crate::options::BrowserContextOptions>>,
+  /// Optional worker scope id when multiple test workers share one browser
+  /// process: filters [`Self::contexts`] and `browser.on('context')` to
+  /// contexts opened through this scoped handle, and makes `close()` tear down
+  /// only this worker's contexts rather than killing the shared browser.
+  context_owner: Option<u64>,
 }
 
 /// One entry in [`Browser::context_names`].
@@ -87,12 +92,14 @@ pub struct Browser {
 struct ContextEntry {
   name: String,
   listed: bool,
+  owner: Option<u64>,
 }
 
 fn default_context_registry() -> Arc<std::sync::Mutex<Vec<ContextEntry>>> {
   Arc::new(std::sync::Mutex::new(vec![ContextEntry {
     name: "default".to_string(),
     listed: true,
+    owner: None,
   }]))
 }
 
@@ -141,6 +148,7 @@ impl Browser {
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory,
       inherited_context_options: None,
+      context_owner: None,
     }
   }
 
@@ -210,6 +218,7 @@ impl Browser {
     browser.context_names = Arc::new(std::sync::Mutex::new(vec![ContextEntry {
       name: default_context,
       listed: default_is_live,
+      owner: None,
     }]));
     Ok(browser.watch_connection(Some(closed)))
   }
@@ -241,6 +250,7 @@ impl Browser {
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory: browser_type,
       inherited_context_options: None,
+      context_owner: None,
     };
     drop(guard);
     Ok(browser.watch_connection(Some(closed)))
@@ -365,6 +375,7 @@ impl Browser {
       disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory,
       inherited_context_options: None,
+      context_owner: None,
     }
   }
 
@@ -411,6 +422,20 @@ impl Browser {
   pub fn inheriting_context_options(&self, options: crate::options::BrowserContextOptions) -> Self {
     Self {
       inherited_context_options: Some(Arc::new(options)),
+      ..self.clone()
+    }
+  }
+
+  /// This browser, as a worker-scoped view whose `contexts()` and
+  /// `browser.on('context')` only observe contexts created through this view
+  /// (plus the default context) and whose `close()` closes only those contexts
+  /// rather than shutting down the shared browser process.
+  #[must_use]
+  pub fn scoped_for_worker(&self, owner: u64) -> Self {
+    Self {
+      events: crate::events::BrowserEventEmitter::new(),
+      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      context_owner: Some(owner),
       ..self.clone()
     }
   }
@@ -498,6 +523,7 @@ impl Browser {
       names.push(ContextEntry {
         name: name.clone(),
         listed,
+        owner: self.context_owner,
       });
     }
     let ctx = ContextRef::new(Arc::clone(&self.state), name).with_browser(self.clone());
@@ -882,6 +908,27 @@ impl Browser {
   }
 
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
+    if let Some(owner) = self.context_owner {
+      let owned: Vec<ContextRef> = {
+        let names = match self.context_names.lock() {
+          Ok(g) => g,
+          Err(poisoned) => poisoned.into_inner(),
+        };
+        names
+          .iter()
+          .filter(|entry| entry.owner == Some(owner))
+          .map(|entry| ContextRef::new(Arc::clone(&self.state), entry.name.clone()).with_browser(self.clone()))
+          .collect()
+      };
+      for ctx in &owned {
+        let _ = ctx.close().await;
+      }
+      let first_close = !self.disconnected.swap(true, std::sync::atomic::Ordering::SeqCst);
+      if first_close {
+        self.announce_disconnect(owned);
+      }
+      return Ok(());
+    }
     let contexts = self.live_contexts().await;
     let first_close = !self.disconnected.swap(true, std::sync::atomic::Ordering::SeqCst);
     let mut state = self.state.write().await;
@@ -914,7 +961,9 @@ impl Browser {
     };
     names
       .iter()
-      .filter(|entry| entry.listed)
+      .filter(|entry| {
+        entry.listed && (self.context_owner.is_none() || entry.owner == self.context_owner || entry.name == "default")
+      })
       .map(|entry| ContextRef::new(Arc::clone(&self.state), entry.name.clone()).with_browser(self.clone()))
       .collect()
   }
@@ -925,7 +974,10 @@ impl Browser {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .iter()
-      .any(|entry| entry.name == name)
+      .any(|entry| {
+        entry.name == name
+          && (self.context_owner.is_none() || entry.owner == self.context_owner || entry.name == "default")
+      })
   }
 
   /// Real product version string for the running browser — mirrors

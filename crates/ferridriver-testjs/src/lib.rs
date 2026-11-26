@@ -336,15 +336,19 @@ pub struct SessionPool {
   bundle: Arc<CompiledBundle>,
   cwd: Arc<Path>,
   expected: Registrations,
+  /// Pre-loaded collection VM donated to the first worker that requests a
+  /// session, eliminating one redundant `QuickJS` VM creation + bundle eval.
+  seed: Mutex<Option<JsTestSession>>,
   slots: DashMap<u32, Arc<OnceCell<Arc<JsTestSession>>>>,
 }
 
 impl SessionPool {
-  fn new(bundle: Arc<CompiledBundle>, cwd: PathBuf, expected: Registrations) -> Self {
+  fn new(bundle: Arc<CompiledBundle>, cwd: PathBuf, expected: Registrations, seed: Option<JsTestSession>) -> Self {
     Self {
       bundle,
       cwd: Arc::from(cwd),
       expected,
+      seed: Mutex::new(seed),
       slots: DashMap::new(),
     }
   }
@@ -368,11 +372,19 @@ impl SessionPool {
     let expected = self.expected;
     cell
       .get_or_try_init(|| async move {
-        let session = Arc::new(
-          JsTestSession::load(bundle, &cwd, expected)
-            .await
-            .map_err(|e| e.to_string())?,
-        );
+        let seeded = self
+          .seed
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .take();
+        let session = match seeded {
+          Some(s) => Arc::new(s),
+          None => Arc::new(
+            JsTestSession::load(bundle, &cwd, expected)
+              .await
+              .map_err(|e| e.to_string())?,
+          ),
+        };
         let key = format!("__js_session_{:p}", Arc::as_ptr(self));
         owner.inject(&key, Arc::clone(&session));
         let sessions = Arc::clone(self);
@@ -419,6 +431,11 @@ impl SessionPool {
   /// Resume every suspended worker-scoped fixture and drop the cached
   /// sessions. Call once after `TestRunner::run` returns.
   pub async fn teardown(&self) {
+    let _ = self
+      .seed
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take();
     let workers: Vec<u32> = self.slots.iter().map(|entry| *entry.key()).collect();
     for worker in workers {
       self.teardown_worker(worker).await;
@@ -445,6 +462,8 @@ pub struct TsTestSource {
   /// Plain scripts, each compiled on its own: its top level runs as a
   /// test's body, never at collection.
   pub scripts: Vec<ScriptSource>,
+  /// Pre-loaded collection VM ready to hand to the first worker.
+  collected_session: Option<JsTestSession>,
 }
 
 /// One plain script and its module.
@@ -491,8 +510,9 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
     });
   }
 
-  // Collection session: evaluate once, snapshot registrations. The
-  // session is discarded — workers build their own.
+  // Collection session: built with the exact same `TestConsole` sink and
+  // engine config as a worker session, so it is handed straight to the
+  // first worker via `SessionPool` instead of being discarded and rebuilt.
   let run_ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
     script_root: cwd.to_path_buf(),
@@ -506,11 +526,9 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
     caps: TEST_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
     session: None,
   };
-  // Built from the SAME engine config a worker uses: sidecars and the
-  // console sink change what an extension's top level can do, and a
-  // collection VM that differs from a worker's is how the two come to
-  // disagree about what was registered.
-  let session = ferridriver_script::Session::create(test_engine_config(None), &run_ctx)
+  let console = Arc::new(TestConsole::default());
+  let engine_config = test_engine_config(Some(Arc::clone(&console) as Arc<dyn ferridriver_script::ConsoleSink>));
+  let session = ferridriver_script::Session::create(engine_config, &run_ctx)
     .await
     .map_err(|e| anyhow::anyhow!("collection session: {}", e.message))?;
   let vm = session.vm_handle();
@@ -525,6 +543,7 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
     collected,
     files,
     scripts,
+    collected_session: Some(JsTestSession { session, console }),
   }))
 }
 
@@ -536,13 +555,14 @@ pub async fn load_ts_tests(config: &TestConfig, cwd: &Path) -> anyhow::Result<Op
 ///
 /// Propagates [`load_ts_tests`] and [`translate_tests`] failures.
 pub async fn build_ts_plan(config: &TestConfig, cwd: &Path) -> anyhow::Result<Option<(TestPlan, Arc<SessionPool>)>> {
-  let Some(source) = load_ts_tests(config, cwd).await? else {
+  let Some(mut source) = load_ts_tests(config, cwd).await? else {
     return Ok(None);
   };
   let pool = Arc::new(SessionPool::new(
     Arc::clone(&source.bundle),
     cwd.to_path_buf(),
     Registrations::of(&source.collected),
+    source.collected_session.take(),
   ));
   let plan = translate_tests(&source, config, cwd, &pool)?;
   Ok(Some((plan, pool)))

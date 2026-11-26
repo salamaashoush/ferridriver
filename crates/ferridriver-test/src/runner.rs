@@ -1583,6 +1583,30 @@ impl TestRunner {
     // (config-only tests, request-only tests) skip the launch entirely —
     // critical in CI where Chromium's first-launch can exceed 30s.
     let (result_tx, result_rx) = mpsc::channel::<WorkerTestResult>(256);
+    let shared_browser = self.matching_shared_browser(&launch_plan, &connection);
+    let launch_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // When multiple workers launch Chromium locally without an already-shared
+    // session browser, share one lazy Chromium process across all workers in
+    // this run (each worker gets a scoped Browser view with isolated contexts).
+    // Cuts cold-start contention and memory by N× while remaining 100% lazy for
+    // fixtureless suites. Set FERRIDRIVER_SHARE_BROWSER=0 to disable.
+    let share_enabled = !matches!(std::env::var("FERRIDRIVER_SHARE_BROWSER").as_deref(), Ok("0" | "false"));
+    let run_shared_handle = if share_enabled
+      && shared_browser.is_none()
+      && num_workers > 1
+      && connection == ConnectMode::Launch
+      && matches!(
+        launch_plan.backend,
+        ferridriver::backend::BackendKind::CdpPipe | ferridriver::backend::BackendKind::CdpWs
+      ) {
+      Some(Arc::new(
+        BrowserHandle::with_connection(launch_plan.clone(), connection.clone())
+          .reporting_launch_failure(Arc::clone(&launch_failed))
+          .recycling_contexts(self.config.context_reuse),
+      ))
+    } else {
+      None
+    };
     let spawner = WorkerSpawner {
       config: Arc::clone(&self.config),
       event_bus: event_bus.has_subscribers().then(|| event_bus.clone()),
@@ -1591,13 +1615,14 @@ impl TestRunner {
       dispatcher: Arc::clone(&dispatcher),
       result_tx,
       custom_fixtures,
-      shared_browser: self.matching_shared_browser(&launch_plan, &connection),
+      shared_browser,
+      run_shared_handle: run_shared_handle.clone(),
       launch_plan,
       connection,
       // Set by any worker whose browser failed to launch: the tests it
       // could not run fail, and the run reports an infrastructure failure
       // rather than a verdict on them.
-      launch_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      launch_failed,
       slots,
       roster: Arc::clone(&roster),
     };
@@ -1626,6 +1651,11 @@ impl TestRunner {
     }
 
     let infrastructure_failed = join_workers(worker_handles, event_bus).await;
+    if let Some(handle) = run_shared_handle
+      && let Err(error) = handle.close().await
+    {
+      tracing::warn!(target: "ferridriver::runner", "shared browser cleanup failed: {error}");
+    }
     Ok(WorkersRun {
       attempt_history,
       infrastructure_failed,
@@ -3104,6 +3134,7 @@ struct WorkerSpawner {
   result_tx: mpsc::Sender<WorkerTestResult>,
   custom_fixtures: FxHashMap<String, crate::fixture::FixtureDef>,
   shared_browser: Option<Arc<Browser>>,
+  run_shared_handle: Option<Arc<BrowserHandle>>,
   launch_plan: LaunchPlan,
   connection: ConnectMode,
   launch_failed: Arc<std::sync::atomic::AtomicBool>,
@@ -3121,6 +3152,7 @@ impl WorkerSpawner {
     let tx = self.result_tx.clone();
     let custom_fixtures = self.custom_fixtures.clone();
     let shared = self.shared_browser.clone();
+    let run_shared = self.run_shared_handle.clone();
     let plan = self.launch_plan.clone();
     let connection = self.connection.clone();
     let stop_flag = self.dispatcher.stop_flag();
@@ -3140,6 +3172,10 @@ impl WorkerSpawner {
         let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
         let browser_handle = if let Some(b) = &shared {
           Arc::new(BrowserHandle::from_shared(Arc::clone(b)))
+        } else if let Some(shared_handle) = &run_shared
+          && shared_handle.try_get().is_none_or(|b| b.is_connected())
+        {
+          Arc::new(shared_handle.borrow_shared_scoped(u64::from(id) + 1))
         } else {
           Arc::new(
             BrowserHandle::with_connection(plan.clone(), connection.clone())
@@ -3698,8 +3734,14 @@ pub struct BrowserHandle {
   plan: LaunchPlan,
   connection: ConnectMode,
   cell: Arc<tokio::sync::OnceCell<Arc<Browser>>>,
-  launch: tokio::sync::Mutex<BrowserLaunchState>,
+  launch: Arc<tokio::sync::Mutex<BrowserLaunchState>>,
   shared: bool,
+  /// Worker scope id when borrowing a run-shared Chromium process so each
+  /// worker's `browser.contexts()` and `browser.on('context')` stay isolated.
+  worker_scope: Option<u64>,
+  /// Cached worker-scoped `Browser` view so every `get()` / `try_get()` on
+  /// this worker shares the exact same event emitter and disconnect latch.
+  scoped_cell: std::sync::OnceLock<Arc<Browser>>,
   /// Raised when a launch fails, so the run can tell a browser that never
   /// started from tests that failed on their own.
   launch_failed: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -3840,10 +3882,29 @@ impl BrowserHandle {
       plan,
       connection,
       cell: Arc::new(tokio::sync::OnceCell::new()),
-      launch: tokio::sync::Mutex::default(),
+      launch: Arc::new(tokio::sync::Mutex::default()),
       shared: false,
+      worker_scope: None,
+      scoped_cell: std::sync::OnceLock::new(),
       launch_failed: None,
       recycle_contexts: false,
+    }
+  }
+
+  /// Borrow a lazy handle owned by the runner, scoping each worker's
+  /// `Browser` view so `browser.contexts()` / `browser.on('context')` remain
+  /// isolated per worker and `close()` leaves shutdown to the owner.
+  fn borrow_shared_scoped(&self, scope: u64) -> Self {
+    Self {
+      plan: self.plan.clone(),
+      connection: self.connection.clone(),
+      cell: Arc::clone(&self.cell),
+      launch: Arc::clone(&self.launch),
+      shared: true,
+      worker_scope: Some(scope),
+      scoped_cell: std::sync::OnceLock::new(),
+      launch_failed: self.launch_failed.clone(),
+      recycle_contexts: self.recycle_contexts,
     }
   }
 
@@ -3872,8 +3933,10 @@ impl BrowserHandle {
       plan: LaunchPlan::default(),
       connection: ConnectMode::Launch,
       cell: Arc::new(cell),
-      launch: tokio::sync::Mutex::default(),
+      launch: Arc::new(tokio::sync::Mutex::default()),
       shared: true,
+      worker_scope: None,
+      scoped_cell: std::sync::OnceLock::new(),
       launch_failed: None,
       recycle_contexts: false,
     }
@@ -3887,6 +3950,17 @@ impl BrowserHandle {
   #[must_use]
   pub fn peek(&self) -> Option<Arc<Browser>> {
     self.cell.get().cloned()
+  }
+
+  fn scope_browser(&self, browser: Arc<Browser>) -> Arc<Browser> {
+    match self.worker_scope {
+      Some(scope) => Arc::clone(
+        self
+          .scoped_cell
+          .get_or_init(|| Arc::new(browser.scoped_for_worker(scope))),
+      ),
+      None => browser,
+    }
   }
 
   /// The browser, launching it on the first call; concurrent callers
@@ -3904,7 +3978,7 @@ impl BrowserHandle {
         return Err(ferridriver::FerriError::TargetClosed { reason: None });
       }
       if let Some(browser) = self.cell.get() {
-        return Ok(Arc::clone(browser));
+        return Ok(self.scope_browser(Arc::clone(browser)));
       }
       state
         .pending
@@ -3940,11 +4014,11 @@ impl BrowserHandle {
         state.pending = None;
       }
     }
-    result
+    result.map(|browser| self.scope_browser(browser))
   }
 
   pub fn try_get(&self) -> Option<Arc<Browser>> {
-    self.cell.get().cloned()
+    self.cell.get().map(|browser| self.scope_browser(Arc::clone(browser)))
   }
 
   /// Close the browser this handle launched; a shared browser is left to
