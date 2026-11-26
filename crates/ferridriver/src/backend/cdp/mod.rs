@@ -40,17 +40,20 @@ mod startup_tests;
 use base64::Engine as _;
 
 use super::{
-  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, BackgroundColor, ConsoleMessage, CookieData, ImageFormat,
-  MetricData, NetworkRequest, RwLock, ScreenshotCapture, ScreenshotScale,
+  AnyElement, AnyPage, AxNodeData, AxProperty, BackgroundColor, CookieData, ImageFormat, MetricData, ScreenshotCapture,
+  ScreenshotScale,
 };
+use crate::console_message::ConsoleMessage;
 use crate::error::{FerriError, Result};
 use crate::network::{
-  self, BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, RequestInit, RequestSizes, RequestTiming, Response,
-  ResponseInit, SecurityDetails, WebSocket,
+  self, BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, Request as NetworkRequest, RequestInit, RequestSizes,
+  RequestTiming, Response, ResponseInit, SecurityDetails, WebSocket,
 };
 use ferridriver_types::keyboard::KeyStroke;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use transport::CdpTransport;
 
 pub(crate) const LC_COMMIT: u8 = 0b001;
