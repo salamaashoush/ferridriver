@@ -53,20 +53,9 @@ impl CdpPage {
       emitter2,
       self.nav_request_slot.clone(),
     ));
-    // Register the emitter-bridge: `page.events().on("dialog", cb)`
-    // keeps working because the bridge handler — installed here for
-    // the page's lifetime — synchronously claims dialogs on behalf
-    // of broadcast listeners. Handler id is discarded: we never
-    // unregister until the page is dropped.
-    let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
-    // Same pattern for file-chooser: broadcast `filechooser`
-    // listeners see live handles via the bridge handler; one-shot
-    // `page.wait_for_file_chooser` callers register directly.
-    let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
-    // And one more for downloads — live [`crate::download::Download`]
-    // handles delivered to `page.events().on("download", cb)` via the
-    // bridge, same claim-on-open pattern as dialog / file-chooser.
-    let _ = self.download_manager.register_emitter_bridge(self.events.clone());
+    // Register the emitter bridges once for dialog, file-chooser, and download
+    // broadcast listeners.
+    self.shared.register_emitter_bridges();
 
     tasks.push(Self::spawn_dialog_listener(
       Arc::clone(&self.transport),
@@ -128,39 +117,36 @@ impl CdpPage {
         else {
           continue;
         };
-        // Without an owning page we cannot build live `JSHandle`s —
-        // drop the event silently (matches Playwright's
-        // `createHandle(context, arg)` guard which returns early if the
-        // execution context is unknown).
-        let Some(page) = page_backref.upgrade() else {
-          continue;
-        };
-
         let type_str = if payload.kind.is_empty() {
           "log".to_string()
         } else {
           payload.kind
         };
-        let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(payload.args.len());
-        for arg in &payload.args {
-          let backing = cdp_remote_object_to_backing(arg, session_id.clone());
-          let is_node = arg.get("subtype").and_then(|v| v.as_str()) == Some("node");
-          args.push(crate::js_handle::JSHandle::from_backing(
-            Arc::clone(&page),
-            backing,
-            is_node,
-          ));
-        }
+        let arg_backings = payload
+          .args
+          .iter()
+          .map(|arg| {
+            let backing = cdp_remote_object_to_backing(arg, session_id.clone());
+            let is_node = arg.get("subtype").and_then(|v| v.as_str()) == Some("node");
+            (backing, is_node)
+          })
+          .collect();
         let location = cdp_stack_trace_to_location(payload.stack_trace.as_ref());
         let timestamp = f64_to_u64_saturating(payload.timestamp);
 
-        let msg = crate::console_message::ConsoleMessage::new(&page, type_str, None, args, location, timestamp);
-        crate::state::push_capped(
-          &mut *console_log.write().await,
-          msg.clone(),
-          crate::state::CONSOLE_LOG_CAP,
-        );
-        emitter.emit(crate::events::PageEvent::Console(msg));
+        crate::backend::shared_page::dispatch_console_event(
+          &page_backref,
+          &console_log,
+          &emitter,
+          crate::backend::shared_page::ConsoleEventInput {
+            kind: type_str,
+            explicit_text: None,
+            arg_backings,
+            location,
+            timestamp,
+          },
+        )
+        .await;
       }
     })
     .abort_handle()
@@ -341,11 +327,7 @@ impl CdpPage {
         };
         let details = cdp_exception_to_error_details(exception_details);
         let location = cdp_exception_to_location(exception_details);
-        let web_err = match page_backref.upgrade() {
-          Some(page) => crate::web_error::WebError::new(&page, details, location),
-          None => crate::web_error::WebError::new_detached(details, location),
-        };
-        emitter.emit(crate::events::PageEvent::PageError(web_err));
+        crate::backend::shared_page::dispatch_page_error_event(&page_backref, &emitter, details, location);
       }
     })
     .abort_handle()
@@ -571,7 +553,6 @@ impl CdpPage {
         };
         let message = payload.message;
         let default_value = payload.default_prompt;
-        let dialog_type = crate::dialog::DialogType::parse(&dialog_type_str);
 
         // Build the responder: a closure that translates the user's
         // accept/dismiss into CDP `Page.handleJavaScriptDialog`. The
@@ -600,33 +581,16 @@ impl CdpPage {
           })
         });
 
-        let dialog = crate::dialog::Dialog::new_with_manager(
-          dialog_type,
-          message.clone(),
-          default_value.clone(),
+        crate::backend::shared_page::dispatch_dialog_event(
+          &page_backref,
+          &dialog_manager,
+          &dialog_log,
+          dialog_type_str,
+          message,
+          default_value,
           responder,
-          Some(dialog_manager.clone()),
-          page_backref.weak(),
-        );
-
-        // Synchronous dialog dispatch — mirrors Playwright's
-        // `DialogManager.dialogDidOpen`. Each registered handler is
-        // called with the live `Dialog` and returns `true` to claim
-        // ownership. If no handler claims, the manager auto-closes
-        // (accept for `beforeunload`, dismiss otherwise). There is no
-        // grace window and no race: `did_open` calls handlers
-        // synchronously in the same stack as the CDP event arrival.
-        dialog_manager.did_open(dialog);
-
-        crate::state::push_capped(
-          &mut *dialog_log.write().await,
-          crate::state::DialogEvent {
-            dialog_type: dialog_type_str,
-            message,
-            action: "dispatched".to_string(),
-          },
-          crate::state::DIALOG_LOG_CAP,
-        );
+        )
+        .await;
       }
     })
     .abort_handle()
@@ -716,13 +680,8 @@ impl CdpPage {
             // has the same guard and silently returns.
             return;
           };
-          let Ok(handle) =
-            crate::element_handle::ElementHandle::from_any_element(Arc::clone(&page_clone), element).await
-          else {
-            return;
-          };
-          let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
-          manager_clone.did_open(&chooser);
+          crate::backend::shared_page::dispatch_file_chooser_event(page_clone, &manager_clone, element, is_multiple)
+            .await;
         });
       }
     })
@@ -832,10 +791,6 @@ impl CdpPage {
     let url = payload.url;
     let suggested = payload.suggested_filename;
 
-    let Some(page) = page_backref.upgrade() else {
-      return;
-    };
-
     // Build the canceler that issues `Browser.cancelDownload`.
     let transport_c = Arc::clone(transport);
     let session_c = session_id.cloned();
@@ -861,15 +816,15 @@ impl CdpPage {
       })
     });
 
-    let download = crate::download::Download::new(
-      &page,
+    crate::backend::shared_page::dispatch_download_started(
+      page_backref,
+      download_manager,
       guid,
       url,
       suggested,
       downloads_dir.path().to_path_buf(),
       canceler,
     );
-    download_manager.did_open(&download);
   }
 
   fn on_download_progress(

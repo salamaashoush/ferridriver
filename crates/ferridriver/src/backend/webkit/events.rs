@@ -1595,11 +1595,7 @@ fn dispatch_file_chooser(
       .unwrap_or(false);
     let element = super::element::WebKitElement::new(target, object_id);
     let any_element = crate::backend::AnyElement::WebKit(element);
-    let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(page, any_element).await else {
-      return;
-    };
-    let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
-    manager.did_open(&chooser);
+    crate::backend::shared_page::dispatch_file_chooser_event(page, &manager, any_element, is_multiple).await;
   });
 }
 
@@ -1610,9 +1606,6 @@ async fn dispatch_console(
   page_backref: &crate::backend::PageBackref,
 ) {
   let Some(message) = params.get("message") else {
-    return;
-  };
-  let Some(page) = page_backref.upgrade() else {
     return;
   };
   let level = message.get("level").and_then(Value::as_str).unwrap_or("log");
@@ -1637,9 +1630,7 @@ async fn dispatch_console(
       column_number: u32::try_from(message.get("column").and_then(Value::as_u64).unwrap_or(1).max(1) - 1)
         .unwrap_or(u32::MAX),
     };
-    emitter.emit(crate::events::PageEvent::PageError(crate::web_error::WebError::new(
-      &page, err, location,
-    )));
+    crate::backend::shared_page::dispatch_page_error_event(page_backref, emitter, err, location);
     return;
   }
   let ty = match level {
@@ -1654,33 +1645,35 @@ async fn dispatch_console(
     line_number: u32::try_from(message.get("line").and_then(Value::as_u64).unwrap_or(1)).unwrap_or(1),
     column_number: u32::try_from(message.get("column").and_then(Value::as_u64).unwrap_or(1)).unwrap_or(1),
   };
-  let mut args = Vec::new();
+  let mut arg_backings = Vec::new();
   if let Some(parameters) = message.get("parameters").and_then(Value::as_array) {
     for arg in parameters {
       let backing = pw_remote_object_to_backing(arg);
       let is_node = arg.get("subtype").and_then(Value::as_str) == Some("node");
-      args.push(crate::js_handle::JSHandle::from_backing(
-        Arc::clone(&page),
-        backing,
-        is_node,
-      ));
+      arg_backings.push((backing, is_node));
     }
   }
   // PW `WebKit`'s `message.text` only carries the first formatted
   // token — defer to [`ConsoleMessage`]'s arg-join fallback by passing
   // `None`, so `text()` reconstructs the full message from args.
-  let explicit_text = if args.is_empty() {
+  let explicit_text = if arg_backings.is_empty() {
     Some(message.get("text").and_then(Value::as_str).unwrap_or("").to_string())
   } else {
     None
   };
-  let msg = ConsoleMessage::new(&page, ty, explicit_text, args, location, 0);
-  crate::state::push_capped(
-    &mut *console_log.write().await,
-    msg.clone(),
-    crate::state::CONSOLE_LOG_CAP,
-  );
-  emitter.emit(crate::events::PageEvent::Console(msg));
+  crate::backend::shared_page::dispatch_console_event(
+    page_backref,
+    console_log,
+    emitter,
+    crate::backend::shared_page::ConsoleEventInput {
+      kind: ty.to_string(),
+      explicit_text,
+      arg_backings,
+      location,
+      timestamp: 0,
+    },
+  )
+  .await;
 }
 
 /// Build a JS-error stack string from PW `WebKit`'s `stackTrace` payload.
@@ -1717,17 +1710,18 @@ async fn dispatch_dialog(
   dialog_log: &Arc<RwLock<Vec<DialogEvent>>>,
   page: std::sync::Weak<crate::page::Page>,
 ) {
-  let dialog_type_str = params
-    .get("type")
-    .and_then(Value::as_str)
-    .unwrap_or("alert")
-    .to_string();
-  let message = params.get("message").and_then(Value::as_str).unwrap_or("").to_string();
-  let default_value = params
-    .get("defaultPrompt")
-    .and_then(Value::as_str)
-    .unwrap_or("")
-    .to_string();
+  let Ok(payload) =
+    serde_json::from_value::<ferridriver_webkit_proto::page::JavascriptDialogOpeningEvent>(params.clone())
+  else {
+    return;
+  };
+  let dialog_type_str = if payload.dialog_type.is_empty() {
+    "alert".to_string()
+  } else {
+    payload.dialog_type
+  };
+  let message = payload.message;
+  let default_value = payload.default_prompt;
   let dialog_type = crate::dialog::DialogType::parse(&dialog_type_str);
 
   let proxy_for_responder = proxy.clone();

@@ -21,17 +21,7 @@ impl BidiPage {
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
   ) {
-    // Register the emitter-bridge so `page.events().on("dialog", cb)`
-    // continues to deliver live `Dialog` handles via the broadcast.
-    let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
-    // Same bridge for `filechooser`: broadcast listeners observe live
-    // handles without needing the one-shot
-    // `page.wait_for_file_chooser` flow.
-    let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
-    // Download bridge: broadcast `download` listeners see live
-    // [`crate::download::Download`] handles via the same claim-on-open
-    // path.
-    let _ = self.download_manager.register_emitter_bridge(self.events.clone());
+    self.shared.register_emitter_bridges();
 
     // Configure Firefox to land downloads in our per-page tempdir.
     // `browser.setDownloadBehavior` is a best-effort browser-scoped
@@ -417,20 +407,18 @@ impl PageEventLoop {
       let stack = build_bidi_stack(text, params.get("stackTrace"));
       let details = crate::web_error::ErrorDetails { name, message, stack };
       let location = bidi_stack_to_location(params.get("stackTrace"));
-      let web_err = match self.page.page_backref.upgrade() {
-        Some(page) => crate::web_error::WebError::new(&page, details, location),
-        None => crate::web_error::WebError::new_detached(details, location),
-      };
-      self.page.events.emit(PageEvent::PageError(web_err));
+      crate::backend::shared_page::dispatch_page_error_event(
+        &self.page.page_backref,
+        &self.page.events,
+        details,
+        location,
+      );
       return;
     }
     if entry_type != "console" {
       return;
     }
 
-    let Some(page) = self.page.page_backref.upgrade() else {
-      return;
-    };
     // BiDi reports `method` for the console variant (e.g.
     // 'log', 'warn', 'error'). Playwright remaps `'warn'` to
     // `'warning'` for parity with CDP's `Runtime.consoleAPICalled.type`.
@@ -447,7 +435,7 @@ impl PageEventLoop {
     } else {
       None
     };
-    let args = params
+    let arg_backings = params
       .get("args")
       .and_then(|v| v.as_array())
       .map(Vec::as_slice)
@@ -456,7 +444,7 @@ impl PageEventLoop {
       .map(|arg| {
         let backing = bidi_remote_value_to_backing(arg);
         let is_node = arg.get("type").and_then(|v| v.as_str()) == Some("node");
-        crate::js_handle::JSHandle::from_backing(Arc::clone(&page), backing, is_node)
+        (backing, is_node)
       })
       .collect();
     let location = bidi_stack_trace_to_location(params.get("stackTrace"), params.get("source"));
@@ -464,13 +452,19 @@ impl PageEventLoop {
       .get("timestamp")
       .and_then(serde_json::Value::as_f64)
       .map_or(0, f64_to_u64_saturating);
-    let msg = ConsoleMessage::new(&page, type_str, text, args, location, timestamp);
-    crate::state::push_capped(
-      &mut *self.console_log.write().await,
-      msg.clone(),
-      crate::state::CONSOLE_LOG_CAP,
-    );
-    self.page.events.emit(PageEvent::Console(msg));
+    crate::backend::shared_page::dispatch_console_event(
+      &self.page.page_backref,
+      &self.console_log,
+      &self.page.events,
+      crate::backend::shared_page::ConsoleEventInput {
+        kind: type_str.to_string(),
+        explicit_text: text,
+        arg_backings,
+        location,
+        timestamp,
+      },
+    )
+    .await;
   }
 
   async fn on_user_prompt_opened(&self, params: &serde_json::Value) {
@@ -486,7 +480,6 @@ impl PageEventLoop {
     };
     let message = payload.message;
     let default_value = payload.default_value;
-    let dialog_type = crate::dialog::DialogType::parse(&prompt_type_str);
 
     // Build the responder: translates the user's accept/dismiss
     // into `browsingContext.handleUserPrompt`. Captures an Arc
@@ -513,29 +506,16 @@ impl PageEventLoop {
       })
     });
 
-    let dialog = crate::dialog::Dialog::new_with_manager(
-      dialog_type,
-      message.clone(),
+    crate::backend::shared_page::dispatch_dialog_event(
+      &self.page.page_backref,
+      &self.page.dialog_manager,
+      &self.dialog_log,
+      prompt_type_str,
+      message,
       default_value,
       responder,
-      Some(self.page.dialog_manager.clone()),
-      self.page.page_backref.weak(),
-    );
-
-    // Synchronous dialog dispatch — mirrors Playwright's
-    // `DialogManager.dialogDidOpen`. See the CDP equivalent
-    // in `backend/cdp/mod.rs` for the full rationale.
-    self.page.dialog_manager.did_open(dialog);
-
-    crate::state::push_capped(
-      &mut *self.dialog_log.write().await,
-      DialogEvent {
-        dialog_type: prompt_type_str,
-        message,
-        action: "dispatched".to_string(),
-      },
-      crate::state::DIALOG_LOG_CAP,
-    );
+    )
+    .await;
   }
 
   /// `BiDi` event shape:
@@ -562,14 +542,8 @@ impl PageEventLoop {
       let Some(page) = backref.upgrade() else {
         return;
       };
-      // Build a BidiElement directly from the shared id so
-      // we don't need a page-scoped selector round-trip.
       let element = crate::backend::AnyElement::Bidi(super::super::BidiElement::new(session, ctx, shared_id));
-      let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(Arc::clone(&page), element).await else {
-        return;
-      };
-      let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
-      manager.did_open(&chooser);
+      crate::backend::shared_page::dispatch_file_chooser_event(page, &manager, element, is_multiple).await;
     });
   }
 
@@ -589,13 +563,9 @@ impl PageEventLoop {
     let url = payload.url;
     let suggested = payload.suggested_filename;
 
-    let Some(page) = self.page.page_backref.upgrade() else {
-      return;
-    };
-
     // BiDi has no native cancel — Playwright's own
     // `bidiBrowser.ts::cancelDownload` is a no-op. Surface
-    // typed `Unsupported` per Rule 4 so callers know.
+    // typed `Unsupported` so callers know.
     let canceler: crate::download::DownloadCanceler = Arc::new(|| {
       Box::pin(async {
         Err(crate::error::FerriError::Unsupported(
@@ -604,15 +574,15 @@ impl PageEventLoop {
       })
     });
 
-    let download = crate::download::Download::new(
-      &page,
+    crate::backend::shared_page::dispatch_download_started(
+      &self.page.page_backref,
+      &self.page.download_manager,
       navigation,
       url,
       suggested,
       self.page.downloads_subdir.to_path_buf(),
       canceler,
     );
-    self.page.download_manager.did_open(&download);
   }
 
   fn on_download_end(&self, params: &serde_json::Value) {
