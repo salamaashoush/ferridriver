@@ -385,7 +385,11 @@ mod tests {
       let mut focus_reads = 0;
       loop {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let request = super::super::tests::request(&mut socket).await;
+        let Some(request) = super::super::tests::optional_request(&mut socket).await else {
+          // A timed-out or cancelled reqwest call can close a freshly-connected
+          // socket before writing its HTTP request; skip and wait for cleanup.
+          continue;
+        };
         let script = request.1["script"].as_str().unwrap_or_default();
         let input = request.0.starts_with("POST /session/navigation/element/field/value ");
         // The tap on the address field returns before focus has moved into it.
@@ -416,7 +420,7 @@ mod tests {
         let cleanup = script.contains("if(state.element)");
         let done = request.0.starts_with("DELETE ");
         let body = json!({"value":value}).to_string();
-        socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        let _ = socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
         requests.push(request);
         if cleanup {
           restored.take().unwrap().send(()).unwrap();
@@ -545,7 +549,11 @@ mod tests {
       let mut requests = Vec::new();
       loop {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let request = super::super::tests::request(&mut socket).await;
+        let Some(request) = super::super::tests::optional_request(&mut socket).await else {
+          // A timed-out or cancelled reqwest call can close a freshly-connected
+          // socket before writing its HTTP request; skip and wait for cleanup.
+          continue;
+        };
         let done = request.0.starts_with("DELETE ");
         requests.push(request);
         let body = json!({"value":true}).to_string();
@@ -624,7 +632,7 @@ mod tests {
           "200 OK"
         };
         let body = json!({"value":value}).to_string();
-        socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        let _ = socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
         if index == 9 {
           restored.take().unwrap().send(()).unwrap();
         }
