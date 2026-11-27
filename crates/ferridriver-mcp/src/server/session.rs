@@ -311,7 +311,7 @@ impl McpServer {
       .await
       .map_err(|e| Self::err(format!("instance health check failed: {e}")))?
       .map_err(Self::err)?;
-    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    let ctx_ref = ferridriver::context::ContextRef::new_async(self.state.state_arc(), context.to_string()).await;
     let page = Box::pin(ctx_ref.active_or_new_page()).await.map_err(Self::err)?;
     self.invalidate_context(context);
     Ok(page)
@@ -325,7 +325,7 @@ impl McpServer {
   /// for the given context cannot be retrieved.
   pub async fn page(&self, context: &str) -> Result<Arc<Page>, ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
-    Ok(self.wrapper_for(context, any_page))
+    Ok(self.wrapper_for(context, any_page).await)
   }
 
   /// Cached-or-fresh `Page` wrapper for `context` over `any_page`.
@@ -338,7 +338,19 @@ impl McpServer {
   /// tool calls instead of resetting it per call. `Page::with_context`
   /// is sync and its frame-event listener spawn is latched per backend
   /// page, so the occasional rebuild is cheap.
-  fn wrapper_for(&self, context: &str, any_page: AnyPage) -> Arc<Page> {
+  async fn wrapper_for(&self, context: &str, any_page: AnyPage) -> Arc<Page> {
+    {
+      let cache = self
+        .page_wrappers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+      if let Some(cached) = cache.get(context)
+        && cached.inner().same_backend_page(&any_page)
+      {
+        return Arc::clone(cached);
+      }
+    }
+    let ctx_ref = ferridriver::context::ContextRef::new_async(self.state.state_arc(), context.to_string()).await;
     let mut cache = self
       .page_wrappers
       .lock()
@@ -348,7 +360,6 @@ impl McpServer {
     {
       return Arc::clone(cached);
     }
-    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     let page = Page::with_context(any_page, ctx_ref);
     cache.insert(context.to_string(), Arc::clone(&page));
     page
@@ -380,8 +391,8 @@ impl McpServer {
     context: &str,
   ) -> Result<(Arc<Page>, ferridriver::context::ContextRef), ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
-    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
-    let page = self.wrapper_for(context, any_page);
+    let ctx_ref = ferridriver::context::ContextRef::new_async(self.state.state_arc(), context.to_string()).await;
+    let page = self.wrapper_for(context, any_page).await;
     Ok((page, ctx_ref))
   }
 
@@ -481,7 +492,7 @@ impl McpServer {
       return;
     };
     let within = std::time::Duration::from_millis(page.default_navigation_timeout());
-    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    let ctx_ref = ferridriver::context::ContextRef::new_async(self.state.state_arc(), context.to_string()).await;
     if let Err(error) = ctx_ref.opened_pages_settled(within).await {
       tracing::debug!(%error, "tabs the call opened are not all listed yet");
     }

@@ -223,7 +223,9 @@ pub async fn page_for(browser: &Browser, context: &str) -> ferridriver::Result<A
   let state = browser.state();
   let key = context_key_for(browser, context)?;
   let context = key.to_composite();
-  let ctx_ref = ferridriver::context::ContextRef::new(Arc::clone(state), context.clone()).with_browser(browser.clone());
+  let ctx_ref = ferridriver::context::ContextRef::new_async(Arc::clone(state), context.clone())
+    .await
+    .with_browser(browser.clone());
   {
     let guard = state.read().await;
     if let Ok(any_page) = guard.active_page(&context) {

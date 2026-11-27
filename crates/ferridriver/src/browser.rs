@@ -21,12 +21,11 @@ use crate::state::BrowserState;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Browser instance. Manages contexts, pages, and browser lifecycle.
-///
-/// `Clone` is cheap — all clones share the same underlying browser process
-/// and state via `Arc`. This enables exposing `browser` as a test fixture.
-#[derive(Clone)]
-pub struct Browser {
+/// Immutable-after-launch handles shared across every [`Browser`] clone and
+/// worker-scoped view. Keeping these behind a single `Arc` shrinks `Browser`
+/// (and therefore `ContextRef` and `ContextEvent`) to a handful of words and
+/// turns `Browser::clone()` from a dozen atomic increments into three.
+struct BrowserInner {
   state: Arc<RwLock<BrowserState>>,
   /// Product version captured once at launch from CDP
   /// `Browser.getVersion().product`. Cached here so `version()` stays
@@ -42,7 +41,7 @@ pub struct Browser {
   /// Direct handle to [`BrowserState::context_options`] so the sync
   /// `new_context` setter can register the options bag without having
   /// to obtain the outer `RwLock` read guard. Cloned at launch from
-  /// the state and again in [`Self::from_shared_state`].
+  /// the state and again in [`Browser::from_shared_state`].
   context_options: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
   /// Mirror of [`BrowserState::record_video`] for the same reason — so
   /// a caller that only sets `record_video` via the bag still gets the
@@ -53,6 +52,11 @@ pub struct Browser {
   /// Direct handle to [`BrowserState::context_defaults`]: a context
   /// `new_context` makes gets options of its own instead.
   context_defaults: Arc<std::sync::Mutex<Option<crate::options::BrowserContextOptions>>>,
+  /// Direct handles to the per-context event/closed/page registries on
+  /// [`BrowserState`] so [`Browser::new_context`], [`Browser::default_context`],
+  /// and [`Browser::contexts`] never contend on `RwLock<BrowserState>` or
+  /// degrade to detached transient emitters.
+  context_registries: Option<crate::state::ContextRegistries>,
   /// Ordered registry of live context names (`"default"` plus every
   /// `new_context`), so `contexts()` stays sync like Playwright's
   /// `browser.contexts()` — no `RwLock<BrowserState>` read, no
@@ -61,14 +65,23 @@ pub struct Browser {
   /// Shared handle to [`BrowserState::connected`] so `is_connected()`
   /// stays sync like Playwright's `browser.isConnected(): boolean`.
   connected: Arc<std::sync::atomic::AtomicBool>,
+  /// What `browser.browserType()` answers.
+  factory: crate::browser_type::BrowserType,
+}
+
+/// Browser instance. Manages contexts, pages, and browser lifecycle.
+///
+/// `Clone` is cheap — all clones share the same underlying browser process
+/// and state via `Arc`. This enables exposing `browser` as a test fixture.
+#[derive(Clone)]
+pub struct Browser {
+  inner: Arc<BrowserInner>,
   /// Browser-level event emitter (`'context'`, `'disconnected'`).
   /// Cheap to clone (Arc-shared) so every `Browser::clone` observes the
   /// same listeners.
   events: crate::events::BrowserEventEmitter,
   /// Set once the connection ended; `disconnected` fires on that edge.
   disconnected: Arc<std::sync::atomic::AtomicBool>,
-  /// What `browser.browserType()` answers.
-  factory: crate::browser_type::BrowserType,
   /// Options every context this handle makes with [`Self::new_context`]
   /// starts from, under the ones the caller names. Per handle, not per
   /// browser: a test runner gives each test its own clone carrying that
@@ -104,6 +117,16 @@ fn default_context_registry() -> Arc<std::sync::Mutex<Vec<ContextEntry>>> {
 }
 
 impl Browser {
+  fn from_inner(inner: BrowserInner) -> Self {
+    Self {
+      inner: Arc::new(inner),
+      events: crate::events::BrowserEventEmitter::new(),
+      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      inherited_context_options: None,
+      context_owner: None,
+    }
+  }
+
   /// Construct from already-prepared component handles. Used by
   /// [`crate::browser_type`] after `state.ensure_browser()` has run
   /// and by callers who need to supply pre-resolved version/registry
@@ -118,21 +141,26 @@ impl Browser {
     record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
     connected: Arc<std::sync::atomic::AtomicBool>,
   ) -> Self {
-    let isolated_contexts = state.try_read().ok().is_none_or(|state| {
-      state
-        .default_browser()
-        .is_none_or(crate::backend::AnyBrowser::supports_isolated_contexts)
-    });
-    let context_defaults = state
-      .try_read()
-      .ok()
-      .map(|state| Arc::clone(&state.context_defaults))
-      .unwrap_or_default();
-    let factory = state.try_read().ok().map_or_else(
-      || crate::browser_type::BrowserType::for_backend(backend_kind),
-      |state| crate::browser_type::BrowserType::launched(state.browser_kind(), backend_kind),
+    let (isolated_contexts, context_defaults, context_registries, factory) = state.try_read().ok().map_or_else(
+      || {
+        (
+          true,
+          Arc::default(),
+          None,
+          crate::browser_type::BrowserType::for_backend(backend_kind),
+        )
+      },
+      |s| {
+        (
+          s.default_browser()
+            .is_none_or(crate::backend::AnyBrowser::supports_isolated_contexts),
+          Arc::clone(&s.context_defaults),
+          Some(s.context_registries()),
+          crate::browser_type::BrowserType::launched(s.browser_kind(), backend_kind),
+        )
+      },
     );
-    Self {
+    Self::from_inner(BrowserInner {
       isolated_contexts,
       state,
       version,
@@ -142,14 +170,11 @@ impl Browser {
       context_options,
       record_video,
       context_defaults,
+      context_registries,
       connected,
       context_names: default_context_registry(),
-      events: crate::events::BrowserEventEmitter::new(),
-      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory,
-      inherited_context_options: None,
-      context_owner: None,
-    }
+    })
   }
 
   /// Infra constructor: wrap a [`BrowserState`] whose
@@ -202,24 +227,38 @@ impl Browser {
     let backend = state
       .instance_browser(instance)
       .ok_or_else(|| crate::FerriError::invalid_argument("instance", "browser has not been connected"))?;
-    let version = backend.version();
+    let version = Arc::from(backend.version());
     let isolated_contexts = backend.supports_isolated_contexts();
     let backend_kind = backend.kind();
     let closed = backend.closed();
     let default_context = format!("{instance}:default");
     let default_is_live = state.context(&default_context).is_ok();
-    let browser_kind = state.browser_kind();
-    let mut browser = Self::from_state_unwatched(state);
-    browser.version = Arc::from(version);
-    browser.backend_kind = backend_kind;
-    browser.factory = crate::browser_type::BrowserType::launched(browser_kind, backend_kind);
-    browser.isolated_contexts = isolated_contexts;
-    browser.instance = Arc::from(instance);
-    browser.context_names = Arc::new(std::sync::Mutex::new(vec![ContextEntry {
-      name: default_context,
-      listed: default_is_live,
-      owner: None,
-    }]));
+    let factory = crate::browser_type::BrowserType::launched(state.browser_kind(), backend_kind);
+    let headless = state.headless;
+    let context_options = Arc::clone(&state.context_options);
+    let record_video = Arc::clone(&state.record_video);
+    let context_defaults = Arc::clone(&state.context_defaults);
+    let context_registries = Some(state.context_registries());
+    let connected = Arc::clone(&state.connected);
+    let browser = Self::from_inner(BrowserInner {
+      state: state.into_shared(),
+      version,
+      backend_kind,
+      instance: Arc::from(instance),
+      isolated_contexts,
+      headless,
+      context_options,
+      record_video,
+      context_defaults,
+      context_registries,
+      context_names: Arc::new(std::sync::Mutex::new(vec![ContextEntry {
+        name: default_context,
+        listed: default_is_live,
+        owner: None,
+      }])),
+      connected,
+      factory,
+    });
     Ok(browser.watch_connection(Some(closed)))
   }
 
@@ -234,7 +273,7 @@ impl Browser {
       .instance_browser(instance)
       .ok_or_else(|| crate::FerriError::target_closed(None))?;
     let closed = backend.closed();
-    let browser = Self {
+    let browser = Self::from_inner(BrowserInner {
       state: Arc::clone(&state),
       version: Arc::from(backend.version()),
       backend_kind: backend.kind(),
@@ -244,14 +283,11 @@ impl Browser {
       context_options: Arc::clone(&guard.context_options),
       record_video: Arc::clone(&guard.record_video),
       context_defaults: Arc::clone(&guard.context_defaults),
+      context_registries: Some(guard.context_registries()),
       context_names: default_context_registry(),
       connected: Arc::clone(&guard.connected),
-      events: crate::events::BrowserEventEmitter::new(),
-      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory: browser_type,
-      inherited_context_options: None,
-      context_owner: None,
-    };
+    });
     drop(guard);
     Ok(browser.watch_connection(Some(closed)))
   }
@@ -279,12 +315,33 @@ impl Browser {
     self.announce_disconnect(contexts);
   }
 
+  /// Build a [`ContextRef`] attached to this browser using the lock-free
+  /// registries when present, falling back to `ContextRef::new` only if the
+  /// browser itself was constructed via `from_shared_state` under a held write
+  /// lock.
+  fn context_ref_sync(&self, name: String) -> ContextRef {
+    match &self.inner.context_registries {
+      Some(registries) => ContextRef::from_registries(Arc::clone(&self.inner.state), name, registries),
+      None => ContextRef::new(Arc::clone(&self.inner.state), name),
+    }
+    .with_browser(self.clone())
+  }
+
+  /// Build a [`ContextRef`] attached to this browser without ever degrading to
+  /// a detached emitter.
+  async fn context_ref_async(&self, name: String) -> ContextRef {
+    match &self.inner.context_registries {
+      Some(registries) => ContextRef::from_registries(Arc::clone(&self.inner.state), name, registries),
+      None => ContextRef::new_async(Arc::clone(&self.inner.state), name).await,
+    }
+    .with_browser(self.clone())
+  }
+
   /// The contexts as their own emitters, which removing a context from
   /// the state forgets: resolve them before the browser shuts down.
-  /// Awaited rather than the sync constructor's fallback, which hands
-  /// back an emitter nobody listens on while the state is locked.
   async fn live_contexts(&self) -> Vec<ContextRef> {
     let names: Vec<String> = self
+      .inner
       .context_names
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -294,11 +351,7 @@ impl Browser {
       .collect();
     let mut contexts = Vec::with_capacity(names.len());
     for name in names {
-      contexts.push(
-        ContextRef::new_async(Arc::clone(&self.state), name)
-          .await
-          .with_browser(self.clone()),
-      );
+      contexts.push(self.context_ref_async(name).await);
     }
     contexts
   }
@@ -319,47 +372,54 @@ impl Browser {
   /// the instance has not been launched yet, `version()` returns
   /// `"Unknown"` until a subsequent `ensure_browser` fills it in.
   pub fn from_shared_state(state: Arc<RwLock<BrowserState>>) -> Self {
-    let (version, backend_kind, headless, context_options, record_video, connected) =
-      state.try_read().ok().map_or_else(
-        || {
-          (
-            Arc::from("Unknown"),
-            crate::backend::BackendKind::CdpPipe,
-            true,
-            Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-            Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-          )
-        },
-        |s| {
-          (
-            s.default_browser()
-              .map(crate::backend::AnyBrowser::version)
-              .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
-            s.default_browser()
-              .map_or_else(|| s.backend_kind(), crate::backend::AnyBrowser::kind),
-            s.headless,
-            Arc::clone(&s.context_options),
-            Arc::clone(&s.record_video),
-            Arc::clone(&s.connected),
-          )
-        },
-      );
-    let isolated_contexts = state.try_read().ok().is_none_or(|state| {
-      state
-        .default_browser()
-        .is_none_or(crate::backend::AnyBrowser::supports_isolated_contexts)
-    });
-    let context_defaults = state
-      .try_read()
-      .ok()
-      .map(|state| Arc::clone(&state.context_defaults))
-      .unwrap_or_default();
-    let factory = state.try_read().ok().map_or_else(
-      || crate::browser_type::BrowserType::for_backend(backend_kind),
-      |state| crate::browser_type::BrowserType::launched(state.browser_kind(), backend_kind),
+    let (
+      version,
+      backend_kind,
+      headless,
+      context_options,
+      record_video,
+      connected,
+      isolated_contexts,
+      context_defaults,
+      context_registries,
+      factory,
+    ) = state.try_read().ok().map_or_else(
+      || {
+        (
+          Arc::from("Unknown"),
+          crate::backend::BackendKind::CdpPipe,
+          true,
+          Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+          Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+          Arc::new(std::sync::atomic::AtomicBool::new(false)),
+          true,
+          Arc::default(),
+          None,
+          crate::browser_type::BrowserType::for_backend(crate::backend::BackendKind::CdpPipe),
+        )
+      },
+      |s| {
+        let kind = s
+          .default_browser()
+          .map_or_else(|| s.backend_kind(), crate::backend::AnyBrowser::kind);
+        (
+          s.default_browser()
+            .map(crate::backend::AnyBrowser::version)
+            .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
+          kind,
+          s.headless,
+          Arc::clone(&s.context_options),
+          Arc::clone(&s.record_video),
+          Arc::clone(&s.connected),
+          s.default_browser()
+            .is_none_or(crate::backend::AnyBrowser::supports_isolated_contexts),
+          Arc::clone(&s.context_defaults),
+          Some(s.context_registries()),
+          crate::browser_type::BrowserType::launched(s.browser_kind(), kind),
+        )
+      },
     );
-    Self {
+    Self::from_inner(BrowserInner {
       isolated_contexts,
       state,
       version,
@@ -369,14 +429,11 @@ impl Browser {
       context_options,
       record_video,
       context_defaults,
+      context_registries,
       connected,
       context_names: default_context_registry(),
-      events: crate::events::BrowserEventEmitter::new(),
-      disconnected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       factory,
-      inherited_context_options: None,
-      context_owner: None,
-    }
+    })
   }
 
   /// Create a new isolated browser context.
@@ -479,7 +536,7 @@ impl Browser {
   /// reports every context it has ever created from `contexts()`, forever,
   /// and holds the name strings for the life of the process.
   pub(crate) fn unregister_context(&self, name: &str) {
-    let mut names = match self.context_names.lock() {
+    let mut names = match self.inner.context_names.lock() {
       Ok(g) => g,
       Err(poisoned) => poisoned.into_inner(),
     };
@@ -491,7 +548,7 @@ impl Browser {
   /// for a context that is already listed.
   pub fn publish_context(&self, ctx: &ContextRef) {
     {
-      let mut names = match self.context_names.lock() {
+      let mut names = match self.inner.context_names.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
       };
@@ -510,13 +567,13 @@ impl Browser {
   ) -> ContextRef {
     static CTX_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = CTX_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let name = if &*self.instance == "default" {
+    let name = if &*self.inner.instance == "default" {
       format!("context-{id}")
     } else {
-      format!("{}:context-{id}", self.instance)
+      format!("{}:context-{id}", self.inner.instance)
     };
     {
-      let mut names = match self.context_names.lock() {
+      let mut names = match self.inner.context_names.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
       };
@@ -526,15 +583,9 @@ impl Browser {
         owner: self.context_owner,
       });
     }
-    // Always await `new_async` rather than sync `ContextRef::new`: under
-    // parallel workers sharing one browser, `state.try_read()` fails whenever
-    // another worker holds or queues `state.write()`, which handed back a
-    // detached emitter that never received page->context events (e.g.
-    // `context.waitForEvent('framenavigated')`).
-    let ctx = ContextRef::new_async(Arc::clone(&self.state), name)
-      .await
-      .with_browser(self.clone());
+    let ctx = self.context_ref_async(name).await;
     let defaults_apply = self
+      .inner
       .context_defaults
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -563,13 +614,13 @@ impl Browser {
     // every new_page without waiting for that registry to be
     // retired.
     if let Some(ref rv) = opts.record_video {
-      let mut rv_map = match self.record_video.lock() {
+      let mut rv_map = match self.inner.record_video.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
       };
       rv_map.insert(composite.clone(), rv.clone());
     }
-    let mut map = match self.context_options.lock() {
+    let mut map = match self.inner.context_options.lock() {
       Ok(g) => g,
       Err(poisoned) => poisoned.into_inner(),
     };
@@ -603,14 +654,14 @@ impl Browser {
   ) -> crate::error::Result<(ContextRef, Arc<crate::Page>)> {
     let previous = self.default_context();
     Box::pin(crate::state::BrowserState::ensure_instance_shared(
-      &self.state,
+      &self.inner.state,
       &previous.key.instance,
     ))
     .await?;
     previous.flush_har_updates().await?;
     previous.release_registrations().await?;
     let (visited, old_pages) = {
-      let mut state = self.state.write().await;
+      let mut state = self.inner.state.write().await;
       let visited = state.visited_origins.of(&previous.key.to_composite());
       (visited, state.reset_context(previous.name()).await)
     };
@@ -780,19 +831,19 @@ impl Browser {
   /// Get the default browser context.
   #[must_use]
   pub fn default_context(&self) -> ContextRef {
-    let name = if &*self.instance == "default" {
+    let name = if &*self.inner.instance == "default" {
       "default".to_owned()
     } else {
-      format!("{}:default", self.instance)
+      format!("{}:default", self.inner.instance)
     };
-    ContextRef::new(Arc::clone(&self.state), name).with_browser(self.clone())
+    self.context_ref_sync(name)
   }
 
   /// Whether the connected browser supports isolated contexts.
   /// Android Chrome exposes only its device context through CDP.
   #[must_use]
   pub fn supports_isolated_contexts(&self) -> bool {
-    self.isolated_contexts
+    self.inner.isolated_contexts
   }
 
   /// Have closed contexts kept for reuse instead of disposed.
@@ -806,7 +857,7 @@ impl Browser {
   /// as before, since neither can be taken back; so is every context on
   /// the other backends.
   pub async fn set_context_recycling(&self, enabled: bool) {
-    self.state.write().await.closed_contexts = if enabled {
+    self.inner.state.write().await.closed_contexts = if enabled {
       crate::state::ClosedContexts::Recycled
     } else {
       crate::state::ClosedContexts::Disposed
@@ -816,14 +867,14 @@ impl Browser {
   /// Backend kind negotiated by the connected instance.
   #[must_use]
   pub fn backend_kind(&self) -> crate::backend::BackendKind {
-    self.backend_kind
+    self.inner.backend_kind
   }
 
   /// Whether the browser was launched in headless mode. Cached at
   /// construction; the launch plan never flips this after the fact.
   #[must_use]
   pub fn is_headless(&self) -> bool {
-    self.headless
+    self.inner.headless
   }
 
   /// Shorthand: create a new page in the default context.
@@ -917,7 +968,7 @@ impl Browser {
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
     if let Some(owner) = self.context_owner {
       let owned_names: Vec<String> = {
-        let names = match self.context_names.lock() {
+        let names = match self.inner.context_names.lock() {
           Ok(g) => g,
           Err(poisoned) => poisoned.into_inner(),
         };
@@ -929,11 +980,7 @@ impl Browser {
       };
       let mut owned = Vec::with_capacity(owned_names.len());
       for name in owned_names {
-        owned.push(
-          ContextRef::new_async(Arc::clone(&self.state), name)
-            .await
-            .with_browser(self.clone()),
-        );
+        owned.push(self.context_ref_async(name).await);
       }
       for ctx in &owned {
         let _ = ctx.close().await;
@@ -946,7 +993,7 @@ impl Browser {
     }
     let contexts = self.live_contexts().await;
     let first_close = !self.disconnected.swap(true, std::sync::atomic::Ordering::SeqCst);
-    let mut state = self.state.write().await;
+    let mut state = self.inner.state.write().await;
     if let Some(reason) = opts.and_then(|o| o.reason) {
       state.set_close_reason(reason);
     }
@@ -961,7 +1008,7 @@ impl Browser {
   /// Access the internal state (for MCP server integration).
   #[must_use]
   pub fn state(&self) -> &Arc<RwLock<BrowserState>> {
-    &self.state
+    &self.inner.state
   }
 
   /// List all browser contexts. Sync — mirrors Playwright's
@@ -970,7 +1017,7 @@ impl Browser {
   /// per-page round-trip.
   #[must_use]
   pub fn contexts(&self) -> Vec<ContextRef> {
-    let names = match self.context_names.lock() {
+    let names = match self.inner.context_names.lock() {
       Ok(g) => g,
       Err(poisoned) => poisoned.into_inner(),
     };
@@ -979,12 +1026,13 @@ impl Browser {
       .filter(|entry| {
         entry.listed && (self.context_owner.is_none() || entry.owner == self.context_owner || entry.name == "default")
       })
-      .map(|entry| ContextRef::new(Arc::clone(&self.state), entry.name.clone()).with_browser(self.clone()))
+      .map(|entry| self.context_ref_sync(entry.name.clone()))
       .collect()
   }
 
   pub(crate) fn owns_context(&self, name: &str) -> bool {
     self
+      .inner
       .context_names
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1006,20 +1054,20 @@ impl Browser {
   /// complete before the `Browser` handle was constructed.
   #[must_use]
   pub fn version(&self) -> &str {
-    &self.version
+    &self.inner.version
   }
 
   /// Playwright: `browser.browserType(): BrowserType`.
   #[must_use]
   pub fn browser_type(&self) -> crate::browser_type::BrowserType {
-    self.factory
+    self.inner.factory
   }
 
   /// Whether the browser is connected. Sync — mirrors Playwright's
   /// `browser.isConnected(): boolean`.
   #[must_use]
   pub fn is_connected(&self) -> bool {
-    self.connected.load(std::sync::atomic::Ordering::Relaxed)
+    self.inner.connected.load(std::sync::atomic::Ordering::Relaxed)
       && !self.disconnected.load(std::sync::atomic::Ordering::SeqCst)
   }
 
@@ -1034,10 +1082,59 @@ impl Browser {
   /// an error if the browser is not launched, or the protocol error if
   /// the attach fails.
   pub async fn new_browser_cdp_session(&self) -> crate::error::Result<crate::cdp_session::CdpSession> {
-    let state = self.state.read().await;
+    let state = self.inner.state.read().await;
     let browser = state
-      .instance_browser(&self.instance)
+      .instance_browser(&self.inner.instance)
       .ok_or_else(|| crate::error::FerriError::backend("browser is not launched".to_string()))?;
     browser.new_browser_cdp_session().await
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn context_handles_share_registries_while_state_write_lock_is_held() {
+    let browser = Browser::from_state(BrowserState::with_plan(
+      crate::state::ConnectMode::Launch,
+      crate::options::LaunchPlan::default(),
+    ));
+    // Hold the BrowserState write lock the entire time: every context handle
+    // constructed through `Browser` must still resolve to the shared emitter
+    // without blocking on `RwLock<BrowserState>` or falling back to a detached
+    // transient emitter.
+    let guard = browser.state().write().await;
+
+    let default_ctx = browser.default_context();
+    let mut default_sub = default_ctx.events().subscribe();
+    let shared_default = guard.get_or_create_context_events("default:default");
+    shared_default.emit(crate::events::ContextEvent::Close(default_ctx.clone()));
+    assert!(matches!(
+      tokio::time::timeout(std::time::Duration::from_secs(1), default_sub.recv()).await,
+      Ok(Some(crate::events::ContextEvent::Close(_)))
+    ));
+
+    let created = browser.new_context().await.unwrap();
+    let composite = created.key.to_composite();
+    let mut created_sub = created.events().subscribe();
+    let listed = browser
+      .contexts()
+      .into_iter()
+      .find(|ctx| ctx.name() == created.name())
+      .expect("new_context must appear in browser.contexts()");
+    let mut listed_sub = listed.events().subscribe();
+
+    let shared_created = guard.get_or_create_context_events(&composite);
+    shared_created.emit(crate::events::ContextEvent::Close(created.clone()));
+    assert!(matches!(
+      tokio::time::timeout(std::time::Duration::from_secs(1), created_sub.recv()).await,
+      Ok(Some(crate::events::ContextEvent::Close(_)))
+    ));
+    assert!(matches!(
+      tokio::time::timeout(std::time::Duration::from_secs(1), listed_sub.recv()).await,
+      Ok(Some(crate::events::ContextEvent::Close(_)))
+    ));
+    drop(guard);
   }
 }

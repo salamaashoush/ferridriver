@@ -377,17 +377,25 @@ impl ContextRef {
   /// deterministically. Anywhere there is an `.await` to spend, spend it
   /// here instead of degrading.
   pub async fn new_async(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
-    let (key, events, closed, test_id_attribute, pages) = {
-      let s = state.read().await;
-      let key = s.session_key(&name);
-      (
-        key.clone(),
-        s.get_or_create_context_events(&key.to_composite()),
-        s.get_or_create_context_closed(&key.to_composite()),
-        s.get_or_create_context_test_id_attribute(&key.to_composite()),
-        s.context_pages.clone(),
-      )
-    };
+    let registries = state.read().await.context_registries();
+    Self::from_registries(state, name, &registries)
+  }
+
+  /// Construct a handle directly from [`crate::state::ContextRegistries`]
+  /// without touching `RwLock<BrowserState>`. Always binds to the real
+  /// shared emitter, closed flag, `testIdAttribute`, and page registry even
+  /// while another worker holds a state write lock.
+  pub(crate) fn from_registries(
+    state: Arc<RwLock<BrowserState>>,
+    name: String,
+    registries: &crate::state::ContextRegistries,
+  ) -> Self {
+    let key = registries.session_key(&name);
+    let composite = key.to_composite();
+    let events = registries.events(&composite);
+    let closed = registries.closed(&composite);
+    let test_id_attribute = registries.test_id_attribute(&composite);
+    let pages = registries.pages();
     let context = Self::from_parts(state, name, key, events, closed, test_id_attribute);
     let _ = context.pages.set(pages);
     context
