@@ -541,6 +541,9 @@ pub fn quickjs_arg_with_functions<'js>(
   // `locator.evaluate`. Walk once, retaining numeric wire sentinels.
   let mut walk = ArgWalk {
     ctx,
+    globals: ctx.globals(),
+    object_proto: CachedGlobal::Unchecked,
+    is_view_fn: CachedGlobal::Unchecked,
     alloc: ferridriver::protocol::SerializationContext::default(),
     handles: Vec::new(),
     mode: functions,
@@ -561,8 +564,19 @@ pub fn quickjs_arg_with_functions<'js>(
 /// that behaviour with an explicit bound instead of overflowing.
 const MAX_ARG_DEPTH: u32 = 512;
 
+enum CachedGlobal<T> {
+  Unchecked,
+  Missing,
+  Present(T),
+}
+
 struct ArgWalk<'a, 'js> {
   ctx: &'a Ctx<'js>,
+  globals: Object<'js>,
+  /// Cached `Object.prototype` for O(1) plain-object fast path in `rich_object`.
+  object_proto: CachedGlobal<Object<'js>>,
+  /// Cached `ArrayBuffer.isView` to guard the 11-entry `TYPED_ARRAYS` scan.
+  is_view_fn: CachedGlobal<Function<'js>>,
   alloc: ferridriver::protocol::SerializationContext,
   handles: Vec<ferridriver::protocol::HandleId>,
   mode: ArgFunctions,
@@ -574,6 +588,49 @@ struct ArgWalk<'a, 'js> {
 }
 
 impl<'js> ArgWalk<'_, 'js> {
+  fn object_proto(&mut self) -> rquickjs::Result<Option<Object<'js>>> {
+    match &self.object_proto {
+      CachedGlobal::Present(proto) => return Ok(Some(proto.clone())),
+      CachedGlobal::Missing => return Ok(None),
+      CachedGlobal::Unchecked => {},
+    }
+    let proto = self
+      .globals
+      .get::<_, Option<Object<'js>>>("Object")?
+      .map(|ctor| ctor.get::<_, Option<Object<'js>>>("prototype"))
+      .transpose()?
+      .flatten();
+    self.object_proto = match &proto {
+      Some(p) => CachedGlobal::Present(p.clone()),
+      None => CachedGlobal::Missing,
+    };
+    Ok(proto)
+  }
+
+  fn is_array_buffer_view(&mut self, v: &Value<'js>) -> rquickjs::Result<bool> {
+    let is_view = match &self.is_view_fn {
+      CachedGlobal::Present(f) => Some(f.clone()),
+      CachedGlobal::Missing => None,
+      CachedGlobal::Unchecked => {
+        let f = self
+          .globals
+          .get::<_, Option<Object<'js>>>("ArrayBuffer")?
+          .map(|ctor| ctor.get::<_, Option<Function<'js>>>("isView"))
+          .transpose()?
+          .flatten();
+        self.is_view_fn = match &f {
+          Some(func) => CachedGlobal::Present(func.clone()),
+          None => CachedGlobal::Missing,
+        };
+        f
+      },
+    };
+    match is_view {
+      Some(f) => f.call((v.clone(),)),
+      None => Ok(true),
+    }
+  }
+
   /// Walk a JS value into a wire [`ferridriver::protocol::SerializedValue`].
   fn serialize(&mut self, v: &Value<'js>, depth: u32) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
     use ferridriver::protocol::{ArgPathStep, SerializedValue, SpecialValue};
@@ -612,13 +669,10 @@ impl<'js> ArgWalk<'_, 'js> {
     if let Some(f) = v.as_function() {
       return self.function(v, f.clone());
     }
-    if let Some(rich) = self.rich_object(v)? {
-      return Ok(rich);
-    }
-    if let Some((_, id)) = self.visited.iter().find(|(seen, _)| seen == v) {
-      return Ok(SerializedValue::Reference(*id));
-    }
     if let Some(arr) = v.as_array() {
+      if let Some((_, id)) = self.visited.iter().find(|(seen, _)| seen == v) {
+        return Ok(SerializedValue::Reference(*id));
+      }
       let id = self.alloc.alloc_id();
       self.visited.push((v.clone(), id));
       let mut items = Vec::with_capacity(arr.len());
@@ -631,6 +685,12 @@ impl<'js> ArgWalk<'_, 'js> {
         self.path.pop();
       }
       return Ok(SerializedValue::Array { id, items });
+    }
+    if let Some(rich) = self.rich_object(v)? {
+      return Ok(rich);
+    }
+    if let Some((_, id)) = self.visited.iter().find(|(seen, _)| seen == v) {
+      return Ok(SerializedValue::Reference(*id));
     }
     if let Some(obj) = v.as_object() {
       // Plain object: own enumerable string keys. An undefined or
@@ -663,7 +723,7 @@ impl<'js> ArgWalk<'_, 'js> {
   /// Upstream's `serializeValue` rich types: an `Error`, `Date`, `URL`,
   /// `RegExp`, `ArrayBuffer` or typed array crosses as itself rather than
   /// as its own keys.
-  fn rich_object(&self, v: &Value<'js>) -> rquickjs::Result<Option<ferridriver::protocol::SerializedValue>> {
+  fn rich_object(&mut self, v: &Value<'js>) -> rquickjs::Result<Option<ferridriver::protocol::SerializedValue>> {
     use ferridriver::protocol::{ArrayBufferValue, ErrorValue, RegExpValue, SerializedValue, TypedArrayValue};
 
     let Some(obj) = v.as_object() else {
@@ -684,8 +744,26 @@ impl<'js> ArgWalk<'_, 'js> {
         s: text("stack")?,
       })));
     }
-    let globals = self.ctx.globals();
-    let is = |class: &str| -> rquickjs::Result<bool> {
+    if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
+      return Ok(Some(SerializedValue::ArrayBuffer(ArrayBufferValue {
+        b: array_buffer_bytes(&buffer, 0, usize::MAX).unwrap_or_default(),
+      })));
+    }
+    // Plain objects (`{}` and `Object.create(null)`) have `Object.prototype`
+    // or `null` as their direct prototype, so they cannot be `instanceof` any
+    // rich built-in (`Date`, `URL`, `RegExp`, or any `TypedArray`). Skipping
+    // the 14 global lookups + `instanceof` checks here keeps plain-object
+    // walks fast.
+    let proto = obj.get_prototype();
+    if proto.is_none() {
+      return Ok(None);
+    }
+    if let Some(object_proto) = self.object_proto()?
+      && proto.as_ref() == Some(&object_proto)
+    {
+      return Ok(None);
+    }
+    let is = |globals: &Object<'js>, class: &str| -> rquickjs::Result<bool> {
       Ok(match globals.get::<_, Option<rquickjs::Object<'js>>>(class)? {
         Some(constructor) => obj.is_instance_of(&constructor),
         None => false,
@@ -696,33 +774,30 @@ impl<'js> ArgWalk<'_, 'js> {
       let json: Option<rquickjs::convert::Coerced<String>> = method.call((rquickjs::function::This(obj.clone()),))?;
       Ok(json.map(|s| s.0).unwrap_or_default())
     };
-    if is("Date")? {
+    if is(&self.globals, "Date")? {
       return Ok(Some(SerializedValue::Date(to_json()?)));
     }
-    if is("URL")? {
+    if is(&self.globals, "URL")? {
       return Ok(Some(SerializedValue::Url(to_json()?)));
     }
-    if is("RegExp")? {
+    if is(&self.globals, "RegExp")? {
       return Ok(Some(SerializedValue::RegExp(RegExpValue {
         p: text("source")?,
         f: text("flags")?,
       })));
     }
-    if let Some(buffer) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
-      return Ok(Some(SerializedValue::ArrayBuffer(ArrayBufferValue {
-        b: array_buffer_bytes(&buffer, 0, usize::MAX).unwrap_or_default(),
-      })));
-    }
-    for (class, k) in TYPED_ARRAYS {
-      if !is(class)? {
-        continue;
+    if self.is_array_buffer_view(v)? {
+      for (class, k) in TYPED_ARRAYS {
+        if !is(&self.globals, class)? {
+          continue;
+        }
+        // A view covers `byteLength` bytes of its buffer from `byteOffset`,
+        // which is the whole of it only when nothing sliced it.
+        let buffer: rquickjs::ArrayBuffer<'js> = obj.get("buffer")?;
+        let (offset, length): (usize, usize) = (obj.get("byteOffset")?, obj.get("byteLength")?);
+        let b = buffer_bytes(&buffer, offset, length);
+        return Ok(Some(SerializedValue::TypedArray(TypedArrayValue { b, k })));
       }
-      // A view covers `byteLength` bytes of its buffer from `byteOffset`,
-      // which is the whole of it only when nothing sliced it.
-      let buffer: rquickjs::ArrayBuffer<'js> = obj.get("buffer")?;
-      let (offset, length): (usize, usize) = (obj.get("byteOffset")?, obj.get("byteLength")?);
-      let b = buffer_bytes(&buffer, offset, length);
-      return Ok(Some(SerializedValue::TypedArray(TypedArrayValue { b, k })));
     }
     Ok(None)
   }
@@ -831,37 +906,25 @@ fn rehydrate<'js>(
     SerializedValue::Special(SpecialValue::Infinity) => Ok(Value::new_number(ctx.clone(), f64::INFINITY)),
     SerializedValue::Special(SpecialValue::NegInfinity) => Ok(Value::new_number(ctx.clone(), f64::NEG_INFINITY)),
     SerializedValue::Special(SpecialValue::NegZero) => Ok(Value::new_float(ctx.clone(), -0.0)),
-    SerializedValue::Date(iso) => construct_global(ctx, "Date", (iso.clone(),)),
-    SerializedValue::Url(url) => construct_global(ctx, "URL", (url.clone(),)),
+    SerializedValue::Date(iso) => construct_global(ctx, "Date", (iso.as_str(),)),
+    SerializedValue::Url(url) => construct_global(ctx, "URL", (url.as_str(),)),
     SerializedValue::BigInt(s) => {
       // BigInt(value) — must be called as function, not constructor.
       let func: Function<'js> = ctx.globals().get("BigInt")?;
-      func.call((s.clone(),))
+      func.call((s.as_str(),))
     },
-    SerializedValue::RegExp(RegExpValue { p, f }) => construct_global(ctx, "RegExp", (p.clone(), f.clone())),
+    SerializedValue::RegExp(RegExpValue { p, f }) => construct_global(ctx, "RegExp", (p.as_str(), f.as_str())),
     SerializedValue::Error(ErrorValue { m, n, s }) => {
-      let err: Value<'js> = construct_global(ctx, "Error", (m.clone(),))?;
+      let err: Value<'js> = construct_global(ctx, "Error", (m.as_str(),))?;
       let obj = err
         .as_object()
         .ok_or_else(|| type_error(ctx, "cannot convert the value: not an object"))?;
-      obj.set("name", n.clone())?;
-      obj.set("stack", s.clone())?;
+      obj.set("name", n.as_str())?;
+      obj.set("stack", s.as_str())?;
       Ok(err)
     },
     SerializedValue::TypedArray(ta) => rehydrate_typed_array(ctx, ta.k, &ta.b),
-    SerializedValue::ArrayBuffer(ab) => {
-      let len =
-        u32::try_from(ab.b.len()).map_err(|_| type_error(ctx, "cannot convert the value: length exceeds u32"))?;
-      let buf: Value<'js> = construct_global(ctx, "ArrayBuffer", (len,))?;
-      let view: Value<'js> = construct_global(ctx, "Uint8Array", (buf.clone(),))?;
-      let view_obj = view
-        .as_object()
-        .ok_or_else(|| type_error(ctx, "cannot convert the value: view not an object"))?;
-      for (i, byte) in ab.b.iter().enumerate() {
-        view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
-      }
-      Ok(buf)
-    },
+    SerializedValue::ArrayBuffer(ab) => Ok(rquickjs::ArrayBuffer::new_copy(ctx.clone(), &ab.b)?.into_value()),
     SerializedValue::Array { id, items } => {
       // `Array::new` already owns one `Ctx` dup (stored inside `arr`).
       // The back-ref map needs a `Value` handle to the same array while
@@ -924,18 +987,9 @@ fn rehydrate_typed_array<'js>(
   kind: ferridriver::protocol::TypedArrayKind,
   bytes: &[u8],
 ) -> rquickjs::Result<Value<'js>> {
-  // Build the backing ArrayBuffer first (as bytes), then construct the
-  // typed-array view via `new <Kind>Array(buffer)` so each variant
-  // reuses one code path.
-  let len = u32::try_from(bytes.len()).map_err(|_| type_error(ctx, "cannot convert the value: length exceeds u32"))?;
-  let ab: Value<'js> = construct_global(ctx, "ArrayBuffer", (len,))?;
-  let view: Value<'js> = construct_global(ctx, "Uint8Array", (ab.clone(),))?;
-  let view_obj = view
-    .as_object()
-    .ok_or_else(|| type_error(ctx, "cannot convert the value: view not an object"))?;
-  for (i, byte) in bytes.iter().enumerate() {
-    view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
-  }
+  // Copy the bytes into a QuickJS ArrayBuffer in one memcpy, then wrap it
+  // in `new <Kind>Array(buffer)` so every typed-array variant shares one path.
+  let ab = rquickjs::ArrayBuffer::new_copy(ctx.clone(), bytes)?.into_value();
   let ctor_name = TYPED_ARRAYS
     .iter()
     .find(|(_, known)| *known == kind)
