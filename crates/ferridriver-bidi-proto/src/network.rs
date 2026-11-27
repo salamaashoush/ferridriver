@@ -128,6 +128,8 @@ pub struct ProvideResponse<'a> {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub body: Option<Value>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub cookies: Option<&'a [Value]>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub headers: Option<&'a [Value]>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub reason_phrase: Option<&'a str>,

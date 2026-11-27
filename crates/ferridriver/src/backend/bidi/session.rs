@@ -47,12 +47,44 @@ pub(crate) struct BidiSession {
   /// Whether scripts can run in a sandbox realm; cleared once the browser
   /// shows it has none.
   sandboxes: Arc<std::sync::atomic::AtomicBool>,
+  /// Whether `network.addDataCollector` accepted `"request"` bodies in
+  /// addition to `"response"` bodies.
+  request_data_collector: bool,
   /// What each user context hands the pages the browser opens in it.
   pub(super) scopes: Arc<super::scope::ContextScopes>,
 }
 
 // WebKit accepts module subscriptions without expanding them (WebKit bug
 // 291371), so lifecycle subscriptions must name their concrete events.
+
+/// Interpret the startup `network.addDataCollector(["request", "response"])`
+/// reply, falling back to `["response"]` on older `BiDi` servers that reject
+/// `"request"` with a protocol error.
+async fn resolve_data_collector(transport: &BidiTransport, initial: Option<Result<serde_json::Value>>) -> Result<bool> {
+  match initial {
+    Some(Ok(_)) => Ok(true),
+    Some(Err(FerriError::Unsupported(reason))) => {
+      tracing::debug!(%reason, "optional BiDi network data collector unavailable");
+      Ok(false)
+    },
+    Some(Err(FerriError::Protocol { .. })) => {
+      match transport
+        .send_command(
+          "network.addDataCollector",
+          json!({"dataTypes": ["response"], "maxEncodedDataSize": 20_000_000}),
+        )
+        .await
+      {
+        Ok(_) => {},
+        Err(FerriError::Unsupported(reason)) => tracing::debug!(%reason, "optional BiDi capability unavailable"),
+        Err(error) => return Err(error),
+      }
+      Ok(false)
+    },
+    Some(Err(error)) => Err(error),
+    None => Ok(false),
+  }
+}
 
 impl BidiSession {
   /// Connect and open a session whose default context uses `proxy`.
@@ -169,7 +201,7 @@ impl BidiSession {
       Box::pin(transport.send_command("session.subscribe", json!({"events": events}))),
       Box::pin(transport.send_command(
         "network.addDataCollector",
-        json!({"dataTypes": ["response"], "maxEncodedDataSize": 20_000_000}),
+        json!({"dataTypes": ["request", "response"], "maxEncodedDataSize": 20_000_000}),
       )),
       Box::pin(transport.send_command("network.addIntercept", json!({"phases": ["authRequired"]}))),
       Box::pin(transport.send_command("browser.getUserContexts", json!({}))),
@@ -178,8 +210,9 @@ impl BidiSession {
     if let Some(sub_res) = results.next() {
       sub_res?;
     }
-    for optional in results.by_ref().take(2) {
-      match optional {
+    let request_data_collector = resolve_data_collector(&transport, results.next()).await?;
+    if let Some(auth_res) = results.next() {
+      match auth_res {
         Ok(_) => {},
         Err(FerriError::Unsupported(reason)) => tracing::debug!(%reason, "optional BiDi capability unavailable"),
         Err(error) => return Err(error),
@@ -206,8 +239,34 @@ impl BidiSession {
       user_contexts,
       unknown_commands: Arc::default(),
       sandboxes: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+      request_data_collector,
       scopes: Arc::default(),
     })
+  }
+
+  /// Fetch collected request body bytes via `network.getData({ dataType: "request" })`
+  /// when the session's data collector supports request payloads.
+  pub(crate) async fn get_request_body(&self, request_id: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    if !self.request_data_collector {
+      return None;
+    }
+    let resp = self
+      .transport
+      .send(&ferridriver_bidi_proto::network::GetData {
+        data_type: "request",
+        request: request_id,
+        collector: None,
+        disown: None,
+      })
+      .await
+      .ok()?;
+    let value = resp.bytes.get("value").and_then(serde_json::Value::as_str)?;
+    match resp.bytes.get("type").and_then(serde_json::Value::as_str) {
+      Some("string") => Some(value.as_bytes().to_vec()),
+      Some("base64") => base64::engine::general_purpose::STANDARD.decode(value).ok(),
+      _ => None,
+    }
   }
 
   pub(crate) async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {

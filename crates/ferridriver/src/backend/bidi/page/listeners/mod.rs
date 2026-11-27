@@ -674,4 +674,4 @@ pub(super) use route_actions::{
   color_scheme_feature, download_behavior_params, execute_bidi_route_action, parse_bidi_cookie,
 };
 use tracker::BidiNetworkTracker;
-pub(super) use tracker::{parse_bidi_headers, permissions_origin};
+pub(super) use tracker::{parse_bidi_headers, permissions_origin, resource_type_from_bidi};

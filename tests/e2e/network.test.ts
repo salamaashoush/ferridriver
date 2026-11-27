@@ -182,7 +182,7 @@ describe('network', () => {
     expect(headerValue?.includes('application/json')).toBe(true);
   });
 
-  test('network_post_data', async ({ page, browserName }) => {
+  test('network_post_data', async ({ page }) => {
     await page.goto('/fx/landed');
     const wait = page.waitForRequest('**/fx/echo', { timeout: 10000 });
     await page.evaluate(
@@ -192,18 +192,12 @@ describe('network', () => {
     const data = req.postData();
     const parsed = req.postDataJSON() as { ping: string; n: number } | null;
     expect(req.method()).toBe('POST');
-    if (browserName === 'firefox') {
-      // BiDi's network.beforeRequestSent.request.body is null for fetch
-      // with a body in current Firefox builds — postData stays null.
-      expect(data == null || data === '').toBe(true);
-      return;
-    }
     expect(data?.includes('"ping":"pong"')).toBe(true);
     expect(parsed?.ping).toBe('pong');
     expect(parsed?.n).toBe(7);
   });
 
-  test('network_post_data_buffer', async ({ page, browserName }) => {
+  test('network_post_data_buffer', async ({ page }) => {
     // postDataBuffer() returns the raw POST body bytes as a Uint8Array.
     await page.goto('/fx/landed');
     const wait = page.waitForRequest('**/fx/echo', { timeout: 10000 });
@@ -212,17 +206,13 @@ describe('network', () => {
     );
     const req = await wait;
     const buf = req.postDataBuffer();
-    if (browserName === 'firefox') {
-      expect(buf).toBeNull();
-      return;
-    }
     expect(buf).not.toBeNull();
     expect(buf!.length).toBeGreaterThan(0);
     const decoded = new TextDecoder().decode(buf!);
     expect(decoded.includes('"buf":"yes"')).toBe(true);
   });
 
-  test('network_headers', async ({ page, browserName }) => {
+  test('network_headers', async ({ page }) => {
     await page.goto('/fx/landed');
     const cookieWait = page.waitForResponse('**/fx/multi-cookie', { timeout: 10000 });
     const uaWait = page.waitForRequest('**/fx/echo-headers', { timeout: 10000 });
@@ -234,31 +224,26 @@ describe('network', () => {
     const uaName = Object.keys(uaHeaders).find((k) => k.toLowerCase() === 'user-agent');
     // Browser-added request headers surface on every backend.
     expect(uaName != null && uaHeaders[uaName!].length > 0).toBe(true);
-    if (browserName === 'chromium') {
-      // CDP preserves duplicate header entries via
-      // responseReceivedExtraInfo.
-      const cookieEntries = (await cookieResp.headersArray()).filter(
-        (h) => h.name.toLowerCase() === 'set-cookie',
-      );
-      expect(cookieEntries.length).toBe(2);
-    }
+    // Duplicate Set-Cookie headers survive in headersArray() across all 4 backends.
+    const cookieEntries = (await cookieResp.headersArray()).filter(
+      (h) => h.name.toLowerCase() === 'set-cookie',
+    );
+    expect(cookieEntries.length).toBe(2);
     const joined = await cookieResp.headerValue('set-cookie');
     expect(joined?.includes('a=1')).toBe(true);
     expect(joined?.includes('b=2')).toBe(true);
   });
 
-  test('network_http_version', async ({ page, browserName }) => {
-    // httpVersion() always resolves to a string; CDP reports the real
-    // protocol version, BiDi surfaces ResponseData.protocol.
+  test('network_http_version', async ({ page }) => {
+    // httpVersion() reports the wire HTTP protocol on all 4 backends
+    // (CDP response.protocol, BiDi ResponseData.protocol, WebKit loadingFinished metrics.protocol).
     await page.goto('/fx/landed');
     const wait = page.waitForResponse('**/api/users', { timeout: 10000 });
     await page.evaluate("fetch('/fx/api/users').then(r => r.text())");
     const resp = await wait;
     const hv = await resp.httpVersion();
     expect(typeof hv).toBe('string');
-    if (browserName === 'chromium' || browserName === 'firefox') {
-      expect(hv.toLowerCase().includes('http')).toBe(true);
-    }
+    expect(hv.toLowerCase().includes('http')).toBe(true);
   });
 
   test('route_fallback_applies_overrides', async ({ page }) => {

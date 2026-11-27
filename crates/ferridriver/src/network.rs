@@ -1038,8 +1038,14 @@ impl Response {
   /// HTTP protocol version (e.g. `http/1.1`), or `None` when the
   /// backend did not report one. Playwright: `response.httpVersion():
   /// Promise<string>` (`client/network.ts`) — async to mirror the
-  /// channel round-trip Playwright performs.
+  /// channel round-trip Playwright performs. Waits for the response to
+  /// finish when the version arrives on loading-finished metrics (`WebKit`).
   pub async fn http_version(&self) -> Option<String> {
+    let version = self.inner.state.read().await.http_version.clone();
+    if version.is_some() {
+      return version;
+    }
+    let _ = self.finished().await;
     self.inner.state.read().await.http_version.clone()
   }
 
@@ -1051,6 +1057,22 @@ impl Response {
 
   pub async fn set_server_addr(&self, addr: RemoteAddr) {
     self.inner.state.write().await.remote_addr = Some(addr);
+  }
+
+  pub async fn set_http_version(&self, protocol: String) {
+    if !protocol.is_empty() {
+      self.inner.state.write().await.http_version = Some(protocol);
+    }
+  }
+
+  pub async fn set_security_protocol(&self, protocol: String) {
+    if protocol.is_empty() {
+      return;
+    }
+    let mut state = self.inner.state.write().await;
+    if let Some(details) = state.security_details.as_mut() {
+      details.protocol = Some(protocol);
+    }
   }
 
   pub async fn finish_success(&self) {
