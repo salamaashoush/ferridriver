@@ -36,8 +36,13 @@ impl BrowserJs {
   }
 }
 
-#[rquickjs::methods]
-impl BrowserJs {
+crate::bindings::macros::qjs_impl! {
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands methods their Ctx and JS arguments by value"
+  )]
+  impl BrowserJs {
+    @mixin event_emitter();
   /// Playwright: `browser.newContext(options?)` —
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:9851`.
   /// Accepts the full `BrowserContextOptions` bag via the
@@ -106,166 +111,6 @@ impl BrowserJs {
 
   // ── Event emitter (Playwright parity) ────────────────────────────────
 
-  /// `browser.on('context', listener)` / `browser.on('disconnected',
-  /// listener)`. Returns the browser so registrations chain, as
-  /// Playwright's do.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "on")]
-  pub fn on<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this
-      .0
-      .borrow()
-      .register_listener(&ctx, &event, listener, false, false)?;
-    Ok(this.0)
-  }
-
-  /// Node's `addListener`, an alias of [`Self::on`].
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "addListener")]
-  pub fn add_listener<'js>(
-    this: This<Class<'js, Self>>,
-    ctx: Ctx<'js>,
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    Self::on(this, ctx, event, listener)
-  }
-
-  /// `browser.once(event, listener)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "once")]
-  pub fn once<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().register_listener(&ctx, &event, listener, true, false)?;
-    Ok(this.0)
-  }
-
-  /// Node's `prependListener`.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "prependListener")]
-  pub fn prepend_listener<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().register_listener(&ctx, &event, listener, false, true)?;
-    Ok(this.0)
-  }
-
-  /// Node's `prependOnceListener`.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "prependOnceListener")]
-  pub fn prepend_once_listener<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().register_listener(&ctx, &event, listener, true, true)?;
-    Ok(this.0)
-  }
-
-  /// `browser.off(event, listener)` — removal by function identity;
-  /// `off(event)` alone drops every listener for that event.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "off")]
-  pub fn off<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    listener: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().off_impl(&ctx, &event, listener.0.as_ref())?;
-    Ok(this.0)
-  }
-
-  /// Node's `removeListener`, an alias of [`Self::off`].
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "removeListener")]
-  pub fn remove_listener<'js>(
-    this: This<Class<'js, Self>>,
-    ctx: Ctx<'js>,
-    event: String,
-    listener: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    Self::off(this, ctx, event, listener)
-  }
-
   /// `browser.removeAllListeners(type?)`.
   ///
   /// # Errors
@@ -274,15 +119,7 @@ impl BrowserJs {
   #[qjs(rename = "removeAllListeners")]
   pub fn remove_all_listeners<'js>(
     this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     event: Opt<String>,
   ) -> rquickjs::Result<Class<'js, Self>> {
     {
@@ -312,19 +149,7 @@ impl BrowserJs {
   ///
   /// Throws an `Error` when the browser's listener registry is unavailable.
   #[qjs(rename = "listeners")]
-  pub fn listeners<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-  ) -> rquickjs::Result<Vec<Value<'js>>> {
+  pub fn listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
     let saved = with_browser_callbacks(&ctx, |r| {
       r.listeners
         .iter()
@@ -339,56 +164,6 @@ impl BrowserJs {
       }
     }
     Ok(out)
-  }
-
-  /// Node's `rawListeners(type)`; see the page form.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the browser's listener registry is unavailable.
-  #[qjs(rename = "rawListeners")]
-  pub fn raw_listeners<'js>(&self, ctx: Ctx<'js>, event: String) -> rquickjs::Result<Vec<Value<'js>>> {
-    self.listeners(ctx, event)
-  }
-
-  /// Node's `listenerCount(type)`.
-  #[qjs(rename = "listenerCount")]
-  #[must_use]
-  pub fn listener_count(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-  ) -> f64 {
-    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
-  }
-
-  /// Node's `eventNames()`.
-  #[qjs(rename = "eventNames")]
-  #[must_use]
-  pub fn event_names(&self) -> Vec<String> {
-    self.inner.event_names()
-  }
-
-  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
-  #[qjs(rename = "setMaxListeners")]
-  #[must_use]
-  pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    this
-      .0
-      .borrow()
-      .inner
-      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
-    this.0
-  }
-
-  /// Node's `getMaxListeners()`.
-  #[qjs(rename = "getMaxListeners")]
-  #[must_use]
-  pub fn get_max_listeners(&self) -> f64 {
-    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
   }
 
   /// Playwright: `browser.waitForEvent(event, options?)`. Supports
@@ -547,6 +322,7 @@ impl BrowserJs {
       .map_err(|e| crate::bindings::convert::throw_named(&ctx, "Error", e.to_string()))?;
     Ok(())
   }
+}
 }
 
 /// JS-side shape for [`BrowserJs::bind`]'s option bag.

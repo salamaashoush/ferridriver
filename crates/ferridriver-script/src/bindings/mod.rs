@@ -48,6 +48,7 @@ pub(crate) mod identity;
 pub mod js_handle;
 pub mod keyboard;
 pub mod locator;
+mod macros;
 pub mod mouse;
 pub mod native_modules;
 pub mod net_policy;

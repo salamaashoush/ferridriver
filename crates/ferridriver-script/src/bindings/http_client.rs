@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use either::Either;
-use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, NetPolicy, RequestOptions};
+use ferridriver::http_client::{HttpClient, HttpResponse, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::promise::Promised;
 use rquickjs::{Class, Ctx, JsLifetime, Value, class::Trace};
@@ -83,37 +83,6 @@ impl JsRequestOptions {
   }
 }
 
-/// Layer explicit `options` over a `Request`-derived base: anything the
-/// caller set wins, the rest falls through to the request's own values.
-fn merge_over(base: Option<RequestOptions>, options: Option<RequestOptions>) -> Option<RequestOptions> {
-  let (base, options) = match (base, options) {
-    (Some(base), Some(options)) => (base, options),
-    (base, options) => return base.or(options),
-  };
-  Some(RequestOptions {
-    method: options.method.or(base.method),
-    headers: match (options.headers, base.headers) {
-      (Some(explicit), Some(inherited)) => {
-        // Explicit headers win per name; the request's others survive.
-        let mut merged = explicit;
-        for (name, value) in inherited {
-          if !merged.iter().any(|(k, _)| k.eq_ignore_ascii_case(&name)) {
-            merged.push((name, value));
-          }
-        }
-        Some(merged)
-      },
-      (explicit, inherited) => explicit.or(inherited),
-    },
-    // A body given in `options` replaces the request's entirely, in any
-    // of its forms — mixing them would produce two bodies.
-    data: options.data.or_else(|| {
-      (options.json_data.is_none() && options.form.is_none() && options.multipart.is_none()).then_some(base.data)?
-    }),
-    ..options
-  })
-}
-
 fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Result<Option<RequestOptions>> {
   match value.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => {
@@ -134,12 +103,10 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
 pub struct HttpClientJs {
   #[qjs(skip_trace)]
   inner: Arc<HttpClient>,
-  /// An attenuation (extension `allow.net`): every request answers to
-  /// the realm's policy and then to this list. `None` is the plain
-  /// binding, which answers to the realm's policy alone. Enforced by the
-  /// engine on every hop -- there is no JS proxy/shim.
+  /// Shared network authority: realm policy plus optional extension
+  /// `allow.net` attenuation, enforced by the engine on every hop.
   #[qjs(skip_trace)]
-  attenuation: Option<Arc<ferrijs::Permissions>>,
+  authority: crate::bindings::net_policy::NetAuthority,
 }
 
 impl HttpClientJs {
@@ -147,7 +114,7 @@ impl HttpClientJs {
   pub fn new(inner: Arc<HttpClient>) -> Self {
     Self {
       inner,
-      attenuation: None,
+      authority: crate::bindings::net_policy::NetAuthority::realm(),
     }
   }
 
@@ -161,7 +128,7 @@ impl HttpClientJs {
   pub fn with_net(inner: Arc<HttpClient>, net: &[String]) -> Result<Self, String> {
     Ok(Self {
       inner,
-      attenuation: Some(Arc::new(ferrijs::Permissions::none().allow_net(net)?)),
+      authority: crate::bindings::net_policy::NetAuthority::from_net_list(net)?,
     })
   }
 
@@ -170,17 +137,6 @@ impl HttpClientJs {
   #[must_use]
   pub fn inner_arc(&self) -> Arc<HttpClient> {
     Arc::clone(&self.inner)
-  }
-
-  /// The policy this binding's requests answer to: the realm's, then the
-  /// attenuation if the binding carries one. Built synchronously, inside
-  /// the call, so an `async fn` body's first poll (which happens later,
-  /// on the VM executor) reads nothing.
-  fn policy(&self, ctx: &Ctx<'_>) -> Option<Arc<dyn NetPolicy>> {
-    match &self.attenuation {
-      Some(declared) => Some(crate::bindings::net_policy::attenuated(ctx, Arc::clone(declared))),
-      None => crate::bindings::net_policy::realm_policy(ctx),
-    }
   }
 
   /// Shared body of every HTTP method. The engine enforces the policy on
@@ -207,21 +163,16 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
     base: Option<RequestOptions>,
   ) -> rquickjs::Result<Promised<impl std::future::Future<Output = rquickjs::Result<HttpResponseJs>> + 'js>> {
-    let guard = crate::bindings::net_policy::guard(self.policy(&ctx));
-    let opts = merge_over(base, parse_options(&ctx, options)?);
+    let guard = self.authority.guard(&ctx);
+    let opts = RequestOptions::merge_over(base, parse_options(&ctx, options)?);
     let inner = Arc::clone(&self.inner);
     Ok(Promised::from(async move {
-      let opts = Some(with_guard(opts, guard));
-      let resp = match verb {
-        Verb::Get => inner.get(&url).maybe_options(opts).await,
-        Verb::Post => inner.post(&url).maybe_options(opts).await,
-        Verb::Put => inner.put(&url).maybe_options(opts).await,
-        Verb::Delete => inner.delete(&url).maybe_options(opts).await,
-        Verb::Patch => inner.patch(&url).maybe_options(opts).await,
-        Verb::Head => inner.head(&url).maybe_options(opts).await,
-        Verb::Fetch => inner.fetch(&url).maybe_options(opts).await,
+      let mut opts = opts.unwrap_or_default();
+      if let Some(method) = verb.method() {
+        opts.method = Some(method.to_string());
       }
-      .into_js_with(&ctx)?;
+      opts.net_guard = Some(guard);
+      let resp = inner.fetch(&url).options(opts).await.into_js_with(&ctx)?;
       Ok(HttpResponseJs::new(resp))
     }))
   }
@@ -238,12 +189,18 @@ enum Verb {
   Fetch,
 }
 
-/// Attach `g` to the per-request options (creating a default bag if the
-/// caller passed none) so core enforces the sandbox network policy.
-fn with_guard(opts: Option<RequestOptions>, g: NetGuard) -> RequestOptions {
-  let mut o = opts.unwrap_or_default();
-  o.net_guard = Some(g);
-  o
+impl Verb {
+  const fn method(self) -> Option<&'static str> {
+    match self {
+      Self::Get => Some("GET"),
+      Self::Post => Some("POST"),
+      Self::Put => Some("PUT"),
+      Self::Delete => Some("DELETE"),
+      Self::Patch => Some("PATCH"),
+      Self::Head => Some("HEAD"),
+      Self::Fetch => None,
+    }
+  }
 }
 
 /// Playwright's `request.newContext(options?)` bag.
@@ -276,11 +233,11 @@ struct JsProxy {
 }
 
 /// The body of `request.newContext`: options to a standalone context
-/// carrying `attenuation`, the network policy of the context it came from.
+/// carrying `authority`, the network policy of the context it came from.
 fn new_api_context<'js>(
   ctx: &Ctx<'js>,
   options: Opt<Value<'js>>,
-  attenuation: Option<Arc<ferrijs::Permissions>>,
+  authority: crate::bindings::net_policy::NetAuthority,
 ) -> rquickjs::Result<HttpClientJs> {
   let options: JsNewContextOptions = match options.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(ctx, v)?,
@@ -293,11 +250,7 @@ fn new_api_context<'js>(
     password: p.password,
   });
   if let Some(proxy) = &proxy {
-    let policy = match &attenuation {
-      Some(declared) => Some(crate::bindings::net_policy::attenuated(ctx, Arc::clone(declared))),
-      None => crate::bindings::net_policy::realm_policy(ctx),
-    };
-    let guard = crate::bindings::net_policy::guard(policy);
+    let guard = authority.guard(ctx);
     ferridriver::http_client::check_proxy(proxy, &guard).into_js_with(ctx)?;
   }
   if options.client_certificates.is_some() {
@@ -333,13 +286,10 @@ fn new_api_context<'js>(
     max_redirects: options.max_redirects,
     proxy,
   };
-  let mut client = HttpClient::new(core);
-  if let Some(state) = storage {
-    client = client.with_storage_state(state).into_js_with(ctx)?;
-  }
+  let client = HttpClient::try_new(core, storage).into_js_with(ctx)?;
   Ok(HttpClientJs {
     inner: Arc::new(client),
-    attenuation,
+    authority,
   })
 }
 
@@ -354,8 +304,8 @@ impl HttpClientJs {
     ctx: Ctx<'js>,
     options: Opt<Value<'js>>,
   ) -> Promised<impl std::future::Future<Output = rquickjs::Result<HttpClientJs>> + 'js> {
-    let attenuation = self.attenuation.clone();
-    Promised(async move { new_api_context(&ctx, options, attenuation) })
+    let authority = self.authority.clone();
+    Promised(async move { new_api_context(&ctx, options, authority) })
   }
 
   /// Playwright: `apiRequestContext.storageState()`.
@@ -496,7 +446,10 @@ impl HttpClientJs {
     let (url, from_request) = match url_or_request {
       Either::Left(request) => {
         let request = request.borrow();
-        (request.url(), Some(request_defaults(&request)))
+        (
+          request.url(),
+          Some(RequestOptions::from_page_request(request.inner_ref())),
+        )
       },
       Either::Right(url) => (url, None),
     };
@@ -559,27 +512,7 @@ impl HttpClientJs {
   }
 }
 
-/// Method, headers and body carried over from a page-network `Request`
-/// passed to `fetch`.
-fn request_defaults(req: &crate::bindings::network::RequestJs) -> RequestOptions {
-  RequestOptions {
-    method: Some(req.method()),
-    headers: Some(ferridriver::http_client::replayable_headers(req.header_pairs())),
-    data: req.post_data_bytes(),
-    ..Default::default()
-  }
-}
-
 // ── HttpResponseJs ────────────────────────────────────────────────────────────
-
-/// What Playwright's `APIResponse` hands back as a promise and this
-/// response already holds: the body is buffered when the response is
-/// made, so the promise is settled when it is returned.
-type Settled<T> = Promised<std::future::Ready<rquickjs::Result<T>>>;
-
-fn settled<T>(value: rquickjs::Result<T>) -> Settled<T> {
-  Promised::from(std::future::ready(value))
-}
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "APIResponse")]
@@ -627,6 +560,10 @@ impl HttpResponseJs {
 }
 
 #[rquickjs::methods]
+#[expect(
+  clippy::needless_pass_by_value,
+  reason = "rquickjs hands methods their `Ctx` and JS string arguments by value"
+)]
 impl HttpResponseJs {
   #[qjs(rename = "redirected")]
   pub fn redirected(&self) -> bool {
@@ -660,16 +597,21 @@ impl HttpResponseJs {
 
   /// Playwright: `apiResponse.serverAddr(): Promise<{ ipAddress, port } | null>`.
   /// Resolved peer address, or `null` when the transport didn't surface one.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the promise.
   #[qjs(rename = "serverAddr")]
-  pub fn server_addr<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
-    settled(match self.inner.server_addr() {
+  pub fn server_addr<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let value = match self.inner.server_addr() {
       Some(addr) => rquickjs::Object::new(ctx.clone()).and_then(|obj| {
         obj.set("ipAddress", addr.ip_address.clone())?;
         obj.set("port", addr.port)?;
         Ok(obj.into_value())
       }),
-      None => Ok(Value::new_null(ctx)),
-    })
+      None => Ok(Value::new_null(ctx.clone())),
+    };
+    crate::bindings::convert::settled_promise(&ctx, value)
   }
 
   /// Playwright: `apiResponse.timing(): ResourceTiming`. Milliseconds
@@ -697,18 +639,27 @@ impl HttpResponseJs {
   /// Playwright: `apiResponse.securityDetails(): Promise<SecurityDetails | null>`.
   /// The server certificate's subject, issuer and validity; `null` for
   /// a response that did not arrive over TLS.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the promise.
   #[qjs(rename = "securityDetails")]
-  pub fn security_details<'js>(&self, ctx: Ctx<'js>) -> Settled<Value<'js>> {
-    settled(self.security_details_object(ctx))
+  pub fn security_details<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let value = self.security_details_object(ctx.clone());
+    crate::bindings::convert::settled_promise(&ctx, value)
   }
 
   /// Playwright: `apiResponse.dispose(): Promise<void>` — release the
   /// buffered body. Status, headers and URL stay readable; body
   /// accessors then reject.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the promise.
   #[qjs(rename = "dispose")]
-  pub fn dispose(&mut self) -> Settled<()> {
+  pub fn dispose<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
     self.inner.dispose();
-    settled(Ok(()))
+    crate::bindings::convert::settled_promise(&ctx, Ok(()))
   }
 
   /// Playwright: `apiResponse.body(): Promise<Buffer>` — raw bytes as
@@ -720,55 +671,46 @@ impl HttpResponseJs {
   /// `ArrayBuffer` lives, and marks it immutable — so writing through
   /// the returned array throws rather than corrupting a buffer other
   /// readers of the same response still share.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the promise.
   #[qjs(rename = "body")]
-  pub fn body<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-  ) -> Settled<Value<'js>> {
-    settled(self.inner.body_shared().into_js_with(&ctx).and_then(|bytes| {
+  pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let value = self.inner.body_shared().into_js_with(&ctx).and_then(|bytes| {
       let buffer = rquickjs::ArrayBuffer::from_source_immutable(ctx.clone(), bytes)?;
       crate::bindings::convert::node_buffer(&ctx, buffer)
-    }))
+    });
+    crate::bindings::convert::settled_promise(&ctx, value)
   }
 
   /// Playwright: `apiResponse.text(): Promise<string>`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the promise.
   #[qjs(rename = "text")]
-  pub fn text(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'_>,
-  ) -> Settled<String> {
-    settled(self.inner.text().into_js_with(&ctx))
+  pub fn text<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let value = self.inner.text_str().into_js_with(&ctx);
+    crate::bindings::convert::settled_promise(&ctx, value)
   }
 
   /// Playwright: `apiResponse.json(): Promise<Serializable>`.
+  ///
+  /// # Errors
+  ///
+  /// Throws when the engine cannot allocate the promise.
   #[qjs(rename = "json")]
-  pub fn json<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-  ) -> Settled<Value<'js>> {
-    // Parse the raw body straight into a JS value with QuickJS's C JSON
-    // parser — no serde_json::Value middle allocation. `json_parse`
-    // does not touch the JS `JSON` global, so a reassigned
-    // `globalThis.JSON` cannot affect it.
-    settled(
-      self
-        .inner
-        .text()
-        .into_js_with(&ctx)
-        .and_then(|text| ctx.json_parse(text)),
-    )
+  pub fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    // Parse the borrowed UTF-8 body straight into a JS value with QuickJS's
+    // C JSON parser — zero String copy and zero serde_json::Value middle
+    // allocation. `json_parse` does not touch `globalThis.JSON`.
+    let value = self
+      .inner
+      .text_str()
+      .into_js_with(&ctx)
+      .and_then(|text| ctx.json_parse(text));
+    crate::bindings::convert::settled_promise(&ctx, value)
   }
 
   /// All response headers as an array of `{name, value}` tuples (Playwright's
@@ -778,17 +720,11 @@ impl HttpResponseJs {
   ///
   /// Throws when the engine cannot allocate the array.
   #[qjs(rename = "headersArray")]
-  pub fn headers_array<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-  ) -> rquickjs::Result<Value<'js>> {
-    let h = self.inner.headers();
-    let pairs: Vec<(&str, &str)> = h.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
-    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
+  pub fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    crate::bindings::convert::name_value_array_to_js(
+      &ctx,
+      self.inner.headers().iter().map(|(n, v)| (n.as_str(), v.as_str())),
+    )
   }
 
   /// All response headers as a flat object: lowercased names, duplicates
@@ -808,14 +744,7 @@ impl HttpResponseJs {
 
   /// Combined value of a single header, or `null` if absent.
   #[qjs(rename = "header")]
-  pub fn header(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    name: String,
-  ) -> crate::bindings::convert::Null<String> {
+  pub fn header(&self, name: String) -> crate::bindings::convert::Null<String> {
     crate::bindings::convert::Null(self.inner.header(&name))
   }
 }

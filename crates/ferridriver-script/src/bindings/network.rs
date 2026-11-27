@@ -43,17 +43,11 @@ impl RequestJs {
     }
   }
 
-  /// Headers as ordered pairs, for `request.fetch(pageRequest)` to
-  /// replay them without a JS round-trip.
+  /// Borrow the underlying core request, for `request.fetch(pageRequest)`
+  /// to build replay defaults directly in core without a JS round-trip.
   #[must_use]
-  pub fn header_pairs(&self) -> Vec<(String, String)> {
-    self.inner.headers().into_iter().collect()
-  }
-
-  /// Raw post body, for the same replay path.
-  #[must_use]
-  pub fn post_data_bytes(&self) -> Option<Vec<u8>> {
-    self.inner.post_data_buffer()
+  pub(crate) fn inner_ref(&self) -> &CoreRequest {
+    &self.inner
   }
 }
 
@@ -147,8 +141,7 @@ impl RequestJs {
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
-    let pairs: Vec<(String, String)> = arr.into_iter().map(|h| (h.name, h.value)).collect();
-    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
+    crate::bindings::convert::name_value_array_to_js(&ctx, arr.into_iter().map(|h| (h.name, h.value)))
   }
 
   /// # Errors
@@ -379,8 +372,7 @@ impl ResponseJs {
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
-    let pairs: Vec<(String, String)> = arr.into_iter().map(|h| (h.name, h.value)).collect();
-    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
+    crate::bindings::convert::name_value_array_to_js(&ctx, arr.into_iter().map(|h| (h.name, h.value)))
   }
 
   /// # Errors
@@ -892,8 +884,7 @@ impl RouteRequestJs {
     )]
     ctx: Ctx<'js>,
   ) -> rquickjs::Result<Value<'js>> {
-    let pairs: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
+    crate::bindings::convert::name_value_array_to_js(&ctx, self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
   }
   /// Playwright: `request.headerValue(name): Promise<string | null>`.
   #[qjs(rename = "headerValue")]

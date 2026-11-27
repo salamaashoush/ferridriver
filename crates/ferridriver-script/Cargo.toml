@@ -52,15 +52,8 @@ rustc-hash = "2"
 inventory = "0.3"
 dashmap = { workspace = true }
 libc = { workspace = true }
-base64 = { workspace = true }
 url = "2"
 either = "1"
-
-# `CompressionStream` / `DecompressionStream`: the Compression Streams
-# spec defines exactly gzip / deflate / deflate-raw, all of which this
-# covers. Brotli and zstd are deliberately not offered — they are not in
-# that spec.
-flate2 = "1"
 
 # Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).
 # Correct number coercion (integral float -> int via serde visitors),
@@ -88,24 +81,7 @@ rquickjs = { version = "0.14", features = [
   "bytes",
 ] }
 
-# Step-file front-end: rolldown bundles + tree-shakes + transpiles TS to
-# one ESM module (resolving node_modules), which is compiled to QuickJS
-# bytecode once.
-rolldown = "1"
-rolldown_common = "1"
-rolldown_plugin = "1"
-# A bundle failure's own diagnostics. `BatchedBuildDiagnostic`'s Debug
-# elides the label spans, so the file and line a parse error points at
-# are only reachable through `to_diagnostic()`.
-rolldown_error = "1"
-# Remap QuickJS error line:col (bundled output) back to original .ts/.js.
-sourcemap = "9"
 regex = { workspace = true }
-getrandom = "0.4"
-sha1 = "0.11"
-sha2 = "0.11"
-hmac = "0.13"
-subtle = "2"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs"] }
