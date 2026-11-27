@@ -1130,12 +1130,13 @@ impl Locator {
 
   /// Whether a trace recorder is currently attached to this page's context.
   fn is_tracing_active(&self) -> bool {
-    self
-      .frame
-      .page_arc()
-      .context()
-      .and_then(|c| crate::trace::recorder_for(&c.composite()))
-      .is_some()
+    crate::trace::has_action_observer_or_gate()
+      || self
+        .frame
+        .page_arc()
+        .context()
+        .and_then(|c| crate::trace::recorder_for(&c.composite()))
+        .is_some()
   }
 
   /// Evaluate `expr` in `rframe` (main frame or child frame).

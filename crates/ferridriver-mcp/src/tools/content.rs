@@ -29,7 +29,8 @@ impl McpServer {
           depth: p.depth,
           track: p.track,
         };
-        match page.snapshot_for_ai().options(opts).await {
+        let (snap_res, tabs) = tokio::join!(page.snapshot_for_ai().options(opts), self.tabs_section(&s));
+        match snap_res {
           Ok(result) => {
             if let Some(handle) = self.state.ref_map_handle(&s).await {
               handle.store(std::sync::Arc::new(result.ref_map));
@@ -37,7 +38,7 @@ impl McpServer {
               let state = self.state.read().await;
               state.set_ref_map(&s, result.ref_map);
             }
-            let mut text = self.tabs_section(&s).await + &result.full;
+            let mut text = tabs + &result.full;
             if let Some(inc) = result.incremental {
               text.push_str("\n### Changes since last snapshot\n");
               text.push_str(&inc);

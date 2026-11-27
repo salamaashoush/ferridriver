@@ -32,8 +32,7 @@ impl McpServer {
         count
       };
       let page = Box::pin(self.page(s)).await?;
-      let tabs = self.tabs_section(s).await;
-      let snap = self.snap(&page, s).await;
+      let (tabs, snap) = tokio::join!(self.tabs_section(s), self.snap(&page, s));
       Ok(self.ok_text(format!(
         "Connected to browser at {url}. Found {page_count} existing page(s) in session '{s}'.\n\n{tabs}{snap}"
       )))
@@ -49,8 +48,7 @@ impl McpServer {
         count
       };
       let page = Box::pin(self.page(s)).await?;
-      let tabs = self.tabs_section(s).await;
-      let snap = self.snap(&page, s).await;
+      let (tabs, snap) = tokio::join!(self.tabs_section(s), self.snap(&page, s));
       Ok(self.ok_text(format!(
         "Auto-connected to the {channel} browser. Found {page_count} existing page(s) in session '{s}'.\n\n{tabs}{snap}"
       )))
@@ -140,9 +138,8 @@ impl McpServer {
               page.goto(url).await.map_err(Self::err)?;
             }
             self.invalidate_context(&s);
-            let tabs = self.tabs_section(&s).await;
-            let snap = self.snap(&page, &s).await;
-            let tools = self.webmcp_section(&page).await;
+            let (tabs, snap, tools) =
+              tokio::join!(self.tabs_section(&s), self.snap(&page, &s), self.webmcp_section(&page));
             Ok(self.ok_text(format!("Opened new page in session '{s}'.\n\n{tabs}{snap}{tools}")))
           })
           .await

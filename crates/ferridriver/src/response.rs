@@ -218,6 +218,18 @@ pub struct TabState {
   pub current: bool,
 }
 
+async fn capture_tab_states(pages: Vec<crate::backend::AnyPage>, active: Option<usize>) -> Vec<TabState> {
+  let futures = pages.into_iter().enumerate().map(|(index, page)| async move {
+    let (url, title) = futures::future::join(page.url(), page.title()).await;
+    TabState {
+      url: url.ok().flatten().unwrap_or_default(),
+      title: title.ok().flatten().unwrap_or_default(),
+      current: active == Some(index),
+    }
+  });
+  futures::future::join_all(futures).await
+}
+
 impl TabState {
   /// The open pages of `context`, in the order `page(select)` indexes them.
   /// Empty when the context does not exist.
@@ -225,15 +237,26 @@ impl TabState {
     let Ok((pages, active)) = state.write().await.open_pages(context) else {
       return Vec::new();
     };
-    let mut tabs = Vec::with_capacity(pages.len());
-    for (index, page) in pages.iter().enumerate() {
-      tabs.push(Self {
-        url: page.url().await.ok().flatten().unwrap_or_default(),
-        title: page.title().await.ok().flatten().unwrap_or_default(),
-        current: active == Some(index),
-      });
+    capture_tab_states(pages, active).await
+  }
+
+  /// Like [`Self::capture`], but returns `None` when `context` has exactly
+  /// one open page without issuing `url`/`title` protocol round-trips.
+  ///
+  /// [`Response::tabs`] omits `### Open tabs` for single-tab contexts, so
+  /// callers that only render that section skip two browser RPCs per tool
+  /// call in the common single-tab case.
+  pub async fn capture_if_not_single(
+    state: &tokio::sync::RwLock<crate::state::BrowserState>,
+    context: &str,
+  ) -> Option<Vec<Self>> {
+    let Ok((pages, active)) = state.write().await.open_pages(context) else {
+      return Some(Vec::new());
+    };
+    if pages.len() == 1 {
+      return None;
     }
-    tabs
+    Some(capture_tab_states(pages, active).await)
   }
 
   /// The `### Open tabs` body, in Playwright MCP's `renderTabsMarkdown`

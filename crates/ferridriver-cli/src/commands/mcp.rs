@@ -49,7 +49,7 @@ pub(crate) async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> an
       server.load_extensions(&extensions).await;
       ui::note(&format!(
         "serving MCP over stdio ({} backend, {})",
-        format!("{backend:?}").to_lowercase(),
+        backend.name(),
         if headless { "headless" } else { "headed" }
       ));
       Box::pin(ferridriver_mcp::mcp::serve_stdio_with(server)).await?
@@ -94,7 +94,7 @@ pub(crate) async fn run(mut config: FerridriverConfig, args: cli::McpArgs) -> an
       }
       ui::note(&format!(
         "serving MCP over HTTP ({} backend, {}){}",
-        format!("{backend:?}").to_lowercase(),
+        backend.name(),
         if headless { "headless" } else { "headed" },
         match clients.len() {
           1 if clients[0].token.is_some() => ", bearer token required".to_string(),

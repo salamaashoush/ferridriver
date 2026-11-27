@@ -205,6 +205,55 @@ impl Cli {
     }
   }
 
+  /// Whether this command reads the resolved configuration stack.
+  ///
+  /// Commands that never consume `config`, `startup` or `contributed`
+  /// skip config discovery, `.ts` config evaluation, and extension
+  /// defaults completely so fast utility commands (`completions`, `init`,
+  /// `install`, `upgrade`, `codegen`, `browser`) start without disk or
+  /// JS runtime overhead.
+  #[must_use]
+  pub(crate) fn reads_config(&self) -> bool {
+    !matches!(
+      self.command,
+      Command::Init(_)
+        | Command::Install(_)
+        | Command::Codegen(_)
+        | Command::Browser(_)
+        | Command::Upgrade(_)
+        | Command::Completions(_)
+    )
+  }
+
+  /// Whether this command launches browsers directly and should reclaim
+  /// stale browser processes left by earlier crashed runs.
+  ///
+  /// `mcp` performs its own sweep inside `ferridriver_mcp::mcp`, and
+  /// non-browser commands (`completions`, `init`, `config`, `trace`,
+  /// `session list/close/attach`, ...) never spawn browsers.
+  #[must_use]
+  pub(crate) fn sweeps_stale_browsers(&self) -> bool {
+    match &self.command {
+      Command::Bdd(_)
+      | Command::Test(_)
+      | Command::RustTest(_)
+      | Command::Run(_)
+      | Command::Codegen(_)
+      | Command::Browser(_)
+      | Command::Doctor(_) => true,
+      Command::Session(a) => matches!(a.command, SessionCommand::Open(_) | SessionCommand::Host(_)),
+      Command::Init(_)
+      | Command::Mcp(_)
+      | Command::Install(_)
+      | Command::Config(_)
+      | Command::Ext(_)
+      | Command::Trace(_)
+      | Command::MergeReports(_)
+      | Command::Upgrade(_)
+      | Command::Completions(_) => false,
+    }
+  }
+
   /// The presentation policy these flags describe.
   #[must_use]
   pub(crate) fn presentation(&self) -> (ui::ColorChoice, ui::Format, bool) {

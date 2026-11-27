@@ -277,7 +277,7 @@ impl Page {
   /// Playwright: [`page.url()`](https://playwright.dev/docs/api/class-page#page-url)
   /// is **synchronous** (`url(): string`). It reads the locally-tracked
   /// main-frame URL (kept current by navigation/lifecycle events), the
-  /// same source [`Frame::url`] uses — no backend round-trip.
+  /// same source [`crate::frame::Frame::url`] uses — no backend round-trip.
   #[must_use]
   pub fn url(&self) -> String {
     let url = self.with_frame_cache(|c| {

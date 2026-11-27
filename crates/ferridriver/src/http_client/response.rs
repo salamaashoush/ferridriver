@@ -277,7 +277,7 @@ impl HttpResponse {
 
 /// A response whose body has NOT been buffered: status/headers are
 /// available immediately, body bytes are pulled incrementally with
-/// [`Self::chunk`]. Produced by [`HttpClient::fetch_stream`]; backs a
+/// [`Self::chunk`]. Produced by [`super::HttpClient::fetch_stream`]; backs a
 /// WHATWG `Response.body` `ReadableStream`.
 pub struct HttpStreamResponse {
   status_code: u16,

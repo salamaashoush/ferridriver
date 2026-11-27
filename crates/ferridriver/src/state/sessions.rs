@@ -772,34 +772,48 @@ impl BrowserState {
   }
 
   pub async fn list_contexts(&self) -> Vec<ContextInfo> {
-    let mut result = Vec::new();
-    for (inst_name, inst) in &self.instances {
-      for (ctx_name, ctx) in &inst.contexts {
-        let mut pages = Vec::new();
-        for (i, page) in ctx.pages.iter().enumerate() {
-          let url = page.url().await.ok().flatten().unwrap_or_default();
-          let title = page.title().await.ok().flatten().unwrap_or_default();
-          pages.push(PageInfo {
+    let snapshots: Vec<_> = self
+      .instances
+      .iter()
+      .flat_map(|(inst_name, inst)| {
+        inst.contexts.iter().map(move |(ctx_name, ctx)| {
+          let name = if inst_name == "default" {
+            ctx_name.clone()
+          } else {
+            format!("{inst_name}:{ctx_name}")
+          };
+          (
+            name,
+            inst_name.clone(),
+            ctx_name.clone(),
+            ctx.active_page_idx,
+            ctx.pages.clone(),
+          )
+        })
+      })
+      .collect();
+
+    let mut result = futures::future::join_all(snapshots.into_iter().map(
+      |(name, instance, context, active_page_idx, pages)| async move {
+        let pages = futures::future::join_all(pages.into_iter().enumerate().map(|(i, page)| async move {
+          let (url, title) = tokio::join!(page.url(), page.title());
+          PageInfo {
             index: i,
-            url,
-            title,
-            active: i == ctx.active_page_idx,
-          });
-        }
-        // Use composite name for non-default instances, bare name for default
-        let name = if inst_name == "default" {
-          ctx_name.clone()
-        } else {
-          format!("{inst_name}:{ctx_name}")
-        };
-        result.push(ContextInfo {
+            url: url.ok().flatten().unwrap_or_default(),
+            title: title.ok().flatten().unwrap_or_default(),
+            active: i == active_page_idx,
+          }
+        }))
+        .await;
+        ContextInfo {
           name,
-          instance: inst_name.clone(),
-          context: ctx_name.clone(),
+          instance,
+          context,
           pages,
-        });
-      }
-    }
+        }
+      },
+    ))
+    .await;
     result.sort_by(|a, b| a.name.cmp(&b.name));
     result
   }

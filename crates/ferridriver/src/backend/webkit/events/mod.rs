@@ -1,5 +1,5 @@
 //! PW `WebKit` event translation: protocol events → ferridriver
-//! [`ConsoleMessage`] / [`DialogEvent`] / accessibility / cookie types.
+//! `ConsoleMessage` / `DialogEvent` / accessibility / cookie types.
 
 use std::sync::Arc;
 
