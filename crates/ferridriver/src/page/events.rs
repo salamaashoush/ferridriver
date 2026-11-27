@@ -1,17 +1,47 @@
-//! Page events, network interception, picker, exposed functions, dialogs, file choosers, downloads, init scripts.
+//! Page event emitter, observations, web storage, and wait/expect helpers.
 
-use super::{web_storage_global, web_storage_js_string};
+use super::{Page, Unregister, web_storage_global, web_storage_js_string};
 use std::sync::Arc;
 
 use crate::backend::AnyPage;
 use crate::error::Result;
 use crate::events::{EventEmitter, PageEvent};
 use crate::frame::Frame;
-use crate::frame_cache::FrameCache;
-use crate::locator::Locator;
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{HighlightEntry, Page, Unregister};
+type ClaimHandler<T> = Arc<dyn Fn(&T) -> bool + Send + Sync>;
+
+/// Pair a one-shot claim handler closure with its receiver so a manager
+/// callback delivers the first event synchronously and reports unclaimed
+/// after timeout or receiver drop.
+fn oneshot_claim_pair<T: Clone + Send + 'static>() -> (ClaimHandler<T>, tokio::sync::oneshot::Receiver<T>) {
+  let (tx, rx) = tokio::sync::oneshot::channel::<T>();
+  let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+  let handler = Arc::new(move |value: &T| {
+    let mut guard = match tx.lock() {
+      Ok(g) => g,
+      Err(p) => p.into_inner(),
+    };
+    match guard.take() {
+      Some(sender) => sender.send(value.clone()).is_ok(),
+      None => false,
+    }
+  });
+  (handler, rx)
+}
+
+async fn await_claimed<T>(rx: tokio::sync::oneshot::Receiver<T>, timeout_ms: u64, noun: &'static str) -> Result<T> {
+  match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
+    Ok(Ok(value)) => Ok(value),
+    Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(format!(
+      "page closed while waiting for {noun}"
+    )))),
+    Err(_) => Err(crate::error::FerriError::timeout(
+      format!("waiting for {noun}"),
+      timeout_ms,
+    )),
+  }
+}
 
 impl Page {
   // ── Events ────────────────────────────────────────────────────────────
@@ -628,500 +658,6 @@ impl Page {
     }
   }
 
-  // ── Network Interception ────────────────────────────────────────────────
-
-  /// Intercept network requests matching a [`crate::url_matcher::UrlMatcher`].
-  /// The handler receives a [`crate::route::Route`] and must call exactly one
-  /// of `fulfill()`, `continue_route()`, or `abort()`.
-  ///
-  /// ```ignore
-  /// use ferridriver::route::{Route, FulfillResponse};
-  /// use ferridriver::url_matcher::UrlMatcher;
-  /// use std::sync::Arc;
-  ///
-  /// // Mock an API endpoint
-  /// page.route(UrlMatcher::glob("**/api/data")?, Arc::new(|route: Route| {
-  ///     route.fulfill(FulfillResponse {
-  ///         status: 200,
-  ///         body: b"{\"mocked\": true}".to_vec(),
-  ///         content_type: Some("application/json".into()),
-  ///         ..Default::default()
-  ///     });
-  /// }), None).await?;
-  ///
-  /// // Block image loading
-  /// page.route(UrlMatcher::glob("**/*.{png,jpg,gif}")?, Arc::new(|route: Route| {
-  ///     route.abort(Some("blockedbyclient"));
-  /// }), None).await?;
-  /// ```
-  ///
-  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` reverses
-  /// the registration (equivalent to calling [`Page::unroute`] with the same
-  /// matcher). Mirrors Playwright `page.route(...)` which returns a
-  /// `DisposableStub` (`client/page.ts:535`).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the route interception cannot be set up.
-  pub async fn route(
-    &self,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::route::RouteHandler,
-    times: Option<u32>,
-  ) -> Result<crate::disposable::Disposable> {
-    self
-      .inner
-      .route(crate::route::RegisteredRoute::new(matcher.clone(), handler, times).with_client(self.http_client()))
-      .await?;
-    let inner = self.inner.clone();
-    Ok(crate::disposable::Disposable::new(move || async move {
-      inner.unroute(&matcher, crate::route::RouteScope::Page, None).await
-    }))
-  }
-
-  /// Playwright: `page.routeFromHAR(har, options?)`. Replay recorded
-  /// responses from a HAR file (plain `.har` or `.zip` archive) for
-  /// matching requests, or with `update: true` record this page's
-  /// traffic into the file instead (written when the owning context
-  /// closes, like Playwright's `HarTracer` page-filtered recorder).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the HAR file cannot be read/parsed, the route
-  /// cannot be installed, or (`update: true`) the page is not bound to
-  /// a context whose close can flush the recording.
-  #[track_caller]
-  pub fn route_from_har(
-    &self,
-    path: &std::path::Path,
-  ) -> crate::action::Action<'_, crate::har::RouteFromHarOptions, ()> {
-    let page = self;
-    let path = path.to_path_buf();
-    crate::action::Action::new(move |opts| Box::pin(async move { page.route_from_har_impl(&path, opts).await }))
-  }
-
-  /// Implementation of [`Self::route_from_har`].
-  pub(crate) async fn route_from_har_impl(
-    &self,
-    path: &std::path::Path,
-    options: crate::har::RouteFromHarOptions,
-  ) -> Result<()> {
-    if options.update {
-      // Same registry + flush point as the context-scoped recorder
-      // (context close), narrowed to this page's traffic via the
-      // capture-time `page_guid` stamped on every logged request.
-      let Some(ctx) = self.context() else {
-        return Err(crate::error::FerriError::unsupported(
-          "page.routeFromHAR({ update: true }) requires a page opened through a context",
-        ));
-      };
-      return ctx
-        .register_har_update_recorder(path, &options, Some(self.inner.page_guid()))
-        .await;
-    }
-    let handler = crate::har::route_handler_from_file(path, options.not_found)?;
-    let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
-    self
-      .inner
-      .route(crate::route::RegisteredRoute::new(matcher, handler, None))
-      .await
-  }
-
-  /// Remove all route handlers whose matcher is
-  /// [`crate::url_matcher::UrlMatcher::equivalent`] to the given matcher.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the route handlers cannot be removed.
-  /// Remove page-scoped routes registered for `matcher`. With a
-  /// `handler_id` — [`crate::route::RegisteredRoute::handler_id`] of the
-  /// registration to drop — only that one goes, which is what
-  /// Playwright's `page.unroute(url, handler)` means; without one, every
-  /// route sharing the matcher is removed.
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher, handler_id: Option<usize>) -> Result<()> {
-    self
-      .inner
-      .unroute(matcher, crate::route::RouteScope::Page, handler_id)
-      .await
-  }
-
-  /// Remove all route handlers registered via [`Page::route`].
-  ///
-  /// Mirrors Playwright's
-  /// `page.unrouteAll({ behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
-  /// The `behavior` selects how to treat handlers still running when the
-  /// call is made; ferridriver route handlers run synchronously inside the
-  /// interception loop, so once the routes are cleared no detached handler
-  /// task can still be in flight — every variant performs the same teardown
-  /// (clear routes, disable interception).
-  ///
-  /// Context-scoped routes installed via `context.route` stay active,
-  /// matching Playwright where `page.unrouteAll` only clears
-  /// `page._routes`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the underlying interception teardown fails.
-  pub async fn unroute_all(&self, behavior: Option<crate::options::UnrouteBehavior>) -> Result<()> {
-    self
-      .inner
-      .unroute_all(behavior.unwrap_or_default(), Some(crate::route::RouteScope::Page))
-      .await
-  }
-
-  // ── Interactive picker ──────────────────────────────────────────────────
-
-  /// Open the interactive locator picker: highlight elements under the
-  /// cursor and resolve with a [`Locator`] for the element the user clicks.
-  ///
-  /// Mirrors Playwright's `page.pickLocator(): Promise<Locator>`. The picker
-  /// generates a selector for the clicked element using the same engine that
-  /// backs `codegen`/recording, then returns `page.locator(selector)`.
-  ///
-  /// Cancel an in-progress pick with [`Page::cancel_pick_locator`].
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the picker scaffolding cannot be injected, the page
-  /// closes before a selection is made, or the returned selector is empty.
-  pub async fn pick_locator(self: &Arc<Self>) -> Result<Locator> {
-    self.inner.ensure_engine_injected().await?;
-    self.inner.evaluate(crate::selectors::RECORDER_SUPPORT_JS).await?;
-    self.inner.evaluate(Self::PICKER_JS).await?;
-
-    // Poll the page-side global for the picked selector. Playwright's
-    // `pickLocator` waits indefinitely for the user to click; we mirror
-    // that (no timeout) while honoring cancellation: when the picker is
-    // torn down via `cancel_pick_locator`/`hide_highlight` without a
-    // selection, `__fdPicker` flips to `false` and we surface a cancelled
-    // error. Polling (rather than a cross-task exposed-function callback)
-    // keeps engine teardown race-free on the QuickJS host.
-    loop {
-      let probe = self
-        .inner
-        .evaluate(
-          "JSON.stringify({ \
-             selector: (typeof window.__fdPickedSelector === 'string') ? window.__fdPickedSelector : null, \
-             active: window.__fdPicker === true })",
-        )
-        .await?;
-      let parsed: serde_json::Value = match probe {
-        Some(serde_json::Value::String(s)) => serde_json::from_str(&s).unwrap_or(serde_json::Value::Null),
-        Some(v) => v,
-        None => serde_json::Value::Null,
-      };
-      if let Some(sel) = parsed.get("selector").and_then(serde_json::Value::as_str) {
-        return Ok(self.locator(sel));
-      }
-      if !parsed
-        .get("active")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-      {
-        return Err(crate::error::FerriError::interrupted(
-          "pickLocator: cancelled before a selection was made",
-        ));
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-  }
-
-  /// Cancel an in-progress [`Page::pick_locator`] and hide its highlight.
-  ///
-  /// Mirrors Playwright's `page.cancelPickLocator()`. Any pending
-  /// `pick_locator` future resolves with a `page closed`-style error once the
-  /// page-side picker is torn down (the exposed callback is removed, so the
-  /// oneshot sender drops).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the page-side teardown evaluation fails.
-  pub async fn cancel_pick_locator(&self) -> Result<()> {
-    self
-      .inner
-      .evaluate("(function(){ if (window.__fdPickerCancel) window.__fdPickerCancel(); })()")
-      .await?;
-    let _ = self.inner.remove_exposed_function("__fdPickLocator").await;
-    Ok(())
-  }
-
-  /// Hide any highlight overlay currently shown by the picker or by
-  /// `highlight`-style helpers.
-  ///
-  /// Mirrors Playwright's `page.hideHighlight()`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the page-side teardown evaluation fails.
-  pub async fn hide_highlight(&self) -> Result<()> {
-    self.lock_highlights().clear();
-    let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
-    let main = self.with_frame_cache(FrameCache::main_frame_id);
-    for id in ids.iter().filter(|id| **id != main) {
-      let _ = self
-        .inner
-        .evaluate_in_frame("window.__fd && window.__fd.hideHighlight()", id)
-        .await;
-    }
-    self
-      .inner
-      .evaluate(
-        "(function(){ if (window.__fd && window.__fd.hideHighlight) window.__fd.hideHighlight(); \
-         if (window.__fdPickerCancel) window.__fdPickerCancel(); })()",
-      )
-      .await?;
-    Ok(())
-  }
-
-  fn lock_highlights(&self) -> std::sync::MutexGuard<'_, Vec<HighlightEntry>> {
-    self
-      .highlights
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-  }
-
-  /// `HighlightController.addHighlight`.
-  pub(crate) async fn add_highlight(
-    self: &Arc<Self>,
-    frame_id: Arc<str>,
-    selector: &str,
-    style: Option<String>,
-  ) -> Result<()> {
-    crate::selectors::parse(selector)?;
-    {
-      let mut entries = self.lock_highlights();
-      entries.retain(|e| !(e.frame_id == frame_id && e.selector == selector));
-      entries.push(HighlightEntry {
-        frame_id,
-        selector: selector.to_string(),
-        style,
-      });
-    }
-    self.apply_highlights().await?;
-    self.keep_highlights_applied();
-    Ok(())
-  }
-
-  /// `HighlightController.removeHighlight`.
-  pub(crate) async fn remove_highlight(&self, frame_id: &str, selector: &str) -> Result<()> {
-    self
-      .lock_highlights()
-      .retain(|e| !(&*e.frame_id == frame_id && e.selector == selector));
-    self.apply_highlights().await
-  }
-
-  /// Give every live frame exactly its own highlights.
-  async fn apply_highlights(&self) -> Result<()> {
-    let entries = self.lock_highlights().clone();
-    let main = self.with_frame_cache(FrameCache::main_frame_id);
-    let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
-    let mut first_error = None;
-    for id in ids {
-      let mine: Vec<(String, Option<String>)> = entries
-        .iter()
-        .filter(|e| e.frame_id == id)
-        .map(|e| (e.selector.clone(), e.style.clone()))
-        .collect();
-      let frame_id = (main != id).then_some(&*id);
-      if let Err(e) = crate::selectors::set_highlights(&self.inner, &mine, frame_id).await
-        && !mine.is_empty()
-      {
-        first_error.get_or_insert(e);
-      }
-    }
-    first_error.map_or(Ok(()), Err)
-  }
-
-  /// The one-second re-apply loop, started by the first highlight and
-  /// ended once none are left or the page closes.
-  fn keep_highlights_applied(self: &Arc<Self>) {
-    if self.highlight_timer.swap(true, std::sync::atomic::Ordering::AcqRel) {
-      return;
-    }
-    let page = Arc::downgrade(self);
-    tokio::spawn(async move {
-      loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let Some(page) = page.upgrade() else { return };
-        if page.is_closed() || page.lock_highlights().is_empty() {
-          page.highlight_timer.store(false, std::sync::atomic::Ordering::Release);
-          return;
-        }
-        let _ = page.apply_highlights().await;
-      }
-    });
-  }
-
-  // ── Exposed Functions ───────────────────────────────────────────────────
-
-  /// Expose a Rust function to the page as `window.<name>(...)`.
-  /// The page can call it as an async function and receive the return value.
-  /// The exposed function persists across navigations.
-  ///
-  /// ```ignore
-  /// use std::sync::Arc;
-  ///
-  /// page.expose_function("compute", Arc::new(|args| {
-  ///     Box::pin(async move {
-  ///         let x = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
-  ///         Ok(serde_json::json!(x * 2.0).into())
-  ///     })
-  /// })).await?;
-  ///
-  /// // In the page:
-  /// // const result = await window.compute(21); // returns 42
-  /// ```
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the function cannot be exposed to the page.
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
-    self.inner.expose_function(name, func).await
-  }
-
-  /// Expose a Rust binding to the page as `window.<name>(...)`. Like
-  /// [`Self::expose_function`], but the callback additionally receives a
-  /// [`crate::events::BindingSource`] identifying the calling context,
-  /// page, and frame (Playwright: `page.exposeBinding(name, callback)`,
-  /// `client/page.ts:371`). The page still calls it as an async function
-  /// receiving the return value.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the binding cannot be installed on the page.
-  pub async fn expose_binding(&self, name: &str, binding: crate::events::ExposedBinding) -> Result<()> {
-    self.inner.expose_binding(name, binding).await
-  }
-
-  /// Playwright: `page.pause(): Promise<void>` (`client/page.ts:858`).
-  /// Playwright suspends script execution and hands control to the
-  /// Inspector/recorder UI. ferridriver has no recorder, so this is a
-  /// typed [`crate::error::FerriError::Unsupported`] rather than a
-  /// silent no-op that would mislead callers into thinking a breakpoint
-  /// was honoured.
-  ///
-  /// # Errors
-  ///
-  /// Always returns [`crate::error::FerriError::Unsupported`].
-  pub fn pause(&self) -> Result<()> {
-    Err(crate::error::FerriError::Unsupported(format!(
-      "page.pause() (page at {}) requires the Playwright Inspector/recorder UI, which ferridriver does not provide",
-      self.url()
-    )))
-  }
-
-  /// Intercept WebSocket connections on this page that match `matcher`.
-  /// Playwright: `page.routeWebSocket(url, handler)`. The handler is
-  /// invoked with a live [`crate::web_socket_route::WebSocketRoute`] when
-  /// a matching `new WebSocket(...)` is created in the page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if installing the page mock / binding fails.
-  pub async fn route_web_socket(
-    self: &Arc<Self>,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::web_socket_route::WsHandler,
-  ) -> Result<()> {
-    self
-      .route_web_socket_scoped(matcher, handler, crate::web_socket_route::WsRouteScope::Page)
-      .await
-  }
-
-  /// `safeNonStallingEvaluateInAllFrames`: run `expression` in every
-  /// frame's main world; a frame that cannot run it (it is navigating,
-  /// or gone) is skipped.
-  pub(crate) async fn evaluate_in_all_frames(&self, expression: &str) {
-    let main = self.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id);
-    let ids: Vec<Arc<str>> = self.with_frame_cache(|c| c.live_ids().collect());
-    let inner = &self.inner;
-    let runs = ids.iter().map(|id| {
-      let is_main = main == *id;
-      async move {
-        let _ = if is_main {
-          inner.evaluate(expression).await
-        } else {
-          inner.evaluate_in_frame(expression, id).await
-        };
-      }
-    });
-    if ids.is_empty() {
-      let _ = inner.evaluate(expression).await;
-    } else {
-      futures::future::join_all(runs).await;
-    }
-  }
-
-  /// Install a WebSocket route at the given scope. `Page` scope routes
-  /// are matched before `Context` scope routes at socket creation
-  /// (Playwright's page-dispatcher-before-context-dispatcher order);
-  /// the context layer uses `Context` scope both for its immediate
-  /// fan-out and when re-applying registered routes to a fresh page.
-  pub(crate) async fn route_web_socket_scoped(
-    self: &Arc<Self>,
-    matcher: crate::url_matcher::UrlMatcher,
-    handler: crate::web_socket_route::WsHandler,
-    scope: crate::web_socket_route::WsRouteScope,
-  ) -> Result<()> {
-    use crate::web_socket_route as wsr;
-    let router = wsr::router_for_page(self.backend_page_id(), self.inner.clone());
-    let first = router.add_route(matcher, handler, scope);
-    if first {
-      self
-        .inner
-        .expose_binding(wsr::WS_BINDING_NAME, wsr::binding_callback(router))
-        .await?;
-      let source = crate::options::evaluation_script(wsr::mock_init_script(), None)?;
-      self.inner.add_init_script(&source).await?;
-      // The documents already loaded get the mock too, as Playwright's
-      // `WebSocketRouteDispatcher.install` does.
-      self.evaluate_in_all_frames(&source).await;
-    }
-    Ok(())
-  }
-
-  /// Remove a previously exposed function.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the function cannot be removed.
-  pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
-    self.inner.remove_exposed_function(name).await
-  }
-
-  // ── Script / Style injection ────────────────────────────────────────────
-
-  /// Playwright: `page.addScriptTag(options?: { content?, path?, type?,
-  /// url? }): Promise<ElementHandle>`. See
-  /// [`crate::frame::Frame::add_script_tag`], which this is for the main
-  /// frame.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if none of `url`, `path` and `content` is given,
-  /// `path` cannot be read, or the script fails to load.
-  #[track_caller]
-  pub fn add_script_tag(
-    self: &Arc<Self>,
-  ) -> crate::action::Action<'static, crate::options::AddScriptTagOptions, crate::element_handle::ElementHandle> {
-    self.main_frame().add_script_tag()
-  }
-
-  /// Playwright: `page.addStyleTag(options?: { content?, path?, url? }):
-  /// Promise<ElementHandle>`. See [`crate::frame::Frame::add_style_tag`],
-  /// which this is for the main frame.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if none of `url`, `path` and `content` is given,
-  /// `path` cannot be read, or the stylesheet fails to load.
-  #[track_caller]
-  pub fn add_style_tag(
-    self: &Arc<Self>,
-  ) -> crate::action::Action<'static, crate::options::AddStyleTagOptions, crate::element_handle::ElementHandle> {
-    self.main_frame().add_style_tag()
-  }
-
   // ── Dialog handling ─────────────────────────────────────────────────────
   //
   // Dialogs (alert/confirm/prompt/beforeunload) are observed through
@@ -1160,36 +696,15 @@ impl Page {
     &self,
     timeout_ms: u64,
   ) -> impl std::future::Future<Output = Result<crate::dialog::Dialog>> + Send + use<> {
-    use std::sync::Mutex;
-    let (tx, rx) = tokio::sync::oneshot::channel::<crate::dialog::Dialog>();
-    let tx = Arc::new(Mutex::new(Some(tx)));
+    let (handler, rx) = oneshot_claim_pair::<crate::dialog::Dialog>();
     // Claimed from the call, so one the caller triggers before awaiting
     // is not missed.
-    let id = self.inner.dialog_manager().add_handler(Arc::new(move |dialog| {
-      let mut guard = match tx.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-      };
-      match guard.take() {
-        // A failed send means the waiter already timed out and dropped
-        // the receiver — report unclaimed so the manager's auto-close
-        // path still runs instead of leaving the dialog open.
-        Some(sender) => sender.send(dialog.clone()).is_ok(),
-        None => false,
-      }
-    }));
+    let id = self.inner.dialog_manager().add_handler(handler);
     let inner = self.inner.clone();
     let claim = Unregister::new(move || inner.dialog_manager().remove_handler(id));
     async move {
       let _claim = claim;
-      let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
-      match result {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
-          "page closed while waiting for dialog".into(),
-        ))),
-        Err(_) => Err(crate::error::FerriError::timeout("waiting for dialog", timeout_ms)),
-      }
+      await_claimed(rx, timeout_ms, "dialog").await
     }
   }
 
@@ -1233,23 +748,10 @@ impl Page {
     &self,
     timeout_ms: u64,
   ) -> impl std::future::Future<Output = Result<crate::file_chooser::FileChooser>> + Send + use<> {
-    use std::sync::Mutex;
-    let (tx, rx) = tokio::sync::oneshot::channel::<crate::file_chooser::FileChooser>();
-    let tx = Arc::new(Mutex::new(Some(tx)));
+    let (handler, rx) = oneshot_claim_pair::<crate::file_chooser::FileChooser>();
     // Claimed from the call, so one the caller triggers before awaiting
     // is not missed.
-    let id = self.inner.file_chooser_manager().add_handler(Arc::new(move |chooser| {
-      let mut guard = match tx.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-      };
-      match guard.take() {
-        // Failed send = waiter already timed out; report unclaimed so
-        // the manager's no-listener disposal path still runs.
-        Some(sender) => sender.send(chooser.clone()).is_ok(),
-        None => false,
-      }
-    }));
+    let id = self.inner.file_chooser_manager().add_handler(handler);
     // Sent now, as `on("filechooser")` sends it, so the browser reports the
     // event before the wait is first awaited.
     self.lazy_enable_for_event("filechooser");
@@ -1262,14 +764,7 @@ impl Page {
       let _claim = claim;
       // Idempotent: answers at once when the call above already sent it.
       inner.enable_file_chooser_intercept().await?;
-      let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
-      match result {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
-          "page closed while waiting for filechooser".into(),
-        ))),
-        Err(_) => Err(crate::error::FerriError::timeout("waiting for filechooser", timeout_ms)),
-      }
+      await_claimed(rx, timeout_ms, "filechooser").await
     }
   }
 
@@ -1312,23 +807,10 @@ impl Page {
     &self,
     timeout_ms: u64,
   ) -> impl std::future::Future<Output = Result<crate::download::Download>> + Send + use<> {
-    use std::sync::Mutex;
-    let (tx, rx) = tokio::sync::oneshot::channel::<crate::download::Download>();
-    let tx = Arc::new(Mutex::new(Some(tx)));
+    let (handler, rx) = oneshot_claim_pair::<crate::download::Download>();
     // Claimed from the call, so one the caller triggers before awaiting
     // is not missed.
-    let id = self.inner.download_manager().add_handler(Arc::new(move |download| {
-      let mut guard = match tx.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-      };
-      match guard.take() {
-        // Failed send = waiter already timed out; report unclaimed so
-        // other handlers / the manager fallback can still take it.
-        Some(sender) => sender.send(download.clone()).is_ok(),
-        None => false,
-      }
-    }));
+    let id = self.inner.download_manager().add_handler(handler);
     // Sent now, as `on("download")` sends it, so the browser reports the
     // event before the wait is first awaited.
     self.lazy_enable_for_event("download");
@@ -1341,89 +823,7 @@ impl Page {
       let _claim = claim;
       // Idempotent: answers at once when the call above already sent it.
       inner.enable_download_behavior().await?;
-      let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
-      match result {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
-          "page closed while waiting for download".into(),
-        ))),
-        Err(_) => Err(crate::error::FerriError::timeout("waiting for download", timeout_ms)),
-      }
+      await_claimed(rx, timeout_ms, "download").await
     }
-  }
-
-  // ── Init Scripts ────────────────────────────────────────────────────────
-
-  /// Register a script to run before any page JS on every navigation.
-  /// Mirrors Playwright's `page.addInitScript(script, arg)` from
-  /// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
-  ///
-  /// Accepts the full Playwright argument shape: a JS function body
-  /// (pre-serialised via `fn.toString()` at the binding layer), a verbatim
-  /// source string, a `{ path }`, or a `{ content }`. The optional `arg`
-  /// is JSON-stringified and composed into a `(body)(arg)` wrapper for
-  /// the `Function` variant; passing `arg` alongside any non-function
-  /// variant is a Playwright-parity error (see [`crate::options::evaluation_script`]).
-  ///
-  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the
-  /// injected script (equivalent to [`Page::remove_init_script`] with the
-  /// generated identifier). Mirrors Playwright `page.addInitScript(...)` which
-  /// returns a `Disposable` (`client/page.ts:532`).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `evaluation_script` lowering fails (bad path, bad
-  /// arg combination, JSON serialisation) or the backend injection fails.
-  pub async fn add_init_script(
-    &self,
-    script: crate::options::InitScriptSource,
-    arg: Option<serde_json::Value>,
-  ) -> Result<crate::disposable::Disposable> {
-    let source = crate::options::evaluation_script(script, arg.as_ref())?;
-    let identifier = self.inner.add_init_script(&source).await?;
-    let inner = self.inner.clone();
-    Ok(crate::disposable::Disposable::new(move || async move {
-      inner.remove_init_script(&identifier).await
-    }))
-  }
-
-  /// Playwright: `page.addInitScript(script, arg, { exposeFunctions: true })`.
-  /// Each function in `arg` stays callable from every document the
-  /// script runs in, until the returned disposable removes the script.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error unless `script` is a function, if `arg` holds a
-  /// handle, or if the backend injection fails.
-  pub async fn add_init_script_exposing_functions(
-    &self,
-    script: crate::options::InitScriptSource,
-    arg: crate::protocol::SerializedArgument,
-  ) -> Result<crate::disposable::Disposable> {
-    let source = crate::options::evaluation_script_exposing(script, &arg.value)?;
-    for function in &arg.functions {
-      self
-        .inner
-        .expose_callback(&function.name, Arc::clone(&function.binding))
-        .await?;
-    }
-    let identifier = self.inner.add_init_script(&source).await?;
-    let inner = self.inner.clone();
-    let names: Vec<String> = arg.functions.into_iter().map(|f| f.name).collect();
-    Ok(crate::disposable::Disposable::new(move || async move {
-      for name in &names {
-        inner.remove_callback(name).await;
-      }
-      inner.remove_init_script(&identifier).await
-    }))
-  }
-
-  /// Remove a previously injected init script by identifier.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the init script cannot be removed.
-  pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
-    self.inner.remove_init_script(identifier).await
   }
 }

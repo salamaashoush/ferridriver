@@ -7,8 +7,10 @@ mod capture;
 mod eval;
 mod events;
 mod input_devices;
+mod inspector;
 mod interaction;
 mod navigation;
+mod routing;
 
 pub use input_devices::{
   Keyboard, KeyboardPressOptions, KeyboardTypeOptions, Mouse, MouseClickOptions, MouseDownOptions, MouseMoveOptions,
