@@ -43,7 +43,7 @@ jobs:
       - name: The revision is a full commit SHA
         run: |
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$REV is not a full commit SHA"; exit 1; }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.REV }}
           persist-credentials: false
@@ -67,7 +67,7 @@ jobs:
           mkdir out
           cp target/release-fast/ferridriver out/ferridriver-${{ matrix.arch }}
           out/ferridriver-${{ matrix.arch }} --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ferridriver-${{ matrix.arch }}
           path: out
@@ -82,7 +82,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: ferridriver-*
           merge-multiple: true
@@ -97,15 +97,15 @@ jobs:
           ARG TARGETARCH
           COPY bin/ferridriver-${TARGETARCH} /ferridriver
           EOF
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ferridriver-cli" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
