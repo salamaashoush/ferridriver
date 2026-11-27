@@ -14,10 +14,10 @@ use ferridriver::events::{ContextEvent, PageEvent};
 use ferridriver::options::LaunchOptions;
 use ferridriver::url_matcher::UrlMatcher;
 
-// Hosted Windows runners can stall a browser IPC round-trip for several
-// seconds under load; 15s is an upper bound and adds zero delay to passing
-// runs.
-const WAIT: u64 = 15_000;
+// Hosted Windows (especially ARM64 running x64-emulated Firefox) can stall a
+// browser IPC or download round-trip under parallel gate load; 30s is an upper
+// bound and adds zero delay to passing runs.
+const WAIT: u64 = 30_000;
 
 /// Serves a page, `/echo` and a `/download` attachment, a thread per
 /// connection and every reply closing it.
