@@ -265,28 +265,6 @@ macro_rules! retry_resolve {
   }};
 }
 
-/// The call-log line for a retried attempt, in Playwright's wording:
-/// `error:notinviewport` is "element is outside of the viewport",
-/// `error:not<state>` is "element is not <state>".
-pub(crate) fn action_log_line(msg: &str) -> String {
-  // `server/dom.ts::_retryAction`'s lines for `selectOption`'s markers.
-  if msg.contains("error:optionsnotfound") {
-    return "did not find some options".to_string();
-  }
-  if msg.contains("error:optionnotenabled") {
-    return "option being selected is not enabled".to_string();
-  }
-  let Some((_, after)) = msg.split_once("error:not") else {
-    return msg.strip_prefix("backend error: ").unwrap_or(msg).to_string();
-  };
-  let state: String = after.chars().take_while(char::is_ascii_alphanumeric).collect();
-  match state.as_str() {
-    "inviewport" => "element is outside of the viewport".to_string(),
-    "connected" => "element is not attached to the DOM".to_string(),
-    _ => format!("element is not {state}"),
-  }
-}
-
 enum PointerPrepVerdict {
   AlreadyDone,
   NotFound,
@@ -295,180 +273,6 @@ enum PointerPrepVerdict {
     point: (f64, f64),
     interceptor_installed: bool,
   },
-}
-
-/// Cold-path trace span setup for [`retry_resolve!`]. Kept out of the macro's
-/// inline state machine so locator action futures stay compact when tracing is
-/// inactive.
-pub(crate) async fn begin_locator_trace(
-  page: &Arc<crate::page::Page>,
-  selector: &str,
-  op: &str,
-  extra: serde_json::Value,
-) -> Option<crate::trace::ActionSpan> {
-  let composite = page.context().map(crate::context::ContextRef::composite);
-  let mut params = serde_json::json!({ "selector": selector });
-  if let (Some(dst), Some(src)) = (params.as_object_mut(), extra.as_object()) {
-    for (k, v) in src {
-      dst.insert(k.clone(), v.clone());
-    }
-  }
-  let span = crate::trace::begin_action(
-    composite.as_deref(),
-    "Locator",
-    op,
-    Some(format!("page@{}", page.backend_page_id())),
-    params,
-  );
-  if span.is_some() {
-    crate::trace::open_action(page.snapshot_before(span).await).await
-  } else {
-    None
-  }
-}
-
-struct CallLogInner {
-  lines: Vec<String>,
-  last_line: String,
-}
-
-/// Lazy Playwright `Call log:` builder. Allocates nothing and skips
-/// `as_locator` selector parsing unless the action actually traces, retries,
-/// aborts, or times out.
-pub(crate) struct LazyCallLog<'a> {
-  selector: &'a str,
-  op_name: &'a str,
-  attempted: bool,
-  inner: Option<Box<CallLogInner>>,
-}
-
-impl<'a> LazyCallLog<'a> {
-  pub(crate) fn new(selector: &'a str, op_name: &'a str) -> Self {
-    Self {
-      selector,
-      op_name,
-      attempted: false,
-      inner: None,
-    }
-  }
-
-  fn ensure_inner(&mut self) -> &mut CallLogInner {
-    let selector = self.selector;
-    let op_name = self.op_name;
-    let attempted = self.attempted;
-    self.inner.get_or_insert_with(|| {
-      let mut lines = Vec::with_capacity(if attempted { 2 } else { 1 });
-      lines.push(format!(
-        "waiting for {}",
-        crate::locator_generator::as_locator(selector)
-      ));
-      if attempted {
-        lines.push(format!("attempting {op_name} action"));
-      }
-      Box::new(CallLogInner {
-        lines,
-        last_line: String::new(),
-      })
-    })
-  }
-
-  pub(crate) fn waiting_line(&mut self) -> &str {
-    self.ensure_inner().lines.first().map_or("", String::as_str)
-  }
-
-  pub(crate) fn mark_attempted(&mut self) {
-    if !self.attempted {
-      self.attempted = true;
-      if let Some(inner) = self.inner.as_deref_mut()
-        && inner.lines.len() == 1
-      {
-        inner.lines.push(format!("attempting {} action", self.op_name));
-      }
-    }
-  }
-
-  pub(crate) fn record_retry(&mut self, line: &str) -> bool {
-    if self
-      .inner
-      .as_deref()
-      .is_some_and(|inner| line == inner.last_line.as_str())
-    {
-      return false;
-    }
-    self.attempted = true;
-    let op_name = self.op_name;
-    let inner = self.ensure_inner();
-    inner.lines.push(format!("  {line}"));
-    inner.lines.push(format!("retrying {op_name} action"));
-    inner.last_line.clear();
-    inner.last_line.push_str(line);
-    true
-  }
-
-  pub(crate) fn push_aborted(&mut self, error: &crate::error::FerriError) {
-    self
-      .ensure_inner()
-      .lines
-      .push(format!("operation was aborted: {error}"));
-  }
-
-  pub(crate) fn into_vec(mut self) -> Vec<String> {
-    let _ = self.ensure_inner();
-    self.inner.map_or_else(Vec::new, |inner| inner.lines)
-  }
-}
-
-/// Whether a failed attempt is tried again: never once its input was
-/// sent, otherwise as [`is_retryable_action_error`] says.
-pub(crate) fn retries(error: &crate::error::FerriError) -> bool {
-  !matches!(error, crate::error::FerriError::InputSent { .. }) && is_retryable_action_error(&error.to_string())
-}
-
-/// Should a failed action attempt be retried (re-resolve + try again
-/// until the action timeout), rather than surfaced as a hard error?
-///
-/// Two families:
-/// 1. Actionability signals from `checkElementStates`
-///    (`error:notvisible` / `error:notenabled` / `error:noteditable`,
-///    "not connected", "detached") — the element exists but is not yet
-///    actionable.
-/// 2. Stale-handle / navigated-away backend errors — the resolved node
-///    vanished mid-action (React re-mount, SPA route swap, in-flight
-///    navigation). Playwright's actionability loop re-resolves and
-///    retries these; ferridriver previously surfaced the raw protocol
-///    error (e.g. CDP "Object id doesn't reference a Node"), which
-///    escaped callers' try/catch and made every real SPA interaction
-///    fragile.
-pub(crate) fn is_retryable_action_error(msg: &str) -> bool {
-  msg.contains("not connected")
-    || msg.contains("not found")
-    || msg.contains("detached")
-    || msg.contains("error:not")
-    // `selectOption` before its options render, or while the one asked
-    // for is disabled: Playwright waits for both (`server/dom.ts`).
-    || msg.contains("error:optionsnotfound")
-    || msg.contains("error:optionnotenabled")
-    // CDP stale-node / stale-context messages.
-    || msg.contains("reference a Node")
-    || msg.contains("Could not find node")
-    || msg.contains("No node with given")
-    || msg.contains("Node with given id")
-    || msg.contains("belong to the document")
-    || msg.contains("Execution context was destroyed")
-    || msg.contains("Cannot find context with specified id")
-    // WebKit / BiDi stale-node phrasings.
-    || msg.contains("Node was not found")
-    || msg.contains("no such node")
-    || msg.contains("stale element")
-    // A WebKit target destroyed under us — the old side of a
-    // cross-process navigation. The page swaps to the committed target,
-    // so the very next attempt runs on a live session.
-    || msg.contains("transport closed")
-    // Hit-target interception: another element covers the action point.
-    // Retryable so the Locator loop keeps running locator handlers and
-    // re-resolving until its deadline (Playwright retries the pointer
-    // action on `hitTargetDescription` the same way).
-    || msg.contains("intercepts pointer events")
 }
 
 /// Outcome of [`Locator::match_aria_snapshot`] — whether the template
@@ -1153,13 +957,13 @@ impl Locator {
   /// default when `None`, without limit when `0`).
   async fn read(&self, op: &'static str, js_body: &str, timeout: Option<u64>) -> Result<serde_json::Value> {
     let page = self.frame.page_arc();
+    let params = if crate::trace::call_origins_wanted() {
+      serde_json::json!({ "selector": self.selector })
+    } else {
+      serde_json::Value::Null
+    };
     page
-      .traced_as(
-        "Locator",
-        op,
-        serde_json::json!({ "selector": self.selector }),
-        self.read_untraced(op, js_body, timeout),
-      )
+      .traced_as("Locator", op, params, self.read_untraced(op, js_body, timeout))
       .await
   }
 
@@ -1168,11 +972,20 @@ impl Locator {
     let deadline = (timeout != 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(timeout));
     // `retryWithProgressAndBackoff` drops the long waits from the
     // schedule when the timeout is short, so it still gets a few tries.
-    let backoffs: Vec<u64> = Self::RETRY_BACKOFFS_MS
-      .iter()
-      .copied()
-      .filter(|&ms| timeout == 0 || ms <= timeout / 5)
-      .collect();
+    let backoff_for = |attempt: usize| -> u64 {
+      let mut last = 0u64;
+      let mut idx = 0usize;
+      for &ms in Self::RETRY_BACKOFFS_MS {
+        if timeout == 0 || ms <= timeout / 5 {
+          last = ms;
+          if idx == attempt {
+            return ms;
+          }
+          idx += 1;
+        }
+      }
+      last
+    };
     let call_log = || {
       vec![format!(
         "waiting for {}",
@@ -1185,7 +998,7 @@ impl Locator {
     crate::operation_budget::OperationBudget::operation(timeout)?
       .scope(async move {
         loop {
-          let delay = backoffs[attempt.min(backoffs.len() - 1)];
+          let delay = backoff_for(attempt);
           attempt += 1;
           if delay > 0 {
             let left = deadline.map_or(delay, |deadline| {
@@ -1715,128 +1528,17 @@ impl std::fmt::Debug for Locator {
   }
 }
 
-// ── Frame resolution ──────────────────────────────────────────────────────────
-
-/// `frameLocator()` without a selector: the rest of the selector may
-/// match in any frame below the one it starts from.
-#[doc(hidden)]
-pub const ANY_FRAME: &str = "internal:control=any-frame";
-
-/// What an any-frame locator runs when no frame matches yet: a selector
-/// that cannot match, so actions keep waiting and counts read zero.
-const MATCHES_NOTHING: &str = ":not(*)";
-
-/// The selector after `frameLocator()`'s token, or `None` when the
-/// selector does not start in any frame.
-fn any_frame_rest(selector: &str) -> Result<Option<&str>> {
-  let Some(rest) = selector.trim().strip_prefix(ANY_FRAME) else {
-    return Ok(None);
-  };
-  match rest.trim_start().strip_prefix(">>").map(str::trim) {
-    Some(rest) if !rest.is_empty() => Ok(Some(rest)),
-    _ => Err(crate::error::FerriError::InvalidSelector {
-      selector: selector.to_string(),
-      reason: "Selector cannot be empty after frameLocator()".into(),
-    }),
-  }
-}
-
-/// Resolve `frameLocator` enter-frame hops from `start` into the deepest
-/// frame plus the selector to run inside it.
-async fn resolve_frame_hops(start: crate::frame::Frame, selector: &str) -> Result<(crate::frame::Frame, String)> {
-  const MARK: &str = ">> internal:control=enter-frame >>";
-  if !selector.contains("internal:control=enter-frame") {
-    return Ok((start, selector.to_string()));
-  }
-  let mut parts = selector.split(MARK).map(str::trim);
-  let mut cur = start;
-  let mut pending = parts.next().unwrap_or("").to_string();
-  for next in parts {
-    let page_arc = Arc::clone(cur.page_arc());
-    let fid = (!cur.is_main_frame()).then(|| cur.id().to_string());
-    let el = crate::selectors::query_one(page_arc.inner(), &pending, false, fid.as_deref()).await?;
-    let handle = crate::element_handle::ElementHandle::from_any_element(Arc::clone(&page_arc), el).await?;
-    cur = handle
-      .content_frame()
-      .await?
-      .ok_or_else(|| crate::error::FerriError::protocol("frameLocator", "<iframe> has no content frame"))?;
-    pending = next.to_string();
-  }
-  Ok((cur, pending))
-}
-
-/// Try `selector` from `root` and every frame below it, keeping the
-/// frames it matches in. A start frame whose hops lead nowhere, or whose
-/// document is between loads, is skipped as Playwright's no-stall pass
-/// skips it.
-async fn resolve_in_any_frame(root: &crate::frame::Frame, selector: &str) -> Result<(crate::frame::Frame, String)> {
-  let mut starts = vec![root.clone()];
-  let mut next = 0;
-  while next < starts.len() {
-    let children = starts[next].child_frames();
-    starts.extend(children);
-    next += 1;
-  }
-  let mut matched: Vec<(crate::frame::Frame, String)> = Vec::new();
-  for start in starts {
-    let Ok((frame, rest)) = resolve_frame_hops(start, selector).await else {
-      continue;
-    };
-    if matched.iter().any(|(seen, _)| seen.id() == frame.id()) {
-      continue;
-    }
-    if count_in(&frame, &rest).await.is_ok_and(|n| n > 0) {
-      matched.push((frame, rest));
-    }
-  }
-  if matched.len() > 1 {
-    return Err(crate::error::FerriError::InvalidSelector {
-      selector: format!("{ANY_FRAME} >> {selector}"),
-      reason: "frameLocator() matched elements in multiple frames.".into(),
-    });
-  }
-  Ok(
-    matched
-      .pop()
-      .unwrap_or_else(|| (root.clone(), MATCHES_NOTHING.to_string())),
-  )
-}
-
-/// Whether `selector`, starting with [`ANY_FRAME`], matches from `root` in
-/// `frame` and in no other frame.
-#[doc(hidden)]
-pub async fn any_frame_resolves_to(root: &crate::frame::Frame, selector: &str, frame: &crate::frame::Frame) -> bool {
-  let Ok(Some(rest)) = any_frame_rest(selector) else {
-    return false;
-  };
-  match Box::pin(resolve_in_any_frame(root, rest)).await {
-    Ok((resolved, rest)) => rest != MATCHES_NOTHING && resolved.id() == frame.id(),
-    Err(_) => false,
-  }
-}
-
-/// How many elements `selector` matches in `frame`, without strictness.
-async fn count_in(frame: &crate::frame::Frame, selector: &str) -> Result<usize> {
-  let parts_json = selectors::build_parts_json(&selectors::parse(selector)?);
-  let inner = frame.page_arc().inner();
-  let fd = inner.injected_script().await?;
-  let js = format!("{fd}.selCount({parts_json})");
-  let val = if frame.is_main_frame() {
-    inner.evaluate(&js).await
-  } else {
-    inner.evaluate_in_frame(&js, frame.id()).await
-  }?
-  .and_then(|v| v.as_u64())
-  .unwrap_or(0);
-  Ok(usize::try_from(val).unwrap_or(usize::MAX))
-}
-
 mod content;
 mod frame_locator;
+mod frame_resolve;
 mod interaction;
+mod retry;
 
 pub use frame_locator::{FrameLocator, guess_mime_type};
 pub(crate) use frame_locator::{
   build_attr_selector, build_role_selector, build_testid_selector, build_text_like_selector,
 };
 use frame_locator::{escape_for_text_selector, json_quote};
+pub use frame_resolve::{ANY_FRAME, any_frame_resolves_to};
+use frame_resolve::{any_frame_rest, count_in, resolve_frame_hops, resolve_in_any_frame};
+pub(crate) use retry::{LazyCallLog, action_log_line, begin_locator_trace, is_retryable_action_error, retries};
