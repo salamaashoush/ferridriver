@@ -14,6 +14,11 @@ import { isAbsolute, join, sep } from 'node:path';
 import { test, describe, expect } from '@ferridriver/test';
 
 describe('testInfo.snapshotPath', () => {
+  // Share the screenshot lock with screenshot-first-capture.test.ts so 16
+  // concurrent 1280x720 captures on a sibling worker cannot starve baseline
+  // writes past the 5s matcher timeout.
+  describe.configure({ lock: 'heavy-screenshot' });
+
   test('names the exact file toHaveScreenshot writes', async ({ page }, testInfo) => {
     const declared = testInfo.snapshotPath('shot.png', { kind: 'screenshot' });
 

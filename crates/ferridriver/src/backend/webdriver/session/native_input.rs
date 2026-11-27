@@ -436,7 +436,7 @@ mod tests {
             ..Default::default()
           },
           "data:text/html,sashoush",
-          if never_commit { 100 } else { 1000 },
+          if never_commit { 500 } else { 2000 },
         )
         .await
     });
