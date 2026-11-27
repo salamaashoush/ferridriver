@@ -378,17 +378,23 @@ struct SubscriberSlot<E> {
 /// Listener + subscription registries shared with the dispatcher task.
 type StateObserver<E> = Arc<dyn Fn(&E) + Send + Sync>;
 
+/// Inline non-blocking forwarder invoked on the emitter's dispatcher task for
+/// each event with its original sequence stamp (used by the page→context
+/// bridge to avoid a second task and channel per page).
+type EventBridge<E> = Arc<dyn Fn(&E, u64) + Send + Sync>;
+
 struct EmitterShared<E> {
   state_observer: std::sync::OnceLock<StateObserver<E>>,
+  bridge: std::sync::OnceLock<EventBridge<E>>,
   listeners: std::sync::Mutex<Vec<ListenerSlot<E>>>,
   subscribers: std::sync::Mutex<Vec<SubscriberSlot<E>>>,
   /// Events a pending [`Emitter::wait_for_event`] is waiting on, by id.
   waiters: std::sync::Mutex<Vec<(u64, String)>>,
-  /// Count of live consumers (`state_observer` + `listeners` + `subscribers`).
-  /// Incremented (`SeqCst`) before a new consumer mints its `registered`
-  /// sequence number and decremented only after removal, so `consumers == 0`
-  /// lets `emit` / `emit_stamped` short-circuit without allocating, locking,
-  /// or waking a dispatcher task.
+  /// Count of live consumers (`state_observer` + `bridge` + `listeners` +
+  /// `subscribers`). Incremented (`SeqCst`) before a new consumer mints its
+  /// `registered` sequence number and decremented only after removal, so
+  /// `consumers == 0` lets `emit` / `emit_stamped` short-circuit without
+  /// allocating, locking, or waking a dispatcher task.
   consumers: std::sync::atomic::AtomicUsize,
 }
 
@@ -465,6 +471,9 @@ fn dispatch_event<E: EmitterEvent>(
   let sequence = stamped.sequence;
   if let Some(observer) = shared.state_observer.get() {
     observer(&event);
+  }
+  if let Some(bridge) = shared.bridge.get() {
+    bridge(&event, sequence);
   }
   {
     let mut listeners = lock_or_recover(&shared.listeners);
@@ -578,6 +587,7 @@ impl<E: EmitterEvent> Emitter<E> {
       queue_tx,
       shared: Arc::new(EmitterShared {
         state_observer: std::sync::OnceLock::new(),
+        bridge: std::sync::OnceLock::new(),
         listeners: std::sync::Mutex::new(Vec::new()),
         subscribers: std::sync::Mutex::new(Vec::new()),
         waiters: std::sync::Mutex::new(Vec::new()),
@@ -657,8 +667,28 @@ impl<E: EmitterEvent> Emitter<E> {
     let _ = self.inner.queue_tx.send(StampedEvent { event, sequence });
   }
 
+  /// Whether at least one consumer (state observer, bridge, listener, or
+  /// subscription) is attached. Used by upstream bridges to skip allocating
+  /// forwarded event payloads when nobody is listening.
+  #[must_use]
+  pub(crate) fn has_consumers(&self) -> bool {
+    self.inner.shared.consumers.load(Ordering::SeqCst) > 0
+  }
+
   pub(crate) fn set_state_observer(&self, observer: StateObserver<E>) -> bool {
     if self.inner.shared.state_observer.set(observer).is_ok() {
+      self.inner.shared.consumers.fetch_add(1, Ordering::SeqCst);
+      self.ensure_dispatcher();
+      true
+    } else {
+      false
+    }
+  }
+
+  /// Attach an inline non-blocking forwarder that runs on this emitter's
+  /// dispatcher task for every event with its original sequence stamp.
+  pub(crate) fn set_bridge(&self, bridge: EventBridge<E>) -> bool {
+    if self.inner.shared.bridge.set(bridge).is_ok() {
       self.inner.shared.consumers.fetch_add(1, Ordering::SeqCst);
       self.ensure_dispatcher();
       true
@@ -948,6 +978,7 @@ impl<E: EmitterEvent> EventSubscription<E> {
     self.rx.recv().await.map(|stamped| stamped.event)
   }
 
+  #[cfg(test)]
   pub(crate) async fn recv_stamped(&mut self) -> Option<(E, u64)> {
     self.rx.recv().await.map(|stamped| (stamped.event, stamped.sequence))
   }

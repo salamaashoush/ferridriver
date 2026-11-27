@@ -10,8 +10,103 @@ use rustc_hash::FxHashMap as HashMap;
 use super::launch::{connect_browser, resolve_with_prefix};
 use super::{
   BrowserInstance, BrowserState, ClosedContexts, ConnectMode, ConsoleMessage, ContextLogHandles, DetachedContext,
-  DialogEvent, Listing, PageOpenPlan, Request, SessionKey,
+  DialogEvent, Listing, PageOpenPlan, Request, SessionKey, VisitedOrigins,
 };
+
+fn forward_page_event_to_context(
+  context_events: &crate::events::ContextEventEmitter,
+  visited_origins: &VisitedOrigins,
+  composite: &str,
+  backref: &crate::backend::PageBackref,
+  event: &crate::events::PageEvent,
+  sequence: u64,
+) {
+  use crate::events::{ContextEvent, PageEvent};
+  if let PageEvent::FrameNavigated(info) = event {
+    visited_origins.visit(composite, &info.url);
+  }
+  if !context_events.has_consumers() {
+    return;
+  }
+  let emit = |ev| context_events.emit_stamped(ev, sequence);
+  // Frame- and page-lifecycle mirror events need the public wrapper
+  // `Arc<Page>` so the binding can mint a `Frame` / deliver a `Page`.
+  // Upgrade lazily; skip if every wrapper has been dropped (page is going away).
+  let upgrade = || backref.upgrade();
+  match event {
+    PageEvent::PageError(err) => emit(ContextEvent::WebError(err.clone())),
+    PageEvent::Download(d) => emit(ContextEvent::Download(d.clone())),
+    PageEvent::DialogClosed(d) => emit(ContextEvent::DialogClosed(d.clone())),
+    PageEvent::FrameAttached(info) => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::FrameAttached {
+          page,
+          frame_id: info.frame_id.clone(),
+        });
+      }
+    },
+    PageEvent::FrameDetached { frame_id } => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::FrameDetached {
+          page,
+          frame_id: frame_id.clone(),
+        });
+      }
+    },
+    PageEvent::FrameNavigated(info) => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::FrameNavigated {
+          page,
+          frame_id: info.frame_id.clone(),
+        });
+      }
+    },
+    PageEvent::Close => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::PageClose(page));
+      }
+    },
+    PageEvent::Load => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::PageLoad(page));
+      }
+    },
+    PageEvent::Console(message) => emit(ContextEvent::Console(message.clone())),
+    PageEvent::Request(request) => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::Request {
+          page,
+          request: request.clone(),
+        });
+      }
+    },
+    PageEvent::Response(response) => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::Response {
+          page,
+          response: response.clone(),
+        });
+      }
+    },
+    PageEvent::RequestFinished(request) => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::RequestFinished {
+          page,
+          request: request.clone(),
+        });
+      }
+    },
+    PageEvent::RequestFailed(request) => {
+      if let Some(page) = upgrade() {
+        emit(ContextEvent::RequestFailed {
+          page,
+          request: request.clone(),
+        });
+      }
+    },
+    _ => {},
+  }
+}
 
 impl BrowserState {
   /// Ensure a browser instance is launched. If it already exists, no-op.
@@ -313,89 +408,16 @@ impl BrowserState {
     );
     let _ = page.dialog_manager().register_context_bridge(context_events.clone());
 
-    // Spawn the page→context bridge exactly once per registered page.
-    // Runs independently of any `ContextRef` or `Page` wrapper
-    // lifetime — forwards as long as the page's emitter stays alive.
-    // Holds only the subscription and the weak backref slot: a strong
-    // `AnyPage` clone here would pin the page's `EventEmitter`, so
-    // this task's own `recv` could never observe the close and the
-    // whole backend page (CDP session, managers, listener tasks)
-    // leaked per open/close cycle.
-    let mut rx = page.events().subscribe();
+    // Install the page→context bridge inline on the page's event dispatcher
+    // (once per registered page). Running inline avoids spawning a second
+    // tokio task + unbounded channel + per-event clone for every page, and
+    // skips `backref.upgrade()` + `ContextEvent` construction altogether when
+    // no context-level consumers are attached. Holds only the weak backref
+    // slot (never a strong `AnyPage` clone) so page teardown stays leak-free.
     let backref = page.page_backref_handle();
-    tokio::spawn(async move {
-      use crate::events::{ContextEvent, PageEvent};
-      while let Some((event, sequence)) = rx.recv_stamped().await {
-        let emit = |event| context_events.emit_stamped(event, sequence);
-        // Frame- and page-lifecycle mirror events need the public
-        // wrapper `Arc<Page>` so the binding can mint a `Frame` /
-        // deliver a `Page`. Upgrade lazily; skip if every wrapper has
-        // been dropped (page is going away).
-        let upgrade = || backref.upgrade();
-        match event {
-          PageEvent::PageError(err) => emit(ContextEvent::WebError(err)),
-          PageEvent::Download(d) => emit(ContextEvent::Download(d)),
-          PageEvent::DialogClosed(d) => emit(ContextEvent::DialogClosed(d)),
-          PageEvent::FrameAttached(info) => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::FrameAttached {
-                page,
-                frame_id: info.frame_id,
-              });
-            }
-          },
-          PageEvent::FrameDetached { frame_id } => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::FrameDetached { page, frame_id });
-            }
-          },
-          PageEvent::FrameNavigated(info) => {
-            visited_origins.visit(&composite, &info.url);
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::FrameNavigated {
-                page,
-                frame_id: info.frame_id,
-              });
-            }
-          },
-          PageEvent::Close => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::PageClose(page));
-            }
-            // The page is gone — exit instead of waiting on a channel
-            // whose senders (backend listener tasks) may outlive it.
-            break;
-          },
-          PageEvent::Load => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::PageLoad(page));
-            }
-          },
-          PageEvent::Console(message) => emit(ContextEvent::Console(message)),
-          PageEvent::Request(request) => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::Request { page, request });
-            }
-          },
-          PageEvent::Response(response) => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::Response { page, response });
-            }
-          },
-          PageEvent::RequestFinished(request) => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::RequestFinished { page, request });
-            }
-          },
-          PageEvent::RequestFailed(request) => {
-            if let Some(page) = upgrade() {
-              emit(ContextEvent::RequestFailed { page, request });
-            }
-          },
-          _ => {},
-        }
-      }
-    });
+    let _ = page.events().set_bridge(Arc::new(move |event, sequence| {
+      forward_page_event_to_context(&context_events, &visited_origins, &composite, &backref, event, sequence);
+    }));
 
     Ok(())
   }
