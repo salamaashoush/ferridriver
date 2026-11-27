@@ -1260,6 +1260,7 @@ fn http_origin(url: &str) -> Option<String> {
   origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
+mod discover;
 mod launch;
 mod sessions;
 #[cfg(test)]
@@ -1268,9 +1269,10 @@ mod tests;
 #[cfg(test)]
 mod adoption_tests;
 
-use launch::{LaunchSpec, LaunchedProxies, browser_executable, connect_browser};
-pub(crate) use sessions::{CHROMIUM_SWITCHES, merge_feature_switches};
-pub use sessions::{
-  ContextInfo, PageInfo, SessionInfo, chrome_flags, chrome_flags_with, detect_chromium, detect_chromium_headless_shell,
-  detect_firefox, detect_ladybird, detect_lightpanda, resolve_chromium,
+pub(crate) use discover::{CHROMIUM_SWITCHES, merge_feature_switches};
+pub use discover::{
+  chrome_flags, chrome_flags_with, detect_chromium, detect_chromium_headless_shell, detect_firefox, detect_ladybird,
+  detect_lightpanda, resolve_chromium,
 };
+use launch::{LaunchSpec, LaunchedProxies, browser_executable, connect_browser};
+pub use sessions::{ContextInfo, PageInfo, SessionInfo};
