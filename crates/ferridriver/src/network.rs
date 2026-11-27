@@ -322,8 +322,11 @@ impl Request {
     let Some(body) = self.post_data() else {
       return Ok(None);
     };
-    if let Some(ct) = self.headers().get("content-type")
-      && ct.contains("application/x-www-form-urlencoded")
+    if self
+      .inner
+      .provisional_headers
+      .iter()
+      .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v.contains("application/x-www-form-urlencoded"))
     {
       let mut entries = serde_json::Map::new();
       for (k, v) in url_decode_form(&body) {
@@ -911,11 +914,10 @@ impl Response {
   /// Returns an error if the raw-header fetcher fails.
   pub async fn header_values(&self, name: &str) -> Result<Vec<String>> {
     let raw = self.fetch_raw_headers().await?;
-    let lc = name.to_ascii_lowercase();
     Ok(
       raw
         .iter()
-        .filter(|h| h.name.to_ascii_lowercase() == lc)
+        .filter(|h| h.name.eq_ignore_ascii_case(name))
         .map(|h| h.value.clone())
         .collect(),
     )
@@ -1297,7 +1299,7 @@ pub fn known_raw_headers(headers: Vec<HeaderEntry>) -> RawHeadersFn {
 /// Playwright's `headers()`: names lower-cased, a name the protocol
 /// reported under two casings joined like a repeated header.
 pub(crate) fn lowercase_names(map: &Headers) -> Headers {
-  let mut out: Headers = FxHashMap::default();
+  let mut out: Headers = FxHashMap::with_capacity_and_hasher(map.len(), rustc_hash::FxBuildHasher);
   for (name, value) in map {
     let name = name.to_ascii_lowercase();
     let separator = if name == "set-cookie" { "\n" } else { ", " };
@@ -1314,32 +1316,41 @@ pub(crate) fn lowercase_names(map: &Headers) -> Headers {
 
 #[must_use]
 pub fn headers_array_to_map(arr: &[HeaderEntry]) -> Headers {
-  let mut out: Headers = FxHashMap::default();
-  let mut groups: FxHashMap<String, Vec<&str>> = FxHashMap::default();
+  let mut out: Headers = FxHashMap::with_capacity_and_hasher(arr.len(), rustc_hash::FxBuildHasher);
   for h in arr {
     let lc = h.name.to_ascii_lowercase();
-    groups.entry(lc).or_default().push(&h.value);
-  }
-  for (lc, values) in groups {
     let sep = if lc == "set-cookie" { "\n" } else { ", " };
-    out.insert(lc, values.join(sep));
+    out
+      .entry(lc)
+      .and_modify(|joined| {
+        joined.push_str(sep);
+        joined.push_str(&h.value);
+      })
+      .or_insert_with(|| h.value.clone());
   }
   out
 }
 
 #[must_use]
 pub fn get_header_value(arr: &[HeaderEntry], name: &str) -> Option<String> {
-  let lc = name.to_ascii_lowercase();
-  let values: Vec<&str> = arr
-    .iter()
-    .filter(|h| h.name.to_ascii_lowercase() == lc)
-    .map(|h| h.value.as_str())
-    .collect();
-  if values.is_empty() {
-    return None;
+  let sep = if name.eq_ignore_ascii_case("set-cookie") {
+    "\n"
+  } else {
+    ", "
+  };
+  let mut out: Option<String> = None;
+  for h in arr {
+    if h.name.eq_ignore_ascii_case(name) {
+      match out {
+        Some(ref mut joined) => {
+          joined.push_str(sep);
+          joined.push_str(&h.value);
+        },
+        None => out = Some(h.value.clone()),
+      }
+    }
   }
-  let sep = if lc == "set-cookie" { "\n" } else { ", " };
-  Some(values.join(sep))
+  out
 }
 
 fn url_decode_form(body: &str) -> Vec<(String, String)> {
