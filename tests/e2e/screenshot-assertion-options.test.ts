@@ -169,6 +169,7 @@ describe('toHaveScreenshot capture options', () => {
   });
 
   test('timeout bounds the assertion', async ({ page }) => {
+    await page.setViewportSize({ width: 100, height: 100 });
     await page.setContent('<div style="width:20px;height:20px;background:#654321"></div>');
     // A baseline that will never match: the assertion polls until its own
     // timeout, and `timeout` is what decides when it gives up.
