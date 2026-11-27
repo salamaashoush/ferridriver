@@ -81,14 +81,14 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: Install system deps
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libclang-dev pkg-config
       - run: |
-          cargo clippy --workspace --all-targets \
+          cargo clippy --locked --workspace --all-targets \
             --exclude bdd-example -- -D warnings
 
   # Windows-only code paths (job objects, named pipes, the C runtime
@@ -106,8 +106,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo clippy --workspace --all-targets --exclude bdd-example -- -D warnings
+          cache-on-failure: true
+      - run: cargo clippy --locked --workspace --all-targets --exclude bdd-example -- -D warnings
 
   doc:
     name: Documentation
@@ -120,14 +120,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: Install system deps
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libclang-dev pkg-config
       - run: |
-          cargo doc --workspace --no-deps \
+          cargo doc --locked --workspace --no-deps \
             --exclude bdd-example
 
   # Gate job: all cheap checks must pass
@@ -170,25 +170,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, id: e2e-chromium, gate: --only e2e --project chromium }
-          - { os: ubuntu-latest, id: e2e-chromium-ws, gate: --only e2e --project chromium-ws }
-          - { os: ubuntu-latest, id: e2e-firefox, gate: --only e2e --project firefox }
-          - { os: ubuntu-latest, id: e2e-webkit, gate: --only e2e --project webkit }
-          - { os: ubuntu-latest, id: integration, gate: --only integration }
-          - { os: ubuntu-latest, id: bdd, gate: --only bdd }
-          - { os: ubuntu-latest, id: acceptance, gate: --only acceptance --only acceptance-bdd }
-          - { os: ubuntu-latest, id: napi, gate: --only napi }
-          - { os: ubuntu-latest, id: rust, gate: --only rust-build --only doc-tests }
-          - { os: macos-latest, id: e2e-webkit, gate: --only e2e --project webkit }
-          - { os: macos-latest, id: e2e-chromium, gate: --only e2e --project chromium }
-          - { os: macos-latest, id: napi, gate: --only napi }
-          - { os: macos-latest, id: rust, gate: --only rust-build --only doc-tests }
-          - { os: windows-latest, id: e2e-chromium, gate: --only e2e --project chromium }
-          - { os: windows-latest, id: e2e-webkit, gate: --only e2e --project webkit }
-          - { os: windows-latest, id: e2e-firefox, gate: --only e2e --project firefox }
-          - { os: windows-latest, id: napi, gate: --only napi }
-          - { os: windows-latest, id: rust, gate: --only rust-build --only doc-tests }
-          - { os: windows-11-arm, id: rust, gate: --only rust-build --only doc-tests }
+          - { os: ubuntu-latest, id: e2e-chromium, gate: --only e2e --project chromium, install: chromium firefox webkit axe ffmpeg }
+          - { os: ubuntu-latest, id: e2e-chromium-ws, gate: --only e2e --project chromium-ws, install: chromium axe ffmpeg }
+          - { os: ubuntu-latest, id: e2e-firefox, gate: --only e2e --project firefox, install: chromium firefox axe ffmpeg }
+          - { os: ubuntu-latest, id: e2e-webkit, gate: --only e2e --project webkit, install: chromium webkit axe ffmpeg }
+          - { os: ubuntu-latest, id: integration, gate: --only integration, install: chromium chromedriver firefox webkit axe }
+          - { os: ubuntu-latest, id: bdd, gate: --only bdd, install: chromium }
+          - { os: ubuntu-latest, id: acceptance, gate: --only acceptance --only acceptance-bdd, install: chromium }
+          - { os: ubuntu-latest, id: napi, gate: --only napi, install: chromium chromedriver firefox webkit axe ffmpeg }
+          - { os: ubuntu-latest, id: rust, gate: --only rust-build --only doc-tests, install: chromium firefox webkit axe }
+          - { os: macos-latest, id: e2e-webkit, gate: --only e2e --project webkit, install: chromium webkit axe ffmpeg }
+          - { os: macos-latest, id: e2e-chromium, gate: --only e2e --project chromium, install: chromium firefox webkit axe ffmpeg }
+          - { os: macos-latest, id: napi, gate: --only napi, install: chromium chromedriver firefox webkit axe ffmpeg }
+          - { os: macos-latest, id: rust, gate: --only rust-build --only doc-tests, install: chromium firefox webkit axe }
+          - { os: windows-latest, id: e2e-chromium, gate: --only e2e --project chromium, install: chromium firefox webkit axe ffmpeg }
+          - { os: windows-latest, id: e2e-webkit, gate: --only e2e --project webkit, install: chromium webkit axe ffmpeg }
+          - { os: windows-latest, id: e2e-firefox, gate: --only e2e --project firefox, install: chromium firefox axe ffmpeg }
+          - { os: windows-latest, id: napi, gate: --only napi, install: chromium chromedriver firefox webkit axe ffmpeg }
+          - { os: windows-latest, id: rust, gate: --only rust-build --only doc-tests, install: chromium firefox webkit axe }
+          - { os: windows-11-arm, id: rust, gate: --only rust-build --only doc-tests, install: chromium firefox webkit axe }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -199,7 +199,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.id == 'rust' && 'rust' || 'browser' }}
-          save-if: ${{ github.ref == 'refs/heads/main' && (matrix.id == 'rust' || matrix.id == 'e2e-webkit') }}
+          save-if: ${{ matrix.id == 'rust' || matrix.id == 'e2e-webkit' }}
+          cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
 
       - name: Install build deps (Linux)
@@ -233,16 +234,19 @@ jobs:
       - name: Install JavaScript build dependencies
         run: bun install --frozen-lockfile
 
+      # Use the exact workspace member set `ferridriver-gate`'s `build` step
+      # runs (`--exclude ferridriver-gate`) so feature unification matches and
+      # the gate's own build check is a fast no-op instead of recompiling.
       - name: Build browser installer and test binaries
-        run: cargo build --locked --workspace --bins --lib
+        run: cargo build --locked --workspace --exclude ferridriver-gate --bins --lib
 
       # The WebDriver tests drive ChromeDriver against the Chrome for Testing
       # build every other suite launches; `chromedriver` is the driver
       # published for that exact version. Under the image's own Chromium
       # it sat 20s and more in startup, past the test's budget.
-      - name: Install browsers, ChromeDriver, accessibility engine and ffmpeg
+      - name: Install required browsers and tools
         shell: bash
-        run: target/debug/ferridriver install --with-deps chromium chromedriver firefox webkit axe ffmpeg
+        run: target/debug/ferridriver install --with-deps ${{ matrix.install }}
 
       # The gate's default of 32 browser slots is sized for a desktop. The
       # hosted runners have 4 vCPUs on Linux and 3 on macOS.
@@ -250,7 +254,7 @@ jobs:
         run: cargo gate test ${{ matrix.gate }}
         env:
           FERRIDRIVER_GATE_WORKERS: ${{ runner.os == 'macOS' && 3 || 4 }}
-          FERRIDRIVER_GATE_TIMEOUT: 1800
+          FERRIDRIVER_GATE_TIMEOUT: ${{ matrix.os == 'windows-11-arm' && 3600 || 1800 }}
           # Printed only when the test fails; see waits_listen_from_call.rs.
           FERRIDRIVER_TEST_TRACE: ferridriver::backend::bidi=trace
 
@@ -284,21 +288,15 @@ jobs:
   lockfile:
     name: Lockfile
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install system deps
-        run: |
-          DEBIAN_FRONTEND=noninteractive sudo apt-get update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config
-      - run: cargo check --locked --workspace
+      # `cargo metadata --locked` verifies Cargo.lock against every workspace
+      # manifest in ~1s instead of compiling the workspace again.
+      - run: cargo metadata --locked --format-version 1 > /dev/null
 
   # ---------------------------------------------------------------------------
   # Conclusion: aggregator for branch protection rules
