@@ -8,7 +8,7 @@ import { test, describe, expect } from '@ferridriver/test';
 describe('cdp session', () => {
   test('cdp_session_page', async ({ page, context, browserName }) => {
     await page.goto('data:text/html,<body>cdp</body>');
-    if (browserName !== 'chromium') {
+    if (browserName !== 'chromium' && browserName !== 'lightpanda') {
       let msg = '';
       try {
         await context.newCDPSession(page);
@@ -51,7 +51,7 @@ describe('cdp session', () => {
   });
 
   test('cdp_session_browser', async ({ browser, browserName }) => {
-    if (browserName !== 'chromium') {
+    if (browserName !== 'chromium' && browserName !== 'lightpanda') {
       let msg = '';
       try {
         await browser.newBrowserCDPSession();

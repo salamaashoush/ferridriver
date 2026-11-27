@@ -213,11 +213,10 @@ export class StorageScript {
       await Promise.all(dbInfo.stores.map(async store => {
         const objectStore = transaction.objectStore(store.name);
         await Promise.all(store.records.map(async record => {
+          const value = record.value ?? parseEvaluationResultValue(record.valueEncoded);
+          const key = record.key ?? parseEvaluationResultValue(record.keyEncoded);
           await this._idbRequestToPromise(
-              objectStore.add(
-                  record.value ?? parseEvaluationResultValue(record.valueEncoded),
-                  record.key ?? parseEvaluationResultValue(record.keyEncoded),
-              )
+              key !== undefined ? objectStore.add(value, key) : objectStore.add(value)
           );
         }));
       }));

@@ -124,6 +124,7 @@ impl CdpPage {
     let mut pending = Vec::new();
     self.queue_emulation_options(opts, &mut pending);
     self.queue_session_options(opts, &mut pending);
+    self.queue_throttling_options(opts, &mut pending);
     let results = futures::future::join_all(
       pending
         .into_iter()
@@ -131,15 +132,21 @@ impl CdpPage {
     )
     .await;
 
-    // Aggregate errors — one failure per field, each labelled.
-    let errs: Vec<String> = results
+    // Aggregate errors — preserve a single `Unsupported` error directly so
+    // callers (e.g. `setCPUThrottling`, `setNetworkConditions`, `setOffline`)
+    // observe the typed `FerriError::Unsupported` rather than a wrapped backend
+    // string; fold multiple failures into one labelled summary.
+    let mut errs: Vec<(&'static str, FerriError)> = results
       .into_iter()
-      .filter_map(|(label, r)| r.err().map(|e| format!("{label}: {e}")))
+      .filter_map(|(label, r)| r.err().map(|e| (label, e)))
       .collect();
     if errs.is_empty() {
       Ok(())
+    } else if errs.len() == 1 && matches!(errs[0].1, FerriError::Unsupported { .. }) {
+      Err(errs.remove(0).1)
     } else {
-      Err(FerriError::Backend(errs.join("; ")))
+      let summary: Vec<String> = errs.into_iter().map(|(label, e)| format!("{label}: {e}")).collect();
+      Err(FerriError::Backend(summary.join("; ")))
     }
   }
 
@@ -195,7 +202,12 @@ impl CdpPage {
     if let Some(v) = opts.java_script_enabled {
       pending.push((
         "javaScriptEnabled",
-        Box::pin(self.configure("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))),
+        Box::pin(async move {
+          self
+            .configure("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))
+            .await
+            .map_err(|e| map_cdp_unsupported(e, "disabling JavaScript is not supported by this browser"))
+        }),
       ));
     }
     if let Some(v) = opts.bypass_csp {
@@ -295,29 +307,54 @@ impl CdpPage {
         }),
       ));
     }
+  }
+
+  /// Queue offline, network-conditions, and CPU-throttling emulation commands.
+  fn queue_throttling_options<'a>(
+    &'a self,
+    opts: &'a crate::options::BrowserContextOptions,
+    pending: &mut Vec<ContextOptionCommand<'a>>,
+  ) {
     // One command carries both, so each must be sent with the other's
     // current value or setting one would undo the other.
     if opts.offline.is_some() || opts.network_conditions.is_some() {
       let conditions = opts
         .network_conditions
         .unwrap_or(crate::options::NetworkConditions::NONE);
-      pending.push((
-        "offline/networkConditions",
-        Box::pin(self.configure(
-          "Network.emulateNetworkConditions",
-          serde_json::json!({
-            "offline": opts.offline.unwrap_or(false),
-            "latency": conditions.latency,
-            "downloadThroughput": conditions.download_throughput.unwrap_or(-1.0),
-            "uploadThroughput": conditions.upload_throughput.unwrap_or(-1.0),
+      if self.flavor.is_lightpanda() && opts.network_conditions.is_some() {
+        pending.push((
+          "offline/networkConditions",
+          Box::pin(async { Err(FerriError::unsupported("network conditions emulation needs Chromium")) }),
+        ));
+      } else {
+        pending.push((
+          "offline/networkConditions",
+          Box::pin(async move {
+            self
+              .configure(
+                "Network.emulateNetworkConditions",
+                serde_json::json!({
+                  "offline": opts.offline.unwrap_or(false),
+                  "latency": conditions.latency,
+                  "downloadThroughput": conditions.download_throughput.unwrap_or(-1.0),
+                  "uploadThroughput": conditions.upload_throughput.unwrap_or(-1.0),
+                }),
+              )
+              .await
+              .map_err(|e| map_cdp_unsupported(e, "offline emulation is not supported by this browser"))
           }),
-        )),
-      ));
+        ));
+      }
     }
     if let Some(rate) = opts.cpu_throttling_rate {
       pending.push((
         "cpuThrottling",
-        Box::pin(self.configure("Emulation.setCPUThrottlingRate", serde_json::json!({ "rate": rate }))),
+        Box::pin(async move {
+          self
+            .configure("Emulation.setCPUThrottlingRate", serde_json::json!({ "rate": rate }))
+            .await
+            .map_err(|e| map_cdp_unsupported(e, "CPU throttling needs Chromium"))
+        }),
       ));
     }
   }
@@ -350,6 +387,9 @@ impl CdpPage {
   /// restored from that profile's last run, so the window carried a
   /// stale size across every later session.
   async fn resize_window_for(&self, config: &crate::options::ViewportConfig) {
+    if self.flavor.is_lightpanda() {
+      return;
+    }
     let Some(window_id) = self.window_id().await else {
       return;
     };
@@ -628,7 +668,10 @@ impl CdpPage {
       .transport
       .tap_event_methods(&["HeapProfiler.addHeapSnapshotChunk"], self.session_id.as_deref());
 
-    self.cmd("HeapProfiler.enable", super::super::empty_params()).await?;
+    self
+      .cmd("HeapProfiler.enable", super::super::empty_params())
+      .await
+      .map_err(|e| map_cdp_unsupported(e, "heap snapshots need Chromium"))?;
     self
       .cmd("HeapProfiler.collectGarbage", super::super::empty_params())
       .await?;
@@ -690,7 +733,8 @@ impl CdpPage {
           "traceConfig": { "includedCategories": categories.split(',').collect::<Vec<_>>() },
         }),
       )
-      .await?;
+      .await
+      .map_err(|e| map_cdp_unsupported(e, "CDP tracing needs Chromium"))?;
     Ok(())
   }
 

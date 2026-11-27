@@ -692,17 +692,33 @@ impl CdpPage {
       .collect();
     if !child_indices.is_empty() {
       let frame_ids: Vec<String> = child_indices.iter().map(|&i| frames[i].frame_id.clone()).collect();
-      let futs: Vec<_> = frame_ids
-        .iter()
-        .map(|fid| self.evaluate_in_frame("window.name", fid))
-        .collect();
-      let results = futures::future::join_all(futs).await;
-      for (idx, result) in child_indices.into_iter().zip(results) {
-        if let Ok(Some(val)) = result
-          && let Some(name) = val.as_str()
-          && !name.is_empty()
-        {
-          frames[idx].name = name.to_string();
+      if self.flavor.is_lightpanda() {
+        // Lightpanda leaves `window.name` undefined on iframes and omits
+        // `frame.name` from `Page.getFrameTree`, so read the owner element's
+        // `name` attribute directly.
+        let futs: Vec<_> = frame_ids
+          .iter()
+          .map(|fid| Self::resolve_frame_owner_name(&self.transport, self.session_id.as_deref(), fid))
+          .collect();
+        let results = futures::future::join_all(futs).await;
+        for (idx, name) in child_indices.into_iter().zip(results) {
+          if let Some(name) = name {
+            frames[idx].name = name;
+          }
+        }
+      } else {
+        let futs: Vec<_> = frame_ids
+          .iter()
+          .map(|fid| self.evaluate_in_frame("window.name", fid))
+          .collect();
+        let results = futures::future::join_all(futs).await;
+        for (idx, result) in child_indices.into_iter().zip(results) {
+          if let Ok(Some(val)) = result
+            && let Some(name) = val.as_str()
+            && !name.is_empty()
+          {
+            frames[idx].name = name.to_string();
+          }
         }
       }
     }

@@ -324,7 +324,7 @@ describe('page api', () => {
     try {
       await page.requestGC();
     } catch (e) {
-      expect(browserName).toBe('firefox');
+      expect(['firefox', 'lightpanda']).toContain(browserName);
       expect(String((e as Error).message ?? e)).toContain('requestGC');
       return;
     }

@@ -192,19 +192,31 @@ unless the launch's own `env` sets `LIGHTPANDA_DISABLE_TELEMETRY`.
 Lightpanda holds one browser context per CDP connection, so every context
 ferridriver creates gets a connection of its own to the same server, and
 the server's connection cap is raised to 128 (`--cdp-max-connections` in
-the launch arguments overrides it). `serve` fetches no sub-resources by
-default; ferridriver has it load iframes, workers, stylesheets, images and
-beacons as a browser does, unless the launch arguments name
-`--load-resources` themselves.
+the launch arguments overrides it). ferridriver also raises the CDP frame
+limit to 64 MiB (`--cdp-max-message-size`), disables Lightpanda's 15 s
+HTTP timeout so ferridriver's own per-operation timeouts govern
+(`--http-timeout`), and switches off the unused Prometheus metrics
+endpoint (`--disable-metrics`); any of those can be overridden through
+launch arguments. `serve` fetches no sub-resources by default;
+ferridriver has it load iframes, workers, stylesheets, images and beacons
+as a browser does, unless the launch arguments name `--load-resources`
+themselves.
 
 **Limits**
 
-- Headless only. Screenshots are PNG only and drawn by Lightpanda's own
-  layout, so pixel comparisons against other browsers will differ; there
-  is no screencast, so no video.
+- Headless only. Lightpanda's `Page.captureScreenshot` emits PNG only
+  (ferridriver transcodes JPEG and WebP in Rust) and draws with
+  Lightpanda's own minimal layout, so pixel comparisons against other
+  browsers will differ; there is no screencast, so no video.
+- `Page.printToPDF`, `Accessibility.getFullAXTree`, `Storage.*` cookies,
+  `Fetch` interception, `IndexedDB` storage state, and raw `CDPSession`
+  work over CDP.
 - Not yet implemented by Lightpanda: popups that open a new window,
-  JavaScript dialogs, file choosers, downloads, colour-scheme and device
-  emulation, offline and throttling emulation.
+  blocking JavaScript dialogs (Lightpanda fires the opening event and
+  returns immediately), file choosers, downloads, colour-scheme and media
+  feature emulation, offline / network throttling, CPU throttling,
+  disabling JavaScript, heap snapshots, and JS/CSS coverage (those
+  surface as typed `Unsupported` errors).
 - No Windows build; run it in WSL.
 
 ## How browsers relate to backends

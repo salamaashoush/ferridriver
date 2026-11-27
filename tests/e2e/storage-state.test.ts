@@ -160,10 +160,12 @@ describe('storage state', () => {
     // Playwright's own spec skips WebKit here: a non-persistent WebKit
     // context has no OPFS. What the engine can do decides what is asserted.
     const available = await page.evaluate(() =>
-      navigator.storage.getDirectory().then(
-        () => true,
-        () => false,
-      ),
+      typeof navigator.storage?.getDirectory === 'function'
+        ? navigator.storage.getDirectory().then(
+            () => true,
+            () => false,
+          )
+        : false,
     );
     if (!available) {
       const error = (await context.storageState({ opfs: true }).catch((e: Error) => e)) as Error;

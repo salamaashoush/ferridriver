@@ -147,6 +147,9 @@ impl Coverage {
   }
 
   async fn start_js_coverage_impl(&self, options: JsCoverageOptions) -> Result<()> {
+    if self.page.inner().is_lightpanda() {
+      return Err(FerriError::unsupported("JavaScript coverage needs Chromium"));
+    }
     let mut state = self.state().lock().await;
     if state.js.is_some() {
       return Err(FerriError::invalid_argument(
@@ -348,6 +351,9 @@ impl Coverage {
     };
     let cleared = Self::on_contexts_cleared(&session, &collected, reset);
     let started = async {
+      if self.page.inner().is_lightpanda() {
+        return Err(FerriError::unsupported("CSS coverage needs Chromium"));
+      }
       session.send("Runtime.enable", json!({})).await?;
       session.send("DOM.enable", json!({})).await?;
       session.send("CSS.enable", json!({})).await?;

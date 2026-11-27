@@ -46,6 +46,11 @@ struct ListenerRegistry {
 struct SessionInner {
   transport: Arc<CdpTransport>,
   session_id: Arc<str>,
+  /// Session id tapped for incoming events. Matches `session_id` on Chromium;
+  /// on Lightpanda (which emits target events only on the target's first
+  /// session) this points at the page's primary session while `session_id`
+  /// remains the dedicated session for `send` and `detach`.
+  event_session_id: Arc<str>,
   detached: AtomicBool,
   listeners: std::sync::Mutex<ListenerRegistry>,
   next_listener_id: AtomicU64,
@@ -66,7 +71,11 @@ pub struct CdpSession {
 }
 
 impl CdpSession {
-  pub(crate) async fn attach_to_target(transport: Arc<CdpTransport>, target_id: &str) -> Result<Self> {
+  pub(crate) async fn attach_to_target(
+    transport: Arc<CdpTransport>,
+    target_id: &str,
+    event_session_override: Option<&str>,
+  ) -> Result<Self> {
     let result = transport
       .send(
         None,
@@ -76,21 +85,28 @@ impl CdpSession {
         },
       )
       .await?;
-    Ok(Self::from_session_id(transport, result.session_id))
+    let event_session_id = event_session_override.map_or_else(|| Arc::from(result.session_id.as_str()), Arc::from);
+    Ok(Self::from_sessions(
+      transport,
+      Arc::from(result.session_id),
+      event_session_id,
+    ))
   }
 
   pub(crate) async fn attach_to_browser_target(transport: Arc<CdpTransport>) -> Result<Self> {
     let result = transport
       .send(None, &ferridriver_cdp_proto::target::AttachToBrowserTarget {})
       .await?;
-    Ok(Self::from_session_id(transport, result.session_id))
+    let sid: Arc<str> = Arc::from(result.session_id);
+    Ok(Self::from_sessions(transport, Arc::clone(&sid), sid))
   }
 
-  fn from_session_id(transport: Arc<CdpTransport>, session_id: String) -> Self {
+  fn from_sessions(transport: Arc<CdpTransport>, session_id: Arc<str>, event_session_id: Arc<str>) -> Self {
     Self {
       inner: Arc::new(SessionInner {
         transport,
-        session_id: Arc::from(session_id),
+        session_id,
+        event_session_id,
         detached: AtomicBool::new(false),
         listeners: std::sync::Mutex::new(ListenerRegistry::default()),
         next_listener_id: AtomicU64::new(1),
@@ -230,7 +246,7 @@ impl CdpSession {
     if self.inner.pump_started.swap(true, Ordering::SeqCst) {
       return;
     }
-    let mut rx = self.inner.transport.tap_all_events(&self.inner.session_id);
+    let mut rx = self.inner.transport.tap_all_events(&self.inner.event_session_id);
     let (flush_tx, mut flushes) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
     let _ = self.inner.flushes.set(flush_tx);
     let inner = Arc::downgrade(&self.inner);
@@ -260,6 +276,9 @@ impl CdpSession {
 /// listeners get `params`, wildcard listeners the `{ method, params }`
 /// envelope (Playwright's `'event'`).
 fn dispatch(inner: &SessionInner, event: &serde_json::Value) {
+  if inner.detached.load(Ordering::SeqCst) {
+    return;
+  }
   let Some(method) = event.get("method").and_then(serde_json::Value::as_str) else {
     return;
   };

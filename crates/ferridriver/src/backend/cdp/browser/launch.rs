@@ -155,13 +155,96 @@ impl CdpBrowser {
   ) -> Result<Self> {
     let (ws_url, group) = lightpanda::serve(binary, options).await?;
     let transport = Box::pin(ws::WsTransport::connect_with_headers(&ws_url, &FxHashMap::default())).await?;
-    let mut browser = Self::init(Arc::new(transport), Some(group), None).await?;
+    let mut browser = Self::init_with_flavor(Arc::new(transport), Some(group), None, CdpFlavor::Lightpanda).await?;
     // `lightpanda serve` outlives a closed connection, and writes its cookie
     // jar as each context closes, not on exit.
     browser.flushes_on_close = false;
     // Lightpanda holds one browser context per connection.
-    browser.connections = Some(Arc::new(connections::ContextConnections::new(ws_url)));
+    browser.connections = Some(Arc::new(connections::ContextConnections::new(
+      ws_url,
+      Arc::clone(&browser.version),
+      Arc::clone(&browser.downloads_dir),
+      browser.flavor,
+    )));
     Ok(browser)
+  }
+
+  /// Fast-path connection for a per-context WebSocket on a single-context-per-connection
+  /// server (Lightpanda). Reuses the parent browser's `version` and `downloads_dir`
+  /// (avoiding a `Browser.getVersion` RTT and a throwaway `TempDir` per context) and
+  /// pipelines `Target.setAutoAttach` with `Target.createBrowserContext` in a single
+  /// round trip instead of six serial discovery RTTs.
+  pub(crate) async fn connect_context_connection(
+    ws_url: &str,
+    version: Arc<str>,
+    downloads_dir: Arc<DownloadsDir>,
+    flavor: CdpFlavor,
+    proxy: Option<&crate::options::ProxyConfig>,
+  ) -> Result<(Self, String)> {
+    let transport = Arc::new(Box::pin(ws::WsTransport::connect_with_headers(ws_url, &FxHashMap::default())).await?);
+    let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let spares = Arc::new(recycle::Spares::default());
+    let headful = false;
+    let headful_flag = Arc::new(std::sync::atomic::AtomicBool::new(headful));
+    let (popup_taps, create_ledger, attach_tasks, popups) = Self::spawn_attach_listener(
+      &transport,
+      &downloads_dir,
+      &attached_targets,
+      &spares,
+      headful_flag,
+      flavor,
+    );
+
+    let auto_attach = ferridriver_cdp_proto::target::SetAutoAttach {
+      auto_attach: true,
+      wait_for_debugger_on_start: true,
+      flatten: Some(true),
+    };
+    let proxy_server = proxy.map(crate::options::ProxyConfig::chromium_server);
+    let proxy_bypass = proxy.and_then(crate::options::ProxyConfig::chromium_bypass_list);
+    let create_ctx = ferridriver_cdp_proto::target::CreateBrowserContext {
+      dispose_on_detach: Some(true),
+      proxy_server: proxy_server.as_deref(),
+      proxy_bypass_list: proxy_bypass.as_deref(),
+    };
+    let res = tokio::try_join!(transport.send(None, &auto_attach), transport.send(None, &create_ctx));
+    let (_, ctx) = match res {
+      Ok(pair) => pair,
+      Err(error) => {
+        attach_tasks.abort();
+        let _ = transport.close().await;
+        return Err(error);
+      },
+    };
+    let raw = ctx.browser_context_id;
+    if proxy.is_some() {
+      spares.mark_proxied(&raw);
+    }
+
+    Ok((
+      Self {
+        transport,
+        downloads_dir,
+        child: Arc::new(tokio::sync::Mutex::new(None)),
+        attached_targets,
+        version,
+        isolated_contexts: true,
+        flavor,
+        headful,
+        front_tab: Arc::default(),
+        spares,
+        attach_tasks: Arc::new(attach_tasks),
+        popup_taps,
+        create_ledger,
+        popups,
+        user_data_dir: None,
+        flushes_on_close: false,
+        connections: None,
+        webdriver: None,
+        android: None,
+      },
+      raw,
+    ))
   }
 
   /// Attach to the first existing page target of a browser we just
@@ -188,7 +271,15 @@ impl CdpBrowser {
         )
         .await?;
       let sid = Some(attach.session_id);
-      Box::pin(Self::enable_domains(transport, sid.as_deref(), None, false, None)).await?;
+      Box::pin(Self::enable_domains(
+        transport,
+        sid.as_deref(),
+        None,
+        false,
+        None,
+        CdpFlavor::Chromium,
+      ))
+      .await?;
       attached.insert(target_id, sid);
       return Ok(true);
     }
@@ -267,7 +358,15 @@ impl CdpBrowser {
     })
     .await
     .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
-    Box::pin(Self::enable_domains(transport, sid.as_deref(), None, false, None)).await?;
+    Box::pin(Self::enable_domains(
+      transport,
+      sid.as_deref(),
+      None,
+      false,
+      None,
+      CdpFlavor::Chromium,
+    ))
+    .await?;
     let _ = transport
       .send(
         sid.as_deref(),
@@ -317,8 +416,14 @@ impl CdpBrowser {
     let attached_targets: AttachedTargets = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
     let spares = Arc::new(recycle::Spares::default());
     let headful_flag = Arc::new(std::sync::atomic::AtomicBool::new(headful));
-    let (popup_taps, create_ledger, attach_tasks, popups) =
-      Self::spawn_attach_listener(&transport, &downloads_dir, &attached_targets, &spares, headful_flag);
+    let (popup_taps, create_ledger, attach_tasks, popups) = Self::spawn_attach_listener(
+      &transport,
+      &downloads_dir,
+      &attached_targets,
+      &spares,
+      headful_flag,
+      CdpFlavor::Chromium,
+    );
 
     // CDP can emit attachedToTarget before setAutoAttach replies. The
     // listener must already own its tap or paused startup targets are lost.
@@ -359,6 +464,7 @@ impl CdpBrowser {
       attached_targets,
       version,
       isolated_contexts,
+      flavor: CdpFlavor::Chromium,
       headful,
       front_tab: Arc::default(),
       spares,

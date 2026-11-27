@@ -39,13 +39,28 @@ pub(crate) async fn serve(binary: &std::path::Path, options: ServeOptions<'_>) -
   // Each browser context is a connection of its own (see
   // `connections.rs`), so the server's connection cap is a context cap;
   // the default of 16 is lower than a suite's open contexts reach.
-  if !options.args.iter().any(|arg| arg.starts_with("--cdp-max-connections")) {
+  if !has_arg(options.args, "--cdp-max-connections") {
     command.args(["--cdp-max-connections", "128"]);
+  }
+  // Lightpanda defaults to a 1 MiB CDP message cap, which large DOM
+  // snapshots, screenshots, and injected bundles can exceed.
+  if !has_arg(options.args, "--cdp-max-message-size") {
+    command.args(["--cdp-max-message-size", "67108864"]);
+  }
+  // Lightpanda's default 15s HTTP timeout cuts off slow navigations
+  // before ferridriver's own per-operation timeout (30s default, or 0
+  // for unbounded). Letting ferridriver enforce deadlines matches the
+  // other backends.
+  if !has_arg(options.args, "--http-timeout") {
+    command.args(["--http-timeout", "0"]);
+  }
+  if !has_arg(options.args, "--disable-metrics") {
+    command.arg("--disable-metrics");
   }
   // `serve` fetches no sub-resources unless told to: no iframe documents,
   // no workers, no stylesheets or images. A page is driven as a browser
   // loads it, so all of them load unless the caller chose its own set.
-  if !options.args.iter().any(|arg| arg.starts_with("--load-resources")) {
+  if !has_arg(options.args, "--load-resources") {
     for resource in ["iframe", "worker", "stylesheet", "image", "beacon"] {
       command.args(["--load-resources", resource]);
     }
@@ -131,6 +146,12 @@ async fn listening_address(stderr: Option<tokio::process::ChildStderr>, group: &
   }
 }
 
+fn has_arg(args: &[String], flag: &str) -> bool {
+  args
+    .iter()
+    .any(|arg| arg == flag || arg.starts_with(flag) && arg.as_bytes().get(flag.len()) == Some(&b'='))
+}
+
 fn logfmt_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
   line
     .split_whitespace()
@@ -161,5 +182,20 @@ mod tests {
       r#"$time=1795546685405 $scope=note $level=note $msg="server running" address=127.0.0.1:50404 max_connections=16"#;
     assert_eq!(super::logfmt_value(line, "address"), Some("127.0.0.1:50404"));
     assert_eq!(super::logfmt_value(line, "missing"), None);
+  }
+
+  #[test]
+  fn detects_caller_supplied_flags_in_both_forms() {
+    let args: Vec<String> = vec![
+      "--http-timeout".into(),
+      "5000".into(),
+      "--cdp-max-message-size=1024".into(),
+      "--disable-metrics".into(),
+    ];
+    assert!(super::has_arg(&args, "--http-timeout"));
+    assert!(super::has_arg(&args, "--cdp-max-message-size"));
+    assert!(super::has_arg(&args, "--disable-metrics"));
+    assert!(!super::has_arg(&args, "--cdp-max-connections"));
+    assert!(!super::has_arg(&args, "--http"));
   }
 }

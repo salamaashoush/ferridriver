@@ -145,9 +145,14 @@ pub(crate) const MAIN_FRAME_BOX_FN: &str = r"function() {
   while (win && win !== win.parent && win.frameElement) {
     const frame = win.frameElement;
     const fr = frame.getBoundingClientRect();
-    const style = win.parent.getComputedStyle(frame);
-    x += fr.x + frame.clientLeft + (parseFloat(style.paddingLeft) || 0);
-    y += fr.y + frame.clientTop + (parseFloat(style.paddingTop) || 0);
+    const gcs = (win.parent && typeof win.parent.getComputedStyle === 'function'
+      ? win.parent.getComputedStyle
+      : frame.ownerDocument && frame.ownerDocument.defaultView && typeof frame.ownerDocument.defaultView.getComputedStyle === 'function'
+        ? frame.ownerDocument.defaultView.getComputedStyle
+        : null);
+    const style = gcs ? gcs(frame) : null;
+    x += fr.x + (frame.clientLeft || 0) + (style ? parseFloat(style.paddingLeft) || 0 : 0);
+    y += fr.y + (frame.clientTop || 0) + (style ? parseFloat(style.paddingTop) || 0 : 0);
     win = win.parent;
   }
   return { x, y, width: r.width, height: r.height };
