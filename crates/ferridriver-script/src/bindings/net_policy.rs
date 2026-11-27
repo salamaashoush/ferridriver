@@ -11,9 +11,9 @@
 //! What a tool's manifest `allow.net` still means is attenuation, the
 //! object-capability shape: the `request` and `fetch` objects handed to
 //! the handler as `ctx.request` / `ctx.fetch` refuse every host outside
-//! the declared list, over the realm's container. A handler that uses
-//! what it was given is bound by it; the globals it can also reach are
-//! bound by the realm.
+//! the declared list, over the realm's container. Both `SessionFetch`
+//! (`fetch`) and `HttpClientJs` (`request` / `APIRequestContext`) share
+//! `NetAuthority` so policy resolution and attenuation exist once.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,13 +22,70 @@ use ferrijs::Permissions;
 use ferrijs::fetch::{FetchBackend, FetchFuture, FetchRequest};
 use rquickjs::Ctx;
 
-/// `declared` over the realm's policy: the container first (so a later
-/// realm-level revoke still binds a handler holding an older
-/// capability), the declared list second.
-pub(crate) fn attenuated(ctx: &Ctx<'_>, declared: Arc<Permissions>) -> Arc<dyn NetPolicy> {
-  match realm_policy(ctx) {
-    Some(realm) => Arc::new(Over { realm, declared }),
-    None => declared as Arc<dyn NetPolicy>,
+/// Shared network-authority handle carried by both `SessionFetch` (`fetch`)
+/// and `HttpClientJs` (`request` / `APIRequestContext`).
+///
+/// `None` means the binding answers to the realm's permission container
+/// alone; `Some(declared)` layers an extension tool's `allow.net` list
+/// over the realm container so revoking at realm level still narrows it.
+#[derive(Clone, Default)]
+pub(crate) struct NetAuthority {
+  attenuation: Option<Arc<Permissions>>,
+}
+
+impl NetAuthority {
+  #[must_use]
+  pub(crate) const fn realm() -> Self {
+    Self { attenuation: None }
+  }
+
+  #[must_use]
+  pub(crate) fn attenuated(declared: Arc<Permissions>) -> Self {
+    Self {
+      attenuation: Some(declared),
+    }
+  }
+
+  /// Build an attenuated authority from a manifest `allow.net` host list.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error string when any entry is not a valid host rule.
+  pub(crate) fn from_net_list(net: &[String]) -> Result<Self, String> {
+    Ok(Self::attenuated(Arc::new(Permissions::none().allow_net(net)?)))
+  }
+
+  /// Combine this authority with an explicit realm policy (used by
+  /// `FetchBackend::net_policy`).
+  #[must_use]
+  pub(crate) fn over(&self, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
+    match &self.attenuation {
+      Some(declared) => Arc::new(Over {
+        realm,
+        declared: Arc::clone(declared),
+      }),
+      None => realm,
+    }
+  }
+
+  /// Resolve the effective [`NetPolicy`] for `ctx` synchronously at call time.
+  #[must_use]
+  pub(crate) fn policy(&self, ctx: &Ctx<'_>) -> Option<Arc<dyn NetPolicy>> {
+    match (realm_policy(ctx), &self.attenuation) {
+      (Some(realm), Some(declared)) => Some(Arc::new(Over {
+        realm,
+        declared: Arc::clone(declared),
+      })),
+      (Some(realm), None) => Some(realm),
+      (None, Some(declared)) => Some(Arc::clone(declared) as Arc<dyn NetPolicy>),
+      (None, None) => None,
+    }
+  }
+
+  /// Build the engine [`NetGuard`] for `ctx` synchronously at call time.
+  #[must_use]
+  pub(crate) fn guard(&self, ctx: &Ctx<'_>) -> NetGuard {
+    guard(self.policy(ctx))
   }
 }
 
@@ -70,11 +127,10 @@ pub(crate) fn realm_policy(ctx: &Ctx<'_>) -> Option<Arc<dyn NetPolicy>> {
 /// `fetch` over the session's HTTP context: the same core the
 /// Playwright-style `request` binding wraps, so one net policy applies
 /// to both. The client is swapped per call, because a run can carry a
-/// context-bound client where the one before it had none. `attenuation`
-/// is set on the copy handed to a tool handler as `ctx.fetch`.
+/// context-bound client where the one before it had none.
 pub struct SessionFetch {
   client: Mutex<Arc<HttpClient>>,
-  attenuation: Option<Arc<Permissions>>,
+  authority: NetAuthority,
 }
 
 impl SessionFetch {
@@ -82,7 +138,7 @@ impl SessionFetch {
   pub fn new(client: Arc<HttpClient>) -> Self {
     Self {
       client: Mutex::new(client),
-      attenuation: None,
+      authority: NetAuthority::realm(),
     }
   }
 
@@ -91,7 +147,7 @@ impl SessionFetch {
   pub(crate) fn attenuated(&self, declared: Arc<Permissions>) -> Self {
     Self {
       client: Mutex::new(self.client()),
-      attenuation: Some(declared),
+      authority: NetAuthority::attenuated(declared),
     }
   }
 
@@ -124,13 +180,7 @@ impl FetchBackend for SessionFetch {
   }
 
   fn net_policy(&self, _ctx: &Ctx<'_>, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
-    match &self.attenuation {
-      Some(declared) => Arc::new(Over {
-        realm,
-        declared: Arc::clone(declared),
-      }),
-      None => realm,
-    }
+    self.authority.over(realm)
   }
 }
 

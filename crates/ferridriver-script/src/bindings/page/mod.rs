@@ -23,11 +23,8 @@ use rquickjs::function::This;
 use rquickjs::function::Opt;
 
 use crate::bindings::convert::FerriResultCtxExt;
-use crate::bindings::convert::{
-  extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serde_to_js,
-  serialized_value_to_quickjs,
-};
-use crate::bindings::convert::{throw_named, type_error};
+use crate::bindings::convert::throw_named;
+use crate::bindings::convert::{init_script_from_js, serde_from_js, serde_to_js};
 use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
 use crate::bindings::mouse::MouseJs;
@@ -90,6 +87,10 @@ impl PageJs {
     RouteOwner::Page(self.inner.backend_page_id())
   }
 
+  fn backend_page_id(&self) -> usize {
+    self.inner.backend_page_id()
+  }
+
   /// Clone of the wrapped `Arc<Page>` for cross-binding consumers
   /// (used by `expect()` to lift a `PageJs` into an assertion target).
   #[must_use]
@@ -105,69 +106,41 @@ impl PageJs {
   fn off_impl<'js>(
     &self,
     ctx: &rquickjs::Ctx<'js>,
-    target: &rquickjs::Value<'js>,
+    event: &str,
     listener: Option<&rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let ctx = ctx.clone();
-    let Some(event) = target.as_string() else {
-      return Err(type_error(&ctx, "page.off: off(event, listener) expects an event name"));
-    };
-    let event = event.to_string()?;
     let listener_fn = listener.and_then(|v| v.as_function().cloned());
     let Some(listener_fn) = listener_fn else {
       // Lenient `off(event)` — drop every listener for that event
       // (matches `removeAllListeners(event)` semantics).
-      let ids = with_page_callbacks(&ctx, |r| r.remove_event_listeners_named(&event))?;
+      let ids = with_page_callbacks(ctx, |r| r.remove_event_listeners_named(event))?;
       for id in ids {
         self.inner.off(ferridriver::events::ListenerId(id));
       }
       return Ok(());
     };
-    // Playwright form: match the registration by JS function identity
-    // (`===`). `Value` equality on objects compares the raw JSValue —
-    // exactly strict equality.
-    let target_value: rquickjs::Value<'js> = listener_fn.clone().into_value();
-    for (id, saved) in with_page_callbacks(&ctx, |r| r.event_listeners_named(&event))? {
-      let restored = saved.restore(&ctx)?;
+    let target_value: rquickjs::Value<'js> = listener_fn.into_value();
+    for (id, saved) in with_page_callbacks(ctx, |r| r.event_listeners_named(event))? {
+      let restored = saved.restore(ctx)?;
       if restored.into_value() == target_value {
         self.inner.off(ferridriver::events::ListenerId(id));
-        with_page_callbacks(&ctx, |r| r.remove_event_listener(id))?;
+        with_page_callbacks(ctx, |r| r.remove_event_listener(id))?;
       }
     }
     Ok(())
   }
 
-  /// Shared core for `page.on` / `page.once`. Saves the JS `listener`
-  /// keyed by the core `ListenerId`, then registers a core callback that
-  /// forwards `(id, event)` to this context's event pump. The backend
-  /// task never touches the VM — only the pump (on the interpreter
-  /// thread, via `ctx.spawn`) restores and invokes the JS function.
-  fn register_event_listener<'js>(
-    &self,
-    ctx: &rquickjs::Ctx<'js>,
-    event: &str,
-    listener: rquickjs::Function<'js>,
-    once: bool,
-  ) -> rquickjs::Result<f64> {
-    self.register_event_listener_at(ctx, event, listener, once, false)
-  }
-
-  /// [`Self::register_event_listener`] with Node's front-insertion
-  /// (`prependListener` / `prependOnceListener`) as an option.
-  fn register_event_listener_at<'js>(
+  /// Shared core for `page.on` / `page.once` / `prependListener` / `prependOnceListener`.
+  fn register_listener<'js>(
     &self,
     ctx: &rquickjs::Ctx<'js>,
     event: &str,
     listener: rquickjs::Function<'js>,
     once: bool,
     front: bool,
-  ) -> rquickjs::Result<f64> {
+  ) -> rquickjs::Result<()> {
     let saved = SavedCallback::save(ctx, listener);
     let tx = ensure_event_pump(ctx);
-    // Core assigns the `ListenerId` only after registration, but the
-    // dispatch closure needs it to look the JS callback back up. Share it
-    // through a slot the closure reads at fire time (registration is
-    // synchronous, so the slot is populated long before any event lands).
     let id_slot = Arc::new(AtomicU64::new(0));
     let id_slot_cb = Arc::clone(&id_slot);
     let page_for_cb = Arc::clone(&self.inner);
@@ -199,7 +172,7 @@ impl PageJs {
     with_page_callbacks(ctx, |r| {
       r.insert_event_listener(id.0, event.to_string(), page_key, saved);
     })?;
-    Ok(crate::bindings::convert::u64_to_f64(id.0))
+    Ok(())
   }
 }
 
@@ -215,8 +188,15 @@ pub(crate) fn pagejs_for_ctx(ctx: &rquickjs::Ctx<'_>, page: Arc<Page>) -> PageJs
   }
 }
 
-#[rquickjs::methods]
-impl PageJs {
+crate::bindings::macros::qjs_impl! {
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands methods their Ctx and JS arguments by value"
+  )]
+  impl PageJs {
+    @mixin locator_queries(optional_frame_locator);
+    @mixin selector_surface();
+    @mixin event_emitter();
   // ── Navigation ────────────────────────────────────────────────────────────
 
   /// Navigate to `url`. Accepts `{ waitUntil?, timeout?, referer? }` to
@@ -321,19 +301,6 @@ impl PageJs {
     self.inner.url()
   }
 
-  /// Document title.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the title cannot be
-  /// read.
-  #[qjs(rename = "title")]
-  pub async fn title(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move { self.inner.title().await.into_js_with(&ctx) })
-      .await
-  }
-
   /// Playwright: `page.video(): null | Video` —
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`.
   /// Returns a live `Video` handle when the owning context was
@@ -353,57 +320,6 @@ impl PageJs {
       },
       None => Ok(rquickjs::Value::new_null(ctx)),
     }
-  }
-
-  /// Full HTML content of the page.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options.includeShadow` throws, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the content cannot be read.
-  #[qjs(rename = "content")]
-  pub async fn content<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<String> {
-    let include_shadow = match options.0.as_ref().and_then(rquickjs::Value::as_object) {
-      Some(bag) => bag.get::<_, Option<bool>>("includeShadow")?,
-      None => None,
-    };
-    let options = ferridriver::options::ContentOptions { include_shadow };
-    call_site
-      .scope(async move { self.inner.content().options(options).await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright: `page.setContent(html, options?: { timeout?, waitUntil? })`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when setting the content fails.
-  #[qjs(rename = "setContent")]
-  pub async fn set_content<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    html: String,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts: Option<ferridriver::options::SetContentOptions> =
-          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        self
-          .inner
-          .set_content(&html)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
   }
 
   /// Register a JS snippet to run on every new document before any page
@@ -483,50 +399,13 @@ impl PageJs {
       .await
   }
 
-  /// Playwright: `page.waitForSelector(selector, options?: { state?,
-  /// strict?, timeout? })`. Resolves to the matched element handle for
-  /// `state: 'attached'` / `'visible'` (default), or `null` for
-  /// `'hidden'` / `'detached'`; throws on timeout.
+  // ── Element handles ───────────────────────────────────────────────────────
+
+  /// Playwright: `page.querySelector(selector, options?): Promise<ElementHandle | null>`.
   ///
   /// # Errors
   ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the element does not reach the state in time.
-  #[qjs(rename = "waitForSelector")]
-  pub async fn wait_for_selector<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let opts = parse_wait_options(&ctx, options)?;
-        let handle = self
-          .inner
-          .wait_for_selector(&selector)
-          .options(opts)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(handle.map(crate::bindings::element_handle::ElementHandleJs::new))
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  // ── Locators ──────────────────────────────────────────────────────────────
-
-  /// Playwright: `page.querySelector(selector): Promise<ElementHandle | null>`.
-  /// Mints a lifecycle [`crate::bindings::element_handle::ElementHandleJs`]
-  /// pinned to the first element matching `selector`, or `null` when no
-  /// element matches. Callers `dispose()` the handle when done to
-  /// release the backend remote.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options.strict` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the query fails, such as a strict-mode violation.
+  /// Rejects when reading `options.strict` throws, or on core query failure.
   #[qjs(rename = "querySelector")]
   pub async fn query_selector<'js>(
     &self,
@@ -535,44 +414,14 @@ impl PageJs {
     selector: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let strict = opt_strict(&options)?;
-        let inner = self.inner.query_selector(&selector, strict).await.into_js_with(&ctx)?;
-        Ok(inner.map(crate::bindings::element_handle::ElementHandleJs::new))
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  /// Playwright: `page.$(selector, options?: { strict?: boolean })`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options.strict` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the query fails, such as a strict-mode violation.
-  #[qjs(rename = "$")]
-  pub async fn dollar<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<crate::bindings::element_handle::ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        self
-          .query_selector(crate::bindings::CallSite::none(), ctx, selector, options)
-          .await
-      })
-      .await
+    self.dollar(call_site, ctx, selector, options).await
   }
 
   /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
   ///
   /// # Errors
   ///
-  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the query fails.
+  /// Rejects with the core failure when the query fails.
   #[qjs(rename = "querySelectorAll")]
   pub async fn query_selector_all(
     &self,
@@ -580,997 +429,17 @@ impl PageJs {
     ctx: rquickjs::Ctx<'_>,
     selector: String,
   ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let inner_handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
-        Ok(
-          inner_handles
-            .into_iter()
-            .map(crate::bindings::element_handle::ElementHandleJs::new)
-            .collect(),
-        )
-      })
-      .await
+    self.dollar_dollar(call_site, ctx, selector).await
   }
 
-  /// Playwright `$$` shortcut for [`Self::query_selector_all`].
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the query fails.
-  #[qjs(rename = "$$")]
-  pub async fn dollar_dollar(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-    selector: String,
-  ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        self
-          .query_selector_all(crate::bindings::CallSite::none(), ctx, selector)
-          .await
-      })
-      .await
-  }
-
-  /// Playwright: `page.$eval(selector, pageFunction, arg?): Promise<R>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when `pageFunction` or `arg` cannot be converted, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when no element matches or the function throws in the page.
-  #[qjs(rename = "$eval")]
-  pub async fn eval_on_selector<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-        let result = self
-          .inner
-          .eval_on_selector(&selector, &source, serialized, is_fn)
-          .await
-          .into_js_with(&ctx)?;
-        serialized_value_to_quickjs(&ctx, &result)
-      })
-      .await
-  }
-
-  /// Playwright: `page.$$eval(selector, pageFunction, arg?): Promise<R>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when `pageFunction` or `arg` cannot be converted, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the function throws in the page.
-  #[qjs(rename = "$$eval")]
-  pub async fn eval_on_selector_all<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-        let result = self
-          .inner
-          .eval_on_selector_all(&selector, &source, serialized, is_fn)
-          .await
-          .into_js_with(&ctx)?;
-        serialized_value_to_quickjs(&ctx, &result)
-      })
-      .await
-  }
-
-  /// Playwright: `page.pause(): Promise<void>`. ferridriver has no
-  /// Inspector/recorder UI, so this rejects with a typed `Unsupported`
-  /// error rather than silently pretending to pause.
+  /// Playwright: `page.pause(): Promise<void>`.
   ///
   /// # Errors
   ///
   /// Always throws a `FerriError`: ferridriver has no Inspector to pause in.
   #[qjs(rename = "pause")]
-  pub fn pause(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
+  pub fn pause(&self, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     self.inner.pause().into_js_with(&ctx)
-  }
-
-  /// Playwright: `page.evaluate(pageFunction, arg?): Promise<R>`.
-  /// `pageFunction` accepts a string or a JS function; rich return
-  /// types (`Date` / `RegExp` / `BigInt` / `URL` / `Error` / typed
-  /// arrays / `NaN` / `±Infinity` / `undefined` / `-0`) arrive as
-  /// native JS, matching Playwright's `parseResult`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when `pageFunction`, `arg` or `options` cannot be converted, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the evaluation fails in the page.
-  #[qjs(rename = "evaluate")]
-  pub async fn evaluate<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = crate::bindings::convert::quickjs_arg_with_functions(
-          &ctx,
-          arg.0,
-          crate::bindings::convert::ArgFunctions::from_options(options.0.as_ref(), Some(self.inner.backend_page_id()))?,
-        )?;
-        let result = self
-          .inner
-          .evaluate(&source, serialized, is_fn)
-          .await
-          .into_js_with(&ctx)?;
-        serialized_value_to_quickjs(&ctx, &result)
-      })
-      .await
-  }
-
-  /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when `pageFunction`, `arg` or `options` cannot be converted, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the evaluation fails in the page.
-  #[qjs(rename = "evaluateHandle")]
-  pub async fn evaluate_handle<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
-    call_site
-      .scope(async move {
-        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = crate::bindings::convert::quickjs_arg_with_functions(
-          &ctx,
-          arg.0,
-          crate::bindings::convert::ArgFunctions::from_options(options.0.as_ref(), Some(self.inner.backend_page_id()))?,
-        )?;
-        let handle = self
-          .inner
-          .evaluate_handle(&source, serialized, is_fn)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
-      })
-      .await
-  }
-
-  /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`.
-  /// Thin delegator to Rust core's `Page::locator`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `options` is malformed.
-  #[qjs(rename = "locator")]
-  pub fn locator<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    selector: String,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let parsed = crate::bindings::locator::parse_locator_options_public(&ctx, options, true)?;
-    let opts = ferridriver::options::FilterOptions {
-      has_text: parsed.has_text,
-      has_not_text: parsed.has_not_text,
-      has: parsed.has,
-      has_not: parsed.has_not,
-      visible: parsed.visible,
-    };
-    let filter = if crate::bindings::locator::is_empty_filter(&opts) {
-      None
-    } else {
-      Some(opts)
-    };
-    let locator = match filter {
-      Some(f) => self.inner.locator_with(&selector, &f),
-      None => self.inner.locator(&selector),
-    };
-    Ok(LocatorJs::new(locator))
-  }
-
-  /// Locate elements by ARIA role. Accepts `{ name: string | RegExp,
-  /// exact, checked, disabled, expanded, level, pressed, selected,
-  /// includeHidden }` via the options bag.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `options.name` or `options.description` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByRole")]
-  pub fn get_by_role(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    role: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let opts = parse_role_options(options)?;
-    Ok(LocatorJs::new(
-      self.inner.get_by_role(role.as_str()).options(opts).into_locator(),
-    ))
-  }
-
-  /// Locate elements containing the given text. Accepts `string | RegExp`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByText")]
-  pub fn get_by_text(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(&text)?;
-    let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
-  }
-
-  /// Locate form controls by associated label text.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByLabel")]
-  pub fn get_by_label(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(&text)?;
-    let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
-  }
-
-  /// Locate inputs by placeholder text.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByPlaceholder")]
-  pub fn get_by_placeholder(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(&text)?;
-    let opts = parse_text_options(options);
-    Ok(LocatorJs::new(
-      self.inner.get_by_placeholder(t).options(opts).into_locator(),
-    ))
-  }
-
-  /// Locate images/media by alt text.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByAltText")]
-  pub fn get_by_alt_text(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(&text)?;
-    let opts = parse_text_options(options);
-    Ok(LocatorJs::new(
-      self.inner.get_by_alt_text(t).options(opts).into_locator(),
-    ))
-  }
-
-  /// Locate elements by `title` attribute text.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByTitle")]
-  pub fn get_by_title(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(&text)?;
-    let opts = parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
-  }
-
-  /// Locate elements by `data-testid`. Accepts `string | RegExp`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `testId` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByTestId")]
-  pub fn get_by_test_id(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    test_id: rquickjs::Value<'_>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = string_or_regex_from_js(&test_id)?;
-    Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
-  }
-
-  // ── Interaction ───────────────────────────────────────────────────────────
-
-  /// Click the first element matching `selector`. Accepts Playwright's
-  /// full `PageClickOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the click fails.
-  #[qjs(rename = "click")]
-  pub async fn click<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-        self.inner.click(&selector).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Double-click the first element matching `selector`. Accepts
-  /// Playwright's full `PageDblClickOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the double-click fails.
-  #[qjs(rename = "dblclick")]
-  pub async fn dblclick<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-        self
-          .inner
-          .dblclick(&selector)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Fill `value` into the input matching `selector`. Accepts
-  /// Playwright's full `PageFillOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the fill fails.
-  #[qjs(rename = "fill")]
-  pub async fn fill<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    value: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-        self
-          .inner
-          .fill(&selector, &value)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Type `text` into the input matching `selector`. Accepts
-  /// Playwright's full `PageTypeOptions` bag.
-  ///
-  /// Exposed as `type` in JS (matches Playwright) — Rust renames to avoid
-  /// the `type` keyword.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when typing fails.
-  #[qjs(rename = "type")]
-  pub async fn type_<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    text: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-        self
-          .inner
-          .r#type(&selector, &text)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Press `key` on the element matching `selector`. Accepts Playwright's
-  /// full `PagePressOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the key press fails.
-  #[qjs(rename = "press")]
-  pub async fn press<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    key: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-        self
-          .inner
-          .press(&selector, &key)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// `page.focus(selector, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core failure (`TimeoutError`, `TargetClosedError` or `FerriError`) when the element cannot be
-  /// focused.
-  #[qjs(rename = "focus")]
-  pub async fn focus(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-    selector: String,
-    _options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.focus(&selector).await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Hover the first element matching `selector`. Accepts Playwright's
-  /// full `PageHoverOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the hover fails.
-  #[qjs(rename = "hover")]
-  pub async fn hover<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-        self.inner.hover(&selector).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Dispatch a DOM event on the first element matching `selector`.
-  /// Mirrors Playwright's `page.dispatchEvent(selector, type, eventInit?, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `eventInit` or `options` is malformed, and with the core failure
-  /// (`TimeoutError`, `TargetClosedError` or `FerriError`) when the event cannot be dispatched.
-  #[qjs(rename = "dispatchEvent")]
-  pub async fn dispatch_event<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    event_type: String,
-    event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let init_json = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, event_init.0)?;
-        let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
-        self
-          .inner
-          .dispatch_event(&selector, &event_type, init_json)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Tap (touch) the first element matching `selector`. Accepts
-  /// Playwright's full `PageTapOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the tap fails.
-  #[qjs(rename = "tap")]
-  pub async fn tap<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-        self.inner.tap(&selector).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Check a checkbox matching `selector`. Accepts Playwright's full
-  /// `PageCheckOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the element cannot be checked.
-  #[qjs(rename = "check")]
-  pub async fn check<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self.inner.check(&selector).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
-  /// `PageUncheckOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the element cannot be unchecked.
-  #[qjs(rename = "uncheck")]
-  pub async fn uncheck<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self
-          .inner
-          .uncheck(&selector)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Set the checked state of a checkbox/radio matching `selector`.
-  /// Accepts Playwright's full `PageSetCheckedOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the checked state cannot be set.
-  #[qjs(rename = "setChecked")]
-  pub async fn set_checked<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    checked: bool,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self
-          .inner
-          .set_checked(&selector, checked)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Select options on the `<select>` matching `selector`. Returns the
-  /// values of the selected options. Accepts Playwright's full
-  /// `string | string[] | { value?, label?, index? } | Array<...>` union.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `values` or `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the selection fails.
-  #[qjs(rename = "selectOption")]
-  pub async fn select_option<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    values: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Vec<String>> {
-    call_site
-      .scope(async move {
-        let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
-        let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-        self
-          .inner
-          .select_option(&selector, values)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  // ── Info ──────────────────────────────────────────────────────────────────
-
-  /// Text content of the first element matching `selector` (or `null`).
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the read fails.
-  #[qjs(rename = "textContent")]
-  pub async fn text_content<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .text_content(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  /// `innerText` of the first element matching `selector`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the read fails.
-  #[qjs(rename = "innerText")]
-  pub async fn inner_text<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .inner_text(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// `innerHTML` of the first element matching `selector`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the read fails.
-  #[qjs(rename = "innerHTML")]
-  pub async fn inner_html<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .inner_html(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Current input value of the first element matching `selector`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the read fails.
-  #[qjs(rename = "inputValue")]
-  pub async fn input_value<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .input_value(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Get attribute `name` on the first element matching `selector`
-  /// (or `null` if the attribute is absent).
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the read fails.
-  #[qjs(rename = "getAttribute")]
-  pub async fn get_attribute<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    name: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .get_attribute(&selector, &name)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  /// Whether the first element matching `selector` is visible.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the check fails.
-  #[qjs(rename = "isVisible")]
-  pub async fn is_visible<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .is_visible(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Whether the first element matching `selector` is hidden.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the check fails.
-  #[qjs(rename = "isHidden")]
-  pub async fn is_hidden<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .is_hidden(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Whether the first element matching `selector` is enabled.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the check fails.
-  #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .is_enabled(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Whether the first element matching `selector` is disabled.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the check fails.
-  #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .is_disabled(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Whether the first checkbox matching `selector` is checked.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the check fails.
-  #[qjs(rename = "isChecked")]
-  pub async fn is_checked<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .is_checked(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
   }
 
   // ── Mouse / keyboard namespaces (Playwright parity) ──────────────────────
@@ -1615,111 +484,6 @@ impl PageJs {
 
   // ── Event emitter (Playwright parity) ────────────────────────────────────
 
-  /// `page.on(event, listener)`. Registers a persistent listener for a
-  /// page event (`console`, `request`, `response`, `requestfinished`,
-  /// `requestfailed`, `websocket`, `dialog`, `filechooser`,
-  /// `frameattached`, `framedetached`, `framenavigated`, `load`,
-  /// `domcontentloaded`, `close`, `pageerror`, `download`). Returns the
-  /// page, so registrations chain the way Playwright's do.
-  ///
-  /// Listeners fire cross-task: when core emits, a tokio task
-  /// `async_with`s back into the script context and invokes the saved
-  /// JS function with the event snapshot (`pageerror` receives a native
-  /// `Error`, matching Playwright). Mirrors `ferridriver-node`'s
-  /// `page.on`, which uses the same core `EventEmitter`.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the context's page-callback registry is missing.
-  #[qjs(rename = "on")]
-  pub fn on<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().register_event_listener(&ctx, &event, listener, false)?;
-    Ok(this.0)
-  }
-
-  /// Node's `addListener`, an alias of [`Self::on`].
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the context's page-callback registry is missing.
-  #[qjs(rename = "addListener")]
-  pub fn add_listener<'js>(
-    this: This<Class<'js, Self>>,
-    ctx: rquickjs::Ctx<'js>,
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    Self::on(this, ctx, event, listener)
-  }
-
-  /// Node's `prependListener`: this listener runs before every listener
-  /// already attached to the same event.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the context's page-callback registry is missing.
-  #[qjs(rename = "prependListener")]
-  pub fn prepend_listener<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this
-      .0
-      .borrow()
-      .register_event_listener_at(&ctx, &event, listener, false, true)?;
-    Ok(this.0)
-  }
-
-  /// Node's `prependOnceListener`.
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the context's page-callback registry is missing.
-  #[qjs(rename = "prependOnceListener")]
-  pub fn prepend_once_listener<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this
-      .0
-      .borrow()
-      .register_event_listener_at(&ctx, &event, listener, true, true)?;
-    Ok(this.0)
-  }
-
   /// Node's `listeners(type)` — the callbacks attached to `event`, in
   /// the order they will fire.
   ///
@@ -1730,15 +494,7 @@ impl PageJs {
   #[qjs(rename = "listeners")]
   pub fn listeners<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     event: String,
   ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let saved = with_page_callbacks(&ctx, |r| r.event_listeners_named(&event))?;
@@ -1752,146 +508,7 @@ impl PageJs {
     Ok(out)
   }
 
-  /// Node's `rawListeners(type)`. ferridriver wraps a `once` listener
-  /// in core rather than in JS, so there is no wrapper to unwrap and
-  /// this is [`Self::listeners`].
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the context's page-callback registry is missing, or when a saved listener cannot be
-  /// restored.
-  #[qjs(rename = "rawListeners")]
-  pub fn raw_listeners<'js>(
-    &self,
-    ctx: rquickjs::Ctx<'js>,
-    event: String,
-  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
-    self.listeners(ctx, event)
-  }
-
-  /// Node's `listenerCount(type)`.
-  #[qjs(rename = "listenerCount")]
-  #[must_use]
-  pub fn listener_count(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-  ) -> f64 {
-    crate::bindings::convert::usize_to_f64(self.inner.listener_count(&event))
-  }
-
-  /// Node's `eventNames()` — every event with a listener attached.
-  #[qjs(rename = "eventNames")]
-  #[must_use]
-  pub fn event_names(&self) -> Vec<String> {
-    self.inner.event_names()
-  }
-
-  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
-  #[qjs(rename = "setMaxListeners")]
-  #[must_use]
-  pub fn set_max_listeners(this: This<Class<'_, Self>>, max: f64) -> Class<'_, Self> {
-    this
-      .0
-      .borrow()
-      .inner
-      .set_max_listeners(crate::bindings::convert::f64_to_usize(max));
-    this.0
-  }
-
-  /// Node's `getMaxListeners()`.
-  #[qjs(rename = "getMaxListeners")]
-  #[must_use]
-  pub fn get_max_listeners(&self) -> f64 {
-    crate::bindings::convert::usize_to_f64(self.inner.max_listeners())
-  }
-
-  /// `page.once(event, listener)`. Like [`Self::on`] but the listener
-  /// fires at most once (core auto-removes it after the first emit).
-  ///
-  /// # Errors
-  ///
-  /// Throws an `Error` when the context's page-callback registry is missing.
-  #[qjs(rename = "once")]
-  pub fn once<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    event: String,
-    listener: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().register_event_listener(&ctx, &event, listener, true)?;
-    Ok(this.0)
-  }
-
-  /// `page.off(event, listener)` — Playwright's form, matching the
-  /// registration by function identity (`===`). `off(event)` with no
-  /// listener drops every listener for that event.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `event` is not a string, and an `Error` when the context's page-callback registry is
-  /// missing.
-  #[qjs(rename = "off")]
-  pub fn off<'js>(
-    this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    target: rquickjs::Value<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    listener: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    this.0.borrow().off_impl(&ctx, &target, listener.0.as_ref())?;
-    Ok(this.0)
-  }
-
-  /// Node's `removeListener`, an alias of [`Self::off`].
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `event` is not a string, and an `Error` when the context's page-callback registry is
-  /// missing.
-  #[qjs(rename = "removeListener")]
-  pub fn remove_listener<'js>(
-    this: This<Class<'js, Self>>,
-    ctx: rquickjs::Ctx<'js>,
-    target: rquickjs::Value<'js>,
-    listener: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Class<'js, Self>> {
-    Self::off(this, ctx, target, listener)
-  }
-
-  /// `page.removeAllListeners(type?, options?)`. Drops every registered
-  /// page listener (or only those for `type`) and releases the persisted
-  /// JS callbacks.
-  ///
-  /// Playwright's two shapes: without options it returns the page, so
-  /// the call chains; with options it returns a promise. `behavior:
-  /// 'wait'` resolves once the event pump has dispatched everything
-  /// queued before the call — a listener that is still awaiting inside
-  /// its own body is NOT tracked, because the pump does not await what
-  /// a listener returns. `'ignoreErrors'` and `'default'` resolve the
-  /// same way: a throwing listener is already contained by the pump.
+  /// `page.removeAllListeners(type?, options?)`.
   ///
   /// # Errors
   ///
@@ -1900,10 +517,6 @@ impl PageJs {
   #[qjs(rename = "removeAllListeners")]
   pub fn remove_all_listeners<'js>(
     this: This<Class<'js, Self>>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
     event: Opt<String>,
     options: Opt<rquickjs::Value<'js>>,
@@ -1947,21 +560,6 @@ impl PageJs {
 
   // ── Misc page surface (Playwright parity) ────────────────────────────────
 
-  /// `page.waitForTimeout(timeout)`. Sleeps `timeout` ms via the core
-  /// async timer (the `QuickJS` engine has no `setTimeout`). Playwright
-  /// discourages this in production code; prefer web-first waits.
-  #[qjs(rename = "waitForTimeout")]
-  pub async fn wait_for_timeout(&self, call_site: crate::bindings::CallSite, timeout: f64) {
-    call_site
-      .scope(async move {
-        self
-          .inner
-          .wait_for_timeout(crate::bindings::convert::f64_to_u64(timeout))
-          .await;
-      })
-      .await;
-  }
-
   /// `page.requestGC()`. Forces a garbage-collection pass in the
   /// page's JS engine (Playwright parity).
   ///
@@ -1986,10 +584,6 @@ impl PageJs {
   #[qjs(rename = "requests")]
   pub fn requests<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Vec<rquickjs::class::Class<'js, crate::bindings::network::RequestJs>>> {
     self
@@ -2011,10 +605,6 @@ impl PageJs {
   #[qjs(rename = "workers")]
   pub fn workers<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Vec<rquickjs::class::Class<'js, crate::bindings::worker::WorkerJs>>> {
     self
@@ -2025,9 +615,7 @@ impl PageJs {
       .collect()
   }
 
-  /// `page.consoleMessages(options?)`. Returns the retained console
-  /// history as `ConsoleMessage` instances. Accepts `{ filter?: 'all' |
-  /// 'since-navigation' }`, defaulting to `since-navigation`.
+  /// `page.consoleMessages(options?)`.
   ///
   /// # Errors
   ///
@@ -2035,15 +623,7 @@ impl PageJs {
   #[qjs(rename = "consoleMessages")]
   pub fn console_messages<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let filter = ferridriver::observed::ObservedFilter::parse(opt_str_field(&options, "filter")?.as_deref());
@@ -2063,9 +643,7 @@ impl PageJs {
     self.inner.clear_console_messages();
   }
 
-  /// `page.pageErrors(options?)`. Returns the retained uncaught page
-  /// exceptions as native JS `Error`s. Accepts `{ filter?: 'all' |
-  /// 'since-navigation' }`, defaulting to `since-navigation`.
+  /// `page.pageErrors(options?)`.
   ///
   /// # Errors
   ///
@@ -2073,15 +651,7 @@ impl PageJs {
   #[qjs(rename = "pageErrors")]
   pub fn page_errors<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
     let filter = ferridriver::observed::ObservedFilter::parse(opt_str_field(&options, "filter")?.as_deref());
@@ -2100,18 +670,13 @@ impl PageJs {
   }
 
   /// Playwright: `page.waitForNavigation(options?: { timeout?, url?,
-  /// waitUntil? }): Promise<Response | null>`. Deprecated in Playwright
-  /// in favour of `waitForURL`, kept for parity.
+  /// waitUntil? }): Promise<Response | null>`.
   #[qjs(rename = "waitForNavigation")]
   #[must_use]
   pub fn wait_for_navigation<'js>(
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
     impl std::future::Future<
@@ -2130,72 +695,6 @@ impl PageJs {
         response.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, page)),
       ))
     }))
-  }
-
-  /// Playwright: `page.addScriptTag(options?: { content?, path?, type?,
-  /// url? }): Promise<ElementHandle>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the tag cannot be added. A `path` the sandbox does not let this script
-  /// read is refused before the page is touched.
-  #[qjs(rename = "addScriptTag")]
-  pub async fn add_script_tag<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
-    call_site
-      .scope(async move {
-        let opts: Option<ferridriver::options::AddScriptTagOptions> =
-          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        if let Some(path) = opts.as_ref().and_then(|o| o.path.as_deref()) {
-          crate::bindings::convert::readable(&ctx, path)?;
-        }
-        let handle = self
-          .inner
-          .add_script_tag()
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
-      })
-      .await
-  }
-
-  /// Playwright: `page.addStyleTag(options?: { content?, path?, url? }):
-  /// Promise<ElementHandle>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the tag cannot be added. A `path` the sandbox does not let this script
-  /// read is refused before the page is touched.
-  #[qjs(rename = "addStyleTag")]
-  pub async fn add_style_tag<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
-    call_site
-      .scope(async move {
-        let opts: Option<ferridriver::options::AddStyleTagOptions> =
-          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        if let Some(path) = opts.as_ref().and_then(|o| o.path.as_deref()) {
-          crate::bindings::convert::readable(&ctx, path)?;
-        }
-        let handle = self
-          .inner
-          .add_style_tag()
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(crate::bindings::element_handle::ElementHandleJs::new(handle))
-      })
-      .await
   }
 
   /// `page.setExtraHTTPHeaders(headers)`. Sends `headers` (a plain
@@ -2234,33 +733,6 @@ impl PageJs {
   ) -> rquickjs::Result<()> {
     call_site
       .scope(async move { self.inner.bring_to_front().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// `page.isEditable(selector)`. Whether the element is editable.
-  ///
-  /// # Errors
-  ///
-  /// Rejects when reading `options` throws, and with the core failure (`TimeoutError`, `TargetClosedError` or
-  /// `FerriError`) when the check fails.
-  #[qjs(rename = "isEditable")]
-  pub async fn is_editable<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move {
-        let options = crate::bindings::page::options::selector_read_options(&options)?;
-        self
-          .inner
-          .is_editable(&selector)
-          .options(options)
-          .await
-          .into_js_with(&ctx)
-      })
       .await
   }
 
@@ -2402,69 +874,6 @@ impl PageJs {
         self
           .inner
           .move_mouse_smooth(from_x, from_y, to_x, to_y, steps)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Drag from the source selector to the target selector. Accepts
-  /// Playwright's `FrameDragAndDropOptions & TimeoutOptions` bag:
-  /// `{ force?, noWaitAfter?, sourcePosition?, targetPosition?, steps?, strict?, timeout?, trial? }`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the drag fails.
-  #[qjs(rename = "dragAndDrop")]
-  pub async fn drag_and_drop<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    source: String,
-    target: String,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = parse_drag_options(&ctx, options)?;
-        self
-          .inner
-          .drag_and_drop(&source, &target)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  // ── File input ────────────────────────────────────────────────────────────
-
-  /// Attach files to a `<input type="file">` selector. Accepts
-  /// Playwright's full `string | string[] | FilePayload | FilePayload[]`
-  /// union plus the `PageSetInputFilesOptions` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `files` or `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`) when the files cannot be set.
-  #[qjs(rename = "setInputFiles")]
-  pub async fn set_input_files<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    files: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
-        let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-        self
-          .inner
-          .set_input_files(&selector, files)
-          .maybe_options(opts)
           .await
           .into_js_with(&ctx)
       })
@@ -3108,16 +1517,8 @@ impl PageJs {
   pub fn route<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<
     rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<rquickjs::Value<'js>>> + 'js>,
@@ -3237,10 +1638,6 @@ impl PageJs {
   pub fn route_web_socket<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<rquickjs::promise::Promised<impl std::future::Future<Output = rquickjs::Result<()>> + 'js>> {
@@ -3411,21 +1808,9 @@ impl PageJs {
   #[qjs(rename = "addLocatorHandler")]
   pub fn add_locator_handler<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     locator: rquickjs::Class<'js, LocatorJs>,
     handler: rquickjs::Function<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let mut times: Option<u32> = None;
@@ -3510,15 +1895,7 @@ impl PageJs {
   #[qjs(rename = "removeLocatorHandler")]
   pub fn remove_locator_handler<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     locator: rquickjs::Class<'js, LocatorJs>,
   ) -> rquickjs::Result<()> {
     let core_locator = locator.borrow().inner_ref().clone();
@@ -3607,10 +1984,6 @@ impl PageJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
@@ -3652,10 +2025,6 @@ impl PageJs {
     &self,
     call_site: crate::bindings::CallSite,
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     url: rquickjs::Value<'js>,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::promise::Promised<
@@ -3685,107 +2054,6 @@ impl PageJs {
         )),
       }
     }))
-  }
-
-  /// Mirrors Playwright `page.waitForEvent(event, options?)`. Dispatches
-  /// on the event name and returns the live class for the lifecycle
-  /// events (`Request` / `Response` / `WebSocket`), or a snapshot object
-  /// for simpler events. The overloaded return keeps the Playwright-
-  /// canonical call shape — scripts write `await page.waitForEvent('websocket')`
-  /// and receive a real `WebSocket` instance.
-  /// Playwright: `page.waitForLoadState(state?: 'load' |
-  /// 'domcontentloaded' | 'networkidle', options?: { timeout? })`.
-  /// Defaults to `'load'`. Thin delegator to `Page::wait_for_load_state`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the state is not reached in time.
-  #[qjs(rename = "waitForLoadState")]
-  pub async fn wait_for_load_state<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    state: Opt<Option<String>>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts: Option<ferridriver::options::WaitForLoadStateOptions> =
-          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        self
-          .inner
-          .wait_for_load_state(state.0.flatten().as_deref())
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `page.waitForURL(url: string | RegExp | ((url: URL) =>
-  /// boolean), options?: { timeout?, waitUntil? })`. A predicate gets a
-  /// `URL` and may return a promise of its answer.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the URL does not match in time.
-  #[qjs(rename = "waitForURL")]
-  pub async fn wait_for_url<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    url: rquickjs::Value<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts: Option<ferridriver::options::WaitForUrlOptions> =
-          crate::bindings::convert::parse_opt_bag(&ctx, options)?;
-        wait_for_url_condition(&ctx, &url, |condition| {
-          self.inner.wait_for_url(condition).maybe_options(opts).into_future()
-        })
-        .await
-      })
-      .await
-  }
-
-  /// Playwright: `page.waitForFunction(pageFunction: Function|string,
-  /// arg?, options?: { polling?: number|'raf', timeout? }): Promise<JSHandle>`.
-  /// Function values get `String(fn)` (Playwright parity); strings are
-  /// polled as expressions. The truthy result comes back as a `JSHandle`,
-  /// like Playwright's `SmartHandle`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `arg` or `options` is malformed, and with the core failure (`TimeoutError`,
-  /// `TargetClosedError` or `FerriError`), a `TimeoutError` when the function stays falsy past the timeout.
-  #[qjs(rename = "waitForFunction")]
-  pub async fn wait_for_function<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    page_function: rquickjs::Value<'js>,
-    arg: Opt<rquickjs::Value<'js>>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
-    call_site
-      .scope(async move {
-        let opts: Option<ferridriver::options::WaitForFunctionOptions> = match options.0 {
-          Some(v) if !v.is_undefined() && !v.is_null() => Some(crate::bindings::convert::serde_from_js(&ctx, v)?),
-          _ => None,
-        };
-        let (src, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-        let handle = self
-          .inner
-          .wait_for_function_serialized(&src, serialized, is_fn, opts)
-          .await
-          .map_err(|e| crate::bindings::convert::ferri_throw(&ctx, &e))?;
-        Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
-      })
-      .await
   }
 
   /// `page.waitForEvent(event, optionsOrPredicate?)`. The second
@@ -3918,10 +2186,6 @@ impl PageJs {
   #[qjs(rename = "mainFrame")]
   pub fn main_frame<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::frame::FrameJs>> {
     crate::bindings::identity::frame_object(&ctx, self.inner.main_frame())
@@ -3936,10 +2200,6 @@ impl PageJs {
   #[qjs(rename = "frames")]
   pub fn frames<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
   ) -> rquickjs::Result<Vec<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     self
@@ -3950,43 +2210,14 @@ impl PageJs {
       .collect()
   }
 
-  /// Playwright: `page.frameLocator(selector?: string): FrameLocator`.
-  /// Without a selector, the locator matches in whichever frame it is
-  /// found.
-  #[qjs(rename = "frameLocator")]
-  #[must_use]
-  pub fn frame_locator(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    selector: Opt<String>,
-  ) -> crate::bindings::frame_locator::FrameLocatorJs {
-    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(selector.0.as_deref()))
-  }
-
   /// Playwright: `page.getByRef(ref: string): Locator`.
   #[qjs(rename = "getByRef")]
   #[must_use]
-  pub fn get_by_ref(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    aria_ref: String,
-  ) -> crate::bindings::locator::LocatorJs {
+  pub fn get_by_ref(&self, aria_ref: String) -> crate::bindings::locator::LocatorJs {
     crate::bindings::locator::LocatorJs::new(self.inner.get_by_ref(&aria_ref))
   }
 
-  /// Locate a frame by name or URL. Accepts Playwright's union:
-  /// `frame(string | { name?: string; url?: string })`.
-  ///
-  /// Distinct null/undefined handling (like emulateMedia in task 3.24)
-  /// is not required here — both absent and explicit-null mean "no
-  /// filter on this field", which matches Playwright's optional-field
-  /// semantics.
+  /// Locate a frame by name or URL.
   ///
   /// # Errors
   ///
@@ -3994,15 +2225,7 @@ impl PageJs {
   #[qjs(rename = "frame")]
   pub fn frame<'js>(
     &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
     ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
     selector: rquickjs::Value<'js>,
   ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
     let core_sel = if let Some(s) = selector.as_string() {
@@ -4397,6 +2620,7 @@ impl PageJs {
       })
       .await
   }
+}
 }
 
 /// Playwright `Touchscreen`. Construct via `page.touchscreen`.

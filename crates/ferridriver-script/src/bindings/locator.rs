@@ -270,1124 +270,482 @@ impl LocatorJs {
   }
 }
 
-#[rquickjs::methods]
-impl LocatorJs {
-  /// The resolved selector string for this locator. Mirrors the NAPI
-  /// `Locator.selector` getter; used by `{ selector }`-style locator
-  /// round-tripping and by `normalize()` callers reading the canonical form.
-  #[qjs(get, rename = "selector")]
-  #[must_use]
-  pub fn selector(&self) -> String {
-    self.inner.selector().to_string()
-  }
+crate::bindings::macros::qjs_impl! {
+  #[expect(
+    clippy::needless_pass_by_value,
+    reason = "rquickjs hands methods their Ctx and JS arguments by value"
+  )]
+  impl LocatorJs {
+    @mixin locator_queries(required_frame_locator);
+    @mixin element_actions();
 
-  /// Whether this locator is in strict mode (mirrors NAPI `isStrict`).
-  #[qjs(get, rename = "isStrict")]
-  #[must_use]
-  pub fn is_strict(&self) -> bool {
-    self.inner.is_strict()
-  }
+    /// The resolved selector string for this locator. Mirrors the NAPI
+    /// `Locator.selector` getter; used by `{ selector }`-style locator
+    /// round-tripping and by `normalize()` callers reading the canonical form.
+    #[qjs(get, rename = "selector")]
+    #[must_use]
+    pub fn selector(&self) -> String {
+      self.inner.selector().to_string()
+    }
 
-  /// Returns a copy of this locator with strict-mode toggled.
-  #[qjs(rename = "setStrict")]
-  #[must_use]
-  pub fn set_strict(&self, strict: bool) -> LocatorJs {
-    LocatorJs::new(self.inner.strict(strict))
-  }
+    /// Whether this locator is in strict mode (mirrors NAPI `isStrict`).
+    #[qjs(get, rename = "isStrict")]
+    #[must_use]
+    pub fn is_strict(&self) -> bool {
+      self.inner.is_strict()
+    }
 
-  /// Playwright: `locator.selectText(options?)`. Selects the element's text.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when selecting
-  /// the text fails.
-  #[qjs(rename = "selectText")]
-  pub async fn select_text(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.select_text().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Returns a copy of this locator with strict-mode toggled.
+    #[qjs(rename = "setStrict")]
+    #[must_use]
+    pub fn set_strict(&self, strict: bool) -> LocatorJs {
+      LocatorJs::new(self.inner.strict(strict))
+    }
 
-  /// Playwright: `locator.click({ button: 'right' })` shorthand.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when the click
-  /// fails.
-  #[qjs(rename = "rightClick")]
-  pub async fn right_click(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.right_click().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright: `locator.click({ button: 'right' })` shorthand.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when the click
+    /// fails.
+    #[qjs(rename = "rightClick")]
+    pub async fn right_click(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move { self.inner.right_click().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright: `locator.boundingBox()`. Returns `{x, y, width, height}` or `null`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when measuring
-  /// the element fails.
-  #[qjs(rename = "boundingBox")]
-  pub async fn bounding_box<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        match self.inner.bounding_box().await.into_js_with(&ctx)? {
-          None => Ok(rquickjs::Value::new_null(ctx)),
-          Some(b) => {
-            let obj = rquickjs::Object::new(ctx.clone())?;
-            obj.set("x", b.x)?;
-            obj.set("y", b.y)?;
-            obj.set("width", b.width)?;
-            obj.set("height", b.height)?;
-            Ok(obj.into_value())
-          },
-        }
-      })
-      .await
-  }
+    // ── Chain/refine (return new Locator) ─────────────────────────────────────
 
-  // ── Chain/refine (return new Locator) ─────────────────────────────────────
+    /// Narrow this locator's scope.
+    ///
+    /// # Errors
+    ///
+    /// Throws a `TypeError` when `selectorOrLocator` is not a selector string, a `Locator` or a
+    /// `{ selector }` object, or when `options` is not an object of the documented shape.
+    #[qjs(rename = "locator")]
+    pub fn locator<'js>(
+      &self,
+      ctx: rquickjs::Ctx<'js>,
+      selector_or_locator: rquickjs::Value<'js>,
+      options: Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<LocatorJs> {
+      let (like, filter) = lower_locator_args(&ctx, &selector_or_locator, options, false)?;
+      let locator = match filter {
+        Some(f) => self.inner.locator_with(like, &f),
+        None => self.inner.locator(like),
+      };
+      Ok(LocatorJs::new(locator))
+    }
 
-  /// Narrow this locator's scope.
-  ///
-  /// Full Playwright signature:
-  /// `locator(selectorOrLocator: string | Locator, options?: { has?, hasNot?, hasText?, hasNotText? }): Locator`.
-  /// The `visible` flag is the one `LocatorOptions` field NOT accepted
-  /// here — Playwright restricts it to `filter()` and the `Locator`
-  /// constructor (see
-  /// `/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `selectorOrLocator` is not a selector string, a `Locator` or a
-  /// `{ selector }` object, or when `options` is not an object of the documented shape.
-  #[qjs(rename = "locator")]
-  pub fn locator<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    selector_or_locator: rquickjs::Value<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let (like, filter) = lower_locator_args(&ctx, &selector_or_locator, options, false)?;
-    let locator = match filter {
-      Some(f) => self.inner.locator_with(like, &f),
-      None => self.inner.locator(like),
-    };
-    Ok(LocatorJs::new(locator))
-  }
+    /// Playwright: `locator.filter(options?: LocatorOptions): Locator`.
+    ///
+    /// # Errors
+    ///
+    /// Throws a `TypeError` when `options` is not an object of the documented shape.
+    #[qjs(rename = "filter")]
+    pub fn filter<'js>(
+      &self,
+      ctx: rquickjs::Ctx<'js>,
+      options: Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<LocatorJs> {
+      let parsed = parse_locator_options_public(&ctx, options, true)?;
+      let opts = FilterOptions {
+        has_text: parsed.has_text,
+        has_not_text: parsed.has_not_text,
+        has: parsed.has,
+        has_not: parsed.has_not,
+        visible: parsed.visible,
+      };
+      Ok(LocatorJs::new(self.inner.filter_with(&opts)))
+    }
 
-  /// Playwright: `locator.filter(options?: LocatorOptions): Locator`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:204`).
-  /// Thin delegator to Rust core's `Locator::filter`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `options` is not an object of the documented shape.
-  #[qjs(rename = "filter")]
-  pub fn filter<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let parsed = parse_locator_options_public(&ctx, options, true)?;
-    let opts = FilterOptions {
-      has_text: parsed.has_text,
-      has_not_text: parsed.has_not_text,
-      has: parsed.has,
-      has_not: parsed.has_not,
-      visible: parsed.visible,
-    };
-    Ok(LocatorJs::new(self.inner.filter_with(&opts)))
-  }
+    /// Playwright: `locator.and(locator: Locator): Locator`.
+    ///
+    /// # Errors
+    ///
+    /// Throws a `TypeError` when `locator` is not a `Locator`.
+    #[qjs(rename = "and")]
+    pub fn and<'js>(&self, ctx: rquickjs::Ctx<'js>, other: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
+      let class = rquickjs::Class::<LocatorJs>::from_value(&other)
+        .map_err(|_| type_error(&ctx, "Locator.and: expected a Locator instance"))?;
+      Ok(LocatorJs::new(self.inner.and(&class.borrow().inner)))
+    }
 
-  /// Playwright: `locator.and(locator: Locator): Locator`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts` —
-  /// matches elements satisfying BOTH this and `other` on the same
-  /// element). Thin delegator to core's `Locator::and`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `locator` is not a `Locator`.
-  #[qjs(rename = "and")]
-  pub fn and<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    other: rquickjs::Value<'js>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let class = rquickjs::Class::<LocatorJs>::from_value(&other)
-      .map_err(|_| type_error(&ctx, "Locator.and: expected a Locator instance"))?;
-    Ok(LocatorJs::new(self.inner.and(&class.borrow().inner)))
-  }
+    /// Playwright: `locator.or(locator: Locator): Locator`.
+    ///
+    /// # Errors
+    ///
+    /// Throws a `TypeError` when `locator` is not a `Locator`.
+    #[qjs(rename = "or")]
+    pub fn or<'js>(&self, ctx: rquickjs::Ctx<'js>, other: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
+      let class = rquickjs::Class::<LocatorJs>::from_value(&other)
+        .map_err(|_| type_error(&ctx, "Locator.or: expected a Locator instance"))?;
+      Ok(LocatorJs::new(self.inner.or(&class.borrow().inner)))
+    }
 
-  /// Playwright: `locator.or(locator: Locator): Locator` — matches
-  /// elements from EITHER selector. Thin delegator to `Locator::or`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `locator` is not a `Locator`.
-  #[qjs(rename = "or")]
-  pub fn or<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    other: rquickjs::Value<'js>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let class = rquickjs::Class::<LocatorJs>::from_value(&other)
-      .map_err(|_| type_error(&ctx, "Locator.or: expected a Locator instance"))?;
-    Ok(LocatorJs::new(self.inner.or(&class.borrow().inner)))
-  }
+    /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error under its Playwright name when resolving fails.
+    #[qjs(rename = "elementHandle")]
+    pub async fn element_handle(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
+      call_site
+        .scope(async move {
+          let inner = self.inner.element_handle().await.into_js_with(&ctx)?;
+          Ok(crate::bindings::element_handle::ElementHandleJs::new(inner))
+        })
+        .await
+    }
 
-  /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
-  /// Resolves and returns a pinned `ElementHandle`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when resolving
-  /// the element fails.
-  #[qjs(rename = "elementHandle")]
-  pub async fn element_handle(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
-    call_site
-      .scope(async move {
-        let inner = self.inner.element_handle().await.into_js_with(&ctx)?;
-        Ok(crate::bindings::element_handle::ElementHandleJs::new(inner))
-      })
-      .await
-  }
+    /// Playwright: `locator.elementHandles(): Promise<ElementHandle[]>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error under its Playwright name when resolving fails.
+    #[qjs(rename = "elementHandles")]
+    pub async fn element_handles(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
+      call_site
+        .scope(async move {
+          let inner = self.inner.element_handles().await.into_js_with(&ctx)?;
+          Ok(
+            inner
+              .into_iter()
+              .map(crate::bindings::element_handle::ElementHandleJs::new)
+              .collect(),
+          )
+        })
+        .await
+    }
 
-  /// Playwright: `locator.elementHandles(): Promise<ElementHandle[]>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// resolving the elements fails.
-  #[qjs(rename = "elementHandles")]
-  pub async fn element_handles(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let inner = self.inner.element_handles().await.into_js_with(&ctx)?;
-        Ok(
-          inner
-            .into_iter()
-            .map(crate::bindings::element_handle::ElementHandleJs::new)
-            .collect(),
-        )
-      })
-      .await
-  }
+    /// Playwright: `locator.contentFrame(): FrameLocator`.
+    #[qjs(rename = "contentFrame")]
+    #[must_use]
+    pub fn content_frame(&self) -> crate::bindings::frame_locator::FrameLocatorJs {
+      crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.content_frame())
+    }
 
-  /// Playwright's `locator.getByRole(role, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `options.name` or `options.description` is neither a string nor a
-  /// `RegExp`.
-  #[qjs(rename = "getByRole")]
-  pub fn get_by_role(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    role: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let opts = crate::bindings::page::parse_role_options(options)?;
-    Ok(LocatorJs::new(
-      self.inner.get_by_role(role.as_str()).options(opts).into_locator(),
-    ))
-  }
+    /// Playwright: `locator.page(): Page`.
+    ///
+    /// # Errors
+    ///
+    /// Throws when the engine cannot create or restore the `Page` object.
+    #[qjs(rename = "page")]
+    pub fn page<'js>(
+      &self,
+      ctx: rquickjs::Ctx<'js>,
+    ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::page::PageJs>> {
+      crate::bindings::identity::page_object(&ctx, std::sync::Arc::clone(self.inner.page()))
+    }
 
-  /// Playwright's `locator.getByText(text, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByText")]
-  pub fn get_by_text(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
-    let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_text(t).options(opts).into_locator()))
-  }
+    /// Playwright: `locator.describe(description: string): Locator`.
+    #[qjs(rename = "describe")]
+    #[must_use]
+    pub fn describe(&self, description: String) -> LocatorJs {
+      LocatorJs::new(self.inner.describe(&description))
+    }
 
-  /// Playwright's `locator.getByLabel(text, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByLabel")]
-  pub fn get_by_label(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
-    let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_label(t).options(opts).into_locator()))
-  }
+    /// Playwright: `locator.description(): string | null`.
+    #[qjs(rename = "description")]
+    #[must_use]
+    pub fn description(&self) -> crate::bindings::convert::Null<String> {
+      crate::bindings::convert::Null(self.inner.description())
+    }
 
-  /// Playwright's `locator.getByPlaceholder(text, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByPlaceholder")]
-  pub fn get_by_placeholder(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
-    let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(
-      self.inner.get_by_placeholder(t).options(opts).into_locator(),
-    ))
-  }
+    /// Playwright: `locator.toString(): string`.
+    #[qjs(rename = "toString")]
+    #[must_use]
+    pub fn to_js_string(&self) -> String {
+      self.inner.to_string()
+    }
 
-  /// Playwright's `locator.getByAltText(text, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByAltText")]
-  pub fn get_by_alt_text(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
-    let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(
-      self.inner.get_by_alt_text(t).options(opts).into_locator(),
-    ))
-  }
+    /// Playwright: `locator.visible(): Locator`.
+    #[qjs(rename = "visible")]
+    #[must_use]
+    pub fn visible(&self) -> LocatorJs {
+      LocatorJs::new(self.inner.visible())
+    }
 
-  /// Playwright's `locator.getByTitle(text, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `text` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByTitle")]
-  pub fn get_by_title(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    text: rquickjs::Value<'_>,
-    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(&text)?;
-    let opts = crate::bindings::page::parse_text_options(options);
-    Ok(LocatorJs::new(self.inner.get_by_title(t).options(opts).into_locator()))
-  }
+    /// Playwright: `locator.within(locator: Locator): Locator`.
+    ///
+    /// # Errors
+    ///
+    /// Throws a `TypeError` when `locator` is not a `Locator`.
+    #[qjs(rename = "within")]
+    pub fn within<'js>(&self, ctx: rquickjs::Ctx<'js>, scope: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
+      let class = rquickjs::Class::<LocatorJs>::from_value(&scope)
+        .map_err(|_| type_error(&ctx, "Locator.within: expected a Locator instance"))?;
+      Ok(LocatorJs::new(self.inner.within(&class.borrow().inner)))
+    }
 
-  /// Playwright's `locator.getByTestId(testId)`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `testId` is neither a string nor a `RegExp`.
-  #[qjs(rename = "getByTestId")]
-  pub fn get_by_test_id(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    test_id: rquickjs::Value<'_>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let t = crate::bindings::page::string_or_regex_from_js(&test_id)?;
-    Ok(LocatorJs::new(self.inner.get_by_test_id(t)))
-  }
+    #[qjs(rename = "first")]
+    #[must_use]
+    pub fn first(&self) -> LocatorJs {
+      LocatorJs::new(self.inner.first())
+    }
 
-  /// Playwright: `locator.contentFrame(): FrameLocator`.
-  #[qjs(rename = "contentFrame")]
-  #[must_use]
-  pub fn content_frame(&self) -> crate::bindings::frame_locator::FrameLocatorJs {
-    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.content_frame())
-  }
+    #[qjs(rename = "last")]
+    #[must_use]
+    pub fn last(&self) -> LocatorJs {
+      LocatorJs::new(self.inner.last())
+    }
 
-  /// Playwright: `locator.frameLocator(selector): FrameLocator`.
-  #[qjs(rename = "frameLocator")]
-  #[must_use]
-  pub fn frame_locator(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    selector: String,
-  ) -> crate::bindings::frame_locator::FrameLocatorJs {
-    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
-  }
+    #[qjs(rename = "nth")]
+    #[must_use]
+    pub fn nth(&self, index: i32) -> LocatorJs {
+      LocatorJs::new(self.inner.nth(index))
+    }
 
-  /// Playwright: `locator.page(): Page`. Carries the session's
-  /// `AsyncContext` (via userdata) so `page.route` /
-  /// `page.exposeFunction` work on the returned handle.
-  ///
-  /// # Errors
-  ///
-  /// Throws when the engine cannot create or restore the `Page` object.
-  #[qjs(rename = "page")]
-  pub fn page<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-  ) -> rquickjs::Result<rquickjs::Class<'js, crate::bindings::page::PageJs>> {
-    crate::bindings::identity::page_object(&ctx, std::sync::Arc::clone(self.inner.page()))
-  }
+    // ── Interaction ───────────────────────────────────────────────────────────
 
-  /// Playwright: `locator.describe(description: string): Locator`.
-  #[qjs(rename = "describe")]
-  #[must_use]
-  pub fn describe(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    description: String,
-  ) -> LocatorJs {
-    LocatorJs::new(self.inner.describe(&description))
-  }
+    /// Playwright's `locator.clear`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error under its Playwright name when clearing fails.
+    #[qjs(rename = "clear")]
+    pub async fn clear(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move { self.inner.clear().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright: `locator.description(): string | null`.
-  #[qjs(rename = "description")]
-  #[must_use]
-  pub fn description(&self) -> crate::bindings::convert::Null<String> {
-    crate::bindings::convert::Null(self.inner.description())
-  }
+    /// Playwright: `highlight(options?: { style?: string | Record<string, string | number> }): Promise<Disposable>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with what a getter throws, or the core error on failure.
+    #[qjs(rename = "highlight")]
+    pub async fn highlight(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+      options: Opt<rquickjs::Value<'_>>,
+    ) -> rquickjs::Result<crate::bindings::disposable::DisposableJs> {
+      call_site
+        .scope(async move {
+          let style = parse_highlight_style(options)?;
+          let disposable = self.inner.highlight(style).await.into_js_with(&ctx)?;
+          Ok(crate::bindings::disposable::DisposableJs::new(disposable))
+        })
+        .await
+    }
 
-  /// Playwright: `locator.toString(): string`.
-  #[qjs(rename = "toString")]
-  #[must_use]
-  pub fn to_js_string(&self) -> String {
-    self.inner.to_string()
-  }
+    /// Playwright: `hideHighlight(): Promise<void>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error when hiding the overlay fails.
+    #[qjs(rename = "hideHighlight")]
+    pub async fn hide_highlight(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move { self.inner.hide_highlight().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright: `locator.visible(): Locator`.
-  #[qjs(rename = "visible")]
-  #[must_use]
-  pub fn visible(&self) -> LocatorJs {
-    LocatorJs::new(self.inner.visible())
-  }
+    /// Playwright's `locator.type`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `TypeError` for malformed options, or the core error on failure.
+    #[qjs(rename = "type")]
+    pub async fn type_<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      text: String,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move {
+          let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+          self.inner.r#type(&text).maybe_options(opts).await.into_js_with(&ctx)
+        })
+        .await
+    }
 
-  /// Playwright: `locator.within(locator: Locator): Locator`.
-  ///
-  /// # Errors
-  ///
-  /// Throws a `TypeError` when `locator` is not a `Locator`.
-  #[qjs(rename = "within")]
-  pub fn within<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: rquickjs::Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    scope: rquickjs::Value<'js>,
-  ) -> rquickjs::Result<LocatorJs> {
-    let class = rquickjs::Class::<LocatorJs>::from_value(&scope)
-      .map_err(|_| type_error(&ctx, "Locator.within: expected a Locator instance"))?;
-    Ok(LocatorJs::new(self.inner.within(&class.borrow().inner)))
-  }
+    /// Playwright's `locator.pressSequentially`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `TypeError` for malformed options, or the core error on failure.
+    #[qjs(rename = "pressSequentially")]
+    pub async fn press_sequentially<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      text: String,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move {
+          let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+          self
+            .inner
+            .press_sequentially(&text)
+            .maybe_options(opts)
+            .await
+            .into_js_with(&ctx)
+        })
+        .await
+    }
 
-  #[qjs(rename = "first")]
-  #[must_use]
-  pub fn first(&self) -> LocatorJs {
-    LocatorJs::new(self.inner.first())
-  }
+    /// Playwright's `locator.blur`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error when blurring fails.
+    #[qjs(rename = "blur")]
+    pub async fn blur(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move { self.inner.blur().await.into_js_with(&ctx) })
+        .await
+    }
 
-  #[qjs(rename = "last")]
-  #[must_use]
-  pub fn last(&self) -> LocatorJs {
-    LocatorJs::new(self.inner.last())
-  }
+    /// Drop a file/data payload onto this element.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `TypeError` for malformed payload or options, or the core error.
+    #[qjs(rename = "drop")]
+    pub async fn drop<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      payload: rquickjs::Value<'js>,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move {
+          let payload = crate::bindings::convert::parse_drop_payload(&ctx, payload)?;
+          let opts = crate::bindings::convert::parse_drop_options(&ctx, options)?;
+          self.inner.drop(payload).maybe_options(opts).await.into_js_with(&ctx)
+        })
+        .await
+    }
 
-  #[qjs(rename = "nth")]
-  #[must_use]
-  pub fn nth(&self, index: i32) -> LocatorJs {
-    LocatorJs::new(self.inner.nth(index))
-  }
-
-  // ── Interaction ───────────────────────────────────────────────────────────
-
-  /// Playwright's `locator.click`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the click fails.
-  #[qjs(rename = "click")]
-  pub async fn click<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-        self.inner.click().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.dblclick`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the double click fails.
-  #[qjs(rename = "dblclick")]
-  pub async fn dblclick<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-        self.inner.dblclick().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.fill`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the fill fails.
-  #[qjs(rename = "fill")]
-  pub async fn fill<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    value: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-        self.inner.fill(&value).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.clear`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when clearing
-  /// the field fails.
-  #[qjs(rename = "clear")]
-  pub async fn clear(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.clear().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright: `highlight(options?: { style?: string | Record<string,
-  /// string | number> }): Promise<Disposable>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:158`).
-  /// Shows the element-highlight overlay; returns a `Disposable` whose
-  /// `dispose()` hides it. The optional `style` is parsed synchronously
-  /// (the JS scope is `!Send`) into [`ferridriver::options::HighlightStyle`]
-  /// before the async body forwards to core.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with what a getter on `options` or `options.style` throws, and with the core error
-  /// under its Playwright name, such as `TargetClosedError`, when showing the overlay fails.
-  #[qjs(rename = "highlight")]
-  pub async fn highlight(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-    options: Opt<rquickjs::Value<'_>>,
-  ) -> rquickjs::Result<crate::bindings::disposable::DisposableJs> {
-    call_site
-      .scope(async move {
-        let style = parse_highlight_style(options)?;
-        let disposable = self.inner.highlight(style).await.into_js_with(&ctx)?;
-        Ok(crate::bindings::disposable::DisposableJs::new(disposable))
-      })
-      .await
-  }
-
-  /// Playwright: `hideHighlight(): Promise<void>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// hiding the overlay fails.
-  #[qjs(rename = "hideHighlight")]
-  pub async fn hide_highlight(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.hide_highlight().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright's `locator.type`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when typing fails.
-  #[qjs(rename = "type")]
-  pub async fn type_<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    text: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-        self.inner.r#type(&text).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.pressSequentially`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when typing fails.
-  #[qjs(rename = "pressSequentially")]
-  pub async fn press_sequentially<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    text: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-        self
-          .inner
-          .press_sequentially(&text)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.press`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the key press fails.
-  #[qjs(rename = "press")]
-  pub async fn press<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    key: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-        self.inner.press(&key).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.hover`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the hover fails.
-  #[qjs(rename = "hover")]
-  pub async fn hover<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-        self.inner.hover().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.tap`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the tap fails.
-  #[qjs(rename = "tap")]
-  pub async fn tap<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-        self.inner.tap().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.focus`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when focusing
-  /// fails.
-  #[qjs(rename = "focus")]
-  pub async fn focus(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.focus().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright's `locator.blur`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when blurring
-  /// fails.
-  #[qjs(rename = "blur")]
-  pub async fn blur(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.blur().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright's `locator.check`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when checking fails.
-  #[qjs(rename = "check")]
-  pub async fn check<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self.inner.check().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.uncheck`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when unchecking fails.
-  #[qjs(rename = "uncheck")]
-  pub async fn uncheck<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self.inner.uncheck().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.setChecked`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the update fails.
-  #[qjs(rename = "setChecked")]
-  pub async fn set_checked<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    checked: bool,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self
-          .inner
-          .set_checked(checked)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.selectOption`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for malformed `values`, a `TypeError` for a malformed `options`
-  /// bag, and with the core error under its Playwright name, such as `TimeoutError`, when the
-  /// selection fails.
-  #[qjs(rename = "selectOption")]
-  pub async fn select_option<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    values: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Vec<String>> {
-    call_site
-      .scope(async move {
-        let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
-        let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-        self
-          .inner
-          .select_option(values)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Attach files to a `<input type=file>` this locator matches.
-  /// Accepts Playwright's full
-  /// `string | string[] | FilePayload | FilePayload[]` union.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for malformed `files`, a `PermissionDeniedError` when the realm may
-  /// not read a named file, a `TypeError` for a malformed `options` bag, and with the core error
-  /// under its Playwright name, such as `TimeoutError`, when setting the files fails.
-  #[qjs(rename = "setInputFiles")]
-  pub async fn set_input_files<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    files: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
-        let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-        self
-          .inner
-          .set_input_files(files)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Drop a file/data payload onto this element. Mirrors Playwright's
-  /// `locator.drop(payload, options?)` per `client/locator.ts:129`.
-  /// `payload` is the native `{ files?, data? }` shape; `options` is the
-  /// trimmed `{ modifiers?, position?, timeout? }` bag.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `payload` is not an object, a `TypeError` for a malformed
-  /// `options` bag, and with the core error under its Playwright name, such as `TimeoutError`, when
-  /// the drop fails.
-  #[qjs(rename = "drop")]
-  pub async fn drop<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    payload: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let payload = crate::bindings::convert::parse_drop_payload(&ctx, payload)?;
-        let opts = crate::bindings::convert::parse_drop_options(&ctx, options)?;
-        self.inner.drop(payload).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright's `locator.scrollIntoViewIfNeeded`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when scrolling
-  /// fails.
-  #[qjs(rename = "scrollIntoViewIfNeeded")]
-  pub async fn scroll_into_view_if_needed(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.scroll_into_view_if_needed().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright: `locator.waitFor(options?: { state?: 'attached' |
-  /// 'detached' | 'visible' | 'hidden', timeout?: number })`. Thin
-  /// delegator to core `Locator::wait_for(WaitOptions)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, an `Error` for an unknown
-  /// `options.state`, and with the core error under its Playwright name, such as `TimeoutError`,
-  /// when the wait fails.
-  #[qjs(rename = "waitFor")]
-  pub async fn wait_for<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        #[derive(serde::Deserialize, Default)]
-        #[serde(rename_all = "camelCase", default)]
-        struct JsWaitOpts {
-          state: Option<String>,
-          timeout: Option<u64>,
-        }
-        let parsed: JsWaitOpts = match options.0 {
-          Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(&ctx, v)?,
-          _ => JsWaitOpts::default(),
-        };
-        self
-          .inner
-          .wait_for()
-          .options(ferridriver::options::WaitOptions {
-            state: parsed
-              .state
-              .as_deref()
-              .map(|s| {
-                ferridriver::options::WaitState::try_from_str(s).map_err(|bad| {
-                  crate::bindings::registry::throw_script_error(
-                    &ctx,
-                    &crate::ScriptError::internal(format!("unknown wait state: {bad}")),
-                  )
+    /// Playwright: `locator.waitFor(options?)`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `TypeError` for malformed options, an `Error` for unknown state, or the core error.
+    #[qjs(rename = "waitFor")]
+    pub async fn wait_for<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move {
+          #[derive(serde::Deserialize, Default)]
+          #[serde(rename_all = "camelCase", default)]
+          struct JsWaitOpts {
+            state: Option<String>,
+            timeout: Option<u64>,
+          }
+          let parsed: JsWaitOpts = match options.0 {
+            Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(&ctx, v)?,
+            _ => JsWaitOpts::default(),
+          };
+          self
+            .inner
+            .wait_for()
+            .options(ferridriver::options::WaitOptions {
+              state: parsed
+                .state
+                .as_deref()
+                .map(|s| {
+                  ferridriver::options::WaitState::try_from_str(s).map_err(|bad| {
+                    crate::bindings::registry::throw_script_error(
+                      &ctx,
+                      &crate::ScriptError::internal(format!("unknown wait state: {bad}")),
+                    )
+                  })
                 })
-              })
-              .transpose()?,
-            timeout: parsed.timeout,
-            strict: None,
-          })
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
+                .transpose()?,
+              timeout: parsed.timeout,
+              strict: None,
+            })
+            .await
+            .into_js_with(&ctx)
+        })
+        .await
+    }
 
-  /// Dispatch a DOM event on the element. Mirrors Playwright's
-  /// `locator.dispatchEvent(type, eventInit?, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `eventInit` cannot be serialized, a `TypeError` for a
-  /// malformed `options` bag, and with the core error under its Playwright name, such as
-  /// `TimeoutError`, when dispatching the event fails.
-  #[qjs(rename = "dispatchEvent")]
-  pub async fn dispatch_event<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    event_type: String,
-    event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let init_json = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, event_init.0)?;
-        let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
-        self
-          .inner
-          .dispatch_event(&event_type, init_json)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
+    // ── Info ──────────────────────────────────────────────────────────────────
 
-  // ── Info ──────────────────────────────────────────────────────────────────
+    /// Playwright's `locator.count`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error when counting fails.
+    #[qjs(rename = "count")]
+    pub async fn count(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<i32> {
+      call_site
+        .scope(async move {
+          self
+            .inner
+            .count()
+            .await
+            .into_js_with(&ctx)
+            .map(|c| i32::try_from(c).unwrap_or(i32::MAX))
+        })
+        .await
+    }
 
-  /// Playwright's `locator.count`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// counting fails.
-  #[qjs(rename = "count")]
-  pub async fn count(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<i32> {
-    call_site
-      .scope(async move {
-        self
-          .inner
-          .count()
-          .await
-          .into_js_with(&ctx)
-          .map(|c| i32::try_from(c).unwrap_or(i32::MAX))
-      })
-      .await
-  }
+    /// The locator expression to paste into a test.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error when resolving fails.
+    #[qjs(rename = "generateLocator")]
+    pub async fn generate_locator(
+      &self,
+      language: rquickjs::function::Opt<String>,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<String> {
+      let language = language.0.map_or(ferridriver_codegen::OutputLanguage::TypeScript, |l| {
+        ferridriver_codegen::OutputLanguage::parse_cli(&l)
+      });
+      call_site
+        .scope(async move { self.inner.generate_locator(language).await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// The locator expression to paste into a test, such as
-  /// `getByRole('button', { name: 'Sign in' })`, rather than the
-  /// selector `normalize()` returns.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when resolving
-  /// the element fails.
-  #[qjs(rename = "generateLocator")]
-  pub async fn generate_locator(
-    &self,
-    language: rquickjs::function::Opt<String>,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<String> {
-    let language = language.0.map_or(ferridriver_codegen::OutputLanguage::TypeScript, |l| {
-      ferridriver_codegen::OutputLanguage::parse_cli(&l)
-    });
-    call_site
-      .scope(async move { self.inner.generate_locator(language).await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright: `locator.normalize(): Promise<Locator>`. Resolves the
-  /// selector to its canonical recorder/codegen form and returns a new
-  /// locator built from it.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TimeoutError`, when resolving
-  /// the element fails.
-  #[qjs(rename = "normalize")]
-  pub async fn normalize(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<LocatorJs> {
-    call_site
-      .scope(async move { self.inner.normalize().await.into_js_with(&ctx).map(LocatorJs::new) })
-      .await
-  }
-
-  /// Playwright: `locator.screenshot(options?: LocatorScreenshotOptions): Promise<Buffer>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the screenshot fails.
-  #[qjs(rename = "screenshot")]
-  pub async fn screenshot<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Vec<u8>> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::page::options::parse_element_screenshot_options(&ctx, options)?;
-        self.inner.screenshot().options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
+    /// Playwright: `locator.normalize(): Promise<Locator>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error when resolving fails.
+    #[qjs(rename = "normalize")]
+    pub async fn normalize(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<LocatorJs> {
+      call_site
+        .scope(async move { self.inner.normalize().await.into_js_with(&ctx).map(LocatorJs::new) })
+        .await
+    }
 
   /// Playwright's `locator.textContent`.
   ///
@@ -1933,4 +1291,5 @@ impl LocatorJs {
       })
       .await
   }
+}
 }

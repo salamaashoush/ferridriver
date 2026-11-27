@@ -1,8 +1,7 @@
 //! `ElementHandleJs`: `QuickJS` wrapper around `ferridriver::ElementHandle`.
 //!
-//! Phase-C surface covers lifecycle — `dispose`, `isDisposed`, `asJSHandle`
-//! — enough to exercise the per-backend release paths from `run_script`.
-//! Phase E bolts the ~25 Playwright DOM methods on top of this same class.
+//! Shared element actions, geometry, and screenshot methods come from
+//! `qjs_impl!`.
 
 use ferridriver::ElementHandle;
 use rquickjs::JsLifetime;
@@ -49,934 +48,512 @@ impl ElementHandleJs {
   }
 }
 
-#[rquickjs::methods]
-impl ElementHandleJs {
-  /// Playwright `elementHandle.isDisposed(): boolean` — METHOD (not a
-  /// property). LLM-generated code calls `eh.isDisposed()` with parens.
-  #[qjs(rename = "isDisposed")]
-  #[must_use]
-  pub fn is_disposed(&self) -> bool {
-    self.inner.is_disposed()
-  }
+crate::bindings::macros::qjs_impl! {
+  impl ElementHandleJs {
+    @mixin element_actions();
 
-  /// Release the underlying remote element. Idempotent.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// releasing the remote element fails.
-  #[qjs(rename = "dispose")]
-  pub async fn dispose(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.dispose().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright `elementHandle.isDisposed(): boolean` — METHOD (not a property).
+    #[qjs(rename = "isDisposed")]
+    #[must_use]
+    pub fn is_disposed(&self) -> bool {
+      self.inner.is_disposed()
+    }
 
-  /// Companion [`crate::bindings::js_handle::JSHandleJs`] sharing the
-  /// same remote reference. Disposing either releases the remote and
-  /// latches both into the disposed state.
-  #[qjs(rename = "asJSHandle")]
-  #[must_use]
-  pub fn as_js_handle(&self) -> crate::bindings::js_handle::JSHandleJs {
-    crate::bindings::js_handle::JSHandleJs::new(self.inner.as_js_handle().clone())
-  }
+    /// Release the underlying remote element. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error under its Playwright name when releasing fails.
+    #[qjs(rename = "dispose")]
+    pub async fn dispose(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move { self.inner.dispose().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright: `elementHandle.evaluate(pageFunction, arg?): Promise<R>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
-  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
-  /// when the page function throws or the page is gone.
-  #[qjs(rename = "evaluate")]
-  pub async fn evaluate<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = crate::bindings::convert::quickjs_arg_with_functions(
-          &ctx,
-          arg.0,
-          crate::bindings::convert::ArgFunctions::from_options(
-            options.0.as_ref(),
-            Some(self.inner.page().backend_page_id()),
-          )?,
-        )?;
-        let result = self
-          .inner
-          .as_js_handle()
-          .evaluate(&source, serialized, is_fn)
-          .await
-          .into_js_with(&ctx)?;
-        serialized_value_to_quickjs(&ctx, &result)
-      })
-      .await
-  }
+    /// Companion [`crate::bindings::js_handle::JSHandleJs`] sharing the same remote reference.
+    #[qjs(rename = "asJSHandle")]
+    #[must_use]
+    pub fn as_js_handle(&self) -> crate::bindings::js_handle::JSHandleJs {
+      crate::bindings::js_handle::JSHandleJs::new(self.inner.as_js_handle().clone())
+    }
 
-  /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
-  /// when `arg` holds a function and `options.exposeFunctions` is unset, and with the core error
-  /// when the page function throws or the page is gone.
-  #[qjs(rename = "evaluateHandle")]
-  pub async fn evaluate_handle<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
-    call_site
-      .scope(async move {
-        let (source, is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = crate::bindings::convert::quickjs_arg_with_functions(
-          &ctx,
-          arg.0,
-          crate::bindings::convert::ArgFunctions::from_options(
-            options.0.as_ref(),
-            Some(self.inner.page().backend_page_id()),
-          )?,
-        )?;
-        let handle = self
-          .inner
-          .as_js_handle()
-          .evaluate_handle(&source, serialized, is_fn)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
-      })
-      .await
-  }
+    /// Playwright: `elementHandle.evaluate(pageFunction, arg?): Promise<R>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when `pageFunction`, `arg`, or `options` cannot be converted, or on evaluation failure.
+    #[qjs(rename = "evaluate")]
+    pub async fn evaluate<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      page_function: rquickjs::Value<'js>,
+      arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<rquickjs::Value<'js>> {
+      call_site
+        .scope(async move {
+          let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+          let serialized = crate::bindings::convert::quickjs_arg_with_functions(
+            &ctx,
+            arg.0,
+            crate::bindings::convert::ArgFunctions::from_options(
+              options.0.as_ref(),
+              Some(self.inner.page().backend_page_id()),
+            )?,
+          )?;
+          let result = self
+            .inner
+            .as_js_handle()
+            .evaluate(&source, serialized, is_fn)
+            .await
+            .into_js_with(&ctx)?;
+          serialized_value_to_quickjs(&ctx, &result)
+        })
+        .await
+    }
 
-  // ── Content reads (Phase E) ──────────────────────────────────────────
+    /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when `pageFunction`, `arg`, or `options` cannot be converted, or on evaluation failure.
+    #[qjs(rename = "evaluateHandle")]
+    pub async fn evaluate_handle<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      page_function: rquickjs::Value<'js>,
+      arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+      call_site
+        .scope(async move {
+          let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+          let serialized = crate::bindings::convert::quickjs_arg_with_functions(
+            &ctx,
+            arg.0,
+            crate::bindings::convert::ArgFunctions::from_options(
+              options.0.as_ref(),
+              Some(self.inner.page().backend_page_id()),
+            )?,
+          )?;
+          let handle = self
+            .inner
+            .as_js_handle()
+            .evaluate_handle(&source, serialized, is_fn)
+            .await
+            .into_js_with(&ctx)?;
+          Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
+        })
+        .await
+    }
 
-  /// Playwright's `elementHandle.innerHTML`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// reading `innerHTML` fails.
-  #[qjs(rename = "innerHTML")]
-  pub async fn inner_html(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move { self.inner.inner_html().await.into_js_with(&ctx) })
-      .await
-  }
+    // ── Content reads ────────────────────────────────────────────────────
 
-  /// Playwright's `elementHandle.innerText`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// reading `innerText` fails.
-  #[qjs(rename = "innerText")]
-  pub async fn inner_text(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move { self.inner.inner_text().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.innerHTML`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "innerHTML")]
+    pub async fn inner_html(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<String> {
+      call_site
+        .scope(async move { self.inner.inner_html().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.textContent`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// reading `textContent` fails.
-  #[qjs(rename = "textContent")]
-  pub async fn text_content(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
-    call_site
-      .scope(async move { self.inner.text_content().await.into_js_with(&ctx) })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
+    /// Playwright's `elementHandle.innerText`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "innerText")]
+    pub async fn inner_text(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<String> {
+      call_site
+        .scope(async move { self.inner.inner_text().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.getAttribute`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// reading the attribute fails.
-  #[qjs(rename = "getAttribute")]
-  pub async fn get_attribute(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-    name: String,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
-    call_site
-      .scope(async move { self.inner.get_attribute(&name).await.into_js_with(&ctx) })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
+    /// Playwright's `elementHandle.textContent`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "textContent")]
+    pub async fn text_content(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
+      call_site
+        .scope(async move { self.inner.text_content().await.into_js_with(&ctx) })
+        .await
+        .map(crate::bindings::convert::Null)
+    }
 
-  /// Playwright's `elementHandle.inputValue`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// reading the value fails.
-  #[qjs(rename = "inputValue")]
-  pub async fn input_value(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<String> {
-    call_site
-      .scope(async move { self.inner.input_value().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.getAttribute`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "getAttribute")]
+    pub async fn get_attribute(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+      name: String,
+    ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
+      call_site
+        .scope(async move { self.inner.get_attribute(&name).await.into_js_with(&ctx) })
+        .await
+        .map(crate::bindings::convert::Null)
+    }
 
-  // ── State predicates (Phase E) ───────────────────────────────────────
+    /// Playwright's `elementHandle.inputValue`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "inputValue")]
+    pub async fn input_value(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<String> {
+      call_site
+        .scope(async move { self.inner.input_value().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.isVisible`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// check fails.
-  #[qjs(rename = "isVisible")]
-  pub async fn is_visible(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move { self.inner.is_visible().await.into_js_with(&ctx) })
-      .await
-  }
+    // ── State predicates ─────────────────────────────────────────────────
 
-  /// Playwright's `elementHandle.isHidden`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// check fails.
-  #[qjs(rename = "isHidden")]
-  pub async fn is_hidden(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move { self.inner.is_hidden().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.isVisible`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "isVisible")]
+    pub async fn is_visible(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<bool> {
+      call_site
+        .scope(async move { self.inner.is_visible().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.isDisabled`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// check fails.
-  #[qjs(rename = "isDisabled")]
-  pub async fn is_disabled(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move { self.inner.is_disabled().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.isHidden`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "isHidden")]
+    pub async fn is_hidden(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<bool> {
+      call_site
+        .scope(async move { self.inner.is_hidden().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.isEnabled`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// check fails.
-  #[qjs(rename = "isEnabled")]
-  pub async fn is_enabled(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move { self.inner.is_enabled().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.isDisabled`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "isDisabled")]
+    pub async fn is_disabled(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<bool> {
+      call_site
+        .scope(async move { self.inner.is_disabled().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.isChecked`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// check fails.
-  #[qjs(rename = "isChecked")]
-  pub async fn is_checked(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move { self.inner.is_checked().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.isEnabled`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "isEnabled")]
+    pub async fn is_enabled(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<bool> {
+      call_site
+        .scope(async move { self.inner.is_enabled().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright's `elementHandle.isEditable`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// check fails.
-  #[qjs(rename = "isEditable")]
-  pub async fn is_editable(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<bool> {
-    call_site
-      .scope(async move { self.inner.is_editable().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright's `elementHandle.isChecked`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "isChecked")]
+    pub async fn is_checked(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<bool> {
+      call_site
+        .scope(async move { self.inner.is_checked().await.into_js_with(&ctx) })
+        .await
+    }
 
-  // ── Geometry (Phase E) ───────────────────────────────────────────────
+    /// Playwright's `elementHandle.isEditable`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "isEditable")]
+    pub async fn is_editable(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+    ) -> rquickjs::Result<bool> {
+      call_site
+        .scope(async move { self.inner.is_editable().await.into_js_with(&ctx) })
+        .await
+    }
 
-  /// Playwright: `elementHandle.boundingBox()`. Returns a plain object
-  /// `{x, y, width, height}` or `null`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// measuring the element fails.
-  #[qjs(rename = "boundingBox")]
-  pub async fn bounding_box<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let bbox = self.inner.bounding_box().await.into_js_with(&ctx)?;
-        match bbox {
-          None => Ok(rquickjs::Value::new_null(ctx)),
-          Some(b) => {
-            let obj = rquickjs::Object::new(ctx.clone())?;
-            obj.set("x", b.x)?;
-            obj.set("y", b.y)?;
-            obj.set("width", b.width)?;
-            obj.set("height", b.height)?;
-            Ok(obj.into_value())
-          },
-        }
-      })
-      .await
-  }
+    /// Playwright's `elementHandle.type`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `TypeError` for malformed options, or the core error on failure.
+    #[qjs(rename = "type")]
+    pub async fn type_str<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      text: String,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move {
+          let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+          self.inner.type_str(&text).maybe_options(opts).await.into_js_with(&ctx)
+        })
+        .await
+    }
 
-  // ── Actions (Phase E) ────────────────────────────────────────────────
+    // ── $eval / $$eval ───────────────────────────────────────────────────
 
-  /// Playwright's `elementHandle.click`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the click fails.
-  #[qjs(rename = "click")]
-  pub async fn click<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
-        self.inner.click().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
+    /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?)`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when `pageFunction` or `arg` cannot be converted, or on evaluation failure.
+    #[qjs(rename = "$eval")]
+    pub async fn dollar_eval<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      selector: String,
+      page_function: rquickjs::Value<'js>,
+      arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<rquickjs::Value<'js>> {
+      call_site
+        .scope(async move {
+          let (source, _is_fn) = extract_page_function(&ctx, page_function)?;
+          let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+          let result = self
+            .inner
+            .eval_on_selector(&selector, &source, serialized)
+            .await
+            .into_js_with(&ctx)?;
+          serialized_value_to_quickjs(&ctx, &result)
+        })
+        .await
+    }
 
-  /// Playwright's `elementHandle.dblclick`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the double click fails.
-  #[qjs(rename = "dblclick")]
-  pub async fn dblclick<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
-        self.inner.dblclick().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
+    /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?)`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when `pageFunction` or `arg` cannot be converted, or on evaluation failure.
+    #[qjs(rename = "$$eval")]
+    pub async fn dollar_dollar_eval<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      selector: String,
+      page_function: rquickjs::Value<'js>,
+      arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<rquickjs::Value<'js>> {
+      call_site
+        .scope(async move {
+          let (source, _is_fn) = extract_page_function(&ctx, page_function)?;
+          let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+          let result = self
+            .inner
+            .eval_on_selector_all(&selector, &source, serialized)
+            .await
+            .into_js_with(&ctx)?;
+          serialized_value_to_quickjs(&ctx, &result)
+        })
+        .await
+    }
 
-  /// Playwright's `elementHandle.hover`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the hover fails.
-  #[qjs(rename = "hover")]
-  pub async fn hover<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
-        self.inner.hover().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
+    // ── $ / $$ ───────────────────────────────────────────────────────────
 
-  /// Playwright's `elementHandle.type`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when typing fails.
-  #[qjs(rename = "type")]
-  pub async fn type_str<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    text: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
-        self.inner.type_str(&text).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
+    /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "$")]
+    pub async fn query_selector(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+      selector: String,
+    ) -> rquickjs::Result<crate::bindings::convert::Null<ElementHandleJs>> {
+      call_site
+        .scope(async move {
+          let maybe = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
+          Ok(maybe.map(ElementHandleJs::new))
+        })
+        .await
+        .map(crate::bindings::convert::Null)
+    }
 
-  /// Playwright's `elementHandle.focus`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// focusing fails.
-  #[qjs(rename = "focus")]
-  pub async fn focus(&self, call_site: crate::bindings::CallSite, ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.focus().await.into_js_with(&ctx) })
-      .await
-  }
+    /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "$$")]
+    pub async fn query_selector_all(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'_>,
+      selector: String,
+    ) -> rquickjs::Result<Vec<ElementHandleJs>> {
+      call_site
+        .scope(async move {
+          let handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
+          Ok(handles.into_iter().map(ElementHandleJs::new).collect())
+        })
+        .await
+    }
 
-  /// Playwright's `elementHandle.scrollIntoViewIfNeeded`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// scrolling fails.
-  #[qjs(rename = "scrollIntoViewIfNeeded")]
-  pub async fn scroll_into_view_if_needed(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.scroll_into_view_if_needed().await.into_js_with(&ctx) })
-      .await
-  }
+    // ── Frame accessors ──────────────────────────────────────────────────
 
-  /// Playwright: `elementHandle.screenshot(options?: ElementHandleScreenshotOptions): Promise<Buffer>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the screenshot fails.
-  #[qjs(rename = "screenshot")]
-  pub async fn screenshot<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Vec<u8>> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::page::options::parse_element_screenshot_options(&ctx, options)?;
-        self.inner.screenshot().options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
+    /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "ownerFrame")]
+    pub async fn owner_frame<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+    ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
+      call_site
+        .scope(async move {
+          let maybe = self.inner.owner_frame().await.into_js_with(&ctx)?;
+          maybe
+            .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+            .transpose()
+        })
+        .await
+        .map(crate::bindings::convert::Null)
+    }
 
-  // ── $eval / $$eval (Playwright parity) ───────────────────────────────
+    /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with the core error on failure.
+    #[qjs(rename = "contentFrame")]
+    pub async fn content_frame<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+    ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
+      call_site
+        .scope(async move {
+          let maybe = self.inner.content_frame().await.into_js_with(&ctx)?;
+          maybe
+            .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
+            .transpose()
+        })
+        .await
+        .map(crate::bindings::convert::Null)
+    }
 
-  /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?)`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:215`).
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
-  /// when `arg` holds a function, and with the core error when no element matches or the page
-  /// function throws.
-  #[qjs(rename = "$eval")]
-  pub async fn dollar_eval<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let (source, _is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-        let result = self
-          .inner
-          .eval_on_selector(&selector, &source, serialized)
-          .await
-          .into_js_with(&ctx)?;
-        serialized_value_to_quickjs(&ctx, &result)
-      })
-      .await
-  }
+    // ── Wait helpers ─────────────────────────────────────────────────────
 
-  /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?)`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:220`).
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `arg` is cyclic, nested too deeply or out of range, an `Error`
-  /// when `arg` holds a function, and with the core error when the page function throws or the page
-  /// is gone.
-  #[qjs(rename = "$$eval")]
-  pub async fn dollar_dollar_eval<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    page_function: rquickjs::Value<'js>,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    call_site
-      .scope(async move {
-        let (source, _is_fn) = extract_page_function(&ctx, page_function)?;
-        let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-        let result = self
-          .inner
-          .eval_on_selector_all(&selector, &source, serialized)
-          .await
-          .into_js_with(&ctx)?;
-        serialized_value_to_quickjs(&ctx, &result)
-      })
-      .await
-  }
+    /// Playwright: `elementHandle.waitForElementState(state, options?: { timeout? })`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `FerriError`, `TypeError`, or `TimeoutError`.
+    #[qjs(rename = "waitForElementState")]
+    pub async fn wait_for_element_state<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      state: String,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<()> {
+      call_site
+        .scope(async move {
+          let st = ferridriver::ElementState::parse(&state).into_js_with(&ctx)?;
+          let timeout_ms = parse_timeout_options(&ctx, options)?;
+          self
+            .inner
+            .wait_for_element_state(st, timeout_ms)
+            .await
+            .into_js_with(&ctx)
+        })
+        .await
+    }
 
-  // ── $ / $$ (query shortcuts — Playwright parity) ─────────────────────
-
-  /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:206`).
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// query fails.
-  #[qjs(rename = "$")]
-  pub async fn query_selector(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-    selector: String,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let maybe = self.inner.query_selector(&selector).await.into_js_with(&ctx)?;
-        Ok(maybe.map(ElementHandleJs::new))
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:210`).
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when the
-  /// query fails.
-  #[qjs(rename = "$$")]
-  pub async fn query_selector_all(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-    selector: String,
-  ) -> rquickjs::Result<Vec<ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let handles = self.inner.query_selector_all(&selector).await.into_js_with(&ctx)?;
-        Ok(handles.into_iter().map(ElementHandleJs::new).collect())
-      })
-      .await
-  }
-
-  // ── Frame accessors ──────────────────────────────────────────────────
-
-  /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// resolving the frame fails.
-  #[qjs(rename = "ownerFrame")]
-  pub async fn owner_frame<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
-    call_site
-      .scope(async move {
-        let maybe = self.inner.owner_frame().await.into_js_with(&ctx)?;
-        maybe
-          .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
-          .transpose()
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// resolving the frame fails.
-  #[qjs(rename = "contentFrame")]
-  pub async fn content_frame<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<rquickjs::Class<'js, crate::bindings::frame::FrameJs>>> {
-    call_site
-      .scope(async move {
-        let maybe = self.inner.content_frame().await.into_js_with(&ctx)?;
-        maybe
-          .map(|frame| crate::bindings::identity::frame_object(&ctx, frame))
-          .transpose()
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  // ── Wait helpers ─────────────────────────────────────────────────────
-
-  /// Playwright: `elementHandle.waitForElementState(state, options?: { timeout? })`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `FerriError` for an unknown `state`, a `TypeError` for a malformed `options`
-  /// bag, and with the core error under its Playwright name, such as `TimeoutError`, when the wait
-  /// fails.
-  #[qjs(rename = "waitForElementState")]
-  pub async fn wait_for_element_state<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    state: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let st = ferridriver::ElementState::parse(&state).into_js_with(&ctx)?;
-        let timeout_ms = parse_timeout_options(&ctx, options)?;
-        self
-          .inner
-          .wait_for_element_state(st, timeout_ms)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.waitForSelector(selector, options?: { timeout? })`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the wait fails.
-  #[qjs(rename = "waitForSelector")]
-  pub async fn wait_for_selector<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    selector: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<crate::bindings::convert::Null<ElementHandleJs>> {
-    call_site
-      .scope(async move {
-        let timeout_ms = parse_timeout_options(&ctx, options)?;
-        let maybe = self
-          .inner
-          .wait_for_selector(&selector, timeout_ms)
-          .await
-          .into_js_with(&ctx)?;
-        Ok(maybe.map(ElementHandleJs::new))
-      })
-      .await
-      .map(crate::bindings::convert::Null)
-  }
-
-  // ── Action methods (temp-tag bridge) ─────────────────────────────────
-
-  /// Playwright: `elementHandle.fill(value, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the fill fails.
-  #[qjs(rename = "fill")]
-  pub async fn fill<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    value: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
-        self.inner.fill(&value).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.check(options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when checking fails.
-  #[qjs(rename = "check")]
-  pub async fn check<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self.inner.check().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.uncheck(options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when unchecking fails.
-  #[qjs(rename = "uncheck")]
-  pub async fn uncheck<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self.inner.uncheck().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.setChecked(checked, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the update fails.
-  #[qjs(rename = "setChecked")]
-  pub async fn set_checked<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    checked: bool,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
-        self
-          .inner
-          .set_checked(checked)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.tap(options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the tap fails.
-  #[qjs(rename = "tap")]
-  pub async fn tap<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
-        self.inner.tap().maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.press(key, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for a malformed `options` bag, and with the core error under its
-  /// Playwright name, such as `TimeoutError`, when the key press fails.
-  #[qjs(rename = "press")]
-  pub async fn press<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    key: String,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
-        self.inner.press(&key).maybe_options(opts).await.into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` when `eventInit` cannot be serialized, a `TypeError` for a
-  /// malformed `options` bag, and with the core error under its Playwright name, such as
-  /// `TimeoutError`, when dispatching the event fails.
-  #[qjs(rename = "dispatchEvent")]
-  pub async fn dispatch_event<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    event_type: String,
-    event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let init_json = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, event_init.0)?;
-        let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
-        self
-          .inner
-          .dispatch_event(&event_type, init_json)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.selectOption(values, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for malformed `values`, a `TypeError` for a malformed `options`
-  /// bag, and with the core error under its Playwright name, such as `TimeoutError`, when the
-  /// selection fails.
-  #[qjs(rename = "selectOption")]
-  pub async fn select_option<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    values: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<Vec<String>> {
-    call_site
-      .scope(async move {
-        let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
-        let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
-        self
-          .inner
-          .select_option(values)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
-  }
-
-  /// Playwright: `elementHandle.selectText(options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with the core error under its Playwright name, such as `TargetClosedError`, when
-  /// selecting the text fails.
-  #[qjs(rename = "selectText")]
-  pub async fn select_text(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'_>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move { self.inner.select_text().await.into_js_with(&ctx) })
-      .await
-  }
-
-  /// Playwright: `elementHandle.setInputFiles(files, options?)`.
-  ///
-  /// # Errors
-  ///
-  /// Rejects with a `TypeError` for malformed `files`, a `PermissionDeniedError` when the realm may
-  /// not read a named file, a `TypeError` for a malformed `options` bag, and with the core error
-  /// under its Playwright name, such as `TimeoutError`, when setting the files fails.
-  #[qjs(rename = "setInputFiles")]
-  pub async fn set_input_files<'js>(
-    &self,
-    call_site: crate::bindings::CallSite,
-    ctx: rquickjs::Ctx<'js>,
-    files: rquickjs::Value<'js>,
-    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
-    call_site
-      .scope(async move {
-        let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
-        let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
-        self
-          .inner
-          .set_input_files(files)
-          .maybe_options(opts)
-          .await
-          .into_js_with(&ctx)
-      })
-      .await
+    /// Playwright: `elementHandle.waitForSelector(selector, options?: { timeout? })`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a `TypeError` or `TimeoutError`.
+    #[qjs(rename = "waitForSelector")]
+    pub async fn wait_for_selector<'js>(
+      &self,
+      call_site: crate::bindings::CallSite,
+      ctx: rquickjs::Ctx<'js>,
+      selector: String,
+      options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    ) -> rquickjs::Result<crate::bindings::convert::Null<ElementHandleJs>> {
+      call_site
+        .scope(async move {
+          let timeout_ms = parse_timeout_options(&ctx, options)?;
+          let maybe = self
+            .inner
+            .wait_for_selector(&selector, timeout_ms)
+            .await
+            .into_js_with(&ctx)?;
+          Ok(maybe.map(ElementHandleJs::new))
+        })
+        .await
+        .map(crate::bindings::convert::Null)
+    }
   }
 }

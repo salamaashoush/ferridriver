@@ -271,28 +271,56 @@ pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Re
   ferrijs_serde::to_value(ctx.clone(), value).map_err(|e| type_error(ctx, format!("cannot convert the value: {e}")))
 }
 
-/// Build a JS `Array<{ name, value }>` straight from name/value pairs
-/// via `ferrijs-serde` — no `serde_json::json!` / `serde_json::Value`
-/// middle allocation. Used by `request`/`response`/`apiResponse`
-/// `headersArray()`.
+/// Build an already-settled JS `Promise` synchronously on the current
+/// `QuickJS` context — avoids allocating a Rust future and scheduling a
+/// `ctx.spawn` poll for values that are already computed (e.g. buffered
+/// `APIResponse` body accessors).
 ///
 /// # Errors
 ///
-/// As [`serde_to_js`].
-pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S)]) -> rquickjs::Result<Value<'js>> {
-  #[derive(Serialize)]
-  struct NameValue<'a> {
-    name: &'a str,
-    value: &'a str,
+/// Throws only when the engine cannot allocate the promise itself.
+pub fn settled_promise<'js, T: rquickjs::IntoJs<'js>>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::Result<T>,
+) -> rquickjs::Result<rquickjs::Promise<'js>> {
+  let (promise, resolve, reject) = rquickjs::Promise::new(ctx)?;
+  match value {
+    Ok(v) => {
+      let (): () = resolve.call((v,))?;
+    },
+    Err(err) => {
+      let reason = if err.is_exception() {
+        ctx.catch()
+      } else {
+        rquickjs::String::from_str(ctx.clone(), &err.to_string())?.into_value()
+      };
+      let (): () = reject.call((reason,))?;
+    },
   }
-  let view: Vec<NameValue<'_>> = pairs
-    .iter()
-    .map(|(n, v)| NameValue {
-      name: n.as_ref(),
-      value: v.as_ref(),
-    })
-    .collect();
-  serde_to_js(ctx, &view)
+  Ok(promise)
+}
+
+/// Build a JS `Array<{ name, value }>` directly from any iterator of
+/// name/value pairs in one pass — no intermediate `Vec` and no serde
+/// dispatch. Used by `request`/`response`/`apiResponse` `headersArray()`.
+///
+/// # Errors
+///
+/// Throws when the engine cannot allocate the array or an entry object.
+pub fn name_value_array_to_js<'js, I, K, V>(ctx: &Ctx<'js>, pairs: I) -> rquickjs::Result<Value<'js>>
+where
+  I: IntoIterator<Item = (K, V)>,
+  K: AsRef<str>,
+  V: AsRef<str>,
+{
+  let arr = rquickjs::Array::new(ctx.clone())?;
+  for (i, (name, value)) in pairs.into_iter().enumerate() {
+    let obj = Object::new(ctx.clone())?;
+    obj.set("name", name.as_ref())?;
+    obj.set("value", value.as_ref())?;
+    arr.set(i, obj)?;
+  }
+  Ok(arr.into_value())
 }
 
 /// Inverse of [`serde_to_js`] — deserialize a JS value into a Rust type

@@ -27,7 +27,7 @@ use rquickjs::{Ctx, Function, IntoJs, JsLifetime, Module, Object, Value, class::
 use super::http_client::HttpClientJs;
 use super::registry::{throw_script_error, tool_dispatch, tool_names};
 use crate::bindings::convert::type_error;
-use crate::bindings::convert::{json_to_js, serde_from_js, throw_named};
+use crate::bindings::convert::{json_to_js, serde_from_js, serde_to_js, throw_named};
 use crate::command_spec::CommandSpec;
 use crate::engine::SessionProcsUd;
 use crate::error::ScriptError;
@@ -135,8 +135,7 @@ impl ExtensionCommandsJs {
     let result = Box::pin(registry.exec_oneshot(&resolved))
       .await
       .map_err(|m| Self::cmd_err(&ctx, "commands.exec", format!("{name}: {m}")))?;
-    let value = serde_json::to_value(result).map_err(|m| Self::cmd_err(&ctx, "commands.exec", m))?;
-    json_to_js(&ctx, &value)
+    serde_to_js(&ctx, &result)
   }
 
   /// One-shot: run to completion and return shaped stdout.
@@ -169,20 +168,7 @@ impl ExtensionCommandsJs {
   /// not resolve, persistent commands are unavailable, or the process cannot
   /// start; a `TypeError` for a malformed `vars`.
   #[qjs(rename = "start")]
-  pub fn start<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    name: String,
-    vars: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
+  pub fn start<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let spec = self.spec(&ctx, "commands.start", &name)?;
     let vars_map = Self::vars_of(&ctx, vars)?;
     let resolved = spec
@@ -192,7 +178,10 @@ impl ExtensionCommandsJs {
       .registry(&ctx, "commands.start")?
       .start(&name, &resolved)
       .map_err(|m| Self::cmd_err(&ctx, "commands.start", format!("{name}: {m}")))?;
-    json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
+    let obj = Object::new(ctx)?;
+    obj.set("name", name)?;
+    obj.set("pid", pid)?;
+    Ok(obj.into_value())
   }
 
   /// Persistent, interactive: start with piped stdin. Returns `{ name, pid }`.
@@ -203,20 +192,7 @@ impl ExtensionCommandsJs {
   /// not resolve, persistent commands are unavailable, or the process cannot
   /// start; a `TypeError` for a malformed `vars`.
   #[qjs(rename = "open")]
-  pub fn open<'js>(
-    &self,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs hands a method its `Ctx` by value"
-    )]
-    ctx: Ctx<'js>,
-    #[expect(
-      clippy::needless_pass_by_value,
-      reason = "rquickjs extracts JS arguments by value; a `&T` parameter would mean a borrowed class instance"
-    )]
-    name: String,
-    vars: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
+  pub fn open<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
     let resolved = self
       .spec(&ctx, "commands.open", &name)?
       .resolve(&Self::vars_of(&ctx, vars)?)
@@ -225,7 +201,10 @@ impl ExtensionCommandsJs {
       .registry(&ctx, "commands.open")?
       .open(&name, &resolved)
       .map_err(|m| Self::cmd_err(&ctx, "commands.open", m))?;
-    json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
+    let obj = Object::new(ctx)?;
+    obj.set("name", name)?;
+    obj.set("pid", pid)?;
+    Ok(obj.into_value())
   }
 
   /// Persistent: write `data` to the process's stdin (`undefined` closes it).
@@ -250,7 +229,12 @@ impl ExtensionCommandsJs {
   /// Rejects with an `Error` when persistent commands are unavailable, the
   /// read fails, or no line arrives within `timeoutMs` (30s by default).
   #[qjs(rename = "read")]
-  pub async fn read<'js>(&self, ctx: Ctx<'js>, name: String, timeout_ms: Opt<u64>) -> rquickjs::Result<Value<'js>> {
+  pub async fn read(
+    &self,
+    ctx: Ctx<'_>,
+    name: String,
+    timeout_ms: Opt<u64>,
+  ) -> rquickjs::Result<crate::bindings::convert::Null<String>> {
     let ms = timeout_ms.0.unwrap_or(30_000);
     let line = tokio::time::timeout(
       std::time::Duration::from_millis(ms),
@@ -259,7 +243,7 @@ impl ExtensionCommandsJs {
     .await
     .map_err(|_| Self::cmd_err(&ctx, "commands.read", format!("stdout timed out after {ms}ms")))?
     .map_err(|m| Self::cmd_err(&ctx, "commands.read", m))?;
-    json_to_js(&ctx, &serde_json::json!(line))
+    Ok(crate::bindings::convert::Null(line))
   }
 
   /// Persistent: wait until the process's output contains `text`.
