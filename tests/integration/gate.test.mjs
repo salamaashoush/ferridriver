@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, readdir } from 'node:fs/promises';
+import { chmod, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from '@ferridriver/test';
 import { passed, repo, run, workspace } from './support.mjs';
@@ -81,22 +81,37 @@ test('the addon gate reports each file and preserves failures across the group',
     cargo: '#!/bin/sh\nexit 0\n',
     bun: `#!/bin/sh
       if [ "$1" = run ]; then exit 0; fi
-      if [ "$2" = test/browser.test.ts ]; then exit 42; fi
-      exit 0
+      shift
+      failed=0
+      for arg in "$@"; do
+        case "$arg" in
+          test/*)
+            printf '%s\\n' "\${arg#test/}" >> "$PROBE_RUN_LOG"
+            if [ "$arg" = test/browser.test.ts ]; then failed=42; fi
+            ;;
+        esac
+      done
+      exit $failed
     `,
   });
   await chmod(join(cwd, 'cargo'), 0o700);
   await chmod(join(cwd, 'bun'), 0o700);
+  const runLog = join(cwd, 'ran.log');
   const result = await run(['test', '--only', 'napi', '--workers', '4', '--jobs', '4'], {
-    executable, env: { PATH: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache') },
+    executable, env: {
+      PATH: cwd, FERRIDRIVER_GATE_CACHE_DIR: join(cwd, 'gate-cache'), PROBE_RUN_LOG: runLog,
+    },
   });
   assert.notEqual(result.code, 0, result.text);
   const files = (await readdir(join(repo, 'crates/ferridriver-node/test')))
-    .filter(name => /\.test\.(ts|js|mjs)$/.test(name));
+    .filter(name => /\.test\.(ts|js|mjs)$/.test(name))
+    .sort();
   assert.ok(files.length > 1);
-  for (const file of files) {
-    assert.ok(result.text.includes(`${file === 'browser.test.ts' ? 'FAIL' : 'PASS'} napi/${file} (`), result.text);
-  }
+  assert.ok(result.text.includes('FAIL napi/browser.test.ts ('), result.text);
+  assert.ok(result.text.includes('PASS napi/api-response.test.ts ('), result.text);
+  assert.ok(result.text.includes('PASS napi/shard-01 ('), result.text);
+  const ran = (await readFile(runLog, 'utf8')).trim().split('\n').sort();
+  assert.deepEqual(ran, files);
   assert.doesNotMatch(result.text, /START (rust-build|e2e|bdd)/);
 });
 

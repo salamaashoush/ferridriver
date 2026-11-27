@@ -524,10 +524,15 @@ impl ferridriver_test::host::DeadlineControl for Deadline {
 /// written to.
 fn publish_process_env(ctx: &Ctx<'_>, caps: &ScriptCaps, published: &[(String, String)]) -> rquickjs::Result<()> {
   let permissions = caps.realm_permissions();
-  let granted: Vec<&(String, String)> = published
-    .iter()
-    .filter(|(name, _)| permissions.check_env(name).is_ok())
-    .collect();
+  publish_process_env_if(ctx, published, |name| permissions.check_env(name).is_ok())
+}
+
+fn publish_process_env_if(
+  ctx: &Ctx<'_>,
+  published: &[(String, String)],
+  allowed: impl Fn(&str) -> bool,
+) -> rquickjs::Result<()> {
+  let granted: Vec<&(String, String)> = published.iter().filter(|(name, _)| allowed(name)).collect();
   if granted.is_empty() {
     return Ok(());
   }
@@ -824,6 +829,31 @@ impl Session {
   #[must_use]
   pub fn resources(&self) -> Arc<crate::SessionResources> {
     Arc::clone(&self.resources)
+  }
+
+  /// Publish additional host environment variables into an already-created
+  /// session (`process.env` where the realm's env grant permits, plus child
+  /// processes spawned by the session). Used when a test worker reuses the
+  /// collection VM after `webServer` startup publishes `FERRIDRIVER_BASE_URL`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the VM is closed or updating `process.env` throws.
+  pub async fn publish_env(&self, published: &[(String, String)]) -> Result<(), ScriptError> {
+    if published.is_empty() {
+      return Ok(());
+    }
+    self.resources.procs.publish_env(published);
+    let published = published.to_vec();
+    let vm = self.rt.handle();
+    crate::vm_with!(&vm => |ctx| {
+      let Some(permissions) = ferrijs::std::permissions::container(&ctx) else {
+        return Ok::<(), ScriptError>(());
+      };
+      publish_process_env_if(&ctx, &published, |name| permissions.check_env(name).is_ok())
+        .map_err(|e| caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), "publish_env"))
+    })
+    .await?
   }
 
   /// Close the session's browsers, then stop its processes.
