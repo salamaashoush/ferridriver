@@ -32,8 +32,13 @@ test('both extension guides describe every runtime host', async () => {
 test('literal extension global installations are included in the public contract', async () => {
   const { contributionPoints } = await contract();
   const installed = new Set();
-  for (const name of ['registry', 'bdd', 'test']) {
-    const source = await read(`crates/ferridriver-script/src/bindings/${name}.rs`);
+  const paths = ['crates/ferridriver-script/src/bindings/registry.rs', 'crates/ferridriver-script/src/bindings/bdd.rs'];
+  const testDir = 'crates/ferridriver-script/src/bindings/test';
+  for (const entry of await readdir(join(repo, testDir), { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.rs')) paths.push(`${testDir}/${entry.name}`);
+  }
+  for (const path of paths) {
+    const source = await read(path);
     for (const match of source.matchAll(/(?:globals\(\)|\bg)\.set\("([A-Za-z_$][A-Za-z0-9_$]*)"/g)) installed.add(match[1]);
   }
   assert.deepEqual([...installed].filter(name => !contributionPoints.includes(name)), []);
