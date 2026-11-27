@@ -53,29 +53,13 @@ macro_rules! retry_resolve {
     // string completely.
     let __trace_page = $self.frame.page_arc();
     let __trace_span = if $crate::trace::call_origins_wanted() {
-      let __trace_composite = __trace_page.context().map(|c| c.composite());
-      let mut __trace_params = ::serde_json::json!({ "selector": $self.selector });
-      if let (
-        ::std::option::Option::Some(__dst),
-        ::std::option::Option::Some(__src),
-      ) = (__trace_params.as_object_mut(), ($extra).as_object())
-      {
-        for (__k, __v) in __src {
-          __dst.insert(__k.clone(), __v.clone());
-        }
-      }
-      let __span = $crate::trace::begin_action(
-        __trace_composite.as_deref(),
-        "Locator",
+      ::std::boxed::Box::pin($crate::locator::begin_locator_trace(
+        &__trace_page,
+        &$self.selector,
         $op,
-        ::std::option::Option::Some(format!("page@{}", __trace_page.backend_page_id())),
-        __trace_params,
-      );
-      if __span.is_some() {
-        $crate::trace::open_action(__trace_page.snapshot_before(__span).await).await
-      } else {
-        ::std::option::Option::None
-      }
+        $extra,
+      ))
+      .await
     } else {
       ::std::option::Option::None
     };
@@ -94,9 +78,7 @@ macro_rules! retry_resolve {
     let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
       ::std::option::Option::None
     } else {
-      ::std::option::Option::Some(
-        ::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout),
-      )
+      ::std::option::Option::Some(::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout))
     };
     let __expired = || __deadline.is_some_and(|__d| ::std::time::Instant::now() >= __d);
     // Every protocol command of every attempt waits at most until the
@@ -107,159 +89,176 @@ macro_rules! retry_resolve {
     let __budget = $crate::operation_budget::OperationBudget::operation(__resolved_timeout);
     let __result = match __budget {
       ::std::result::Result::Err(__e) => ::std::result::Result::Err(__e),
-      ::std::result::Result::Ok(__budget) => __budget.scope(async { 'retry: {
-
-      let __signal = $crate::abort::current();
-      if let ::std::option::Option::Some(__signal) = __signal.as_ref()
-        && __signal.was_refused()
-      {
-        break 'retry ::std::result::Result::Err(__signal.error());
-      }
-      let mut __idx: usize = 0;
-      // Tries of the action itself (an element was found and acted on),
-      // which pick each pointer try's scroll alignment.
-      let mut __tries: usize = 0;
-      loop {
-        if let ::std::option::Option::Some(__signal) = __signal.as_ref()
-          && __signal.is_aborted()
-        {
-          let __error = __signal.error();
-          __call_log.push_aborted(&__error);
-          break 'retry ::std::result::Result::Err(__error.with_call_log(__call_log.into_vec()));
-        }
-        // Deadline check up-front so we never race into one more attempt after
-        // time has already run out.
-        if __expired() {
-          break 'retry ::std::result::Result::Err(
-            $crate::error::FerriError::timeout(__op_name.to_string(), __resolved_timeout)
-              .with_call_log(__call_log.into_vec()),
-          );
-        }
-
-        // Action pre-checks: run registered locator handlers if any of their
-        // overlays are currently visible (Playwright `performActionPreChecks`).
-        $crate::locator_handler::perform_checkpoint($self.frame.page_arc()).await;
-
-        let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
-        __idx = __idx.saturating_add(1);
-        if __delay_ms > 0 {
-          // Clamp the sleep to whatever's left on the deadline so the timeout
-          // error fires on time rather than after an overshoot sleep.
-          let __sleep_ms = match __deadline {
-            ::std::option::Option::Some(__d) => {
-              let __left = u64::try_from(__d.saturating_duration_since(::std::time::Instant::now()).as_millis())
-                .unwrap_or(__delay_ms);
-              __delay_ms.min(__left)
-            },
-            ::std::option::Option::None => __delay_ms,
-          };
-          if __sleep_ms > 0 {
-            $self.frame.pause_until_change(::std::time::Duration::from_millis(__sleep_ms)).await;
-          }
-        }
-
-        // Resolve `frameLocator` enter-frame hops to the real child frame
-        // + trailing selector (a no-op clone for plain selectors). This
-        // is INSIDE the loop because an `<iframe>` swaps documents: a
-        // chain resolved once, before the frame finished loading, would
-        // keep querying a dead frame for the rest of the deadline (and
-        // an unknown frame id falls back to the main document, so the
-        // selector silently matches the WRONG page).
-        // A failure here means the iframe itself is not there yet — same
-        // retry semantics as a missing element.
-        let (__rframe, __rsel) = match $self.resolved().await {
-          ::std::result::Result::Ok(resolved) => resolved,
-          ::std::result::Result::Err(e @ $crate::error::FerriError::InvalidSelector { .. }) => {
-            break 'retry ::std::result::Result::Err(e);
-          },
-          ::std::result::Result::Err(_) => continue,
-        };
-        let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
-        if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
-          if __expired() {
-            continue;
-          }
-          break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
-        }
-        let __sel_js = match $crate::selectors::build_selone_js(&__rsel, "window.__fd", $self.strict) {
-          ::std::result::Result::Ok(v) => v,
-          ::std::result::Result::Err(e) => break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e)),
-        };
-        // Pass `None` for main-frame locators so the backend skips a
-        // `frame_contexts` lookup; child frames thread their cached id.
-        let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
-          ::std::option::Option::None
-        } else {
-          ::std::option::Option::Some(__rframe.id())
-        };
-
-        // Strict mode (the default) is folded into the same engine-side
-        // `selOne(parts, strict)` call below — the JS throws
-        // `strict mode violation: <count>` when the selector matches more
-        // than one element, the host catches the exception and converts
-        // to a typed `FerriError::StrictModeViolation`. Saves the
-        // separate `query_all` + `cleanup_tags` round-trips the previous
-        // implementation paid on every retry attempt (~2 RTTs).
-        match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
-          ::std::result::Result::Ok($el) => {
-            __call_log.mark_attempted();
-            if __trace_input_pending {
-              __trace_input_pending = false;
-              if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
-                __trace_page.trace_capture_input(__s, &$el, $op).await;
+      ::std::result::Result::Ok(__budget) => {
+        __budget
+          .scope(async {
+            'retry: {
+              let __signal = $crate::abort::current();
+              if let ::std::option::Option::Some(__signal) = __signal.as_ref()
+                && __signal.was_refused()
+              {
+                break 'retry ::std::result::Result::Err(__signal.error());
               }
-            }
-            // Boxed: the guarded attempt would otherwise sit inline in the
-            // state machine of every action this macro expands into.
-            let __try = __tries;
-            __tries = __tries.saturating_add(1);
-            match ::std::boxed::Box::pin($crate::actions::with_pointer_context(__try, (!__rframe.is_main_frame()).then(|| __rframe.clone()), $crate::abort::guard($body))).await {
-              ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
-              ::std::result::Result::Err(e @ $crate::error::FerriError::Aborted { .. }) => {
-                __call_log.push_aborted(&e);
-                break 'retry ::std::result::Result::Err(e.with_call_log(__call_log.into_vec()));
-              },
-              ::std::result::Result::Err(e) => {
-                let __msg = e.to_string();
-                if $crate::locator::retries(&e) {
-                  // Retriable: actionability signals
-                  // (`error:notvisible` / `error:notenabled` / ...) plus
-                  // stale-handle backend errors (the node detached
-                  // mid-action). Keep re-resolving until the deadline.
-                  let __line = $crate::locator::action_log_line(&__msg);
-                  if __call_log.record_retry(&__line)
-                    && let ::std::option::Option::Some(__s) = __trace_span.as_ref()
-                  {
-                    __s.log(__line);
+              let mut __idx: usize = 0;
+              // Tries of the action itself (an element was found and acted on),
+              // which pick each pointer try's scroll alignment.
+              let mut __tries: usize = 0;
+              loop {
+                if let ::std::option::Option::Some(__signal) = __signal.as_ref()
+                  && __signal.is_aborted()
+                {
+                  let __error = __signal.error();
+                  __call_log.push_aborted(&__error);
+                  break 'retry ::std::result::Result::Err(__error.with_call_log(__call_log.into_vec()));
+                }
+                // Deadline check up-front so we never race into one more attempt after
+                // time has already run out.
+                if __expired() {
+                  break 'retry ::std::result::Result::Err(
+                    $crate::error::FerriError::timeout(__op_name.to_string(), __resolved_timeout)
+                      .with_call_log(__call_log.into_vec()),
+                  );
+                }
+
+                // Action pre-checks: run registered locator handlers if any of their
+                // overlays are currently visible (Playwright `performActionPreChecks`).
+                $crate::locator_handler::perform_checkpoint($self.frame.page_arc()).await;
+
+                let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
+                __idx = __idx.saturating_add(1);
+                if __delay_ms > 0 {
+                  // Clamp the sleep to whatever's left on the deadline so the timeout
+                  // error fires on time rather than after an overshoot sleep.
+                  let __sleep_ms = match __deadline {
+                    ::std::option::Option::Some(__d) => {
+                      let __left =
+                        u64::try_from(__d.saturating_duration_since(::std::time::Instant::now()).as_millis())
+                          .unwrap_or(__delay_ms);
+                      __delay_ms.min(__left)
+                    },
+                    ::std::option::Option::None => __delay_ms,
+                  };
+                  if __sleep_ms > 0 {
+                    $self
+                      .frame
+                      .pause_until_change(::std::time::Duration::from_millis(__sleep_ms))
+                      .await;
                   }
-                } else if !__expired() {
+                }
+
+                // Resolve `frameLocator` enter-frame hops to the real child frame
+                // + trailing selector (a no-op clone for plain selectors). This
+                // is INSIDE the loop because an `<iframe>` swaps documents: a
+                // chain resolved once, before the frame finished loading, would
+                // keep querying a dead frame for the rest of the deadline (and
+                // an unknown frame id falls back to the main document, so the
+                // selector silently matches the WRONG page).
+                // A failure here means the iframe itself is not there yet — same
+                // retry semantics as a missing element.
+                let (__rframe, __rsel) = match $self.resolved().await {
+                  ::std::result::Result::Ok(resolved) => resolved,
+                  ::std::result::Result::Err(e @ $crate::error::FerriError::InvalidSelector { .. }) => {
+                    break 'retry ::std::result::Result::Err(e);
+                  },
+                  ::std::result::Result::Err(_) => continue,
+                };
+                let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
+                if let ::std::result::Result::Err(e) = $page.ensure_engine_injected().await {
+                  if __expired() {
+                    continue;
+                  }
                   break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
                 }
-                // Otherwise a command the deadline cut off: the loop's own
-                // check reports the action timing out, with its call log.
-              },
+                let __sel_js = match $crate::selectors::build_selone_js(&__rsel, "window.__fd", $self.strict) {
+                  ::std::result::Result::Ok(v) => v,
+                  ::std::result::Result::Err(e) => {
+                    break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
+                  },
+                };
+                // Pass `None` for main-frame locators so the backend skips a
+                // `frame_contexts` lookup; child frames thread their cached id.
+                let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
+                  ::std::option::Option::None
+                } else {
+                  ::std::option::Option::Some(__rframe.id())
+                };
+
+                // Strict mode (the default) is folded into the same engine-side
+                // `selOne(parts, strict)` call below — the JS throws
+                // `strict mode violation: <count>` when the selector matches more
+                // than one element, the host catches the exception and converts
+                // to a typed `FerriError::StrictModeViolation`. Saves the
+                // separate `query_all` + `cleanup_tags` round-trips the previous
+                // implementation paid on every retry attempt (~2 RTTs).
+                match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
+                  ::std::result::Result::Ok($el) => {
+                    __call_log.mark_attempted();
+                    if __trace_input_pending {
+                      __trace_input_pending = false;
+                      if let ::std::option::Option::Some(__s) = __trace_span.as_ref() {
+                        ::std::boxed::Box::pin(__trace_page.trace_capture_input(__s, &$el, $op)).await;
+                      }
+                    }
+                    // Boxed: the guarded attempt would otherwise sit inline in the
+                    // state machine of every action this macro expands into.
+                    let __try = __tries;
+                    __tries = __tries.saturating_add(1);
+                    match ::std::boxed::Box::pin($crate::actions::with_pointer_context(
+                      __try,
+                      (!__rframe.is_main_frame()).then(|| __rframe.clone()),
+                      $crate::abort::guard($body),
+                    ))
+                    .await
+                    {
+                      ::std::result::Result::Ok(val) => break 'retry ::std::result::Result::Ok(val),
+                      ::std::result::Result::Err(e @ $crate::error::FerriError::Aborted { .. }) => {
+                        __call_log.push_aborted(&e);
+                        break 'retry ::std::result::Result::Err(e.with_call_log(__call_log.into_vec()));
+                      },
+                      ::std::result::Result::Err(e) => {
+                        let __msg = e.to_string();
+                        if $crate::locator::retries(&e) {
+                          // Retriable: actionability signals
+                          // (`error:notvisible` / `error:notenabled` / ...) plus
+                          // stale-handle backend errors (the node detached
+                          // mid-action). Keep re-resolving until the deadline.
+                          let __line = $crate::locator::action_log_line(&__msg);
+                          if __call_log.record_retry(&__line)
+                            && let ::std::option::Option::Some(__s) = __trace_span.as_ref()
+                          {
+                            __s.log(__line);
+                          }
+                        } else if !__expired() {
+                          break 'retry ::std::result::Result::Err($crate::error::FerriError::from(e));
+                        }
+                        // Otherwise a command the deadline cut off: the loop's own
+                        // check reports the action timing out, with its call log.
+                      },
+                    }
+                  },
+                  ::std::result::Result::Err(__err) => {
+                    // Strict-mode violation: the engine threw
+                    // `strict mode violation: <count>` from inside `selOne`.
+                    // Surface it as a typed error rather than a retry signal.
+                    if let ::std::option::Option::Some(__count) =
+                      $crate::selectors::parse_strict_violation_count(&__err)
+                    {
+                      break 'retry ::std::result::Result::Err($crate::error::FerriError::strict(
+                        $self.selector.clone(),
+                        __count,
+                      ));
+                    }
+                    // Otherwise: element not found this iteration; retry until deadline.
+                  },
+                }
+              }
             }
-          },
-          ::std::result::Result::Err(__err) => {
-            // Strict-mode violation: the engine threw
-            // `strict mode violation: <count>` from inside `selOne`.
-            // Surface it as a typed error rather than a retry signal.
-            if let ::std::option::Option::Some(__count) = $crate::selectors::parse_strict_violation_count(&__err) {
-              break 'retry ::std::result::Result::Err($crate::error::FerriError::strict(
-                $self.selector.clone(),
-                __count,
-              ));
-            }
-            // Otherwise: element not found this iteration; retry until deadline.
-          },
-        }
-      }
-    }}).await,
+          })
+          .await
+      },
     };
     if let ::std::option::Option::Some(__s) = __trace_span {
-      __trace_page
-        .snapshot_after_and_finish(__s, __result.as_ref().err())
-        .await;
+      ::std::boxed::Box::pin(__trace_page.snapshot_after_and_finish(__s, __result.as_ref().err())).await;
     }
     __trace_page.slow_mo_pause("Locator", $op).await;
     __result
@@ -298,6 +297,41 @@ enum PointerPrepVerdict {
   },
 }
 
+/// Cold-path trace span setup for [`retry_resolve!`]. Kept out of the macro's
+/// inline state machine so locator action futures stay compact when tracing is
+/// inactive.
+pub(crate) async fn begin_locator_trace(
+  page: &Arc<crate::page::Page>,
+  selector: &str,
+  op: &str,
+  extra: serde_json::Value,
+) -> Option<crate::trace::ActionSpan> {
+  let composite = page.context().map(crate::context::ContextRef::composite);
+  let mut params = serde_json::json!({ "selector": selector });
+  if let (Some(dst), Some(src)) = (params.as_object_mut(), extra.as_object()) {
+    for (k, v) in src {
+      dst.insert(k.clone(), v.clone());
+    }
+  }
+  let span = crate::trace::begin_action(
+    composite.as_deref(),
+    "Locator",
+    op,
+    Some(format!("page@{}", page.backend_page_id())),
+    params,
+  );
+  if span.is_some() {
+    crate::trace::open_action(page.snapshot_before(span).await).await
+  } else {
+    None
+  }
+}
+
+struct CallLogInner {
+  lines: Vec<String>,
+  last_line: String,
+}
+
 /// Lazy Playwright `Call log:` builder. Allocates nothing and skips
 /// `as_locator` selector parsing unless the action actually traces, retries,
 /// aborts, or times out.
@@ -305,8 +339,7 @@ pub(crate) struct LazyCallLog<'a> {
   selector: &'a str,
   op_name: &'a str,
   attempted: bool,
-  lines: Vec<String>,
-  last_line: String,
+  inner: Option<Box<CallLogInner>>,
 }
 
 impl<'a> LazyCallLog<'a> {
@@ -315,58 +348,73 @@ impl<'a> LazyCallLog<'a> {
       selector,
       op_name,
       attempted: false,
-      lines: Vec::new(),
-      last_line: String::new(),
+      inner: None,
     }
   }
 
-  fn ensure_header(&mut self) {
-    if self.lines.is_empty() {
-      self.lines.push(format!(
+  fn ensure_inner(&mut self) -> &mut CallLogInner {
+    let selector = self.selector;
+    let op_name = self.op_name;
+    let attempted = self.attempted;
+    self.inner.get_or_insert_with(|| {
+      let mut lines = Vec::with_capacity(if attempted { 2 } else { 1 });
+      lines.push(format!(
         "waiting for {}",
-        crate::locator_generator::as_locator(self.selector)
+        crate::locator_generator::as_locator(selector)
       ));
-      if self.attempted {
-        self.lines.push(format!("attempting {} action", self.op_name));
+      if attempted {
+        lines.push(format!("attempting {op_name} action"));
       }
-    }
+      Box::new(CallLogInner {
+        lines,
+        last_line: String::new(),
+      })
+    })
   }
 
   pub(crate) fn waiting_line(&mut self) -> &str {
-    self.ensure_header();
-    self.lines.first().map_or("", String::as_str)
+    self.ensure_inner().lines.first().map_or("", String::as_str)
   }
 
   pub(crate) fn mark_attempted(&mut self) {
     if !self.attempted {
       self.attempted = true;
-      if self.lines.len() == 1 {
-        self.lines.push(format!("attempting {} action", self.op_name));
+      if let Some(inner) = self.inner.as_deref_mut()
+        && inner.lines.len() == 1
+      {
+        inner.lines.push(format!("attempting {} action", self.op_name));
       }
     }
   }
 
   pub(crate) fn record_retry(&mut self, line: &str) -> bool {
-    if line == self.last_line.as_str() {
+    if self
+      .inner
+      .as_deref()
+      .is_some_and(|inner| line == inner.last_line.as_str())
+    {
       return false;
     }
     self.attempted = true;
-    self.ensure_header();
-    self.lines.push(format!("  {line}"));
-    self.lines.push(format!("retrying {} action", self.op_name));
-    self.last_line.clear();
-    self.last_line.push_str(line);
+    let op_name = self.op_name;
+    let inner = self.ensure_inner();
+    inner.lines.push(format!("  {line}"));
+    inner.lines.push(format!("retrying {op_name} action"));
+    inner.last_line.clear();
+    inner.last_line.push_str(line);
     true
   }
 
   pub(crate) fn push_aborted(&mut self, error: &crate::error::FerriError) {
-    self.ensure_header();
-    self.lines.push(format!("operation was aborted: {error}"));
+    self
+      .ensure_inner()
+      .lines
+      .push(format!("operation was aborted: {error}"));
   }
 
   pub(crate) fn into_vec(mut self) -> Vec<String> {
-    self.ensure_header();
-    self.lines
+    let _ = self.ensure_inner();
+    self.inner.map_or_else(Vec::new, |inner| inner.lines)
   }
 }
 
