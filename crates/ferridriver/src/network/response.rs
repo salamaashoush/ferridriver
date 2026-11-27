@@ -12,7 +12,7 @@ use super::{BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, Request, Sec
 /// Live reference to an HTTP response. Mirrors Playwright's `Response`.
 ///
 /// Holds both the originating [`Request`] handle and the response's own
-/// [`ResponseState`] rather than storing an `Arc<RequestState>` back-pointer
+/// `ResponseState` rather than storing an `Arc<RequestState>` back-pointer
 /// inside `ResponseState`. That breaks the `RequestState <-> ResponseState`
 /// reference cycle while preserving Playwright's lifetime guarantee: holding
 /// either a `Request` or a `Response` keeps both sides alive.

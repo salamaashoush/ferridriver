@@ -253,7 +253,7 @@ pub struct TestOutcome {
   /// Effective timeout for this attempt, after `test.slow()` and
   /// `testInfo.setTimeout()`.
   pub timeout: Duration,
-  /// [`TestCase::metadata`], carried onto the attempt so a reporter
+  /// [`super::TestCase::metadata`], carried onto the attempt so a reporter
   /// reads it from the outcome it is handed. Distinct from
   /// [`Self::metadata`], which is the RUN's (from config).
   pub case_metadata: Option<serde_json::Value>,

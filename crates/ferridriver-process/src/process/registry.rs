@@ -72,7 +72,7 @@ fn staged_record_writer(name: &str) -> Option<u32> {
 }
 
 /// A launch-record file, deleted when the browser it describes is
-/// killed through [`ChildGroup`].
+/// killed through [`super::ChildGroup`].
 ///
 /// It also owns the browser's temp directories, so they and the record
 /// that would let a later run reclaim them disappear together. Leaving
@@ -138,12 +138,12 @@ pub(super) fn registry_dir() -> Option<std::path::PathBuf> {
 /// Start tracking a browser the instant it is spawned, before any
 /// protocol handshake.
 ///
-/// Registration used to happen when the [`ChildGroup`] was built, which
+/// Registration used to happen when the [`super::ChildGroup`] was built, which
 /// is after the launcher has connected and completed its handshake. For
 /// a `BiDi` Firefox that window is seconds long, and a process killed
 /// inside it left a browser nothing knew about — no watchdog entry, no
 /// record for the next start to sweep. Called again by
-/// [`ChildGroup::recorded`], which is harmless: the record path is
+/// [`super::ChildGroup::recorded`], which is harmless: the record path is
 /// derived from the pid, and the watchdog drops every copy of a pid
 /// when it is unwatched.
 pub fn track_spawned(pid: u32, profile_dir: Option<&std::path::Path>, owns_profile_dir: bool) {

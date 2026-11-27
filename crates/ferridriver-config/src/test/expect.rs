@@ -15,7 +15,7 @@ pub const DEFAULT_EXPECT_TIMEOUT_MS: u64 = 5_000;
 /// {})` (`playwright/src/common/config.ts:201`) — so a project that
 /// sets only `timeout` starts from Playwright's defaults for
 /// everything else, not from the config's screenshot thresholds. See
-/// [`TestConfig::resolved_expect`].
+/// [`super::TestConfig::resolved_expect`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ExpectConfig {

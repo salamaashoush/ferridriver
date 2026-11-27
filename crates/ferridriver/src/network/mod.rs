@@ -269,7 +269,7 @@ impl Request {
   /// Construct a fresh `Request`. Called by backend listeners on the
   /// initial `requestWillBeSent` / `beforeRequestSent` event. When
   /// `init.redirected_from` is set, the constructor appends this hop to the
-  /// prior request's [`RedirectChain`] synchronously.
+  /// prior request's redirect chain synchronously.
   #[must_use]
   pub fn new(init: RequestInit) -> Self {
     let timing = init.timing.unwrap_or_else(|| RequestTiming {
