@@ -9,7 +9,7 @@
 //! its cost is proportional to the number of state changes and not to
 //! the simulated duration.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::lantern::constants::Throttling;
 use crate::lantern::graph::{Graph, NodeId, NodeKind, RequestFacts};
@@ -382,26 +382,37 @@ fn priority_penalty(priority: &str) -> f64 {
   }
 }
 
-/// Connections, grouped by origin, as a browser would keep them.
+/// Connections, grouped by interned origin id, as a browser would keep them.
 struct ConnectionPool {
-  by_origin: FxHashMap<String, Vec<TcpConnection>>,
-  /// request index -> (origin, slot)
-  assigned: FxHashMap<usize, (String, usize)>,
-  in_use: FxHashSet<(String, usize)>,
-  /// request index -> origin, so the hot path never re-parses a URL.
-  origin_by_request: FxHashMap<usize, String>,
+  /// `by_origin[origin_id][slot] = (connection, in_use)`
+  by_origin: Vec<Vec<(TcpConnection, bool)>>,
+  /// request index -> `(origin_id, slot)` while assigned
+  assigned: Vec<Option<(usize, usize)>>,
+  /// Active `(origin_id, slot)` pairs (bounded by `MAXIMUM_CONCURRENT_REQUESTS`).
+  in_use: Vec<(usize, usize)>,
+  /// request index -> `origin_id`, so the hot path never hashes or clones strings.
+  origin_by_request: Vec<Option<usize>>,
 }
 
 impl ConnectionPool {
   fn new(facts: &[RequestFacts], analysis: &NetworkAnalysis, rtt: f64, throughput: f64) -> Self {
-    let mut by_origin: FxHashMap<String, Vec<TcpConnection>> = FxHashMap::default();
-    let mut origin_by_request = FxHashMap::default();
+    let mut origin_ids: FxHashMap<&str, usize> = FxHashMap::default();
+    let mut by_origin: Vec<Vec<(TcpConnection, bool)>> = Vec::new();
+    let mut origin_by_request = vec![None; facts.len()];
 
     for (index, fact) in facts.iter().enumerate() {
       if fact.delivery.is_connectionless() {
         continue;
       }
-      origin_by_request.insert(index, fact.origin.clone());
+      let origin_id = if let Some(&id) = origin_ids.get(fact.origin.as_str()) {
+        id
+      } else {
+        let id = by_origin.len();
+        origin_ids.insert(fact.origin.as_str(), id);
+        by_origin.push(Vec::new());
+        id
+      };
+      origin_by_request[index] = Some(origin_id);
       let additional = analysis
         .additional_rtt_by_origin
         .get(&fact.origin)
@@ -426,27 +437,27 @@ impl ConnectionPool {
         fact.delivery.is_tls(),
         fact.delivery.is_h2(),
       );
-      by_origin.entry(fact.origin.clone()).or_default().push(connection);
+      by_origin[origin_id].push((connection, false));
     }
 
     // An origin must have enough connections to saturate the link. h2
     // multiplexes, so one is already enough there.
-    for connections in by_origin.values_mut() {
-      let minimum = if connections.first().is_some_and(|c| c.h2) {
+    for connections in &mut by_origin {
+      let minimum = if connections.first().is_some_and(|(c, _)| c.h2) {
         1
       } else {
         CONNECTIONS_PER_ORIGIN
       };
       while connections.len() < minimum {
-        let template = connections[0].clone();
-        connections.push(template);
+        let template = connections[0].0.clone();
+        connections.push((template, false));
       }
     }
 
     Self {
       by_origin,
-      assigned: FxHashMap::default(),
-      in_use: FxHashSet::default(),
+      assigned: vec![None; facts.len()],
+      in_use: Vec::with_capacity(MAXIMUM_CONCURRENT_REQUESTS),
       origin_by_request,
     }
   }
@@ -454,31 +465,32 @@ impl ConnectionPool {
   /// Take the free connection with the largest congestion window: it is
   /// already warmed up and will finish soonest.
   fn acquire(&mut self, request: usize) -> Option<()> {
-    if self.assigned.contains_key(&request) {
+    if self.assigned.get(request).copied().flatten().is_some() {
       return Some(());
     }
-    let origin = self.origin_of(request)?;
-    let connections = self.by_origin.get(&origin)?;
+    let origin_id = self.origin_by_request.get(request).copied().flatten()?;
+    let connections = self.by_origin.get_mut(origin_id)?;
     let slot = connections
       .iter()
       .enumerate()
-      .filter(|(slot, _)| !self.in_use.contains(&(origin.clone(), *slot)))
-      .max_by(|a, b| a.1.congestion_window.total_cmp(&b.1.congestion_window))
+      .filter(|(_, (_, in_use))| !*in_use)
+      .max_by(|a, b| a.1.0.congestion_window.total_cmp(&b.1.0.congestion_window))
       .map(|(slot, _)| slot)?;
 
-    self.in_use.insert((origin.clone(), slot));
-    self.assigned.insert(request, (origin, slot));
+    connections[slot].1 = true;
+    self.in_use.push((origin_id, slot));
+    self.assigned[request] = Some((origin_id, slot));
     Some(())
   }
 
   fn active(&self, request: usize) -> &TcpConnection {
-    let (origin, slot) = &self.assigned[&request];
-    &self.by_origin[origin][*slot]
+    let (origin_id, slot) = self.assigned[request].unwrap_or((0, 0));
+    &self.by_origin[origin_id][slot].0
   }
 
   fn record_progress(&mut self, request: usize, congestion_window: f64, extra_bytes: f64) {
-    if let Some((origin, slot)) = self.assigned.get(&request)
-      && let Some(connection) = self.by_origin.get_mut(origin).and_then(|c| c.get_mut(*slot))
+    if let Some((origin_id, slot)) = self.assigned.get(request).copied().flatten()
+      && let Some((connection, _)) = self.by_origin.get_mut(origin_id).and_then(|c| c.get_mut(slot))
     {
       connection.congestion_window = congestion_window;
       connection.h2_overflow_bytes_downloaded = extra_bytes;
@@ -486,24 +498,23 @@ impl ConnectionPool {
   }
 
   fn release(&mut self, request: usize) {
-    if let Some((origin, slot)) = self.assigned.remove(&request) {
-      if let Some(connection) = self.by_origin.get_mut(&origin).and_then(|c| c.get_mut(slot)) {
+    if let Some((origin_id, slot)) = self.assigned.get_mut(request).and_then(Option::take) {
+      if let Some((connection, in_use)) = self.by_origin.get_mut(origin_id).and_then(|c| c.get_mut(slot)) {
         connection.warmed = true;
+        *in_use = false;
       }
-      self.in_use.remove(&(origin, slot));
+      if let Some(pos) = self.in_use.iter().position(|pair| *pair == (origin_id, slot)) {
+        self.in_use.swap_remove(pos);
+      }
     }
   }
 
   fn set_shared_throughput(&mut self, throughput: f64) {
-    for (origin, slot) in &self.in_use {
-      if let Some(connection) = self.by_origin.get_mut(origin).and_then(|c| c.get_mut(*slot)) {
+    for &(origin_id, slot) in &self.in_use {
+      if let Some((connection, _)) = self.by_origin.get_mut(origin_id).and_then(|c| c.get_mut(slot)) {
         connection.throughput = throughput;
       }
     }
-  }
-
-  fn origin_of(&self, request: usize) -> Option<String> {
-    self.origin_by_request.get(&request).cloned()
   }
 }
 
@@ -523,16 +534,16 @@ impl DnsCache {
 
   fn time_until_resolution(&mut self, host: &str, requested_at: f64, update: bool) -> f64 {
     let mut time_until = self.rtt * DNS_RESOLUTION_RTT_MULTIPLIER;
-    if let Some(resolved_at) = self.resolved.get(host) {
-      time_until = time_until.min((resolved_at - requested_at).max(0.0));
+    if let Some(resolved_at) = self.resolved.get_mut(host) {
+      time_until = time_until.min((*resolved_at - requested_at).max(0.0));
+      if update {
+        let next = requested_at + time_until;
+        *resolved_at = resolved_at.min(next);
+      }
+      return time_until;
     }
     if update {
-      let resolved_at = requested_at + time_until;
-      self
-        .resolved
-        .entry(host.to_string())
-        .and_modify(|current| *current = current.min(resolved_at))
-        .or_insert(resolved_at);
+      self.resolved.insert(host.to_string(), requested_at + time_until);
     }
     time_until
   }

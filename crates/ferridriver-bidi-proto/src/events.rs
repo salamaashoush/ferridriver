@@ -1,5 +1,6 @@
 //! Typed `WebDriver` `BiDi` event envelope parsed from `(method, params)`.
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{browsing_context, input, log, script};
@@ -29,23 +30,21 @@ impl BidiEvent {
   #[must_use]
   pub fn parse(method: &str, params: &Value) -> Option<Self> {
     match method {
-      "browsingContext.contextCreated" => serde_json::from_value(params.clone()).ok().map(Self::ContextCreated),
-      "browsingContext.contextDestroyed" => serde_json::from_value(params.clone()).ok().map(Self::ContextDestroyed),
-      "browsingContext.navigationStarted" => serde_json::from_value(params.clone()).ok().map(Self::NavigationStarted),
-      "browsingContext.navigationCommitted" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::NavigationCommitted),
-      "browsingContext.domContentLoaded" => serde_json::from_value(params.clone()).ok().map(Self::DomContentLoaded),
-      "browsingContext.load" => serde_json::from_value(params.clone()).ok().map(Self::Load),
-      "browsingContext.historyUpdated" => serde_json::from_value(params.clone()).ok().map(Self::HistoryUpdated),
-      "browsingContext.fragmentNavigated" => serde_json::from_value(params.clone()).ok().map(Self::FragmentNavigated),
-      "browsingContext.userPromptOpened" => serde_json::from_value(params.clone()).ok().map(Self::UserPromptOpened),
-      "browsingContext.userPromptClosed" => serde_json::from_value(params.clone()).ok().map(Self::UserPromptClosed),
-      "browsingContext.downloadWillBegin" => serde_json::from_value(params.clone()).ok().map(Self::DownloadWillBegin),
-      "browsingContext.downloadEnd" => serde_json::from_value(params.clone()).ok().map(Self::DownloadEnd),
-      "log.entryAdded" => serde_json::from_value(params.clone()).ok().map(Self::LogEntryAdded),
-      "script.message" => serde_json::from_value(params.clone()).ok().map(Self::ScriptMessage),
-      "input.fileDialogOpened" => serde_json::from_value(params.clone()).ok().map(Self::FileDialogOpened),
+      "browsingContext.contextCreated" => Deserialize::deserialize(params).ok().map(Self::ContextCreated),
+      "browsingContext.contextDestroyed" => Deserialize::deserialize(params).ok().map(Self::ContextDestroyed),
+      "browsingContext.navigationStarted" => Deserialize::deserialize(params).ok().map(Self::NavigationStarted),
+      "browsingContext.navigationCommitted" => Deserialize::deserialize(params).ok().map(Self::NavigationCommitted),
+      "browsingContext.domContentLoaded" => Deserialize::deserialize(params).ok().map(Self::DomContentLoaded),
+      "browsingContext.load" => Deserialize::deserialize(params).ok().map(Self::Load),
+      "browsingContext.historyUpdated" => Deserialize::deserialize(params).ok().map(Self::HistoryUpdated),
+      "browsingContext.fragmentNavigated" => Deserialize::deserialize(params).ok().map(Self::FragmentNavigated),
+      "browsingContext.userPromptOpened" => Deserialize::deserialize(params).ok().map(Self::UserPromptOpened),
+      "browsingContext.userPromptClosed" => Deserialize::deserialize(params).ok().map(Self::UserPromptClosed),
+      "browsingContext.downloadWillBegin" => Deserialize::deserialize(params).ok().map(Self::DownloadWillBegin),
+      "browsingContext.downloadEnd" => Deserialize::deserialize(params).ok().map(Self::DownloadEnd),
+      "log.entryAdded" => Deserialize::deserialize(params).ok().map(Self::LogEntryAdded),
+      "script.message" => Deserialize::deserialize(params).ok().map(Self::ScriptMessage),
+      "input.fileDialogOpened" => Deserialize::deserialize(params).ok().map(Self::FileDialogOpened),
       _ => None,
     }
   }

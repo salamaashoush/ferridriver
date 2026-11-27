@@ -277,3 +277,163 @@ pub(crate) async fn wait_response_predicate<'js>(
     }
   }
 }
+
+impl super::PageJs {
+  pub(super) fn off_impl<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    event: &str,
+    listener: Option<&rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let listener_fn = listener.and_then(|v| v.as_function().cloned());
+    let Some(listener_fn) = listener_fn else {
+      // Lenient `off(event)` — drop every listener for that event
+      // (matches `removeAllListeners(event)` semantics).
+      let ids = super::with_page_callbacks(ctx, |r| r.remove_event_listeners_named(event))?;
+      for id in ids {
+        self.inner.off(ferridriver::events::ListenerId(id));
+      }
+      return Ok(());
+    };
+    let target_value: rquickjs::Value<'js> = listener_fn.into_value();
+    for (id, saved) in super::with_page_callbacks(ctx, |r| r.event_listeners_named(event))? {
+      let restored = saved.restore(ctx)?;
+      if restored.into_value() == target_value {
+        self.inner.off(ferridriver::events::ListenerId(id));
+        super::with_page_callbacks(ctx, |r| r.remove_event_listener(id))?;
+      }
+    }
+    Ok(())
+  }
+
+  /// Shared core for `page.on` / `page.once` / `prependListener` / `prependOnceListener`.
+  pub(super) fn register_listener<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    event: &str,
+    listener: rquickjs::Function<'js>,
+    once: bool,
+    front: bool,
+  ) -> rquickjs::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let saved = super::SavedCallback::save(ctx, listener);
+    let tx = super::ensure_event_pump(ctx);
+    let id_slot = Arc::new(AtomicU64::new(0));
+    let id_slot_cb = Arc::clone(&id_slot);
+    let page_for_cb = Arc::clone(&self.inner);
+    let callback: ferridriver::events::EventCallback = Arc::new(move |ev: ferridriver::events::PageEvent| {
+      let id = id_slot_cb.load(Ordering::Relaxed);
+      let msg = super::callbacks::PageEventMsg::Event {
+        id,
+        remove_after: once,
+        page: Arc::clone(&page_for_cb),
+        event: ev,
+      };
+      if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
+        tracing::warn!(
+          listener_id = id,
+          capacity = super::PAGE_EVENT_PUMP_CAPACITY,
+          "page event pump full (VM idle between scripts?); dropping event"
+        );
+      }
+    });
+    let id = match (once, front) {
+      (false, false) => self.inner.on(event, callback),
+      (true, false) => self.inner.once(event, callback),
+      (false, true) => self.inner.prepend_listener(event, callback),
+      (true, true) => self.inner.prepend_once_listener(event, callback),
+    };
+    id_slot.store(id.0, Ordering::Relaxed);
+    let page_key = self.inner.backend_page_id();
+    super::with_page_callbacks(ctx, |r| {
+      r.insert_event_listener(id.0, event.to_string(), page_key, saved);
+    })?;
+    Ok(())
+  }
+
+  pub(super) fn listeners_impl<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    event: &str,
+  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+    let saved = super::with_page_callbacks(ctx, |r| r.event_listeners_named(event))?;
+    let mut out = Vec::with_capacity(saved.len());
+    // Dispatch order lives in core; the registry is a map.
+    for id in self.inner.listener_ids_named(event) {
+      if let Some((_, cb)) = saved.iter().find(|(saved_id, _)| *saved_id == id.0) {
+        out.push(cb.restore(ctx)?.into_value());
+      }
+    }
+    Ok(out)
+  }
+
+  pub(super) fn remove_all_listeners_impl<'js>(
+    this: rquickjs::function::This<rquickjs::class::Class<'js, Self>>,
+    ctx: &rquickjs::Ctx<'js>,
+    event: rquickjs::function::Opt<String>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    {
+      let page = this.0.borrow();
+      if let Some(ev) = event.0 {
+        let ids = super::with_page_callbacks(ctx, |r| r.remove_event_listeners_named(&ev))?;
+        for id in ids {
+          page.inner.off(ferridriver::events::ListenerId(id));
+        }
+        page.inner.remove_listeners_named(&ev);
+      } else {
+        page.inner.remove_all_listeners();
+        super::with_page_callbacks(ctx, super::PageCallbacks::clear_event_listeners)?;
+      }
+    }
+    let Some(options) = options.0.filter(|v| !v.is_undefined() && !v.is_null()) else {
+      return Ok(this.0.into_value());
+    };
+    let wait = options
+      .as_object()
+      .and_then(|o| o.get::<_, Option<String>>("behavior").ok().flatten())
+      .is_some_and(|behavior| behavior == "wait");
+    let tx = super::ensure_event_pump(ctx);
+    let promise = rquickjs::promise::Promise::wrap_future(ctx, async move {
+      if wait {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if tx.send(super::callbacks::PageEventMsg::Drain(done_tx)).await.is_ok() {
+          let _ = done_rx.await;
+        }
+      }
+      Ok::<(), rquickjs::Error>(())
+    })?;
+    Ok(promise.into_value())
+  }
+
+  pub(super) fn console_messages_impl<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    options: &rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+    let filter = ferridriver::observed::ObservedFilter::parse(super::opt_str_field(options, "filter")?.as_deref());
+    let msgs = self.inner.console_messages(filter);
+    let mut out = Vec::with_capacity(msgs.len());
+    for m in msgs {
+      let instance =
+        rquickjs::class::Class::instance(ctx.clone(), crate::bindings::console_message::ConsoleMessageJs::new(m))?;
+      out.push(rquickjs::IntoJs::into_js(instance, ctx)?);
+    }
+    Ok(out)
+  }
+
+  pub(super) fn page_errors_impl<'js>(
+    &self,
+    ctx: &rquickjs::Ctx<'js>,
+    options: &rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<rquickjs::Value<'js>>> {
+    let filter = ferridriver::observed::ObservedFilter::parse(super::opt_str_field(options, "filter")?.as_deref());
+    let errs = self.inner.page_errors(filter);
+    let mut out = Vec::with_capacity(errs.len());
+    for e in errs {
+      out.push(crate::bindings::web_error::build_native_error(ctx, e.error())?);
+    }
+    Ok(out)
+  }
+}

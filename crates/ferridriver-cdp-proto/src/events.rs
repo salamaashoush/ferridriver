@@ -1,5 +1,6 @@
 //! Typed CDP event envelope parsed from `(method, params)`.
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{browser, page, runtime, target};
@@ -38,42 +39,30 @@ impl CdpEvent {
   #[must_use]
   pub fn parse(method: &str, params: &Value) -> Option<Self> {
     match method {
-      "Runtime.consoleAPICalled" => serde_json::from_value(params.clone()).ok().map(Self::ConsoleApiCalled),
-      "Runtime.exceptionThrown" => serde_json::from_value(params.clone()).ok().map(Self::ExceptionThrown),
-      "Runtime.executionContextCreated" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::ExecutionContextCreated),
-      "Runtime.executionContextDestroyed" => serde_json::from_value(params.clone())
+      "Runtime.consoleAPICalled" => Deserialize::deserialize(params).ok().map(Self::ConsoleApiCalled),
+      "Runtime.exceptionThrown" => Deserialize::deserialize(params).ok().map(Self::ExceptionThrown),
+      "Runtime.executionContextCreated" => Deserialize::deserialize(params).ok().map(Self::ExecutionContextCreated),
+      "Runtime.executionContextDestroyed" => Deserialize::deserialize(params)
         .ok()
         .map(Self::ExecutionContextDestroyed),
       "Runtime.executionContextsCleared" => Some(Self::ExecutionContextsCleared),
-      "Runtime.bindingCalled" => serde_json::from_value(params.clone()).ok().map(Self::BindingCalled),
-      "Page.frameNavigated" => serde_json::from_value(params.clone()).ok().map(Self::FrameNavigated),
-      "Page.navigatedWithinDocument" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::NavigatedWithinDocument),
-      "Page.frameAttached" => serde_json::from_value(params.clone()).ok().map(Self::FrameAttached),
-      "Page.frameDetached" => serde_json::from_value(params.clone()).ok().map(Self::FrameDetached),
-      "Page.lifecycleEvent" => serde_json::from_value(params.clone()).ok().map(Self::LifecycleEvent),
-      "Page.loadEventFired" => serde_json::from_value(params.clone()).ok().map(Self::LoadEventFired),
-      "Page.domContentEventFired" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::DomContentEventFired),
-      "Page.javascriptDialogOpening" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::JavascriptDialogOpening),
-      "Page.javascriptDialogClosed" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::JavascriptDialogClosed),
-      "Page.fileChooserOpened" => serde_json::from_value(params.clone()).ok().map(Self::FileChooserOpened),
-      "Browser.downloadWillBegin" => serde_json::from_value(params.clone()).ok().map(Self::DownloadWillBegin),
-      "Browser.downloadProgress" => serde_json::from_value(params.clone()).ok().map(Self::DownloadProgress),
-      "Target.attachedToTarget" => serde_json::from_value(params.clone()).ok().map(Self::AttachedToTarget),
-      "Target.detachedFromTarget" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::DetachedFromTarget),
-      "Target.targetCreated" => serde_json::from_value(params.clone()).ok().map(Self::TargetCreated),
-      "Target.targetDestroyed" => serde_json::from_value(params.clone()).ok().map(Self::TargetDestroyed),
+      "Runtime.bindingCalled" => Deserialize::deserialize(params).ok().map(Self::BindingCalled),
+      "Page.frameNavigated" => Deserialize::deserialize(params).ok().map(Self::FrameNavigated),
+      "Page.navigatedWithinDocument" => Deserialize::deserialize(params).ok().map(Self::NavigatedWithinDocument),
+      "Page.frameAttached" => Deserialize::deserialize(params).ok().map(Self::FrameAttached),
+      "Page.frameDetached" => Deserialize::deserialize(params).ok().map(Self::FrameDetached),
+      "Page.lifecycleEvent" => Deserialize::deserialize(params).ok().map(Self::LifecycleEvent),
+      "Page.loadEventFired" => Deserialize::deserialize(params).ok().map(Self::LoadEventFired),
+      "Page.domContentEventFired" => Deserialize::deserialize(params).ok().map(Self::DomContentEventFired),
+      "Page.javascriptDialogOpening" => Deserialize::deserialize(params).ok().map(Self::JavascriptDialogOpening),
+      "Page.javascriptDialogClosed" => Deserialize::deserialize(params).ok().map(Self::JavascriptDialogClosed),
+      "Page.fileChooserOpened" => Deserialize::deserialize(params).ok().map(Self::FileChooserOpened),
+      "Browser.downloadWillBegin" => Deserialize::deserialize(params).ok().map(Self::DownloadWillBegin),
+      "Browser.downloadProgress" => Deserialize::deserialize(params).ok().map(Self::DownloadProgress),
+      "Target.attachedToTarget" => Deserialize::deserialize(params).ok().map(Self::AttachedToTarget),
+      "Target.detachedFromTarget" => Deserialize::deserialize(params).ok().map(Self::DetachedFromTarget),
+      "Target.targetCreated" => Deserialize::deserialize(params).ok().map(Self::TargetCreated),
+      "Target.targetDestroyed" => Deserialize::deserialize(params).ok().map(Self::TargetDestroyed),
       "Inspector.targetCrashed" => Some(Self::TargetCrashed),
       _ => None,
     }

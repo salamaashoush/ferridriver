@@ -9,16 +9,7 @@ use napi_derive::napi;
 use crate::locator::Locator;
 
 use super::Page;
-use super::events::{
-  AddLocatorHandlerOptions, JsUrl, LocatorHandlerReturn, MatcherSpec, PredReturn, PredRoute, resolve_pred,
-};
-
-/// One `page.route` registration: the identity of the core handler
-/// closure, plus a `FunctionRef` to the JS handler that installed it.
-pub(super) struct RouteReg {
-  pub(super) handler_id: usize,
-  pub(super) handler_ref: napi::bindgen_prelude::FunctionRef<crate::route::Route, ()>,
-}
+use super::events::{AddLocatorHandlerOptions, JsUrl, LocatorHandlerReturn, PredReturn};
 
 #[napi]
 #[expect(
@@ -28,34 +19,10 @@ pub(super) struct RouteReg {
 impl Page {
   // ── Network interception ─────────────────────────────────────────────
 
-  /// Route network requests matching a glob pattern.
+  /// Route network requests matching a glob pattern, `RegExp`, or predicate.
   ///
   /// The handler receives a `Route` object with request details and must call
   /// one of `route.fulfill()`, `route.continue()`, or `route.abort()`.
-  ///
-  /// ```js
-  /// await page.route('**/api/*', (route) => {
-  ///   if (route.url.includes('block')) {
-  ///     route.abort();
-  ///   } else {
-  ///     route.fulfill({ status: 200, body: '{"ok":true}', contentType: 'application/json' });
-  ///   }
-  /// });
-  /// ```
-  /// Route network requests matching a glob pattern.
-  ///
-  /// The handler receives a `Route` object with request details and must call
-  /// one of `route.fulfill()`, `route.continue()`, or `route.abort()`.
-  ///
-  /// ```js
-  /// await page.route('**/api/*', (route) => {
-  ///   if (route.url.includes('block')) {
-  ///     route.abort();
-  ///   } else {
-  ///     route.fulfill({ status: 200, body: '{"ok":true}', contentType: 'application/json' });
-  ///   }
-  /// });
-  /// ```
   #[napi(
     ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void, options?: { times?: number }",
     ts_return_type = "Promise<Disposable>"
@@ -71,93 +38,12 @@ impl Page {
     handler: napi::bindgen_prelude::Function<'_, crate::route::Route, ()>,
     options: Option<crate::types::RouteOptions>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::disposable::Disposable>> {
-    use napi::bindgen_prelude::Either3;
-    let times = options.and_then(|o| o.times_u32());
-    let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
-    // Keep a `FunctionRef` to the handler as well as the dispatch TSFN:
-    // `unroute(url, handler)` names the registration by the identity of
-    // the function the caller passed.
-    let handler_ref = handler.create_ref()?;
-    // The route-handler TSFN is `weak` (not `Clone`); share it via `Arc`
-    // so the predicate path can move it into a per-request task.
-    let handler = std::sync::Arc::new(
-      handler
-        .build_threadsafe_function()
-        .callee_handled::<false>()
-        .weak::<true>()
-        .max_queue_size::<0>()
-        .build()?,
-    );
-    let (spec, rust_handler): (MatcherSpec, ferridriver::route::RouteHandler) = match url {
-      Either3::A(glob) => (
-        MatcherSpec::Glob(glob),
-        std::sync::Arc::new(move |route| {
-          handler.call(crate::route::Route::wrap(route), nb);
-        }),
-      ),
-      Either3::B(re) => (
-        MatcherSpec::Regex {
-          source: re.source,
-          flags: re.flags,
-        },
-        std::sync::Arc::new(move |route| {
-          handler.call(crate::route::Route::wrap(route), nb);
-        }),
-      ),
-      Either3::C(predicate) => {
-        let pred_ref = predicate.create_ref()?;
-        let ptsfn = predicate
-          .build_threadsafe_function::<JsUrl>()
-          .callee_handled::<false>()
-          .weak::<false>()
-          .max_queue_size::<0>()
-          .build()?;
-        let ptsfn = std::sync::Arc::new(ptsfn);
-        let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
-        self
-          .predicate_routes
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner)
-          .push(PredRoute {
-            matcher: m.clone(),
-            pred_ref,
-          });
-        (
-          MatcherSpec::Ready(m),
-          std::sync::Arc::new(move |route| {
-            let ptsfn = Arc::clone(&ptsfn);
-            let handler = Arc::clone(&handler);
-            let url = JsUrl::new(route.request().url.clone());
-            tokio::spawn(async move {
-              let truthy = match ptsfn.call_async(url).await {
-                Ok(r) => resolve_pred(r).await,
-                Err(_) => false,
-              };
-              if truthy {
-                handler.call(crate::route::Route::wrap(route), nb);
-              } else {
-                route.reject_as_unmatched();
-              }
-            });
-          }),
-        )
-      },
-    };
-
-    self
-      .route_regs
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(RouteReg {
-        handler_id: ferridriver::route::route_handler_id(&rust_handler),
-        handler_ref,
-      });
-
+    let prepared = self.routes.prepare_route(url, &handler, options)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      let matcher = spec.build()?;
+      let matcher = prepared.spec.build()?;
       let disposable = inner
-        .route(matcher, rust_handler, times)
+        .route(matcher, prepared.handler, prepared.times)
         .await
         .map_err(crate::error::to_napi)?;
       Ok(crate::disposable::Disposable::wrap(disposable))
@@ -178,15 +64,7 @@ impl Page {
     url: napi::bindgen_prelude::Either<String, crate::types::JsRegExpLike>,
     handler: napi::bindgen_prelude::Function<'_, crate::web_socket_route::WebSocketRouteArg, ()>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
-    use napi::bindgen_prelude::Either;
-    let matcher = match url {
-      Either::A(glob) => ferridriver::url_matcher::UrlMatcher::glob(glob).map_err(crate::error::to_napi)?,
-      Either::B(re) => {
-        ferridriver::url_matcher::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or(""))
-          .map_err(crate::error::to_napi)?
-      },
-    };
-    let rust_handler = crate::web_socket_route::build_ws_handler(&handler)?;
+    let (matcher, rust_handler) = crate::route_registry::RouteRegistry::prepare_ws_route(url, &handler)?;
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       inner
@@ -214,67 +92,17 @@ impl Page {
     >,
     handler: Option<napi::bindgen_prelude::Function<'_, crate::route::Route, ()>>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
-    use napi::bindgen_prelude::Either3;
-    // Playwright's second argument: remove only the registration made
-    // with THIS handler, leaving another handler on the same pattern
-    // serving. A handler that never registered anything is a no-op.
-    let mut handler_id: Option<usize> = None;
-    if let Some(handler) = handler {
-      let in_ref = handler.create_ref()?;
-      let regs = self
-        .route_regs
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-      for reg in regs.iter() {
-        let a = in_ref.borrow_back(&env)?;
-        let b = reg.handler_ref.borrow_back(&env)?;
-        if env.strict_equals(a, b)? {
-          handler_id = Some(reg.handler_id);
-          break;
-        }
-      }
-      drop(regs);
-      if handler_id.is_none() {
-        return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(&env);
-      }
-    }
-    let specs: Vec<MatcherSpec> = match url {
-      Either3::A(glob) => vec![MatcherSpec::Glob(glob)],
-      Either3::B(re) => vec![MatcherSpec::Regex {
-        source: re.source,
-        flags: re.flags,
-      }],
-      Either3::C(predicate) => {
-        // `Function` is not `Copy` across iterations; round-trip the
-        // input through a `Ref` so each comparison borrows a fresh
-        // handle.
-        let in_ref = predicate.create_ref()?;
-        let mut guard = self
-          .predicate_routes
-          .lock()
-          .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut hit = Vec::new();
-        let mut i = 0;
-        while i < guard.len() {
-          let same = {
-            let a = in_ref.borrow_back(&env)?;
-            let b = guard[i].pred_ref.borrow_back(&env)?;
-            env.strict_equals(a, b)?
-          };
-          if same {
-            hit.push(MatcherSpec::Ready(guard.remove(i).matcher));
-          } else {
-            i += 1;
-          }
-        }
-        hit
-      },
+    let Some(unroute) = self.routes.prepare_unroute(env, url, handler)? else {
+      return napi::bindgen_prelude::AsyncBlockBuilder::new(async move { Ok(()) }).build(&env);
     };
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      for spec in specs {
+      for spec in unroute.specs {
         let m = spec.build()?;
-        inner.unroute(&m, handler_id).await.map_err(crate::error::to_napi)?;
+        inner
+          .unroute(&m, unroute.handler_id)
+          .await
+          .map_err(crate::error::to_napi)?;
       }
       Ok(())
     })
@@ -293,7 +121,9 @@ impl Page {
       .inner
       .unroute_all(Some(behavior))
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    self.routes.clear();
+    Ok(())
   }
 
   /// Playwright: `page.routeFromHAR(har, options?)`. Replays recorded

@@ -399,7 +399,8 @@ async fn handle_committed_provisional_target(
   provisional: ProvisionalSlot,
 ) -> Option<tokio::sync::mpsc::UnboundedReceiver<super::protocol::Envelope>> {
   let ev =
-    serde_json::from_value::<ferridriver_webkit_proto::target::DidCommitProvisionalTargetEvent>(params.clone()).ok()?;
+    <ferridriver_webkit_proto::target::DidCommitProvisionalTargetEvent as serde::Deserialize>::deserialize(params)
+      .ok()?;
   let new_target_id = ev.new_target_id;
   let (new_session, stashed_id, fwd_rx) = provisional.lock().await.take()?;
   if &*stashed_id != new_target_id.as_str() {
@@ -696,11 +697,11 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
     Some("Worker.workerTerminated") => {
       super::worker::terminated(env.params.get("workerId").and_then(Value::as_str), &ctx.workers);
     },
-    Some("Network.webSocketCreated") => handle_websocket_created(&env.params, &ctx.websockets, &ctx.emitter).await,
-    Some("Network.webSocketFrameSent") => handle_websocket_frame(&env.params, &ctx.websockets, true).await,
-    Some("Network.webSocketFrameReceived") => handle_websocket_frame(&env.params, &ctx.websockets, false).await,
-    Some("Network.webSocketFrameError") => handle_websocket_error(&env.params, &ctx.websockets).await,
-    Some("Network.webSocketClosed") => handle_websocket_closed(&env.params, &ctx.websockets).await,
+    Some("Network.webSocketCreated") => handle_websocket_created(&env.params, &ctx.websockets, &ctx.emitter),
+    Some("Network.webSocketFrameSent") => handle_websocket_frame(&env.params, &ctx.websockets, true),
+    Some("Network.webSocketFrameReceived") => handle_websocket_frame(&env.params, &ctx.websockets, false),
+    Some("Network.webSocketFrameError") => handle_websocket_error(&env.params, &ctx.websockets),
+    Some("Network.webSocketClosed") => handle_websocket_closed(&env.params, &ctx.websockets),
     _ => {},
   }
 }

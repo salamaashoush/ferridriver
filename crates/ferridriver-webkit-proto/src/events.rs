@@ -1,5 +1,6 @@
 //! Typed `WebKit` Inspector event envelope parsed from `(method, params)`.
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{console, page, playwright, target};
@@ -25,27 +26,21 @@ impl WebKitEvent {
   #[must_use]
   pub fn parse(method: &str, params: &Value) -> Option<Self> {
     match method {
-      "Console.messageAdded" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::ConsoleMessageAdded),
-      "Dialog.javascriptDialogOpening" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::JavascriptDialogOpening),
+      "Console.messageAdded" => Deserialize::deserialize(params).ok().map(Self::ConsoleMessageAdded),
+      "Dialog.javascriptDialogOpening" => Deserialize::deserialize(params).ok().map(Self::JavascriptDialogOpening),
       "Dialog.javascriptDialogClosed" => Some(Self::JavascriptDialogClosed),
-      "Page.fileChooserOpened" => serde_json::from_value(params.clone()).ok().map(Self::FileChooserOpened),
-      "Target.targetCreated" => serde_json::from_value(params.clone()).ok().map(Self::TargetCreated),
-      "Target.didCommitProvisionalTarget" => serde_json::from_value(params.clone())
+      "Page.fileChooserOpened" => Deserialize::deserialize(params).ok().map(Self::FileChooserOpened),
+      "Target.targetCreated" => Deserialize::deserialize(params).ok().map(Self::TargetCreated),
+      "Target.didCommitProvisionalTarget" => Deserialize::deserialize(params)
         .ok()
         .map(Self::DidCommitProvisionalTarget),
-      "Playwright.downloadCreated" => serde_json::from_value(params.clone()).ok().map(Self::DownloadCreated),
-      "Playwright.downloadFilenameSuggested" => serde_json::from_value(params.clone())
+      "Playwright.downloadCreated" => Deserialize::deserialize(params).ok().map(Self::DownloadCreated),
+      "Playwright.downloadFilenameSuggested" => Deserialize::deserialize(params)
         .ok()
         .map(Self::DownloadFilenameSuggested),
-      "Playwright.downloadFinished" => serde_json::from_value(params.clone()).ok().map(Self::DownloadFinished),
-      "Playwright.pageProxyCreated" => serde_json::from_value(params.clone()).ok().map(Self::PageProxyCreated),
-      "Playwright.pageProxyDestroyed" => serde_json::from_value(params.clone())
-        .ok()
-        .map(Self::PageProxyDestroyed),
+      "Playwright.downloadFinished" => Deserialize::deserialize(params).ok().map(Self::DownloadFinished),
+      "Playwright.pageProxyCreated" => Deserialize::deserialize(params).ok().map(Self::PageProxyCreated),
+      "Playwright.pageProxyDestroyed" => Deserialize::deserialize(params).ok().map(Self::PageProxyDestroyed),
       _ => None,
     }
   }

@@ -6,7 +6,7 @@ use crate::backend::{AnyBrowser, BackendKind};
 use crate::error::{FerriError, Result};
 use rustc_hash::FxHashMap as HashMap;
 
-use super::sessions::{
+use super::discover::{
   chrome_flags_with, detect_firefox, detect_ladybird, detect_lightpanda, discover_chrome_ws, discover_ws_with_headers,
   resolve_chromium,
 };

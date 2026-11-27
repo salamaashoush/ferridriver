@@ -64,10 +64,20 @@ impl FromNapiValue for NapiEvaluateArg {
   }
 }
 
+#[derive(Clone, Copy)]
+enum CachedCtor {
+  Unchecked,
+  Missing,
+  Present(sys::napi_value),
+}
+
 /// One argument's walk. Every `napi_value` it is handed or reaches is a
 /// handle in the scope of the call that built it, against `env`.
 struct Walk {
   env: sys::napi_env,
+  global: Option<sys::napi_value>,
+  url_ctor: CachedCtor,
+  regexp_ctor: CachedCtor,
   alloc: SerializationContext,
   handles: Vec<HandleId>,
   functions: Vec<ArgFunction>,
@@ -85,6 +95,9 @@ impl Walk {
   unsafe fn new(env: sys::napi_env) -> Self {
     Self {
       env,
+      global: None,
+      url_ctor: CachedCtor::Unchecked,
+      regexp_ctor: CachedCtor::Unchecked,
       alloc: SerializationContext::default(),
       handles: Vec::new(),
       functions: Vec::new(),
@@ -146,13 +159,7 @@ impl Walk {
     Ok(SerializedValue::Function(name))
   }
 
-  fn object(&mut self, value: sys::napi_value, depth: u32) -> napi::Result<SerializedValue> {
-    if let Some(handle) = self.handle(value)? {
-      return Ok(handle);
-    }
-    if let Some(rich) = self.rich(value)? {
-      return Ok(rich);
-    }
+  fn find_visited(&self, value: sys::napi_value) -> napi::Result<Option<u32>> {
     for (seen, id) in &self.visited {
       let mut same = false;
       // SAFETY: both handles were reached by this walk, so are live in
@@ -160,17 +167,24 @@ impl Walk {
       let status = unsafe { sys::napi_strict_equals(self.env, *seen, value, &raw mut same) };
       check_status!(status)?;
       if same {
-        return Ok(SerializedValue::Reference(*id));
+        return Ok(Some(*id));
       }
     }
-    let id = self.alloc.alloc_id();
-    self.visited.push((value, id));
+    Ok(None)
+  }
+
+  fn object(&mut self, value: sys::napi_value, depth: u32) -> napi::Result<SerializedValue> {
     let mut is_array = false;
     // SAFETY: `self.env` is live and `value` is a handle in its scope (see
     // [`Walk`]); `is_array` is a writable out-parameter.
     let status = unsafe { sys::napi_is_array(self.env, value, &raw mut is_array) };
     check_status!(status)?;
     if is_array {
+      if let Some(id) = self.find_visited(value)? {
+        return Ok(SerializedValue::Reference(id));
+      }
+      let id = self.alloc.alloc_id();
+      self.visited.push((value, id));
       let mut len = 0;
       // SAFETY: `value` is a live array handle (see [`Walk`]); `len` is a
       // writable out-parameter.
@@ -192,6 +206,17 @@ impl Walk {
       }
       return Ok(SerializedValue::Array { id, items });
     }
+    if let Some(handle) = self.handle(value)? {
+      return Ok(handle);
+    }
+    if let Some(rich) = self.rich(value)? {
+      return Ok(rich);
+    }
+    if let Some(id) = self.find_visited(value)? {
+      return Ok(SerializedValue::Reference(id));
+    }
+    let id = self.alloc.alloc_id();
+    self.visited.push((value, id));
     let mut keys = ptr::null_mut();
     // SAFETY: `self.env` is live and `value` is a handle in its scope (see
     // [`Walk`]); `keys` is a writable out-parameter.
@@ -280,10 +305,10 @@ impl Walk {
     if yes {
       return Ok(Some(SerializedValue::Date(self.to_json(value)?)));
     }
-    if self.instance_of(value, "URL")? {
+    if self.is_url(value)? {
       return Ok(Some(SerializedValue::Url(self.to_json(value)?)));
     }
-    if self.instance_of(value, "RegExp")? {
+    if self.is_regexp(value)? {
       return Ok(Some(SerializedValue::RegExp(RegExpValue {
         p: self.property_string(value, "source")?,
         f: self.property_string(value, "flags")?,
@@ -383,27 +408,66 @@ impl Walk {
     self.coerce_string(value)
   }
 
-  fn instance_of(&self, value: sys::napi_value, class: &str) -> napi::Result<bool> {
+  fn global(&mut self) -> napi::Result<sys::napi_value> {
+    if let Some(global) = self.global {
+      return Ok(global);
+    }
     let mut global = ptr::null_mut();
     // SAFETY: `self.env` is live (see [`Walk`]); `global` is a writable
     // out-parameter.
     let status = unsafe { sys::napi_get_global(self.env, &raw mut global) };
     check_status!(status)?;
+    self.global = Some(global);
+    Ok(global)
+  }
+
+  fn lookup_constructor(&mut self, class: &str) -> napi::Result<Option<sys::napi_value>> {
+    let global = self.global()?;
     let constructor = self.property(global, class)?;
     let mut kind = 0;
     // SAFETY: `constructor` is the handle `property` just read in
     // `self.env`'s scope; `kind` is a writable out-parameter.
     let status = unsafe { sys::napi_typeof(self.env, constructor, &raw mut kind) };
     check_status!(status)?;
-    if kind != sys::ValueType::napi_function {
+    Ok((kind == sys::ValueType::napi_function).then_some(constructor))
+  }
+
+  fn instance_of_ctor(&self, value: sys::napi_value, constructor: Option<sys::napi_value>) -> napi::Result<bool> {
+    let Some(constructor) = constructor else {
       return Ok(false);
-    }
+    };
     let mut yes = false;
-    // SAFETY: `value` is a live handle (see [`Walk`]) and `constructor` a
-    // function `napi_typeof` just confirmed; `yes` is a writable out-parameter.
+    // SAFETY: `value` is a live handle (see [`Walk`]) and `constructor` is a
+    // cached global function handle from this same scope; `yes` is a writable out-parameter.
     let status = unsafe { sys::napi_instanceof(self.env, value, constructor, &raw mut yes) };
     check_status!(status)?;
     Ok(yes)
+  }
+
+  fn is_url(&mut self, value: sys::napi_value) -> napi::Result<bool> {
+    let ctor = match self.url_ctor {
+      CachedCtor::Present(c) => Some(c),
+      CachedCtor::Missing => None,
+      CachedCtor::Unchecked => {
+        let found = self.lookup_constructor("URL")?;
+        self.url_ctor = found.map_or(CachedCtor::Missing, CachedCtor::Present);
+        found
+      },
+    };
+    self.instance_of_ctor(value, ctor)
+  }
+
+  fn is_regexp(&mut self, value: sys::napi_value) -> napi::Result<bool> {
+    let ctor = match self.regexp_ctor {
+      CachedCtor::Present(c) => Some(c),
+      CachedCtor::Missing => None,
+      CachedCtor::Unchecked => {
+        let found = self.lookup_constructor("RegExp")?;
+        self.regexp_ctor = found.map_or(CachedCtor::Missing, CachedCtor::Present);
+        found
+      },
+    };
+    self.instance_of_ctor(value, ctor)
   }
 
   fn to_json(&self, value: sys::napi_value) -> napi::Result<String> {

@@ -7,8 +7,10 @@ mod capture;
 mod eval;
 mod events;
 mod input_devices;
+mod inspector;
 mod interaction;
 mod navigation;
+mod routing;
 
 pub use input_devices::{
   Keyboard, KeyboardPressOptions, KeyboardTypeOptions, Mouse, MouseClickOptions, MouseDownOptions, MouseMoveOptions,
@@ -480,15 +482,19 @@ impl Page {
     op: impl std::future::Future<Output = Result<T>> + 'a,
   ) -> impl std::future::Future<Output = Result<T>> + 'a {
     Box::pin(async move {
-      let composite = self.context_ref.as_ref().map(super::context::ContextRef::composite);
-      let span = crate::trace::begin_action(
-        composite.as_deref(),
-        class,
-        method,
-        Some(format!("page@{}", self.backend_page_id())),
-        params,
-      );
-      let span = crate::trace::open_action(self.snapshot_before(span).await).await;
+      let span = if crate::trace::call_origins_wanted() {
+        let composite = self.context_ref.as_ref().map(super::context::ContextRef::composite);
+        let span = crate::trace::begin_action(
+          composite.as_deref(),
+          class,
+          method,
+          Some(format!("page@{}", self.backend_page_id())),
+          params,
+        );
+        crate::trace::open_action(self.snapshot_before(span).await).await
+      } else {
+        None
+      };
       let result = crate::trace::within_action(crate::abort::guard(op)).await;
       if let Some(span) = span {
         self.snapshot_after_and_finish(span, result.as_ref().err()).await;

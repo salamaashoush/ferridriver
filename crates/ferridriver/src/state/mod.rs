@@ -1091,10 +1091,81 @@ impl BrowserState {
     Arc::clone(&self.known_instances)
   }
 
+  /// Shared `Arc` handles to the lock-free per-context registries so callers
+  /// such as [`crate::Browser`] can construct [`crate::ContextRef`] handles
+  /// without acquiring `RwLock<BrowserState>` or risking a detached transient
+  /// emitter when a sibling worker holds a write lock.
+  pub(crate) fn context_registries(&self) -> ContextRegistries {
+    ContextRegistries {
+      events: Arc::clone(&self.context_events),
+      closed: Arc::clone(&self.context_closed),
+      test_id_attribute: Arc::clone(&self.context_test_id_attribute),
+      pages: self.context_pages.clone(),
+      known_instances: Arc::clone(&self.known_instances),
+    }
+  }
+
   /// Parse a session key against THIS state's instance vocabulary.
   #[must_use]
   pub fn session_key(&self, raw: &str) -> SessionKey {
     SessionKey::parse_with(raw, &self.known_instances)
+  }
+}
+
+/// Shared handles to the per-context registries on [`BrowserState`].
+///
+/// Every field is `Arc`-backed behind a sync mutex or immutable slice, so a
+/// [`crate::Browser`] holding a clone can construct [`crate::ContextRef`]
+/// handles synchronously without touching `RwLock<BrowserState>`.
+#[derive(Clone)]
+pub(crate) struct ContextRegistries {
+  events: Arc<std::sync::Mutex<HashMap<String, crate::events::ContextEventEmitter>>>,
+  closed: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+  test_id_attribute: Arc<std::sync::Mutex<HashMap<String, TestIdAttributeSlot>>>,
+  pages: ContextPages,
+  known_instances: KnownInstances,
+}
+
+impl ContextRegistries {
+  pub(crate) fn session_key(&self, raw: &str) -> SessionKey {
+    SessionKey::parse_with(raw, &self.known_instances)
+  }
+
+  pub(crate) fn events(&self, composite: &str) -> crate::events::ContextEventEmitter {
+    let mut map = self.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = map.get(composite) {
+      return existing.clone();
+    }
+    let emitter = crate::events::ContextEventEmitter::new();
+    map.insert(composite.to_string(), emitter.clone());
+    emitter
+  }
+
+  pub(crate) fn closed(&self, composite: &str) -> Arc<std::sync::atomic::AtomicBool> {
+    let mut map = self.closed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = map.get(composite) {
+      return Arc::clone(existing);
+    }
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    map.insert(composite.to_string(), Arc::clone(&flag));
+    flag
+  }
+
+  pub(crate) fn test_id_attribute(&self, composite: &str) -> TestIdAttributeSlot {
+    let mut map = self
+      .test_id_attribute
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = map.get(composite) {
+      return Arc::clone(existing);
+    }
+    let slot = Arc::new(std::sync::RwLock::new(None));
+    map.insert(composite.to_string(), Arc::clone(&slot));
+    slot
+  }
+
+  pub(crate) fn pages(&self) -> ContextPages {
+    self.pages.clone()
   }
 }
 
@@ -1189,6 +1260,7 @@ fn http_origin(url: &str) -> Option<String> {
   origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
+mod discover;
 mod launch;
 mod sessions;
 #[cfg(test)]
@@ -1197,9 +1269,10 @@ mod tests;
 #[cfg(test)]
 mod adoption_tests;
 
-use launch::{LaunchSpec, LaunchedProxies, browser_executable, connect_browser};
-pub(crate) use sessions::{CHROMIUM_SWITCHES, merge_feature_switches};
-pub use sessions::{
-  ContextInfo, PageInfo, SessionInfo, chrome_flags, chrome_flags_with, detect_chromium, detect_chromium_headless_shell,
-  detect_firefox, detect_ladybird, detect_lightpanda, resolve_chromium,
+pub(crate) use discover::{CHROMIUM_SWITCHES, merge_feature_switches};
+pub use discover::{
+  chrome_flags, chrome_flags_with, detect_chromium, detect_chromium_headless_shell, detect_firefox, detect_ladybird,
+  detect_lightpanda, resolve_chromium,
 };
+use launch::{LaunchSpec, LaunchedProxies, browser_executable, connect_browser};
+pub use sessions::{ContextInfo, PageInfo, SessionInfo};

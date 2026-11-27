@@ -1,6 +1,6 @@
 //! Unit tests for `BrowserState`, launch plans, discovery, and visited origins.
 
-use super::sessions::*;
+use super::discover::*;
 use super::*;
 
 pub(super) use state_tests::test_state;

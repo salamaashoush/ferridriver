@@ -132,7 +132,7 @@ impl McpServer {
         self
           .on_session(p.session.as_opt(), async |s| {
             let url = p.url.as_deref().unwrap_or("about:blank");
-            let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), s.clone());
+            let ctx_ref = ferridriver::context::ContextRef::new_async(self.state.state_arc(), s.clone()).await;
             let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
             if url != "about:blank" {
               page.goto(url).await.map_err(Self::err)?;

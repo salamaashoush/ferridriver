@@ -377,7 +377,7 @@ pub(super) async fn dispatch_dialog(
   page: std::sync::Weak<crate::page::Page>,
 ) {
   let Ok(payload) =
-    serde_json::from_value::<ferridriver_webkit_proto::page::JavascriptDialogOpeningEvent>(params.clone())
+    <ferridriver_webkit_proto::page::JavascriptDialogOpeningEvent as serde::Deserialize>::deserialize(params)
   else {
     return;
   };

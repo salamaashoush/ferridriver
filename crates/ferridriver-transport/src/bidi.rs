@@ -64,7 +64,7 @@ pub struct BidiEvent {
 pub type EventObserver = Arc<dyn Fn(&BidiEvent) -> bool + Send + Sync>;
 
 enum TapMessage {
-  Event(BidiEvent),
+  Event(Arc<BidiEvent>),
   Barrier(oneshot::Sender<()>),
 }
 
@@ -111,7 +111,7 @@ impl EventTap {
   }
 
   /// Receive the next event in wire order, or `None` once the transport closes.
-  pub async fn recv(&mut self) -> Option<BidiEvent> {
+  pub async fn recv(&mut self) -> Option<Arc<BidiEvent>> {
     while let Some(message) = self.receiver.recv().await {
       match message {
         TapMessage::Event(event) => return Some(event),
@@ -164,7 +164,7 @@ pub struct BidiTransport {
   next_id: AtomicU64,
   pending: Arc<PendingMap>,
   write_tx: mpsc::Sender<Message>,
-  event_tx: Arc<arc_swap::ArcSwapOption<broadcast::Sender<BidiEvent>>>,
+  event_tx: Arc<arc_swap::ArcSwapOption<broadcast::Sender<Arc<BidiEvent>>>>,
   /// Lossless taps fed by the reader in wire order before the broadcast
   /// fanout. State-mutating consumers (frame cache, network tracker,
   /// route interception) use these; a broadcast `Lagged` drop there
@@ -265,7 +265,7 @@ impl BidiTransport {
     // `browsingContext.contextDestroyed` and leak stale frames). See
     // `EVENT_BROADCAST_CAPACITY` in the CDP transport for the same
     // rationale.
-    let (event_tx, _) = broadcast::channel::<BidiEvent>(4096);
+    let (event_tx, _) = broadcast::channel::<Arc<BidiEvent>>(4096);
     let event_tx = Arc::new(arc_swap::ArcSwapOption::from(Some(Arc::new(event_tx))));
     let event_tx2 = Arc::clone(&event_tx);
     let event_taps: Arc<std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>> =
@@ -454,7 +454,7 @@ impl BidiTransport {
   /// Subscribe to `BiDi` events. Returns a broadcast receiver.
   /// Receivers filter by event method at the receive site.
   #[must_use]
-  pub fn subscribe_events(&self) -> broadcast::Receiver<BidiEvent> {
+  pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<BidiEvent>> {
     self
       .event_tx
       .load()
@@ -499,7 +499,7 @@ fn dispatch_bidi_event(
   bytes: &[u8],
   observers: &std::sync::Mutex<Vec<EventObserver>>,
   taps: &std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>,
-  event_tx: &arc_swap::ArcSwapOption<broadcast::Sender<BidiEvent>>,
+  event_tx: &arc_swap::ArcSwapOption<broadcast::Sender<Arc<BidiEvent>>>,
 ) {
   let sender_guard = event_tx.load();
   let has_broadcast = sender_guard.as_ref().is_some_and(|s| s.receiver_count() > 0);
@@ -525,7 +525,7 @@ fn dispatch_bidi_event(
         .as_object_mut()
         .and_then(|obj| obj.remove("params"))
         .unwrap_or(serde_json::Value::Null);
-      let event = BidiEvent { method, params };
+      let event = Arc::new(BidiEvent { method, params });
       trace_event(&event);
       if has_observers || has_taps {
         deliver_losslessly(observers, taps, &event);
@@ -546,24 +546,27 @@ fn dispatch_bidi_event(
 fn deliver_losslessly(
   observers: &std::sync::Mutex<Vec<EventObserver>>,
   taps: &std::sync::Mutex<Vec<mpsc::UnboundedSender<TapMessage>>>,
-  event: &BidiEvent,
+  event: &Arc<BidiEvent>,
 ) {
-  // Cloned out so an observer may register another.
-  let current = observers
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .clone();
-  let finished: Vec<EventObserver> = current.into_iter().filter(|observer| !observer(event)).collect();
-  if !finished.is_empty() {
-    observers
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .retain(|observer| !finished.iter().any(|done| Arc::ptr_eq(done, observer)));
+  // Cloned out so an observer may register another; skip the Vec allocation
+  // when no observers are registered (the common steady-state case).
+  let current = {
+    let guard = observers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.is_empty() { Vec::new() } else { guard.clone() }
+  };
+  if !current.is_empty() {
+    let finished: Vec<EventObserver> = current.into_iter().filter(|observer| !observer(event)).collect();
+    if !finished.is_empty() {
+      observers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|observer| !finished.iter().any(|done| Arc::ptr_eq(done, observer)));
+    }
   }
   taps
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .retain(|tap| tap.send(TapMessage::Event(event.clone())).is_ok());
+    .retain(|tap| tap.send(TapMessage::Event(Arc::clone(event))).is_ok());
 }
 
 /// Process a `BiDi` command response (success or error) by correlating with the pending map.
@@ -590,8 +593,11 @@ fn handle_command_response(bytes: &[u8], type_field: &[u8], pending: &PendingMap
     let _ = tx.send(Err(BidiError { error, message }));
   } else {
     match serde_json::from_slice::<serde_json::Value>(bytes) {
-      Ok(parsed) => {
-        let result = parsed.get("result").cloned().unwrap_or(serde_json::Value::Null);
+      Ok(mut parsed) => {
+        let result = parsed
+          .as_object_mut()
+          .and_then(|obj| obj.remove("result"))
+          .unwrap_or(serde_json::Value::Null);
         trace!("BiDi response id={id}");
         let _ = tx.send(Ok(result));
       },
@@ -774,10 +780,10 @@ mod tests {
     for status in [401, 200] {
       assert!(
         sender
-          .send(TapMessage::Event(BidiEvent {
+          .send(TapMessage::Event(Arc::new(BidiEvent {
             method: "network.responseStarted".into(),
             params: serde_json::json!({ "response": { "status": status } }),
-          }))
+          })))
           .is_ok()
       );
     }

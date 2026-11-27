@@ -408,7 +408,8 @@ pub struct BidiPageInner {
   /// The blocked requests of a page the browser opened by itself, handed
   /// on in wire order by the listener that saw it created. A tap of the
   /// page's own would start after its first request had gone by.
-  forwarded_requests: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<super::transport::BidiEvent>>>>,
+  forwarded_requests:
+    Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Arc<super::transport::BidiEvent>>>>>,
   /// Abort handles for this page's long-lived listener tasks (the
   /// main event listener, the route listener, the screencast
   /// navigation tap). They subscribe to the SESSION-wide event
@@ -620,7 +621,7 @@ impl BidiPage {
 
   pub(super) fn adopt_popup(
     &self,
-    requests: tokio::sync::mpsc::UnboundedReceiver<super::transport::BidiEvent>,
+    requests: tokio::sync::mpsc::UnboundedReceiver<Arc<super::transport::BidiEvent>>,
     first_navigation: Option<Arc<super::frames::FirstNavigation>>,
   ) {
     if let Some(navigation) = first_navigation

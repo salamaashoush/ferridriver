@@ -179,6 +179,16 @@ pub fn measure_images(
   let mut expected = decode(expected)?;
   let (actual_width, actual_height) = (actual.width, actual.height);
   let (width, height) = (expected.width.max(actual.width), expected.height.max(actual.height));
+  let total_pixels = u64::from(expected.width) * u64::from(expected.height);
+  if expected.width == actual.width && expected.height == actual.height && expected.data == actual.data {
+    return Ok(ImageComparison {
+      diff_pixels: 0,
+      total_pixels,
+      width: actual_width,
+      height: actual_height,
+      mismatch: None,
+    });
+  }
   let mut sizes_mismatch = String::new();
   if expected.width != actual.width || expected.height != actual.height {
     sizes_mismatch = format!(
@@ -366,6 +376,9 @@ fn has_many_siblings(img: &[u8], x1: usize, y1: usize, width: usize, height: usi
 /// "Measuring perceived color difference using YIQ NTSC transmission
 /// color space in mobile applications", Y. Kotsarenko and F. Ramos.
 fn color_delta(img1: &[u8], img2: &[u8], pos1: usize, pos2: usize, y_only: bool) -> f64 {
+  if img1[pos1..pos1 + 4] == img2[pos2..pos2 + 4] {
+    return 0.0;
+  }
   let (mut r1, mut g1, mut b1, a1) = (
     f64::from(img1[pos1]),
     f64::from(img1[pos1 + 1]),
@@ -378,9 +391,6 @@ fn color_delta(img1: &[u8], img2: &[u8], pos1: usize, pos2: usize, y_only: bool)
     f64::from(img2[pos2 + 2]),
     img2[pos2 + 3],
   );
-  if img1[pos1..pos1 + 4] == img2[pos2..pos2 + 4] {
-    return 0.0;
-  }
   if a1 < 255 {
     let alpha = f64::from(a1) / 255.0;
     r1 = blend(r1, alpha);
@@ -467,33 +477,24 @@ pub fn ssim_cie94(
   let [r1, g1, b1] = Channel::into_rgb(width, height, expected, padding);
   let [r2, g2, b2] = Channel::into_rgb(width, height, actual, padding);
   let mut output = output;
-  let mut draw = |x: usize, y: usize, rgb: [u8; 3]| {
-    if let Some(out) = output.as_deref_mut() {
-      draw_pixel(out, ((y - padding) * width + (x - padding)) * 4, rgb);
-    }
-  };
 
   let mut stats: Option<[FastStats; 3]> = None;
   let mut diff_count = 0;
   for y in padding..r1.height - padding {
+    let row = y * r1.width;
+    let out_row = (y - padding) * width;
     for x in padding..r1.width - padding {
-      let gray = || {
-        let value = to_byte(blend(
-          f64::from(rgb2gray(r1.get(x, y), g1.get(x, y), b1.get(x, y))),
-          0.1,
-        ));
-        [value, value, value]
-      };
-      if r1.get(x, y) == r2.get(x, y) && g1.get(x, y) == g2.get(x, y) && b1.get(x, y) == b2.get(x, y) {
-        draw(x, y, gray());
-        continue;
-      }
-      let delta = color_delta_e94(
-        [r1.get(x, y), g1.get(x, y), b1.get(x, y)],
-        [r2.get(x, y), g2.get(x, y), b2.get(x, y)],
-      );
-      if delta <= max_color_delta_e94 {
-        draw(x, y, gray());
+      let idx = row + x;
+      let out_pos = (out_row + (x - padding)) * 4;
+      let (p1r, p1g, p1b) = (r1.data[idx], g1.data[idx], b1.data[idx]);
+      let (p2r, p2g, p2b) = (r2.data[idx], g2.data[idx], b2.data[idx]);
+      if (p1r == p2r && p1g == p2g && p1b == p2b)
+        || color_delta_e94([p1r, p1g, p1b], [p2r, p2g, p2b]) <= max_color_delta_e94
+      {
+        if let Some(out) = output.as_deref_mut() {
+          let value = to_byte(blend(f64::from(rgb2gray(p1r, p1g, p1b)), 0.1));
+          draw_pixel(out, out_pos, [value, value, value]);
+        }
         continue;
       }
       let [fast_r, fast_g, fast_b] = stats.get_or_insert_with(|| {
@@ -512,7 +513,9 @@ pub fn ssim_cie94(
         + fast_b.variance_c2(vx1, vy1, vx2, vy2);
       // Part of a flood fill in either image: not anti-aliasing.
       if var1 == 0.0 || var2 == 0.0 {
-        draw(x, y, DIFF_COLOR);
+        if let Some(out) = output.as_deref_mut() {
+          draw_pixel(out, out_pos, DIFF_COLOR);
+        }
         diff_count += 1;
         continue;
       }
@@ -520,9 +523,13 @@ pub fn ssim_cie94(
       let ssim_rgb =
         (ssim(fast_r, sx1, sy1, sx2, sy2) + ssim(fast_g, sx1, sy1, sx2, sy2) + ssim(fast_b, sx1, sy1, sx2, sy2)) / 3.0;
       if ssim_rgb >= 0.99 {
-        draw(x, y, AA_COLOR);
+        if let Some(out) = output.as_deref_mut() {
+          draw_pixel(out, out_pos, AA_COLOR);
+        }
       } else {
-        draw(x, y, DIFF_COLOR);
+        if let Some(out) = output.as_deref_mut() {
+          draw_pixel(out, out_pos, DIFF_COLOR);
+        }
         diff_count += 1;
       }
     }
@@ -542,41 +549,54 @@ impl Channel {
     const ODD: [u8; 3] = [0, 255, 0];
     let new_width = width + 2 * padding;
     let new_height = height + 2 * padding;
-    let mut channels = [
-      vec![0u8; new_width * new_height],
-      vec![0u8; new_width * new_height],
-      vec![0u8; new_width * new_height],
-    ];
+    let len = new_width * new_height;
+    let mut red = vec![0u8; len];
+    let mut green = vec![0u8; len];
+    let mut blue = vec![0u8; len];
+
+    let fill_pad = |x: usize, y: usize, index: usize, red: &mut [u8], green: &mut [u8], blue: &mut [u8]| {
+      let color = if (y + x).is_multiple_of(2) { EVEN } else { ODD };
+      red[index] = color[0];
+      green[index] = color[1];
+      blue[index] = color[2];
+    };
+
     for y in 0..new_height {
-      for x in 0..new_width {
-        let index = y * new_width + x;
-        if y >= padding && y < new_height - padding && x >= padding && x < new_width - padding {
-          let offset = ((y - padding) * width + (x - padding)) * 4;
-          let alpha = if data[offset + 3] == 255 {
-            1.0
-          } else {
-            f64::from(data[offset + 3]) / 255.0
-          };
-          for (c, channel) in channels.iter_mut().enumerate() {
-            channel[index] = to_byte(blend(f64::from(data[offset + c]), alpha));
-          }
+      let row = y * new_width;
+      if y < padding || y >= new_height - padding {
+        for x in 0..new_width {
+          fill_pad(x, y, row + x, &mut red, &mut green, &mut blue);
+        }
+        continue;
+      }
+      for x in 0..padding {
+        fill_pad(x, y, row + x, &mut red, &mut green, &mut blue);
+      }
+      let src_row = (y - padding) * width * 4;
+      for x in 0..width {
+        let index = row + padding + x;
+        let offset = src_row + x * 4;
+        let alpha_u8 = data[offset + 3];
+        if alpha_u8 == 255 {
+          red[index] = data[offset];
+          green[index] = data[offset + 1];
+          blue[index] = data[offset + 2];
         } else {
-          let color = if (y + x) % 2 == 0 { EVEN } else { ODD };
-          for (c, channel) in channels.iter_mut().enumerate() {
-            channel[index] = color[c];
-          }
+          let alpha = f64::from(alpha_u8) / 255.0;
+          red[index] = to_byte(blend(f64::from(data[offset]), alpha));
+          green[index] = to_byte(blend(f64::from(data[offset + 1]), alpha));
+          blue[index] = to_byte(blend(f64::from(data[offset + 2]), alpha));
         }
       }
+      for x in (new_width - padding)..new_width {
+        fill_pad(x, y, row + x, &mut red, &mut green, &mut blue);
+      }
     }
-    channels.map(|data| Self {
+    [red, green, blue].map(|data| Self {
       width: new_width,
       height: new_height,
       data,
     })
-  }
-
-  fn get(&self, x: usize, y: usize) -> u8 {
-    self.data[y * self.width + x]
   }
 
   /// The square of `radius` around (x, y), clamped to the channel
@@ -613,27 +633,43 @@ impl FastStats {
       sq2: vec![0.0; n],
       mult: vec![0.0; n],
     };
-    let recalc = |mx: &mut Vec<f64>, idx: usize, initial: f64, x: usize, y: usize| {
-      mx[idx] = initial;
-      if y > 0 {
-        mx[idx] += mx[(y - 1) * width + x];
-      }
-      if x > 0 {
-        mx[idx] += mx[y * width + x - 1];
-      }
-      if x > 0 && y > 0 {
-        mx[idx] -= mx[(y - 1) * width + x - 1];
-      }
-    };
-    for y in 0..height {
-      for x in 0..width {
-        let idx = y * width + x;
+    if width == 0 || height == 0 {
+      return s;
+    }
+    // Row 0: accumulate horizontally with no top neighbor.
+    let (v1, v2) = (f64::from(a.data[0]), f64::from(b.data[0]));
+    s.c1[0] = v1;
+    s.c2[0] = v2;
+    s.sq1[0] = v1 * v1;
+    s.sq2[0] = v2 * v2;
+    s.mult[0] = v1 * v2;
+    for x in 1..width {
+      let (v1, v2) = (f64::from(a.data[x]), f64::from(b.data[x]));
+      s.c1[x] = v1 + s.c1[x - 1];
+      s.c2[x] = v2 + s.c2[x - 1];
+      s.sq1[x] = v1 * v1 + s.sq1[x - 1];
+      s.sq2[x] = v2 * v2 + s.sq2[x - 1];
+      s.mult[x] = v1 * v2 + s.mult[x - 1];
+    }
+    // Remaining rows: col 0 has no left neighbor; cols 1..width are branchless.
+    for y in 1..height {
+      let row = y * width;
+      let prev = row - width;
+      let (v1, v2) = (f64::from(a.data[row]), f64::from(b.data[row]));
+      s.c1[row] = v1 + s.c1[prev];
+      s.c2[row] = v2 + s.c2[prev];
+      s.sq1[row] = v1 * v1 + s.sq1[prev];
+      s.sq2[row] = v2 * v2 + s.sq2[prev];
+      s.mult[row] = v1 * v2 + s.mult[prev];
+      for x in 1..width {
+        let idx = row + x;
+        let top = prev + x;
         let (v1, v2) = (f64::from(a.data[idx]), f64::from(b.data[idx]));
-        recalc(&mut s.c1, idx, v1, x, y);
-        recalc(&mut s.c2, idx, v2, x, y);
-        recalc(&mut s.sq1, idx, v1 * v1, x, y);
-        recalc(&mut s.sq2, idx, v2 * v2, x, y);
-        recalc(&mut s.mult, idx, v1 * v2, x, y);
+        s.c1[idx] = v1 + s.c1[top] + s.c1[idx - 1] - s.c1[top - 1];
+        s.c2[idx] = v2 + s.c2[top] + s.c2[idx - 1] - s.c2[top - 1];
+        s.sq1[idx] = v1 * v1 + s.sq1[top] + s.sq1[idx - 1] - s.sq1[top - 1];
+        s.sq2[idx] = v2 * v2 + s.sq2[top] + s.sq2[idx - 1] - s.sq2[top - 1];
+        s.mult[idx] = v1 * v2 + s.mult[top] + s.mult[idx - 1] - s.mult[top - 1];
       }
     }
     s
@@ -658,14 +694,6 @@ impl FastStats {
     f64::from(u32::try_from((y2 - y1 + 1) * (x2 - x1 + 1)).unwrap_or(u32::MAX))
   }
 
-  fn mean_c1(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> f64 {
-    self.sum(&self.c1, x1, y1, x2, y2) / Self::count(x1, y1, x2, y2)
-  }
-
-  fn mean_c2(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> f64 {
-    self.sum(&self.c2, x1, y1, x2, y2) / Self::count(x1, y1, x2, y2)
-  }
-
   fn variance_c1(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> f64 {
     let n = Self::count(x1, y1, x2, y2);
     (self.sum(&self.sq1, x1, y1, x2, y2) - self.sum(&self.c1, x1, y1, x2, y2).powi(2) / n) / n
@@ -675,21 +703,21 @@ impl FastStats {
     let n = Self::count(x1, y1, x2, y2);
     (self.sum(&self.sq2, x1, y1, x2, y2) - self.sum(&self.c2, x1, y1, x2, y2).powi(2) / n) / n
   }
-
-  fn covariance(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> f64 {
-    let n = Self::count(x1, y1, x2, y2);
-    (self.sum(&self.mult, x1, y1, x2, y2) - self.sum(&self.c1, x1, y1, x2, y2) * self.sum(&self.c2, x1, y1, x2, y2) / n)
-      / n
-  }
 }
 
 fn ssim(stats: &FastStats, x1: usize, y1: usize, x2: usize, y2: usize) -> f64 {
   const DYNAMIC_RANGE: f64 = 255.0;
-  let mean1 = stats.mean_c1(x1, y1, x2, y2);
-  let mean2 = stats.mean_c2(x1, y1, x2, y2);
-  let var1 = stats.variance_c1(x1, y1, x2, y2);
-  let var2 = stats.variance_c2(x1, y1, x2, y2);
-  let cov = stats.covariance(x1, y1, x2, y2);
+  let n = FastStats::count(x1, y1, x2, y2);
+  let sum1 = stats.sum(&stats.c1, x1, y1, x2, y2);
+  let sum2 = stats.sum(&stats.c2, x1, y1, x2, y2);
+  let sum_sq1 = stats.sum(&stats.sq1, x1, y1, x2, y2);
+  let sum_sq2 = stats.sum(&stats.sq2, x1, y1, x2, y2);
+  let sum_mult = stats.sum(&stats.mult, x1, y1, x2, y2);
+  let mean1 = sum1 / n;
+  let mean2 = sum2 / n;
+  let var1 = (sum_sq1 - sum1.powi(2) / n) / n;
+  let var2 = (sum_sq2 - sum2.powi(2) / n) / n;
+  let cov = (sum_mult - sum1 * sum2 / n) / n;
   let c1 = (0.01 * DYNAMIC_RANGE).powi(2);
   let c2 = (0.03 * DYNAMIC_RANGE).powi(2);
   (2.0 * mean1 * mean2 + c1) * (2.0 * cov + c2) / (mean1.powi(2) + mean2.powi(2) + c1) / (var1 + var2 + c2)
@@ -718,15 +746,18 @@ fn color_delta_e94(rgb1: [u8; 3], rgb2: [u8; 3]) -> f64 {
 }
 
 fn srgb2xyz([r, g, b]: [u8; 3]) -> [f64; 3] {
-  let linear = |c: u8| {
-    let c = f64::from(c) / 255.0;
-    if c > 0.04045 {
-      ((c + 0.055) / 1.055).powf(2.4)
-    } else {
-      c / 12.92
-    }
-  };
-  let (r, g, b) = (linear(r), linear(g), linear(b));
+  static SRGB_LINEAR: std::sync::LazyLock<[f64; 256]> = std::sync::LazyLock::new(|| {
+    std::array::from_fn(|i| {
+      let c = f64::from(u8::try_from(i).unwrap_or(255)) / 255.0;
+      if c > 0.04045 {
+        ((c + 0.055) / 1.055).powf(2.4)
+      } else {
+        c / 12.92
+      }
+    })
+  });
+  let lut = &*SRGB_LINEAR;
+  let (r, g, b) = (lut[usize::from(r)], lut[usize::from(g)], lut[usize::from(b)]);
   [
     r * 0.4124 + g * 0.3576 + b * 0.1805,
     r * 0.2126 + g * 0.7152 + b * 0.0722,

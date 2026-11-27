@@ -176,7 +176,7 @@ impl PageEventLoop {
         self.tracker.on_fetch_error(&event.params, &self.page.events).await;
       },
       "network.authRequired" => {
-        self.tracker.on_auth_required(&event.params).await;
+        self.tracker.on_auth_required(&event.params);
       },
       "browsingContext.userPromptOpened" => self.on_user_prompt_opened(&event.params).await,
       // Playwright's `_onUserPromptClosed`: a prompt the browser
@@ -468,7 +468,7 @@ impl PageEventLoop {
 
   async fn on_user_prompt_opened(&self, params: &serde_json::Value) {
     let Ok(payload) =
-      serde_json::from_value::<ferridriver_bidi_proto::browsing_context::UserPromptOpenedEvent>(params.clone())
+      <ferridriver_bidi_proto::browsing_context::UserPromptOpenedEvent as serde::Deserialize>::deserialize(params)
     else {
       return;
     };
@@ -521,7 +521,7 @@ impl PageEventLoop {
   /// { "context": "<frameId>", "element": { "sharedId": "..." }, "multiple": bool }
   /// Per `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts::_onFileDialogOpened`.
   fn on_file_dialog_opened(&self, params: &serde_json::Value) {
-    let Ok(payload) = serde_json::from_value::<ferridriver_bidi_proto::input::FileDialogOpenedEvent>(params.clone())
+    let Ok(payload) = <ferridriver_bidi_proto::input::FileDialogOpenedEvent as serde::Deserialize>::deserialize(params)
     else {
       return;
     };
@@ -552,7 +552,7 @@ impl PageEventLoop {
   /// (see `bidiPage.ts::_onDownloadWillBegin`) — so do we.
   fn on_download_will_begin(&self, params: &serde_json::Value) {
     let Ok(payload) =
-      serde_json::from_value::<ferridriver_bidi_proto::browsing_context::DownloadWillBeginEvent>(params.clone())
+      <ferridriver_bidi_proto::browsing_context::DownloadWillBeginEvent as serde::Deserialize>::deserialize(params)
     else {
       return;
     };
@@ -586,7 +586,7 @@ impl PageEventLoop {
 
   fn on_download_end(&self, params: &serde_json::Value) {
     let Ok(payload) =
-      serde_json::from_value::<ferridriver_bidi_proto::browsing_context::DownloadEndEvent>(params.clone())
+      <ferridriver_bidi_proto::browsing_context::DownloadEndEvent as serde::Deserialize>::deserialize(params)
     else {
       return;
     };

@@ -632,6 +632,10 @@ pub(crate) struct CdpDispatcher {
   /// Lossless wildcard taps — every event of one exact session, in wire
   /// order. Backs the public `CDPSession` event stream.
   wildcard_taps: Arc<std::sync::Mutex<Vec<EventTap>>>,
+  /// Fast-path flag tracking whether `wildcard_taps` is non-empty so
+  /// `dispatch_event` skips locking `wildcard_taps` when no `CDPSession`
+  /// is attached.
+  has_wildcard_taps: std::sync::atomic::AtomicBool,
   /// Per-method RTT statistics. Only populated when
   /// `FERRIDRIVER_RTT_STATS=1` is set; otherwise the entry insert /
   /// remove path skips the bookkeeping for zero-cost-when-unused.
@@ -680,6 +684,18 @@ impl EventTap {
     }
     self.session.as_deref().is_none_or(|s| sid.is_empty() || sid == s)
   }
+}
+
+/// Deliver `msg` to every matching tap in `taps` under a shared read lock.
+/// Returns `true` if any matching tap's receiver was dropped and should be pruned.
+pub(super) fn send_to_taps_read(taps: &[EventTap], sid: &str, msg: &Arc<serde_json::Value>) -> bool {
+  let mut needs_prune = false;
+  for tap in taps {
+    if tap.matches_session(sid) && tap.tx.send(Arc::clone(msg)).is_err() {
+      needs_prune = true;
+    }
+  }
+  needs_prune
 }
 
 /// Deliver `msg` to every matching tap in `taps`, pruning taps whose
