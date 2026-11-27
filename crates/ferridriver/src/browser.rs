@@ -405,7 +405,7 @@ impl Browser {
           None => opts,
         };
         let restore = opts.clone();
-        let context = this.new_context_impl(Some(opts), true);
+        let context = this.new_context_impl(Some(opts), true).await;
         context.restore_storage_state_credentials(&restore).await?;
         Ok(context)
       })
@@ -464,7 +464,7 @@ impl Browser {
           ));
         }
         let restore = opts.clone();
-        let context = this.new_context_impl(Some(opts), false);
+        let context = this.new_context_impl(Some(opts), false).await;
         context.restore_storage_state_credentials(&restore).await?;
         Ok(context)
       })
@@ -503,7 +503,7 @@ impl Browser {
     self.emit_context_created(ctx.clone());
   }
 
-  pub(crate) fn new_context_impl(
+  pub(crate) async fn new_context_impl(
     &self,
     options: Option<crate::options::BrowserContextOptions>,
     listed: bool,
@@ -526,7 +526,14 @@ impl Browser {
         owner: self.context_owner,
       });
     }
-    let ctx = ContextRef::new(Arc::clone(&self.state), name).with_browser(self.clone());
+    // Always await `new_async` rather than sync `ContextRef::new`: under
+    // parallel workers sharing one browser, `state.try_read()` fails whenever
+    // another worker holds or queues `state.write()`, which handed back a
+    // detached emitter that never received page->context events (e.g.
+    // `context.waitForEvent('framenavigated')`).
+    let ctx = ContextRef::new_async(Arc::clone(&self.state), name)
+      .await
+      .with_browser(self.clone());
     let defaults_apply = self
       .context_defaults
       .lock()
@@ -909,7 +916,7 @@ impl Browser {
 
   pub(crate) async fn close_impl(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
     if let Some(owner) = self.context_owner {
-      let owned: Vec<ContextRef> = {
+      let owned_names: Vec<String> = {
         let names = match self.context_names.lock() {
           Ok(g) => g,
           Err(poisoned) => poisoned.into_inner(),
@@ -917,9 +924,17 @@ impl Browser {
         names
           .iter()
           .filter(|entry| entry.owner == Some(owner))
-          .map(|entry| ContextRef::new(Arc::clone(&self.state), entry.name.clone()).with_browser(self.clone()))
+          .map(|entry| entry.name.clone())
           .collect()
       };
+      let mut owned = Vec::with_capacity(owned_names.len());
+      for name in owned_names {
+        owned.push(
+          ContextRef::new_async(Arc::clone(&self.state), name)
+            .await
+            .with_browser(self.clone()),
+        );
+      }
       for ctx in &owned {
         let _ = ctx.close().await;
       }

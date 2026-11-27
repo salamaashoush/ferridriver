@@ -592,6 +592,12 @@ async fn run_gate(root: &Path, workers: usize, parallel: usize, mut pending: Vec
     .unwrap_or_default();
   let mut completed = BTreeMap::<String, bool>::new();
   let mut running = tokio::task::JoinSet::new();
+  // Install the SIGINT handler before spawning any child so a backgrounded
+  // gate (`... &` in /bin/sh, which starts with SIG_IGN) cannot miss an
+  // interrupt sent as soon as the first child signals readiness.
+  #[cfg(unix)]
+  let mut interrupt =
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).context("register SIGINT handler")?;
   let (cancel, cancellation) = tokio::sync::watch::channel(false);
   let mut used_browsers = 0;
   let mut cargo_busy = false;
@@ -640,9 +646,13 @@ async fn run_gate(root: &Path, workers: usize, parallel: usize, mut pending: Vec
       }
       bail!("gate dependency cycle or unschedulable resource request");
     }
+    #[cfg(unix)]
+    let interrupted = interrupt.recv();
+    #[cfg(not(unix))]
+    let interrupted = tokio::signal::ctrl_c();
     let (job, result) = tokio::select! {
       result = running.join_next() => result.context("missing running job")??,
-      _ = tokio::signal::ctrl_c() => {
+      _ = interrupted => {
         cancel.send_replace(true);
         while running.join_next().await.is_some() {}
         if let Some(server) = &mut fixture_server {
