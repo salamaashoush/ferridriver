@@ -378,7 +378,16 @@ impl SessionPool {
           .unwrap_or_else(std::sync::PoisonError::into_inner)
           .take();
         let session = match seeded {
-          Some(s) => Arc::new(s),
+          Some(s) => {
+            // The collection VM was created before `webServer` started and
+            // published `FERRIDRIVER_BASE_URL`; sync the run env into the
+            // reused session before any test or child process reads it.
+            s.session()
+              .publish_env(&ferridriver_test::config::run_env())
+              .await
+              .map_err(|e| e.message)?;
+            Arc::new(s)
+          },
           None => Arc::new(
             JsTestSession::load(bundle, &cwd, expected)
               .await

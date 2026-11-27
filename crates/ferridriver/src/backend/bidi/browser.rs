@@ -707,14 +707,13 @@ impl BidiBrowser {
       user_context_id,
       Arc::clone(&self.downloads_dir),
     );
+    // Wait for the initial about:blank browsing context to settle before
+    // applying the viewport: on Windows Firefox, `browsingContext.setViewport`
+    // raced against the initial context swap can fail with
+    // `DiscardedBrowsingContextError`.
+    page.wait_until_ready().await?;
     if let Some(viewport) = viewport {
-      futures::future::try_join(
-        Box::pin(page.wait_until_ready()),
-        Box::pin(page.emulate_viewport(viewport)),
-      )
-      .await?;
-    } else {
-      page.wait_until_ready().await?;
+      page.emulate_viewport(viewport).await?;
     }
 
     if !url.is_empty() && url != "about:blank" {

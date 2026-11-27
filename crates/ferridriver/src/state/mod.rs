@@ -755,15 +755,22 @@ impl BrowserState {
         .iter()
         .find(|(_, ctx)| ctx.cdp_context_id.as_deref() == Some(id))
         .map(|(name, _)| name.clone())
-        // The `default` context opens its pages in the browser's own
-        // context and never learns that context's id, but the browser
-        // still names it on the pages those pages open.
+        // On CDP, the `default` context opens its pages in the browser's own
+        // opaque context and never learns that context's id, but Chrome still
+        // names it on popups. BiDi and WebKit already normalize their default
+        // context to `None`, so any `Some(id)` on those backends is an
+        // explicit non-default context (e.g. another client's on a served
+        // browser) and must never fall back to `default`.
         .or_else(|| {
-          inst
-            .contexts
-            .get("default")
-            .filter(|ctx| ctx.cdp_context_id.is_none())
-            .map(|_| "default".to_string())
+          matches!(inst.browser, crate::backend::AnyBrowser::Cdp(_))
+            .then(|| {
+              inst
+                .contexts
+                .get("default")
+                .filter(|ctx| ctx.cdp_context_id.is_none())
+                .map(|_| "default".to_string())
+            })
+            .flatten()
         }),
     }
   }

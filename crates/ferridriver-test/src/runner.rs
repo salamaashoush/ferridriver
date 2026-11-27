@@ -3134,12 +3134,11 @@ fn shared_browser_pool(
     && num_workers > 1
     && workers_per_browser > 1
     && *connection == ConnectMode::Launch
-    && matches!(
+    && (matches!(
       launch_plan.backend,
-      ferridriver::backend::BackendKind::CdpPipe
-        | ferridriver::backend::BackendKind::CdpWs
-        | ferridriver::backend::BackendKind::WebKit
-    ) {
+      ferridriver::backend::BackendKind::CdpPipe | ferridriver::backend::BackendKind::CdpWs
+    ) || (!cfg!(windows) && launch_plan.backend == ferridriver::backend::BackendKind::WebKit))
+  {
     let pool_size = (num_workers as usize).div_ceil(workers_per_browser);
     (0..pool_size)
       .map(|_| {

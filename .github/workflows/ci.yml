@@ -176,7 +176,7 @@ jobs:
           - { os: ubuntu-latest, id: e2e-webkit, gate: --only e2e --project webkit, install: chromium webkit axe ffmpeg }
           - { os: ubuntu-latest, id: integration, gate: --only integration, install: chromium chromedriver firefox webkit axe }
           - { os: ubuntu-latest, id: bdd, gate: --only bdd, install: chromium }
-          - { os: ubuntu-latest, id: acceptance, gate: --only acceptance --only acceptance-bdd, install: chromium }
+          - { os: ubuntu-latest, id: acceptance, gate: --only acceptance --only acceptance-bdd, install: chromium webkit }
           - { os: ubuntu-latest, id: napi, gate: --only napi, install: chromium chromedriver firefox webkit axe ffmpeg }
           - { os: ubuntu-latest, id: rust, gate: --only rust-build --only doc-tests, install: chromium firefox webkit axe }
           - { os: macos-latest, id: e2e-webkit, gate: --only e2e --project webkit, install: chromium webkit axe ffmpeg }
