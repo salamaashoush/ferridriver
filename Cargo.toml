@@ -192,7 +192,7 @@ ring = "0.17"
 semver = "1"
 rmcp = { version = "3.9", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
 schemars = "1"
-jsonschema = { version = "0.60", default-features = false }
+jsonschema = { version = "0.61", default-features = false }
 axum = "0.8"
 tokio-util = "0.7"
 dashmap = "6"
