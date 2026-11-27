@@ -363,44 +363,41 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
     expect(messages.length).toBe(1);
   });
 
-  // Response events only available on CDP backends (webkit doesn't track HTTP responses natively)
-  if (backend !== "webkit") {
-    it("page.waitForEvent('response') resolves on network response", async () => {
-      const [event] = await Promise.all([
-        page.waitForEvent("response", 10000),
-        page.goto(testUrl),
-      ]);
-      expect(event).toBeDefined();
-      // `waitForEvent('response')` now returns a live `Response` instance
-      // (Playwright parity: methods, not fields).
-      expect((event as any).status()).toBe(200);
-      expect((event as any).url()).toContain("127.0.0.1");
+  it("page.waitForEvent('response') resolves on network response", async () => {
+    const [event] = await Promise.all([
+      page.waitForEvent("response", 10000),
+      page.goto(testUrl),
+    ]);
+    expect(event).toBeDefined();
+    // `waitForEvent('response')` now returns a live `Response` instance
+    // (Playwright parity: methods, not fields).
+    expect((event as any).status()).toBe(200);
+    expect((event as any).url()).toContain("127.0.0.1");
+  });
+
+  it("page.waitForResponse matches URL pattern", async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse(/127\.0\.0\.1/, 10000),
+      page.goto(testUrl),
+    ]);
+    expect(response.status()).toBe(200);
+    expect(response.url()).toContain("127.0.0.1");
+  });
+
+  it("page.on('response') fires for every request", async () => {
+    const responses: any[] = [];
+    page.on("response", (r) => {
+      responses.push(r);
     });
 
-    it("page.waitForResponse matches URL pattern", async () => {
-      const [response] = await Promise.all([
-        page.waitForResponse(/127\.0\.0\.1/, 10000),
-        page.goto(testUrl),
-      ]);
-      expect(response.status()).toBe(200);
-      expect(response.url()).toContain("127.0.0.1");
-    });
+    await page.goto(testUrl);
+    await page.waitForTimeout(500);
 
-    it("page.on('response') fires for every request", async () => {
-      const responses: any[] = [];
-      page.on("response", (r) => {
-        responses.push(r);
-      });
-
-      await page.goto(testUrl);
-      await page.waitForTimeout(500);
-
-      expect(responses.length).toBeGreaterThan(0);
-      // Live Response instances, same as waitForEvent('response').
-      expect(responses[0].status()).toBe(200);
-      expect(responses[0].url()).toContain("127.0.0.1");
-    });
-  }
+    expect(responses.length).toBeGreaterThan(0);
+    // Live Response instances, same as waitForEvent('response').
+    expect(responses[0].status()).toBe(200);
+    expect(responses[0].url()).toContain("127.0.0.1");
+  });
 
   it("off(event, listener) removes by function identity (Playwright shape)", async () => {
     const got: string[] = [];

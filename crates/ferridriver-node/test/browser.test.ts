@@ -341,8 +341,6 @@ for (const backend of BACKENDS) {
     });
 
     it("screenshot clip crops to the supplied rectangle", async () => {
-      // BiDi supports clip; WebKit rejects it with a typed error.
-      if (backend === "webkit") return;
       await page.setContent('<div style="width:800px;height:600px;background:red"></div>');
       const buf = await page.screenshot({
         clip: { x: 10, y: 10, width: 100, height: 50 },
@@ -359,8 +357,8 @@ for (const backend of BACKENDS) {
     });
 
     it("screenshot omitBackground yields a transparent PNG", async () => {
-      // BiDi/WebKit refuse this option — CDP is the only supported path.
-      if (backend !== "cdp-pipe" && backend !== "cdp-raw") return;
+      // BiDi refuses transparent background override; CDP and WebKit support it.
+      if (backend === "bidi") return;
       await page.setContent("<html><body></body></html>");
       const buf = await page.screenshot({ omitBackground: true });
       expect(buf.length).toBeGreaterThan(0);
@@ -388,9 +386,6 @@ for (const backend of BACKENDS) {
     });
 
     it("screenshot mask paints over the target", async () => {
-      // webkit doesn't support clip yet; skip since mask without clip
-      // would require a full-page diff.
-      if (backend === "webkit") return;
       await page.setContent(
         '<html><body style="margin:0"><div id="target" style="width:100px;height:100px;background:#ff0000"></div></body></html>'
       );
@@ -566,7 +561,6 @@ for (const backend of BACKENDS) {
     });
 
     it("emulateMedia({}) is a no-op — does not disable prior emulation", async () => {
-      if (backend === "bidi") return;
       await page.emulateMedia({ colorScheme: "dark" });
       await page.emulateMedia({});
       await page.goto(testUrl);
