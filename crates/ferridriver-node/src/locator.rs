@@ -2,9 +2,8 @@
 
 use crate::abort::Bag;
 use crate::error::IntoNapi;
-use crate::types::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
+use crate::types::{FilterOptions, WaitOptions};
 use napi::Result;
-use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 /// A lazy element locator. Does not query the DOM until an action is called.
@@ -22,6 +21,9 @@ impl Locator {
     &self.inner
   }
 }
+
+crate::macros::napi_locator_queries!(Locator, required_frame_locator);
+crate::macros::napi_element_actions!(Locator);
 
 #[napi]
 #[expect(
@@ -95,111 +97,12 @@ impl Locator {
     })
   }
 
-  #[napi]
-  pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts = options.map(ferridriver::options::RoleOptions::from);
-    Self::wrap(self.inner.get_by_role(role.as_str()).maybe_options(opts).into_locator())
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_text(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Self::wrap(
-      self
-        .inner
-        .get_by_text(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_label(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Self::wrap(
-      self
-        .inner
-        .get_by_label(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_placeholder(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Self::wrap(
-      self
-        .inner
-        .get_by_placeholder(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_alt_text(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Self::wrap(
-      self
-        .inner
-        .get_by_alt_text(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_title(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Self::wrap(
-      self
-        .inner
-        .get_by_title(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "testId: string | RegExp")]
-  pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
-    Self::wrap(self.inner.get_by_test_id(crate::types::getby_input_to_rust(test_id)))
-  }
-
   /// Playwright: `locator.contentFrame(): FrameLocator`. Treats the
   /// matched element as an `<iframe>` and returns a `FrameLocator`
   /// scoped to its contents.
   #[napi]
   pub fn content_frame(&self) -> crate::frame_locator::FrameLocator {
     crate::frame_locator::FrameLocator::wrap(self.inner.content_frame())
-  }
-
-  /// Playwright: `locator.frameLocator(selector): FrameLocator`.
-  /// Targets an `<iframe>` matched by `selector` within this locator's
-  /// scope.
-  #[napi]
-  pub fn frame_locator(&self, selector: String) -> crate::frame_locator::FrameLocator {
-    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(&selector))
   }
 
   /// Playwright: `locator.page(): Page`.
@@ -279,33 +182,6 @@ impl Locator {
 
   // ── Actions ─────────────────────────────────────────────────────────────
 
-  /// Click the element matched by this locator. Accepts Playwright's
-  /// full `LocatorClickOptions` bag — see
-  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
-  #[napi]
-  pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
-    self.inner.click().bag(options)?.await.map_err(crate::error::to_napi)
-  }
-
-  /// Double-click the element matched by this locator. Accepts
-  /// Playwright's full `LocatorDblClickOptions` bag.
-  #[napi]
-  pub async fn dblclick(&self, options: Option<crate::types::DblClickOptions>) -> Result<()> {
-    self.inner.dblclick().bag(options)?.await.map_err(crate::error::to_napi)
-  }
-
-  /// Fill an input with `value`. Accepts Playwright's full
-  /// `LocatorFillOptions` bag.
-  #[napi]
-  pub async fn fill(&self, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
-    self
-      .inner
-      .fill(&value)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
-  }
-
   #[napi]
   pub async fn clear(&self) -> Result<()> {
     self.inner.clear().await.map_err(crate::error::to_napi)
@@ -314,10 +190,6 @@ impl Locator {
   /// Playwright: `highlight(options?: { style?: string | Record<string,
   /// string | number> }): Promise<Disposable>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:158`).
-  /// Shows the element-highlight overlay and returns a `Disposable` whose
-  /// `dispose()` hides it. The `style` union is lowered by
-  /// [`crate::types::highlight_style_to_rust`]; core composes the CSS
-  /// string and applies it.
   #[napi(ts_args_type = "options?: { style?: string | Record<string, string | number> }")]
   pub async fn highlight(&self, options: Option<serde_json::Value>) -> Result<crate::disposable::Disposable> {
     let style = options
@@ -334,9 +206,6 @@ impl Locator {
     self.inner.hide_highlight().await.map_err(crate::error::to_napi)
   }
 
-  /// Type `text` character-by-character. Accepts Playwright's full
-  /// `LocatorTypeOptions` bag. Deprecated in Playwright in favor of
-  /// `pressSequentially`; both call paths are identical in ferridriver.
   #[napi]
   pub async fn type_text(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
     self
@@ -357,95 +226,14 @@ impl Locator {
       .map_err(crate::error::to_napi)
   }
 
-  /// Press a key or key combination. Accepts Playwright's full
-  /// `LocatorPressOptions` bag.
-  #[napi]
-  pub async fn press(&self, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
-    self
-      .inner
-      .press(&key)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
-  }
-
-  /// Hover over the element matched by this locator. Accepts
-  /// Playwright's full `LocatorHoverOptions` bag.
-  #[napi]
-  pub async fn hover(&self, options: Option<crate::types::HoverOptions>) -> Result<()> {
-    self.inner.hover().bag(options)?.await.map_err(crate::error::to_napi)
-  }
-
-  #[napi]
-  pub async fn focus(&self) -> Result<()> {
-    self.inner.focus().await.map_err(crate::error::to_napi)
-  }
-
   #[napi]
   pub async fn blur(&self) -> Result<()> {
     self.inner.blur().await.map_err(crate::error::to_napi)
   }
 
-  /// Check a checkbox or radio. Accepts Playwright's full
-  /// `LocatorCheckOptions` bag.
-  #[napi]
-  pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    self.inner.check().bag(options)?.await.map_err(crate::error::to_napi)
-  }
-
-  /// Uncheck a checkbox. Accepts Playwright's full `LocatorUncheckOptions` bag.
-  #[napi]
-  pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    self.inner.uncheck().bag(options)?.await.map_err(crate::error::to_napi)
-  }
-
-  /// Select options on a `<select>` element. Accepts Playwright's
-  /// full `string | string[] | { value?, label?, index? } | Array<...>`
-  /// union plus the `LocatorSelectOptionOptions` bag.
-  #[napi]
-  pub async fn select_option(
-    &self,
-    values: crate::types::NapiSelectOptionInput,
-    options: Option<crate::types::SelectOptionOptions>,
-  ) -> Result<Vec<String>> {
-    self
-      .inner
-      .select_option(values.0)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
-  }
-
   #[napi]
   pub async fn scroll_into_view(&self) -> Result<()> {
-    self
-      .inner
-      .scroll_into_view_if_needed()
-      .await
-      .map_err(crate::error::to_napi)
-  }
-
-  #[napi(js_name = "scrollIntoViewIfNeeded")]
-  pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
-    self.scroll_into_view().await
-  }
-
-  /// Dispatch a DOM event of `type` on this element with an optional
-  /// `eventInit` dict. Mirrors Playwright's
-  /// `locator.dispatchEvent(type, eventInit?, options?)`.
-  #[napi(ts_args_type = "eventType: string, eventInit?: unknown, options?: DispatchEventOptions")]
-  pub async fn dispatch_event(
-    &self,
-    event_type: String,
-    event_init: Option<crate::types::NapiEvaluateArg>,
-    options: Option<crate::types::DispatchEventOptions>,
-  ) -> Result<()> {
-    self
-      .inner
-      .dispatch_event(&event_type, crate::page::build_evaluate_argument(event_init, false)?)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
+    self.scroll_into_view_if_needed().await
   }
 
   /// Type `text` character-by-character. Accepts Playwright's full
@@ -642,17 +430,6 @@ impl Locator {
       .map_err(crate::error::to_napi)
   }
 
-  #[napi]
-  pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
-    let bb = self.inner.bounding_box().await.map_err(crate::error::to_napi)?;
-    Ok(bb.map(|b| BoundingBox {
-      x: b.x,
-      y: b.y,
-      width: b.width,
-      height: b.height,
-    }))
-  }
-
   /// Drag this element to `target`. Mirrors Playwright's
   /// `locator.dragTo(target, options?)` per
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
@@ -686,23 +463,6 @@ impl Locator {
     self.inner.wait_for().bag(options)?.await.map_err(crate::error::to_napi)
   }
 
-  // ── Screenshot ──────────────────────────────────────────────────────────
-
-  /// Playwright: `locator.screenshot(options?: LocatorScreenshotOptions): Promise<Buffer>`.
-  #[napi]
-  pub async fn screenshot(&self, mut options: Option<crate::types::ElementScreenshotOptions>) -> Result<Buffer> {
-    let signal = crate::abort::take(&mut options);
-    let opts = options.unwrap_or_default().into_core(self.inner.page());
-    let bytes = self
-      .inner
-      .screenshot()
-      .options(opts)
-      .maybe_signal(signal)
-      .await
-      .map_err(crate::error::to_napi)?;
-    Ok(bytes.into())
-  }
-
   // ── All matches ─────────────────────────────────────────────────────────
 
   #[napi]
@@ -720,45 +480,6 @@ impl Locator {
   #[napi]
   pub async fn right_click(&self) -> Result<()> {
     self.inner.right_click().await.map_err(crate::error::to_napi)
-  }
-
-  /// Tap (touch event) the element matched by this locator. Accepts
-  /// Playwright's full `LocatorTapOptions` bag.
-  #[napi]
-  pub async fn tap(&self, options: Option<crate::types::TapOptions>) -> Result<()> {
-    self.inner.tap().bag(options)?.await.map_err(crate::error::to_napi)
-  }
-
-  #[napi]
-  pub async fn select_text(&self) -> Result<()> {
-    self.inner.select_text().await.map_err(crate::error::to_napi)
-  }
-
-  #[napi]
-  pub async fn set_checked(&self, checked: bool, options: Option<crate::types::CheckOptions>) -> Result<()> {
-    self
-      .inner
-      .set_checked(checked)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
-  }
-
-  /// Set files on a `<input type=file>` element. Accepts Playwright's
-  /// full `string | string[] | FilePayload | FilePayload[]` union plus
-  /// the `LocatorSetInputFilesOptions` bag.
-  #[napi(ts_args_type = "files: string | string[] | FilePayload | FilePayload[], options?: SetInputFilesOptions")]
-  pub async fn set_input_files(
-    &self,
-    files: crate::types::NapiInputFiles,
-    options: Option<crate::types::SetInputFilesOptions>,
-  ) -> Result<()> {
-    self
-      .inner
-      .set_input_files(files.0)
-      .bag(options)?
-      .await
-      .map_err(crate::error::to_napi)
   }
 
   #[napi]

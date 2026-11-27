@@ -24,6 +24,61 @@ pub struct CssCoverageOptions {
   pub reset_on_navigation: Option<bool>,
 }
 
+/// Playwright `JSCoverageEntry`.
+#[napi(object, js_name = "JSCoverageEntry")]
+pub struct JsCoverageEntry {
+  pub url: String,
+  pub script_id: String,
+  pub source: Option<String>,
+  #[napi(
+    ts_type = "Array<{ functionName: string; isBlockCoverage: boolean; ranges: Array<{ count: number; startOffset: number; endOffset: number }> }>"
+  )]
+  pub functions: Vec<serde_json::Value>,
+}
+
+/// One used byte range inside a CSS stylesheet.
+#[napi(object)]
+pub struct CssCoverageRange {
+  pub start: f64,
+  pub end: f64,
+}
+
+/// Playwright `CSSCoverageEntry`.
+#[napi(object, js_name = "CSSCoverageEntry")]
+pub struct CssCoverageEntry {
+  pub url: String,
+  pub text: Option<String>,
+  pub ranges: Vec<CssCoverageRange>,
+}
+
+impl From<ferridriver::coverage::JsCoverageEntry> for JsCoverageEntry {
+  fn from(entry: ferridriver::coverage::JsCoverageEntry) -> Self {
+    Self {
+      url: entry.url,
+      script_id: entry.script_id,
+      source: entry.source,
+      functions: entry.functions,
+    }
+  }
+}
+
+impl From<ferridriver::coverage::CssCoverageEntry> for CssCoverageEntry {
+  fn from(entry: ferridriver::coverage::CssCoverageEntry) -> Self {
+    Self {
+      url: entry.url,
+      text: entry.text,
+      ranges: entry
+        .ranges
+        .into_iter()
+        .map(|r| CssCoverageRange {
+          start: crate::types::u64_to_f64(r.start),
+          end: crate::types::u64_to_f64(r.end),
+        })
+        .collect(),
+    }
+  }
+}
+
 /// Playwright's `page.coverage`. Chromium only.
 #[napi]
 pub struct Coverage {
@@ -58,9 +113,9 @@ impl Coverage {
     js_name = "stopJSCoverage",
     ts_return_type = "Promise<Array<{ url: string; scriptId: string; source?: string; functions: Array<{ functionName: string; isBlockCoverage: boolean; ranges: Array<{ count: number; startOffset: number; endOffset: number }> }> }>>"
   )]
-  pub async fn stop_js_coverage(&self) -> Result<serde_json::Value> {
+  pub async fn stop_js_coverage(&self) -> Result<Vec<JsCoverageEntry>> {
     let entries = self.inner.stop_js_coverage().await.into_napi()?;
-    serde_json::to_value(entries).map_err(|e| napi::Error::from_reason(e.to_string()))
+    Ok(entries.into_iter().map(Into::into).collect())
   }
 
   /// Playwright: `coverage.startCSSCoverage(options?)`.
@@ -81,8 +136,8 @@ impl Coverage {
     js_name = "stopCSSCoverage",
     ts_return_type = "Promise<Array<{ url: string; text?: string; ranges: Array<{ start: number; end: number }> }>>"
   )]
-  pub async fn stop_css_coverage(&self) -> Result<serde_json::Value> {
+  pub async fn stop_css_coverage(&self) -> Result<Vec<CssCoverageEntry>> {
     let entries = self.inner.stop_css_coverage().await.into_napi()?;
-    serde_json::to_value(entries).map_err(|e| napi::Error::from_reason(e.to_string()))
+    Ok(entries.into_iter().map(Into::into).collect())
   }
 }

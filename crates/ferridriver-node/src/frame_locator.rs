@@ -7,7 +7,7 @@
 //! `FrameLocator` resolves inside the iframe's document.
 
 use crate::locator::Locator;
-use crate::types::{FilterOptions, RoleOptions, TextOptions};
+use crate::types::FilterOptions;
 use napi_derive::napi;
 
 /// Lazy locator scoped to the contents of an `<iframe>`. Construct via
@@ -26,11 +26,9 @@ impl FrameLocator {
   }
 }
 
+crate::macros::napi_locator_queries!(FrameLocator, required_frame_locator);
+
 #[napi]
-#[expect(
-  clippy::needless_pass_by_value,
-  reason = "napi-derive takes JS strings, functions and option bags only by value"
-)]
 impl FrameLocator {
   /// Playwright: `frameLocator.locator(selectorOrLocator, options?): Locator`.
   #[napi(ts_args_type = "selectorOrLocator: string | Locator, options?: FilterOptions")]
@@ -52,109 +50,11 @@ impl FrameLocator {
     })
   }
 
-  /// Playwright: `frameLocator.getByRole(role, options?): Locator`.
-  #[napi]
-  pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts = options.map(ferridriver::options::RoleOptions::from);
-    Locator::wrap(self.inner.get_by_role(role.as_str()).maybe_options(opts).into_locator())
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_text(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Locator::wrap(
-      self
-        .inner
-        .get_by_text(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "testId: string | RegExp")]
-  pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
-    Locator::wrap(self.inner.get_by_test_id(crate::types::getby_input_to_rust(test_id)))
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_label(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Locator::wrap(
-      self
-        .inner
-        .get_by_label(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_placeholder(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Locator::wrap(
-      self
-        .inner
-        .get_by_placeholder(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_alt_text(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Locator::wrap(
-      self
-        .inner
-        .get_by_alt_text(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
-  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
-  pub fn get_by_title(
-    &self,
-    text: napi::Either<String, crate::types::JsRegExpLike>,
-    options: Option<TextOptions>,
-  ) -> Locator {
-    let opts = options.map(ferridriver::options::TextOptions::from);
-    Locator::wrap(
-      self
-        .inner
-        .get_by_title(crate::types::getby_input_to_rust(text))
-        .maybe_options(opts)
-        .into_locator(),
-    )
-  }
-
   /// Playwright: `frameLocator.owner(): Locator` — returns the
   /// `<iframe>` element this locator is scoped through.
   #[napi]
   pub fn owner(&self) -> Locator {
     Locator::wrap(self.inner.owner())
-  }
-
-  /// Nested-frame chain: `frameLocator.frameLocator(selector)`.
-  #[napi]
-  pub fn frame_locator(&self, selector: String) -> FrameLocator {
-    FrameLocator::wrap(self.inner.frame_locator(selector.as_str()))
   }
 
   /// Playwright: `frameLocator.first(): FrameLocator`.

@@ -18,14 +18,7 @@ pub struct Browser {
   /// `browser.on` / `browser.once` registrations, so `off(event,
   /// listener)` resolves the core `ListenerId` from JS function
   /// identity — the registry `Page` and `BrowserContext` also keep.
-  listener_regs: std::sync::Arc<std::sync::Mutex<Vec<BrowserListenerReg>>>,
-}
-
-/// One browser-level listener registration.
-struct BrowserListenerReg {
-  event: String,
-  id: u64,
-  fn_ref: napi::bindgen_prelude::FunctionRef<BrowserEventArg, ()>,
+  listener_regs: crate::emitter::ListenerRegistry<BrowserEventArg>,
 }
 
 impl Browser {
@@ -33,7 +26,7 @@ impl Browser {
   pub(crate) fn wrap(inner: ferridriver::Browser) -> Self {
     Self {
       inner,
-      listener_regs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+      listener_regs: crate::emitter::ListenerRegistry::new(),
     }
   }
 
@@ -54,18 +47,18 @@ impl Browser {
       (false, true) => self.inner.prepend_listener(event, callback),
       (true, true) => self.inner.prepend_once_listener(event, callback),
     };
-    self
-      .listener_regs
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(BrowserListenerReg {
-        event: event.to_string(),
-        id: id.0,
-        fn_ref,
-      });
+    self.listener_regs.record(event, id.0, fn_ref);
     Ok(())
   }
 }
+
+crate::macros::napi_event_emitter!(
+  target: Browser,
+  arg: BrowserEventArg,
+  ts_on: "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
+  ts_off: "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
+  full
+);
 
 /// Cross-thread dispatch arg for `browser.on(...)` — carries the core
 /// value across the tokio→napi boundary; the `ToNapiValue` conversion
@@ -230,188 +223,6 @@ impl Browser {
   #[napi]
   pub fn default_context(&self) -> crate::context::BrowserContext {
     crate::context::BrowserContext::wrap(self.inner.default_context())
-  }
-
-  /// Register a browser-level event listener. Playwright:
-  /// `browser.on(event, listener)`, which returns the browser so
-  /// registrations chain.
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn on<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, &listener, false, false)?;
-    Ok(this.object)
-  }
-
-  /// Node's `addListener`, an alias of [`Self::on`].
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn add_listener<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.on(this, event, listener)
-  }
-
-  /// One-shot variant of [`Self::on`].
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn once<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, &listener, true, false)?;
-    Ok(this.object)
-  }
-
-  /// Node's `prependListener`.
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn prepend_listener<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, &listener, false, true)?;
-    Ok(this.object)
-  }
-
-  /// Node's `prependOnceListener`.
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn prepend_once_listener<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.register_listener(&event, &listener, true, true)?;
-    Ok(this.object)
-  }
-
-  /// Remove a browser-level listener by function identity, Playwright's
-  /// `off(event, listener)`; `off(event)` alone drops every listener for
-  /// that event.
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn off<'env>(
-    &self,
-    env: napi::Env,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: Option<napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    let mut regs = self
-      .listener_regs
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Some(listener) = listener else {
-      self.inner.remove_listeners_named(&event);
-      regs.retain(|r| r.event != event);
-      return Ok(this.object);
-    };
-    let in_ref = listener.create_ref()?;
-    let mut i = 0;
-    while i < regs.len() {
-      let hit = regs[i].event == event && {
-        let a = in_ref.borrow_back(&env)?;
-        let b = regs[i].fn_ref.borrow_back(&env)?;
-        env.strict_equals(a, b)?
-      };
-      if hit {
-        let reg = regs.remove(i);
-        self.inner.off(ferridriver::events::ListenerId(reg.id));
-      } else {
-        i += 1;
-      }
-    }
-    Ok(this.object)
-  }
-
-  /// Node's `removeListener`, an alias of [`Self::off`].
-  #[napi(
-    ts_args_type = "event: 'context' | 'disconnected', listener?: (arg: BrowserContext | Browser) => void",
-    ts_return_type = "this"
-  )]
-  pub fn remove_listener<'env>(
-    &self,
-    env: napi::Env,
-    this: napi::bindgen_prelude::This<'env>,
-    event: String,
-    listener: Option<napi::bindgen_prelude::Function<'_, BrowserEventArg, ()>>,
-  ) -> Result<napi::bindgen_prelude::Object<'env>> {
-    self.off(env, this, event, listener)
-  }
-
-  /// Remove every browser-level listener, or only those for `event`.
-  #[napi(ts_return_type = "this")]
-  pub fn remove_all_listeners<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    event: Option<String>,
-  ) -> napi::bindgen_prelude::Object<'env> {
-    let mut regs = self
-      .listener_regs
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(ev) = event {
-      self.inner.remove_listeners_named(&ev);
-      regs.retain(|r| r.event != ev);
-    } else {
-      self.inner.remove_all_listeners();
-      regs.clear();
-    }
-    this.object
-  }
-
-  /// Node's `listenerCount(type)`.
-  #[napi]
-  pub fn listener_count(&self, event: String) -> f64 {
-    crate::types::usize_to_f64(self.inner.listener_count(&event))
-  }
-
-  /// Node's `eventNames()`.
-  #[napi]
-  pub fn event_names(&self) -> Vec<String> {
-    self.inner.event_names()
-  }
-
-  /// Node's `setMaxListeners(n)`; `0` disables the leak warning.
-  #[napi(ts_return_type = "this")]
-  pub fn set_max_listeners<'env>(
-    &self,
-    this: napi::bindgen_prelude::This<'env>,
-    max: f64,
-  ) -> napi::bindgen_prelude::Object<'env> {
-    self.inner.set_max_listeners(crate::types::f64_to_usize(max));
-    this.object
-  }
-
-  /// Node's `getMaxListeners()`.
-  #[napi]
-  pub fn get_max_listeners(&self) -> f64 {
-    crate::types::usize_to_f64(self.inner.max_listeners())
   }
 
   /// Wait for a browser-level event. Playwright:

@@ -19,20 +19,14 @@ pub struct CDPSession {
   inner: ferridriver::CdpSession,
   /// Listener-id registry so `off(event, listener)` can match the JS
   /// function by identity (`env.strict_equals`), like `page.off`.
-  listeners: std::sync::Mutex<Vec<ListenerReg>>,
-}
-
-struct ListenerReg {
-  event: String,
-  id: ferridriver::cdp_session::CdpListenerId,
-  fn_ref: napi::bindgen_prelude::FunctionRef<serde_json::Value, ()>,
+  listeners: crate::emitter::ListenerRegistry<serde_json::Value, ferridriver::cdp_session::CdpListenerId>,
 }
 
 impl CDPSession {
   pub(crate) fn wrap(inner: ferridriver::CdpSession) -> Self {
     Self {
       inner,
-      listeners: std::sync::Mutex::new(Vec::new()),
+      listeners: crate::emitter::ListenerRegistry::new(),
     }
   }
 }
@@ -95,21 +89,8 @@ impl CDPSession {
     event: String,
     listener: napi::bindgen_prelude::Function<'static, serde_json::Value, ()>,
   ) -> Result<()> {
-    let incoming = listener.create_ref()?;
-    let mut regs = self.listeners.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut i = 0;
-    while i < regs.len() {
-      let matches = regs[i].event == event && {
-        let a = incoming.borrow_back(&env)?;
-        let b = regs[i].fn_ref.borrow_back(&env)?;
-        env.strict_equals(a, b)?
-      };
-      if matches {
-        let reg = regs.remove(i);
-        self.inner.off(reg.id);
-      } else {
-        i += 1;
-      }
+    for id in self.listeners.take_matching(env, &event, &listener)? {
+      self.inner.off(id);
     }
     Ok(())
   }
@@ -141,15 +122,7 @@ impl CDPSession {
       (_, false) => self.inner.on(event, callback),
       (_, true) => self.inner.once(event, callback),
     };
-    self
-      .listeners
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .push(ListenerReg {
-        event: event.to_owned(),
-        id,
-        fn_ref,
-      });
+    self.listeners.record(event, id, fn_ref);
     Ok(())
   }
 }
