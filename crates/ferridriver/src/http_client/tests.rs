@@ -208,6 +208,50 @@ mod response_tests {
     assert_eq!(r.url(), "http://example.test/");
     assert_eq!(r.header("content-type").as_deref(), Some("application/json"));
   }
+
+  #[test]
+  fn merge_over_layers_overrides_over_request_base() {
+    let base = RequestOptions {
+      method: Some("POST".into()),
+      headers: Some(vec![
+        ("X-Base".into(), "keep".into()),
+        ("X-Override".into(), "old".into()),
+      ]),
+      data: Some(b"base-body".to_vec()),
+      ..RequestOptions::default()
+    };
+    let overrides = RequestOptions {
+      headers: Some(vec![("x-override".into(), "new".into())]),
+      json_data: Some(serde_json::json!({"ok": true})),
+      ..RequestOptions::default()
+    };
+    let merged = RequestOptions::merge_over(Some(base), Some(overrides)).expect("merged");
+    assert_eq!(merged.method.as_deref(), Some("POST"));
+    assert_eq!(
+      merged.headers.as_deref(),
+      Some(&[("x-override".into(), "new".into()), ("X-Base".into(), "keep".into())][..])
+    );
+    assert!(
+      merged.data.is_none(),
+      "an explicit json body replaces base's raw data instead of sending both"
+    );
+    assert_eq!(merged.json_data, Some(serde_json::json!({"ok": true})));
+  }
+
+  #[test]
+  fn try_new_validates_proxy_before_first_request() {
+    let bad = HttpClientOptions {
+      proxy: Some(ProxyConfig {
+        server: "ftp://proxy.example.com".into(),
+        bypass: None,
+        username: None,
+        password: None,
+      }),
+      ..HttpClientOptions::default()
+    };
+    assert!(HttpClient::try_new(bad, None).is_err());
+    assert!(HttpClient::try_new(HttpClientOptions::default(), None).is_ok());
+  }
 }
 
 #[cfg(test)]

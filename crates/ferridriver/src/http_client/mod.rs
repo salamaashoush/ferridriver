@@ -5,7 +5,8 @@
 //! the same [`fetch::send`] path.
 //!
 //! [`HttpClient`] provides `get`, `post`, `put`, `delete`, `patch`,
-//! `head`, and generic `fetch` (buffered) / `fetch_stream` (streamed).
+//! `head`, and generic `fetch` (buffered), plus [`HttpClient::send_whatwg`]
+//! for streaming WHATWG `fetch` backends.
 //! Each buffered call returns an [`HttpResponse`] with `status()`,
 //! `text()`, `json()`, `headers()`, `ok()`, and `body()`.
 //!
@@ -36,7 +37,7 @@ mod response;
 #[cfg(test)]
 mod tests;
 
-pub use response::{HttpResponse, HttpStreamResponse};
+pub use response::HttpResponse;
 
 /// Options for creating an `HttpClient`.
 #[derive(Debug, Clone, Default)]
@@ -99,16 +100,51 @@ impl ErasedClientPool {
   }
 }
 
+/// Type-erases [`crate::context::ContextRef`] inside [`HttpClient`] so
+/// proving `HttpClient: Send + Sync` stops here instead of walking the
+/// `ContextRef -> BrowserState -> Browser -> Emitter<BrowserEvent>` cycle
+/// in downstream crates like `ferridriver-mcp`.
+trait ContextHandle: Send + Sync {
+  fn storage_state(&self) -> futures::future::BoxFuture<'_, crate::error::Result<crate::options::StorageState>>;
+  fn cookies(&self) -> futures::future::BoxFuture<'_, crate::error::Result<Vec<crate::backend::CookieData>>>;
+  fn add_cookies(
+    &self,
+    cookies: Vec<crate::backend::CookieData>,
+  ) -> futures::future::BoxFuture<'_, crate::error::Result<()>>;
+  fn clear_cookies<'a>(
+    &'a self,
+    options: &'a crate::backend::ClearCookieOptions,
+  ) -> futures::future::BoxFuture<'a, crate::error::Result<()>>;
+}
+
+impl ContextHandle for crate::context::ContextRef {
+  fn storage_state(&self) -> futures::future::BoxFuture<'_, crate::error::Result<crate::options::StorageState>> {
+    Box::pin(self.storage_state_impl(None))
+  }
+
+  fn cookies(&self) -> futures::future::BoxFuture<'_, crate::error::Result<Vec<crate::backend::CookieData>>> {
+    Box::pin(self.cookies())
+  }
+
+  fn add_cookies(
+    &self,
+    cookies: Vec<crate::backend::CookieData>,
+  ) -> futures::future::BoxFuture<'_, crate::error::Result<()>> {
+    Box::pin(self.add_cookies(cookies))
+  }
+
+  fn clear_cookies<'a>(
+    &'a self,
+    options: &'a crate::backend::ClearCookieOptions,
+  ) -> futures::future::BoxFuture<'a, crate::error::Result<()>> {
+    Box::pin(self.clear_cookies_impl(options))
+  }
+}
+
 #[derive(Clone)]
 struct ContextProxy {
   resolve: LiveProxy,
   pool: Arc<tokio::sync::OnceCell<ErasedClientPool>>,
-}
-
-#[derive(Clone)]
-enum CredentialSource {
-  Fixed(Vec<HttpCredentials>),
-  Live(LiveHttpCredentials),
 }
 
 fn basic_authorization(credentials: &HttpCredentials) -> String {
@@ -215,7 +251,7 @@ pub fn replayable_headers(headers: Vec<(String, String)>) -> Vec<(String, String
 }
 
 /// A request assembled by the WHATWG `fetch` layer, for
-/// [`HttpClient::fetch_whatwg`].
+/// [`HttpClient::send_whatwg`].
 ///
 /// Unlike [`RequestOptions`] this carries no body *forms* — the spec's
 /// "extract a body" step has already run, so `body` is final and
@@ -249,34 +285,53 @@ struct ResolvedDefaults {
   ctx_style: bool,
 }
 
+/// State owned by a standalone [`HttpClient`] (`request.newContext()` /
+/// `HttpClient::new`). Holds its own reqwest cookie jar, fixed options,
+/// credentials, and initial `storageState` origins.
+#[derive(Clone)]
+struct StandaloneState {
+  pool: ErasedClientPool,
+  base_url: Option<String>,
+  extra_headers: Vec<(String, String)>,
+  ignore_https_errors: bool,
+  credentials: Vec<HttpCredentials>,
+  user_agent: Option<String>,
+  fail_on_status_code: Option<bool>,
+  max_redirects: Option<u32>,
+  /// The `origins` of the `storageState` a standalone client was made
+  /// with, handed back by [`HttpClient::storage_state`].
+  origins: Vec<crate::options::OriginState>,
+}
+
+/// State owned by a browser-context-bound [`HttpClient`] (`page.request` /
+/// `context.request`). Cookies live in the browser via `bridge` and
+/// `context`; defaults, credentials and proxy are read live from the
+/// context rather than copied at construction time.
+#[derive(Clone)]
+struct ContextBoundState {
+  base_pool: ErasedClientPool,
+  bridge: Arc<dyn ContextBridge>,
+  context: Option<Arc<dyn ContextHandle>>,
+  credentials: Option<LiveHttpCredentials>,
+  proxy: Option<ContextProxy>,
+}
+
+/// Discriminates standalone clients (own jar + fixed options) from
+/// browser-context-bound clients (browser jar + live context bridge) so
+/// mode-specific invariants are enforced by the type system.
+#[derive(Clone)]
+enum ClientMode {
+  Standalone(StandaloneState),
+  ContextBound(ContextBoundState),
+}
+
 /// A general HTTP client: all methods, JSON/form/multipart bodies,
 /// query params, custom headers, timeouts, and cookie persistence. The
 /// one stack `fetch` and `request` share.
 #[derive(Clone)]
 pub struct HttpClient {
-  pool: ErasedClientPool,
-  base_url: Option<String>,
-  extra_headers: Vec<(String, String)>,
+  mode: ClientMode,
   default_timeout: Duration,
-  default_ignore_https: bool,
-  /// Browser-context bridge. `Some` for a client minted by
-  /// `ContextRef::http_client()` (Playwright's `page.request` /
-  /// `context.request`): cookies are read from and written back to the
-  /// BROWSER on every hop, defaults come live from the context options.
-  /// `None` = the standalone client with its own reqwest jar.
-  bridge: Option<Arc<dyn ContextBridge>>,
-  /// The context a bound client reads and writes cookies through.
-  context: Option<crate::context::ContextRef>,
-  credentials: CredentialSource,
-  user_agent: Option<String>,
-  fail_on_status_code: Option<bool>,
-  max_redirects: Option<u32>,
-  /// The `origins` of the `storageState` a standalone client was made
-  /// with, handed back by [`Self::storage_state`].
-  origins: Vec<crate::options::OriginState>,
-  /// `Some` for a context-bound client, whose pool takes the context's
-  /// proxy the first time it sends.
-  context_proxy: Option<ContextProxy>,
 }
 
 /// Playwright's `rewriteCookies` (`server/network.ts`): a cookie given
@@ -381,22 +436,43 @@ impl HttpClient {
   #[must_use]
   pub fn new(options: HttpClientOptions) -> Self {
     Self {
-      pool: ErasedClientPool::new(
-        fetch::ClientPool::standalone(options.ignore_https_errors)
-          .with_proxy(options.proxy.as_ref().map(ProxyConfig::transport)),
-      ),
-      base_url: options.base_url,
-      extra_headers: options.extra_http_headers,
+      mode: ClientMode::Standalone(StandaloneState {
+        pool: ErasedClientPool::new(
+          fetch::ClientPool::standalone(options.ignore_https_errors)
+            .with_proxy(options.proxy.as_ref().map(ProxyConfig::transport)),
+        ),
+        base_url: options.base_url,
+        extra_headers: options.extra_http_headers,
+        ignore_https_errors: options.ignore_https_errors,
+        credentials: options.http_credentials,
+        user_agent: options.user_agent,
+        fail_on_status_code: options.fail_on_status_code,
+        max_redirects: options.max_redirects,
+        origins: Vec::new(),
+      }),
       default_timeout: options.timeout.unwrap_or(Duration::from_secs(30)),
-      default_ignore_https: options.ignore_https_errors,
-      bridge: None,
-      context: None,
-      credentials: CredentialSource::Fixed(options.http_credentials),
-      user_agent: options.user_agent,
-      fail_on_status_code: options.fail_on_status_code,
-      max_redirects: options.max_redirects,
-      origins: Vec::new(),
-      context_proxy: None,
+    }
+  }
+
+  /// Create a validated standalone HTTP client, optionally seeded from a
+  /// `storageState`. Validates `options.proxy` up front so both the NAPI
+  /// and `QuickJS` bindings report the same error before any request runs.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `options.proxy` is invalid or if `storage_state`
+  /// contains a malformed cookie.
+  pub fn try_new(
+    options: HttpClientOptions,
+    storage_state: Option<crate::options::StorageState>,
+  ) -> crate::error::Result<Self> {
+    if let Some(proxy) = &options.proxy {
+      proxy.validate()?;
+    }
+    let client = Self::new(options);
+    match storage_state {
+      Some(state) => client.with_storage_state(state),
+      None => Ok(client),
     }
   }
 
@@ -407,15 +483,17 @@ impl HttpClient {
   ///
   /// A cookie with neither a `url` nor a `domain`/`path` pair.
   pub fn with_storage_state(mut self, state: crate::options::StorageState) -> crate::error::Result<Self> {
-    if let Some(jar) = self.pool.as_pool().jar() {
-      let cookies = state
-        .cookies
-        .into_iter()
-        .map(stored_cookie)
-        .collect::<crate::error::Result<Vec<_>>>()?;
-      jar.add(cookies);
+    if let ClientMode::Standalone(standalone) = &mut self.mode {
+      if let Some(jar) = standalone.pool.as_pool().jar() {
+        let cookies = state
+          .cookies
+          .into_iter()
+          .map(stored_cookie)
+          .collect::<crate::error::Result<Vec<_>>>()?;
+        jar.add(cookies);
+      }
+      standalone.origins = state.origins;
     }
-    self.origins = state.origins;
     Ok(self)
   }
 
@@ -427,14 +505,23 @@ impl HttpClient {
   ///
   /// The bound context's state cannot be read.
   pub async fn storage_state(&self) -> crate::error::Result<crate::options::StorageState> {
-    if let Some(context) = &self.context {
-      return Box::pin(context.storage_state_impl(None)).await;
+    match &self.mode {
+      ClientMode::ContextBound(bound) => {
+        if let Some(context) = &bound.context {
+          return context.storage_state().await;
+        }
+        Ok(crate::options::StorageState {
+          cookies: Vec::new(),
+          origins: Vec::new(),
+          credentials: None,
+        })
+      },
+      ClientMode::Standalone(standalone) => Ok(crate::options::StorageState {
+        cookies: standalone.pool.as_pool().jar().map(|jar| jar.all()).unwrap_or_default(),
+        origins: standalone.origins.clone(),
+        credentials: None,
+      }),
     }
-    Ok(crate::options::StorageState {
-      cookies: self.pool.as_pool().jar().map(|jar| jar.all()).unwrap_or_default(),
-      origins: self.origins.clone(),
-      credentials: None,
-    })
   }
 
   /// Create a client bound to a browser context (Playwright's
@@ -445,19 +532,14 @@ impl HttpClient {
   #[must_use]
   pub fn context_bound(bridge: Arc<dyn ContextBridge>) -> Self {
     Self {
-      pool: ErasedClientPool::new(fetch::ClientPool::bridged()),
-      base_url: None,
-      extra_headers: Vec::new(),
+      mode: ClientMode::ContextBound(ContextBoundState {
+        base_pool: ErasedClientPool::new(fetch::ClientPool::bridged()),
+        bridge,
+        context: None,
+        credentials: None,
+        proxy: None,
+      }),
       default_timeout: Duration::from_secs(30),
-      default_ignore_https: false,
-      bridge: Some(bridge),
-      context: None,
-      credentials: CredentialSource::Fixed(Vec::new()),
-      user_agent: None,
-      fail_on_status_code: None,
-      max_redirects: None,
-      origins: Vec::new(),
-      context_proxy: None,
     }
   }
 
@@ -465,7 +547,9 @@ impl HttpClient {
   /// `clear_cookies()` read and write, for a client bound to one.
   #[must_use]
   pub fn with_context(mut self, context: crate::context::ContextRef) -> Self {
-    self.context = Some(context);
+    if let ClientMode::ContextBound(bound) = &mut self.mode {
+      bound.context = Some(Arc::new(context));
+    }
     self
   }
 
@@ -479,15 +563,17 @@ impl HttpClient {
   /// Returns an error for a URL that does not parse, or if the context's
   /// cookies cannot be read.
   pub async fn cookies(&self, urls: &[String]) -> crate::error::Result<Vec<crate::backend::CookieData>> {
-    let all = match (&self.context, self.pool.as_pool().jar()) {
-      (Some(context), _) => match context.cookies().await {
-        Ok(cookies) => cookies,
-        // A context has no jar in the browser before its first page.
-        Err(crate::error::FerriError::InvalidArgument { .. }) => Vec::new(),
-        Err(e) => return Err(e),
+    let all = match &self.mode {
+      ClientMode::ContextBound(bound) => match &bound.context {
+        Some(context) => match context.cookies().await {
+          Ok(cookies) => cookies,
+          // A context has no jar in the browser before its first page.
+          Err(crate::error::FerriError::InvalidArgument { .. }) => Vec::new(),
+          Err(e) => return Err(e),
+        },
+        None => Vec::new(),
       },
-      (None, Some(jar)) => jar.all(),
-      (None, None) => Vec::new(),
+      ClientMode::Standalone(standalone) => standalone.pool.as_pool().jar().map(|jar| jar.all()).unwrap_or_default(),
     };
     cookies_for_urls(all, urls)
   }
@@ -499,17 +585,21 @@ impl HttpClient {
   /// Returns an error for a cookie with neither a `url` nor a
   /// `domain`/`path` pair, or if the context refuses it.
   pub async fn add_cookies(&self, cookies: Vec<crate::backend::CookieData>) -> crate::error::Result<()> {
-    match (&self.context, self.pool.as_pool().jar()) {
-      (Some(context), _) => context.add_cookies(cookies).await,
-      (None, Some(jar)) => {
-        let cookies = cookies
-          .into_iter()
-          .map(stored_cookie)
-          .collect::<crate::error::Result<Vec<_>>>()?;
-        jar.add(cookies);
+    match &self.mode {
+      ClientMode::ContextBound(bound) => match &bound.context {
+        Some(context) => context.add_cookies(cookies).await,
+        None => Ok(()),
+      },
+      ClientMode::Standalone(standalone) => {
+        if let Some(jar) = standalone.pool.as_pool().jar() {
+          let cookies = cookies
+            .into_iter()
+            .map(stored_cookie)
+            .collect::<crate::error::Result<Vec<_>>>()?;
+          jar.add(cookies);
+        }
         Ok(())
       },
-      (None, None) => Ok(()),
     }
   }
 
@@ -526,21 +616,27 @@ impl HttpClient {
   }
 
   async fn clear_cookies_impl(&self, options: &crate::backend::ClearCookieOptions) -> crate::error::Result<()> {
-    match (&self.context, self.pool.as_pool().jar()) {
-      (Some(context), _) => context.clear_cookies_impl(options).await,
-      (None, Some(jar)) => {
-        let filter = options.compile()?;
-        jar.remove(|cookie| filter.matches(cookie));
+    match &self.mode {
+      ClientMode::ContextBound(bound) => match &bound.context {
+        Some(context) => context.clear_cookies(options).await,
+        None => Ok(()),
+      },
+      ClientMode::Standalone(standalone) => {
+        if let Some(jar) = standalone.pool.as_pool().jar() {
+          let filter = options.compile()?;
+          jar.remove(|cookie| filter.matches(cookie));
+        }
         Ok(())
       },
-      (None, None) => Ok(()),
     }
   }
 
   /// Answer challenges with whatever `credentials` returns at the time.
   #[must_use]
   pub fn with_live_http_credentials(mut self, credentials: LiveHttpCredentials) -> Self {
-    self.credentials = CredentialSource::Live(credentials);
+    if let ClientMode::ContextBound(bound) = &mut self.mode {
+      bound.credentials = Some(credentials);
+    }
     self
   }
 
@@ -548,55 +644,76 @@ impl HttpClient {
   /// is made, as a context's `request` sends through the context's proxy.
   #[must_use]
   pub fn with_live_proxy(mut self, resolve: LiveProxy) -> Self {
-    self.context_proxy = Some(ContextProxy {
-      resolve,
-      pool: Arc::new(tokio::sync::OnceCell::new()),
-    });
+    if let ClientMode::ContextBound(bound) = &mut self.mode {
+      bound.proxy = Some(ContextProxy {
+        resolve,
+        pool: Arc::new(tokio::sync::OnceCell::new()),
+      });
+    }
     self
   }
 
+  fn bridge(&self) -> Option<&Arc<dyn ContextBridge>> {
+    match &self.mode {
+      ClientMode::ContextBound(bound) => Some(&bound.bridge),
+      ClientMode::Standalone(_) => None,
+    }
+  }
+
+  fn default_max_redirects(&self) -> Option<u32> {
+    match &self.mode {
+      ClientMode::Standalone(standalone) => standalone.max_redirects,
+      ClientMode::ContextBound(_) => None,
+    }
+  }
+
+  fn default_fail_on_status_code(&self) -> Option<bool> {
+    match &self.mode {
+      ClientMode::Standalone(standalone) => standalone.fail_on_status_code,
+      ClientMode::ContextBound(_) => None,
+    }
+  }
+
   async fn transport_pool(&self) -> fetch::ClientPool {
-    let Some(live) = &self.context_proxy else {
-      return self.pool.as_pool().clone();
-    };
-    live
-      .pool
-      .get_or_init(|| async {
-        let proxy = (live.resolve)().await;
-        ErasedClientPool::new(
-          self
-            .pool
-            .as_pool()
-            .clone()
-            .with_proxy(proxy.as_ref().map(ProxyConfig::transport)),
-        )
-      })
-      .await
-      .as_pool()
-      .clone()
+    match &self.mode {
+      ClientMode::Standalone(standalone) => standalone.pool.as_pool().clone(),
+      ClientMode::ContextBound(bound) => {
+        let Some(live) = &bound.proxy else {
+          return bound.base_pool.as_pool().clone();
+        };
+        live
+          .pool
+          .get_or_init(|| async {
+            let proxy = (live.resolve)().await;
+            ErasedClientPool::new(
+              bound
+                .base_pool
+                .as_pool()
+                .clone()
+                .with_proxy(proxy.as_ref().map(ProxyConfig::transport)),
+            )
+          })
+          .await
+          .as_pool()
+          .clone()
+      },
+    }
   }
 
   async fn http_credentials(&self) -> Vec<HttpCredentials> {
-    match &self.credentials {
-      CredentialSource::Fixed(list) => list.clone(),
-      CredentialSource::Live(read) => read().await,
+    match &self.mode {
+      ClientMode::Standalone(standalone) => standalone.credentials.clone(),
+      ClientMode::ContextBound(bound) => match &bound.credentials {
+        Some(read) => read().await,
+        None => Vec::new(),
+      },
     }
   }
 
-  /// Send `request`, letting the engine answer a Basic challenge with
-  /// the credentials matching the URL that raised it, as Playwright's
-  /// `_sendRequest` does (`server/fetch.ts`): a 401 to a hop that carried
-  /// no `authorization` is sent again with one, a hop reached through a
-  /// redirect to another origin included.
-  async fn send_answering_challenge(&self, mut request: fetch::Request) -> crate::error::Result<fetch::Response> {
-    let credentials = self.http_credentials().await;
-    if !credentials.is_empty() {
-      request.challenge = Some(fetch::ChallengeAnswer::new(move |url| {
-        crate::options::matching_http_credentials(&credentials, url.as_str()).map(basic_authorization)
-      }));
-    }
+  /// Send a prepared request over this client's transport pool.
+  async fn send_prepared(&self, request: fetch::Request) -> crate::error::Result<fetch::Response> {
     let pool = self.transport_pool().await;
-    fetch::send(&pool, self.bridge.as_ref(), request)
+    fetch::send(&pool, self.bridge(), request)
       .await
       .map_err(|e| crate::error::FerriError::backend(e.to_string()))
   }
@@ -610,35 +727,29 @@ impl HttpClient {
   /// path so both resolve the base URL, context headers and TLS posture
   /// identically — only body/content-type handling differs between them.
   async fn resolved_defaults(&self) -> crate::error::Result<ResolvedDefaults> {
-    let (base_url, mut extra_headers, user_agent, ignore_https_errors, ctx_style) = if let Some(bridge) = &self.bridge {
-      let d = bridge
-        .defaults()
-        .await
-        .map_err(|e| crate::error::FerriError::backend(e.to_string()))?;
-      (
-        d.base_url,
-        d.extra_http_headers,
-        d.user_agent,
-        d.ignore_https_errors,
-        true,
-      )
-    } else {
-      (
-        self.base_url.clone(),
-        Vec::new(),
-        self.user_agent.clone(),
-        self.default_ignore_https,
-        false,
-      )
-    };
-    extra_headers.extend(self.extra_headers.iter().cloned());
-    Ok(ResolvedDefaults {
-      base_url,
-      extra_headers,
-      user_agent,
-      ignore_https_errors,
-      ctx_style,
-    })
+    match &self.mode {
+      ClientMode::ContextBound(bound) => {
+        let d = bound
+          .bridge
+          .defaults()
+          .await
+          .map_err(|e| crate::error::FerriError::backend(e.to_string()))?;
+        Ok(ResolvedDefaults {
+          base_url: d.base_url,
+          extra_headers: d.extra_http_headers,
+          user_agent: d.user_agent,
+          ignore_https_errors: d.ignore_https_errors,
+          ctx_style: true,
+        })
+      },
+      ClientMode::Standalone(standalone) => Ok(ResolvedDefaults {
+        base_url: standalone.base_url.clone(),
+        extra_headers: standalone.extra_headers.clone(),
+        user_agent: standalone.user_agent.clone(),
+        ignore_https_errors: standalone.ignore_https_errors,
+        ctx_style: false,
+      }),
+    }
   }
 
   /// The default + context headers every request starts from, before the
@@ -657,32 +768,17 @@ impl HttpClient {
     headers
   }
 
-  /// Send a request assembled by the WHATWG `fetch` layer.
+  /// Send a request assembled by the WHATWG `fetch` layer, answering with
+  /// the engine's own [`fetch::Response`] so the caller can stream the body
+  /// directly (backs the runtime's `fetch` global over this client).
   ///
   /// The caller has already run the spec's "extract a body" step, so the
   /// body and its `content-type` arrive decided. That is the whole point
-  /// of this entry point: `Self::build_request` applies Playwright's
+  /// of this entry point: `build_request` applies Playwright's
   /// `data` defaults (notably `content-type: application/octet-stream`),
   /// which are right for `request.post(url, { data })` and wrong for
   /// `fetch(url, { body: someArrayBuffer })` — where the spec sends no
   /// `content-type` at all.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the URL cannot be resolved, the method is
-  /// invalid, or the request fails.
-  pub async fn fetch_whatwg(&self, request: WhatwgRequest) -> crate::error::Result<HttpStreamResponse> {
-    Ok(HttpStreamResponse::from_response(
-      self
-        .send_whatwg(request)
-        .await
-        .map_err(|e| crate::error::FerriError::backend(e.to_string()))?,
-    ))
-  }
-
-  /// [`Self::fetch_whatwg`] answering the engine's own
-  /// [`fetch::Response`], for a caller that streams the body itself
-  /// (the runtime's `fetch` global over this client).
   ///
   /// # Errors
   ///
@@ -707,7 +803,7 @@ impl HttpClient {
     let pool = self.transport_pool().await;
     fetch::send(
       &pool,
-      self.bridge.as_ref(),
+      self.bridge(),
       fetch::Request {
         method,
         url,
@@ -728,8 +824,9 @@ impl HttpClient {
 
   /// Lower the Playwright option bag into a [`fetch::Request`], resolving
   /// the URL/defaults live (from the context bridge when bound, else from
-  /// the client options) and materializing the body + content-type.
-  async fn build_request(&self, url: &str, opts: &RequestOptions) -> crate::error::Result<fetch::Request> {
+  /// the client options), reading credentials once for both `send: always`
+  /// and 401 Basic challenges, and materializing the body without copying.
+  async fn build_request(&self, url: &str, opts: RequestOptions) -> crate::error::Result<fetch::Request> {
     let defaults = self.resolved_defaults().await?;
     let ignore_default = defaults.ignore_https_errors;
 
@@ -749,20 +846,26 @@ impl HttpClient {
     // Default headers, then context extras, then per-request headers —
     // later writers replace earlier ones (fetch.ts:178).
     let mut headers = Self::base_headers(&defaults);
-    if let Some(request_headers) = &opts.headers {
+    if let Some(request_headers) = opts.headers {
       for (k, v) in request_headers {
-        headers.set(k, v.clone());
+        headers.set(&k, v);
       }
     }
 
-    // `send: 'always'` puts the header on before any challenge, over one
-    // the caller set (fetch.ts sets it after the request's own headers).
+    // Read credentials once for both `send: 'always'` (applied after the
+    // request's own headers, matching fetch.ts) and per-hop 401 Basic
+    // challenges (including cross-origin redirects).
     let credentials = self.http_credentials().await;
     if let Some(entry) = crate::options::matching_http_credentials(&credentials, request_url.as_str())
       && entry.send == Some(HttpCredentialsSend::Always)
     {
       headers.set("authorization", basic_authorization(entry));
     }
+    let challenge = (!credentials.is_empty()).then(|| {
+      fetch::ChallengeAnswer::new(move |url| {
+        crate::options::matching_http_credentials(&credentials, url.as_str()).map(basic_authorization)
+      })
+    });
 
     // Request body (mutually exclusive: multipart, json, form, raw data).
     let body = if let Some(fields) = &opts.multipart {
@@ -777,9 +880,9 @@ impl HttpClient {
       let encoded = serde_urlencoded::to_string(form)
         .map_err(|e| crate::error::FerriError::Backend(format!("serialize form data: {e}")))?;
       fetch::Body::from_bytes(encoded.into_bytes())
-    } else if let Some(data) = &opts.data {
+    } else if let Some(data) = opts.data {
       headers.set_if_absent("content-type", "application/octet-stream");
-      fetch::Body::from_bytes(data.clone())
+      fetch::Body::from_bytes(data)
     } else {
       fetch::Body::empty()
     };
@@ -791,12 +894,12 @@ impl HttpClient {
       body,
       redirect: opts.redirect,
       credentials: opts.credentials.unwrap_or_default(),
-      max_redirects: opts.max_redirects.or(self.max_redirects),
+      max_redirects: opts.max_redirects.or_else(|| self.default_max_redirects()),
       max_retries: opts.max_retries.unwrap_or(0),
       timeout: opts.timeout.unwrap_or(self.default_timeout),
       ignore_https_errors: opts.ignore_https_errors.unwrap_or(ignore_default),
-      net_guard: opts.net_guard.clone(),
-      challenge: None,
+      net_guard: opts.net_guard,
+      challenge,
     })
   }
 
@@ -892,50 +995,24 @@ impl HttpClient {
   }
 
   async fn fetch_impl(&self, url: &str, opts: RequestOptions) -> crate::error::Result<HttpResponse> {
-    let request = self.build_request(url, &opts).await?;
-    let response = self.send_answering_challenge(request).await?;
+    let fail_on_status_code = opts
+      .fail_on_status_code
+      .or_else(|| self.default_fail_on_status_code())
+      .unwrap_or(false);
+    let request = self.build_request(url, opts).await?;
+    let method = request.method.clone();
+    let response = self.send_prepared(request).await?;
     let http = HttpResponse::buffer(response).await?;
-    if opts.fail_on_status_code.or(self.fail_on_status_code).unwrap_or(false) && fails_status(http.status()) {
+    if fail_on_status_code && fails_status(http.status()) {
       return Err(crate::error::FerriError::Backend(format!(
         "{} {} failed: {} {}",
-        opts.method.as_deref().unwrap_or("GET"),
+        method,
         http.url(),
         http.status(),
         http.status_text()
       )));
     }
     Ok(http)
-  }
-
-  /// Like [`Self::fetch`] but the body is NOT buffered: returns the
-  /// status/headers plus a handle whose [`HttpStreamResponse::chunk`]
-  /// yields bytes as they arrive (backs a WHATWG `Response.body`).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the request fails, or `fail_on_status_code` is
-  /// set and the response is 4xx/5xx (checked before any body is read).
-  #[track_caller]
-  pub fn fetch_stream(&self, url: &str) -> crate::action::Action<'_, RequestOptions, HttpStreamResponse> {
-    let url = url.to_string();
-    crate::action::Action::new(move |opts: RequestOptions| {
-      Box::pin(async move { self.fetch_stream_impl(&url, opts).await })
-    })
-  }
-
-  async fn fetch_stream_impl(&self, url: &str, opts: RequestOptions) -> crate::error::Result<HttpStreamResponse> {
-    let request = self.build_request(url, &opts).await?;
-    let response = self.send_answering_challenge(request).await?;
-    if opts.fail_on_status_code.or(self.fail_on_status_code).unwrap_or(false) && fails_status(response.status) {
-      return Err(crate::error::FerriError::Backend(format!(
-        "{} {} failed: {} {}",
-        opts.method.as_deref().unwrap_or("GET"),
-        response.url,
-        response.status,
-        response.status_text
-      )));
-    }
-    Ok(HttpStreamResponse::from_response(response))
   }
 
   /// Dispose the request context (Playwright compat).
@@ -945,6 +1022,49 @@ impl HttpClient {
 }
 
 impl RequestOptions {
+  /// Method, replayable headers and raw body carried over from a captured
+  /// page-network [`crate::network::Request`], for Playwright's
+  /// `apiRequestContext.fetch(request, options?)`.
+  #[must_use]
+  pub fn from_page_request(request: &crate::network::Request) -> Self {
+    Self {
+      method: Some(request.method().to_string()),
+      headers: Some(replayable_headers(request.headers().into_iter().collect())),
+      data: request.post_data_buffer(),
+      ..Self::default()
+    }
+  }
+
+  /// Layer explicit `overrides` over a `Request`-derived `base`: anything
+  /// the caller set wins, the rest falls through to `base`. A body given
+  /// in any form replaces `base`'s body completely.
+  #[must_use]
+  pub fn merge_over(base: Option<Self>, overrides: Option<Self>) -> Option<Self> {
+    let (base, options) = match (base, overrides) {
+      (Some(base), Some(options)) => (base, options),
+      (base, options) => return base.or(options),
+    };
+    Some(Self {
+      method: options.method.or(base.method),
+      headers: match (options.headers, base.headers) {
+        (Some(explicit), Some(inherited)) => {
+          let mut merged = explicit;
+          for (name, value) in inherited {
+            if !merged.iter().any(|(k, _)| k.eq_ignore_ascii_case(&name)) {
+              merged.push((name, value));
+            }
+          }
+          Some(merged)
+        },
+        (explicit, inherited) => explicit.or(inherited),
+      },
+      data: options.data.or_else(|| {
+        (options.json_data.is_none() && options.form.is_none() && options.multipart.is_none()).then_some(base.data)?
+      }),
+      ..options
+    })
+  }
+
   /// # Errors
   /// Rejects modes outside `follow`, `manual`, and `error` before any request is sent.
   pub fn parse_redirect(value: &str) -> Result<RedirectMode, String> {
