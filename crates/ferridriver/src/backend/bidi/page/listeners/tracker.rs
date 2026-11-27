@@ -71,23 +71,20 @@ impl BidiNetworkTracker {
     }
     let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
-    let headers = req.get("headers").map(parse_bidi_headers).unwrap_or_default();
-    let resource_type = params
-      .get("initiator")
-      .and_then(|i| i.get("type"))
-      .and_then(|v| v.as_str())
-      .map_or("", |t| match t {
-        "parser" => "Document",
-        "script" => "Script",
-        "preflight" => "Preflight",
-        other => other,
-      })
-      .to_string();
-    let post_data = req
+    let header_entries = req.get("headers").map(parse_bidi_header_entries).unwrap_or_default();
+    let headers = crate::network::headers_array_to_map(&header_entries);
+    let raw_headers_fn = crate::network::known_raw_headers(header_entries);
+    let resource_type = resource_type_from_bidi(req, params).to_string();
+    let body_size = req.get("bodySize").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let headers_size = req.get("headersSize").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let mut post_data = req
       .get("body")
       .and_then(|b| b.get("value"))
       .and_then(|v| v.as_str())
       .map(|s| s.as_bytes().to_vec());
+    if post_data.is_none() && body_size > 0 {
+      post_data = self.session.get_request_body(&id).await;
+    }
     let frame_id = params
       .get("context")
       .and_then(|v| v.as_str())
@@ -128,8 +125,16 @@ impl BidiNetworkTracker {
           start_time: ts,
           ..network::RequestTiming::empty()
         }),
-      raw_headers_fn: None,
+      raw_headers_fn: Some(raw_headers_fn),
     });
+    if headers_size > 0 || body_size > 0 {
+      new_request.update_sizes(network::RequestSizes {
+        request_body: body_size,
+        request_headers: headers_size,
+        response_body: 0,
+        response_headers: 0,
+      });
+    }
 
     self.requests.lock().await.insert(id.clone(), new_request.clone());
 
@@ -195,6 +200,29 @@ impl BidiNetworkTracker {
       self.responses.lock().await.insert(request_id.clone(), response.clone());
       req.set_response(&response).await;
       emitter.emit(PageEvent::Response(response));
+    }
+    if let Some(resp) = params.get("response") {
+      let resp_headers = resp.get("headersSize").and_then(serde_json::Value::as_u64).unwrap_or(0);
+      let resp_body = resp
+        .get("bytesReceived")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+      let req_headers = params
+        .pointer("/request/headersSize")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+      let req_body = params
+        .pointer("/request/bodySize")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+      if req_headers > 0 || req_body > 0 || resp_headers > 0 || resp_body > 0 {
+        req.update_sizes(network::RequestSizes {
+          request_body: req_body,
+          request_headers: req_headers,
+          response_body: resp_body,
+          response_headers: resp_headers,
+        });
+      }
     }
     let response = self.responses.lock().await.get(&request_id).cloned();
     if let Some(resp) = response {
@@ -430,6 +458,40 @@ fn parse_bidi_security_details(resp: &serde_json::Value) -> Option<SecurityDetai
       valid_from: obj.get("validFrom").and_then(serde_json::Value::as_f64),
       valid_to: obj.get("validTo").and_then(serde_json::Value::as_f64),
     })
+}
+
+/// Map `BiDi` `RequestData.destination` / `initiatorType` / `event.initiator.type`
+/// into Playwright's canonical `ResourceType` vocabulary (mirrors
+/// `bidiNetworkManager.ts::resourceTypeFromBidi`).
+pub(in crate::backend::bidi::page) fn resource_type_from_bidi(
+  req: &serde_json::Value,
+  event: &serde_json::Value,
+) -> &'static str {
+  let destination = req.get("destination").and_then(serde_json::Value::as_str).unwrap_or("");
+  match destination {
+    "audio" | "video" => "media",
+    "audioworklet" | "paintworklet" | "script" | "serviceworker" | "sharedworker" | "worker" => "script",
+    "document" | "frame" | "iframe" => "document",
+    "font" => "font",
+    "image" => "image",
+    "style" => "stylesheet",
+    "track" => "texttrack",
+    "" => {
+      let req_initiator = req.get("initiatorType").and_then(serde_json::Value::as_str);
+      match req_initiator {
+        Some("fetch") => "fetch",
+        Some("font") => "font",
+        Some("xmlhttprequest") => "xhr",
+        None => match event.pointer("/initiator/type").and_then(serde_json::Value::as_str) {
+          Some("script") => "xhr",
+          Some("preflight") => "preflight",
+          _ => "document",
+        },
+        Some(_) => "other",
+      }
+    },
+    _ => "other",
+  }
 }
 
 /// Parse BiDi-format headers `[{name, value: {type, value}}]` into a `FxHashMap`.

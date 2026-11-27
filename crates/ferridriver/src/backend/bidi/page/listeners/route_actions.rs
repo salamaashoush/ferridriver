@@ -14,22 +14,17 @@ pub(in crate::backend::bidi::page) async fn execute_bidi_route_action(
   match action {
     crate::route::RouteAction::Fulfill(resp) => {
       let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
-      let hdrs: Vec<serde_json::Value> = resp
-        .effective_headers()
-        .into_iter()
-        .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
-        .collect();
+      let (hdrs, cookies) = to_bidi_response_headers(resp.effective_headers());
+      let status_u16 = u16::try_from(resp.status).unwrap_or(200);
       let _ = transport
-        .send_command(
-          "network.provideResponse",
-          json!({
-            "request": request_id,
-            "statusCode": resp.status,
-            "reasonPhrase": crate::route::status_text(resp.status),
-            "headers": hdrs,
-            "body": {"type": "base64", "value": body_b64},
-          }),
-        )
+        .send(&ferridriver_bidi_proto::network::ProvideResponse {
+          request: request_id,
+          status_code: Some(status_u16),
+          reason_phrase: Some(crate::route::status_text(resp.status)),
+          headers: Some(&hdrs),
+          cookies: (!cookies.is_empty()).then_some(cookies.as_slice()),
+          body: Some(json!({"type": "base64", "value": body_b64})),
+        })
         .await;
     },
     crate::route::RouteAction::Continue(overrides) | crate::route::RouteAction::Fallback(overrides) => {
@@ -65,7 +60,24 @@ pub(in crate::backend::bidi::page) async fn execute_bidi_route_action(
         )
         .await;
       } else {
-        let hdrs: Option<Vec<serde_json::Value>> = overrides.headers.as_ref().map(|headers| {
+        // Firefox does not recompute `content-length` when `network.continueRequest`
+        // overrides the body (`bidiNetworkManager.ts:333-341`). Update it on
+        // the outgoing headers so the server receives the exact new payload.
+        let updated_headers: Option<Vec<(String, String)>> = match (&overrides.headers, &overrides.post_data) {
+          (Some(headers), Some(post_data)) => {
+            let mut out = headers.clone();
+            update_content_length(&mut out, post_data.len());
+            Some(out)
+          },
+          (Some(headers), None) => Some(headers.clone()),
+          (None, Some(post_data)) => {
+            let mut out: Vec<(String, String)> = orig_headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            update_content_length(&mut out, post_data.len());
+            Some(out)
+          },
+          (None, None) => None,
+        };
+        let hdrs: Option<Vec<serde_json::Value>> = updated_headers.as_ref().map(|headers| {
           headers
             .iter()
             .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
@@ -130,16 +142,14 @@ async fn bidi_continue_via_fetch(
   match fetch_for_route(&refetch).await {
     Ok((status, resp_headers, resp_body)) => {
       let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp_body);
-      let hdrs: Vec<serde_json::Value> = resp_headers
-        .iter()
-        .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
-        .collect();
+      let (hdrs, cookies) = to_bidi_response_headers(resp_headers);
       let _ = transport
         .send(&ferridriver_bidi_proto::network::ProvideResponse {
           request: request_id,
           status_code: Some(status),
           reason_phrase: Some(crate::route::status_text(i32::from(status))),
           headers: Some(&hdrs),
+          cookies: (!cookies.is_empty()).then_some(cookies.as_slice()),
           body: Some(json!({"type": "base64", "value": body_b64})),
         })
         .await;
@@ -306,4 +316,100 @@ pub(in crate::backend::bidi::page) fn download_behavior_params(
     params["userContexts"] = serde_json::json!([uc]);
   }
   params
+}
+
+/// Update (or leave absent) `content-length` in `headers` to match a newly
+/// overridden request body length. Mirrors `bidiNetworkManager.ts:334-341`.
+fn update_content_length(headers: &mut [(String, String)], body_len: usize) {
+  let len_str = body_len.to_string();
+  for (name, value) in headers.iter_mut() {
+    if name.eq_ignore_ascii_case("content-length") {
+      value.clone_from(&len_str);
+    }
+  }
+}
+
+/// Split fulfillment/re-fetched response headers into `BiDi` `headers` and
+/// `cookies` (`network.SetCookieHeader[]`), stripping `content-encoding`
+/// because the body is already decoded (mirrors `bidiNetworkManager.ts:354-395`).
+fn to_bidi_response_headers(headers: Vec<(String, String)>) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+  let mut out_headers = Vec::new();
+  let mut out_cookies = Vec::new();
+  for (name, value) in headers {
+    if name.eq_ignore_ascii_case("content-encoding") {
+      continue;
+    }
+    if name.eq_ignore_ascii_case("set-cookie") {
+      if let Some(cookie) = parse_set_cookie_to_bidi(&value) {
+        out_cookies.push(cookie);
+      }
+      continue;
+    }
+    out_headers.push(json!({"name": name, "value": {"type": "string", "value": value}}));
+  }
+  (out_headers, out_cookies)
+}
+
+/// Parse a `Set-Cookie` header value into a W3C `BiDi` `network.SetCookieHeader`
+/// JSON object.
+fn parse_set_cookie_to_bidi(raw: &str) -> Option<serde_json::Value> {
+  let mut parts = raw.split(';');
+  let pair = parts.next()?.trim();
+  let (name, value) = pair.split_once('=')?;
+  let name = name.trim();
+  if name.is_empty() {
+    return None;
+  }
+  let mut obj = serde_json::Map::new();
+  obj.insert("name".into(), json!(name));
+  obj.insert("value".into(), json!({"type": "string", "value": value.trim()}));
+  for attr in parts {
+    let attr = attr.trim();
+    if attr.is_empty() {
+      continue;
+    }
+    if let Some((k, v)) = attr.split_once('=') {
+      let k_lower = k.trim().to_ascii_lowercase();
+      let v = v.trim();
+      match k_lower.as_str() {
+        "domain" => {
+          obj.insert("domain".into(), json!(v));
+        },
+        "path" => {
+          obj.insert("path".into(), json!(v));
+        },
+        "expires" => {
+          obj.insert("expiry".into(), json!(v));
+        },
+        "max-age" => {
+          if let Ok(secs) = v.parse::<i64>() {
+            obj.insert("maxAge".into(), json!(secs));
+          }
+        },
+        "samesite" => {
+          let ss = match v.to_ascii_lowercase().as_str() {
+            "strict" => Some("strict"),
+            "lax" => Some("lax"),
+            "none" => Some("none"),
+            _ => None,
+          };
+          if let Some(ss) = ss {
+            obj.insert("sameSite".into(), json!(ss));
+          }
+        },
+        _ => {},
+      }
+    } else {
+      match attr.to_ascii_lowercase().as_str() {
+        "secure" => {
+          obj.insert("secure".into(), json!(true));
+        },
+        "httponly" => {
+          obj.insert("httpOnly".into(), json!(true));
+        },
+        _ => {},
+      }
+    }
+  }
+  Some(serde_json::Value::Object(obj))
 }

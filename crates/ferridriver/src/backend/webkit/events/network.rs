@@ -259,6 +259,29 @@ pub(super) async fn handle_loading_finished(
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .remove(request_id);
   if let Some(req) = req {
+    if let Some(metrics) = params.get("metrics") {
+      let request_headers = metrics
+        .get("requestHeaderBytesSent")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+      let request_body = metrics.get("requestBodyBytesSent").and_then(Value::as_u64).unwrap_or(0);
+      let response_headers = metrics
+        .get("responseHeaderBytesReceived")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+      let response_body = metrics
+        .get("responseBodyBytesReceived")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+      if request_headers > 0 || request_body > 0 || response_headers > 0 || response_body > 0 {
+        req.update_sizes(crate::network::RequestSizes {
+          request_body,
+          request_headers,
+          response_body,
+          response_headers,
+        });
+      }
+    }
     if let Some(response) = req.existing_response().await {
       if let Some(addr) = params
         .pointer("/metrics/remoteAddress")
@@ -266,6 +289,15 @@ pub(super) async fn handle_loading_finished(
         .and_then(parse_remote_address)
       {
         response.set_server_addr(addr).await;
+      }
+      if let Some(protocol) = params.pointer("/metrics/protocol").and_then(Value::as_str) {
+        response.set_http_version(protocol.to_string()).await;
+      }
+      if let Some(tls_protocol) = params
+        .pointer("/metrics/securityConnection/protocol")
+        .and_then(Value::as_str)
+      {
+        response.set_security_protocol(tls_protocol.to_string()).await;
       }
       response.finish_success().await;
     }

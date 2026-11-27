@@ -139,14 +139,21 @@ impl BidiPage {
       // `InterceptedRequest` moves them into the handler's `Route`.
       let orig_method = method.to_string();
       let orig_headers = headers.clone();
+      let body_size = req_obj
+        .and_then(|r| r.get("bodySize"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+      let resource_type = req_obj
+        .map_or("", |r| super::listeners::resource_type_from_bidi(r, &event.params))
+        .to_string();
 
-      let intercepted = crate::route::InterceptedRequest {
+      let mut intercepted = crate::route::InterceptedRequest {
         request_id: request_id.to_string(),
         url: url.to_string(),
         method: method.to_string(),
         headers,
         post_data: None,
-        resource_type: String::new(),
+        resource_type,
       };
 
       // Resolve each blocked request on its own task — running the
@@ -160,6 +167,11 @@ impl BidiPage {
       let routes2 = Arc::clone(routes);
       let network = Arc::clone(network);
       tokio::spawn(async move {
+        if body_size > 0
+          && let Some(bytes) = session2.get_request_body(&request_id_owned).await
+        {
+          intercepted.post_data = Some(String::from_utf8_lossy(&bytes).into_owned());
+        }
         let action = crate::route::run_route_chain(&routes2, intercepted).await;
         let network = network.lock().map(|settings| settings.clone()).unwrap_or_default();
         execute_bidi_route_action(
