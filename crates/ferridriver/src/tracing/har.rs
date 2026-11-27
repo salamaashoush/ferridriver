@@ -28,7 +28,7 @@ pub enum HarMode {
   Minimal,
 }
 
-/// Options bag for [`Tracing::start_har`].
+/// Options bag for [`crate::tracing::Tracing::start_har`].
 #[derive(Default)]
 pub struct StartHarOptions {
   pub content: Option<HarContentPolicy>,

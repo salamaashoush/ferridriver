@@ -36,7 +36,9 @@ pub use actions::{
   forget_pending_calls, observe_owner_actions, observe_session_actions, pending_calls, record_error, set_action_gate,
   set_action_observer, track_pending_calls, with_call_origin, with_call_owner, within_assertion,
 };
-pub(crate) use actions::{InputKind, begin_action, input_action_kind, open_action, within_action};
+pub(crate) use actions::{
+  InputKind, begin_action, has_action_observer_or_gate, input_action_kind, open_action, within_action,
+};
 pub use events::{
   ActionErrorInfo, AfterActionEvent, BeforeActionEvent, ConsoleEvent, InputActionEvent, LogEvent, PageEventEntry,
   ScreencastFrameEvent, StackFrame, StdioEvent, TraceAttachment, TraceErrorEvent, TraceEvent, TraceLocation,

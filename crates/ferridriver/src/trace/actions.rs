@@ -119,6 +119,14 @@ pub fn with_call_origin<F: std::future::Future>(
   CALL_ORIGIN.scope(origin, fut)
 }
 
+/// Whether any action observer (such as code echo) or debugger action gate
+/// is currently installed. Fast paths that skip `begin_action` consult this
+/// so observed or gated runs still record every locator action.
+#[must_use]
+pub(crate) fn has_action_observer_or_gate() -> bool {
+  ACTION_OBSERVER_INSTALLED.load(Ordering::Acquire) || ACTION_GATE_INSTALLED.load(Ordering::Acquire)
+}
+
 /// Whether anything would read a call origin.
 ///
 /// Capturing one costs the host a stack walk per call (`new Error().stack`

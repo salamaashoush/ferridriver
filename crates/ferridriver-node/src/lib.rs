@@ -2,6 +2,10 @@
 //!
 //! Exposes the Playwright-compatible Browser/Page/Locator API to Node.js.
 
+// Deep async futures holding cyclic `Browser` / `Emitter<BrowserEvent>` types
+// can exceed rustc's default 128-step `Send` trait-solver recursion limit.
+#![recursion_limit = "256"]
+
 // Use mimalloc as the global allocator for better NAPI workload performance.
 // Reduces fragmentation and improves throughput for the frequent small allocations
 // that occur at the Rust/JS boundary (strings, options structs, callbacks).

@@ -6,7 +6,7 @@
 //! meanwhile has to stand still: the test's own timeout, the script
 //! engine's per-call timeout, and the backstop around it. They live in
 //! different crates, so the clock lives here — below all of them, beside
-//! the [`ActionGate`] that does the parking.
+//! the `ActionGate` that does the parking.
 //!
 //! Suspending, never disabling. A test that hangs on its own after being
 //! released still times out, which is what makes `--debug` safe to leave

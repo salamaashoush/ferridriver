@@ -90,7 +90,7 @@ pub(crate) enum WireSender {
 /// Concrete CDP transport over either Unix pipes (`--remote-debugging-pipe`)
 /// or WebSocket (`--remote-debugging-port` / `connectOverCDP`).
 ///
-/// Both transports share [`CdpDispatcher`] for response correlation, lifecycle
+/// Both transports share `CdpDispatcher` for response correlation, lifecycle
 /// tracking, and event taps; only the outbound wire framing differs.
 pub struct CdpTransport {
   dispatcher: Arc<CdpDispatcher>,

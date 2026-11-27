@@ -168,7 +168,7 @@ impl McpServer {
     result: &ferridriver_script::ScriptResult,
     code: &[String],
     code_language: Option<&str>,
-    tabs: &[ferridriver::response::TabState],
+    tabs: Option<&[ferridriver::response::TabState]>,
     page: Option<&ferridriver::response::PageState>,
   ) -> String {
     let mut response = ferridriver::response::Response::new().with_secrets(self.secrets.clone());
@@ -192,7 +192,9 @@ impl McpServer {
     if let Some(language) = code_language {
       response.code(code.to_vec(), ferridriver_codegen::OutputLanguage::parse_cli(language));
     }
-    response.tabs(tabs);
+    if let Some(tabs) = tabs {
+      response.tabs(tabs);
+    }
     if let Some(page) = page {
       response.page(page);
     }
@@ -386,14 +388,15 @@ impl McpServer {
     // the code the run just echoed. A tab the script opened is waited for,
     // so the tab list names it; it stays a tab the caller selects.
     self.opened_tabs_settled(&session).await;
-    let tabs = self.open_tabs(&session).await;
-    let page_state = match Box::pin(self.page(&session)).await {
-      Ok(page) => Some(ferridriver::response::PageState::capture(&page).await),
-      Err(e) => {
-        tracing::debug!(error = ?e, "page state unavailable for the response");
-        None
-      },
-    };
+    let (tabs, page_state) = tokio::join!(self.open_tabs_if_not_single(&session), async {
+      match Box::pin(self.page(&session)).await {
+        Ok(page) => Some(ferridriver::response::PageState::capture(&page).await),
+        Err(e) => {
+          tracing::debug!(error = ?e, "page state unavailable for the response");
+          None
+        },
+      }
+    });
 
     let code = collected_code
       .lock()
@@ -403,7 +406,9 @@ impl McpServer {
       result,
       code: code.clone(),
       page: page_state.clone().map(PageStateOut::from),
-      tabs: (tabs.len() != 1).then(|| tabs.iter().cloned().enumerate().map(TabOut::from).collect()),
+      tabs: tabs
+        .as_ref()
+        .map(|list| list.iter().cloned().enumerate().map(TabOut::from).collect()),
     };
     let result = &output.result;
 
@@ -420,7 +425,13 @@ impl McpServer {
     // Ahead of it, the same run as titled sections — the shape an agent reads
     // without parsing. Cheap to skip past, and it is what carries the page
     // the session is now on into a skimmed reading.
-    let sections = self.run_script_sections(result, &code, p.code_language.as_deref(), &tabs, page_state.as_ref());
+    let sections = self.run_script_sections(
+      result,
+      &code,
+      p.code_language.as_deref(),
+      tabs.as_deref(),
+      page_state.as_ref(),
+    );
     if !sections.is_empty() {
       contents.insert(0, ContentBlock::text(sections));
     }
